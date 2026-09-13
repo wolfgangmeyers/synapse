@@ -16,6 +16,10 @@ import (
 	"unicode/utf8"
 )
 
+var ErrManagedChildDeltaGap = errors.New("managed child delta sequence gap")
+var ErrManagedChildDeltaConflict = errors.New("managed child delta conflicts with current sequence")
+var ErrManagedChildSnapshotConflict = errors.New("managed child snapshot conflicts with current sequence")
+
 var managedIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var managedSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -3209,6 +3213,121 @@ func (s *Store) ManagedChildHistoryEntryForDelta(ctx context.Context, fence Mana
 	return entry, nil
 }
 
+// RecoverManagedChildSnapshot replaces a post-readiness child projection only
+// when its source sequence advances. Equal snapshots are idempotent; different
+// values at the same sequence are a source conflict and cannot be resolved by
+// arrival order.
+func (s *Store) RecoverManagedChildSnapshot(ctx context.Context, fence ManagedRuntimeFence, snapshot ManagedChildSnapshot) (bool, error) {
+	if !validManagedRuntimeFence(fence) || snapshot.SnapshotID == "" || snapshot.OwnerSessionID != fence.PiSessionID || snapshot.Sequence < 0 || len(snapshot.Canonical) < 2 || len(snapshot.Canonical) > 32768 || !managedSHA256RE.MatchString(snapshot.SHA256) {
+		return false, errors.New("managed child snapshot recovery is invalid")
+	}
+	updated := false
+	err := s.runImmediate(ctx, func() error {
+		var currentSequence int64
+		var currentCanonical []byte
+		err := s.db.QueryRowContext(ctx, `SELECT snapshot_sequence,snapshot_canonical FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere()+`
+			AND snapshot_id IS NOT NULL AND snapshot_owner_session_id=?`, append(readinessSourceFenceArgs(fence), fence.PiSessionID)...).Scan(&currentSequence, &currentCanonical)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if snapshot.Sequence < currentSequence {
+			return nil
+		}
+		if snapshot.Sequence == currentSequence {
+			if bytes.Equal(snapshot.Canonical, currentCanonical) {
+				return nil
+			}
+			return ErrManagedChildSnapshotConflict
+		}
+		if err := s.archiveOmittedActiveManagedChildrenTx(ctx, fence, currentCanonical, snapshot.Canonical); err != nil {
+			return err
+		}
+		reconciled, reconciliations, err := reconcileManagedChildCompactionSnapshot(currentCanonical, snapshot.Canonical)
+		if err != nil {
+			return err
+		}
+		snapshot.Canonical = reconciled
+		sum := sha256.Sum256(snapshot.Canonical)
+		snapshot.SHA256 = hex.EncodeToString(sum[:])
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET snapshot_id=?,snapshot_sequence=?,snapshot_canonical=?,snapshot_sha256=?,snapshot_confirmed_at=? WHERE `+readinessSourceFenceWhere()+`
+			AND snapshot_owner_session_id=? AND snapshot_sequence < ?`, append([]any{snapshot.SnapshotID, snapshot.Sequence, snapshot.Canonical, snapshot.SHA256, formatTimestamp(s.clock.Now())}, append(readinessSourceFenceArgs(fence), fence.PiSessionID, snapshot.Sequence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return nil
+		}
+		for _, reconciliation := range reconciliations {
+			if _, err := s.recordManagedChildHistoryTx(ctx, fence, reconciliation.ParentEntryID, reconciliation.TaskID, reconciliation.RunID, reconciliation.Sequence, "transition", reconciliation.LifecycleState, "confirmed", "", []string{"compaction", "reconciled_unknown"}); err != nil {
+				return err
+			}
+		}
+		if err := s.reconcileManagedChildRecoveriesForSnapshotTx(ctx, fence, snapshot); err != nil {
+			return err
+		}
+		updated = true
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+	return updated, err
+}
+
+// archiveOmittedActiveManagedChildrenTx preserves active source rows that an
+// authoritative same-fence recovery snapshot no longer contains. Omission is
+// uncertainty, never proof of a terminal child outcome.
+func (s *Store) archiveOmittedActiveManagedChildrenTx(ctx context.Context, fence ManagedRuntimeFence, priorCanonical, incomingCanonical []byte) error {
+	var incoming managedChildArchiveSnapshot
+	if err := json.Unmarshal(incomingCanonical, &incoming); err != nil {
+		return errors.New("managed child recovery snapshot is unreadable")
+	}
+	present := make(map[string]struct{}, len(incoming.Runs))
+	for _, run := range incoming.Runs {
+		if !managedChildRunIdentityValid(run) {
+			return errors.New("managed child recovery snapshot has invalid run")
+		}
+		present[managedChildRecoveryIdentity(run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string))] = struct{}{}
+	}
+	active, err := activeManagedChildRuns(priorCanonical)
+	if err != nil {
+		return err
+	}
+	now := formatTimestamp(s.clock.Now())
+	for _, run := range active {
+		parentEntryID, taskID, runID := run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string)
+		if _, found := present[managedChildRecoveryIdentity(parentEntryID, taskID, runID)]; found {
+			continue
+		}
+		sequence, valid := managedChildRunSequence(run)
+		if !valid {
+			return errors.New("stored managed child snapshot has invalid active sequence")
+		}
+		runCanonical, err := json.Marshal(run)
+		if err != nil || len(runCanonical) < 2 || len(runCanonical) > 8192 {
+			return errors.New("stored managed child run cannot be archived")
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_recoveries(
+			agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown','snapshot_omitted',?,?)
+			ON CONFLICT(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,parent_entry_id,task_id,run_id)
+			DO UPDATE SET recovery_cause=excluded.recovery_cause,run_json=excluded.run_json,source_sequence=excluded.source_sequence,updated_at=excluded.updated_at`,
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, now, now)
+		if err != nil {
+			return err
+		}
+		if _, err := s.recordManagedChildHistoryTx(ctx, fence, parentEntryID, taskID, runID, sequence, "recovery", run["lifecycle_state"].(string), "interrupted_unknown", "snapshot_omitted", []string{"snapshot"}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta) (bool, error) {
 	if !validManagedRuntimeFence(fence) || !validManagedChildDelta(delta) {
 		return false, errors.New("managed child delta is invalid")
@@ -3230,13 +3349,21 @@ func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntime
 			_, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", "unknown", "confirmed", "", []string{"stale", "owner_session_mismatch"})
 			return err
 		}
-		if delta.Sequence <= sequence {
-			state, _ := delta.Changes["lifecycle_state"].(string)
-			if state == "" {
-				state = "unknown"
+		if delta.Sequence < sequence {
+			return nil
+		}
+		if delta.Sequence == sequence {
+			matches, matchErr := managedChildDeltaMatchesSnapshot(canonical, delta)
+			if matchErr != nil {
+				return matchErr
 			}
-			_, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", []string{"stale", "sequence_regression"})
-			return err
+			if matches {
+				return nil
+			}
+			return ErrManagedChildDeltaConflict
+		}
+		if delta.Sequence != sequence+1 {
+			return ErrManagedChildDeltaGap
 		}
 		next, err := mergeManagedChildDelta(canonical, delta)
 		if err != nil {
@@ -3274,6 +3401,47 @@ func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntime
 		return err
 	})
 	return updated, err
+}
+
+// managedChildDeltaMatchesSnapshot distinguishes a repeated receipt from two
+// incompatible claims at the same source sequence. The latter must be repaired
+// from the package snapshot rather than chosen by arrival order.
+func managedChildDeltaMatchesSnapshot(canonical []byte, delta ManagedChildDelta) (bool, error) {
+	var snapshot map[string]any
+	if err := json.Unmarshal(canonical, &snapshot); err != nil {
+		return false, errors.New("stored managed child snapshot is unreadable")
+	}
+	runs, ok := snapshot["runs"].([]any)
+	if !ok {
+		return false, errors.New("stored managed child snapshot has invalid runs")
+	}
+	for _, value := range runs {
+		run, ok := value.(map[string]any)
+		if !ok || run["task_id"] != delta.TaskID || run["run_id"] != delta.RunID || run["parent_entry_id"] != delta.ParentEntryID {
+			continue
+		}
+		sequence, valid := managedChildRunSequence(run)
+		if !valid || sequence != delta.Sequence {
+			return false, nil
+		}
+		for key, value := range delta.Changes {
+			candidate, found := run[key]
+			if !found || !managedChildSourceValueEqual(candidate, value) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// JSON numbers can arrive from the live RPC reader as json.Number while a
+// persisted snapshot decodes them as float64. JSON encoding normalizes both
+// representations before comparing this already-validated source value.
+func managedChildSourceValueEqual(left, right any) bool {
+	leftCanonical, leftErr := json.Marshal(left)
+	rightCanonical, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftCanonical, rightCanonical)
 }
 
 func managedChildChangedFields(changes map[string]any) []string {

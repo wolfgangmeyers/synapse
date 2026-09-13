@@ -4,6 +4,7 @@ import { writeFileSync } from "node:fs";
 import { getSubagentsService, type SubagentsService } from "@gotgenes/pi-subagents";
 
 import { createChildBridge } from "./child-bridge.js";
+import { BoundedChildDeltaBuffer } from "./child-delta-buffer.js";
 import { hashCanonicalJson, type DesiredManifest, type JsonRecord } from "./manifest.js";
 import { createPolicyBridge } from "./policy-bridge.js";
 import {
@@ -423,22 +424,16 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   let commandRegistrationFailed = false;
   let registeredOwnerSessionId: string | undefined;
   let disposeChildFactory: (() => void) | undefined;
-  let childDeltaDelivery: Promise<void> = Promise.resolve();
+  const childDeltaBuffer = new BoundedChildDeltaBuffer(
+    async (wire) => sendHiddenCustomMessage(pi, "mecha.child.delta.v1", "Managed child lifecycle updated.", wire, { triggerTurn: false }),
+    (ownerSessionId) => registeredOwnerSessionId === ownerSessionId,
+  );
   // The source increments lifecycle sequence before its asynchronous custom
-  // message append settles. Serialize delivery so the router never receives a
-  // terminal-only delta ahead of the preceding compaction transition.
+  // message append settles. The bounded FIFO preserves that order; overflow or
+  // exhausted retry leaves a sequence gap for router-side snapshot recovery.
   const enqueueChildDelta = (wire: JsonRecord): void => {
     const ownerSessionId = wire.owner_session_id;
-    if (typeof ownerSessionId !== "string") return;
-    childDeltaDelivery = childDeltaDelivery
-      .catch(() => undefined)
-      .then(async () => {
-        // A queued receipt from a closed session must not append into its
-        // replacement session after the router has changed the owner fence.
-        if (registeredOwnerSessionId !== ownerSessionId) return;
-        await sendHiddenCustomMessage(pi, "mecha.child.delta.v1", "Managed child lifecycle updated.", wire, { triggerTurn: false });
-      })
-      .catch(() => undefined);
+    if (typeof ownerSessionId === "string") childDeltaBuffer.enqueue(ownerSessionId, wire);
   };
   const queuedCommands: Array<{ name: string; command: Command }> = [];
   const queueCommand = (name: string, command: Command): void => {
@@ -835,7 +830,9 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   // Pi only exposes registry inspection after its extension runtime starts. This
   // is still before get_commands or any model request can observe this extension.
   pi.on("session_start", async (_event, context) => {
-    registeredOwnerSessionId = sessionIdFromContext(context);
+    const ownerSessionId = sessionIdFromContext(context);
+    if (registeredOwnerSessionId !== ownerSessionId) childDeltaBuffer.clear();
+    registeredOwnerSessionId = ownerSessionId;
     registerCommands();
     if (nativeRootControlTestEnabled && registeredOwnerSessionId !== undefined && initialAcceptedManifest === undefined) {
       const ownerSessionId = registeredOwnerSessionId;
@@ -898,6 +895,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     if (registeredOwnerSessionId !== undefined) nativeRootControlTestHooks.delete(registeredOwnerSessionId);
     rootPendingRequestIds.clear();
     installationReceipts.clear();
+    childDeltaBuffer.clear();
     registeredOwnerSessionId = undefined;
   });
 

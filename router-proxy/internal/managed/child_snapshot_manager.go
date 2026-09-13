@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -78,18 +79,73 @@ func (m *Manager) handleChildDeltaEvent(binding *managedBinding, delta map[strin
 			return
 		}
 		updated, err := m.store.ApplyManagedChildDelta(context.Background(), fence, candidate)
-		if err == nil && updated {
-			m.publishProjection()
-			if changes["lifecycle_state"] == "running" {
-				m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "child", ID: candidate.TaskID + ":" + candidate.RunID + ":" + candidate.ParentEntryID})
-			}
-			// The snapshot wakeup keeps the live child disclosure current. Publish
-			// this exact durable fact too: a terminal child is no longer live work,
-			// so Complete must not depend on a later history poll to show its result.
-			if entry, historyErr := m.store.ManagedChildHistoryEntryForDelta(context.Background(), fence, candidate); historyErr == nil {
-				m.publishCompleteHistory(entry)
-			}
-			m.scheduleManagedGoalSnoozeWakeup(binding, fence)
+		if errors.Is(err, store.ErrManagedChildDeltaGap) || errors.Is(err, store.ErrManagedChildDeltaConflict) {
+			updated, err = m.recoverManagedChildSnapshot(context.Background(), binding, fence)
 		}
+		if err != nil || !updated {
+			return
+		}
+		m.publishProjection()
+		if changes["lifecycle_state"] == "running" {
+			m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "child", ID: candidate.TaskID + ":" + candidate.RunID + ":" + candidate.ParentEntryID})
+		}
+		// The snapshot wakeup keeps the live child disclosure current. Publish
+		// this exact durable fact too: a terminal child is no longer live work,
+		// so Complete must not depend on a later history poll to show its result.
+		if entry, historyErr := m.store.ManagedChildHistoryEntryForDelta(context.Background(), fence, candidate); historyErr == nil {
+			m.publishCompleteHistory(entry)
+		}
+		m.scheduleManagedGoalSnoozeWakeup(binding, fence)
 	})
+}
+
+// recoverManagedChildSnapshot is the one repair path for a bounded extension
+// queue overflow, exhausted append retry, or conflicting same-sequence delta.
+// It consumes a fresh package snapshot under the binding fence instead of
+// guessing which delta or lifecycle state should win.
+func (m *Manager) recoverManagedChildSnapshot(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) (bool, error) {
+	sourceRPC, ok := binding.rpc.(readinessSourceRPC)
+	if !ok {
+		return false, errors.New("managed Pi does not support child snapshot recovery")
+	}
+	if !m.liveBindingForFence(ctx, binding, fence) {
+		return false, errors.New("managed runtime binding changed before child snapshot recovery")
+	}
+	envelope := map[string]any{"protocol": "mecha.child-snapshot/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "manifest_sha256": fence.ManifestHash}
+	response, err := sourceRPC.RequestChildSnapshot(ctx, envelope)
+	if err != nil {
+		return false, err
+	}
+	var responseSnapshot map[string]any
+	var responseCanonical []byte
+	if !privateCommandAcknowledgement(response) {
+		responseSnapshot, err = normalizeChildSnapshotReceipt(response)
+		if err != nil {
+			return false, err
+		}
+		responseCanonical, _, err = HashReadinessCanonicalJSON(responseSnapshot)
+		if err != nil {
+			return false, err
+		}
+	}
+	receipt, err := sourceRPC.WaitForChildSnapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	snapshot, err := normalizeChildSnapshotReceipt(receipt)
+	if err != nil {
+		return false, err
+	}
+	canonical, hash, err := HashReadinessCanonicalJSON(snapshot)
+	if err != nil {
+		return false, err
+	}
+	if snapshot["owner_session_id"] != fence.PiSessionID || (responseSnapshot != nil && string(responseCanonical) != string(canonical)) {
+		return false, errors.New("child snapshot recovery does not match current runtime")
+	}
+	sequence, ok := readinessInteger(snapshot["sequence"])
+	if !ok || !m.liveBindingForFence(ctx, binding, fence) {
+		return false, errors.New("managed runtime binding changed before child snapshot recovery confirmation")
+	}
+	return m.store.RecoverManagedChildSnapshot(context.Background(), fence, store.ManagedChildSnapshot{SnapshotID: snapshot["snapshot_id"].(string), OwnerSessionID: snapshot["owner_session_id"].(string), Sequence: sequence, Canonical: canonical, SHA256: hash})
 }
