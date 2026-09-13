@@ -52,6 +52,9 @@ func (m *Manager) handleParentCompactionEvent(binding *managedBinding, event map
 		if entry, historyErr := m.store.ManagedParentCompactionHistoryEntry(context.Background(), fence, transition); historyErr == nil {
 			m.publishCompleteHistory(entry)
 		}
+		if state == "idle" {
+			m.scheduleManagedGoalSnoozeWakeup(binding, fence)
+		}
 	}
 }
 

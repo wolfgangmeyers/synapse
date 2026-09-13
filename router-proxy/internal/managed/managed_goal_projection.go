@@ -224,16 +224,25 @@ func (m *Manager) recoverManagedGoalProjection(binding *managedBinding) {
 		return
 	}
 	m.startManagedTask(func() {
+		// Lifecycle replacement and test probes update a binding under serial.
+		// Recovery reads the same immutable fence under that lock before spawning
+		// any independent waiters.
+		binding.serial.Lock()
 		fence := bindingFence(binding.agentID, binding)
-		if !m.rootBindingCurrent(m.runCtx, binding, fence) {
+		current := m.rootBindingCurrent(m.runCtx, binding, fence)
+		if current {
+			// A router or process replacement cannot inherit an in-flight evaluator.
+			// Its old result remains fenced; a later native settled boundary decides
+			// whether the current runtime needs a new evaluation.
+			if changed, err := m.store.RecoverManagedGoalEvaluationForFence(context.Background(), fence); err == nil && changed {
+				m.publishProjection()
+			}
+		}
+		binding.serial.Unlock()
+		if !current {
 			return
 		}
-		// A router or process replacement cannot inherit an in-flight evaluator.
-		// Its old result remains fenced; a later native settled boundary decides
-		// whether the current runtime needs a new evaluation.
-		if changed, err := m.store.RecoverManagedGoalEvaluationForFence(context.Background(), fence); err == nil && changed {
-			m.publishProjection()
-		}
+		m.scheduleManagedGoalSnoozeWakeup(binding, fence)
 		m.startManagedGoalProjectionRecovery(binding, fence)
 	})
 }

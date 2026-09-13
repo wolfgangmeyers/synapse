@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -227,6 +228,70 @@ func TestManagedGoalDirectControlPersistsSharedSettingsBeforeProjection(t *testi
 	stored, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, stored.DesiredRevision)
+}
+
+func TestManagedGoalSnoozeSchedulesOneFencedOrdinaryWakeup(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	rpc.directBodies = make(chan string, 2)
+	settings := map[string]any{"goal_lock_enabled": false, "snooze_enabled": true, "snooze_duration_ms": int64(1), "snooze_turn_limit": nil, "snooze_budget_cap_ms": nil, "snooze_refill_yield_ms": int64(30_000), "snooze_refill_elapsed_ms": int64(60_000)}
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174011", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration", "settings": settings}, Fence: fence})
+	require.NoError(t, err)
+
+	result, err := manager.executeManagedGoalSnooze(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174012", OperationID: "goal.snooze", Arguments: map[string]any{}, Fence: fence})
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Status)
+	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "snoozed", policy.EvaluatorState)
+
+	time.Sleep(5 * time.Millisecond)
+	manager.wakeSnoozedGoalInLane(binding, fence)
+	manager.wakeSnoozedGoalInLane(binding, fence)
+	select {
+	case body := <-rpc.directBodies:
+		require.Equal(t, "NOT_DONE: Review finish the migration and take the next concrete action now.", body)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for snooze wakeup")
+	}
+	select {
+	case body := <-rpc.directBodies:
+		t.Fatalf("duplicate snooze wakeup: %s", body)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestManagedGoalMeaningfulActivityRearmsOnlyQualifiedEvents(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, _ := readyGoalProjectionFixture(t)
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174013", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence})
+	require.NoError(t, err)
+	for sequence := int64(1); sequence <= 1_000; sequence++ {
+		_, claimed, claimErr := durable.ClaimManagedGoalEvaluation(ctx, fence, sequence)
+		require.NoError(t, claimErr)
+		require.True(t, claimed)
+		_, changed, completeErr := durable.CompleteManagedGoalEvaluation(ctx, fence, sequence, store.ManagedGoalEvaluationNotDone)
+		require.NoError(t, completeErr)
+		require.True(t, changed)
+	}
+
+	manager.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "routine", ID: "ignored"})
+	stale := fence
+	stale.ProcessIncarnation = "old-incarnation"
+	for index := 0; index < 3; index++ {
+		manager.recordManagedGoalActivity(binding, stale, managedGoalActivity{Kind: "tool", ID: fmt.Sprintf("stale-%d", index)})
+	}
+	require.Never(t, func() bool {
+		policy, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+		return lookupErr == nil && policy.EvaluatorState == "idle"
+	}, 50*time.Millisecond, 5*time.Millisecond)
+	for index := 0; index < 3; index++ {
+		manager.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "tool", ID: fmt.Sprintf("tool-%d", index)})
+	}
+	require.Eventually(t, func() bool {
+		policy, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+		return lookupErr == nil && policy.EvaluatorState == "idle" && policy.NotDoneWakeups == 0
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestManagedGoalProjectionAppliesCurrentRevisionAndKeepsFailurePending(t *testing.T) {
