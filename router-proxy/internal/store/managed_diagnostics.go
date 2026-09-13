@@ -42,6 +42,10 @@ func RedactedManagedDiagnostic(value string) string {
 			}
 			continue
 		}
+		if managedDiagnosticPath(field) {
+			fields[index] = "[REDACTED]"
+			continue
+		}
 		if question := strings.IndexByte(field, '?'); question >= 0 {
 			fields[index] = field[:question] + "?[REDACTED]"
 		}
@@ -54,4 +58,15 @@ func RedactedManagedDiagnostic(value string) string {
 		return "A local managed-worker failure was recorded"
 	}
 	return result
+}
+
+func managedDiagnosticPath(field string) bool {
+	lower := strings.ToLower(field)
+	if strings.HasPrefix(field, "/") || strings.HasPrefix(field, "~/") || strings.HasPrefix(lower, "file:") {
+		return true
+	}
+	if separator := strings.IndexAny(field, "=:"); separator >= 0 {
+		return strings.HasPrefix(field[separator+1:], "/") || strings.HasPrefix(field[separator+1:], "~/")
+	}
+	return false
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +22,10 @@ type launchProcess struct {
 	once      sync.Once
 	stopMu    sync.Mutex
 	stopCalls int
+	waitMu    sync.Mutex
+	waitCalls int
+	waitDone  chan struct{}
+	waitOnce  sync.Once
 }
 
 type nopWriteCloser struct{ io.Writer }
@@ -30,8 +35,17 @@ func (nopWriteCloser) Close() error { return nil }
 func (p *launchProcess) Identity() ProcessIdentity { return p.identity }
 func (p *launchProcess) Stdin() io.WriteCloser     { return nopWriteCloser{io.Discard} }
 func (p *launchProcess) Stdout() io.ReadCloser     { return io.NopCloser(strings.NewReader("")) }
-func (p *launchProcess) Wait() error               { <-p.stopped; return p.waitErr }
-func (p *launchProcess) Reap()                     { p.once.Do(func() { close(p.stopped) }) }
+func (p *launchProcess) Wait() error {
+	p.waitMu.Lock()
+	p.waitCalls++
+	p.waitMu.Unlock()
+	<-p.stopped
+	if p.waitDone != nil {
+		p.waitOnce.Do(func() { close(p.waitDone) })
+	}
+	return p.waitErr
+}
+func (p *launchProcess) Reap() { p.once.Do(func() { close(p.stopped) }) }
 func (p *launchProcess) Stop(context.Context) error {
 	p.stopMu.Lock()
 	p.stopCalls++
@@ -43,6 +57,11 @@ func (p *launchProcess) Stops() int {
 	p.stopMu.Lock()
 	defer p.stopMu.Unlock()
 	return p.stopCalls
+}
+func (p *launchProcess) Waits() int {
+	p.waitMu.Lock()
+	defer p.waitMu.Unlock()
+	return p.waitCalls
 }
 
 type launchRPC struct {
@@ -57,6 +76,8 @@ type launchRPC struct {
 	policyEnvelope         map[string]any
 	snapshotEnvelope       map[string]any
 	failAt                 string
+	stateErr               error
+	beforeState            func()
 	abortCalls             int
 	abortErr               error
 	once                   sync.Once
@@ -64,6 +85,12 @@ type launchRPC struct {
 
 func (r *launchRPC) GetState(context.Context) (map[string]any, error) {
 	r.calls = append(r.calls, "state")
+	if r.beforeState != nil {
+		r.beforeState()
+	}
+	if r.stateErr != nil {
+		return nil, r.stateErr
+	}
 	return map[string]any{"sessionId": r.session}, nil
 }
 func (r *launchRPC) GetCommands(context.Context) ([]string, error) {
@@ -278,6 +305,77 @@ func TestManagerSourceReadinessFailuresNeverAdmitTheInitialInstruction(t *testin
 			require.Equal(t, test.wantPolicy, source.AppliedPolicy != nil)
 			require.Equal(t, test.wantSnapshot, source.Snapshot != nil)
 		})
+	}
+}
+
+func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	processExit := exec.Command("/bin/sh", "-c", "exit 17").Run()
+	require.Error(t, processExit)
+	process := &launchProcess{identity: ProcessIdentity{PID: 801, StartMarker: "start", Incarnation: "incarnation"}, waitErr: &managedProcessExitError{cause: processExit, detail: "fatal token=do-not-retain /private/router/session.json"}, stopped: make(chan struct{}), waitDone: make(chan struct{})}
+	process.Reap() // The fake Pi closes stdout before get_state can answer.
+	rpc := &launchRPC{stateErr: io.EOF, beforeState: func() {
+		<-process.waitDone
+		// The process waiter owns the one Wait call. Give its completion handoff
+		// a turn before returning EOF from the fake RPC pipe.
+		time.Sleep(time.Millisecond)
+	}}
+	root := t.TempDir()
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "eof-exit", Cwd: root, InitialInstruction: "must not prompt", RequestID: "eof-exit-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "eof-exit")
+		return readErr == nil && agent.LifecycleState == "failed"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "eof-exit")
+	require.NoError(t, err)
+	require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "code 17")
+	for _, forbidden := range []string{"do-not-retain", "/private/router/session.json"} {
+		require.NotContains(t, agent.LastErrorMessage, forbidden)
+	}
+	require.Equal(t, 0, rpc.promptCount)
+	require.Equal(t, 0, process.Stops(), "a confirmed exit must not be stopped again")
+	require.Equal(t, 1, process.Waits(), "the waiter is the only Process.Wait caller")
+	operation, err := durable.ManagedOperation(ctx, "eof-exit-request")
+	require.NoError(t, err)
+	require.Equal(t, "terminal", operation.State)
+	require.Equal(t, 202, operation.ResponseStatus)
+}
+
+func TestManagerKeepsUnconfirmedReadinessPipeFailuresAsReadinessFailures(t *testing.T) {
+	for _, stateErr := range []error{io.EOF, context.DeadlineExceeded} {
+		ctx := context.Background()
+		durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+		require.NoError(t, err)
+		manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+		require.NoError(t, err)
+		root := t.TempDir()
+		process := &launchProcess{identity: ProcessIdentity{PID: 802, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+		rpc := &launchRPC{stateErr: stateErr}
+		manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+		require.NoError(t, err)
+		_, err = manager.Launch(ctx, LaunchRequest{Name: "unconfirmed-" + strings.ReplaceAll(stateErr.Error(), " ", "-"), Cwd: root, RequestID: "unconfirmed-" + strings.ReplaceAll(stateErr.Error(), " ", "-")})
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			agent, readErr := durable.ManagedAgent(ctx, "unconfirmed-"+strings.ReplaceAll(stateErr.Error(), " ", "-"))
+			return readErr == nil && agent.LifecycleState == "failed"
+		}, time.Second, time.Millisecond)
+		agent, err := durable.ManagedAgent(ctx, "unconfirmed-"+strings.ReplaceAll(stateErr.Error(), " ", "-"))
+		require.NoError(t, err)
+		require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+		require.Equal(t, 1, process.Stops())
+		require.NoError(t, manager.Close(context.Background()))
+		require.NoError(t, durable.Close())
 	}
 }
 

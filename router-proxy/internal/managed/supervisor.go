@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -494,20 +495,25 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.mu.Unlock()
 	fence := bindingFence(agent.AgentID, binding)
 	if err = m.readinessGate(ctx, binding, fence); err != nil {
+		// An EOF can be the pipe symptom of a real Pi exit. Upgrade only after
+		// the dedicated waiter has reaped that exact child; timeouts and an EOF
+		// with no completed waiter remain ordinary readiness failures.
+		if errors.Is(err, io.EOF) {
+			if waitErr, exited := completedBindingWait(binding); exited {
+				_ = rpc.Close()
+				m.recordPreReadinessProcessExit(fence, request.RequestID, waitErr)
+				return
+			}
+		}
 		_ = rpc.Close()
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "READINESS_FAILED", sanitizeError(err))
 		return
 	}
-	select {
-	case <-waitSignal:
-		binding.serial.Lock()
-		waitErr := binding.waitErr
-		binding.serial.Unlock()
+	if waitErr, exited := completedBindingWait(binding); exited {
 		_ = rpc.Close()
-		m.fail(agent.AgentID, "PROCESS_EXITED", sanitizeError(waitErr))
+		m.recordPreReadinessProcessExit(fence, request.RequestID, waitErr)
 		return
-	default:
 	}
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
@@ -632,6 +638,34 @@ func (m *Manager) runningBindingCurrent(ctx context.Context, binding *managedBin
 	}
 	agent, err := m.store.ManagedAgent(ctx, fence.AgentID)
 	return err == nil && agent.DesiredState == "running" && agent.LifecycleState == "running" && sameBindingFence(storedAgentFence(agent), fence)
+}
+
+// completedBindingWait reads the wait result only after the one waiter has
+// completed. It never calls Process.Wait itself, preserving the single-reap
+// ownership boundary during readiness failures.
+func completedBindingWait(binding *managedBinding) (error, bool) {
+	if binding == nil {
+		return nil, false
+	}
+	binding.serial.Lock()
+	defer binding.serial.Unlock()
+	if binding.waitSignal == nil {
+		return nil, false
+	}
+	select {
+	case <-binding.waitSignal:
+		return binding.waitErr, true
+	default:
+		return nil, false
+	}
+}
+
+// recordPreReadinessProcessExit keeps an exit found before readiness on the
+// launch's exact durable fence. A stale waiter is intentionally a no-op.
+func (m *Manager) recordPreReadinessProcessExit(fence store.ManagedRuntimeFence, operationID string, waitErr error) {
+	if err := m.store.RecordManagedPreReadinessProcessExit(context.Background(), fence, operationID, ManagedProcessExitDiagnostic(waitErr)); err == nil {
+		m.publishProjection()
+	}
 }
 
 // recordReadyBindingProcessExitInLane is shared by the process waiter and the
