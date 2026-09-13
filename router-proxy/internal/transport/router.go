@@ -588,6 +588,9 @@ func (r *Router) Listen(ctx context.Context) error {
 		if urlErr := r.managed.SetRouterURL(routerURL); urlErr != nil {
 			return urlErr
 		}
+		if err := r.managed.RecoverManagedRootColdStarts(ctx); err != nil {
+			return err
+		}
 		if err := r.managed.RecoverPendingManagedLaunches(ctx); err != nil {
 			return err
 		}
