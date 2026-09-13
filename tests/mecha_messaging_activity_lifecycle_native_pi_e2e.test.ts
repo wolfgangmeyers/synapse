@@ -4,7 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { cp, mkdtemp, readFile, readdir, rm, symlink, mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -17,13 +17,13 @@ import {
 } from "./support/native_pi_lifecycle_test_support.ts";
 
 const CHILD_FLAG = "--mecha-messaging-native-pi-lifecycle-child";
-const PI_VERSION = "0.84.3";
+const PI_VERSION = "0.85.0";
 const NATIVE_VERSION = "19.2.2";
 const NATIVE_SOURCE_ROOT = "/Users/wolfgang/code/pi-packages";
-const NATIVE_SOURCE_COMMIT = "c058820f9437807c626392b53e56081a6477deac";
+const NATIVE_SOURCE_COMMIT = "5b362aaa6b65204ace95c62b5089b6ad5a801b4a";
 // The current source checkout intentionally carries the approved diagnostics instrumentation as
 // uncommitted changes. Keep this digest tied to that exact source, so stale packages still fail.
-const NATIVE_SOURCE_DIGEST = "f7611c2c33d65f584ebd45c88549bb9bd98abe1885bf2df61ba223e957c5d36c";
+const NATIVE_SOURCE_DIGEST = "460719c0e59be51385e2d5f7a2128c480b0f8ad6364f7ccc61daa64a55082e06";
 const AGENT_ID = "native-lifecycle-e2e";
 const PRIVATE_PROMPT = "PRIVATE_NATIVE_PROMPT_7f13";
 const PRIVATE_MODEL = "PRIVATE_NATIVE_MODEL_4c92";
@@ -268,7 +268,7 @@ async function terminateProcess(child: ReturnType<typeof spawn>, description: st
   return processExited(child);
 }
 async function startRouter(binary: string, database: string, logPath: string, port: number, home: string, resources?: ResourceTracker): Promise<RouterProcess> {
-  const child = spawn(binary, ["--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", String(port)], { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(binary, ["--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", String(port), "--managed=false"], { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
   resources?.trackChild(child, "isolated-router");
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk.toString("utf8"); });
@@ -604,7 +604,9 @@ async function runChild(binary: string, pi: PackageIdentity, native: PackageIden
     assert.equal(retryClient.lifecycleStatus?.().pending, 0, "reconnected lifecycle journal must be empty");
     releaseReplayChild(); releaseChild(); await waitFor(() => (parentService.getLifecycleSnapshots?.() ?? []).length === 0, "native child completion");
     await waitFor(async () => (await currentAgent(router?.http ?? ""))?.subagent_count === 0, "durable child removal");
-    const childSessionDir = join(temp, `pi-subagents-${process.getuid?.() ?? 0}`, project.replace(/[\\/]/g, "-").replace(/^-+/, ""), "tasks");
+    const parentSessionFile = session?.sessionManager.getSessionFile();
+    if (typeof parentSessionFile !== "string") throw new Error("persisted parent session file is required for native child transcripts");
+    const childSessionDir = join(dirname(parentSessionFile), basename(parentSessionFile, ".jsonl"), "tasks");
     const childTranscripts = (await recursiveFiles(childSessionDir)).filter((path) => path.endsWith(".jsonl"));
     assert.equal(childTranscripts.length > 0, true, "native child transcript was not persisted");
     const transcript = (await Promise.all(childTranscripts.map((path) => readFile(path, "utf8")))).join("\\n");
