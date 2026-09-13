@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,79 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRootControlRouterOperationsUseConfiguredEndpointOnly(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is required by the managed root-control runner")
+	}
+	var targetPaths []string
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		targetPaths = append(targetPaths, request.URL.Path)
+		switch request.URL.Path {
+		case "/v1/messages":
+			_, _ = writer.Write([]byte(`{"message_id":"target-message"}`))
+		case "/v1/reminders":
+			body, _ := io.ReadAll(request.Body)
+			var reminder map[string]any
+			require.NoError(t, json.Unmarshal(body, &reminder))
+			response, marshalErr := json.Marshal(map[string]any{"reminder": reminder})
+			require.NoError(t, marshalErr)
+			_, _ = writer.Write(response)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer target.Close()
+	decoyRequests := 0
+	decoy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		decoyRequests++
+		http.Error(writer, "decoy", http.StatusInternalServerError)
+	}))
+	defer decoy.Close()
+	t.Setenv("MECHA_ROUTER_URL", decoy.URL)
+
+	toolsDir := t.TempDir()
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	runner, err := os.ReadFile(filepath.Join(repositoryRoot, ".claude", "skills", "supervisor", "tools", managedRootControlRunner))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, managedRootControlRunner), runner, 0o700))
+	mailSender := `#!/usr/bin/env python3
+import os
+from urllib.request import Request, urlopen
+base = os.environ["MECHA_ROUTER_URL"].rstrip("/")
+with urlopen(Request(base + "/v1/messages", data=b"{}", method="POST", headers={"content-type": "application/json"}), timeout=5) as response:
+    response.read()
+print("mail sent")
+`
+	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "mailbox_send.py"), []byte(mailSender), 0o700))
+	t.Setenv("MECHA_SUPERVISOR_TOOLS", toolsDir)
+	executor, err := newMailboxRouterRootControlExecutor(managed.Config{ManagedHome: t.TempDir(), RouterURL: target.URL})
+	require.NoError(t, err)
+
+	mailResult, err := executor.ExecuteRootControl(context.Background(), managed.RootControlHandlerIdentity{OperationID: "mail.send"}, managed.RootControlInvocation{
+		RequestID: "request-mail", ResultID: "result-mail", ToolCallID: "call-mail", OperationID: "mail.send",
+		Arguments: map[string]any{"recipient": "supervisor", "body": "configured target"}, Fence: store.ManagedRuntimeFence{AgentID: "managed-worker"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", mailResult.Status)
+
+	reminderResult, err := executor.ExecuteRootControl(context.Background(), managed.RootControlHandlerIdentity{OperationID: "reminder.control"}, managed.RootControlInvocation{
+		RequestID: "request-reminder", ResultID: "result-reminder", ToolCallID: "call-reminder", OperationID: "reminder.control",
+		Arguments: map[string]any{"action": "create", "message": "check target", "delayMinutes": 1}, Fence: store.ManagedRuntimeFence{AgentID: "managed-worker"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", reminderResult.Status)
+	require.Equal(t, []string{"/v1/messages", "/v1/reminders"}, targetPaths)
+	require.Zero(t, decoyRequests)
+}
+
+func TestRootControlExecutorRejectsMissingOrInvalidRouterEndpoint(t *testing.T) {
+	for _, routerURL := range []string{"", "http://127.0.0.1:8765/path", "http://localhost:8765"} {
+		_, err := newMailboxRouterRootControlExecutor(managed.Config{ManagedHome: t.TempDir(), RouterURL: routerURL})
+		require.Error(t, err, "router URL %q must fail closed", routerURL)
+	}
+}
 
 func TestRootControlledWebSearchReturnsBoundedSourceResults(t *testing.T) {
 	python, err := exec.LookPath("python3")
@@ -28,7 +103,7 @@ func TestRootControlledWebSearchReturnsBoundedSourceResults(t *testing.T) {
 	t.Setenv("MECHA_MANAGED_WEB_SEARCH_ENDPOINT", search.URL+"/search")
 	toolsDir, err := filepath.Abs(filepath.Join("..", "..", "..", ".claude", "skills", "supervisor", "tools"))
 	require.NoError(t, err)
-	executor := mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: t.TempDir()}
+	executor := mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: t.TempDir(), routerURL: "http://127.0.0.1:18775"}
 
 	result, err := executor.ExecuteRootControl(context.Background(), managed.RootControlHandlerIdentity{OperationID: "web.search"}, managed.RootControlInvocation{
 		RequestID: "request-1", ResultID: "result-1", ToolCallID: "call-1", OperationID: "web.search",
@@ -68,7 +143,7 @@ if not isinstance(fence, dict) or set(fence) != expected or fence.get("agent_id"
 print(json.dumps({"status": "ok", "content": "mail sent", "details": {"history": "quiet"}}))
 `
 	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, managedRootControlRunner), []byte(runner), 0o600))
-	executor := mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: t.TempDir()}
+	executor := mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: t.TempDir(), routerURL: "http://127.0.0.1:18775"}
 
 	result, err := executor.ExecuteRootControl(context.Background(), managed.RootControlHandlerIdentity{OperationID: "mail.send"}, managed.RootControlInvocation{
 		RequestID: "request-1", ResultID: "result-1", ToolCallID: "call-1", OperationID: "mail.send",
