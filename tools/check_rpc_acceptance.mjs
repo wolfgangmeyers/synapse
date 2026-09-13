@@ -48,8 +48,8 @@ function acceptanceRows(html) {
     rows.push({ id: `AC-${match[1]}`, setup: clean(match[2]), action: clean(match[3]), predicates: [clean(match[4])] });
   }
   rows.sort((left, right) => left.id.localeCompare(right.id));
-  if (rows.length !== 90 || new Set(rows.map((row) => row.id)).size !== 90 || rows.some((row, index) => row.id !== `AC-${String(index + 1).padStart(3, "0")}`)) {
-    fail(`canonical spec must expose exactly AC-001 through AC-090 (found ${rows.length})`);
+  if (rows.length !== 91 || new Set(rows.map((row) => row.id)).size !== 91 || rows.some((row, index) => row.id !== `AC-${String(index + 1).padStart(3, "0")}`)) {
+    fail(`canonical spec must expose exactly AC-001 through AC-091 (found ${rows.length})`);
   }
   return rows;
 }
@@ -67,10 +67,12 @@ async function createRegistry() {
     required_custom_message_types: ["mecha.tools.accepted.v1", "mecha.tools.rejected.v1", "mecha.control.request.v1", "mecha.control.result.v1", "mecha.mailbox.appended.v1", "mecha.policy.applied.v1", "mecha.child.snapshot.v1", "mecha.child.delta.v1"],
     required_artifacts: ["stock-pi-0.85-parent-commands.json", "stock-pi-0.85-command-registration-failures.json", "stock-pi-0.85-supplemental-collision.json", "stock-pi-0.85-real-child.json", "stock-pi-0.85-custom-message-types.json", "stock-pi-0.85-ac090-child-factory-lifecycle.json", "stock-pi-0.85-lifecycle-generations.json", "stock-pi-0.85-fresh-generation.json"],
     phase2_exclusions: ["router dispatch and persistence", "managed HTTP and authentication", "mailbox recovery", "browser acceptance and release gates"],
-    generated_from: { path: "RPC_SPEC.html", sha256: hash(spec), selection: "tr#ac-001 through tr#ac-090" },
+    generated_from: { path: "RPC_SPEC.html", sha256: hash(spec), selection: "tr#ac-001 through tr#ac-091" },
     criteria: rows.map((row) => ({
       ...row,
       owner_phase: ownerFor(row.id),
+      // AC-091 is authoritative but has no implemented release proof yet.
+      release_evidence_status: row.id === "AC-091" ? "pending" : "required",
       artifact_id: `rpc-${row.id.toLowerCase()}`,
       proof_symbols: proofSymbolsFor(row.id),
       evidence_class: evidenceClassFor(row.id),
@@ -108,7 +110,7 @@ async function verifyRegistry(registry) {
 }
 async function verifyRun(registry, run, runPath) {
   requireObject(run, "release run");
-  if (run.schema !== runSchema || run.result !== "passed" || run.status !== "passed") fail("release run is not a passed mecha.rpc.acceptance-run/v1 artifact");
+  if (run.schema !== runSchema || !["passed", "not_proven"].includes(run.result) || run.status !== run.result) fail("release run has an invalid mecha.rpc.acceptance-run/v1 result");
   if (typeof run.artifact_directory !== "string" || !run.artifact_directory.startsWith("/tmp/")) fail("release run must declare a /tmp candidate artifact directory");
   const artifactDirectory = resolve(run.artifact_directory);
   if (resolve(runPath) !== resolve(artifactDirectory, "acceptance-run.json")) fail("release run must be read from its declared candidate artifact directory");
@@ -121,7 +123,14 @@ async function verifyRun(registry, run, runPath) {
     const criterion = expected.get(evidence.acceptance_id);
     if (criterion === undefined) fail("evidence references an unknown acceptance ID");
     if (actual.has(criterion.id)) fail(`${criterion.id} has duplicate evidence`);
-    if (evidence.artifact_id !== criterion.artifact_id || evidence.owner_phase !== criterion.owner_phase || evidence.status !== "passed" || !equalJson(evidence.evidence_class, criterion.evidence_class) || !equalJson(evidence.observed_predicates, criterion.predicates)) fail(`${criterion.id} does not match its declared artifact, owner, class, status, or predicates`);
+    if (evidence.artifact_id !== criterion.artifact_id || evidence.owner_phase !== criterion.owner_phase || !equalJson(evidence.evidence_class, criterion.evidence_class)) fail(`${criterion.id} does not match its declared artifact, owner, or class`);
+    const pending = criterion.release_evidence_status === "pending";
+    if (pending) {
+      if (evidence.status !== "not_proven" || !equalJson(evidence.observed_predicates, []) || !Array.isArray(evidence.proofs) || evidence.proofs.length !== 0) fail(`${criterion.id} must remain not_proven until its release proof exists`);
+      actual.set(criterion.id, evidence);
+      continue;
+    }
+    if (evidence.status !== "passed" || !equalJson(evidence.observed_predicates, criterion.predicates)) fail(`${criterion.id} does not match its declared status or predicates`);
     if (!Array.isArray(evidence.proofs) || evidence.proofs.length !== criterion.proof_symbols.length) fail(`${criterion.id} has an incomplete proof set`);
     const proofs = new Map();
     for (const proof of evidence.proofs) {
@@ -137,13 +146,34 @@ async function verifyRun(registry, run, runPath) {
     if (!equalJson([...proofs.keys()].sort(), [...criterion.proof_symbols].sort())) fail(`${criterion.id} proof symbols do not match the registry`);
     actual.set(criterion.id, evidence);
   }
-  if (actual.size !== expected.size || [...expected.keys()].some((id) => !actual.has(id))) fail("release run does not close every AC-001 through AC-090 row");
-  return { candidate: run.candidate, acceptance_count: actual.size, composite_count: registry.composite_proofs.length };
+  if (actual.size !== expected.size || [...expected.keys()].some((id) => !actual.has(id))) fail("release run does not cover every AC-001 through AC-091 row");
+  const pending = registry.criteria.filter((criterion) => criterion.release_evidence_status === "pending").map((criterion) => criterion.id);
+  if (pending.length > 0 && run.result !== "not_proven") fail(`release run must be not_proven while ${pending.join(", ")} lacks release evidence`);
+  if (pending.length === 0 && run.result !== "passed") fail("release run must be passed when every AC has release evidence");
+  return { candidate: run.candidate, acceptance_count: actual.size, pending_acceptance_ids: pending, composite_count: registry.composite_proofs.length };
+}
+
+function selfTest() {
+  const row = (number) => `<tr id="ac-${number}"><td>AC-${number}</td><td>setup</td><td>action</td><td>predicate</td></tr>`;
+  const complete = Array.from({ length: 91 }, (_, index) => row(String(index + 1).padStart(3, "0"))).join("");
+  if (acceptanceRows(complete).length !== 91) fail("self-test did not accept AC-001 through AC-091");
+  try {
+    acceptanceRows(complete.replace(row("091"), ""));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("AC-001 through AC-091")) return;
+    throw error;
+  }
+  fail("self-test accepted a missing AC-091 row");
 }
 
 const args = new Set(process.argv.slice(2));
 const registryPath = process.env.MECHA_RPC_ACCEPTANCE_REGISTRY ? resolve(process.env.MECHA_RPC_ACCEPTANCE_REGISTRY) : DEFAULT_REGISTRY;
-if (args.has("--write-registry")) {
+if (args.has("--self-test")) {
+  selfTest();
+  const registry = JSON.parse(await readFile(registryPath, "utf8"));
+  await verifyRegistry(registry);
+  process.stdout.write("RPC acceptance checker self-test passed\n");
+} else if (args.has("--write-registry")) {
   await writeFile(registryPath, `${JSON.stringify(await createRegistry(), null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`wrote ${registryPath}\n`);
 } else {
