@@ -11,18 +11,17 @@ import (
 // transport keeps the conversation/recipient ownership rules.
 type DirectReplyPublisher func(context.Context, store.ManagedDirectAttempt, DirectMailboxReply) error
 
-// SetDirectReplyPublisher installs the router-owned reply path after transport
-// construction. A replacement publisher is used only for future responses.
 func (m *Manager) SetDirectReplyPublisher(publish DirectReplyPublisher) {
 	m.mu.Lock()
 	m.directReplyPublisher = publish
 	m.mu.Unlock()
 }
 
+// publishDirectReply first records the source, then claims exactly one bounded
+// outbox attempt. The transport's successful return is the existing broker /
+// conversation-store delivery receipt. Its deterministic message identity makes
+// recovery after a post-write crash idempotent; the protocol has no browser ACK.
 func (m *Manager) publishDirectReply(attempt store.ManagedDirectAttempt, reply DirectMailboxReply) {
-	// Persist source work before handing text to transport. This closes the
-	// reply-before-settled race and makes restart recovery independent of the
-	// ephemeral RPC callback.
 	delivery, err := m.store.QueueManagedFinalDelivery(context.Background(), attempt, reply.EntryIdentity, reply.Body)
 	if err != nil || delivery == nil {
 		if err != nil {
@@ -30,17 +29,43 @@ func (m *Manager) publishDirectReply(attempt store.ManagedDirectAttempt, reply D
 		}
 		return
 	}
-	m.mu.Lock()
-	publish := m.directReplyPublisher
-	m.mu.Unlock()
-	if publish == nil {
-		return
-	}
+	m.publishManagedFinalDelivery(*delivery)
+}
+
+func (m *Manager) publishManagedFinalDelivery(delivery store.ManagedFinalDelivery) {
 	m.startManagedTask(func() {
-		if err := publish(context.Background(), attempt, reply); err != nil {
-			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "reply_persistence_failed", "")
+		claimed, err := m.store.ClaimManagedFinalDelivery(context.Background(), delivery)
+		if err != nil || claimed == nil {
 			return
 		}
-		_, _ = m.store.MarkManagedFinalDeliveryDelivered(context.Background(), *delivery)
+		m.mu.Lock()
+		publish := m.directReplyPublisher
+		m.mu.Unlock()
+		if publish == nil {
+			m.failManagedFinalDelivery(*claimed, "reply_publisher_unavailable")
+			return
+		}
+		reply := DirectMailboxReply{EntryIdentity: claimed.EntryID, Body: claimed.Body}
+		if err := publish(context.Background(), claimed.Attempt, reply); err != nil {
+			m.failManagedFinalDelivery(*claimed, "reply_transport_failed")
+			return
+		}
+		if _, err := m.store.MarkManagedFinalDeliveryDelivered(context.Background(), *claimed); err != nil {
+			// The outbox remains delivering and startup recovery retries the
+			// deterministic conversation write; never claim success from persistence.
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), claimed.Attempt.Fence.AgentID, claimed.Attempt.MessageID, claimed.Attempt.AttemptNumber, "reply_delivery_receipt_persistence_failed", "")
+		}
 	})
+}
+
+func (m *Manager) failManagedFinalDelivery(delivery store.ManagedFinalDelivery, code string) {
+	terminal, err := m.store.FailManagedFinalDelivery(context.Background(), delivery, code)
+	if err != nil {
+		_ = m.store.RecordManagedDirectDiagnostic(context.Background(), delivery.Attempt.Fence.AgentID, delivery.Attempt.MessageID, delivery.Attempt.AttemptNumber, "reply_failure_persistence_failed", "")
+		return
+	}
+	_ = m.store.RecordManagedDirectDiagnostic(context.Background(), delivery.Attempt.Fence.AgentID, delivery.Attempt.MessageID, delivery.Attempt.AttemptNumber, code, "")
+	if !terminal {
+		m.scheduleManagedFinalDeliveryRetry(delivery.Attempt.Fence.AgentID)
+	}
 }

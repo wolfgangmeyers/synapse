@@ -283,6 +283,7 @@ func (m *Manager) executeResetInLane(sourceBinding *managedBinding, actionID str
 		if err := m.store.AdvanceManagedReset(context.Background(), actionID, "awaiting_settle", "source_settle", "stopping_source", "source_stop", source); err != nil {
 			return
 		}
+		_ = m.store.InterruptManagedParentWork(context.Background(), source)
 		if err := m.store.MarkManagedResetSourceStopped(context.Background(), actionID, source); err != nil {
 			return
 		}
@@ -339,6 +340,7 @@ func (m *Manager) executeResetInLane(sourceBinding *managedBinding, actionID str
 		return
 	}
 	m.interruptBuiltinToolInvocations(sourceBinding, source)
+	_ = m.store.InterruptManagedParentWork(context.Background(), source)
 	if err := m.store.MarkManagedResetSourceStopped(context.Background(), actionID, source); err != nil {
 		return
 	}
@@ -524,6 +526,9 @@ func (m *Manager) RecoverPendingManagedLaunches(ctx context.Context) error {
 				}
 			}
 		}
+		if validRestartFence(fence) {
+			_ = m.store.InterruptManagedParentWork(context.Background(), fence)
+		}
 		if terminalErr := m.store.TerminalizeRecoveredManagedLaunch(ctx, agent.AgentID, agent.LaunchOperationID, code, message); terminalErr != nil {
 			lane.serial.Unlock()
 			return terminalErr
@@ -594,6 +599,7 @@ func (m *Manager) recoverResetActionInLane(claim *store.ManagedLifecycleRecovery
 		_ = m.store.FailManagedReset(context.Background(), action.ActionID, "RESET_RECOVERY_NEEDS_SETTLE", false, claim.Fence)
 	case "source_stop":
 		if probe.State == ProcessAbsent || (probe.State == ProcessOwned && m.reapRestartGroup(context.Background(), oldFenceIdentity(claim.Fence), nil)) {
+			_ = m.store.InterruptManagedParentWork(context.Background(), claim.Fence)
 			_ = m.store.MarkManagedResetSourceStopped(context.Background(), action.ActionID, claim.Fence)
 			return
 		}
@@ -669,6 +675,7 @@ func (m *Manager) shutdownResetBinding(ctx context.Context, binding *managedBind
 		return true, m.store.ClearResetTargetAfterVerifiedAbsence(context.Background(), action.ActionID, *action.SourceFence, fence)
 	}
 	if action.SourceFence != nil && sameBindingFence(*action.SourceFence, fence) && action.State == "stopping_source" {
+		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 		return true, m.store.MarkManagedResetSourceStopped(context.Background(), action.ActionID, fence)
 	}
 	return true, nil

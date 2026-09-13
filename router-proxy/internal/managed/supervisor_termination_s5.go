@@ -74,6 +74,9 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 		source, sourcePtr = current, &source
 	}
 
+	if sourcePtr != nil {
+		_ = m.store.InterruptManagedParentWork(context.Background(), source)
+	}
 	responseAgent := *agent
 	responseAgent.DesiredState = "terminated"
 	responseAgent.LifecycleState = "terminating"

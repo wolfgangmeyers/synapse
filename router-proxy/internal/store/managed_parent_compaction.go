@@ -113,17 +113,8 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 		if err != nil {
 			return err
 		}
-		activity := managedParentProjectedActivity(event.State == "compacting", active != 0)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')`, append([]any{activity, now}, managedFenceValues(fence)...)...)
-		if err != nil {
+		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
 			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 		}
 		key := managedParentCompactionHistoryKey(fence, event)
 		message := "Compacting context"
@@ -143,7 +134,7 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 		if presentationErr != nil {
 			return presentationErr
 		}
-		result, err = s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,?)`, fence.AgentID, "managed_parent_compaction", "info", message, now, key, presentationJSON)
+		result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,?)`, fence.AgentID, "managed_parent_compaction", "info", message, now, key, presentationJSON)
 		if err != nil {
 			return err
 		}
