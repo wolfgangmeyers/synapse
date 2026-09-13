@@ -19,6 +19,7 @@ type launchProcess struct {
 	identity  ProcessIdentity
 	stopped   chan struct{}
 	waitErr   error
+	stopErr   error
 	once      sync.Once
 	stopMu    sync.Mutex
 	stopCalls int
@@ -50,6 +51,9 @@ func (p *launchProcess) Stop(context.Context) error {
 	p.stopMu.Lock()
 	p.stopCalls++
 	p.stopMu.Unlock()
+	if p.stopErr != nil {
+		return p.stopErr
+	}
 	p.Reap()
 	return nil
 }
@@ -80,6 +84,7 @@ type launchRPC struct {
 	beforeState            func()
 	abortCalls             int
 	abortErr               error
+	closeErr               error
 	once                   sync.Once
 }
 
@@ -175,15 +180,17 @@ func (r *launchRPC) Abort(context.Context) error {
 	r.abortCalls++
 	return r.abortErr
 }
-func (r *launchRPC) Close() error { return nil }
+func (r *launchRPC) Close() error { return r.closeErr }
 
 type launchFactory struct {
-	process *launchProcess
-	spec    CommandSpec
-	rpc     *launchRPC
+	process    Process
+	spec       CommandSpec
+	rpc        *launchRPC
+	startCalls int
 }
 
 func (f *launchFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
+	f.startCalls++
 	f.spec = spec
 	f.rpc.session = spec.SessionID
 	return f.process, nil
@@ -192,6 +199,48 @@ func (f *launchFactory) Start(_ context.Context, spec CommandSpec) (Process, err
 type launchRPCFactory struct{ rpc *launchRPC }
 
 func (f launchRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
+
+type eofWaitProcess struct {
+	identity    ProcessIdentity
+	waitErr     error
+	waitStarted chan struct{}
+	stopCalled  chan struct{}
+	releaseWait chan struct{}
+	waitOnce    sync.Once
+	stopOnce    sync.Once
+	mu          sync.Mutex
+	waitCalls   int
+	stopCalls   int
+}
+
+func (p *eofWaitProcess) Identity() ProcessIdentity { return p.identity }
+func (p *eofWaitProcess) Stdin() io.WriteCloser     { return nopWriteCloser{io.Discard} }
+func (p *eofWaitProcess) Stdout() io.ReadCloser     { return io.NopCloser(strings.NewReader("")) }
+func (p *eofWaitProcess) Wait() error {
+	p.mu.Lock()
+	p.waitCalls++
+	p.mu.Unlock()
+	p.waitOnce.Do(func() { close(p.waitStarted) })
+	<-p.releaseWait
+	return p.waitErr
+}
+func (p *eofWaitProcess) Stop(context.Context) error {
+	p.mu.Lock()
+	p.stopCalls++
+	p.mu.Unlock()
+	p.stopOnce.Do(func() { close(p.stopCalled) })
+	return nil
+}
+func (p *eofWaitProcess) Waits() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waitCalls
+}
+func (p *eofWaitProcess) Stops() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopCalls
+}
 
 func TestManagerMarksReadyOnlyAfterReadinessSources(t *testing.T) {
 	ctx := context.Background()
@@ -356,12 +405,277 @@ func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 		require.NotContains(t, agent.LastErrorMessage, forbidden)
 	}
 	require.Equal(t, 0, rpc.promptCount)
-	require.Equal(t, 0, process.Stops(), "a confirmed exit must not be stopped again")
+	require.Equal(t, 1, process.Stops(), "a confirmed exit still checks complete group cleanup")
 	require.Equal(t, 1, process.Waits(), "the waiter is the only Process.Wait caller")
 	operation, err := durable.ManagedOperation(ctx, "eof-exit-request")
 	require.NoError(t, err)
 	require.Equal(t, "terminal", operation.State)
 	require.Equal(t, 202, operation.ResponseStatus)
+}
+
+func TestManagerDoesNotClassifyManagerInducedExitAsProcessExit(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	exit := exec.Command("/bin/sh", "-c", "exit 23").Run()
+	require.Error(t, exit)
+	process := &eofWaitProcess{
+		identity:    ProcessIdentity{PID: 803, StartMarker: "start", Incarnation: "incarnation"},
+		waitErr:     &managedProcessExitError{cause: exit, detail: "fatal token=do-not-retain /private/router/session.json"},
+		waitStarted: make(chan struct{}), stopCalled: make(chan struct{}), releaseWait: make(chan struct{}),
+	}
+	rpc := &launchRPC{stateErr: io.EOF}
+	rpc.beforeState = func() { <-process.waitStarted }
+	go func() { <-process.stopCalled; close(process.releaseWait) }()
+	root := t.TempDir()
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: 250 * time.Millisecond, TermStop: 250 * time.Millisecond}}, Manifest: manifest,
+		ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "delayed-eof", Cwd: root, InitialInstruction: "must not prompt", RequestID: "delayed-eof-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "delayed-eof")
+		return readErr == nil && agent.LifecycleState == "failed"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "delayed-eof")
+	require.NoError(t, err)
+	require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "EOF")
+	require.NotContains(t, agent.LastErrorMessage, "do-not-retain")
+	require.NotContains(t, agent.LastErrorMessage, "/private/router/session.json")
+	require.Equal(t, 1, process.Stops())
+	require.Equal(t, 1, process.Waits())
+	require.Equal(t, 0, rpc.promptCount)
+}
+
+func TestManagerKeepsEOFWhenWaitStaysUnavailableWithinBound(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	process := &eofWaitProcess{
+		identity:    ProcessIdentity{PID: 805, StartMarker: "start", Incarnation: "incarnation"},
+		waitStarted: make(chan struct{}), stopCalled: make(chan struct{}), releaseWait: make(chan struct{}),
+	}
+	rpc := &launchRPC{stateErr: io.EOF}
+	rpc.beforeState = func() { <-process.waitStarted }
+	root := t.TempDir()
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: 25 * time.Millisecond, TermStop: 25 * time.Millisecond}}, Manifest: manifest,
+		ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		select {
+		case <-process.releaseWait:
+		default:
+			close(process.releaseWait)
+		}
+		_ = manager.Close(context.Background())
+	})
+	started := time.Now()
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "stalled-eof", Cwd: root, RequestID: "stalled-eof-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "stalled-eof")
+		return readErr == nil && agent.LifecycleState == "failed"
+	}, time.Second, time.Millisecond)
+	require.Less(t, time.Since(started), 500*time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "stalled-eof")
+	require.NoError(t, err)
+	require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "EOF")
+	require.Equal(t, 1, process.Stops())
+	require.Equal(t, 1, process.Waits())
+}
+
+func TestManagerRecordsPrePublishedZeroExitAsProcessExit(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	process := &launchProcess{identity: ProcessIdentity{PID: 804, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+	rpc := &launchRPC{stateErr: io.EOF}
+	root := t.TempDir()
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	require.NoError(t, err)
+	rpc.beforeState = func() {
+		process.Reap()
+		manager.mu.Lock()
+		binding := manager.bindings["zero-eof"]
+		manager.mu.Unlock()
+		require.NotNil(t, binding)
+		select {
+		case <-binding.waitSignal:
+		case <-time.After(time.Second):
+			t.Fatal("process waiter did not publish zero exit")
+		}
+	}
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "zero-eof", Cwd: root, RequestID: "zero-eof-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "zero-eof")
+		return readErr == nil && agent.LifecycleState == "failed"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "zero-eof")
+	require.NoError(t, err)
+	require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
+	require.NotContains(t, agent.LastErrorMessage, "EOF")
+	require.Equal(t, 1, process.Stops())
+	require.Equal(t, 1, process.Waits())
+}
+
+func TestManagerPersistsNaturalExitStopFailureWithExactBinding(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	exit, err := exec.Command("/bin/sh", "-c", "echo safe-stderr >&2; exit 19").CombinedOutput()
+	require.Error(t, err)
+	process := &launchProcess{identity: ProcessIdentity{PID: 808, StartMarker: "start", Incarnation: "incarnation"}, waitErr: &managedProcessExitError{cause: err, detail: string(exit)}, stopped: make(chan struct{})}
+	process.Reap()
+	rpc := &launchRPC{stateErr: io.EOF}
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{808: ProcessOwned}}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: 25 * time.Millisecond}}, Manifest: manifest,
+		ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, ProcessGroupOps: ops,
+		CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	rpc.beforeState = func() {
+		manager.mu.Lock()
+		binding := manager.bindings["natural-stop-failure"]
+		manager.mu.Unlock()
+		require.NotNil(t, binding)
+		select {
+		case <-binding.waitSignal:
+		case <-time.After(time.Second):
+			t.Fatal("process waiter did not publish natural exit")
+		}
+	}
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "natural-stop-failure", Cwd: root, RequestID: "natural-stop-failure-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "natural-stop-failure")
+		return readErr == nil && agent.LastErrorCode == "PROCESS_STOP_FAILED"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "natural-stop-failure")
+	require.NoError(t, err)
+	require.Equal(t, 808, agent.ProcessPID)
+	require.Equal(t, "start", agent.ProcessStartMarker)
+	require.Equal(t, "incarnation", agent.ProcessIncarnation)
+	require.Equal(t, "PROCESS_STOP_FAILED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "code 19")
+	require.Contains(t, agent.LastErrorMessage, "safe-stderr")
+	require.Contains(t, agent.LastErrorMessage, "cleanup")
+	require.False(t, agent.AcceptingPrompts)
+	require.False(t, agent.SlotHeld)
+	operation, err := durable.ManagedOperation(ctx, "natural-stop-failure-request")
+	require.NoError(t, err)
+	require.Equal(t, "terminal", operation.State)
+	_, bound := manager.bindingFor("natural-stop-failure")
+	require.True(t, bound)
+	require.Equal(t, 1, process.Stops())
+	require.Equal(t, 1, process.Waits())
+}
+
+func TestManagerPersistsStopFailureWithExactBinding(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	stopErr := errors.New("stop failed")
+	process := &launchProcess{identity: ProcessIdentity{PID: 806, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{}), stopErr: stopErr}
+	rpc := &launchRPC{stateErr: io.EOF}
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{806: ProcessOwned}}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: 25 * time.Millisecond}}, Manifest: manifest,
+		ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, ProcessGroupOps: ops,
+		CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { process.Reap(); _ = manager.Close(context.Background()) })
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "stop-failure", Cwd: root, RequestID: "stop-failure-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "stop-failure")
+		return readErr == nil && agent.LastErrorCode == "PROCESS_STOP_FAILED"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "stop-failure")
+	require.NoError(t, err)
+	require.Equal(t, 806, agent.ProcessPID)
+	require.Equal(t, "start", agent.ProcessStartMarker)
+	require.Equal(t, "incarnation", agent.ProcessIncarnation)
+	require.Equal(t, "PROCESS_STOP_FAILED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "readiness")
+	require.Contains(t, agent.LastErrorMessage, "stop failed")
+	require.False(t, agent.AcceptingPrompts)
+	require.False(t, agent.SlotHeld)
+	operation, err := durable.ManagedOperation(ctx, "stop-failure-request")
+	require.NoError(t, err)
+	require.Equal(t, "terminal", operation.State)
+	_, bound := manager.bindingFor("stop-failure")
+	require.True(t, bound)
+	require.Equal(t, 1, process.Stops())
+}
+
+func TestManagerIgnoresRPCCloseFailureAfterReapedEOF(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	process := &eofWaitProcess{identity: ProcessIdentity{PID: 807, StartMarker: "start", Incarnation: "incarnation"}, waitStarted: make(chan struct{}), stopCalled: make(chan struct{}), releaseWait: make(chan struct{})}
+	rpc := &launchRPC{stateErr: io.EOF, closeErr: errors.New("rpc close failed")}
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{807: ProcessAbsent}}
+	go func() { <-process.stopCalled; close(process.releaseWait) }()
+	root := t.TempDir()
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, ProcessGroupOps: ops,
+		CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	rpc.beforeState = func() {
+		manager.mu.Lock()
+		binding := manager.bindings["rpc-close"]
+		manager.mu.Unlock()
+		require.NotNil(t, binding)
+		<-process.waitStarted
+	}
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "rpc-close", Cwd: root, RequestID: "rpc-close-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "rpc-close")
+		return readErr == nil && agent.LifecycleState == "failed"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "rpc-close")
+	require.NoError(t, err)
+	require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+	require.NotEqual(t, "PROCESS_STOP_FAILED", agent.LastErrorCode)
+	require.Equal(t, 1, process.Stops())
+	_, bound := manager.bindingFor("rpc-close")
+	require.False(t, bound)
 }
 
 func TestManagerKeepsUnconfirmedReadinessPipeFailuresAsReadinessFailures(t *testing.T) {

@@ -96,6 +96,51 @@ func setupColdRecovery(t *testing.T, factory ProcessFactory, rpcFactory RPCFacto
 	return manager, durable, agent, tracked, databasePath
 }
 
+func TestRecoverFailedStopUsesOnlyExactOwnedFence(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		state      ProcessProbeState
+		wantLaunch bool
+		wantSignal int
+		wantWait   int
+	}{
+		{name: "absent", state: ProcessAbsent, wantLaunch: true},
+		{name: "owned", state: ProcessOwned, wantLaunch: true, wantWait: 1},
+		{name: "mismatch", state: ProcessMismatch},
+		{name: "unknown", state: ProcessUnknown},
+		{name: "present", state: ProcessPresent},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
+			rpc := &launchRPC{}
+			ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: testCase.state, 902: ProcessOwned}}
+			manager, durable, agent, tracked, _ := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+			fence := storedAgentFence(&agent)
+			require.NoError(t, durable.MarkManagedFailedForFenceAndOperation(ctx, fence, "fault-operation", "PROCESS_STOP_FAILED", "stop failed"))
+			factory := manager.processFactory.(*launchFactory)
+			require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+			require.Equal(t, testCase.wantLaunch, factory.startCalls == 1)
+			tracked.mu.Lock()
+			signals := len(tracked.signals)
+			tracked.mu.Unlock()
+			require.Equal(t, testCase.wantSignal, signals)
+			tracked.mu.Lock()
+			waits := len(tracked.waited)
+			tracked.mu.Unlock()
+			require.Equal(t, testCase.wantWait, waits)
+			current, err := durable.ManagedAgent(ctx, agent.AgentID)
+			require.NoError(t, err)
+			if testCase.wantLaunch {
+				require.Equal(t, "running", current.LifecycleState)
+				require.True(t, current.AcceptingPrompts)
+			} else {
+				require.Equal(t, "PROCESS_STOP_FAILED", current.LastErrorCode)
+			}
+		})
+	}
+}
+
 func installColdRecoveryTrigger(t *testing.T, databasePath, statement string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", databasePath)

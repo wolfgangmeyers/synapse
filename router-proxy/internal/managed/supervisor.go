@@ -164,6 +164,8 @@ type managedBinding struct {
 	restartExecutionDone    bool
 	restartShutdownDone     bool
 	restartShutdownError    error
+	// retainBinding keeps a failed EOF cleanup owner available for retry.
+	retainBinding bool
 }
 
 type Manager struct {
@@ -436,9 +438,14 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		if launchLaneHeld {
 			lane.serial.Unlock()
 		}
-		lane.serial.Lock()
-		m.clearBinding(binding)
-		lane.serial.Unlock()
+		binding.serial.Lock()
+		reaped, retain := binding.reaped, binding.retainBinding
+		binding.serial.Unlock()
+		if reaped || !retain {
+			lane.serial.Lock()
+			m.clearBinding(binding)
+			lane.serial.Unlock()
+		}
 	}()
 	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
 	pending, pendingErr := m.store.ManagedLaunchStillPending(durableCtx, agent.AgentID, request.RequestID)
@@ -503,13 +510,53 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.mu.Unlock()
 	fence := bindingFence(agent.AgentID, binding)
 	if err = m.readinessGate(ctx, binding, fence); err != nil {
-		// An EOF can be the pipe symptom of a real Pi exit. Upgrade only after
-		// the dedicated waiter has reaped that exact child; timeouts and an EOF
-		// with no completed waiter remain ordinary readiness failures.
+		// Only a result published before cleanup began describes a child exit.
+		// A result released by Stop belongs to manager cleanup and remains EOF.
 		if errors.Is(err, io.EOF) {
 			if waitErr, exited := completedBindingWait(binding); exited {
-				_ = rpc.Close()
-				m.recordPreReadinessProcessExit(fence, request.RequestID, waitErr)
+				_ = rpc.Close() // diagnostic only; RPC closure does not decide ownership.
+				m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr)
+				return
+			}
+			_ = rpc.Close() // diagnostic only; RPC closure does not decide ownership.
+			limit := m.config.Limits.GracefulStop
+			if limit <= 0 {
+				limit = DefaultLimits().GracefulStop
+			}
+			stopCtx, cancel := context.WithTimeout(context.Background(), limit)
+			stopErr := process.Stop(stopCtx)
+			cancel()
+			if stopErr == nil {
+				if m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "READINESS_FAILED", sanitizeError(err)) == nil {
+					binding.serial.Lock()
+					binding.reaped = true
+					binding.serial.Unlock()
+				} else {
+					binding.serial.Lock()
+					binding.retainBinding = true
+					binding.serial.Unlock()
+				}
+				return
+			} else {
+				// Process absence, when proven, still permits the binding to be
+				// cleared. An RPC close error is never a stop failure.
+				if m.processOps.Probe(identity).State == ProcessAbsent {
+					if m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "READINESS_FAILED", sanitizeError(err)) == nil {
+						binding.serial.Lock()
+						binding.reaped = true
+						binding.serial.Unlock()
+					} else {
+						binding.serial.Lock()
+						binding.retainBinding = true
+						binding.serial.Unlock()
+					}
+					return
+				}
+				message := "readiness: " + sanitizeError(err) + "; cleanup: " + sanitizeError(stopErr)
+				binding.serial.Lock()
+				binding.retainBinding = true
+				binding.serial.Unlock()
+				_ = m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "PROCESS_STOP_FAILED", message)
 				return
 			}
 		}
@@ -519,8 +566,8 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		return
 	}
 	if waitErr, exited := completedBindingWait(binding); exited {
-		_ = rpc.Close()
-		m.recordPreReadinessProcessExit(fence, request.RequestID, waitErr)
+		_ = rpc.Close() // diagnostic only; RPC closure does not decide ownership.
+		m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr)
 		return
 	}
 	binding.serial.Lock()
@@ -668,11 +715,51 @@ func completedBindingWait(binding *managedBinding) (error, bool) {
 }
 
 // recordPreReadinessProcessExit keeps an exit found before readiness on the
-// launch's exact durable fence. A stale waiter is intentionally a no-op.
-func (m *Manager) recordPreReadinessProcessExit(fence store.ManagedRuntimeFence, operationID string, waitErr error) {
-	if err := m.store.RecordManagedPreReadinessProcessExit(context.Background(), fence, operationID, ManagedProcessExitDiagnostic(waitErr)); err == nil {
+// launch's exact durable fence. The bounded stop also proves that a natural
+// leader exit did not leave descendants behind before PROCESS_EXITED is saved.
+func (m *Manager) recordPreReadinessProcessExit(binding *managedBinding, process Process, identity ProcessIdentity, fence store.ManagedRuntimeFence, operationID string, waitErr error) {
+	diagnostic := ManagedProcessExitDiagnostic(waitErr)
+	cleanupErr := m.stopPreReadinessProcess(process, identity)
+	if cleanupErr == nil {
+		if err := m.store.RecordManagedPreReadinessProcessExit(context.Background(), fence, operationID, diagnostic); err == nil {
+			binding.serial.Lock()
+			binding.reaped = true
+			binding.serial.Unlock()
+			m.publishProjection()
+			return
+		}
+		binding.serial.Lock()
+		binding.retainBinding = true
+		binding.serial.Unlock()
+		return
+	}
+	message := "exit: " + diagnostic + "; cleanup: " + sanitizeError(cleanupErr)
+	binding.serial.Lock()
+	binding.retainBinding = true
+	binding.serial.Unlock()
+	if err := m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, operationID, "PROCESS_STOP_FAILED", message); err == nil {
 		m.publishProjection()
 	}
+}
+
+// stopPreReadinessProcess uses the same bounded Process.Stop contract as other
+// managed cleanup, then checks the injected ownership probe for full-group absence.
+func (m *Manager) stopPreReadinessProcess(process Process, identity ProcessIdentity) error {
+	limit := m.config.Limits.GracefulStop
+	if limit <= 0 {
+		limit = DefaultLimits().GracefulStop
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), limit)
+	stopErr := process.Stop(stopCtx)
+	cancel()
+	probe := m.processOps.Probe(identity)
+	if probe.State == ProcessAbsent {
+		return nil
+	}
+	if stopErr != nil {
+		return stopErr
+	}
+	return newProcessCleanupError("managed process group remains present after stop", probe.State, nil)
 }
 
 // recordReadyBindingProcessExitInLane is shared by the process waiter and the
