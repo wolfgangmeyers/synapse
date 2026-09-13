@@ -38,6 +38,8 @@ class ControlledSocket implements WebSocketLike {
 
 function renderLegacy(overrides: { agent?: Record<string, unknown>; fetchImpl?: FetchLike } = {}) {
   let currentAgent = legacyAgent(overrides.agent);
+  let agentRefreshCount = 0;
+  let holdAgentRefresh = false;
   const socket = new ControlledSocket();
   const webSocketFactory = (): WebSocketLike => {
     queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
@@ -45,7 +47,11 @@ function renderLegacy(overrides: { agent?: Record<string, unknown>; fetchImpl?: 
   };
   const fetchImpl = overrides.fetchImpl ?? vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [currentAgent] });
+    if (url.endsWith("/v1/agents")) {
+      agentRefreshCount += 1;
+      if (holdAgentRefresh) await new Promise<void>(() => undefined);
+      return jsonResponse({ agents: [currentAgent] });
+    }
     if (url.endsWith("/v1/capabilities")) return jsonResponse({ goal_control_v1: true });
     if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [modelOne, modelTwo], default_model: modelOne });
     if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: "worker-one", high_water_sequence: 0, messages: [] });
@@ -54,7 +60,7 @@ function renderLegacy(overrides: { agent?: Record<string, unknown>; fetchImpl?: 
     throw new Error(`Unexpected request: ${url}`);
   });
   render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory, autoReconnect: false }} />);
-  return { socket, fetchImpl, setAgent: (agent: Record<string, unknown>) => { currentAgent = { ...currentAgent, ...agent }; } };
+  return { socket, setAgent: (agent: Record<string, unknown>) => { currentAgent = { ...currentAgent, ...agent }; }, agentRefreshCount: () => agentRefreshCount, holdAgentRefresh: () => { holdAgentRefresh = true; } };
 }
 
 const managedAgent = (overrides: Partial<ManagedAgent> = {}): ManagedAgent => ({ agent_id: "managed-alpha", source: "router-managed", cwd: "/allowed/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null, ...overrides });
@@ -91,9 +97,9 @@ function renderManaged(actionResponse: Response | undefined = undefined) {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("App control fencing and managed lifecycle projections", () => {
-  it("ignores a goal result from the old connection after reconnect invalidates it", async () => {
+  it("ignores a goal result for the old instance while the replacement remains active", async () => {
     const user = userEvent.setup();
-    const { socket } = renderLegacy();
+    const { socket, setAgent, agentRefreshCount, holdAgentRefresh } = renderLegacy();
     await user.click(await screen.findByRole("button", { name: "Worker One (worker-one)" }));
     await waitFor(() => expect(screen.getByText(/Connected as/)).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Set goal" }));
@@ -102,11 +108,27 @@ describe("App control fencing and managed lifecycle projections", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     const control = socket.frame("goal_control");
     expect(control).toBeDefined();
-    socket.close();
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("not available"));
-    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "stale-goal", type: "goal_control_result", agent_id: "worker-one", instance_id: "peer-instance", lease_id: "peer-lease", source_agent_id: "web-ui", control_id: control?.control_id, revision: 1, accepted: true, goal_state: goalState({ enabled: true, goal: "Old goal" }) }) });
-    expect(screen.getByRole("alert")).toHaveTextContent("not available");
-    expect(screen.queryByRole("heading", { name: "Goal for worker-one" })).toBeInTheDocument();
+
+    const currentGoal = goalState({ enabled: true, goal: "Current goal", outcome_counts: { COMPLETED: 2, NOT_DONE: 1 } });
+    const agentCallsBeforeReplacement = agentRefreshCount();
+    setAgent({ instance_id: "replacement-instance", activity_state: "active", goal_state: currentGoal });
+    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "replacement-activity", type: "agent_activity", agent_id: "worker-one", instance_id: "replacement-instance", activity_state: "active", subagent_count: 0, subagents: [], current_model: modelOne, generated_at: "2030-01-01T00:00:01.000Z" }) });
+    await waitFor(() => expect(agentRefreshCount()).toBeGreaterThan(agentCallsBeforeReplacement));
+    expect(screen.getByRole("listitem")).toHaveClass("working");
+    const replacementGoalButton = within(screen.getByRole("listitem")).getByRole("button", { name: "Set goal" });
+    expect(replacementGoalButton).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(screen.getByRole("listitem")).getByRole("button", { name: "Set goal" }));
+    expect(screen.getByRole("textbox", { name: "What should this agent work toward?" })).toHaveValue("Current goal");
+    holdAgentRefresh();
+
+    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "stale-goal", type: "goal_control_result", agent_id: "worker-one", instance_id: "peer-instance", lease_id: "peer-lease", source_agent_id: control?.agent_id, control_id: control?.control_id, revision: 1, accepted: true, goal_state: goalState({ enabled: true, goal: "Old goal" }) }) });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Goal for worker-one" })).not.toBeInTheDocument());
+
+    await user.click(within(screen.getByRole("listitem")).getByRole("button", { name: "Set goal" }));
+    expect(screen.getByRole("button", { name: "Goal: ON" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "What should this agent work toward?" })).toHaveValue("Current goal");
+    expect(screen.getByText("Outcomes: completed 2, not done 1")).toBeInTheDocument();
   });
 
   it("projects a newer goal status with enabled state, outcome counts, and snooze settings", async () => {
