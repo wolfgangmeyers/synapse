@@ -145,11 +145,11 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	require.Len(t, runs, 1)
 	require.Equal(t, "steered", runs[0].(map[string]any)["lifecycle_state"])
 	require.Equal(t, "compacting", runs[0].(map[string]any)["compaction"].(map[string]any)["state"])
-	// Retries and rejected owners are retained once in complete history but do
-	// not alter the source snapshot or enter quiet history.
+	// An exact retry is idempotent. Owner rejection remains a single complete
+	// history fact, while a replaced fence cannot mutate current state.
 	var staleHistory int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=? AND details_json LIKE '%stale%'`, fence.AgentID).Scan(&staleHistory))
-	require.Equal(t, 2, staleHistory)
+	require.Equal(t, 1, staleHistory)
 	require.NoError(t, durable.RecordStaleManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 4, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}}, "parent_fence_replaced"))
 	require.NoError(t, durable.RecordStaleManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 4, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}}, "parent_fence_replaced"))
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=? AND details_json LIKE '%parent_fence_replaced%'`, fence.AgentID).Scan(&staleHistory))
@@ -161,8 +161,51 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	var transitionCount, completeCount int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=?`, fence.AgentID).Scan(&transitionCount))
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=? AND category='managed_child'`, fence.AgentID).Scan(&completeCount))
-	require.Equal(t, 6, transitionCount)
+	require.Equal(t, 5, transitionCount)
 	require.Equal(t, transitionCount, completeCount)
+}
+
+func TestManagedChildDeltaGapRecoversFromCurrentSnapshotWithIdempotencyAndConflictFences(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, DefaultManagedReadinessPolicy()))
+	initial := ManagedChildSnapshot{SnapshotID: "initial", OwnerSessionID: fence.PiSessionID, Sequence: 1, Canonical: []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[{"parent_entry_id":"entry","task_id":"task","run_id":"run","description":"Child","model":null,"lifecycle_state":"running","started_at":"2026-01-01T00:00:00Z","finished_at":null,"duration_ms":null,"compaction":{"state":"idle","count":0,"started_at":null,"last_outcome":null},"sequence":1}],"sequence":1,"snapshot_id":"initial"}`), SHA256: testManifestHash}
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, initial))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, fence))
+
+	updated, err := durable.ApplyManagedChildDelta(ctx, fence, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 3, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}})
+	require.ErrorIs(t, err, ErrManagedChildDeltaGap)
+	require.False(t, updated)
+
+	recovered := ManagedChildSnapshot{SnapshotID: "recovered", OwnerSessionID: fence.PiSessionID, Sequence: 3, Canonical: []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[{"parent_entry_id":"entry","task_id":"task","run_id":"run","description":"Child","model":null,"lifecycle_state":"completed","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:02Z","duration_ms":2000,"compaction":{"state":"idle","count":0,"started_at":null,"last_outcome":null},"sequence":3}],"sequence":3,"snapshot_id":"recovered"}`), SHA256: testManifestHash}
+	updated, err = durable.RecoverManagedChildSnapshot(ctx, fence, recovered)
+	require.NoError(t, err)
+	require.True(t, updated)
+	updated, err = durable.RecoverManagedChildSnapshot(ctx, fence, recovered)
+	require.NoError(t, err)
+	require.False(t, updated, "the same authoritative snapshot is idempotent")
+	conflicting := recovered
+	conflicting.Canonical = []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[],"sequence":3,"snapshot_id":"conflict"}`)
+	updated, err = durable.RecoverManagedChildSnapshot(ctx, fence, conflicting)
+	require.ErrorIs(t, err, ErrManagedChildSnapshotConflict)
+	require.False(t, updated)
+
+	// A newer snapshot may omit an active run only by retaining its last
+	// structured state as interrupted_unknown, never by manufacturing terminal.
+	active := initial
+	active.SnapshotID, active.Sequence = "active", 4
+	active.Canonical = []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[{"parent_entry_id":"entry-2","task_id":"task-2","run_id":"run-2","description":"Active Child","model":null,"lifecycle_state":"running","started_at":"2026-01-01T00:00:03Z","finished_at":null,"duration_ms":null,"compaction":{"state":"idle","count":0,"started_at":null,"last_outcome":null},"sequence":4}],"sequence":4,"snapshot_id":"active"}`)
+	updated, err = durable.RecoverManagedChildSnapshot(ctx, fence, active)
+	require.NoError(t, err)
+	require.True(t, updated)
+	omitting := ManagedChildSnapshot{SnapshotID: "omitting", OwnerSessionID: fence.PiSessionID, Sequence: 5, Canonical: []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[],"sequence":5,"snapshot_id":"omitting"}`), SHA256: testManifestHash}
+	updated, err = durable.RecoverManagedChildSnapshot(ctx, fence, omitting)
+	require.NoError(t, err)
+	require.True(t, updated)
+	source, err := durable.ManagedReadinessSource(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Len(t, source.Recoveries, 1)
+	require.Equal(t, "snapshot_omitted", source.Recoveries[0].Cause)
 }
 
 func TestManagedChildSnapshotReconcilesLostCompactionEndWithoutTerminalInference(t *testing.T) {

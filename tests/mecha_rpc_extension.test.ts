@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { BoundedChildDeltaBuffer, MAX_BUFFERED_CHILD_DELTAS } from "../pi-extensions/mecha-rpc/child-delta-buffer.ts";
 import { createMechaRpcExtension } from "../pi-extensions/mecha-rpc/index.ts";
 import { hashCanonicalJson, validateDesiredManifest } from "../pi-extensions/mecha-rpc/manifest.ts";
 import { decodeHiddenEnvelope, encodeHiddenEnvelope } from "../pi-extensions/mecha-rpc/protocol.ts";
@@ -89,6 +90,47 @@ function bootstrap(current: ReturnType<typeof fixture>) {
   };
   return current.commands.get("mecha-bootstrap-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
 }
+
+test("child delta delivery retries in order and bounds overflow into a recoverable gap", async () => {
+  const delivered: number[] = [];
+  let firstAttempts = 0;
+  const buffer = new BoundedChildDeltaBuffer(
+    async (wire) => {
+      const sequence = wire.sequence;
+      if (typeof sequence !== "number") throw new Error("test sequence is invalid");
+      if (sequence === 1 && firstAttempts++ < 2) throw new Error("transient append failure");
+      delivered.push(sequence);
+    },
+    () => true,
+  );
+  buffer.enqueue("owner", { sequence: 1 });
+  buffer.enqueue("owner", { sequence: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(delivered, [1, 2]);
+
+  const overflow: number[] = [];
+  const blocked = Promise.withResolvers<void>();
+  const bounded = new BoundedChildDeltaBuffer(
+    async (wire) => {
+      const sequence = wire.sequence;
+      if (typeof sequence !== "number") throw new Error("test sequence is invalid");
+      overflow.push(sequence);
+      if (sequence === 1) await blocked.promise;
+    },
+    () => true,
+  );
+  for (let sequence = 1; sequence <= MAX_BUFFERED_CHILD_DELTAS + 2; sequence++) {
+    bounded.enqueue("owner", { sequence });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  blocked.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(overflow[0], 1);
+  assert.equal(overflow.at(-1), MAX_BUFFERED_CHILD_DELTAS + 2);
+  assert.equal(overflow.length, MAX_BUFFERED_CHILD_DELTAS, "overflow replaces queued newest input and leaves one recovery gap");
+});
 
 test("the extension preflights all 16 command names and registers no Mailbox bridge", () => {
   const current = fixture();
