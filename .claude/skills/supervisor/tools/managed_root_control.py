@@ -38,6 +38,51 @@ MAX_RECORDS = 200
 RETENTION_SECONDS = 30 * 24 * 60 * 60
 TOOLS = Path(__file__).resolve().parent
 
+# This runner is also a host boundary, so it must not treat an admitted
+# manifest operation as permission to accept arbitrary action names or fields.
+# Keep this contract static: the Go admission path owns the canonical manifest,
+# while these entries make direct runner validation fail closed if either side
+# receives malformed input.
+ROOT_OPERATION_CONTRACT: dict[str, dict[str, frozenset[str] | None | bool]] = {
+    "goal.control": {"fields": frozenset({"action", "goal", "settings"}), "actions": frozenset({"set", "status", "off"}), "available": True},
+    "goal.snooze": {"fields": frozenset(), "actions": None, "available": True},
+    "context.control": {"fields": frozenset({"action", "policy", "customInstructions", "postCompactionNotification"}), "actions": frozenset({"status", "set_policy", "compact"}), "available": True},
+    "ops.git_status": {"fields": frozenset({"action", "task"}), "actions": frozenset({"status"}), "available": True},
+    "mail.send": {"fields": frozenset({"recipient", "body", "subject"}), "actions": None, "available": True},
+    "mail.parent": {"fields": frozenset({"message"}), "actions": None, "available": False},
+    "ops.pr_status": {"fields": frozenset({"action", "pullRequest"}), "actions": frozenset({"status"}), "available": True},
+    "ops.priority": {"fields": frozenset({"action", "priorityId", "name", "status", "taskIds", "evidence"}), "actions": frozenset({"create", "update", "status"}), "available": True},
+    "recall.control": {"fields": frozenset({"action", "stores"}), "actions": frozenset({"enable", "disable", "status"}), "available": True},
+    "reminder.control": {"fields": frozenset({"action", "reminderId", "message", "subject", "delayMinutes", "scheduledAt", "intervalMinutes"}), "actions": frozenset({"list", "create", "update", "delete"}), "available": True},
+    "policy.inline_allowance": {"fields": frozenset({"toolName", "usageCount"}), "actions": None, "available": True},
+    "router.control": {"fields": frozenset({"action", "messageId"}), "actions": frozenset({"health", "retry", "dismiss"}), "available": True},
+    "notifications.settled": {"fields": frozenset({"action"}), "actions": frozenset({"enable", "disable", "status"}), "available": True},
+    "ops.state": {"fields": frozenset({"action", "task", "state", "alias", "type", "project", "description", "purpose", "window", "branch", "pr", "linear", "field", "value"}), "actions": frozenset({"query", "create", "update"}), "available": True},
+    "ops.verification_handoff": {"fields": frozenset({"action", "task", "reminderId", "successor", "remoteVerified"}), "actions": frozenset({"record"}), "available": True},
+    "ops.worker": {"fields": frozenset({"action", "alias", "worker", "message", "subject"}), "actions": frozenset({"list", "launch", "cleanup", "send"}), "available": True},
+    "web.search": {"fields": frozenset({"query", "freshness", "maxResults"}), "actions": None, "available": True},
+}
+
+
+def validate_operation_dispatch(operation: str, arguments: dict[str, Any]) -> None:
+    contract = ROOT_OPERATION_CONTRACT.get(operation)
+    if contract is None:
+        raise ValueError("root operation is invalid")
+    fields = contract["fields"]
+    actions = contract["actions"]
+    if not isinstance(fields, frozenset) or (actions is not None and not isinstance(actions, frozenset)):
+        raise RuntimeError("root operation contract is invalid")
+    unsupported = set(arguments) - fields
+    if unsupported:
+        raise ValueError(f"unsupported field(s) for {operation}")
+    if actions is None:
+        if "action" in arguments:
+            raise ValueError(f"{operation} action is invalid")
+    elif arguments.get("action") not in actions:
+        raise ValueError(f"{operation} action is invalid")
+    if contract["available"] is not True:
+        raise ValueError(f"{operation} is unavailable")
+
 
 def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -434,6 +479,7 @@ def managed_reminder(arguments: dict[str, Any], fence: dict[str, Any]) -> dict[s
 
 
 def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str, settings: dict[str, Any], request_id: str, fence: dict[str, Any]) -> dict[str, Any]:
+    validate_operation_dispatch(operation, arguments)
     action = arguments.get("action")
     if operation == "ops.state":
         if action == "query":
