@@ -118,10 +118,36 @@ func TestManagedProcessExitDiagnosticKeepsOnlySafeExitAndStderrDetails(t *testin
 		require.NotContains(t, diagnostic, forbidden)
 	}
 	require.Contains(t, diagnostic, "[REDACTED]")
+	require.LessOrEqual(t, len(diagnostic), 512)
+	bounded := ManagedProcessExitDiagnostic(&managedProcessExitError{cause: exitErr, detail: strings.Repeat("permission denied ", 100)})
+	require.LessOrEqual(t, len(bounded), 512)
+	require.Contains(t, bounded, "permission denied")
 	signalCommand := exec.Command("/bin/sh", "-c", "kill -TERM $$")
 	signalErr := signalCommand.Run()
 	require.Error(t, signalErr)
 	require.Contains(t, ManagedProcessExitDiagnostic(&managedProcessExitError{cause: signalErr}), "signal terminated")
+}
+
+func TestRedactedStderrRedactsLocalPathsAcrossDiagnosticEncodings(t *testing.T) {
+	for _, test := range []struct {
+		name, detail, forbidden string
+	}{
+		{"quoted Unix path", `exit status 17: cwd="/Users/wolfgang/project/output.log" token=secret-value permission denied`, "/Users/wolfgang/project/output.log"},
+		{"HTML-escaped quote path", `exit status 17: cwd=&quot;/Users/wolfgang/project/output.log&quot; token=secret-value permission denied`, "/Users/wolfgang/project/output.log"},
+		{"quoted path with spaces", `exit status 17: cwd="/Users/wolfgang/project/output log" token=secret-value permission denied`, "/Users/wolfgang/project/output log"},
+		{"file URL", `exit status 17: file:///Users/wolfgang/project/output.log token=secret-value permission denied`, "file:///Users/wolfgang/project/output.log"},
+		{"Windows-like path", `exit status 17: cwd="C:\Users\wolfgang\project\output log" token=secret-value permission denied`, `C:\Users\wolfgang\project\output log`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			diagnostic := RedactedStderr(test.detail)
+			require.NotContains(t, diagnostic, test.forbidden)
+			require.NotContains(t, diagnostic, "secret-value")
+			require.Contains(t, diagnostic, "exit status 17")
+			require.Contains(t, diagnostic, "permission denied")
+			require.Contains(t, diagnostic, "[REDACTED]")
+			require.LessOrEqual(t, len(diagnostic), 512)
+		})
+	}
 }
 
 func TestProcessFactoryRejectsAnUnspecifiedSessionLaunchMode(t *testing.T) {

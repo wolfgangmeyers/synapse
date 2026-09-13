@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
 // SessionLaunchMode is a router-owned proof boundary. Pi accepts the same
@@ -440,7 +442,7 @@ func ManagedProcessExitDiagnostic(err error) string {
 	if detail == "" {
 		return outcome
 	}
-	return outcome + ": " + detail
+	return store.RedactedManagedDiagnostic(outcome + ": " + detail)
 }
 
 func processStartMarker(pid int) (string, error) {
@@ -465,59 +467,13 @@ func ValidateIdentity(identity ProcessIdentity) error {
 	return nil
 }
 
+// RedactedStderr uses the durable/public diagnostic sanitizer so the process
+// tail cannot preserve a path that would later be rejected at projection time.
 func RedactedStderr(value string) string {
-	fields := strings.Fields(value)
-	redactFollowing := 0
-	for index, field := range fields {
-		lower := strings.ToLower(field)
-		if redactFollowing > 0 {
-			fields[index] = "[REDACTED]"
-			redactFollowing--
-			continue
-		}
-		// Keep a bounded operational reason while never retaining credential
-		// values in durable errors, complete history, or UI projections.
-		if strings.HasPrefix(lower, "bearer") {
-			fields[index] = "[REDACTED]"
-			redactFollowing = 1
-			continue
-		}
-		if lower == "authorization:" || lower == "authorization" {
-			fields[index] = "[REDACTED]"
-			// Authorization schemes such as `Bearer` are followed by the value.
-			redactFollowing = 2
-			continue
-		}
-		if strings.Contains(lower, "token") || strings.Contains(lower, "key") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "credential") || strings.Contains(lower, "apikey") || strings.Contains(lower, "session") || strings.Contains(lower, "process") || strings.Contains(lower, "runtime_generation") {
-			fields[index] = "[REDACTED]"
-			if !strings.ContainsAny(field, "=:") {
-				redactFollowing = 1
-			}
-			continue
-		}
-		if managedDiagnosticPath(field) {
-			fields[index] = "[REDACTED]"
-			continue
-		}
-		if question := strings.IndexByte(field, '?'); question >= 0 {
-			fields[index] = field[:question] + "?[REDACTED]"
-		}
+	if strings.TrimSpace(value) == "" {
+		return ""
 	}
-	result := strings.Join(fields, " ")
-	if len(result) > 512 {
-		result = result[:512]
-	}
-	return result
-}
-func managedDiagnosticPath(field string) bool {
-	lower := strings.ToLower(field)
-	if strings.HasPrefix(field, "/") || strings.HasPrefix(field, "~/") || strings.HasPrefix(lower, "file:") {
-		return true
-	}
-	if separator := strings.IndexAny(field, "=:"); separator >= 0 {
-		return strings.HasPrefix(field[separator+1:], "/") || strings.HasPrefix(field[separator+1:], "~/")
-	}
-	return false
+	return store.RedactedManagedDiagnostic(value)
 }
 
 func ValidateCwd(cwd string) (string, error) { return filepath.Abs(cwd) }

@@ -317,17 +317,29 @@ func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 	require.NoError(t, err)
 	processExit := exec.Command("/bin/sh", "-c", "exit 17").Run()
 	require.Error(t, processExit)
-	process := &launchProcess{identity: ProcessIdentity{PID: 801, StartMarker: "start", Incarnation: "incarnation"}, waitErr: &managedProcessExitError{cause: processExit, detail: "fatal token=do-not-retain /private/router/session.json"}, stopped: make(chan struct{}), waitDone: make(chan struct{})}
-	process.Reap() // The fake Pi closes stdout before get_state can answer.
-	rpc := &launchRPC{stateErr: io.EOF, beforeState: func() {
-		<-process.waitDone
-		// The process waiter owns the one Wait call. Give its completion handoff
-		// a turn before returning EOF from the fake RPC pipe.
-		time.Sleep(time.Millisecond)
-	}}
+	process := &launchProcess{identity: ProcessIdentity{PID: 801, StartMarker: "start", Incarnation: "incarnation"}, waitErr: &managedProcessExitError{cause: processExit, detail: "fatal token=do-not-retain /private/router/session.json"}, stopped: make(chan struct{})}
+	rpc := &launchRPC{stateErr: io.EOF}
 	root := t.TempDir()
 	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
+	rpc.beforeState = func() {
+		// Simulate stdout closing at the same time as the process exits, then wait
+		// for the manager's waiter to publish its result before returning EOF.
+		process.Reap()
+		manager.mu.Lock()
+		binding := manager.bindings["eof-exit"]
+		manager.mu.Unlock()
+		require.NotNil(t, binding)
+		// start assigned this channel before calling GetState. Do not take
+		// binding.serial here: readiness owns it during this callback.
+		waitSignal := binding.waitSignal
+		require.NotNil(t, waitSignal)
+		select {
+		case <-waitSignal:
+		case <-time.After(time.Second):
+			t.Fatal("process waiter did not publish waitSignal before EOF classification")
+		}
+	}
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "eof-exit", Cwd: root, InitialInstruction: "must not prompt", RequestID: "eof-exit-request"})
