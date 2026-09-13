@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,8 +52,8 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.host, "host", transport.DefaultHost, "bind host")
 	flags.IntVar(&result.port, "port", transport.DefaultPort, "listen port")
 	flags.IntVar(&result.maxBatch, "max-batch-chars", 4096, "maximum UTF-16 characters in a delivery batch")
-	flags.StringVar(&result.auditSupervisorTarget, "audit-supervisor-target", "supervisor", "supervisor agent ID for tmux/router audit delivery")
-	flags.StringVar(&result.auditTmuxSession, "audit-tmux-session", "mecha", "tmux session for read-only tmux/router audit inventory")
+	flags.StringVar(&result.auditSupervisorTarget, "audit-supervisor-target", "", "supervisor agent ID for tmux/router audit delivery (must be paired with --audit-tmux-session)")
+	flags.StringVar(&result.auditTmuxSession, "audit-tmux-session", "", "tmux session for read-only tmux/router audit inventory (must be paired with --audit-supervisor-target)")
 	flags.DurationVar(&result.policyTimeout, "policy-timeout", transport.DefaultPolicyTimeout, "maximum duration for one native policy run")
 	flags.StringVar(&result.managedUIDist, "managed-ui-dist", "", "built React UI directory served by the router")
 	var managedEnabled bool
@@ -92,11 +93,13 @@ func parseConfig(args []string) (config, error) {
 	if result.maxBatch < 0 {
 		return config{}, errors.New("--max-batch-chars must be a non-negative integer")
 	}
-	if result.auditSupervisorTarget == "" {
-		return config{}, errors.New("--audit-supervisor-target is required")
+	if (result.auditSupervisorTarget == "") != (result.auditTmuxSession == "") {
+		return config{}, errors.New("--audit-supervisor-target and --audit-tmux-session must be provided together")
 	}
-	if result.auditTmuxSession == "" {
-		return config{}, errors.New("--audit-tmux-session is required")
+	if result.auditSupervisorTarget != "" && result.auditTmuxSession != "" {
+		if strings.TrimSpace(result.auditTmuxSession) == "" {
+			return config{}, errors.New("--audit-tmux-session is required")
+		}
 	}
 	if result.policyTimeout <= 0 {
 		return config{}, errors.New("--policy-timeout must be positive")
@@ -204,7 +207,7 @@ func main() {
 			log.Print("managed provider status is unavailable")
 		}
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}})
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

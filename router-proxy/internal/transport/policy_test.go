@@ -25,6 +25,7 @@ type auditTmux struct {
 	windows               []TmuxWindow
 	sessionsErr           error
 	windowsErr            error
+	sessionCalls          int
 	provisionSessionCalls int
 	windowSessions        []string
 }
@@ -32,6 +33,7 @@ type auditTmux struct {
 func (tmux *auditTmux) Sessions(context.Context) ([]string, error) {
 	tmux.mu.Lock()
 	defer tmux.mu.Unlock()
+	tmux.sessionCalls++
 	return append([]string(nil), tmux.sessions...), tmux.sessionsErr
 }
 
@@ -80,6 +82,12 @@ func (tmux *auditTmux) setWindows(windows []TmuxWindow) {
 	tmux.windows = append([]TmuxWindow(nil), windows...)
 }
 
+func (tmux *auditTmux) wasCalled() bool {
+	tmux.mu.Lock()
+	defer tmux.mu.Unlock()
+	return tmux.sessionCalls > 0 || tmux.provisionSessionCalls > 0 || len(tmux.windowSessions) > 0
+}
+
 func newPolicyRouter(t *testing.T, options Options) (*Router, *store.Store, *deterministic.FixedClock) {
 	t.Helper()
 	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
@@ -123,10 +131,47 @@ func createRecurringReminder(t *testing.T, durable *store.Store, target, id stri
 
 func TestRouterDoesNotRegisterTmuxAuditWithoutConfiguration(t *testing.T) {
 	var events []string
-	router, _, _ := newPolicyRouter(t, Options{EventLogger: func(event string, _ map[string]any) { events = append(events, event) }})
+	tmux := &auditTmux{sessionsErr: errors.New("tmux must not be called")}
+	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, EventLogger: func(event string, _ map[string]any) { events = append(events, event) }})
 	require.Empty(t, router.policies)
 	require.NoError(t, router.Listen(context.Background()))
 	require.Equal(t, []string{"router_started"}, events)
+	httpURL, _ := router.URLs()
+	response, err := http.Get(httpURL + "/v1/health")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.NoError(t, response.Body.Close())
+	require.False(t, tmux.wasCalled())
+	provisions, sessions := tmux.calls()
+	require.Zero(t, provisions)
+	require.Empty(t, sessions)
+}
+
+func TestRouterRejectsHalfConfiguredTmuxAudit(t *testing.T) {
+	for _, options := range []Options{
+		{AuditSupervisorTarget: "supervisor"},
+		{AuditTmuxSession: "mecha"},
+	} {
+		_, err := newPolicyRouterForValidation(t, options)
+		require.EqualError(t, err, "audit supervisor target and tmux session must be provided together")
+	}
+}
+
+func newPolicyRouterForValidation(t *testing.T, options Options) (*Router, error) {
+	t.Helper()
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	options.Store = durable
+	router, err := New(options)
+	if err != nil {
+		require.NoError(t, durable.Close())
+		return nil, err
+	}
+	t.Cleanup(func() {
+		require.NoError(t, router.Close(context.Background()))
+		require.NoError(t, durable.Close())
+	})
+	return router, nil
 }
 
 func TestTmuxRouterAuditReportsCoverageWithoutPrivateData(t *testing.T) {
@@ -163,11 +208,11 @@ func TestTmuxRouterAuditReportsCoverageWithoutPrivateData(t *testing.T) {
 	require.Equal(t, []string{"mecha"}, sessions)
 }
 
-func TestTmuxRouterAuditUsesConfiguredDefaultsAndOverrides(t *testing.T) {
+func TestTmuxRouterAuditUsesConfiguredTargetAndSession(t *testing.T) {
 	for _, test := range []struct {
 		name, target, session, wantTarget, wantSession string
 	}{
-		{name: "defaults", wantTarget: "supervisor", wantSession: "mecha"},
+		{name: "explicit legacy values", target: "supervisor", session: "mecha", wantTarget: "supervisor", wantSession: "mecha"},
 		{name: "overrides", target: "audit-target", session: "other", wantTarget: "audit-target", wantSession: "other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -191,7 +236,7 @@ func TestTmuxRouterAuditMissingSessionDoesNotProvisionAndIsIsolated(t *testing.T
 	tmux := &auditTmux{sessions: []string{"other"}}
 	var events []map[string]any
 	after := false
-	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, EventLogger: func(event string, fields map[string]any) {
+	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", EventLogger: func(event string, fields map[string]any) {
 		if event == "router_error" {
 			events = append(events, fields)
 		}
@@ -243,7 +288,7 @@ func TestTmuxRouterAuditStoreAndSenderFailuresAreIsolated(t *testing.T) {
 			tmux := &auditTmux{sessions: []string{"mecha"}, windows: []TmuxWindow{{Name: "worker"}}}
 			var events []map[string]any
 			after := false
-			router, durable, clock := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, PolicySender: test.sender, EventLogger: func(event string, fields map[string]any) {
+			router, durable, clock := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", PolicySender: test.sender, EventLogger: func(event string, fields map[string]any) {
 				if event == "router_error" {
 					events = append(events, fields)
 				}
@@ -284,7 +329,7 @@ func TestTmuxRouterAuditIDSourceFailureIsIsolated(t *testing.T) {
 	ids := deterministic.NewSequenceIDSource()
 	var events []map[string]any
 	after := false
-	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, IDSource: ids, EventLogger: func(event string, fields map[string]any) {
+	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", IDSource: ids, EventLogger: func(event string, fields map[string]any) {
 		if event == "router_error" {
 			events = append(events, fields)
 		}
@@ -352,7 +397,7 @@ func TestRunAndStopPoliciesAcceptNilContexts(t *testing.T) {
 func TestTmuxRouterAuditRunsOnPostListenPeriodicSweep(t *testing.T) {
 	tmux := &auditTmux{sessions: []string{"mecha"}, windows: []TmuxWindow{{Name: "worker"}}}
 	delivered := make(chan protocol.Envelope, 1)
-	router, durable, clock := newPolicyRouter(t, Options{Host: "127.0.0.1", Port: 0, Tmux: tmux, EnableTmuxRouterAudit: true, SweepInterval: 10 * time.Millisecond, PolicySender: func(_ context.Context, message protocol.Envelope) error {
+	router, durable, clock := newPolicyRouter(t, Options{Host: "127.0.0.1", Port: 0, Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", SweepInterval: 10 * time.Millisecond, PolicySender: func(_ context.Context, message protocol.Envelope) error {
 		delivered <- message
 		return nil
 	}})
@@ -382,7 +427,7 @@ func TestTmuxRouterAuditRunsOnPostListenPeriodicSweep(t *testing.T) {
 
 func TestTmuxRouterAuditDefaultSenderDedupesRepeatedDurableEnqueues(t *testing.T) {
 	tmux := &auditTmux{sessions: []string{"mecha"}, windows: []TmuxWindow{{Name: "orphan-window"}}}
-	router, durable, clock := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, IDSource: deterministic.NewSequenceIDSource("audit-message-1", "audit-message-2")})
+	router, durable, clock := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", IDSource: deterministic.NewSequenceIDSource("audit-message-1", "audit-message-2")})
 
 	router.runPolicies(context.Background())
 	require.NoError(t, clock.Advance(DefaultTmuxRouterAuditPeriod))
@@ -398,7 +443,7 @@ func TestTmuxRouterAuditDefaultSenderDedupesRepeatedDurableEnqueues(t *testing.T
 
 func TestTmuxRouterAuditDefaultSenderDurablyEnqueuesAndDelivers(t *testing.T) {
 	tmux := &auditTmux{sessions: []string{"mecha"}}
-	router, durable, clock := newPolicyRouter(t, Options{Host: "127.0.0.1", Port: 0, LeaseDuration: time.Hour, Tmux: tmux, EnableTmuxRouterAudit: true, IDSource: deterministic.NewSequenceIDSource("supervisor-lease", "supervisor-registered", "audit-message-1", "audit-delivery")})
+	router, durable, clock := newPolicyRouter(t, Options{Host: "127.0.0.1", Port: 0, LeaseDuration: time.Hour, Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", IDSource: deterministic.NewSequenceIDSource("supervisor-lease", "supervisor-registered", "audit-message-1", "audit-delivery")})
 	// The startup audit finds no windows. Its 30-minute slot prevents a second
 	// run until the configured cadence has elapsed.
 	router.runPolicies(context.Background())
