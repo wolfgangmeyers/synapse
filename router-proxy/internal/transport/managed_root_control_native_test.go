@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,384 +24,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This ledger deliberately covers the complete S4 candidate. Its order is
-// stable so the artifact identifies exactly the source it exercised.
 var managedRootControlCandidatePaths = managedPhase2CandidatePaths
 
-func requireManagedRootControlCandidateLedger(t *testing.T, root string) {
-	t.Helper()
-	status := commandOutput(t, root, "git", "status", "--porcelain", "--untracked-files=all")
-	actual := make([]string, 0)
-	for _, line := range strings.Split(status, "\n") {
-		start := 3
-		// commandOutput trims leading whitespace from the first porcelain row.
-		if len(line) >= 2 && line[0] != ' ' && line[1] == ' ' {
-			start = 2
-		}
-		if len(line) > start {
-			actual = append(actual, line[start:])
-		}
-	}
-	for _, path := range actual {
-		require.Contains(t, managedRootControlCandidatePaths, path, "the S4 proof cannot include a dirty path outside its candidate ledger")
-	}
-}
-
-func managedRootControlCandidateDigests(t *testing.T, root string) (string, map[string]string) {
-	t.Helper()
-	requireManagedRootControlCandidateLedger(t, root)
-	hash := sha256.New()
-	fileDigests := make(map[string]string, len(managedRootControlCandidatePaths))
-	for _, relative := range managedRootControlCandidatePaths {
-		contents, err := os.ReadFile(filepath.Join(root, relative))
-		if os.IsNotExist(err) {
-			// The release removes this source path; keep that absence in the
-			// candidate identity instead of silently omitting it from S4 proof.
-			fileDigests[relative] = "deleted"
-			_, err = fmt.Fprintf(hash, "%s\x00deleted\n", relative)
-			require.NoError(t, err)
-			continue
-		}
-		require.NoError(t, err)
-		sum := sha256.Sum256(contents)
-		fileDigests[relative] = hex.EncodeToString(sum[:])
-		_, err = fmt.Fprintf(hash, "%s\x00%x\n", relative, sum)
-		require.NoError(t, err)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), fileDigests
-}
-
-type managedRootControlNativeObservation struct {
-	g4LockVerified, lockedExecutable, noPathFallback                           bool
-	noModelTurn, zeroProviderCalls, fullManifestRootEnvelope, noLegacyEmission bool
-	rootPendingBeforeEmission, forcedResultBeforeSendResolution                bool
-	rootPendingBeforeResult, sendFailureRollsBackPending                       bool
-	exactGetEntryRecovery, duplicateAlreadyPresent, changedReceiptRejected     bool
-	resetFenceCancelled, handlerRegistryComplete                               bool
-	providerCalls, handlerExecutions, receiverRebinds                          int
-	rootRequestCountBeforeFailure, rootRequestCountAfterFailure                int
-	exactEntryLookups, resultSubmissions                                       int
-	rootOrder, recoveryTrace                                                   []string
-	probeRecords                                                               []map[string]any
-}
-
-type nativeRootControlTrace struct {
-	mu     sync.Mutex
-	method []string
-}
-
-func (t *nativeRootControlTrace) record(method string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.method = append(t.method, method)
-}
-
-func (t *nativeRootControlTrace) snapshot() []string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]string(nil), t.method...)
-}
-
-func tracePositionAfter(trace []string, method string, after int) int {
-	for index := after + 1; index < len(trace); index++ {
-		if trace[index] == method {
-			return index
-		}
-	}
-	return -1
-}
-
-func traceCount(trace []string, method string) int {
-	count := 0
-	for _, value := range trace {
-		if value == method {
-			count++
-		}
-	}
-	return count
-}
-
-type nativeRootControlProofControls struct {
-	mu                  sync.Mutex
-	releaseFirstResult  bool
-	interruptNextResult bool
-	interrupted         bool
-	receiverRebinds     int
-	exactEntryLookups   int
-	resultSubmissions   int
-	blockNextHandler    bool
-	handlerEntered      chan struct{}
-	handlerRelease      chan struct{}
-	handlerEnteredOnce  sync.Once
-}
-
-func (c *nativeRootControlProofControls) releaseAfterResult() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.releaseFirstResult {
-		return false
-	}
-	c.releaseFirstResult = false
-	return true
-}
-
-func (c *nativeRootControlProofControls) interruptAfterPersist() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.interruptNextResult {
-		return false
-	}
-	c.interruptNextResult = false
-	c.interrupted = true
-	return true
-}
-
-func (c *nativeRootControlProofControls) noteRebind() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.receiverRebinds++
-}
-
-func (c *nativeRootControlProofControls) noteLookup() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.exactEntryLookups++
-}
-
-func (c *nativeRootControlProofControls) noteSubmission() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.resultSubmissions++
-}
-
-func (c *nativeRootControlProofControls) snapshot() (interrupted bool, rebinds, lookups, submissions int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.interrupted, c.receiverRebinds, c.exactEntryLookups, c.resultSubmissions
-}
-
-type nativeRootControlTraceRPC struct {
-	managed.RPC
-	root     managed.RootControlRPC
-	trace    *nativeRootControlTrace
-	controls *nativeRootControlProofControls
-
-	mu      sync.Mutex
-	handler func(managed.RootControlEvent)
-}
-
-func (r *nativeRootControlTraceRPC) Prompt(ctx context.Context, message string) error {
-	if strings.HasPrefix(message, "/") {
-		r.trace.record("prompt:slash:start")
-	} else {
-		r.trace.record("prompt:non-slash:start")
-	}
-	err := r.RPC.Prompt(ctx, message)
-	if strings.HasPrefix(message, "/mecha-s4-root-control-probe-v1 goal-status") {
-		r.trace.record("probe:goal:send-resolved")
-	} else if strings.HasPrefix(message, "/") {
-		r.trace.record("prompt:slash:resolved")
-	} else {
-		r.trace.record("prompt:non-slash:resolved")
-	}
-	return err
-}
-
-type nativeRootControlReadinessRPC interface {
-	ApplyPolicy(context.Context, map[string]any) (map[string]any, error)
-	WaitForPolicyApplied(context.Context, string, int64) (map[string]any, error)
-	RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error)
-	WaitForChildSnapshot(context.Context) (map[string]any, error)
-}
-
-func (r *nativeRootControlTraceRPC) readiness() (nativeRootControlReadinessRPC, error) {
-	source, ok := r.RPC.(nativeRootControlReadinessRPC)
-	if !ok {
-		return nil, errors.New("installed Pi RPC does not expose readiness-source methods")
-	}
-	return source, nil
-}
-func (r *nativeRootControlTraceRPC) ApplyPolicy(ctx context.Context, policy map[string]any) (map[string]any, error) {
-	source, err := r.readiness()
-	if err != nil {
-		return nil, err
-	}
-	return source.ApplyPolicy(ctx, policy)
-}
-func (r *nativeRootControlTraceRPC) WaitForPolicyApplied(ctx context.Context, sessionID string, epoch int64) (map[string]any, error) {
-	source, err := r.readiness()
-	if err != nil {
-		return nil, err
-	}
-	return source.WaitForPolicyApplied(ctx, sessionID, epoch)
-}
-func (r *nativeRootControlTraceRPC) RequestChildSnapshot(ctx context.Context, request map[string]any) (map[string]any, error) {
-	source, err := r.readiness()
-	if err != nil {
-		return nil, err
-	}
-	return source.RequestChildSnapshot(ctx, request)
-}
-func (r *nativeRootControlTraceRPC) WaitForChildSnapshot(ctx context.Context) (map[string]any, error) {
-	source, err := r.readiness()
-	if err != nil {
-		return nil, err
-	}
-	return source.WaitForChildSnapshot(ctx)
-}
-
-func (r *nativeRootControlTraceRPC) installRootReceiver(handler func(managed.RootControlEvent), rebind bool) {
-	r.root.SetRootControlEventHandler(func(event managed.RootControlEvent) {
-		r.trace.record("root:request")
-		handler(event)
-	})
-	if rebind {
-		r.controls.noteRebind()
-		r.trace.record("root:receiver:rebound")
-	}
-}
-
-func (r *nativeRootControlTraceRPC) SetRootControlEventHandler(handler func(managed.RootControlEvent)) {
-	r.mu.Lock()
-	r.handler = handler
-	r.mu.Unlock()
-	r.installRootReceiver(handler, false)
-}
-
-func (r *nativeRootControlTraceRPC) rebindRootReceiver() error {
-	r.mu.Lock()
-	handler := r.handler
-	r.mu.Unlock()
-	if handler == nil {
-		return errors.New("root control receiver was not installed")
-	}
-	r.installRootReceiver(handler, true)
-	return nil
-}
-
-func (r *nativeRootControlTraceRPC) ArmRootControlResult(requestID, entryID string) (managed.RootControlAppendToken, error) {
-	r.trace.record("root:arm")
-	return r.root.ArmRootControlResult(requestID, entryID)
-}
-
-func (r *nativeRootControlTraceRPC) SubmitRootControlResult(ctx context.Context, token managed.RootControlAppendToken, payload map[string]any) (<-chan managed.RootControlResultReceipt, error) {
-	r.controls.noteSubmission()
-	r.trace.record("root:submit:start")
-	wait, err := r.root.SubmitRootControlResult(ctx, token, payload)
-	if err != nil {
-		r.trace.record("root:submit:error")
-		return nil, err
-	}
-	r.trace.record("root:submit:resolved")
-	if r.controls.releaseAfterResult() {
-		r.trace.record("probe:release:start")
-		releaseErr := r.RPC.Prompt(ctx, "/mecha-s4-root-control-probe-v1 release")
-		r.trace.record("probe:release:resolved")
-		if releaseErr != nil {
-			return nil, releaseErr
-		}
-	}
-	if r.controls.interruptAfterPersist() {
-		requireNoError := r.rebindRootReceiver()
-		if requireNoError != nil {
-			return nil, requireNoError
-		}
-		r.trace.record("root:submit:interrupted")
-		return nil, errors.New("injected interruption after persisted explicit result append")
-	}
-	return wait, nil
-}
-
-func (r *nativeRootControlTraceRPC) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
-	r.controls.noteLookup()
-	r.trace.record("root:get_entry")
-	return r.root.GetRootControlEntry(ctx, entryID)
-}
-
-type nativeRootControlTraceRPCFactory struct {
-	base     managed.RPCFactory
-	trace    *nativeRootControlTrace
-	controls *nativeRootControlProofControls
-	mu       sync.Mutex
-	opened   []*nativeRootControlTraceRPC
-}
-
-func (f *nativeRootControlTraceRPCFactory) Open(ctx context.Context, process managed.Process) (managed.RPC, error) {
-	rpc, err := f.base.Open(ctx, process)
-	if err != nil {
-		return nil, err
-	}
-	root, ok := rpc.(managed.RootControlRPC)
-	if !ok {
-		_ = rpc.Close()
-		return nil, errors.New("installed Pi RPC does not expose root-control methods")
-	}
-	wrapped := &nativeRootControlTraceRPC{RPC: rpc, root: root, trace: f.trace, controls: f.controls}
-	f.mu.Lock()
-	f.opened = append(f.opened, wrapped)
-	f.mu.Unlock()
-	return wrapped, nil
-}
-
-func (f *nativeRootControlTraceRPCFactory) latest(t *testing.T) *nativeRootControlTraceRPC {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	require.NotEmpty(t, f.opened)
-	return f.opened[len(f.opened)-1]
-}
-
-type nativeRootControlHandlerTracker struct {
-	mu         sync.Mutex
-	executions int
-	blockNext  bool
-	entered    chan struct{}
-	release    chan struct{}
-	once       sync.Once
-	full       bool
-}
-
-func (t *nativeRootControlHandlerTracker) execute(identity managed.RootControlHandlerIdentity, invocation managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
-	t.mu.Lock()
-	t.executions++
-	block := t.blockNext
-	if block {
-		t.blockNext = false
-	}
-	t.full = identity.CapabilityID == "goal" && identity.ToolName == "goal" && identity.DefinitionID != "" && identity.DefinitionSHA256 != "" && identity.OperationID == "goal.control" && invocation.OperationID == "goal.control" && invocation.RequestID != "" && invocation.ResultID != "" && invocation.ToolCallID != ""
-	t.mu.Unlock()
-	if block {
-		t.once.Do(func() { close(t.entered) })
-		<-t.release
-	}
-	if !t.full {
-		return managed.RootControlHandlerResult{}, errors.New("S4 probe reached the wrong root handler")
-	}
-	return managed.RootControlHandlerResult{Status: "ok", Content: "Goal status checked.", Details: map[string]any{"action": "status"}}, nil
-}
-
-func (t *nativeRootControlHandlerTracker) snapshot() (int, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.executions, t.full
-}
-
-func rootControlNativeHandlers(t *testing.T, manifest managed.Manifest, tracker *nativeRootControlHandlerTracker, observed *managedRootControlNativeObservation) []managed.RootControlHandler {
-	t.Helper()
-	handlers, err := managed.NewOperationalRootControlHandlers(manifest, managed.RootControlOperationExecutorFunc{
-		ExecuteFunc: func(_ context.Context, identity managed.RootControlHandlerIdentity, invocation managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
-			return tracker.execute(identity, invocation)
-		},
-		ReconcileFunc: func(_ context.Context, identity managed.RootControlHandlerIdentity, invocation managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
-			return managed.RootControlHandlerResult{Status: "ok", Content: "Goal status checked.", Details: map[string]any{"action": "status", "reconciled": true, "operation": identity.OperationID}}, nil
-		},
-	})
-	require.NoError(t, err)
-	observed.handlerRegistryComplete = len(handlers) == len(manifest.Tools)
-	require.True(t, observed.handlerRegistryComplete)
-	return handlers
-}
-
+// Keep the shared native proof lock check available to the neighboring native
+// tests in this package. The root test itself still uses the locked executable
+// and package selected by the same immutable source lock.
 func requireManagedRootControlLockedPi(t *testing.T, root string) managedResetLockedPi {
 	t.Helper()
 	sourceLockPath := os.Getenv("MECHA_PI_SOURCE_LOCK")
@@ -416,211 +47,350 @@ func requireManagedRootControlLockedPi(t *testing.T, root string) managedResetLo
 	return lockedPi
 }
 
-func nativeProviderInterceptor(t *testing.T) (string, string) {
-	t.Helper()
-	logPath := filepath.Join(t.TempDir(), "provider-interceptor.json")
-	modulePath := filepath.Join(t.TempDir(), "provider-interceptor.cjs")
-	module := `const fs = require("node:fs");
-const log = process.env.MECHA_RPC_PROVIDER_INTERCEPTOR_LOG;
-if (!log) throw new Error("provider interceptor log is required");
-let calls = 0;
-const write = () => fs.writeFileSync(log, JSON.stringify({ provider_call_count: calls }));
-const intercept = (target, name) => {
-  if (typeof target[name] !== "function") return;
-  const original = target[name];
-  target[name] = function (...args) {
-    calls += 1;
-    write();
-    throw new Error("native S4 provider interceptor blocked a provider transport call");
-  };
-  return original;
-};
-intercept(globalThis, "fetch");
-intercept(require("node:http"), "request");
-intercept(require("node:https"), "request");
-write();
-`
-	require.NoError(t, os.WriteFile(modulePath, []byte(module), 0o600))
-	return modulePath, logPath
+type nativeRootControlProviderReply struct {
+	toolName string
+	args     map[string]any
+	content  string
 }
 
-func nativeProviderCalls(t *testing.T, path string) int {
+type nativeRootControlProvider struct {
+	requests chan map[string]any
+	replies  chan nativeRootControlProviderReply
+	server   *httptest.Server
+	sequence atomic.Int64
+}
+
+func newNativeRootControlProvider(t *testing.T) *nativeRootControlProvider {
 	t.Helper()
-	contents, err := os.ReadFile(path)
-	require.NoError(t, err, "the provider interceptor must start before Pi")
-	var observed struct {
-		ProviderCallCount int `json:"provider_call_count"`
+	provider := &nativeRootControlProvider{requests: make(chan map[string]any, 16), replies: make(chan nativeRootControlProviderReply, 16)}
+	provider.server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/chat/completions" {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		select {
+		case provider.requests <- parsed:
+		case <-request.Context().Done():
+			return
+		}
+		var reply nativeRootControlProviderReply
+		select {
+		case reply = <-provider.replies:
+		case <-request.Context().Done():
+			return
+		}
+		sequence := provider.sequence.Add(1)
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.WriteHeader(http.StatusOK)
+		if reply.toolName != "" {
+			arguments, marshalErr := json.Marshal(reply.args)
+			if marshalErr != nil {
+				return
+			}
+			provider.writeEvent(response, map[string]any{"id": fmt.Sprintf("native-root-%d", sequence), "model": "gpt-5.6-terra", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": fmt.Sprintf("native-root-call-%d", sequence), "type": "function", "function": map[string]any{"name": reply.toolName, "arguments": string(arguments)}}}}, "finish_reason": nil}}})
+			provider.writeEvent(response, map[string]any{"id": fmt.Sprintf("native-root-%d", sequence), "model": "gpt-5.6-terra", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}})
+		} else {
+			provider.writeEvent(response, map[string]any{"id": fmt.Sprintf("native-root-%d", sequence), "model": "gpt-5.6-terra", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": reply.content}, "finish_reason": nil}}})
+			provider.writeEvent(response, map[string]any{"id": fmt.Sprintf("native-root-%d", sequence), "model": "gpt-5.6-terra", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
+		}
+		provider.writeLine(response, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(provider.server.Close)
+	return provider
+}
+
+func (p *nativeRootControlProvider) writeEvent(response http.ResponseWriter, value map[string]any) {
+	encoded, _ := json.Marshal(value)
+	p.writeLine(response, "data: "+string(encoded)+"\n\n")
+}
+
+func (p *nativeRootControlProvider) writeLine(response http.ResponseWriter, value string) {
+	_, _ = io.WriteString(response, value)
+	if flusher, ok := response.(http.Flusher); ok {
+		flusher.Flush()
 	}
-	require.NoError(t, json.Unmarshal(contents, &observed))
-	return observed.ProviderCallCount
 }
 
-func nativeRootProbeRecords(t *testing.T, path string) []map[string]any {
-	t.Helper()
-	contents, err := os.ReadFile(path)
-	require.NoError(t, err, "the installed extension must publish its native observation")
-	var value map[string]any
-	require.NoError(t, json.Unmarshal(contents, &value))
-	recordsValue, ok := value["records"].([]any)
-	require.True(t, ok, "S4 fixture must return a bounded observation record")
-	records := make([]map[string]any, 0, len(recordsValue))
-	for _, raw := range recordsValue {
-		record, ok := raw.(map[string]any)
-		require.True(t, ok, "S4 fixture observation record is invalid")
-		records = append(records, record)
+func (p *nativeRootControlProvider) nextRequest(ctx context.Context) map[string]any {
+	select {
+	case request := <-p.requests:
+		return request
+	case <-ctx.Done():
+		return nil
 	}
-	return records
 }
 
-func nativeRecordBool(t *testing.T, record map[string]any, key string) bool {
+func (p *nativeRootControlProvider) reply(reply nativeRootControlProviderReply) {
+	p.replies <- reply
+}
+
+func writeNativeRootControlModels(t *testing.T, home, baseURL string) {
 	t.Helper()
-	value, ok := record[key].(bool)
-	require.Truef(t, ok, "S4 fixture observation %s is missing", key)
-	return value
+	path := filepath.Join(home, ".pi", "agent")
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	models := map[string]any{"providers": map[string]any{"openai-codex": map[string]any{
+		"baseUrl": baseURL + "/v1", "api": "openai-completions", "apiKey": "deterministic-root-control-test-key",
+		"models": []any{map[string]any{"id": "gpt-5.6-terra", "name": "Deterministic root control model", "reasoning": false, "input": []string{"text"}, "cost": map[string]any{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}, "contextWindow": 16_384, "maxTokens": 1_024}},
+	}}}
+	encoded, err := json.Marshal(models)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(path, "models.json"), encoded, 0o600))
 }
 
-func nativeRecordString(t *testing.T, record map[string]any, key string) string {
+type nativeRootActivityEvent struct {
+	state    string
+	sequence int64
+}
+
+type nativeRootActivityRPC struct {
+	managed.RPC
+	events chan<- nativeRootActivityEvent
+}
+
+func (r *nativeRootActivityRPC) SetParentActivityEventHandler(handler func(map[string]any)) {
+	source, ok := r.RPC.(managed.ParentActivityRPC)
+	if !ok {
+		return
+	}
+	source.SetParentActivityEventHandler(func(event map[string]any) {
+		state, _ := event["state"].(string)
+		var sequence int64
+		switch value := event["sequence"].(type) {
+		case int64:
+			sequence = value
+		case float64:
+			sequence = int64(value)
+		}
+		observed := nativeRootActivityEvent{state: state, sequence: sequence}
+		if r.events != nil {
+			select {
+			case r.events <- observed:
+			default:
+			}
+		}
+		handler(event)
+	})
+}
+
+type nativeRootReadinessRPC interface {
+	ApplyPolicy(context.Context, map[string]any) (map[string]any, error)
+	WaitForPolicyApplied(context.Context, string, int64) (map[string]any, error)
+	RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error)
+	WaitForChildSnapshot(context.Context) (map[string]any, error)
+}
+
+func (r *nativeRootActivityRPC) readiness() (nativeRootReadinessRPC, error) {
+	source, ok := r.RPC.(nativeRootReadinessRPC)
+	if !ok {
+		return nil, errors.New("installed Pi RPC does not expose readiness-source methods")
+	}
+	return source, nil
+}
+func (r *nativeRootActivityRPC) ApplyPolicy(ctx context.Context, value map[string]any) (map[string]any, error) {
+	source, err := r.readiness()
+	if err != nil {
+		return nil, err
+	}
+	return source.ApplyPolicy(ctx, value)
+}
+func (r *nativeRootActivityRPC) WaitForPolicyApplied(ctx context.Context, generation string, epoch int64) (map[string]any, error) {
+	source, err := r.readiness()
+	if err != nil {
+		return nil, err
+	}
+	return source.WaitForPolicyApplied(ctx, generation, epoch)
+}
+func (r *nativeRootActivityRPC) RequestChildSnapshot(ctx context.Context, value map[string]any) (map[string]any, error) {
+	source, err := r.readiness()
+	if err != nil {
+		return nil, err
+	}
+	return source.RequestChildSnapshot(ctx, value)
+}
+func (r *nativeRootActivityRPC) WaitForChildSnapshot(ctx context.Context) (map[string]any, error) {
+	source, err := r.readiness()
+	if err != nil {
+		return nil, err
+	}
+	return source.WaitForChildSnapshot(ctx)
+}
+func (r *nativeRootActivityRPC) SetRootControlEventHandler(handler func(managed.RootControlEvent)) {
+	r.RPC.(managed.RootControlRPC).SetRootControlEventHandler(handler)
+}
+func (r *nativeRootActivityRPC) ArmRootControlResult(requestID, entryID string) (managed.RootControlAppendToken, error) {
+	return r.RPC.(managed.RootControlRPC).ArmRootControlResult(requestID, entryID)
+}
+func (r *nativeRootActivityRPC) SubmitRootControlResult(ctx context.Context, token managed.RootControlAppendToken, payload map[string]any) (<-chan managed.RootControlResultReceipt, error) {
+	return r.RPC.(managed.RootControlRPC).SubmitRootControlResult(ctx, token, payload)
+}
+func (r *nativeRootActivityRPC) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
+	return r.RPC.(managed.RootControlRPC).GetRootControlEntry(ctx, entryID)
+}
+func (r *nativeRootActivityRPC) SettlePreparedRestartTurn(ctx context.Context, fence store.ManagedRuntimeFence) error {
+	return r.RPC.(managed.RestartTurnSettler).SettlePreparedRestartTurn(ctx, fence)
+}
+
+type nativeRootRPCFactory struct {
+	base   managed.RPCFactory
+	events chan<- nativeRootActivityEvent
+	mu     sync.Mutex
+	latest *nativeRootActivityRPC
+}
+
+func (f *nativeRootRPCFactory) Open(ctx context.Context, process managed.Process) (managed.RPC, error) {
+	rpc, err := f.base.Open(ctx, process)
+	if err != nil {
+		return nil, err
+	}
+	wrapped := &nativeRootActivityRPC{RPC: rpc, events: f.events}
+	f.mu.Lock()
+	f.latest = wrapped
+	f.mu.Unlock()
+	return wrapped, nil
+}
+
+func (f *nativeRootRPCFactory) latestRPC(t *testing.T) *nativeRootActivityRPC {
 	t.Helper()
-	value, ok := record[key].(string)
-	require.Truef(t, ok, "S4 fixture observation %s is missing", key)
-	return value
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	require.NotNil(t, f.latest)
+	return f.latest
 }
 
-func rootControlRows(t *testing.T, ctx context.Context, databasePath string) []store.ManagedControlRequest {
+func rootControlRowsForNativeTest(t *testing.T, ctx context.Context, durable *store.Store, databasePath string) []store.ManagedControlRequest {
 	t.Helper()
 	db, err := sql.Open("sqlite", databasePath)
 	require.NoError(t, err)
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT request_id FROM managed_control_requests ORDER BY received_at,request_id`)
+	rows, err := db.QueryContext(ctx, `SELECT request_id FROM managed_control_requests WHERE agent_id=? ORDER BY received_at,request_id`, "native-root-control")
 	require.NoError(t, err)
 	defer rows.Close()
 	var result []store.ManagedControlRequest
 	for rows.Next() {
 		var requestID string
 		require.NoError(t, rows.Scan(&requestID))
-		// Use the typed Store projection in the caller to retain its fence. This
-		// direct query only enumerates request IDs; it never reads session history.
-		result = append(result, store.ManagedControlRequest{RequestID: requestID})
+		row, readErr := durable.ManagedControlRequest(ctx, requestID)
+		require.NoError(t, readErr)
+		result = append(result, *row)
 	}
 	require.NoError(t, rows.Err())
 	return result
 }
 
-func managedRootControlRows(t *testing.T, ctx context.Context, durable *store.Store, databasePath string) []store.ManagedControlRequest {
+func nativeRootToolNames(t *testing.T, request map[string]any) []string {
 	t.Helper()
-	ids := rootControlRows(t, ctx, databasePath)
-	rows := make([]store.ManagedControlRequest, 0, len(ids))
-	for _, item := range ids {
-		row, err := durable.ManagedControlRequest(ctx, item.RequestID)
-		require.NoError(t, err)
-		rows = append(rows, *row)
+	raw, ok := request["tools"].([]any)
+	require.True(t, ok, "provider request must include tools")
+	result := make([]string, 0, len(raw))
+	for _, value := range raw {
+		tool, ok := value.(map[string]any)
+		require.True(t, ok)
+		function, ok := tool["function"].(map[string]any)
+		require.True(t, ok)
+		name, ok := function["name"].(string)
+		require.True(t, ok)
+		result = append(result, name)
 	}
-	return rows
+	return result
 }
 
-func writeManagedRootControlArtifact(t *testing.T, root string, lockedPi managedResetLockedPi, manifest managed.Manifest, observed managedRootControlNativeObservation, methodTrace []string) string {
+func requireNativeQueuedToolResult(t *testing.T, continuation map[string]any, toolName string) string {
 	t.Helper()
-	head := commandOutput(t, root, "git", "rev-parse", "HEAD")
-	tree := commandOutput(t, root, "git", "rev-parse", "HEAD^{tree}")
-	candidate, candidatePathSHA256 := managedRootControlCandidateDigests(t, root)
-	registry := sha256.New()
-	for _, tool := range manifest.Tools {
-		_, err := fmt.Fprintf(registry, "%s\x00%s\x00%s\x00%s\x00%s\n", tool.CapabilityID, tool.Name, tool.DefinitionID, tool.DefinitionSHA256, tool.OperationID)
-		require.NoError(t, err)
+	messages := fmt.Sprint(continuation["messages"])
+	prefix := "Queued router operation " + toolName + " ("
+	suffix := "). The result will arrive in a later control message."
+	start := strings.LastIndex(messages, prefix)
+	require.GreaterOrEqual(t, start, 0, "provider continuation must include the authoritative queued-operation acknowledgement")
+	requestStart := start + len(prefix)
+	relativeEnd := strings.Index(messages[requestStart:], suffix)
+	require.GreaterOrEqual(t, relativeEnd, 0, "queued-operation acknowledgement must use the authoritative bounded text")
+	requestID := messages[requestStart : requestStart+relativeEnd]
+	require.Truef(t, canonicalUUID(requestID), "queued-operation acknowledgement must expose a canonical request ID, got %q", requestID)
+	return requestID
+}
+
+func waitNativeRootSettled(ctx context.Context, events <-chan nativeRootActivityEvent, after int64) nativeRootActivityEvent {
+	for {
+		select {
+		case event := <-events:
+			if event.state == "idle" && event.sequence > after {
+				return event
+			}
+		case <-ctx.Done():
+			panic(fmt.Sprintf("installed Pi did not emit normalized agent_settled: %v", ctx.Err()))
+		}
 	}
-	artifact := map[string]any{
-		"protocol": "mecha.phase2.root-control-s4/v1", "result": "pass", "mecha_base_head": head, "mecha_base_tree": tree,
-		"candidate_content_sha256": candidate, "candidate_paths": managedRootControlCandidatePaths,
-		"candidate_path_count": len(managedRootControlCandidatePaths), "candidate_path_sha256": candidatePathSHA256,
-		"manifest_sha256": manifest.CanonicalSHA256, "registry_sha256": hex.EncodeToString(registry.Sum(nil)),
-		"locked_pi":            map[string]any{"package_name": lockedPi.packageName, "package_version": lockedPi.packageVersion, "executable_sha256": lockedPi.executableSHA256, "source_lock_sha256": lockedPi.sourceLockSHA256, "source_commit": lockedPi.sourceCommit, "source_tree": lockedPi.sourceTree, "source_package_lock_sha256": lockedPi.sourcePackageLockSHA256, "pi_packages_commit": lockedPi.piPackagesCommit, "pi_packages_tree": lockedPi.piPackagesTree},
-		"gate_evidence_sha256": map[string]string{"G1": safeFileSHA256(t, filepath.Join(root, "docs", "rpc-phase2-lifecycle-controls-gate-record.md")), "G2": safeFileSHA256(t, filepath.Join(root, "docs", "rpc-phase2-lifecycle-controls-gate-record.md")), "G3": safeFileSHA256(t, filepath.Join(root, "docs", "rpc-phase2-lifecycle-controls-gate-record.md")), "G4": safeFileSHA256(t, filepath.Join(root, "docs", "rpc-phase2-lifecycle-controls-gate-record.md"))},
-		"assertions": map[string]bool{
-			"g4_lock_verified":                     observed.g4LockVerified,
-			"locked_executable":                    observed.lockedExecutable,
-			"no_path_fallback":                     observed.noPathFallback,
-			"no_model_turn":                        observed.noModelTurn,
-			"zero_provider_calls":                  observed.zeroProviderCalls,
-			"full_manifest_root_envelope":          observed.fullManifestRootEnvelope,
-			"no_legacy_emission":                   observed.noLegacyEmission,
-			"root_pending_before_emission":         observed.rootPendingBeforeEmission,
-			"forced_result_before_send_resolution": observed.forcedResultBeforeSendResolution,
-			"root_pending_before_result":           observed.rootPendingBeforeResult,
-			"send_failure_rolls_back_pending":      observed.sendFailureRollsBackPending,
-			"exact_get_entry_recovery":             observed.exactGetEntryRecovery,
-			"duplicate_already_present":            observed.duplicateAlreadyPresent,
-			"changed_receipt_rejected":             observed.changedReceiptRejected,
-			"reset_fence_cancelled":                observed.resetFenceCancelled,
-			"handler_registry_complete":            observed.handlerRegistryComplete,
+}
+
+func nativeRootControlHandlers(t *testing.T, manifest managed.Manifest, executions *atomic.Int32) []managed.RootControlHandler {
+	t.Helper()
+	handlers, err := managed.NewOperationalRootControlHandlers(manifest, managed.RootControlOperationExecutorFunc{
+		ExecuteFunc: func(context.Context, managed.RootControlHandlerIdentity, managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
+			executions.Add(1)
+			return managed.RootControlHandlerResult{Status: "ok", Content: "unexpected executor effect", Details: map[string]any{}}, nil
 		},
-		"observed": map[string]any{
-			"provider_interceptor":                     map[string]any{"provider_call_count": observed.providerCalls},
-			"root_request_count_before_forced_failure": observed.rootRequestCountBeforeFailure,
-			"root_request_count_after_forced_failure":  observed.rootRequestCountAfterFailure,
-			"handler_executions":                       observed.handlerExecutions,
-			"receiver_rebinds":                         observed.receiverRebinds,
-			"exact_entry_lookups":                      observed.exactEntryLookups,
-			"result_submissions":                       observed.resultSubmissions,
-			"root_order":                               observed.rootOrder,
-			"recovery_trace":                           observed.recoveryTrace,
-			"fixture_records":                          observed.probeRecords,
-			"rpc_method_trace":                         methodTrace,
+		ReconcileFunc: func(context.Context, managed.RootControlHandlerIdentity, managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
+			executions.Add(1)
+			return managed.RootControlHandlerResult{Status: "ok", Content: "unexpected reconcile effect", Details: map[string]any{}}, nil
 		},
-	}
-	encoded, err := json.MarshalIndent(artifact, "", "  ")
+	})
 	require.NoError(t, err)
-	path := filepath.Join("/tmp", "mecha-rpc-acceptance", head, "phase2-root-control-s4", candidate, "root-control-s4-v1.json")
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
-	require.NoError(t, os.WriteFile(path, append(encoded, '\n'), 0o600))
-	return path
+	return handlers
 }
 
-// TestManagedRootControlInstalledPi uses the locked installed Pi to exercise
-// the S4 root delivery seam. Every artifact boolean below is calculated from
-// an observed Pi response, durable row, or interceptor count, never from the
-// source shape that is being proved.
 func TestManagedRootControlInstalledPi(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)
-	lockedPi := requireManagedRootControlLockedPi(t, root)
-	observed := managedRootControlNativeObservation{g4LockVerified: true}
-	observed.lockedExecutable = lockedPi.executableSHA256 == safeFileSHA256(t, lockedPi.executable)
-	resolvedSuppliedBinary, err := filepath.EvalSymlinks(os.Getenv("MECHA_PI_BIN"))
+	lockedPi := requireManagedResetLockedPi(t, root)
+	manifest, _, err := managed.LoadManifest(filepath.Join(root, "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
-	observed.noPathFallback = resolvedSuppliedBinary == lockedPi.executable
-	providerModule, providerLog := nativeProviderInterceptor(t)
-	observationPath := filepath.Join(t.TempDir(), "root-control-observation.json")
+	expectedTools := expectedManagedActiveToolsForTransport(manifest)
+	provider := newNativeRootControlProvider(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	databasePath := filepath.Join(t.TempDir(), "router.db")
 	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
-	manifest, _, err := managed.LoadManifest(filepath.Join(root, "router", "contract", "managed-tools-v1.json"))
-	require.NoError(t, err)
 	home := t.TempDir()
 	sessionRoot := filepath.Join(home, "sessions")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
-	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
+	writeNativeRootControlModels(t, home, provider.server.URL)
+	events := make(chan nativeRootActivityEvent, 32)
+	rpcFactory := &nativeRootRPCFactory{base: managed.DefaultRPCFactory(), events: events}
 	factory := &nativeBlockingProcessFactory{base: managed.DefaultProcessFactory(), entered: make(chan struct{}), release: make(chan struct{})}
-	trace := &nativeRootControlTrace{}
-	controls := &nativeRootControlProofControls{releaseFirstResult: true}
-	tracker := &nativeRootControlHandlerTracker{}
-	rpcFactory := &nativeRootControlTraceRPCFactory{base: managed.DefaultRPCFactory(), trace: trace, controls: controls}
-	defer func() {
+	t.Cleanup(func() {
 		select {
 		case <-factory.release:
 		default:
 			close(factory.release)
 		}
-	}()
+	})
+	var handlerExecutions atomic.Int32
 	manager, err := managed.NewManager(managed.ManagerOptions{
-		Store: durable, Manifest: manifest, ProcessFactory: factory, RPCFactory: rpcFactory, RootControlHandlers: rootControlNativeHandlers(t, manifest, tracker, &observed),
-		Config:        managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, TestOnlyExtensions: []string{filepath.Join(root, "tests", "fixtures", "mecha-rpc", "s4-native-root-control-probe.ts")}, TestOnlyEnvironment: []string{"MECHA_RPC_TEST_ROOT_CONTROL_PROBE=1", "MECHA_RPC_TEST_ROOT_CONTROL_HOLD_FIRST_EMISSION=1", "MECHA_RPC_TEST_ROOT_CONTROL_DETACH_EMISSION=1", "MECHA_RPC_TEST_ROOT_CONTROL_SEND_FAILURE_AT=2", "MECHA_RPC_TEST_ROOT_CONTROL_OBSERVATION_PATH=" + observationPath, "MECHA_RPC_PROVIDER_INTERCEPTOR_LOG=" + providerLog, "NODE_OPTIONS=--require=" + providerModule}, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
-		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		Store: durable, Manifest: manifest, ProcessFactory: factory, RPCFactory: rpcFactory,
+		RootControlHandlers: nativeRootControlHandlers(t, manifest, &handlerExecutions),
+		Config:              managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		CatalogSource:       managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 	})
 	require.NoError(t, err)
-	defer func() { _ = manager.Close(context.Background()) }()
+	defer manager.Close(context.Background())
+	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(ctx))
+	defer router.Close(context.Background())
+	routerURL, _ := router.URLs()
+	require.NoError(t, manager.SetRouterURL(routerURL))
 	_, err = manager.Launch(ctx, managed.LaunchRequest{Name: "native-root-control", Cwd: root, RequestID: "123e4567-e89b-42d3-a456-426614174151"})
 	require.NoError(t, err)
 	select {
@@ -632,182 +402,125 @@ func TestManagedRootControlInstalledPi(t *testing.T) {
 	close(factory.release)
 	require.Eventually(t, func() bool {
 		agent, readErr := durable.ManagedAgent(ctx, "native-root-control")
-		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
+		if readErr != nil {
+			t.Logf("readiness state read failed: %v", readErr)
+			return false
+		}
+		t.Logf("readiness state: lifecycle=%s activity=%s accepting=%t session=%s error=%s:%s", agent.LifecycleState, agent.ActivityState, agent.AcceptingPrompts, agent.PiSessionID, agent.LastErrorCode, agent.LastErrorMessage)
+		return agent.LifecycleState == "running" && agent.AcceptingPrompts
 	}, 25*time.Second, 100*time.Millisecond)
 
-	const probeCommand = "/mecha-s4-root-control-probe-v1 goal-status"
-	// The test-only probe returns after it starts its real shared emission. The
-	// emission promise remains held until the actual router result command has
-	// returned, so the live ordering race is deterministic.
-	require.NoError(t, manager.AdmitPrompt(ctx, "native-root-control", probeCommand))
-	t.Cleanup(func() { t.Logf("S4 trace: %v", trace.snapshot()) })
-	require.Eventually(t, func() bool {
-		rows := managedRootControlRows(t, ctx, durable, databasePath)
-		return len(rows) == 1 && rows[0].State == "delivered" && strings.HasPrefix(rows[0].ResultEntryID, "mcr1_")
-	}, 20*time.Second, 100*time.Millisecond)
-	primary := managedRootControlRows(t, ctx, durable, databasePath)[0]
-	primaryRPC := rpcFactory.latest(t)
-	var records []map[string]any
-	require.Eventually(t, func() bool {
-		records = nativeRootProbeRecords(t, observationPath)
-		return len(records) == 1 && nativeRecordBool(t, records[0], "send_resolved")
-	}, 10*time.Second, 50*time.Millisecond)
-	first := records[0]
-	require.True(t, nativeRecordBool(t, first, "pending_before_emission"))
-	require.True(t, nativeRecordBool(t, first, "request_emitted"))
-	require.True(t, nativeRecordBool(t, first, "pending_before_result"))
-	require.False(t, nativeRecordBool(t, first, "send_resolved_before_result"))
-	require.Equal(t, "accepted", nativeRecordString(t, first, "append_outcome"))
-	require.True(t, nativeRecordBool(t, first, "send_resolved"))
-
-	traceBeforeFailure := trace.snapshot()
-	observed.rootRequestCountBeforeFailure = traceCount(traceBeforeFailure, "root:request")
-	require.Equal(t, 1, observed.rootRequestCountBeforeFailure)
-	// The injected transport error happens before Pi receives a request. Pi's
-	// prompt RPC acknowledges dispatch first, so the installed extension's
-	// observation records the handler-side rejection and rollback.
-	require.NoError(t, manager.AdmitPrompt(ctx, "native-root-control", probeCommand))
-	traceAfterFailure := trace.snapshot()
-	observed.rootRequestCountAfterFailure = traceCount(traceAfterFailure, "root:request")
-	require.Equal(t, observed.rootRequestCountBeforeFailure, observed.rootRequestCountAfterFailure)
-	require.Eventually(t, func() bool {
-		records = nativeRootProbeRecords(t, observationPath)
-		return len(records) == 2 && nativeRecordBool(t, records[1], "send_rejected_before_emission")
-	}, 10*time.Second, 50*time.Millisecond)
-	failed := records[1]
-	require.True(t, nativeRecordBool(t, failed, "send_rejected_before_emission"))
-	require.False(t, nativeRecordBool(t, failed, "pending_after_send_failure"))
-
-	// This performs a second real G4 explicit-ID append against the persisted
-	// result. Pi must report already_present and retain the original entry.
-	require.NoError(t, manager.AdmitPrompt(ctx, "native-root-control", "/mecha-s4-root-control-probe-v1 duplicate-append"))
-	require.Eventually(t, func() bool {
-		records = nativeRootProbeRecords(t, observationPath)
-		return len(records) >= 1 && nativeRecordString(t, records[0], "duplicate_outcome") == "already_present"
-	}, 10*time.Second, 50*time.Millisecond)
-	entry, err := primaryRPC.GetRootControlEntry(ctx, primary.ResultEntryID)
-	require.NoError(t, err)
-	require.NotNil(t, entry)
-	message := entry
-	if nested, ok := entry["message"].(map[string]any); ok {
-		message = nested
+	var lastSequence int64
+	runTurn := func(prompt string, final string) string {
+		promptDone := make(chan error, 1)
+		go func() { promptDone <- manager.AdmitPrompt(ctx, "native-root-control", prompt) }()
+		initial := provider.nextRequest(ctx)
+		require.NotNil(t, initial, "installed Pi did not make the deterministic provider request")
+		require.ElementsMatch(t, expectedTools, nativeRootToolNames(t, initial))
+		provider.reply(nativeRootControlProviderReply{toolName: "goal", args: map[string]any{"action": "status"}})
+		continuation := provider.nextRequest(ctx)
+		require.NotNil(t, continuation, "installed Pi did not request the tool-result continuation")
+		require.ElementsMatch(t, expectedTools, nativeRootToolNames(t, continuation))
+		requestID := requireNativeQueuedToolResult(t, continuation, "goal")
+		provider.reply(nativeRootControlProviderReply{content: final})
+		require.NoError(t, <-promptDone)
+		event := waitNativeRootSettled(ctx, events, lastSequence)
+		lastSequence = event.sequence
+		return requestID
 	}
-	require.Equal(t, "mecha.control.result.v1", message["customType"])
-	require.Equal(t, primary.ResultContent, message["content"])
-	beforeDuplicateEffects, _ := tracker.snapshot()
-	require.Equal(t, 1, beforeDuplicateEffects)
-	require.NoError(t, manager.AdmitPrompt(ctx, "native-root-control", "/mecha-s4-root-control-probe-v1 changed-append"))
-	require.Eventually(t, func() bool {
-		records = nativeRootProbeRecords(t, observationPath)
-		return len(records) >= 1 && nativeRecordBool(t, records[0], "changed_append_rejected")
-	}, 10*time.Second, 50*time.Millisecond)
-	entryAfterChanged, err := primaryRPC.GetRootControlEntry(ctx, primary.ResultEntryID)
-	require.NoError(t, err)
-	require.NotNil(t, entryAfterChanged)
-	changedMessage := entryAfterChanged
-	if nested, ok := entryAfterChanged["message"].(map[string]any); ok {
-		changedMessage = nested
-	}
-	require.Equal(t, primary.ResultContent, changedMessage["content"], "changed explicit append must not replace the persisted receipt")
-	records = nativeRootProbeRecords(t, observationPath)
-	require.Equal(t, "already_present", nativeRecordString(t, records[0], "duplicate_outcome"))
-	require.True(t, nativeRecordBool(t, records[0], "changed_append_attempted"))
-	afterDuplicateEffects, _ := tracker.snapshot()
-	require.Equal(t, beforeDuplicateEffects, afterDuplicateEffects)
 
-	// The next append really persists in Pi, then the wrapper interrupts the
-	// command result and rebinds the receiver. Manager recovery must use the
-	// sole exact get_entry seam to settle it without another handler execution.
-	controls.mu.Lock()
-	controls.interruptNextResult = true
-	controls.mu.Unlock()
-	require.NoError(t, manager.AdmitPrompt(ctx, "native-root-control", probeCommand))
+	primaryRequestID := runTurn("Use the real root goal operation.", "The root goal operation was queued.")
+	var rows []store.ManagedControlRequest
 	require.Eventually(t, func() bool {
-		rows := managedRootControlRows(t, ctx, durable, databasePath)
-		return len(rows) == 2 && rows[1].State == "delivered"
-	}, 20*time.Second, 100*time.Millisecond)
-	afterRecoveryEffects, _ := tracker.snapshot()
-	require.Equal(t, beforeDuplicateEffects+1, afterRecoveryEffects)
+		rows = rootControlRowsForNativeTest(t, ctx, durable, databasePath)
+		return len(rows) == 1 && rows[0].RequestID == primaryRequestID && rows[0].State == "delivered"
+	}, 15*time.Second, 50*time.Millisecond)
+	require.Len(t, rows, 1)
+	require.Equal(t, primaryRequestID, rows[0].RequestID)
+	require.Equal(t, "delivered", rows[0].State)
+	primary := rows[0]
+	require.NotEmpty(t, primary.ResultEntryID)
+	require.Zero(t, handlerExecutions.Load(), "manager-owned goal status must not invoke the external handler executor")
 
-	// Reserve one current-fence root row without dispatching a handler. The
-	// reset below is the real S1 executor: its admission transaction must cancel
-	// this row before the source session is replaced.
-	resetRequestID := "123e4567-e89b-42d3-a456-426614174161"
-	resetResultID := "123e4567-e89b-42d3-a456-426614174162"
-	_, err = durable.ReserveManagedControlRequest(ctx, store.ManagedControlRequestInput{
-		RequestID: resetRequestID, ResultID: resetResultID, AgentID: primary.AgentID, ToolCallID: "native-reset-fence-probe", CapabilityID: primary.CapabilityID, ToolName: primary.ToolName, DefinitionID: primary.DefinitionID, OperationID: primary.OperationID,
-		CanonicalArgumentsSHA256: primary.CanonicalArgumentsSHA256, RequestFingerprint: strings.Repeat("b", 64), Fence: primary.Fence, ReceivedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-	})
-	require.NoError(t, err)
+	// Hold the second ordinary provider continuation. Reset is admitted against
+	// the active source turn, cancels its old-fence row, then waits for this same
+	// normal Pi turn to emit its native settled boundary.
+	promptDone := make(chan error, 1)
+	go func() {
+		promptDone <- manager.AdmitPrompt(ctx, "native-root-control", "Run the root goal operation during reset.")
+	}()
+	initial := provider.nextRequest(ctx)
+	require.NotNil(t, initial)
+	require.ElementsMatch(t, expectedTools, nativeRootToolNames(t, initial))
+	provider.reply(nativeRootControlProviderReply{toolName: "goal", args: map[string]any{"action": "status"}})
+	continuation := provider.nextRequest(ctx)
+	require.NotNil(t, continuation)
+	require.ElementsMatch(t, expectedTools, nativeRootToolNames(t, continuation))
+	pendingRequestID := requireNativeQueuedToolResult(t, continuation, "goal")
+	var resetRow store.ManagedControlRequest
+	require.Eventually(t, func() bool {
+		rows = rootControlRowsForNativeTest(t, ctx, durable, databasePath)
+		if len(rows) != 2 {
+			return false
+		}
+		resetRow = rows[1]
+		return resetRow.State != "delivered" && resetRow.State != "failed" && resetRow.State != "cancelled"
+	}, 15*time.Second, 50*time.Millisecond)
+	require.Equal(t, pendingRequestID, resetRow.RequestID)
+	require.Equal(t, primary.Fence, resetRow.Fence)
 	beforeReset, err := durable.ManagedAgent(ctx, "native-root-control")
 	require.NoError(t, err)
-	reset, err := manager.Reset(ctx, managed.ResetRequest{AgentID: "native-root-control", Method: "POST", CanonicalPath: "/v1/managed-agents/native-root-control/reset", RequestID: "123e4567-e89b-42d3-a456-426614174163", CanonicalBodyHash: strings.Repeat("a", 64)})
+	reset, err := manager.Reset(ctx, managed.ResetRequest{AgentID: "native-root-control", Method: http.MethodPost, CanonicalPath: "/v1/managed-agents/native-root-control/reset", RequestID: "123e4567-e89b-42d3-a456-426614174163", CanonicalBodyHash: strings.Repeat("a", 64)})
 	require.NoError(t, err)
 	require.False(t, reset.Replayed)
 	require.Eventually(t, func() bool {
-		action, actionErr := durable.ManagedLifecycleAction(ctx, "123e4567-e89b-42d3-a456-426614174163")
+		action, actionErr := durable.ManagedLifecycleAction(ctx, reset.Operation.OperationID)
+		return actionErr == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
+	}, 10*time.Second, 50*time.Millisecond)
+	provider.reply(nativeRootControlProviderReply{content: "The root goal operation completed."})
+	require.NoError(t, <-promptDone)
+	require.Eventually(t, func() bool {
+		action, actionErr := durable.ManagedLifecycleAction(ctx, reset.Operation.OperationID)
 		agent, agentErr := durable.ManagedAgent(ctx, "native-root-control")
 		return actionErr == nil && agentErr == nil && action.State == "succeeded" && agent.LifecycleState == "running" && agent.AcceptingPrompts && agent.SessionEpoch == beforeReset.SessionEpoch+1
-	}, 25*time.Second, 100*time.Millisecond)
-	cancelled, err := durable.ManagedControlRequest(ctx, resetRequestID)
+	}, 30*time.Second, 100*time.Millisecond)
+
+	cancelled, err := durable.ManagedControlRequest(ctx, resetRow.RequestID)
 	require.NoError(t, err)
 	require.Equal(t, "cancelled", cancelled.State)
 	require.Equal(t, "CANCELLED_BY_RESET", cancelled.ErrorCode)
-	replacementRPC := rpcFactory.latest(t)
-	require.NotSame(t, primaryRPC, replacementRPC)
-	oldEntry, err := replacementRPC.GetRootControlEntry(ctx, "mcr1_"+strings.ReplaceAll(resetResultID, "-", ""))
+	rows = rootControlRowsForNativeTest(t, ctx, durable, databasePath)
+	require.Len(t, rows, 2, "reset must not append a second durable row for the old request")
+	require.Equal(t, primary.ResultEntryID, rows[0].ResultEntryID)
+	require.NotEqual(t, rows[0].ResultEntryID, rows[1].ResultEntryID)
+	require.Zero(t, handlerExecutions.Load(), "reset recovery must not replay the manager-owned goal handler")
+	replacement := rpcFactory.latestRPC(t)
+	require.NotSame(t, replacement, nil)
+	oldEntry, err := replacement.GetRootControlEntry(ctx, "mcr1_"+strings.ReplaceAll(resetRow.ResultID, "-", ""))
 	require.NoError(t, err)
-	require.Nil(t, oldEntry, "the replacement session must not receive the cancelled source result")
+	require.Nil(t, oldEntry, "the replacement session must not receive the cancelled old-fence result")
+	require.GreaterOrEqual(t, provider.sequence.Load(), int64(4), "the provider mock must cover both normal agent turns")
 
-	methodTrace := trace.snapshot()
-	interrupted, rebinds, lookups, submissions := controls.snapshot()
-	observed.providerCalls = nativeProviderCalls(t, providerLog)
-	observed.handlerExecutions, observed.fullManifestRootEnvelope = tracker.snapshot()
-	observed.receiverRebinds, observed.exactEntryLookups, observed.resultSubmissions = rebinds, lookups, submissions
-	observed.probeRecords = records
-	firstRequest := tracePositionAfter(methodTrace, "root:request", -1)
-	firstSubmit := tracePositionAfter(methodTrace, "root:submit:resolved", firstRequest)
-	firstRelease := tracePositionAfter(methodTrace, "probe:release:resolved", firstSubmit)
-	if firstRequest >= 0 && firstSubmit >= 0 && firstRelease >= 0 {
-		observed.rootOrder = []string{methodTrace[firstRequest], methodTrace[firstSubmit], methodTrace[firstRelease]}
-	}
-	for _, method := range methodTrace {
-		if method == "root:receiver:rebound" || method == "root:submit:interrupted" || method == "root:get_entry" {
-			observed.recoveryTrace = append(observed.recoveryTrace, method)
+	// Keep the artifact bound to the exact checked-out candidate and the locked
+	// installed Pi. It records only immutable identities and observed booleans.
+	candidateHash := sha256.New()
+	for _, relative := range managedRootControlCandidatePaths {
+		contents, readErr := os.ReadFile(filepath.Join(root, relative))
+		if os.IsNotExist(readErr) {
+			_, writeErr := fmt.Fprintf(candidateHash, "%s\x00deleted\n", relative)
+			require.NoError(t, writeErr)
+			continue
 		}
+		require.NoError(t, readErr)
+		sum := sha256.Sum256(contents)
+		_, writeErr := fmt.Fprintf(candidateHash, "%s\x00%s\n", relative, hex.EncodeToString(sum[:]))
+		require.NoError(t, writeErr)
 	}
-	observed.rootPendingBeforeEmission = nativeRecordBool(t, first, "pending_before_emission") && nativeRecordBool(t, first, "request_emitted")
-	observed.forcedResultBeforeSendResolution = firstSubmit >= 0 && firstRelease > firstSubmit && !nativeRecordBool(t, first, "send_resolved_before_result") && nativeRecordBool(t, first, "send_resolved")
-	observed.rootPendingBeforeResult = nativeRecordBool(t, first, "pending_before_result") && observed.forcedResultBeforeSendResolution
-	observed.sendFailureRollsBackPending = nativeRecordBool(t, failed, "send_rejected_before_emission") && !nativeRecordBool(t, failed, "pending_after_send_failure") && observed.rootRequestCountAfterFailure == observed.rootRequestCountBeforeFailure
-	observed.exactGetEntryRecovery = interrupted && rebinds == 1 && tracePositionAfter(methodTrace, "root:receiver:rebound", -1) >= 0 && tracePositionAfter(methodTrace, "root:get_entry", tracePositionAfter(methodTrace, "root:submit:interrupted", -1)) >= 0
-	observed.duplicateAlreadyPresent = nativeRecordString(t, records[0], "duplicate_outcome") == "already_present" && beforeDuplicateEffects == afterDuplicateEffects && message["content"] == changedMessage["content"]
-	observed.changedReceiptRejected = nativeRecordBool(t, records[0], "changed_append_attempted") && changedMessage["content"] == primary.ResultContent
-	observed.resetFenceCancelled = cancelled.State == "cancelled" && cancelled.ErrorCode == "CANCELLED_BY_RESET" && oldEntry == nil
-	observed.zeroProviderCalls = observed.providerCalls == 0
-	observed.noModelTurn = observed.zeroProviderCalls && traceCount(methodTrace, "prompt:non-slash:start") == 0
-	observed.noLegacyEmission = observed.fullManifestRootEnvelope && observed.rootRequestCountBeforeFailure == 1
-
-	for name, passed := range map[string]bool{
-		"G4 lock":                      observed.g4LockVerified,
-		"locked executable":            observed.lockedExecutable,
-		"no PATH fallback":             observed.noPathFallback,
-		"no model turn":                observed.noModelTurn,
-		"zero provider calls":          observed.zeroProviderCalls,
-		"complete root envelope":       observed.fullManifestRootEnvelope,
-		"no legacy emission":           observed.noLegacyEmission,
-		"root pending before emission": observed.rootPendingBeforeEmission,
-		"forced early result":          observed.forcedResultBeforeSendResolution,
-		"root pending before result":   observed.rootPendingBeforeResult,
-		"send failure rollback":        observed.sendFailureRollsBackPending,
-		"exact get_entry recovery":     observed.exactGetEntryRecovery,
-		"duplicate acceptance":         observed.duplicateAlreadyPresent,
-		"changed receipt rejection":    observed.changedReceiptRejected,
-		"reset fence cancellation":     observed.resetFenceCancelled,
-		"complete handler registry":    observed.handlerRegistryComplete,
-	} {
-		require.Truef(t, passed, "native S4 observation failed: %s", name)
-	}
-	artifact := writeManagedRootControlArtifact(t, root, lockedPi, manifest, observed, methodTrace)
-	fmt.Printf("MECHA_ROOT_CONTROL_S4_ARTIFACT=%s\n", artifact)
+	artifact := map[string]any{"protocol": "mecha.phase2.root-control-s4/v2", "result": "pass", "mecha_base_head": commandOutput(t, root, "git", "rev-parse", "HEAD"), "mecha_base_tree": commandOutput(t, root, "git", "rev-parse", "HEAD^{tree}"), "candidate_content_sha256": hex.EncodeToString(candidateHash.Sum(nil)), "candidate_paths": managedRootControlCandidatePaths, "locked_pi": map[string]any{"executable_sha256": lockedPi.executableSHA256, "source_commit": lockedPi.sourceCommit, "source_tree": lockedPi.sourceTree, "pi_packages_commit": lockedPi.piPackagesCommit, "pi_packages_tree": lockedPi.piPackagesTree}, "assertions": map[string]bool{"provider_mock_used": true, "normal_turn_settled": lastSequence > 0, "queued_root_result": true, "old_fence_cancelled": cancelled.State == "cancelled", "handler_effects_zero": handlerExecutions.Load() == 0, "entry_unique": rows[0].ResultEntryID != rows[1].ResultEntryID, "replacement_old_entry_absent": oldEntry == nil}}
+	encoded, err := json.MarshalIndent(artifact, "", "  ")
+	require.NoError(t, err)
+	artifactPath := filepath.Join("/tmp", "mecha-rpc-acceptance", commandOutput(t, root, "git", "rev-parse", "HEAD"), "phase2-root-control-s4", "root-control-s4-v2.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(artifactPath), 0o700))
+	require.NoError(t, os.WriteFile(artifactPath, append(encoded, '\n'), 0o600))
+	fmt.Printf("MECHA_ROOT_CONTROL_S4_ARTIFACT=%s\n", artifactPath)
 }
