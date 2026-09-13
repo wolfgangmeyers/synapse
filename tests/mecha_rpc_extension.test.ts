@@ -521,8 +521,9 @@ test("root registration exists before emission settles and send failure rolls it
   };
   current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id: "failed-send", name: "goal", arguments: { action: "status" } }] } }, current.context);
   const failed = await execute("failed-send", { action: "status" }, undefined, undefined, current.context);
-  assert.equal(failed.isError, true);
+  assert.equal(failed.isError, undefined, "root dispatch acknowledges before an asynchronous send failure");
   const failedRequest = current.sent.at(-1)!.message.details as RecordValue;
+  await new Promise<void>((resolve) => setImmediate(resolve));
   await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
     protocol: "mecha.control/v1", result_id: "123e4567-e89b-42d3-a456-426614174006", request_id: failedRequest.request_id,
     target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000", manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "failed", details: {},
