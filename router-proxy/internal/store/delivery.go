@@ -1265,7 +1265,10 @@ func (s *Store) MarkManagedDirectPrompted(ctx context.Context, attempt ManagedDi
 		if !ok {
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
-		return nil
+		if err := s.openManagedParentWorkTx(ctx, attempt, now); err != nil {
+			return err
+		}
+		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
 }
 
@@ -1306,7 +1309,10 @@ func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDir
 			return err
 		}
 		_, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, attempt.MessageID)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
 }
 

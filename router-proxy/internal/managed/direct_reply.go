@@ -20,6 +20,16 @@ func (m *Manager) SetDirectReplyPublisher(publish DirectReplyPublisher) {
 }
 
 func (m *Manager) publishDirectReply(attempt store.ManagedDirectAttempt, reply DirectMailboxReply) {
+	// Persist source work before handing text to transport. This closes the
+	// reply-before-settled race and makes restart recovery independent of the
+	// ephemeral RPC callback.
+	delivery, err := m.store.QueueManagedFinalDelivery(context.Background(), attempt, reply.EntryIdentity, reply.Body)
+	if err != nil || delivery == nil {
+		if err != nil {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "reply_persistence_failed", "")
+		}
+		return
+	}
 	m.mu.Lock()
 	publish := m.directReplyPublisher
 	m.mu.Unlock()
@@ -29,6 +39,8 @@ func (m *Manager) publishDirectReply(attempt store.ManagedDirectAttempt, reply D
 	m.startManagedTask(func() {
 		if err := publish(context.Background(), attempt, reply); err != nil {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "reply_persistence_failed", "")
+			return
 		}
+		_, _ = m.store.MarkManagedFinalDeliveryDelivered(context.Background(), *delivery)
 	})
 }
