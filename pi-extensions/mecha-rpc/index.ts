@@ -301,8 +301,33 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     },
   });
   const policyBridge = createPolicyBridge();
-  type GoalEvaluationTurn = { evaluationId: string; goalRevision: number; settledSequence: number; manifestHash: string; goal: string; activeTools: string[]; assistantText: string };
+  type GoalEvaluationTurn = {
+    evaluationId: string;
+    goalRevision: number;
+    settledSequence: number;
+    manifestHash: string;
+    goal: string;
+    activeTools: string[];
+    assistantText: string;
+    phase: "armed" | "running";
+    turnFence: string;
+    activeTurnFence?: string;
+    runtimeGeneration: string;
+    sessionEpoch: number;
+  };
   let goalEvaluationTurn: GoalEvaluationTurn | undefined;
+  const evaluatorPrompt = (goal: string): string => `Evaluate the managed goal using the available conversation only.\nGoal: ${goal}\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.`;
+  const isCurrentGoalEvaluationTurn = (evaluator: GoalEvaluationTurn): boolean => goalEvaluationTurn === evaluator
+    && evaluator.runtimeGeneration === generation
+    && evaluator.sessionEpoch === epoch
+    && evaluator.manifestHash === acceptedHash;
+  const clearGoalEvaluationTurn = (evaluator: GoalEvaluationTurn | undefined = goalEvaluationTurn): void => {
+    if (evaluator === undefined || goalEvaluationTurn !== evaluator) return;
+    // Clear first so a queued or stale lifecycle event cannot restore this
+    // evaluator's tool snapshot after another evaluator has been armed.
+    goalEvaluationTurn = undefined;
+    pi.setActiveTools?.(evaluator.activeTools);
+  };
   const boundedGoalEvaluation = (text: string): { outcome: "DONE" | "NOT_DONE"; reason: string } => {
     const lines = text.split(/\r?\n/);
     const verdict = lines.length === 2 ? /^(DONE|NOT_DONE)$/.exec(lines[0] ?? "")?.[1] : undefined;
@@ -665,19 +690,28 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       if (envelope.evaluator !== undefined) {
         const request = envelope.evaluator;
         if (!isRecord(request) || goalEvaluationTurn !== undefined || acceptedHash === undefined || envelope.manifest_sha256 !== acceptedHash) throw new TypeError("Managed goal evaluator is unavailable.");
-        goalEvaluationTurn = {
+        const evaluator: GoalEvaluationTurn = {
           evaluationId: String(request.evaluation_id), goalRevision: Number(request.goal_revision), settledSequence: Number(request.settled_sequence), manifestHash: acceptedHash, goal: String(request.goal),
-          activeTools: [], assistantText: "",
+          activeTools: pi.getActiveTools?.() ?? [], assistantText: "", phase: "armed", turnFence: randomUUID(), runtimeGeneration: generation, sessionEpoch: epoch,
         };
-        // This is a hidden, bounded turn request. It uses the current Pi model
-        // and credential context, and does not add a command, custom type, or tool.
-        await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Evaluate the managed goal.", {
-          protocol: "mecha.policy/v1", manifest_sha256: goalEvaluationTurn.manifestHash, runtime_generation: generation, session_epoch: epoch,
-          evaluator: { evaluation_id: goalEvaluationTurn.evaluationId, goal_revision: goalEvaluationTurn.goalRevision, settled_sequence: goalEvaluationTurn.settledSequence, phase: "requested" },
-        }, { deliverAs: "followUp", triggerTurn: true });
+        // sendMessage({ triggerTurn: true }) starts a turn directly, without
+        // before_agent_start. Isolate the evaluator before enqueuing its hidden
+        // message so its provider request cannot advertise normal tools.
+        pi.setActiveTools?.([]);
+        goalEvaluationTurn = evaluator;
+        try {
+          await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", evaluatorPrompt(evaluator.goal), {
+            protocol: "mecha.policy/v1", manifest_sha256: evaluator.manifestHash, runtime_generation: generation, session_epoch: epoch,
+            evaluator: { evaluation_id: evaluator.evaluationId, goal_revision: evaluator.goalRevision, settled_sequence: evaluator.settledSequence, phase: "requested" },
+          }, { deliverAs: "followUp", triggerTurn: true });
+        } catch (error) {
+          clearGoalEvaluationTurn(evaluator);
+          throw error;
+        }
         return { queued: true };
       }
       const projection = policyBridge.apply(envelope.policy);
+      if (projection.goalControl !== undefined) clearGoalEvaluationTurn();
       await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Managed policy applied.", {
         protocol: "mecha.policy/v1", runtime_generation: generation, session_epoch: epoch,
         applied: {
@@ -889,6 +923,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     }
   });
   pi.on("session_shutdown", () => {
+    clearGoalEvaluationTurn();
     disposeChildFactory?.();
     disposeChildFactory = undefined;
     childBridge.clearOwnerSession(registeredOwnerSessionId);
@@ -899,9 +934,17 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     registeredOwnerSessionId = undefined;
   });
 
+  pi.on("agent_start", () => {
+    const evaluator = goalEvaluationTurn;
+    if (evaluator !== undefined && evaluator.phase === "armed" && isCurrentGoalEvaluationTurn(evaluator)) {
+      evaluator.activeTurnFence = evaluator.turnFence;
+      evaluator.phase = "running";
+    }
+  });
   pi.on("message_end", (event) => {
-    if (goalEvaluationTurn !== undefined && isRecord(event.message) && event.message.role === "assistant") {
-      goalEvaluationTurn.assistantText = contentBlocks(event).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => String(block.text)).join("").slice(0, 1024);
+    const evaluator = goalEvaluationTurn;
+    if (evaluator !== undefined && evaluator.phase === "running" && isCurrentGoalEvaluationTurn(evaluator) && isRecord(event.message) && event.message.role === "assistant") {
+      evaluator.assistantText = contentBlocks(event).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => String(block.text)).join("").slice(0, 1024);
     }
     for (const block of contentBlocks(event)) {
       if (block.type !== "toolCall" || typeof block.id !== "string" || typeof block.name !== "string") continue;
@@ -909,6 +952,10 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     }
   });
   pi.on("tool_call", (event, context) => {
+    const evaluator = goalEvaluationTurn;
+    if (evaluator !== undefined && evaluator.phase === "running" && isCurrentGoalEvaluationTurn(evaluator)) {
+      return { block: true, reason: "Managed goal evaluation cannot call tools." };
+    }
     const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : typeof event.tool_call_id === "string" ? event.tool_call_id : undefined;
     const name = typeof event.toolName === "string" ? event.toolName : typeof event.name === "string" ? event.name : undefined;
     if (toolCallId !== undefined && name !== undefined && toolRegistry.isManagedToolName(name) && !toolRegistry.capturedRawCallIsValid(toolCallId, name)) {
@@ -920,25 +967,20 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     return { block: true, reason: "This managed runtime requires an inline-tool allowance." };
   });
   pi.on("before_agent_start", (event) => {
-    const evaluator = goalEvaluationTurn;
-    if (evaluator !== undefined) {
-      evaluator.activeTools = pi.getActiveTools?.() ?? [];
-      pi.setActiveTools?.([]);
-      const systemPrompt = typeof event.systemPrompt === "string" ? event.systemPrompt : "";
-      return { systemPrompt: `${systemPrompt}\n\nEvaluate this goal using the available conversation only. Goal: ${evaluator.goal}\nReturn exactly two lines: DONE|NOT_DONE and REASON: <concise reason>. Do not use tools or take actions.` };
-    }
     const recall = policyBridge.snapshot().recallContent;
     if (recall.length === 0 || typeof event.systemPrompt !== "string") return undefined;
     return { systemPrompt: `${event.systemPrompt}\n\n${recall}` };
   });
   pi.on("agent_settled", async () => {
     const evaluator = goalEvaluationTurn;
-    if (evaluator === undefined) return;
-    goalEvaluationTurn = undefined;
-    pi.setActiveTools?.(evaluator.activeTools);
+    // agent_settled has no turn identifier. The armed/running phase and the
+    // evaluation/runtime fence keep an older settlement from consuming a
+    // replacement evaluator before its own agent_start boundary.
+    if (evaluator === undefined || evaluator.phase !== "running" || evaluator.activeTurnFence !== evaluator.turnFence || !isCurrentGoalEvaluationTurn(evaluator)) return;
+    clearGoalEvaluationTurn(evaluator);
     const verdict = boundedGoalEvaluation(evaluator.assistantText);
     await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Managed goal evaluation completed.", {
-      protocol: "mecha.policy/v1", manifest_sha256: evaluator.manifestHash, runtime_generation: generation, session_epoch: epoch,
+      protocol: "mecha.policy/v1", manifest_sha256: evaluator.manifestHash, runtime_generation: evaluator.runtimeGeneration, session_epoch: evaluator.sessionEpoch,
       evaluator: { evaluation_id: evaluator.evaluationId, goal_revision: evaluator.goalRevision, settled_sequence: evaluator.settledSequence, phase: "result", outcome: verdict.outcome, reason: verdict.reason },
     }, { triggerTurn: false });
   });
