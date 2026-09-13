@@ -44,6 +44,16 @@ func (m *Manager) managedLaunchRecipe(agent store.ManagedAgentRecord) (store.Man
 	return store.ManagedLaunchRecipeDigest(recipe)
 }
 
+// PruneManagedRootRecovery runs the bounded action-retention pass owned by the
+// managed lifecycle. The transport calls it at each ordinary sweep boundary.
+func (m *Manager) PruneManagedRootRecovery(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	_, err := m.store.PruneManagedRootRecovery(ctx)
+	return err
+}
+
 // RecoverManagedRootColdStarts owns ordinary desired-running rows after a
 // router restart. It is deliberately separate from pending-launch recovery:
 // pending launches are terminalized, while this path resumes durable agents.
@@ -51,7 +61,7 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
-	if _, err := m.store.PruneManagedRootRecovery(ctx); err != nil {
+	if err := m.PruneManagedRootRecovery(ctx); err != nil {
 		return err
 	}
 	agents, err := m.store.ManagedAgents(ctx)
@@ -59,10 +69,16 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
-		if agent == nil || agent.DesiredState != "running" || agent.LifecycleState != "running" {
+		if agent == nil || agent.DesiredState != "running" {
 			continue
 		}
 		if _, bound := m.bindingFor(agent.AgentID); bound {
+			continue
+		}
+		// A crash after the target fence was installed leaves the durable row in
+		// starting. Let recovery close that incomplete target; pending launches
+		// remain owned by RecoverPendingManagedLaunches below this pass.
+		if agent.LifecycleState != "running" && !m.hasColdRecoveryTarget(ctx, agent) {
 			continue
 		}
 		if err := m.recoverManagedRoot(ctx, agent); err != nil {
@@ -100,11 +116,26 @@ func (m *Manager) recoverManagedRoot(ctx context.Context, agent *store.ManagedAg
 	}
 
 	action, actionErr := m.store.ManagedRootRecoveryAction(ctx, agent.AgentID)
-	if actionErr == nil && rootRecoveryActionFence(action) == old {
-		if action.Stage == "ready" || action.Stage == "failed" {
+	if actionErr == nil {
+		switch {
+		case rootRecoveryActionFence(action) == old:
+			if action.Stage == "ready" || action.Stage == "failed" {
+				return nil
+			}
+		case rootRecoveryActionTargetsFence(action, old):
+			if action.Stage == "ready" || action.Stage == "failed" {
+				return nil
+			}
+			// The prior router installed the target fence before it stopped. Its
+			// pipes cannot be reattached, so reap that exact target and publish a
+			// truthful failed projection. Crucially, do not claim or start again.
+			m.failColdRecoveryTarget(action, old)
 			return nil
+		default:
+			action = nil
 		}
-	} else {
+	}
+	if action == nil {
 		targetGeneration, idErr := m.ids.Next()
 		if idErr != nil {
 			return idErr
@@ -127,6 +158,23 @@ func rootRecoveryActionFence(action *store.ManagedRootRecoveryAction) store.Mana
 		return store.ManagedRuntimeFence{}
 	}
 	return store.ManagedRuntimeFence{AgentID: action.AgentID, PiSessionID: action.OldPiSessionID, SessionEpoch: int64(action.OldSessionEpoch), ProcessPID: action.OldProcessPID, ProcessStartMarker: action.OldProcessStartMarker, ProcessIncarnation: action.OldProcessIncarnation, RuntimeGeneration: action.OldRuntimeGeneration, ManifestRevision: action.OldManifestRevision, ManifestHash: action.OldManifestHash}
+}
+
+func rootRecoveryActionTargetsFence(action *store.ManagedRootRecoveryAction, fence store.ManagedRuntimeFence) bool {
+	return action != nil && action.AgentID == fence.AgentID && action.OldPiSessionID == fence.PiSessionID && action.OldSessionEpoch == int(fence.SessionEpoch) && action.OldManifestRevision == fence.ManifestRevision && action.OldManifestHash == fence.ManifestHash && action.TargetProcessPID == fence.ProcessPID && action.TargetProcessStartMarker == fence.ProcessStartMarker && action.TargetProcessIncarnation == fence.ProcessIncarnation && action.TargetRuntimeGeneration == fence.RuntimeGeneration
+}
+
+func (m *Manager) hasColdRecoveryTarget(ctx context.Context, agent *store.ManagedAgentRecord) bool {
+	action, err := m.store.ManagedRootRecoveryAction(ctx, agent.AgentID)
+	return err == nil && action.Stage == "starting" && rootRecoveryActionTargetsFence(action, storedAgentFence(agent))
+}
+
+func (m *Manager) failColdRecoveryTarget(action *store.ManagedRootRecoveryAction, target store.ManagedRuntimeFence) {
+	identity := oldFenceIdentity(target)
+	if m.processOps.Probe(identity).State == ProcessOwned {
+		_ = m.reapRestartGroup(context.Background(), identity, nil)
+	}
+	m.failColdRecoveryAction(action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
 }
 
 func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.ManagedAgentRecord, recipe store.ManagedLaunchRecipe, old store.ManagedRuntimeFence, action *store.ManagedRootRecoveryAction) error {

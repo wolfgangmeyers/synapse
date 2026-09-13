@@ -428,6 +428,11 @@ func (r *Router) connectedAgents(ctx context.Context, includeModels bool) map[st
 }
 
 func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
+	if r.managed != nil {
+		if err := r.managed.PruneManagedRootRecovery(ctx); err != nil {
+			return store.SweepResult{}, err
+		}
+	}
 	// Recovery owns these deletions and transitions so the router can publish
 	// the same records as Node. In particular, do not let store retention remove
 	// an expired queued message before message_expired is emitted.
