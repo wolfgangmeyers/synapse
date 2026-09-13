@@ -78,6 +78,48 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
+  it("accepts the retained V23 active builtin frame without reconnecting", () => {
+    vi.useFakeTimers();
+    const sockets: UILiveSocket[] = [];
+    const frames: unknown[] = [];
+    const recoveries = vi.fn();
+    const errors = vi.fn();
+    const client = createUILiveClient({
+      routerUrl: "http://router.test",
+      retryDelayMs: 1,
+      webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; },
+      onFrame: (frame) => frames.push(frame),
+      onRecovery: recoveries,
+      onError: errors,
+    });
+    const activeBuiltinFrame = {
+      type: "history_entry",
+      protocol: "mecha.web/v1",
+      projection_version: 23,
+      view: "complete",
+      entry: {
+        id: "complete:23",
+        agent_id: "managed-alpha",
+        at: "2026-09-13T05:54:04.124Z",
+        level: "info",
+        message: "Running read",
+        presentation: { kind: "tool", tool_name: "read", outcome: "active", summary: "Running" },
+      },
+    };
+
+    client.connect();
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 23, generated_at: "2026-09-13T05:54:04.124Z", agents: [agent] }) });
+    sockets[0]?.emit("message", { data: JSON.stringify(activeBuiltinFrame) });
+
+    expect(frames).toEqual([expect.objectContaining({ type: "managed_agents_snapshot" }), activeBuiltinFrame]);
+    expect(recoveries).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    vi.runOnlyPendingTimers();
+    expect(sockets).toHaveLength(1);
+    client.close();
+    vi.useRealTimers();
+  });
+
   it("maps a failed live connection to safe retry diagnostics", () => {
     vi.useFakeTimers();
     const sockets: UILiveSocket[] = [];

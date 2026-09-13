@@ -45,6 +45,17 @@ function retainManagedGoalStates(incoming: ManagedAgent[], current: ManagedAgent
   });
 }
 function cloneMaps(state: AppState): AppState { return { ...state, pendingControls: new Map(state.pendingControls), pendingLifecycle: new Map(state.pendingLifecycle ?? []), arrivals: new Map(state.arrivals), expandedSubagents: new Set(state.expandedSubagents), reminderLocks: new Map(state.reminderLocks), modelProjections: new Map(state.modelProjections) }; }
+function sameManagedHistoryEntry(left: ManagedHistoryEntry, right: ManagedHistoryEntry): boolean {
+  const leftPresentation = left.presentation;
+  const rightPresentation = right.presentation;
+  const samePresentation = leftPresentation === rightPresentation || (leftPresentation !== undefined && rightPresentation !== undefined
+    && leftPresentation.kind === rightPresentation.kind && leftPresentation.tool_name === rightPresentation.tool_name && leftPresentation.outcome === rightPresentation.outcome
+    && leftPresentation.from === rightPresentation.from && leftPresentation.to === rightPresentation.to && leftPresentation.child_label === rightPresentation.child_label
+    && leftPresentation.child_state === rightPresentation.child_state && leftPresentation.summary === rightPresentation.summary
+    && (leftPresentation.error === rightPresentation.error || (leftPresentation.error !== undefined && rightPresentation.error !== undefined
+      && leftPresentation.error.code === rightPresentation.error.code && leftPresentation.error.retryable === rightPresentation.error.retryable && leftPresentation.error.detail_available === rightPresentation.error.detail_available)));
+  return left.id === right.id && left.agent_id === right.agent_id && left.at === right.at && left.level === right.level && left.message === right.message && samePresentation;
+}
 export function reducer(state: AppState, action: AppAction): AppState {
   if (action.type === "scope/reset") {
     const next = createInitialState(action.scope);
@@ -102,7 +113,15 @@ export function reducer(state: AppState, action: AppAction): AppState {
       const history = state.managedHistory ?? {};
       const agentHistory = history[action.entry.agent_id] ?? { quiet: [], complete: [] };
       const entries = agentHistory[action.view];
-      if (entries.some((entry) => entry.id === action.entry.id)) return state;
+      // The active router scope and agent history are the public fence. A
+      // repeated durable ID updates its existing timeline position.
+      const existingIndex = entries.findIndex((entry) => entry.id === action.entry.id);
+      if (existingIndex >= 0) {
+        if (sameManagedHistoryEntry(entries[existingIndex]!, action.entry)) return state;
+        const updated = entries.slice();
+        updated[existingIndex] = action.entry;
+        return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: updated } } };
+      }
       return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: [...entries, action.entry].slice(-200) } } };
     }
     case "message/append": {

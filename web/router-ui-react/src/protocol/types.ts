@@ -873,7 +873,7 @@ export interface ManagedChildrenProjection {
   children: ManagedChild[];
 }
 export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth";
-export type ManagedHistoryOutcome = "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "aborted" | "reconciled_unknown";
+export type ManagedHistoryOutcome = "active" | "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "interrupted" | "aborted" | "reconciled_unknown";
 export interface ManagedHistoryError {
   code: string;
   retryable: boolean;
