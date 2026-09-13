@@ -109,6 +109,47 @@ const (
 
 type ProcessProbe struct{ State ProcessProbeState }
 
+// ProcessCleanupError reports a controlled-stop failure without reducing an
+// unsafe ownership result to a generic error. The cause is retained so callers
+// can distinguish deadline and syscall failures with errors.Is.
+type ProcessCleanupError struct {
+	Reason string
+	State  ProcessProbeState
+	Cause  error
+}
+
+func (err *ProcessCleanupError) Error() string {
+	if err == nil {
+		return "managed process cleanup failed"
+	}
+	message := "managed process cleanup failed"
+	if err.Reason != "" {
+		message += ": " + err.Reason
+	}
+	if err.State != "" {
+		message += " (state " + string(err.State) + ")"
+	}
+	if err.Cause != nil {
+		message += ": " + err.Cause.Error()
+	}
+	return message
+}
+
+func (err *ProcessCleanupError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Cause
+}
+
+// ProcessStopError is an expressive alias for callers that name the operation
+// instead of the cleanup boundary.
+type ProcessStopError = ProcessCleanupError
+
+func newProcessCleanupError(reason string, state ProcessProbeState, cause error) error {
+	return &ProcessCleanupError{Reason: reason, State: state, Cause: cause}
+}
+
 // ProcessGroupOps is the narrow ownership boundary used by restart execution.
 // It never exposes a positive-PID signal fallback.
 type ProcessGroupOps interface {
@@ -180,10 +221,12 @@ func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process,
 		return nil, errors.New("managed process start marker is unavailable")
 	}
 	stderrTail := newManagedStderrTail()
-	process := &execProcess{cmd: command, stdin: stdin, stdout: stdout, stderr: stderr, stderrTail: stderrTail, identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: incarnation}, waitDone: make(chan struct{}), stopDone: make(chan struct{})}
+	process := &execProcess{cmd: command, stdin: stdin, stdout: stdout, stderr: stderr, stderrTail: stderrTail, identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: incarnation}, waitDone: make(chan struct{})}
 	go stderrTail.drain(stderr)
 	return process, nil
 }
+
+const processStopInternalGrace = 5 * time.Second
 
 type execProcess struct {
 	cmd            *exec.Cmd
@@ -194,8 +237,10 @@ type execProcess struct {
 	waitOnce       sync.Once
 	waitErr        error
 	waitDone       chan struct{}
-	stopOnce       sync.Once
-	stopDone       chan struct{}
+	waitResultOnce sync.Once
+	waitResult     chan error
+	stopGateOnce   sync.Once
+	stopGate       chan struct{}
 }
 
 func (p *execProcess) Identity() ProcessIdentity { return p.identity }
@@ -218,48 +263,131 @@ func (p *execProcess) Wait() error {
 }
 func (p *execProcess) Stop(ctx context.Context) error {
 	if ctx == nil {
-		ctx = context.Background()
+		return newProcessCleanupError("stop requires a context", ProcessUnknown, errors.New("nil context"))
 	}
-	var result error
-	p.stopOnce.Do(func() {
-		if p.cmd.Process == nil {
-			close(p.stopDone)
-			return
-		}
-		select {
-		case <-p.waitDone:
-			result = p.Wait()
-			close(p.stopDone)
-			return
-		default:
-		}
-		ops := DefaultProcessGroupOps()
-		if ops.Probe(p.identity).State != ProcessOwned {
-			result = errors.New("managed process identity no longer matches")
-			close(p.stopDone)
-			return
-		}
-		if err := ops.SignalVerifiedProcessGroup(p.identity, syscall.SIGTERM); err != nil {
-			result = err
-			close(p.stopDone)
-			return
-		}
-		done := make(chan error, 1)
-		go func() { done <- p.Wait() }()
-		probe := ops.WaitForProcessGroupEmpty(ctx, p.identity, done)
-		if probe.State != ProcessAbsent {
-			if ops.Probe(p.identity).State == ProcessOwned {
-				_ = ops.SignalVerifiedProcessGroup(p.identity, syscall.SIGKILL)
-				probe = ops.WaitForProcessGroupEmpty(context.Background(), p.identity, done)
-			}
-		}
-		if probe.State != ProcessAbsent {
-			result = errors.New("managed process group did not stop")
-		}
-		close(p.stopDone)
+	if p == nil || p.cmd == nil {
+		return newProcessCleanupError("process handle is unavailable", ProcessUnknown, errors.New("nil process"))
+	}
+	if p.cmd.Process == nil {
+		return nil
+	}
+	p.stopGateOnce.Do(func() {
+		p.stopGate = make(chan struct{}, 1)
+		p.stopGate <- struct{}{}
 	})
-	<-p.stopDone
-	return result
+	select {
+	case <-ctx.Done():
+		return newProcessCleanupError("stop context ended before cleanup", ProcessUnknown, ctx.Err())
+	case <-p.stopGate:
+		defer func() { p.stopGate <- struct{}{} }()
+	}
+
+	// Bound the complete stop attempt, not just graceful termination. Deriving
+	// this from the caller preserves an earlier caller deadline while ensuring
+	// Background callers cannot hold the stop gate forever.
+	stopCtx, stopCancel := processStopContext(ctx)
+	defer stopCancel()
+
+	ops := DefaultProcessGroupOps()
+	if err := stopCtx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended before probing", ProcessUnknown, err)
+	}
+	probe := ops.Probe(p.identity)
+	if err := stopCtx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended after probing", probe.State, err)
+	}
+	if probe.State == ProcessAbsent {
+		// A group probe, not waitDone, proves that descendants are gone. Reap
+		// the leader through the shared waiter, bounded by the stop context.
+		return p.awaitProcessWait(stopCtx, p.startWaiter(), probe.State)
+	}
+	if probe.State != ProcessOwned {
+		return newProcessCleanupError("process identity is not owned", probe.State, nil)
+	}
+
+	if err := signalProcessGroupWithContext(stopCtx, ops, p.identity, syscall.SIGTERM); err != nil {
+		return err
+	}
+	done := p.startWaiter()
+
+	graceCtx, cancel := processGraceContext(stopCtx)
+	probe = ops.WaitForProcessGroupEmpty(graceCtx, p.identity, done)
+	cancel()
+	if probe.State == ProcessAbsent {
+		return p.awaitProcessWait(stopCtx, done, probe.State)
+	}
+	if err := stopCtx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended before escalation", probe.State, err)
+	}
+	// Re-probe immediately before escalation. ProcessPresent means the leader
+	// is gone and the stored identity cannot authorize a group signal.
+	if err := signalProcessGroupWithContext(stopCtx, ops, p.identity, syscall.SIGKILL); err != nil {
+		return err
+	}
+	probe = ops.WaitForProcessGroupEmpty(stopCtx, p.identity, done)
+	if probe.State != ProcessAbsent {
+		cause := stopCtx.Err()
+		if cause == nil {
+			cause = errors.New("process group remains present")
+		}
+		return newProcessCleanupError("managed process group did not stop", probe.State, cause)
+	}
+	return p.awaitProcessWait(stopCtx, done, probe.State)
+}
+
+func processStopContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, processStopInternalGrace)
+}
+
+func (p *execProcess) startWaiter() <-chan error {
+	p.waitResultOnce.Do(func() {
+		p.waitResult = make(chan error, 1)
+		go func() {
+			err := p.Wait()
+			p.waitResult <- err
+			close(p.waitResult)
+		}()
+	})
+	return p.waitResult
+}
+
+func processGraceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return ctx, func() {}
+		}
+		return context.WithTimeout(ctx, remaining/2)
+	}
+	// Background callers still get an escalation bound, while cancellation is
+	// always inherited from the caller and the final wait uses that same context.
+	return context.WithTimeout(ctx, processStopInternalGrace)
+}
+
+func signalProcessGroupWithContext(ctx context.Context, ops ProcessGroupOps, identity ProcessIdentity, signal syscall.Signal) error {
+	if err := ctx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended before signaling", ProcessUnknown, err)
+	}
+	probe := ops.Probe(identity)
+	if err := ctx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended after signal probe", probe.State, err)
+	}
+	if probe.State != ProcessOwned {
+		return newProcessCleanupError("process identity is not owned for signal", probe.State, nil)
+	}
+	if err := ops.SignalVerifiedProcessGroup(identity, signal); err != nil {
+		return newProcessCleanupError("process group signal failed", probe.State, err)
+	}
+	return nil
+}
+
+func (p *execProcess) awaitProcessWait(ctx context.Context, done <-chan error, state ProcessProbeState) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return newProcessCleanupError("stop context ended while reaping", state, ctx.Err())
+	}
 }
 
 func signalOwnedProcessGroup(pid int, signal syscall.Signal) error {
@@ -279,6 +407,14 @@ func (defaultProcessGroupOps) Probe(identity ProcessIdentity) ProcessProbe {
 	if err := syscall.Kill(-identity.PID, 0); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return ProcessProbe{State: ProcessAbsent}
+		}
+		if errors.Is(err, syscall.EPERM) {
+			// A leaderless group can briefly report EPERM while its last
+			// descendant is being reaped. The group exists, but its leader
+			// cannot establish ownership anymore.
+			if _, groupErr := syscall.Getpgid(identity.PID); errors.Is(groupErr, syscall.ESRCH) {
+				return ProcessProbe{State: ProcessPresent}
+			}
 		}
 		return ProcessProbe{State: ProcessUnknown}
 	}
@@ -324,29 +460,25 @@ func (ops defaultProcessGroupOps) SignalVerifiedProcessGroup(identity ProcessIde
 
 func (ops defaultProcessGroupOps) WaitForProcessGroupEmpty(ctx context.Context, identity ProcessIdentity, leaderDone <-chan error) ProcessProbe {
 	if ctx == nil {
-		ctx = context.Background()
+		return ProcessProbe{State: ProcessUnknown}
 	}
 	interval := time.NewTicker(10 * time.Millisecond)
 	defer interval.Stop()
-	leaderObserved := false
 	for {
 		probe := ops.Probe(identity)
 		if probe.State == ProcessAbsent {
 			return probe
 		}
+		if err := ctx.Err(); err != nil {
+			return probe
+		}
 		select {
 		case <-leaderDone:
-			leaderObserved = true
-			if probe.State == ProcessPresent {
-				// The leader exited, but the group remains. Keep waiting for all
-				// descendants, never treating leader exit as a success.
-				continue
-			}
+			// A leader exit is only an observation. Continue probing until the
+			// complete process group, including descendants, is absent.
+			leaderDone = nil
 		case <-ctx.Done():
-			if leaderObserved && probe.State == ProcessPresent {
-				return probe
-			}
-			return ProcessProbe{State: ProcessUnknown}
+			return probe
 		case <-interval.C:
 		}
 	}
