@@ -282,9 +282,48 @@ func (s *Store) fireOneShot(ctx context.Context, reminder *domain.Reminder, now 
 	return nil
 }
 
+type managedRecurringTargetState uint8
+
+const (
+	managedRecurringTargetAbsent managedRecurringTargetState = iota
+	managedRecurringTargetLive
+	managedRecurringTargetUnavailable
+)
+
+// managedRecurringTargetStateTx separates router-owned managed recipients from
+// legacy WebSocket identities before recurring cleanup touches agents. The
+// agents row is only a compatibility foreign-key anchor for managed mail.
+func managedRecurringTargetStateTx(ctx context.Context, db *sql.DB, target string) (managedRecurringTargetState, error) {
+	var sourceState, desiredState, lifecycleState string
+	var acceptingPrompts, slotHeld int
+	err := db.QueryRowContext(ctx, `SELECT source.state,agent.desired_state,agent.lifecycle_state,agent.accepting_prompts,agent.slot_held
+		FROM recipient_sources source
+		JOIN managed_agents agent ON agent.agent_id=source.owner_identity
+		WHERE source.recipient_name=? AND source.source_kind='managed'
+		LIMIT 1`, target).Scan(&sourceState, &desiredState, &lifecycleState, &acceptingPrompts, &slotHeld)
+	if errors.Is(err, sql.ErrNoRows) {
+		return managedRecurringTargetAbsent, nil
+	}
+	if err != nil {
+		return managedRecurringTargetAbsent, err
+	}
+	if sourceState == "active" && desiredState == "running" && lifecycleState == "running" && acceptingPrompts == 1 && slotHeld == 1 {
+		return managedRecurringTargetLive, nil
+	}
+	return managedRecurringTargetUnavailable, nil
+}
+
 func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, now string, onAttempt func(ReminderFireAttempt), output **ReminderFireOutcome) error {
+	managedState, err := managedRecurringTargetStateTx(ctx, s.db, reminder.Target)
+	if err != nil {
+		return err
+	}
+	if managedState != managedRecurringTargetAbsent {
+		return s.fireManagedRecurring(ctx, reminder, now, managedState == managedRecurringTargetLive, onAttempt, output)
+	}
+
 	var lastConnected sql.NullString
-	err := s.db.QueryRowContext(ctx, "SELECT last_connected_at FROM agents WHERE agent_id = ?", reminder.Target).Scan(&lastConnected)
+	err = s.db.QueryRowContext(ctx, "SELECT last_connected_at FROM agents WHERE agent_id = ?", reminder.Target).Scan(&lastConnected)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -319,6 +358,49 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 		return err
 	}
 	if reminder.LinkedMessageID != nil {
+		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)
+		return err
+	}
+	prior, _ := protocol.ParseTimestamp(reminder.NextDueAt)
+	current, _ := protocol.ParseTimestamp(now)
+	if current.UnixMilli()-prior.UnixMilli() >= intervalMS {
+		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled' AND linked_message_id IS NULL", next, reminder.ID)
+		return err
+	}
+	notifyAttempt(onAttempt, ReminderFireAttempt{ReminderID: reminder.ID, ScheduledFor: reminder.NextDueAt})
+	message, conversation, err := s.enqueueReminderTx(ctx, reminder, now)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE reminders SET linked_message_id=?,occurrence_number=occurrence_number+1,next_due_at=? WHERE id=? AND state='scheduled' AND interval_ms IS NOT NULL AND linked_message_id IS NULL AND next_due_at <= ?`, message.ID, next, reminder.ID, now)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("reminder changed while its due message was firing")
+	}
+	updated, err := s.reminderForTx(ctx, reminder.ID)
+	if err != nil {
+		return err
+	}
+	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Target: reminder.Target, Reminder: updated, Message: message, ConversationMessage: conversation}
+	return nil
+}
+
+// fireManagedRecurring uses the managed recipient directory as liveness
+// authority. A restarting or failed managed process skips its slot but leaves
+// recovery and explicit lifecycle cleanup in charge of the recipient record.
+func (s *Store) fireManagedRecurring(ctx context.Context, reminder *domain.Reminder, now string, live bool, onAttempt func(ReminderFireAttempt), output **ReminderFireOutcome) error {
+	intervalMS := *reminder.IntervalMS
+	next, err := recurringDueAtAfterNow(reminder.NextDueAt, intervalMS, now)
+	if err != nil {
+		return err
+	}
+	if !live || reminder.LinkedMessageID != nil {
 		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)
 		return err
 	}
