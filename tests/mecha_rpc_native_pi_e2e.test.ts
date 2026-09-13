@@ -742,6 +742,7 @@ test("locked Pi G4 persists deterministic root results through get_entry and pre
     provider.release();
     successful(await appendDuringStream);
     successful(await rootTurn);
+    assert.equal(provider.requests.length, 2, "the root tool call gets exactly one provider continuation before result append");
     const rootLookup = await rpc.request({ type: "get_entry", entryId: rootEntryId });
     successful(rootLookup);
     const rootData = rootLookup.data;
@@ -930,6 +931,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     });
     const resultResponse = await rpc.request({ type: "prompt", message: `/mecha-control-result-v1 ${result}` });
     successful(resultResponse);
+    assert.equal(provider.requests.length, 2, "the managed tool call gets exactly one provider continuation before result append");
 
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     const accepted = customMessages(rpc.events, "mecha.tools.accepted.v1");
