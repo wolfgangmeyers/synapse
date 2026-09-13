@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -238,6 +239,68 @@ func TestManagedGoalRecoveryDropsInterruptedEvaluatorAfterReplacement(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "idle", policy.EvaluatorState)
 	require.Equal(t, "evaluation interrupted", policy.EvaluatorReason)
+}
+
+func TestManagedGoalRestartRejectsLateOldCorrelatedEvaluatorResult(t *testing.T) {
+	ctx := context.Background()
+	durable, oldFence, clock := readyManagedGoalEvaluatorFixture(t)
+
+	claimedPolicy, claimed, err := durable.ClaimManagedGoalEvaluation(ctx, oldFence, 10)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	oldEvaluationID := claimedPolicy.EvaluatorID
+	require.NotEmpty(t, oldEvaluationID)
+	require.NoError(t, durable.Close())
+
+	reopened, err := Open(ctx, durable.path, Options{Clock: clock})
+	require.NoError(t, err)
+	replacementFence := oldFence
+	replacementFence.PiSessionID = "replacement-session"
+	replacementFence.SessionEpoch++
+	replacementFence.ProcessPID++
+	replacementFence.ProcessStartMarker = "replacement-marker"
+	replacementFence.ProcessIncarnation = "replacement-incarnation"
+	replacementFence.RuntimeGeneration = "replacement-generation"
+	replacementFence.ManifestRevision++
+	replacementFence.ManifestHash = strings.Repeat("b", 64)
+	_, err = reopened.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?,session_epoch=?,process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,manifest_revision=?,manifest_hash=? WHERE agent_id=?`, replacementFence.PiSessionID, replacementFence.SessionEpoch, replacementFence.ProcessPID, replacementFence.ProcessStartMarker, replacementFence.ProcessIncarnation, replacementFence.RuntimeGeneration, replacementFence.ManifestRevision, replacementFence.ManifestHash, replacementFence.AgentID)
+	require.NoError(t, err)
+	changed, err := reopened.RecoverManagedGoalEvaluationForFence(ctx, replacementFence)
+	require.NoError(t, err)
+	require.True(t, changed)
+	replacementPolicy, err := reopened.ManagedGoalPolicyFor(ctx, replacementFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", replacementPolicy.EvaluatorState)
+	require.Equal(t, oldEvaluationID, replacementPolicy.EvaluatorID)
+	require.Empty(t, replacementPolicy.EvaluatorLeaseUntil)
+	require.Equal(t, "evaluation interrupted", replacementPolicy.EvaluatorReason)
+
+	_, completed, err := reopened.CompleteManagedGoalEvaluationWithWakeup(ctx, oldFence, oldEvaluationID, 10, ManagedGoalEvaluationNotDone, "late old result", "late-wakeup")
+	require.NoError(t, err)
+	require.False(t, completed)
+	policyAfterLateResult, err := reopened.ManagedGoalPolicyFor(ctx, replacementFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, replacementPolicy, policyAfterLateResult)
+	var wakeups, deliveries int
+	require.NoError(t, reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_goal_wakeups WHERE agent_id=?`, oldFence.AgentID).Scan(&wakeups))
+	require.Zero(t, wakeups)
+	require.NoError(t, reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE agent_id=?`, oldFence.AgentID).Scan(&deliveries))
+	require.Zero(t, deliveries)
+	require.NoError(t, reopened.Close())
+
+	reopenedAgain, err := Open(ctx, durable.path, Options{Clock: clock})
+	require.NoError(t, err)
+	defer reopenedAgain.Close()
+	_, completed, err = reopenedAgain.CompleteManagedGoalEvaluationWithWakeup(ctx, oldFence, oldEvaluationID, 10, ManagedGoalEvaluationCompleted, "late old result again", "")
+	require.NoError(t, err)
+	require.False(t, completed)
+	finalPolicy, err := reopenedAgain.ManagedGoalPolicyFor(ctx, replacementFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, replacementPolicy, finalPolicy)
+	require.NoError(t, reopenedAgain.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_goal_wakeups WHERE agent_id=?`, oldFence.AgentID).Scan(&wakeups))
+	require.Zero(t, wakeups)
+	require.NoError(t, reopenedAgain.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE agent_id=?`, oldFence.AgentID).Scan(&deliveries))
+	require.Zero(t, deliveries)
 }
 
 func TestManagedGoalClaimAndRearmAreAtomic(t *testing.T) {
