@@ -96,6 +96,10 @@ describe("protocol guards", () => {
   it("accepts only closed, redacted Complete history metadata", () => {
     const entry = { id: "complete:1", agent_id: "managed-alpha", at: "2026-09-09T09:48:28Z", level: "info", message: "Ran bash", presentation: { kind: "tool", tool_name: "functions.bash", outcome: "success", summary: "Completed successfully" } };
     expect(isManagedHistoryEntry(entry)).toBe(true);
+    for (const outcome of ["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown"]) {
+      expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, outcome } })).toBe(true);
+    }
+    expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, outcome: "pending" } })).toBe(false);
     expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, summary: "stdout: private output" } })).toBe(false);
     expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, tool_name: "bash --private-argument" } })).toBe(false);
     expect(isManagedCompleteHistoryEntry({ ...entry, message: "token=private" })).toBe(false);
