@@ -2466,6 +2466,79 @@ func (m *Manager) recordCloseError(err error) {
 	}
 }
 
+// AbortStartup releases bindings created during a failed Router.Listen attempt
+// without closing the manager. Recovery bindings are made retryable after their
+// exact target groups have been reaped, so the same Router can listen again.
+func (m *Manager) AbortStartup(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	bindings := make([]*managedBinding, 0, len(m.bindings))
+	for _, binding := range m.bindings {
+		bindings = append(bindings, binding)
+	}
+	orphanProcesses := make(map[string]Process)
+	for agentID, process := range m.processes {
+		if m.bindings[agentID] == nil {
+			orphanProcesses[agentID] = process
+		}
+	}
+	m.mu.Unlock()
+	var firstErr error
+	for _, binding := range bindings {
+		lane := binding.lane
+		if lane != nil {
+			lane.serial.Lock()
+		}
+		binding.serial.Lock()
+		process, rpc, identity, waitDone := binding.process, binding.rpc, binding.identity, binding.waitDone
+		actionID, lifecycleAction := binding.operationID, binding.lifecycleAction
+		binding.reaped = true
+		binding.serial.Unlock()
+		m.stopBuiltinToolLifecycleQueue(binding)
+		if rpc != nil {
+			if err := rpc.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if process != nil {
+			// Stop the owned handle first so its waiter can finish; the group
+			// reaper below still proves the complete exact identity is absent.
+			if m.processOps.Probe(identity).State == ProcessOwned {
+				if err := process.Stop(ctx); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			cleaned := m.cleanupUninstalledTarget(process, identity, waitDone)
+			if !cleaned && firstErr == nil {
+				firstErr = errors.New("managed startup binding cleanup failed")
+			}
+		}
+		if lifecycleAction == "root-recovery" && actionID != "" && process != nil {
+			if err := m.store.SupersedeManagedRootRecovery(context.Background(), actionID); err == nil {
+				if err := m.store.ClearManagedRootRecoveryTargetAfterVerifiedAbsence(context.Background(), actionID, store.ManagedProcessIdentity{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			} else if firstErr == nil {
+				firstErr = err
+			}
+		}
+		m.clearBinding(binding)
+		if lane != nil {
+			lane.serial.Unlock()
+		}
+	}
+	for _, process := range orphanProcesses {
+		if process != nil {
+			if err := process.Stop(ctx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	if m.closed {
@@ -2521,6 +2594,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		if lane != nil {
 			lane.serial.Unlock()
 		}
+		m.clearBinding(binding)
 		genericAgentIDs = append(genericAgentIDs, binding.agentID)
 	}
 	waitDone := make(chan struct{})
