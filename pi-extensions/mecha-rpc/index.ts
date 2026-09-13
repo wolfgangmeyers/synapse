@@ -653,16 +653,15 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         ...(payload.error === undefined ? {} : { error: payload.error }),
       };
       const entryId = `mcr1_${payload.result_id.replaceAll("-", "")}`;
-      // Root tools resolve after the model has yielded its queued tool result.
-      // Deliver the durable source result as a follow-up so Pi can finish the
-      // original direct request instead of leaving the user with "waiting".
+      // The result is a deferred hidden append while the root turn is active.
+      // Pi flushes it after the tool-result continuation, preserving the exact
+      // entry ID without starting a second model turn.
       const outcome = await sendHiddenCustomMessageWithEntryId(
         pi,
         "mecha.control.result.v1",
         payload.content,
         details,
         entryId,
-        { deliverAs: "followUp", triggerTurn: true },
       );
       if (outcome.entryId !== entryId) throw new TypeError("Explicit control-result entry ID mismatch.");
       if (nativeRecord !== undefined) {
