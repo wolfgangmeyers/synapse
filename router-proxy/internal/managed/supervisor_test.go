@@ -471,6 +471,9 @@ func TestManagedDirectReleasePersistenceFailureRetriesWithoutStranding(t *testin
 		attempt, readErr := durable.ManagedDirectAttempt(context.Background(), "release-persistence-failure", 1)
 		return readErr == nil && attempt.State == "released" && attempt.FailureCode == "prompt_failed"
 	}, 2*time.Second, time.Millisecond)
+	var parentState string
+	require.NoError(t, db.QueryRow(`SELECT state FROM managed_parent_work WHERE message_id=? AND attempt_number=1`, "release-persistence-failure").Scan(&parentState))
+	require.Equal(t, "interrupted", parentState)
 	require.Eventually(t, func() bool {
 		history, readErr := durable.ManagedHistoryPage(context.Background(), "direct-agent", "complete", 0, 10)
 		if readErr != nil {

@@ -28,6 +28,9 @@ func TestManagedBuiltinToolLifecycleMutatesOneCompleteEntry(t *testing.T) {
 	require.True(t, created)
 	require.Equal(t, "Running bash", active.Message)
 	require.Equal(t, "active", active.Presentation.Outcome)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
 
 	terminal, changed, err := durable.FinishManagedBuiltinInvocation(ctx, fence, "call-1", "succeeded")
 	require.NoError(t, err)
@@ -35,6 +38,9 @@ func TestManagedBuiltinToolLifecycleMutatesOneCompleteEntry(t *testing.T) {
 	require.Equal(t, active.ID, terminal.ID)
 	require.Equal(t, "Ran bash", terminal.Message)
 	require.Equal(t, "success", terminal.Presentation.Outcome)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
 
 	repeated, changed, err := durable.FinishManagedBuiltinInvocation(ctx, fence, "call-1", "succeeded")
 	require.NoError(t, err)

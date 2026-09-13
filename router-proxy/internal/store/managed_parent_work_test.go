@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
@@ -60,6 +61,29 @@ func TestManagedFinalDeliveryConvergesReplyAndSettlementInEitherOrder(t *testing
 	}
 }
 
+func TestManagedFinalDeliveryRecoveryTerminalizesAnExhaustedInFlightAttempt(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	attempt := parentWorkAttempt(fence, "final-recovery")
+	openParentWorkForTest(t, durable, attempt)
+	delivery, err := durable.QueueManagedFinalDelivery(ctx, attempt, "assistant-entry", "final")
+	require.NoError(t, err)
+	claimed, err := durable.ClaimManagedFinalDelivery(ctx, *delivery)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	_, err = durable.db.Exec(`UPDATE managed_parent_final_deliveries SET attempt_count=? WHERE delivery_id=?`, managedFinalDeliveryMaxAttempts, delivery.DeliveryID)
+	require.NoError(t, err)
+
+	require.NoError(t, durable.RecoverManagedFinalDeliveries(ctx, fence))
+	require.Equal(t, "final_delivery_failed", parentWorkState(t, durable, attempt))
+	pending, err := durable.PendingManagedFinalDeliveries(ctx, fence)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
 func TestManagedFinalDeliveryFailureIsBoundedAndInterruptClosesExactFence(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)
@@ -90,4 +114,29 @@ func TestManagedFinalDeliveryFailureIsBoundedAndInterruptClosesExactFence(t *tes
 	require.NoError(t, err)
 	require.NoError(t, durable.InterruptManagedParentWork(ctx, fence))
 	require.Equal(t, "interrupted", parentWorkState(t, durable, other))
+
+	fresh := parentWorkAttempt(fence, "final-stale-fence")
+	openParentWorkForTest(t, durable, fresh)
+	_, err = durable.QueueManagedFinalDelivery(ctx, fresh, "assistant-entry-three", "final")
+	require.NoError(t, err)
+	stale := fence
+	stale.ProcessIncarnation = "replaced-incarnation"
+	require.NoError(t, durable.InterruptManagedParentWork(ctx, stale))
+	require.Equal(t, "final_delivery_pending", parentWorkState(t, durable, fresh))
+}
+
+func TestManagedParentWorkRetentionKeepsABoundedTerminalArchivePerAgent(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	for index := 0; index <= managedParentWorkTerminalPerAgent; index++ {
+		attempt := parentWorkAttempt(fence, fmt.Sprintf("retention-%03d", index))
+		openParentWorkForTest(t, durable, attempt)
+		require.NoError(t, durable.SettleManagedParentDirectTurn(ctx, attempt))
+	}
+	require.NoError(t, durable.runImmediate(ctx, func() error {
+		return durable.pruneManagedParentWorkTx(ctx, formatTimestamp(durable.clock.Now()))
+	}))
+	var count int
+	require.NoError(t, durable.db.QueryRow(`SELECT COUNT(*) FROM managed_parent_work WHERE agent_id=? AND state='settled'`, fence.AgentID).Scan(&count))
+	require.Equal(t, managedParentWorkTerminalPerAgent, count)
 }

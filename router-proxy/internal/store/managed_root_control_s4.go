@@ -81,6 +81,16 @@ func managedControlTerminal(state string) bool {
 	return state == managedControlDelivered || state == managedControlFailed || state == managedControlCancelled
 }
 
+// Root controls are durable parent-work sources. A terminal append or handler
+// result must refresh the same activity projection used by child and tool work.
+func (s *Store) recomputeManagedControlActivityTx(ctx context.Context, fence ManagedRuntimeFence) error {
+	if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+		return err
+	}
+	_, err := s.bumpManagedProjectionVersion(ctx)
+	return err
+}
+
 func validManagedControlResult(value ManagedControlResult) error {
 	if (value.Status != "ok" && value.Status != "error") || len([]byte(value.Content)) > managedControlContentLimit || len([]byte(value.DetailsJSON)) > managedControlDetailsLimit || len([]byte(value.Content))+len([]byte(value.DetailsJSON)) > managedControlPayloadLimit || !managedSHA256RE.MatchString(value.PayloadSHA256) || value.DecodedPayloadBytes < 1 || value.DecodedPayloadBytes > managedControlPayloadLimit {
 		return errors.New("managed control result is invalid")
@@ -398,8 +408,10 @@ func (s *Store) DeliverManagedControlReceipt(ctx context.Context, receipt Manage
 			}
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
-		_, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, s.clock.Now())
-		return err
+		if _, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, s.clock.Now()); err != nil {
+			return err
+		}
+		return s.recomputeManagedControlActivityTx(ctx, receipt.Fence)
 	})
 }
 
@@ -433,8 +445,10 @@ func (s *Store) RetryManagedControlAppend(ctx context.Context, requestID, owner 
 				}
 				return &ManagedControlStaleError{AgentID: row.AgentID}
 			}
-			_, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, now)
-			return err
+			if _, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, now); err != nil {
+				return err
+			}
+			return s.recomputeManagedControlActivityTx(ctx, fence)
 		}
 		delay := []time.Duration{0, time.Second, 5 * time.Second, 30 * time.Second, 120 * time.Second}[attempt]
 		due := formatTimestamp(now.Add(delay))
@@ -496,8 +510,10 @@ func (s *Store) FailManagedControl(ctx context.Context, requestID, owner string,
 			}
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
-		_, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, s.clock.Now())
-		return err
+		if _, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, s.clock.Now()); err != nil {
+			return err
+		}
+		return s.recomputeManagedControlActivityTx(ctx, fence)
 	})
 }
 
