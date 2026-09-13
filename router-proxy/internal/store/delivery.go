@@ -1204,10 +1204,12 @@ func (s *Store) AllocateManagedDirectAttempt(ctx context.Context, fence ManagedR
 			JOIN recipient_sources source ON source.recipient_name = target.recipient_name
 			WHERE m.state = 'queued' AND m.expires_at > ? AND target.source_kind = 'managed' AND target.owner_identity = ?
 			AND source.source_kind = 'managed' AND source.state = 'active' AND source.owner_identity = target.owner_identity
+			AND (NOT EXISTS (SELECT 1 FROM managed_goal_wakeups wakeup WHERE wakeup.message_id=m.id)
+				OR EXISTS (SELECT 1 FROM managed_goal_wakeups wakeup WHERE wakeup.message_id=m.id AND wakeup.agent_id=? AND wakeup.pi_session_id=? AND wakeup.session_epoch=? AND wakeup.process_pid=? AND wakeup.process_start_marker=? AND wakeup.process_incarnation=? AND wakeup.runtime_generation=?))
 			AND NOT EXISTS (SELECT 1 FROM managed_direct_delivery_attempts active WHERE active.message_id = m.id AND active.message_incarnation_id = m.message_incarnation_id AND active.state IN ('direct_pending','direct_prompted'))
 			AND (NOT EXISTS (SELECT 1 FROM managed_direct_delivery_attempts previous WHERE previous.message_id = m.id AND previous.message_incarnation_id = m.message_incarnation_id)
 				OR EXISTS (SELECT 1 FROM managed_direct_delivery_attempts previous WHERE previous.message_id = m.id AND previous.message_incarnation_id = m.message_incarnation_id AND previous.attempt_number = (SELECT MAX(last.attempt_number) FROM managed_direct_delivery_attempts last WHERE last.message_id = m.id AND last.message_incarnation_id = m.message_incarnation_id) AND previous.state = 'released' AND previous.next_attempt_at <= ?))
-			ORDER BY m.enqueue_sequence ASC LIMIT 1`, now, fence.AgentID, now)
+			ORDER BY m.enqueue_sequence ASC LIMIT 1`, now, fence.AgentID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, now)
 		var id, incarnation string
 		var ignored int64
 		if err := row.Scan(&id, &incarnation, &ignored); errors.Is(err, sql.ErrNoRows) {

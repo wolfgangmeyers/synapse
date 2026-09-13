@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,6 +144,47 @@ func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t 
 	select {
 	case body := <-rpc.directBodies:
 		t.Fatalf("duplicate settled boundary woke goal again: %s", body)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestManagedGoalNotDoneWakeupCannotRetargetReplacement(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	rpc.directBodies = make(chan string, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	manager.goalEvaluator = func(context.Context, store.ManagedGoalPolicy) (string, error) {
+		once.Do(func() { close(started) })
+		<-release
+		return store.ManagedGoalEvaluationNotDone, nil
+	}
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174006", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence})
+	require.NoError(t, err)
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(1), "state": "idle"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("evaluator did not start")
+	}
+
+	// Replacement wins the live binding before the old evaluator returns. The
+	// old evaluation still commits its immutable reservation, but its wakeup is
+	// never offered to the replacement.
+	replacement := *binding
+	replacement.runtimeGeneration = "replacement-generation"
+	manager.mu.Lock()
+	manager.bindings[fence.AgentID] = &replacement
+	manager.mu.Unlock()
+	close(release)
+	require.Eventually(t, func() bool {
+		policy, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+		return lookupErr == nil && policy.NotDoneWakeups == 1 && policy.WakeupMessageID != ""
+	}, time.Second, 10*time.Millisecond)
+	select {
+	case body := <-rpc.directBodies:
+		t.Fatalf("replacement received stale wakeup: %s", body)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
