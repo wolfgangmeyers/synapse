@@ -35,30 +35,38 @@ func (m *Manager) evaluateManagedGoalAtSettled(binding *managedBinding, fence st
 		return
 	}
 	outcome, evaluateErr := m.goalEvaluator(m.runCtx, *policy)
+	reason := ""
 	if evaluateErr != nil || (outcome != store.ManagedGoalEvaluationCompleted && outcome != store.ManagedGoalEvaluationNotDone) {
-		// Evaluation failures are deliberately treated as not done. This preserves
-		// the active goal rather than allowing a transient provider failure to end it.
+		// A malformed, canceled, or timed-out model result cannot complete a goal.
+		// The next ordinary settled boundary may evaluate again under a new fence.
 		outcome = store.ManagedGoalEvaluationNotDone
+		reason = "evaluation unavailable"
 	}
-	completed, changed, err := m.store.CompleteManagedGoalEvaluation(context.Background(), fence, sequence, outcome)
+	wakeupID := ""
+	if outcome == store.ManagedGoalEvaluationNotDone {
+		wakeupID, err = m.ids.Next()
+		if err != nil {
+			return
+		}
+	}
+	completed, changed, err := m.store.CompleteManagedGoalEvaluationWithWakeup(context.Background(), fence, policy.EvaluatorID, sequence, outcome, reason, wakeupID)
 	if err != nil || !changed || completed == nil {
 		return
 	}
 	m.publishProjection()
 	if outcome == store.ManagedGoalEvaluationNotDone {
-		m.enqueueManagedGoalWakeup(binding, fence, completed.Config.Goal)
+		m.enqueueManagedGoalWakeup(binding, fence, wakeupID, completed.Config.Goal)
 	}
 }
 
 // enqueueManagedGoalWakeup creates an ordinary, source-marked mailbox row and
 // then uses the existing managed direct-delivery receipt path. It never writes
 // an unfenced RPC prompt, so a continuation cannot bypass direct settlement.
-func (m *Manager) enqueueManagedGoalWakeup(binding *managedBinding, fence store.ManagedRuntimeFence, goal string) {
+func (m *Manager) enqueueManagedGoalWakeup(binding *managedBinding, fence store.ManagedRuntimeFence, id, goal string) {
 	if !m.liveBindingForFence(m.runCtx, binding, fence) {
 		return
 	}
-	id, err := m.ids.Next()
-	if err != nil {
+	if id == "" {
 		return
 	}
 	body := fmt.Sprintf("NOT_DONE: Review %s and take the next concrete action now.", strings.TrimSpace(goal))
@@ -76,9 +84,9 @@ func (m *Manager) enqueueManagedGoalWakeup(binding *managedBinding, fence store.
 	if _, err := m.store.ResolveMessageTarget(context.Background(), envelope.ID); err != nil {
 		return
 	}
-	// Recheck the immutable binding after the durable write. A replacement can
-	// still retain the ordinary row for normal recovery, but cannot be prompted
-	// by this old manager callback.
+	// The durable reservation makes AllocateManagedDirectAttempt reject a
+	// replacement fence. Recheck before offering so a stale callback cannot even
+	// start the ordinary direct-delivery loop for this old evaluation.
 	if m.liveBindingForFence(m.runCtx, binding, fence) {
 		m.OfferDirect(fence.AgentID)
 	}

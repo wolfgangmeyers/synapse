@@ -122,6 +122,32 @@ test("a managed goal policy acknowledges the validated policy revision", async (
   });
 });
 
+test("a managed goal evaluator uses one hidden no-tools turn and emits an exact fenced result", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const before = current.handlers.get("before_agent_start")!({ systemPrompt: "base prompt" }, current.context) as RecordValue;
+  assert.equal(before, undefined);
+  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()), policy: {},
+    evaluator: { evaluation_id: "123e4567-e89b-42d3-a456-426614174009", goal_revision: 1, settled_sequence: 7, goal: "finish the migration" },
+  }), current.context);
+  const evaluatorStart = current.sent.at(-1);
+  assert.equal(evaluatorStart?.message.customType, "mecha.policy.applied.v1");
+  assert.deepEqual(evaluatorStart?.options, { deliverAs: "followUp", triggerTurn: true });
+  const evaluatorPrompt = current.handlers.get("before_agent_start")!({ systemPrompt: "base prompt" }, current.context) as RecordValue;
+  assert.match(String(evaluatorPrompt.systemPrompt), /Return exactly two lines: DONE\|NOT_DONE/);
+  assert.deepEqual(current.pi.getActiveTools(), []);
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: The migration is complete." }] } }, current.context);
+  await current.handlers.get("agent_settled")!({}, current.context);
+  const evaluatorResult = current.sent.at(-1);
+  assert.deepEqual((evaluatorResult?.message.details as RecordValue).evaluator, {
+    evaluation_id: "123e4567-e89b-42d3-a456-426614174009", goal_revision: 1, settled_sequence: 7,
+    phase: "result", outcome: "DONE", reason: "The migration is complete.",
+  });
+  assert.ok(current.pi.getActiveTools().length > 0);
+});
+
 test("a managed goal policy rejects malformed goal settings before it acknowledges the revision", async () => {
   const current = fixture();
   await assert.rejects(() => current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({

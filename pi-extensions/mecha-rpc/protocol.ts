@@ -305,9 +305,17 @@ export function validateMailboxDeliverEnvelope(value: unknown): JsonRecord {
 /** Closes the router-owned policy projection command before applying local mechanics. */
 export function validatePolicyApplyEnvelope(value: unknown): JsonRecord {
   if (!isRecord(value)) protocolError("policy envelope is invalid");
-  assertExactKeys(value, ["protocol", "policy", "runtime_generation", "session_epoch"], ["manifest_sha256"]);
+  assertExactKeys(value, ["protocol", "policy", "runtime_generation", "session_epoch"], ["manifest_sha256", "evaluator"]);
   if (value.protocol !== "mecha.policy/v1" || !isRecord(value.policy)) protocolError("policy envelope is invalid");
   validateHiddenCommandFence(value);
+  if (value.evaluator !== undefined) {
+    if (!isRecord(value.evaluator)) protocolError("goal evaluator envelope is invalid");
+    assertExactKeys(value.evaluator, ["evaluation_id", "goal_revision", "settled_sequence", "goal"]);
+    if (!UUID.test(boundedString(value.evaluator.evaluation_id, "goal evaluation ID", 64))
+      || safeInteger(value.evaluator.goal_revision, "goal revision") < 1
+      || safeInteger(value.evaluator.settled_sequence, "settled sequence") < 1) protocolError("goal evaluator envelope is invalid");
+    boundedString(value.evaluator.goal, "goal evaluator goal", 4_000);
+  }
   return value;
 }
 
@@ -475,9 +483,24 @@ export function validateCustomMessageDetails(customType: CustomMessageType, deta
     if (details.protocol !== "mecha.mailbox/v1") protocolError("mailbox append protocol is invalid");
     boundedString(details.message_id, "message ID", 128);
   } else if (customType === "mecha.policy.applied.v1") {
-    validateRuntimeFence(details, ["protocol", "runtime_generation", "session_epoch", "applied"]);
-    if (details.protocol !== "mecha.policy/v1") protocolError("policy application protocol is invalid");
-    validatePolicyApplied(details.applied);
+    if (details.evaluator !== undefined) {
+      validateRuntimeFence(details, ["protocol", "runtime_generation", "session_epoch", "evaluator"]);
+      if (details.protocol !== "mecha.policy/v1" || !isRecord(details.evaluator)) protocolError("goal evaluator receipt is invalid");
+      assertExactKeys(details.evaluator, ["evaluation_id", "goal_revision", "settled_sequence", "phase"], ["outcome", "reason"]);
+      if (!UUID.test(boundedString(details.evaluator.evaluation_id, "goal evaluation ID", 64))
+        || safeInteger(details.evaluator.goal_revision, "goal revision") < 1
+        || safeInteger(details.evaluator.settled_sequence, "settled sequence") < 1
+        || (details.evaluator.phase !== "requested" && details.evaluator.phase !== "result")) protocolError("goal evaluator receipt is invalid");
+      if (details.evaluator.phase === "requested" && (details.evaluator.outcome !== undefined || details.evaluator.reason !== undefined)) protocolError("goal evaluator request receipt is invalid");
+      if (details.evaluator.phase === "result") {
+        if ((details.evaluator.outcome !== "DONE" && details.evaluator.outcome !== "NOT_DONE") || typeof details.evaluator.reason !== "string") protocolError("goal evaluator result receipt is invalid");
+        boundedString(details.evaluator.reason, "goal evaluator reason", 512, true);
+      }
+    } else {
+      validateRuntimeFence(details, ["protocol", "runtime_generation", "session_epoch", "applied"]);
+      if (details.protocol !== "mecha.policy/v1") protocolError("policy application protocol is invalid");
+      validatePolicyApplied(details.applied);
+    }
   } else if (customType === "mecha.child.snapshot.v1") {
     assertExactKeys(details, ["protocol", "snapshot_id", "owner_session_id", "sequence", "runs"]);
     if (details.protocol !== "mecha.children/v1" || !Array.isArray(details.runs)) protocolError("child snapshot details are invalid");
