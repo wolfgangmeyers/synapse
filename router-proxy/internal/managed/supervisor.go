@@ -121,6 +121,8 @@ type ResetResult struct {
 // durable transition or either process group.
 type managedAgentLane struct{ serial sync.Mutex }
 
+const maxQueuedManagedChildDeltas = 64
+
 type managedBinding struct {
 	agentID string
 	lane    *managedAgentLane
@@ -128,6 +130,9 @@ type managedBinding struct {
 	// Root controls can resolve an active direct turn. Keep their append path
 	// ordered without blocking the direct-delivery lane that needs that result.
 	rootControlSerial     sync.Mutex
+	childDeltaSerial      sync.Mutex
+	childDeltaQueue       []map[string]any
+	childDeltaDraining    bool
 	builtinToolSerial     sync.Mutex
 	builtinToolOrphanEnds map[string]builtinToolOrphanEnd
 	preparationWG         sync.WaitGroup

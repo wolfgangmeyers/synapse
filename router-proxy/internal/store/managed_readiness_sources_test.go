@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -206,6 +207,45 @@ func TestManagedChildDeltaGapRecoversFromCurrentSnapshotWithIdempotencyAndConfli
 	require.NoError(t, err)
 	require.Len(t, source.Recoveries, 1)
 	require.Equal(t, "snapshot_omitted", source.Recoveries[0].Cause)
+}
+
+func TestManagedChildSnapshotOmissionKeepsRecoveryLedgerBounded(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, DefaultManagedReadinessPolicy()))
+	snapshot := func(index int, sequence int64, active bool) ManagedChildSnapshot {
+		runs := []any{}
+		if active {
+			runs = append(runs, map[string]any{
+				"parent_entry_id": fmt.Sprintf("entry-%03d", index), "task_id": fmt.Sprintf("task-%03d", index), "run_id": fmt.Sprintf("run-%03d", index),
+				"description": "Active child", "model": nil, "lifecycle_state": "running", "started_at": "2026-01-01T00:00:00Z", "finished_at": nil, "duration_ms": nil,
+				"compaction": map[string]any{"state": "idle", "count": 0, "started_at": nil, "last_outcome": nil}, "sequence": sequence,
+			})
+		}
+		canonical, err := json.Marshal(map[string]any{"owner_session_id": fence.PiSessionID, "protocol": "mecha.children/v1", "runs": runs, "sequence": sequence, "snapshot_id": fmt.Sprintf("snapshot-%03d-%t", index, active)})
+		require.NoError(t, err)
+		return ManagedChildSnapshot{SnapshotID: fmt.Sprintf("snapshot-%03d-%t", index, active), OwnerSessionID: fence.PiSessionID, Sequence: sequence, Canonical: canonical, SHA256: testManifestHash}
+	}
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, snapshot(0, 1, true)))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, fence))
+
+	for index := 0; index <= maxManagedHistoryEntries; index++ {
+		if index > 0 {
+			updated, err := durable.RecoverManagedChildSnapshot(ctx, fence, snapshot(index, int64(index*2+1), true))
+			require.NoError(t, err)
+			require.True(t, updated)
+		}
+		updated, err := durable.RecoverManagedChildSnapshot(ctx, fence, snapshot(index, int64(index*2+2), false))
+		require.NoError(t, err)
+		require.True(t, updated)
+	}
+
+	source, err := durable.ManagedReadinessSource(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Len(t, source.Recoveries, maxManagedHistoryEntries)
+	var recoveries int
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_recoveries`).Scan(&recoveries))
+	require.Equal(t, maxManagedHistoryEntries, recoveries)
 }
 
 func TestManagedChildSnapshotReconcilesLostCompactionEndWithoutTerminalInference(t *testing.T) {

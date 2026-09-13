@@ -57,7 +57,10 @@ export class BoundedChildDeltaBuffer {
       }
     } finally {
       this.draining = false;
-      if (this.pending.length > 0 && generation === this.generation) this.startDraining();
+      // clear() invalidates this drain but may be followed immediately by a
+      // replacement owner. Its first delta still needs a fresh worker after
+      // the old append settles.
+      if (this.pending.length > 0) this.startDraining();
     }
   }
 

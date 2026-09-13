@@ -3325,7 +3325,10 @@ func (s *Store) archiveOmittedActiveManagedChildrenTx(ctx context.Context, fence
 			return err
 		}
 	}
-	return nil
+	// Snapshot omission follows the same durable recovery ledger cap as
+	// process-loss recovery, so repeated incomplete snapshots cannot grow it.
+	_, err = s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE rowid NOT IN (SELECT rowid FROM managed_child_recoveries ORDER BY updated_at DESC, rowid DESC LIMIT ?)`, maxManagedHistoryEntries)
+	return err
 }
 
 func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta) (bool, error) {
