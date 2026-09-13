@@ -355,10 +355,14 @@ func TestManagedDirectMailboxLeavesPolicyReceiptForItsFencedWaiter(t *testing.T)
 			err     error
 		}{receipt: receipt, err: waitErr}
 	}()
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": policyDetails("generation", 2)}}))
+	retainedPolicy := policyDetails("generation", 2)
+	retainedPolicy["applied"].(map[string]any)["goal_revision"] = int64(1)
+	retainedPolicy["applied"].(map[string]any)["future_extension_field"] = map[string]any{"enabled": true}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": retainedPolicy}}))
 	result := <-waited
 	require.NoError(t, result.err)
 	require.Equal(t, "generation", result.receipt["runtime_generation"])
+	require.Equal(t, json.Number("1"), result.receipt["applied"].(map[string]any)["goal_revision"])
 }
 
 func TestManagedDirectMailboxCapturesAssistantReplyUntilSettled(t *testing.T) {

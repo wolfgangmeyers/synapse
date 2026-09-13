@@ -534,6 +534,18 @@ func exactReadinessKeys(value map[string]any, keys ...string) error {
 	}
 	return nil
 }
+
+// requiredReadinessKeys verifies the fields that determine the router-owned
+// projection. Receipts can carry extension metadata, which is intentionally
+// discarded after the required values have been checked.
+func requiredReadinessKeys(value map[string]any, keys ...string) error {
+	for _, key := range keys {
+		if _, present := value[key]; !present {
+			return errors.New("readiness value has unsupported or missing fields")
+		}
+	}
+	return nil
+}
 func readinessObject(value any) (map[string]any, error) {
 	object, ok := value.(map[string]any)
 	if !ok {
@@ -683,7 +695,7 @@ func normalizeAppliedPolicyReceipt(value any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := exactReadinessKeys(applied, "inline_enabled", "inline_credits", "recall_content", "settled_enabled", "goal_lock_enabled", "compaction_deferred"); err != nil {
+	if err := requiredReadinessKeys(applied, "inline_enabled", "inline_credits", "recall_content", "settled_enabled", "goal_lock_enabled", "compaction_deferred"); err != nil {
 		return nil, err
 	}
 	inlineEnabled, ok := readinessBool(applied["inline_enabled"])
