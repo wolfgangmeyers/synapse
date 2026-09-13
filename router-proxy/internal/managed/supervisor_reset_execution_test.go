@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sync"
@@ -114,7 +115,8 @@ func (o *resetProcessOps) WaitForProcessGroupEmpty(_ context.Context, identity P
 
 func TestResetCreatesFreshSessionAndOpensPromptsOnlyAfterArtifactCleanup(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = durable.Close() })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -146,6 +148,12 @@ func TestResetCreatesFreshSessionAndOpensPromptsOnlyAfterArtifactCleanup(t *test
 	}, 3*time.Second, time.Millisecond)
 	before, err := durable.ManagedAgent(ctx, "reset-agent")
 	require.NoError(t, err)
+	sourceAttempt := queueManagedParentFinalForTest(t, durable, storedAgentFence(before), "reset-source-turn")
+	db, err := sql.Open("sqlite", databasePath)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE managed_agents SET activity_state='idle' WHERE agent_id='reset-agent'`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
 	result, err := manager.Reset(ctx, ResetRequest{AgentID: "reset-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/reset-agent/reset", RequestID: "123e4567-e89b-42d3-a456-426614174012", CanonicalBodyHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	require.NoError(t, err)
 	require.NotNil(t, result.Operation)
@@ -156,6 +164,7 @@ func TestResetCreatesFreshSessionAndOpensPromptsOnlyAfterArtifactCleanup(t *test
 	}, 5*time.Second, time.Millisecond)
 	after, err := durable.ManagedAgent(ctx, "reset-agent")
 	require.NoError(t, err)
+	requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
 	require.NotEqual(t, before.PiSessionID, after.PiSessionID)
 	require.Equal(t, before.SessionEpoch+1, after.SessionEpoch)
 	require.Equal(t, "123e4567-e89b-42d3-a456-426614174003", after.PiSessionID)

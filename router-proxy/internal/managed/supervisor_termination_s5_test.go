@@ -57,11 +57,15 @@ func TestTerminateFencesAbortButReapsAndDeletesArtifactsAfterEOF(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "termination-agent")
 		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
 	}, 3*time.Second, time.Millisecond)
+	sourceAgent, err := durable.ManagedAgent(ctx, "termination-agent")
+	require.NoError(t, err)
+	sourceAttempt := queueManagedParentFinalForTest(t, durable, storedAgentFence(sourceAgent), "termination-source-turn")
 
 	request := TerminateRequest{AgentID: "termination-agent", Method: "DELETE", CanonicalPath: "/v1/managed-agents/termination-agent", RequestID: "123e4567-e89b-42d3-a456-426614174204", CanonicalBodyHash: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"}
 	first, err := manager.Terminate(ctx, request)
 	require.NoError(t, err)
 	require.NotNil(t, first.Operation)
+	requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
 	require.Eventually(t, func() bool { return projectionPublications.Load() > 0 }, time.Second, time.Millisecond, "termination admission must wake UI-live before cleanup can remove the row")
 	replay, err := manager.Terminate(ctx, request)
 	require.NoError(t, err)
