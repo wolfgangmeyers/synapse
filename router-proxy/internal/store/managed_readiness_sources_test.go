@@ -114,6 +114,8 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	complete, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
 	require.NotEmpty(t, complete.Entries)
+	stableChildID := complete.Entries[0].ID
+	stableChildAt := complete.Entries[0].At
 	require.Equal(t, "Child compacting", complete.Entries[0].Message)
 	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "compacting"}, complete.Entries[0].Presentation)
 
@@ -129,6 +131,8 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	require.Equal(t, "idle", agent.ActivityState)
 	complete, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
+	require.Equal(t, stableChildID, complete.Entries[0].ID)
+	require.Equal(t, stableChildAt, complete.Entries[0].At)
 	require.Equal(t, "Subagent wrapped up", complete.Entries[0].Message)
 	require.Equal(t, &ManagedHistoryPresentation{Kind: "child", ChildState: "steered", Outcome: "success", ChildLabel: "Child", Summary: "Wrapped up in 20 seconds"}, complete.Entries[0].Presentation)
 	published, err := durable.ManagedChildHistoryEntryForDelta(ctx, fence, terminal)
@@ -162,14 +166,24 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=? AND details_json LIKE '%parent_fence_replaced%'`, fence.AgentID).Scan(&staleHistory))
 	require.Equal(t, 1, staleHistory)
 
-	// The fenced transaction is the one complete-history writer for child
-	// changes. Every transition has one visible row, including rejected stale
-	// deliveries, and no generic UI projection row is needed to describe it.
+	// The source transition ledger remains immutable and keeps every source
+	// sequence. The visible invocation row is updated in place, so its ID and
+	// original position survive compaction and terminal updates. Stale fences
+	// get separate audit and visible rows and cannot mutate that invocation.
 	var transitionCount, completeCount int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=?`, fence.AgentID).Scan(&transitionCount))
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=? AND category='managed_child'`, fence.AgentID).Scan(&completeCount))
 	require.Equal(t, 5, transitionCount)
-	require.Equal(t, transitionCount, completeCount)
+	require.Equal(t, 3, completeCount)
+	var firstComplete, compactionComplete, terminalComplete int64
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT complete_sequence FROM managed_child_transitions WHERE agent_id=? AND parent_entry_id=? AND task_id=? AND run_id=? AND source_sequence=?`, fence.AgentID, "entry", "task", "run", 1).Scan(&firstComplete))
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT complete_sequence FROM managed_child_transitions WHERE agent_id=? AND parent_entry_id=? AND task_id=? AND run_id=? AND source_sequence=?`, fence.AgentID, "entry", "task", "run", 2).Scan(&compactionComplete))
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT complete_sequence FROM managed_child_transitions WHERE agent_id=? AND parent_entry_id=? AND task_id=? AND run_id=? AND source_sequence=?`, fence.AgentID, "entry", "task", "run", 3).Scan(&terminalComplete))
+	require.Equal(t, firstComplete, compactionComplete)
+	require.Equal(t, compactionComplete, terminalComplete)
+	var staleComplete int64
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT complete_sequence FROM managed_child_transitions WHERE agent_id=? AND details_json LIKE '%parent_fence_replaced%'`, fence.AgentID).Scan(&staleComplete))
+	require.NotEqual(t, terminalComplete, staleComplete)
 }
 
 func TestManagedChildDeltaGapRecoversFromCurrentSnapshotWithIdempotencyAndConflictFences(t *testing.T) {

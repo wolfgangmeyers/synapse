@@ -2,7 +2,7 @@
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { setImmediate } from "node:timers";
-import { existsSync, watch, writeFileSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -24,11 +24,7 @@ const activeTools = [
   "web_search__4f4ca2a3ae8ea237531b8c5264d53d15474c0848fc8d7eeada0fef5b85b139ac",
 ].sort();
 
-let outerRPCSequence = 0;
-function emit(value) {
-  if (value.type !== "response") outerRPCSequence += 1;
-  process.stdout.write(`${JSON.stringify(value)}\n`);
-}
+function emit(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
 function decodeMessage(message) {
   const encoded = message.slice(message.indexOf(" ") + 1);
   const json = Buffer.from(encoded, "base64url").toString("utf8");
@@ -74,7 +70,7 @@ function childSnapshot() {
   };
 }
 
-async function childDelta(sequence, changes, envelope) {
+async function childDelta(sequence, changes) {
   childSequence = sequence;
   childRun = {
     task_id: "functional-child-task",
@@ -100,33 +96,6 @@ async function childDelta(sequence, changes, envelope) {
     changes,
   };
   emitChildDeltaReceipt("mecha.child.delta.v1", "Managed child lifecycle updated.", `functional-child-delta-${sequence}`, details);
-  // This marker is outside the RPC stream. The test must prove the public
-  // projection changed after this exact receipt, not infer consumption from
-  // fixture stdout alone.
-  writeFileSync(join(sessionRoot, `child-receipt-${sequence}.json`), JSON.stringify({
-    outer_rpc_sequence: outerRPCSequence,
-    fence: { owner_session_id: sessionId, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch },
-    receipt: { type: "message_end", message: { id: `functional-child-delta-${sequence}`, customType: "mecha.child.delta.v1", display: false, content: "Managed child lifecycle updated.", details } },
-  }), { mode: 0o600 });
-  await waitForMarker(join(sessionRoot, `allow-child-${sequence}`));
-}
-
-async function emitChildCompactionLifecycle(envelope) {
-  await childDelta(1, {
-    description: "Functional child",
-    model: { provider: "openai-codex", id: "gpt-5.6-terra", name: "" },
-    lifecycle_state: "running",
-    started_at: "2030-01-01T00:00:00.000Z",
-    finished_at: null,
-    duration_ms: null,
-    compaction: { state: "idle", count: 0, started_at: null, last_outcome: null },
-  }, envelope);
-  await new Promise((resolve) => setImmediate(resolve));
-  await childDelta(2, { compaction: { state: "compacting", count: 1, started_at: "2030-01-01T00:00:01.000Z", last_outcome: null } }, envelope);
-  await new Promise((resolve) => setImmediate(resolve));
-  await childDelta(3, { compaction: { state: "idle", count: 1, started_at: null, last_outcome: "completed" } }, envelope);
-  await new Promise((resolve) => setImmediate(resolve));
-  await childDelta(4, { lifecycle_state: "completed", finished_at: "2030-01-01T00:00:04.000Z", duration_ms: 4000 }, envelope);
 }
 
 function emitParentCompactionLifecycle() {
@@ -147,21 +116,27 @@ function emitOmittedChildGap() {
   });
 }
 
-async function emitStructuredLifecycle(envelope) {
-  await emitChildCompactionLifecycle(envelope);
-  emitParentCompactionLifecycle();
-  emit({ type: "message_end", message: {
-    id: "functional-parent-compaction-notification",
-    customType: "mecha.post_compaction.v1",
-    display: true,
-    content: "Parent compaction complete",
-    details: {
-      protocol: "mecha.post-compaction/v1",
-      runtime_generation: envelope.runtime_generation,
-      session_epoch: envelope.session_epoch,
-      manifest_sha256: envelope.manifest_sha256,
-    },
-  } });
+function emitChildTransitionCommand(content) {
+  switch (content) {
+    case "Start structured child":
+      return childDelta(1, {
+        description: "Functional child",
+        model: { provider: "openai-codex", id: "gpt-5.6-terra", name: "" },
+        lifecycle_state: "running",
+        started_at: "2030-01-01T00:00:00.000Z",
+        finished_at: null,
+        duration_ms: null,
+        compaction: { state: "idle", count: 0, started_at: null, last_outcome: null },
+      });
+    case "Start child compaction":
+      return childDelta(2, { compaction: { state: "compacting", count: 1, started_at: "2030-01-01T00:00:01.000Z", last_outcome: null } });
+    case "Finish child compaction":
+      return childDelta(3, { compaction: { state: "idle", count: 1, started_at: null, last_outcome: "completed" } });
+    case "Finish structured child":
+      return childDelta(4, { lifecycle_state: "completed", finished_at: "2030-01-01T00:00:04.000Z", duration_ms: 4000 });
+    default:
+      return undefined;
+  }
 }
 
 function emitChildDeltaReceipt(customType, content, id, details) {
@@ -224,10 +199,16 @@ input.on("line", (line) => {
     if (existsSync(join(sessionRoot, "omit-child"))) omitChild = true;
     privateReceipt("mecha.child.snapshot.v1", childSnapshot());
   } else if (command === "mecha-mailbox-deliver-v1") {
-    if (envelope.content === "Run structured child lifecycle") {
-      // Complete the normal direct turn first so its serialized binding lane is
-      // free when the child lifecycle receipts arrive.
-      void emitDirectLifecycle(envelope).then(() => emitStructuredLifecycle(envelope));
+    const childCommand = ["Start structured child", "Start child compaction", "Finish child compaction", "Finish structured child"].includes(envelope.content);
+    if (childCommand) {
+      // Each managed prompt commands exactly one source transition. The direct
+      // receipt and settlement follow the command on this same Pi stdout.
+      privateReceipt("mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: envelope.message_id, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch }, `functional-append-${envelope.message_id}`);
+      void emitChildTransitionCommand(envelope.content).then(() => emit({ type: "agent_settled" }));
+    } else if (envelope.content === "Run parent compaction") {
+      privateReceipt("mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: envelope.message_id, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch }, `functional-append-${envelope.message_id}`);
+      emitParentCompactionLifecycle();
+      emit({ type: "agent_settled" });
     } else if (envelope.content === "Reconcile omitted child") {
       emitOmittedChildGap();
       emitDirectLifecycle(envelope);
