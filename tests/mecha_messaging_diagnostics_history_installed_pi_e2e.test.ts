@@ -12,7 +12,7 @@ import {
   createMechaMessagingExtension,
 } from "../pi-extensions/mecha-messaging/index.ts";
 
-const EXPECTED_PI_VERSION = "0.84.3";
+const EXPECTED_PI_VERSION = "0.85.0";
 const FAKE_ROUTER_URL = "http://127.0.0.1:65535";
 const FIXED_NOW = 1_735_689_600_000;
 const FIXED_TRACE_DATE = new Date("2025-01-01T00:00:00.000Z");
