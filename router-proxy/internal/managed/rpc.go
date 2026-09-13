@@ -133,11 +133,25 @@ type ParentActivityRPC interface {
 	SetParentActivityEventHandler(func(map[string]any))
 }
 
-// QualifiedGoalActivityRPC is the C4 handoff for native Pi builtin completion
-// telemetry. The installed Pi stream currently has no completion event with a
-// stable builtin identity, so rpcClient intentionally does not implement it.
-// When C4 supplies that authoritative event, this receiver is the only path
-// allowed to turn it into qualified goal activity.
+// BuiltinToolLifecycleEvent is the narrow, redacted native Pi lifecycle fact.
+// Its payload intentionally has no arguments, result, output, or diagnostics.
+type BuiltinToolLifecycleEvent struct {
+	Phase      string
+	ToolCallID string
+	ToolName   string
+	IsError    bool
+	Watermark  uint64
+}
+
+// BuiltinToolLifecycleRPC exposes only the ordered native builtin stream. It
+// is not a root-control or custom-message channel.
+type BuiltinToolLifecycleRPC interface {
+	SetBuiltinToolLifecycleEventHandler(func(BuiltinToolLifecycleEvent))
+}
+
+// QualifiedGoalActivityRPC remains the existing general qualified-activity
+// seam. Native builtin completion uses it only after its terminal lifecycle
+// transition commits, with the durable Complete entry ID as its identity.
 type QualifiedGoalActivityRPC interface {
 	SetQualifiedGoalActivityEventHandler(func(store.ManagedGoalActivity))
 }
@@ -268,6 +282,7 @@ type rpcClient struct {
 	parentCompactionHandler             func(map[string]any)
 	parentCompactionNotificationHandler func(map[string]any)
 	parentActivityHandler               func(map[string]any)
+	builtinToolLifecycleHandler         func(BuiltinToolLifecycleEvent)
 	suppressNextEvaluatorSettled        bool
 	rootResult                          *rootResultToken
 
@@ -326,11 +341,28 @@ func (c *rpcClient) readLoop() {
 		var parentActivityCallback func(map[string]any)
 		var parentActivity map[string]any
 		var parentActivityCandidate bool
+		var builtinToolLifecycleCallback func(BuiltinToolLifecycleEvent)
+		var builtinToolLifecycleEvent *BuiltinToolLifecycleEvent
 		var evaluatorSettledSuppressed bool
 		c.mu.Lock()
 		terminal := c.terminal != nil
 		if !terminal {
 			c.eventSequence++
+			if event, candidate := classifyBuiltinToolLifecycleEvent(raw, c.eventSequence); candidate {
+				// Native tool lifecycle is a separate ordered channel. Invalid and
+				// unsupported records are consumed here, never retained as readiness
+				// receipts or forwarded as raw tool data.
+				if event != nil && c.builtinToolLifecycleHandler != nil {
+					builtinToolLifecycleCallback, builtinToolLifecycleEvent = c.builtinToolLifecycleHandler, event
+				}
+				c.mu.Unlock()
+				if builtinToolLifecycleCallback != nil {
+					// Do not dispatch start/end in independent goroutines: one Pi stdout
+					// reader is the ordering authority for the same tool call.
+					builtinToolLifecycleCallback(*builtinToolLifecycleEvent)
+				}
+				continue
+			}
 			if event, candidate := classifyRootControlEvent(raw, c.eventSequence); candidate {
 				// Root requests are control-plane input, not readiness receipts. Bad
 				// candidates are dropped locally and cannot fill the receipt backlog.
@@ -872,6 +904,12 @@ func (c *rpcClient) waitForReceipt(ctx context.Context, watermark uint64, want s
 // boundary. The frame has no session or process fields, so the supplied fence
 // is deliberately retained only as the caller's immutable binding proof; this
 // client proves pipe ownership by observing the frame on this stdout reader.
+func (c *rpcClient) SetBuiltinToolLifecycleEventHandler(handler func(BuiltinToolLifecycleEvent)) {
+	c.mu.Lock()
+	c.builtinToolLifecycleHandler = handler
+	c.mu.Unlock()
+}
+
 func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.ManagedRuntimeFence) error {
 	if !validRestartFence(fence) {
 		return errors.New("restart settlement fence is invalid")
@@ -1351,6 +1389,41 @@ func rootControlEpoch(value any) (int64, bool) {
 
 // classifyRootControlEvent identifies only the documented completed hidden
 // request. It deliberately ignores partial frames and malformed candidates.
+// classifyBuiltinToolLifecycleEvent accepts only the native ordered RPC start
+// and end frames for the fixed local coding builtin allowlist. It deliberately
+// ignores args, result, and every update field so no private tool material can
+// enter the manager or SQLite path.
+func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (*BuiltinToolLifecycleEvent, bool) {
+	kind, _ := event["type"].(string)
+	if kind != "tool_execution_start" && kind != "tool_execution_end" {
+		return nil, false
+	}
+	callID, callOK := event["toolCallId"].(string)
+	toolName, toolOK := event["toolName"].(string)
+	if !callOK || !validBuiltinToolCallID(callID) || !toolOK || !validBuiltinToolName(toolName) {
+		return nil, true
+	}
+	result := &BuiltinToolLifecycleEvent{ToolCallID: callID, ToolName: toolName, Watermark: watermark}
+	if kind == "tool_execution_start" {
+		result.Phase = "start"
+		return result, true
+	}
+	isError, errorOK := event["isError"].(bool)
+	if !errorOK {
+		return nil, true
+	}
+	result.Phase, result.IsError = "end", isError
+	return result, true
+}
+
+func validBuiltinToolName(name string) bool {
+	return name == "read" || name == "bash" || name == "edit" || name == "write"
+}
+
+func validBuiltinToolCallID(value string) bool {
+	return value != "" && len(value) <= 256 && !strings.ContainsAny(value, "\x00\r\n")
+}
+
 func classifyRootControlEvent(event map[string]any, watermark uint64) (*RootControlEvent, bool) {
 	// Pi's RPC stream uses message_end, while the native custom-message stream
 	// exposes the same persisted entry directly. Both are durable completed

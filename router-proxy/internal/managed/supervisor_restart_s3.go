@@ -161,6 +161,7 @@ func (m *Manager) stopLifecycleRestartSourceInLane(binding *managedBinding, acti
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return false
 	}
+	m.interruptBuiltinToolInvocations(binding, source)
 	if err := m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), actionID, source); err != nil {
 		return false
 	}
@@ -301,6 +302,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	m.installParentCompactionNotificationReceiver(candidate)
 	m.installParentActivityReceiver(candidate)
 	m.installQualifiedGoalActivityReceiver(candidate)
+	m.installBuiltinToolLifecycleReceiver(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = ""
 	candidate.serial.Unlock()

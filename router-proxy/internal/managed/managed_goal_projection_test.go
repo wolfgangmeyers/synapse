@@ -188,10 +188,10 @@ func TestManagedGoalNotDoneWakeupCannotRetargetReplacement(t *testing.T) {
 	// Replacement wins the live binding before the old evaluator returns. The
 	// old evaluation still commits its immutable reservation, but its wakeup is
 	// never offered to the replacement.
-	replacement := *binding
-	replacement.runtimeGeneration = "replacement-generation"
+	// Do not copy managedBinding: its serializers are intentionally per binding.
+	replacement := &managedBinding{agentID: binding.agentID, lane: binding.lane, process: binding.process, rpc: binding.rpc, identity: binding.identity, sessionID: binding.sessionID, sessionEpoch: binding.sessionEpoch, runtimeGeneration: "replacement-generation", manifestRevision: binding.manifestRevision, manifestHash: binding.manifestHash}
 	manager.mu.Lock()
-	manager.bindings[fence.AgentID] = &replacement
+	manager.bindings[fence.AgentID] = replacement
 	manager.mu.Unlock()
 	close(release)
 	require.Eventually(t, func() bool {

@@ -169,6 +169,9 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			}
 		}
 		if candidate != nil {
+			if source != nil {
+				m.interruptBuiltinToolInvocations(candidate, *source)
+			}
 			candidate.serial.Lock()
 			candidate.reaped = true
 			rpc := candidate.rpc
