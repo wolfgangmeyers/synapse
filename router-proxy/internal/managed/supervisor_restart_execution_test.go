@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -272,6 +273,50 @@ func (fixture *restartExecutionFixture) waitReady(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+// queueManagedParentFinalForTest creates the durable direct-turn and its final
+// reply through the same store boundaries used by the manager.
+func queueManagedParentFinalForTest(t *testing.T, durable *store.Store, fence store.ManagedRuntimeFence, id string) store.ManagedDirectAttempt {
+	t.Helper()
+	ctx := context.Background()
+	_, err := durable.Enqueue(ctx, protocol.Envelope{ID: id, From: "sender", To: fence.AgentID, Body: "work", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, id)
+	require.NoError(t, err)
+	attempt, err := durable.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.NotNil(t, attempt)
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, id+"-cursor"))
+	require.NoError(t, durable.AcknowledgeManagedDirect(ctx, *attempt, id+"-receipt", true))
+	delivery, err := durable.QueueManagedFinalDelivery(ctx, *attempt, id+"-reply", "final reply")
+	require.NoError(t, err)
+	require.NotNil(t, delivery)
+	return *attempt
+}
+
+func requireManagedParentTerminalForTest(t *testing.T, databasePath string, attempt store.ManagedDirectAttempt, workState, deliveryState string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	require.NoError(t, err)
+	defer db.Close()
+	var agentID, sessionID, startMarker, incarnation, generation, manifestHash, gotWorkState, gotDeliveryState string
+	var epoch int64
+	var pid, revision int
+	require.NoError(t, db.QueryRow(`SELECT w.agent_id,w.pi_session_id,w.session_epoch,w.process_pid,w.process_start_marker,w.process_incarnation,w.runtime_generation,w.manifest_revision,w.manifest_hash,w.state,d.state
+		FROM managed_parent_work w JOIN managed_parent_final_deliveries d ON d.work_id=w.work_id
+		WHERE w.message_id=? AND w.message_incarnation_id=? AND w.attempt_number=?`, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber).Scan(&agentID, &sessionID, &epoch, &pid, &startMarker, &incarnation, &generation, &revision, &manifestHash, &gotWorkState, &gotDeliveryState))
+	require.Equal(t, attempt.Fence.AgentID, agentID)
+	require.Equal(t, attempt.Fence.PiSessionID, sessionID)
+	require.Equal(t, attempt.Fence.SessionEpoch, epoch)
+	require.Equal(t, attempt.Fence.ProcessPID, pid)
+	require.Equal(t, attempt.Fence.ProcessStartMarker, startMarker)
+	require.Equal(t, attempt.Fence.ProcessIncarnation, incarnation)
+	require.Equal(t, attempt.Fence.RuntimeGeneration, generation)
+	require.Equal(t, attempt.Fence.ManifestRevision, revision)
+	require.Equal(t, attempt.Fence.ManifestHash, manifestHash)
+	require.Equal(t, workState, gotWorkState)
+	require.Equal(t, deliveryState, gotDeliveryState)
+}
+
 func TestRestartExecution(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "router.db")
@@ -300,6 +345,9 @@ func TestRestartExecution(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "restart-agent")
 		return readErr == nil && agent.LifecycleState == "running"
 	}, time.Second, time.Millisecond)
+	sourceAgent, err := durable.ManagedAgent(ctx, "restart-agent")
+	require.NoError(t, err)
+	sourceAttempt := queueManagedParentFinalForTest(t, durable, storedAgentFence(sourceAgent), "restart-source-turn")
 	db, err := sql.Open("sqlite", databasePath)
 	require.NoError(t, err)
 	_, err = db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id='restart-agent'`)
@@ -319,6 +367,7 @@ func TestRestartExecution(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "restart-agent")
 		return readErr == nil && agent.LifecycleState == "running" && agent.RuntimeGeneration == "target-generation" && agent.AcceptingPrompts
 	}, time.Second, time.Millisecond)
+	requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
 	old.input.mu.Lock()
 	closed := old.input.closed
 	old.input.mu.Unlock()
@@ -437,6 +486,9 @@ func TestRestartCloseSettlesActiveSourceWithoutGenericStop(t *testing.T) {
 
 func TestRestartRecovery(t *testing.T) {
 	fixture := newRestartExecutionFixture(t, 100*time.Millisecond)
+	sourceAgent, err := fixture.durable.ManagedAgent(context.Background(), "restart-agent")
+	require.NoError(t, err)
+	sourceAttempt := queueManagedParentFinalForTest(t, fixture.durable, storedAgentFence(sourceAgent), "restart-recovery-source-turn")
 	fixture.oldRPC.settleRelease = make(chan struct{})
 	fixture.reserve(t)
 	require.Eventually(t, func() bool {
@@ -456,6 +508,7 @@ func TestRestartRecovery(t *testing.T) {
 		agent, err := fixture.durable.ManagedAgent(context.Background(), "restart-agent")
 		return err == nil && agent.LifecycleState == "running" && agent.RuntimeGeneration == "target-generation" && agent.AcceptingPrompts
 	}, time.Second, time.Millisecond)
+	requireManagedParentTerminalForTest(t, fixture.database, sourceAttempt, "interrupted", "interrupted")
 }
 
 func TestRestartStaleBindingCleanup(t *testing.T) {

@@ -162,6 +162,7 @@ func (m *Manager) stopLifecycleRestartSourceInLane(binding *managedBinding, acti
 		return false
 	}
 	m.interruptBuiltinToolInvocations(binding, source)
+	_ = m.store.InterruptManagedParentWork(context.Background(), source)
 	if err := m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), actionID, source); err != nil {
 		return false
 	}
@@ -537,6 +538,7 @@ func (m *Manager) handleLifecycleRestartExitInLane(binding *managedBinding, acti
 		_ = m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), actionID, fence)
 	}
 	if action.Stage == "source_stop" || action.Stage == "admission" || action.Stage == "source_settle" {
+		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 		_ = m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), actionID, fence)
 	}
 	binding.serial.Lock()
@@ -596,14 +598,18 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 		}
 		if probe == ProcessAbsent {
 			_ = m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source)
+			_ = m.store.InterruptManagedParentWork(context.Background(), source)
 			if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
 				m.startLifecycleRestartTargetInLane(action.ActionID, source)
 			}
 			return
 		}
 		if probe == ProcessOwned && agent.ActivityState == "idle" {
-			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil && m.reapRestartGroup(context.Background(), oldFenceIdentity(source), nil) && m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
-				m.startLifecycleRestartTargetInLane(action.ActionID, source)
+			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil && m.reapRestartGroup(context.Background(), oldFenceIdentity(source), nil) {
+				_ = m.store.InterruptManagedParentWork(context.Background(), source)
+				if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
+					m.startLifecycleRestartTargetInLane(action.ActionID, source)
+				}
 			}
 			return
 		}
@@ -618,8 +624,11 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 	}
 	if action.Stage == "source_settle" {
 		if m.processOps.Probe(oldFenceIdentity(source)).State == ProcessAbsent {
-			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil && m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
-				m.startLifecycleRestartTargetInLane(action.ActionID, source)
+			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil {
+				_ = m.store.InterruptManagedParentWork(context.Background(), source)
+				if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
+					m.startLifecycleRestartTargetInLane(action.ActionID, source)
+				}
 			}
 		} else {
 			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_RECOVERY_NEEDS_SETTLE", source)
@@ -638,6 +647,7 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_IDENTITY_UNSAFE", source)
 			return
 		}
+		_ = m.store.InterruptManagedParentWork(context.Background(), source)
 		if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
 			m.startLifecycleRestartTargetInLane(action.ActionID, source)
 		}

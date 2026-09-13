@@ -357,6 +357,86 @@ func TestManagedDirectPromptShowsWorkingUntilSettled(t *testing.T) {
 	}
 }
 
+func TestManagedDirectReceiptStreamClosureInterruptsPersistedFinalOnlyAfterDeliveryAck(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = durable.Close() })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 996, StartMarker: "closing-start", Incarnation: "closing-incarnation"}, stopped: make(chan struct{})}
+	rpc := &holdingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, prompted: make(chan struct{}), events: make(chan DirectMailboxEvent, 3)}
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: holdingDirectFactory{process: process, rpc: rpc}, RPCFactory: holdingDirectRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "closing-agent", Cwd: root, RequestID: "closing-launch"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "closing-agent")
+		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "closing-agent")
+	require.NoError(t, err)
+	fence := storedAgentFence(agent)
+	published := make(chan struct{}, 1)
+	manager.SetDirectReplyPublisher(func(context.Context, store.ManagedDirectAttempt, DirectMailboxReply) error {
+		published <- struct{}{}
+		return nil
+	})
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "closing-message", From: "sender", To: "closing-agent", Body: "work", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, "closing-message")
+	require.NoError(t, err)
+	manager.OfferDirect("closing-agent")
+	select {
+	case <-rpc.prompted:
+	case <-time.After(time.Second):
+		t.Fatal("managed direct prompt was not submitted")
+	}
+	attempt, err := durable.ManagedDirectAttempt(ctx, "closing-message", 1)
+	require.NoError(t, err)
+	require.Equal(t, "direct_prompted", attempt.State)
+	rpc.events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: "closing-receipt"}}
+	rpc.events <- DirectMailboxEvent{Reply: &DirectMailboxReply{EntryIdentity: "closing-reply", Body: "done"}}
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("managed final was not delivered")
+	}
+	// Acknowledging the ordinary row deletes it and deliberately cascades its
+	// direct-attempt record. Parent work retains the final-delivery audit row.
+	_, err = durable.ManagedDirectAttempt(ctx, "closing-message", 1)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	pending, err := durable.PendingManagedFinalDeliveries(ctx, fence)
+	require.NoError(t, err)
+	require.Empty(t, pending, "the publisher receipt closes the final-delivery outbox item")
+	_, err = durable.ApplyManagedParentActivity(ctx, fence, store.ManagedParentActivityEvent{Sequence: 1, State: "active"})
+	require.NoError(t, err)
+	close(rpc.events)
+	require.Eventually(t, func() bool {
+		db, openErr := sql.Open("sqlite", databasePath)
+		if openErr != nil {
+			return false
+		}
+		defer db.Close()
+		var state string
+		err := db.QueryRow(`SELECT state FROM managed_parent_work WHERE message_id=? AND message_incarnation_id=? AND attempt_number=?`, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber).Scan(&state)
+		return err == nil && state == "interrupted"
+	}, time.Second, time.Millisecond)
+	requireManagedParentTerminalForTest(t, databasePath, *attempt, "interrupted", "delivered")
+	current, err := durable.ManagedAgent(ctx, "closing-agent")
+	require.NoError(t, err)
+	require.Equal(t, "active", current.ActivityState, "native activity remains a separate live source")
+	_, err = durable.ApplyManagedParentActivity(ctx, fence, store.ManagedParentActivityEvent{Sequence: 2, State: "idle"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		current, readErr := durable.ManagedAgent(ctx, "closing-agent")
+		return readErr == nil && current.ActivityState == "idle"
+	}, time.Second, time.Millisecond)
+}
+
 func TestManagedDirectReplyPublishesAfterAppendAndBeforeNextOffer(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})

@@ -26,7 +26,8 @@ func TestDirectControlReconcilesUnownedReadyBindingWithoutWaitSignal(t *testing.
 	for _, state := range []ProcessProbeState{ProcessAbsent, ProcessPresent} {
 		t.Run(string(state), func(t *testing.T) {
 			ctx := context.Background()
-			manager, binding, fence, _ := readyInlineAllowanceFixture(t)
+			manager, binding, fence, _, databasePath := readyInlineAllowanceFixture(t)
+			sourceAttempt := queueManagedParentFinalForTest(t, manager.store, fence, "process-loss-source-turn")
 			manager.processOps = directControlProbeOps{state: state}
 			binding.waitSignal = make(chan struct{}) // The process never delivered Wait.
 			published := make(chan struct{}, 2)
@@ -45,6 +46,7 @@ func TestDirectControlReconcilesUnownedReadyBindingWithoutWaitSignal(t *testing.
 			require.False(t, agent.AcceptingPrompts)
 			require.False(t, agent.SlotHeld)
 			require.Equal(t, "The managed process is no longer available.", agent.LastErrorMessage)
+			requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
 
 			after, err := manager.store.GetProjectionVersion(ctx)
 			require.NoError(t, err)
@@ -62,8 +64,12 @@ func TestDirectControlReconcilesUnownedReadyBindingWithoutWaitSignal(t *testing.
 
 			_, _, err = manager.currentDirectControlBinding(ctx, fence.AgentID)
 			require.EqualError(t, err, "managed agent is not ready for controls")
+
 			_, stillBound := manager.bindingFor(fence.AgentID)
 			require.False(t, stillBound)
+			// A repeated unowned-control reconciliation must not reopen the exact
+			// interrupted source work or publish another process-loss transition.
+			requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
 		})
 	}
 }

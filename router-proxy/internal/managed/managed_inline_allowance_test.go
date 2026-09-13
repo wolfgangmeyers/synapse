@@ -42,10 +42,11 @@ func (r *inlineAllowanceRPC) WaitForPolicyApplied(_ context.Context, generation 
 	}}, nil
 }
 
-func readyInlineAllowanceFixture(t *testing.T) (*Manager, *managedBinding, store.ManagedRuntimeFence, *inlineAllowanceRPC) {
+func readyInlineAllowanceFixture(t *testing.T) (*Manager, *managedBinding, store.ManagedRuntimeFence, *inlineAllowanceRPC, string) {
 	t.Helper()
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
@@ -68,12 +69,12 @@ func readyInlineAllowanceFixture(t *testing.T) (*Manager, *managedBinding, store
 	binding := &managedBinding{agentID: fence.AgentID, lane: &managedAgentLane{}, process: process, rpc: rpc, identity: process.identity, sessionID: fence.PiSessionID, sessionEpoch: fence.SessionEpoch, runtimeGeneration: fence.RuntimeGeneration, manifestRevision: fence.ManifestRevision, manifestHash: fence.ManifestHash}
 	manager.bindings[fence.AgentID] = binding
 	t.Cleanup(func() { _ = manager.Close(context.Background()); _ = durable.Close() })
-	return manager, binding, fence, rpc
+	return manager, binding, fence, rpc, databasePath
 }
 
 func TestHandlerFailureCompletesDynamicInlineAllowanceRequest(t *testing.T) {
 	ctx := context.Background()
-	manager, binding, fence, _ := readyInlineAllowanceFixture(t)
+	manager, binding, fence, _, _ := readyInlineAllowanceFixture(t)
 	requestID := "123e4567-e89b-42d3-a456-426614174005"
 	reservation, err := manager.store.ReserveManagedControlRequest(ctx, store.ManagedControlRequestInput{
 		RequestID: requestID, ResultID: "123e4567-e89b-42d3-a456-426614174006", AgentID: fence.AgentID,
@@ -98,7 +99,7 @@ func TestHandlerFailureCompletesDynamicInlineAllowanceRequest(t *testing.T) {
 
 func TestHandlerFailureWithUTF8BoundaryCompletesDynamicInlineAllowanceRequest(t *testing.T) {
 	ctx := context.Background()
-	manager, binding, fence, _ := readyInlineAllowanceFixture(t)
+	manager, binding, fence, _, _ := readyInlineAllowanceFixture(t)
 	requestID := "123e4567-e89b-42d3-a456-426614174008"
 	reservation, err := manager.store.ReserveManagedControlRequest(ctx, store.ManagedControlRequestInput{
 		RequestID: requestID, ResultID: "123e4567-e89b-42d3-a456-426614174009", AgentID: fence.AgentID,
@@ -437,7 +438,7 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 
 func TestManagedInlineAllowanceProjectsRequestedCreditBeforeSuccess(t *testing.T) {
 	ctx := context.Background()
-	manager, binding, fence, rpc := readyInlineAllowanceFixture(t)
+	manager, binding, fence, rpc, _ := readyInlineAllowanceFixture(t)
 	// Default deny remains in force until the managed inline setting is enabled.
 	_, err := manager.executeRootControlHandler(ctx, binding, nil, RootControlInvocation{
 		RequestID: "123e4567-e89b-42d3-a456-426614174004", OperationID: "policy.inline_allowance",
