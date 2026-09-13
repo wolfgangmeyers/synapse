@@ -516,6 +516,22 @@ func TestManagedDirectPromptStatePersistenceFailureReleasesAttempt(t *testing.T)
 	require.Zero(t, rpc.directPromptCount(), "a failed prompted-state write must not reach Pi")
 }
 
+func TestManagedDirectPromptFailureBeforeAppendReleasesAttempt(t *testing.T) {
+	manager, durable, _, rpc := readyFailingDirectManager(t)
+	ctx := context.Background()
+	_, err := durable.Enqueue(ctx, protocol.Envelope{ID: "pre-append-failure", From: "sender", To: "direct-agent", Body: "body", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, "pre-append-failure")
+	require.NoError(t, err)
+
+	manager.OfferDirect("direct-agent")
+	require.Eventually(t, func() bool {
+		attempt, readErr := durable.ManagedDirectAttempt(ctx, "pre-append-failure", 1)
+		return readErr == nil && attempt.State == "released" && attempt.FailureCode == "prompt_failed"
+	}, time.Second, time.Millisecond)
+	require.Equal(t, 1, rpc.directPromptCount())
+}
+
 func TestManagedDirectReleasePersistenceFailureRetriesWithoutStranding(t *testing.T) {
 	manager, durable, path, rpc := readyFailingDirectManager(t)
 	_, err := durable.Enqueue(context.Background(), protocol.Envelope{ID: "release-persistence-failure", From: "sender", To: "direct-agent", Body: "body", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})

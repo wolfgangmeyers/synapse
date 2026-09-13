@@ -2344,11 +2344,13 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					}
 					if m.beforeDirectAcknowledge != nil {
 						if err := m.beforeDirectAcknowledge(context.Background(), *attempt); err != nil {
+							// Receipt delivery proves that Pi appended the exact entry. Keep
+							// the prompted attempt for cursor-based recovery; releasing here
+							// could send the same message a second time.
 							clearDirectPromptActivity()
 							cancelTurn()
 							cancelReceipt()
-							m.releaseManagedDirect(*attempt, "acknowledgment_interrupted", "")
-							_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", "")
+							_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", sanitizeError(err))
 							return
 						}
 					}
