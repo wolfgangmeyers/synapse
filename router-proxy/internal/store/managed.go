@@ -3855,21 +3855,29 @@ func managedCrashRecoveryQuery(ctx context.Context, db *sql.DB, agentID string) 
 	return &state, nil
 }
 
+// clearManagedCrashHistoryTx is used by explicit restart/reset admission and
+// must run inside the same immediate transaction as that admission. A failed
+// clear must not leave a durable lifecycle action that no executor can own.
+func (s *Store) clearManagedCrashHistoryTx(ctx context.Context, db *sql.DB, agentID, now string) error {
+	if err := ensureManagedCrashRecoveryTx(ctx, db, agentID, now); err != nil {
+		if strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
+			return nil
+		}
+		return err
+	}
+	_, err := db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=NULL,crash_history='[]',ready_since=NULL,updated_at=? WHERE agent_id=?`, now, agentID)
+	return err
+}
+
 // ClearManagedCrashHistory is used by explicit restart/reset controls. It is
 // separate from readiness: a healthy runtime needs ten continuous minutes.
 func (s *Store) ClearManagedCrashHistory(ctx context.Context, agentID string) error {
 	if agentID == "" {
 		return errors.New("managed crash recovery identity is invalid")
 	}
+	now := formatTimestamp(s.clock.Now())
 	return s.runImmediate(ctx, func() error {
-		if err := ensureManagedCrashRecoveryTx(ctx, s.db, agentID, formatTimestamp(s.clock.Now())); err != nil {
-			if strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
-				return nil
-			}
-			return err
-		}
-		_, err := s.db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=NULL,crash_history='[]',ready_since=NULL,updated_at=? WHERE agent_id=?`, formatTimestamp(s.clock.Now()), agentID)
-		return err
+		return s.clearManagedCrashHistoryTx(ctx, s.db, agentID, now)
 	})
 }
 

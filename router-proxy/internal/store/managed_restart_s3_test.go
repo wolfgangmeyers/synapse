@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -111,6 +112,32 @@ func TestLifecycleRestartArtifactMarkerAndTargetFenceAreFenced(t *testing.T) {
 	require.Equal(t, "target_start", stopped.Stage)
 	require.Nil(t, stopped.TargetFence)
 	require.Empty(t, stopped.RecoveryOwner)
+}
+
+func TestLifecycleRestartAdmissionClearFailureRollsBackForReplay(t *testing.T) {
+	durable, ctx, agent, launch := restartFixture(t)
+	reservation := lifecycleRestartReservation(t, agent, launch, lifecycleUUID(725))
+	_, err := durable.db.Exec(`UPDATE managed_crash_recovery SET retry_at='2026-09-13T12:00:01.000Z',crash_history='["2026-09-13T12:00:00.000Z"]' WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+	_, err = durable.db.Exec(`CREATE TRIGGER fail_restart_crash_clear BEFORE UPDATE OF retry_at ON managed_crash_recovery BEGIN SELECT RAISE(ABORT, 'injected restart crash clear failure'); END`)
+	require.NoError(t, err)
+	_, err = durable.ReserveManagedLifecycleRestart(ctx, reservation)
+	require.ErrorContains(t, err, "injected restart crash clear failure")
+	_, err = durable.ManagedOperation(ctx, reservation.Operation.OperationID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	stored, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", stored.LifecycleState)
+	require.True(t, stored.AcceptingPrompts)
+	_, err = durable.db.Exec(`DROP TRIGGER fail_restart_crash_clear`)
+	require.NoError(t, err)
+	admission, err := durable.ReserveManagedLifecycleRestart(ctx, reservation)
+	require.NoError(t, err)
+	require.False(t, admission.Replayed)
+	recovery, err := durable.ManagedCrashRecovery(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Empty(t, recovery.RetryAt)
+	require.Empty(t, recovery.CrashTimes)
 }
 
 func TestLifecycleRestartPreparationFailureRestoresSourceProjection(t *testing.T) {

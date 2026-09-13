@@ -1048,9 +1048,6 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if admission.Replayed {
 		return RestartResult{Operation: admission.Operation, Replayed: true}, nil
 	}
-	if err := m.store.ClearManagedCrashHistory(ctx, request.AgentID); err != nil {
-		return RestartResult{}, err
-	}
 	binding.operationID, binding.lifecycleAction = admission.Action.ActionID, "restart"
 	m.mu.Lock()
 	if m.bindings[request.AgentID] == binding {
