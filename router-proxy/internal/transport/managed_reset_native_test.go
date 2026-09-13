@@ -434,6 +434,16 @@ func (o *nativeResetProcessOps) SignalVerifiedProcessGroup(identity managed.Proc
 	}
 	return o.base.SignalVerifiedProcessGroup(identity, signal)
 }
+func (o *nativeResetProcessOps) SignalVerifiedProcessGroupAfterLeaderExit(identity managed.ProcessIdentity) error {
+	if process := o.fakeProcess(identity); process != nil {
+		o.mu.Lock()
+		o.signals = append(o.signals, identity)
+		o.mu.Unlock()
+		process.reap()
+		return nil
+	}
+	return o.base.SignalVerifiedProcessGroupAfterLeaderExit(identity)
+}
 
 func (o *nativeResetProcessOps) WaitForProcessGroupEmpty(ctx context.Context, identity managed.ProcessIdentity, done <-chan error) managed.ProcessProbe {
 	if process := o.fakeProcess(identity); process != nil {

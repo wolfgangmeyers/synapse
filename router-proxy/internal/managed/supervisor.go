@@ -1459,16 +1459,20 @@ func (m *Manager) reapRestartGroup(parent context.Context, identity ProcessIdent
 	if probe.State == ProcessAbsent {
 		return true
 	}
+	// This local proof belongs to this reaping attempt. It is the only
+	// authorization that permits a leaderless continuation after TERM.
+	termSentUnderOwnedProof := false
 	if m.processOps.Probe(identity).State != ProcessOwned || m.processOps.SignalVerifiedProcessGroup(identity, syscall.SIGTERM) != nil {
 		return false
 	}
+	termSentUnderOwnedProof = true
 	term, cancel := context.WithTimeout(context.Background(), m.config.Limits.TermStop)
 	probe = m.processOps.WaitForProcessGroupEmpty(term, identity, waitDone)
 	cancel()
 	if probe.State == ProcessAbsent {
 		return true
 	}
-	if m.processOps.Probe(identity).State != ProcessOwned || m.processOps.SignalVerifiedProcessGroup(identity, syscall.SIGKILL) != nil {
+	if !termSentUnderOwnedProof || probe.State != ProcessPresent || m.processOps.SignalVerifiedProcessGroupAfterLeaderExit(identity) != nil {
 		return false
 	}
 	kill, cancel := context.WithTimeout(context.Background(), m.config.Limits.TermStop)

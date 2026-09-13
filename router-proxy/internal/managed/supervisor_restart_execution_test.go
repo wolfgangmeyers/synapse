@@ -82,6 +82,9 @@ func (ops *restartExecutionOps) SignalVerifiedProcessGroup(identity ProcessIdent
 	ops.process[identity.PID].once.Do(func() { close(ops.process[identity.PID].done) })
 	return nil
 }
+func (ops *restartExecutionOps) SignalVerifiedProcessGroupAfterLeaderExit(identity ProcessIdentity) error {
+	return ops.SignalVerifiedProcessGroup(identity, syscall.SIGKILL)
+}
 func (ops *restartExecutionOps) WaitForProcessGroupEmpty(ctx context.Context, identity ProcessIdentity, _ <-chan error) ProcessProbe {
 	ops.mu.Lock()
 	state := ops.states[identity.PID]
