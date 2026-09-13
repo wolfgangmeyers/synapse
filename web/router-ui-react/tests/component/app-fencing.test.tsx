@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
+
+vi.mock("../../src/platform/secure-uuid", () => ({ secureUuid: () => "00000000-0000-4000-8000-000000000001" }));
 import { DEFAULT_GOAL_STATE, type GoalState } from "../../src/domain/goals";
 import type { ManagedAgent } from "../../src/protocol/types";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
@@ -147,19 +149,34 @@ describe("App control fencing and managed lifecycle projections", () => {
     expect(screen.getByRole("spinbutton", { name: "Snooze duration (seconds)" })).toHaveValue(120);
   });
 
-  it("keeps the displayed model after an old result arrives following instance replacement", async () => {
+  it("keeps the replacement model and pending action after an old result arrives over the live socket", async () => {
     const user = userEvent.setup();
-    const { socket } = renderLegacy();
+    const { socket, setAgent, agentRefreshCount } = renderLegacy();
     await user.click(await screen.findByRole("button", { name: "Worker One (worker-one)" }));
     await waitFor(() => expect(screen.getByText(/Connected as/)).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" }));
     await user.click(screen.getByRole("option", { name: /Gemini 2.5 Pro/ }));
-    const control = socket.frame("model_control");
-    expect(control).toBeDefined();
-    socket.close();
-    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "stale-model", type: "model_control_result", agent_id: "worker-one", instance_id: "peer-instance", lease_id: "peer-lease", source_agent_id: "web-ui", control_id: control?.control_id, accepted: true, current_model: modelTwo }) });
-    expect(screen.getByRole("button", { name: "google/gemini-2.5-pro" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "openai-codex/gpt-5.6-terra" })).not.toBeInTheDocument();
+    const oldControl = socket.frame("model_control");
+    expect(oldControl).toBeDefined();
+
+    const replacementRefreshCount = agentRefreshCount();
+    setAgent({ instance_id: "replacement-instance", current_model: modelTwo, activity_state: "active" });
+    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "replacement-activity", type: "agent_activity", agent_id: "worker-one", instance_id: "replacement-instance", activity_state: "active", subagent_count: 0, subagents: [], current_model: modelTwo, generated_at: "2030-01-01T00:00:01.000Z" }) });
+    await waitFor(() => expect(agentRefreshCount()).toBeGreaterThan(replacementRefreshCount));
+    await waitFor(() => expect(screen.getByRole("button", { name: "google/gemini-2.5-pro" })).toBeInTheDocument());
+    const refreshesAfterReplacement = agentRefreshCount();
+
+    await user.click(screen.getByRole("button", { name: "google/gemini-2.5-pro" }));
+    await user.click(screen.getByRole("option", { name: /GPT-5.6 Terra/ }));
+    const replacementButton = screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" });
+    expect(replacementButton).toBeDisabled();
+    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "00000000-0000-4000-8000-000000000002", type: "model_control_result", agent_id: "worker-one", instance_id: "peer-instance", lease_id: "peer-lease", source_agent_id: oldControl?.agent_id, control_id: oldControl?.control_id, accepted: true, current_model: modelOne }) });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(agentRefreshCount()).toBe(refreshesAfterReplacement);
+    await waitFor(() => {
+      const current = screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" });
+      expect(current).toBeDisabled();
+    });
   });
 
   it("projects a successful managed restart and disables actions while it is pending", async () => {
