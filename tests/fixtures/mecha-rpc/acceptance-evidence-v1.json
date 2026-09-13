@@ -54,8 +54,8 @@
   ],
   "generated_from": {
     "path": "RPC_SPEC.html",
-    "sha256": "0f32ea5d60aeada2723afc90fc5ae96dea74292893a1809283e4d013ca10a19a",
-    "selection": "tr#ac-001 through tr#ac-090"
+    "sha256": "6f255ae68f7a4ce1350e4a4251b3ff770b4c14df7ac916b1153bee388b345a00",
+    "selection": "tr#ac-001 through tr#ac-091"
   },
   "criteria": [
     {
@@ -66,6 +66,7 @@
         "202 once; one direct Pi RPC process; no tmux window; ready snapshot after mandatory manifest."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-001",
       "proof_symbols": [
         "rpc-ac-001"
@@ -85,6 +86,7 @@
         "Directory succeeds; file and escape return 422 INVALID_WORKING_DIRECTORY; no process for failures."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-002",
       "proof_symbols": [
         "rpc-ac-002"
@@ -104,6 +106,7 @@
         "Exact explicit model; saved default; Terra fallback; 422 for unavailable explicit; 422 when Terra unavailable. No arbitrary fallback."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-003",
       "proof_symbols": [
         "rpc-ac-003"
@@ -123,6 +126,7 @@
         "Manifest accepted before the instruction creates the first model request; the instruction appears once. A 32 KiB-plus-one body returns 413."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-004",
       "proof_symbols": [
         "rpc-ac-004"
@@ -142,6 +146,7 @@
         "Structured states progress idle → waiting → active → idle from accepted prompt/agent events; no transcript-text parser called."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-005",
       "proof_symbols": [
         "rpc-ac-005"
@@ -161,6 +166,7 @@
         "Each creates a new process incarnation and mandatory manifest, preserves Pi session ID/epoch/history, and returns ready."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-006",
       "proof_symbols": [
         "rpc-ac-006"
@@ -180,6 +186,7 @@
         "New session ID and incremented epoch; same name/model/cwd/histories/policies; old session deleted only after new ready."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-007",
       "proof_symbols": [
         "rpc-ac-007"
@@ -199,6 +206,7 @@
         "Process stops; owned session/control/child/policy/history/agent rows disappear; cwd untouched; final removal delta; name reusable."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-008",
       "proof_symbols": [
         "rpc-ac-008"
@@ -218,6 +226,7 @@
         "Agent remains as failed tombstone with TERMINATION_CLEANUP_FAILED; success/removal is not published; retry works after fault clears."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-009",
       "proof_symbols": [
         "rpc-ac-009"
@@ -237,6 +246,7 @@
         "Two managed process incarnations change on same sessions; tmux PID/session receives no signal; aggregate has exactly two rows."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-010",
       "proof_symbols": [
         "rpc-ac-010"
@@ -256,6 +266,7 @@
         "First series restarts after 1 s/5 s then fails CRASH_LOOP with no fourth timer. At exactly 120 s the oldest exit is excluded, so the new exit is second, not third."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-011",
       "proof_symbols": [
         "rpc-ac-011"
@@ -275,6 +286,7 @@
         "First retains the prior exit; exactly ten ready minutes clears it before the new crash, which schedules the one-second first retry."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-012",
       "proof_symbols": [
         "rpc-ac-012"
@@ -294,6 +306,7 @@
         "Persisted counter clears before one same-session startup; that startup failure is the first exit of a new window and schedules one second."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-013",
       "proof_symbols": [
         "rpc-ac-013"
@@ -313,6 +326,7 @@
         "Only verified orphan groups are reaped; both agents return on prior sessions; full manifest/child snapshot precede ready/deltas; recovery does not reset persisted crash history."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-014",
       "proof_symbols": [
         "rpc-ac-014"
@@ -332,6 +346,7 @@
         "Router sends no signal, records ORPHAN_IDENTITY_UNSAFE, and does not claim recovery."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-015",
       "proof_symbols": [
         "rpc-ac-015"
@@ -351,6 +366,7 @@
         "Reset supersedes restart; terminate supersedes reset and aborts; one stop sequence; no replacement process."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-016",
       "proof_symbols": [
         "rpc-ac-016"
@@ -370,6 +386,7 @@
         "All old-incarnation callbacks are ignored and logged stale; current projection is unchanged."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-017",
       "proof_symbols": [
         "rpc-ac-017"
@@ -389,6 +406,7 @@
         "Existing fields still parse; both rows appear; only visible source labels are router-managed and tmux."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-018",
       "proof_symbols": [
         "rpc-ac-018"
@@ -408,6 +426,7 @@
         "State badges match snapshots, focus is visible/retained, labels are announced, no horizontal page overflow, confirmations name destructive effects."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-019",
       "proof_symbols": [
         "rpc-ac-019"
@@ -427,6 +446,7 @@
         "Valid pretty-printed ManagedAgent JSON appears in a scrollable code viewer; no secret/internal path/PID; Escape closes and restores focus."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-020",
       "proof_symbols": [
         "rpc-ac-020"
@@ -446,6 +466,7 @@
         "Both submit identical canonical cwd. Picker lists folders only and cannot leave configured roots."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-021",
       "proof_symbols": [
         "rpc-ac-021"
@@ -465,6 +486,7 @@
         "Text is submitted unchanged once; empty launch sends no first prompt."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-022",
       "proof_symbols": [
         "rpc-ac-022"
@@ -484,6 +506,7 @@
         "Each reaches authenticated only after provider resolution, refreshes its real model rows, increments auth revision once, uses no terminal/console, and stores no secret in router/browser persistence."
       ],
       "owner_phase": "P4-auth-models",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-023",
       "proof_symbols": [
         "rpc-ac-023"
@@ -505,6 +528,7 @@
         "Credential is unavailable, discovery refreshes, revision increments once, idle restarts immediately, active settles then restarts, sessions stay the same, unavailable selected models fail without fallback, and no intervening prompt is accepted."
       ],
       "owner_phase": "P4-auth-models",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-024",
       "proof_symbols": [
         "rpc-ac-024"
@@ -526,6 +550,7 @@
         "Sanitized failure and complete-history entry; helper exits; no revision increment, credential echo, model mutation, or agent restart."
       ],
       "owner_phase": "P4-auth-models",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-025",
       "proof_symbols": [
         "rpc-ac-025"
@@ -547,6 +572,7 @@
         "Sentinel exists only transiently in helper input and the configured Pi auth store; absent from every captured router/browser artifact and history."
       ],
       "owner_phase": "P4-auth-models",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-026",
       "proof_symbols": [
         "rpc-ac-026"
@@ -568,6 +594,7 @@
         "Durable row delivered by RPC custom message once; Pi turn triggers; ACK follows matching message_end; no managed WebSocket client. See DM-RETRY-001, DM-DIAG-002, and DM-CONFLICT-001."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-027",
       "proof_symbols": [
         "rpc-ac-027"
@@ -587,6 +614,7 @@
         "Both intended recipients receive ordinary content once with correct derived sender; existing API shape unchanged."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-028",
       "proof_symbols": [
         "rpc-ac-028"
@@ -606,6 +634,7 @@
         "Entry scan finds message ID; router ACKs without appending a duplicate. See DM-RETRY-002 and DM-DIAG-001."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-029",
       "proof_symbols": [
         "rpc-ac-029"
@@ -625,6 +654,7 @@
         "Quiet gets exactly the ordinary message; complete gets tool/request/result/message activity; control records never enter quiet."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-030",
       "proof_symbols": [
         "rpc-ac-030"
@@ -644,6 +674,7 @@
         "Only direct Wolfgang tool mail appears in quiet; every named type appears in complete."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-031",
       "proof_symbols": [
         "rpc-ac-031"
@@ -663,6 +694,7 @@
         "Newest 200 and only ≤30-day records remain for that pair; another pair is unchanged."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-032",
       "proof_symbols": [
         "rpc-ac-032"
@@ -682,6 +714,7 @@
         "Complete retains newest 200 total; all 200 quiet messages remain."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-033",
       "proof_symbols": [
         "rpc-ac-033"
@@ -701,6 +734,7 @@
         "Both histories retain identical IDs/content across new session; subsequent entries use new session fence."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-034",
       "proof_symbols": [
         "rpc-ac-034"
@@ -720,6 +754,7 @@
         "Views announce selected state, show correct independent data/order, and no source-specific alternate workflow appears."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-035",
       "proof_symbols": [
         "rpc-ac-035"
@@ -739,6 +774,7 @@
         "One exact request has name/tool-call ID/raw args/definition/manifest/generation; closure returns queued before delayed handler; spy invoked once."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-036",
       "proof_symbols": [
         "rpc-ac-036"
@@ -758,6 +794,7 @@
         "Exact protocol error in complete history; zero handler calls; zero ordinary mailbox records."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-037",
       "proof_symbols": [
         "rpc-ac-037"
@@ -777,6 +814,7 @@
         "Schema rejects unsupported fields; sender/fences come from channel; no forged identity is stored or delivered."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-038",
       "proof_symbols": [
         "rpc-ac-038"
@@ -796,6 +834,7 @@
         "One ledger row, one handler invocation, one side effect; duplicate receives/reuses existing outcome."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-039",
       "proof_symbols": [
         "rpc-ac-039"
@@ -815,6 +854,7 @@
         "Handler-specific reconciliation observes intended effect, commits once, and does not repeat it."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-040",
       "proof_symbols": [
         "rpc-ac-040"
@@ -834,6 +874,7 @@
         "Original tool result stays queued; no extra model request; the package validates and appends exactly one hidden model-visible mecha.control.result.v1 custom_message after the turn with triggerTurn:false and no deliverAs; router waits for its matching message_end."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-041",
       "proof_symbols": [
         "rpc-ac-041"
@@ -853,6 +894,7 @@
         "Same-session router restoration cannot revive an old child reference; only a current matching live binding can continue. Old, terminal, disposed, resumed, forged, or mismatched references return STALE_CHILD_CONTEXT with no append or parent fallback; reset rejects/cancels as STALE_SESSION with no insertion in the new context."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-042",
       "proof_symbols": [
         "rpc-ac-042"
@@ -872,6 +914,7 @@
         "A present result_id becomes delivered without replay. An absent ID is restored and appended once; repeated identical payload returns already_present, and a changed payload returns CONFLICT."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-043",
       "proof_symbols": [
         "rpc-ac-043"
@@ -891,6 +934,7 @@
         "Timeout returns HANDLER_TIMEOUT; excess returns bounded busy error; no leaked goroutine/side effect; queue counts recover."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-044",
       "proof_symbols": [
         "rpc-ac-044"
@@ -910,6 +954,7 @@
         "Accepted hash matches independent RFC 8785/SHA-256 fixture before ready; provider sees exactly all 16 required baseline names and normalized schemas; no earlier model request."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-045",
       "proof_symbols": [
         "rpc-ac-045"
@@ -929,6 +974,7 @@
         "Exact rejection occurs before any registration or target-state change; no model request; boundary-valid counterpart accepts. Independent canonicalizer produces the same accepted bytes/hash."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-046",
       "proof_symbols": [
         "rpc-ac-046"
@@ -942,12 +988,13 @@
     },
     {
       "id": "AC-047",
-      "setup": "Partially invalid full manifest; tool collision with built-in/extension; each of six reserved application commands pre-collided; forced registration exception at positions 1, 8, and 16.",
+      "setup": "Partially invalid full manifest; tool collision with built-in/extension; each of seven reserved application commands pre-collided; forced registration exception at positions 1, 8, and 16.",
       "action": "Bootstrap each fresh process.",
       "predicates": [
         "Validation/collision rejects with no registration. Unexpected registration exception kills the process before ready/model use and leaves committed desired state unchanged; no usable partial runtime survives. Commands never appear as model tools."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-047",
       "proof_symbols": [
         "rpc-ac-047"
@@ -967,6 +1014,7 @@
         "First target commits once and next provider request has 17 tools; same delivery returns same receipt; every invalid target leaves the exact 17-tool registry/hash unchanged with no model request during staging."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-048",
       "proof_symbols": [
         "rpc-ac-048"
@@ -986,6 +1034,7 @@
         "Only exact bounded values pass; every coercion/open/over-limit input fails before request and side effect; router independently rejects it too; Type.Unsafe/Value.Convert are absent."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-049",
       "proof_symbols": [
         "rpc-ac-049-manifest",
@@ -1006,6 +1055,7 @@
         "Changed definition uses capability_id__<full new hash>; old Pi-visible name is never reused for changed bytes; each fresh generation receives the complete current 16–32-tool full manifest before ready/first turn; no in-place replace/remove/deactivate occurs."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-050",
       "proof_symbols": [
         "rpc-ac-050"
@@ -1019,12 +1069,13 @@
     },
     {
       "id": "AC-051",
-      "setup": "Goal lock/evaluator fake clock/model; restore and meaningful activity fixtures.",
-      "action": "Exercise goal set/status/off, settle, NOT_DONE/rearm, completion, restart.",
+      "setup": "Managed goal policy with a deterministic model-backed evaluator, Pi credential context, fake clock, restore, and meaningful-activity fixtures.",
+      "action": "At a real settled boundary, claim one evaluation and run one fenced hidden Pi model turn with no tools or side effects. Exercise goal set/status/off, exact DONE/NOT_DONE parsing, correlation, timeout, cancellation, process replacement, router restart, evaluator-settled suppression, and the red race test TestManagedGoalNotDoneWakeupCannotRetargetReplacement.",
       "predicates": [
-        "Outputs/state/wake limits/lock/restore match current effective contract; only structured activity advances rearm."
+        "The router remains durable authority. Only exact DONE or NOT_DONE changes the claimed evaluation. A stale, timed-out, canceled, or replaced turn cannot complete the goal or wake a replacement. A NOT_DONE wakeup is atomically bound to the original evaluation and full runtime fence. Existing meaningful-activity rearm callers remain required."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-051",
       "proof_symbols": [
         "rpc-ac-051"
@@ -1039,11 +1090,12 @@
     {
       "id": "AC-052",
       "setup": "Goal snooze disabled/enabled, budget and compaction/child gates.",
-      "action": "Invoke goal_snooze in each state.",
+      "action": "Invoke goal_snooze in each state and exercise its existing wakeup caller alongside explicit goal off.",
       "predicates": [
-        "Disabled/gated calls error; valid call schedules one durable wakeup with current budget/refill behavior."
+        "Disabled/gated calls error; valid snooze schedules one durable wakeup; snooze, wake, rearm, and off remain router controls and fence evaluator work without retargeting it."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-052",
       "proof_symbols": [
         "rpc-ac-052"
@@ -1063,6 +1115,7 @@
         "Only current child sends one ordinary message to bound parent; root/stale fail; no fallback sender."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-053",
       "proof_symbols": [
         "rpc-ac-053"
@@ -1082,6 +1135,7 @@
         "Derived sender and API-equivalent delivery; from rejected; current pair rate limit preserved."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-054",
       "proof_symbols": [
         "rpc-ac-054"
@@ -1101,6 +1155,7 @@
         "Exact credits consumed once and synced; next parent call blocked; invalid rejected; child remains exempt without changing parent credits."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-055",
       "proof_symbols": [
         "rpc-ac-055"
@@ -1120,6 +1175,7 @@
         "Selected content is ephemeral before-turn context only when enabled; status exact; no duplicate persistent session entry; unsafe store rejected."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-056",
       "proof_symbols": [
         "rpc-ac-056"
@@ -1139,6 +1195,7 @@
         "One notice after valid settle/cooldown; later activity/child suppresses; disabled sends none; current status fields preserved."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-057",
       "proof_symbols": [
         "rpc-ac-057"
@@ -1158,6 +1215,7 @@
         "Policy forms validate; compact reports deferred immediately, runs only at structured settled boundary, carries handoff, and records exact success/failure."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-058",
       "proof_symbols": [
         "rpc-ac-058"
@@ -1177,6 +1235,7 @@
         "Query/create/update effects/output match source; invalid action fields invoke no adapter; retry is idempotent."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-059",
       "proof_symbols": [
         "rpc-ac-059"
@@ -1196,6 +1255,7 @@
         "All current action rules and terminal evidence requirement match; duplicate request has one effect."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-060",
       "proof_symbols": [
         "rpc-ac-060"
@@ -1215,6 +1275,7 @@
         "Exact handoff row updates once with validated three-state remote value; invalid input has no effect."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-061",
       "proof_symbols": [
         "rpc-ac-061"
@@ -1234,6 +1295,7 @@
         "Current timing/ownership/lock behavior matches; only derived current target listed/mutated; retries do not duplicate."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-062",
       "proof_symbols": [
         "rpc-ac-062"
@@ -1253,6 +1315,7 @@
         "Exact allowed argv/action runs without shell; desired state reconciles idempotently; secret redacted; no arbitrary command."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-063",
       "proof_symbols": [
         "rpc-ac-063"
@@ -1272,6 +1335,7 @@
         "Valid parsed details match current contract; invalid identifier/JSON yields bounded error and no unsafe execution."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-064",
       "proof_symbols": [
         "rpc-ac-064"
@@ -1291,6 +1355,7 @@
         "Health and exact retry/dismiss transitions match current routes once; unknown message yields current-equivalent error."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-065",
       "proof_symbols": [
         "rpc-ac-065"
@@ -1310,6 +1375,7 @@
         "Exact argument grammar and availability preserved through named handlers; each emits one typed control; no extra model request/UI console."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-066",
       "proof_symbols": [
         "rpc-ac-066"
@@ -1329,6 +1395,7 @@
         "Service rows expose the opaque nullable binding only to the root bridge; router child snapshot/delta envelopes omit it. Stable task/run rows show description, known model, exact structured lifecycle, live elapsed or fixed finished timing; unknowns are labeled, not inferred."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-067",
       "proof_symbols": [
         "rpc-ac-067"
@@ -1348,6 +1415,7 @@
         "None changes the current child, clears uncertainty, or appends a result; each stale delta is recorded with its exact fence reason and each stale reference returns STALE_CHILD_CONTEXT. No old terminal attaches to a resumed run."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-068",
       "proof_symbols": [
         "rpc-ac-068"
@@ -1367,6 +1435,7 @@
         "First frame is the current snapshot; contiguous applies; duplicate ignored; regression/gap reconnects for a snapshot and performs no best-effort merge."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-069",
       "proof_symbols": [
         "rpc-ac-069"
@@ -1386,6 +1455,7 @@
         "Contained run reflects exact source. Omitted run keeps last source lifecycle plus interrupted_unknown/snapshot_omitted, is excluded from active count, and is not marked stopped/completed; snapshot publishes before deltas; old events stay fenced."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-070",
       "proof_symbols": [
         "rpc-ac-070"
@@ -1405,6 +1475,7 @@
         "Prior runs keep last source lifecycle plus interrupted_unknown/session_changed; new snapshot starts current; no fabricated terminal; old events cannot attach to new epoch."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-071",
       "proof_symbols": [
         "rpc-ac-071"
@@ -1424,6 +1495,7 @@
         "Badge starts/clears exactly; failure distinct; missing start repaired; missing end becomes reconciled_unknown, never success; complete entries exact."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-072",
       "proof_symbols": [
         "rpc-ac-072"
@@ -1443,6 +1515,7 @@
         "Only nested child changes; count/outcome/times exact; explicit failure clears; lost terminal becomes reconciled_unknown without child terminal inference; quiet unchanged."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-073",
       "proof_symbols": [
         "rpc-ac-073"
@@ -1462,6 +1535,7 @@
         "Before replacement snapshot, every live run keeps its last lifecycle with interrupted_unknown/parent_process_lost, elapsed timers stop, compaction becomes reconciled_unknown, and complete history records uncertainty; no terminal state is manufactured."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-074",
       "proof_symbols": [
         "rpc-ac-074"
@@ -1481,6 +1555,7 @@
         "Every transition appears once in complete with fences; none appears in quiet."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-075",
       "proof_symbols": [
         "rpc-ac-075"
@@ -1500,6 +1575,7 @@
         "No overlap/page overflow; text wraps/truncates with accessible full label; focus order and expanded state are correct."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-076",
       "proof_symbols": [
         "rpc-ac-076"
@@ -1519,6 +1595,7 @@
         "Lifecycle and permissions are identical apart from displayed name and content-derived state."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-077",
       "proof_symbols": [
         "rpc-ac-077"
@@ -1538,6 +1615,7 @@
         "Tmux router works; no new managed launch/mutation; controlled managed processes stop; records/sessions remain for forward recovery."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-078",
       "proof_symbols": [
         "rpc-ac-078"
@@ -1557,6 +1635,7 @@
         "Each response matches the new envelope/status/code matrix and request/operation correlation; no route contains a caller-authentication outcome; existing routes retain prior bodies/errors; every failure creates one bounded complete-history error when an agent/operation is known and no side effect otherwise."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-079",
       "proof_symbols": [
         "rpc-ac-079"
@@ -1576,6 +1655,7 @@
         "Tmux extension/protocol behavior and APIs pass unchanged; managed process never connects by Mailbox WebSocket."
       ],
       "owner_phase": "P2-router-handlers",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-080",
       "proof_symbols": [
         "rpc-ac-080"
@@ -1595,6 +1675,7 @@
         "Each acceptance ID links to automated output or browser artifact showing its exact setup/action/result; isolated dynamic/control proofs are not reused as router evidence."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-081",
       "proof_symbols": [
         "rpc-ac-081"
@@ -1614,6 +1695,7 @@
         "Every valid request succeeds identically. No cookie, CSRF value, ticket, bearer value, Origin allowlist, or browser auth storage exists. The existing agent WebSocket still works."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-082",
       "proof_symbols": [
         "rpc-ac-082"
@@ -1633,6 +1715,7 @@
         "One effect occurs. An exact replay returns the retained response and operation ID. Changed input returns 409 IDEMPOTENCY_CONFLICT. The retained replay works after router restart and expires only after 24 hours."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-083",
       "proof_symbols": [
         "rpc-ac-083"
@@ -1652,6 +1735,7 @@
         "Missing config prevents managed mode; exact configured ID alone qualifies future tool mail; replacement does not reclassify retained rows; unknown recipient creates no message/quiet row."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-084",
       "proof_symbols": [
         "rpc-ac-084"
@@ -1671,6 +1755,7 @@
         "Tmux correlation and ID-reuse behavior stays byte-compatible, duplicate delivery is not consumed incorrectly, repeated subagent lookup returns snapshots without consumption, and managed traffic never alters tmux lease/ACK state."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-085",
       "proof_symbols": [
         "rpc-ac-085"
@@ -1687,9 +1772,10 @@
       "setup": "Desktop settings UI; authenticated model catalogs; next-run capture; DOM route inventory.",
       "action": "Discover/set/clear router default, refresh provider models, launch next agent, and inspect all managed navigation/actions.",
       "predicates": [
-        "Saved available default drives the next omitted-model launch, unavailable default uses only Terra rule, selected state persists/refreshes, and no terminal, console, shell, or alternate auth/model path exists."
+        "Saved available default drives the next omitted-model launch, unavailable default uses only Terra rule, selected state persists/refreshes, and no terminal, console, or alternate auth/model path exists."
       ],
       "owner_phase": "P4-auth-models",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-086",
       "proof_symbols": [
         "rpc-ac-086-provider-auth",
@@ -1712,6 +1798,7 @@
         "Managed Pi uses the installed pinned runtime; router/thin/helper come from this project; the checked fork workspace supplies the package-declared packages/pi-subagents/src/index.ts fixed extension path. No launch/import requires /Users/wolfgang/code/pi, a registry pi-subagents package/version, or a patched Pi core."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-087",
       "proof_symbols": [
         "rpc-ac-087"
@@ -1731,6 +1818,7 @@
         "One persisted timer resumes with remaining delay; no duplicate spawn; invalid config fails before child, startup exit counts once; planned escalated exit never counts as crash; exact five-second stages and errors are recorded."
       ],
       "owner_phase": "P3-supervision",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-088",
       "proof_symbols": [
         "rpc-ac-088"
@@ -1750,6 +1838,7 @@
         "Stale event only records stale history. Matching structured terminal establishes the exact terminal state, clears recovery uncertainty, fixes finish/duration, and never updates another run."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-089",
       "proof_symbols": [
         "rpc-ac-089"
@@ -1769,9 +1858,30 @@
         "The duplicate name rejects without replacement. The spawned child receives the factory snapshot in DefaultResourceLoader before reload/bind and its first provider request includes all 16 managed definitions. Its factory uses only the accepted parent manifest. The disposer excludes later children; owner release clears remaining registrations. No model input or global/file/socket/configuration/private-manager/service-registry/CLI-path backchannel selects or supplies the factory."
       ],
       "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "required",
       "artifact_id": "rpc-ac-090",
       "proof_symbols": [
         "rpc-ac-090"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-091",
+      "setup": "Ready managed agent and a built-in code tool with controllable active, progress, success, failure, and cancellation outcomes.",
+      "action": "Invoke the code tool; observe it while active, then drive each terminal outcome.",
+      "predicates": [
+        "Complete contains one persistent entry and one box for that invocation. The border rotates only while active, then the same box becomes solid and motionless. Progress and terminal updates do not create another Complete entry, consume another complete-history retention slot, or enter Quiet."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "release_evidence_status": "pending",
+      "artifact_id": "rpc-ac-091",
+      "proof_symbols": [
+        "rpc-ac-091"
       ],
       "evidence_class": [
         "actual-go-router",
@@ -1892,7 +2002,8 @@
       "AC-087",
       "AC-088",
       "AC-089",
-      "AC-090"
+      "AC-090",
+      "AC-091"
     ],
     "no_skipped_release_blocking_cases": true
   }

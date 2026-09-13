@@ -644,7 +644,7 @@ async function rerunCurrentCandidateGates(prerequisites, write) {
 
 async function writeCandidateAcceptanceRun(output, candidate, write) {
   const registry = JSON.parse(await readFile(join(REPOSITORY, "tests", "fixtures", "mecha-rpc", "acceptance-evidence-v1.json"), "utf8"));
-  if (registry?.schema !== "mecha.rpc.acceptance-evidence/v1" || !Array.isArray(registry.criteria) || registry.criteria.length !== 90) fail("canonical acceptance registry is unavailable for the candidate release run");
+  if (registry?.schema !== "mecha.rpc.acceptance-evidence/v1" || !Array.isArray(registry.criteria) || registry.criteria.length !== 91 || registry.criteria.some((criterion, index) => criterion?.id !== `AC-${String(index + 1).padStart(3, "0")}`)) fail("canonical AC-001 through AC-091 acceptance registry is unavailable for the candidate release run");
   const artifacts = {
     release_report: join(output, "REPORT.json"),
     provider_auth: join(output, "provider-auth-three-provider-ui.json"),
@@ -680,10 +680,11 @@ async function writeCandidateAcceptanceRun(output, candidate, write) {
     if (number <= 17 || number === 88) return [artifacts.current_go, artifacts.release_report];
     return [artifacts.current_ui_tests, artifacts.current_ui_typecheck, artifacts.current_ui_lint, artifacts.current_ui_build, artifacts.release_report];
   };
+  const pendingCriteria = registry.criteria.filter((criterion) => criterion.release_evidence_status === "pending");
   const run = {
     schema: "mecha.rpc.acceptance-run/v1",
-    result: "passed",
-    status: "passed",
+    result: pendingCriteria.length === 0 ? "passed" : "not_proven",
+    status: pendingCriteria.length === 0 ? "passed" : "not_proven",
     artifact_directory: output,
     candidate: {
       mecha_developer_head: candidate.head,
@@ -694,17 +695,28 @@ async function writeCandidateAcceptanceRun(output, candidate, write) {
       installed_pi_version: "0.85.0",
     },
     source_index: join(output, "acceptance-source-index.json"),
-    evidence: registry.criteria.map((criterion) => ({
-      acceptance_id: criterion.id,
-      artifact_id: criterion.artifact_id,
-      owner_phase: criterion.owner_phase,
-      evidence_class: criterion.evidence_class,
-      observed_predicates: criterion.predicates,
-      status: "passed",
-      proofs: criterion.proof_symbols.map((proof_symbol) => ({ proof_symbol, status: "passed", locations: sourceFor(criterion, proof_symbol) })),
-    })),
+    evidence: registry.criteria.map((criterion) => criterion.release_evidence_status === "pending"
+      ? {
+        acceptance_id: criterion.id,
+        artifact_id: criterion.artifact_id,
+        owner_phase: criterion.owner_phase,
+        evidence_class: criterion.evidence_class,
+        observed_predicates: [],
+        status: "not_proven",
+        proofs: [],
+      }
+      : {
+        acceptance_id: criterion.id,
+        artifact_id: criterion.artifact_id,
+        owner_phase: criterion.owner_phase,
+        evidence_class: criterion.evidence_class,
+        observed_predicates: criterion.predicates,
+        status: "passed",
+        proofs: criterion.proof_symbols.map((proof_symbol) => ({ proof_symbol, status: "passed", locations: sourceFor(criterion, proof_symbol) })),
+      }),
   };
   await write("acceptance-run.json", run);
+  if (pendingCriteria.length > 0) fail(`release acceptance is not proven: ${pendingCriteria.map((criterion) => criterion.id).join(", ")} has no implemented release proof`);
   return join(output, "acceptance-run.json");
 }
 
