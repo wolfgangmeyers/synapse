@@ -274,8 +274,8 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		// not reconnectable, so this router never starts a second target.
 		if action.TargetProcessPID > 0 {
 			identity := ProcessIdentity{PID: action.TargetProcessPID, StartMarker: action.TargetProcessStartMarker, Incarnation: action.TargetProcessIncarnation}
-			if m.processOps.Probe(identity).State == ProcessOwned {
-				_ = m.reapRestartGroup(ctx, identity, nil)
+			if m.processOps.Probe(identity).State == ProcessOwned && !m.reapRestartGroup(ctx, identity, nil) {
+				return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
 			}
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
@@ -305,8 +305,8 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process identity could not be verified")
 	}
 	if err := m.store.InstallManagedRootRecoveryTarget(ctx, action.ActionID, store.ManagedProcessIdentity{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}, action.TargetRuntimeGeneration); err != nil {
-		if m.processOps.Probe(identity).State == ProcessOwned {
-			_ = m.reapRestartGroup(ctx, identity, nil)
+		if !m.cleanupUninstalledTarget(process, identity, nil) {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process target could not be recorded")
 	}
@@ -314,8 +314,8 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation = identity.PID, identity.StartMarker, identity.Incarnation
 	targetFence.RuntimeGeneration = action.TargetRuntimeGeneration
 	if err := m.store.InstallManagedRootRecoveryFence(ctx, old, targetFence); err != nil {
-		if m.processOps.Probe(identity).State == ProcessOwned {
-			_ = m.reapRestartGroup(ctx, identity, nil)
+		if !m.cleanupUninstalledTarget(process, identity, nil) {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process fence could not be installed")
 	}
@@ -323,25 +323,36 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	m.watchRestartProcess(target)
 	targetRPC, err := m.rpcFactory.Open(m.runCtx, process)
 	if err != nil {
-		m.cleanupRecoveredTarget(target, targetFence)
+		if !m.cleanupRecoveredTarget(target, targetFence) {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement RPC could not open")
 	}
 	target.rpc = targetRPC
 	if !m.installBinding(target) {
 		_ = targetRPC.Close()
-		m.cleanupRecoveredTarget(target, targetFence)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement binding could not be installed")
 	}
 	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
 		_ = targetRPC.Close()
-		m.cleanupRecoveredTarget(target, targetFence)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
 		m.clearBinding(target)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
 	}
 	if err := m.store.CompleteManagedRootRecoveryReady(ctx, agent.AgentID, targetFence); err != nil {
 		_ = targetRPC.Close()
-		m.cleanupRecoveredTarget(target, targetFence)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
 		m.clearBinding(target)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness could not be committed")
 	}
 	target.serial.Lock()
@@ -364,14 +375,11 @@ func recoveryEnvironment(stable []string, routerURL, generation string, epoch in
 	return environment
 }
 
-func (m *Manager) cleanupRecoveredTarget(target *managedBinding, fence store.ManagedRuntimeFence) {
+func (m *Manager) cleanupRecoveredTarget(target *managedBinding, fence store.ManagedRuntimeFence) bool {
 	if target == nil || target.process == nil {
-		return
+		return false
 	}
-	if m.processOps.Probe(fenceToIdentity(fence)).State == ProcessOwned {
-		_ = m.processOps.CloseProcessInput(target.process)
-		_ = m.reapRestartGroup(context.Background(), fenceToIdentity(fence), target.waitDone)
-	}
+	return m.cleanupUninstalledTarget(target.process, fenceToIdentity(fence), target.waitDone)
 }
 
 func fenceToIdentity(fence store.ManagedRuntimeFence) ProcessIdentity {
