@@ -124,29 +124,39 @@ func TestHandlerFailureWithUTF8BoundaryCompletesDynamicInlineAllowanceRequest(t 
 
 type nativeInlineAllowanceRPC struct {
 	*rpcClient
-	policyMu sync.Mutex
-	policy   map[string]any
+	policyMu      sync.Mutex
+	policy        map[string]any
+	useNativePipe bool
 }
 
-func (r *nativeInlineAllowanceRPC) ApplyPolicy(_ context.Context, envelope map[string]any) (map[string]any, error) {
+func (r *nativeInlineAllowanceRPC) ApplyPolicy(ctx context.Context, envelope map[string]any) (map[string]any, error) {
 	r.policyMu.Lock()
 	r.policy, _ = envelope["policy"].(map[string]any)
+	nativePipe := r.useNativePipe
 	r.policyMu.Unlock()
+	if nativePipe {
+		return r.rpcClient.ApplyPolicy(ctx, envelope)
+	}
 	return map[string]any{"success": true, "command": "prompt"}, nil
 }
 
-func (r *nativeInlineAllowanceRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
+func (r *nativeInlineAllowanceRPC) WaitForPolicyApplied(ctx context.Context, generation string, epoch int64) (map[string]any, error) {
 	r.policyMu.Lock()
-	defer r.policyMu.Unlock()
-	inline, _ := r.policy["inline"].(map[string]any)
-	recall, _ := r.policy["recall"].(map[string]any)
-	settled, _ := r.policy["settled"].(map[string]any)
-	goalLock, _ := r.policy["goal_lock"].(map[string]any)
-	compaction, _ := r.policy["compaction"].(map[string]any)
-	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{
-		"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"],
-		"settled_enabled": settled["enabled"], "goal_lock_enabled": goalLock["enabled"], "compaction_deferred": compaction["deferred"],
-	}}, nil
+	nativePipe := r.useNativePipe
+	if !nativePipe {
+		defer r.policyMu.Unlock()
+		inline, _ := r.policy["inline"].(map[string]any)
+		recall, _ := r.policy["recall"].(map[string]any)
+		settled, _ := r.policy["settled"].(map[string]any)
+		goalLock, _ := r.policy["goal_lock"].(map[string]any)
+		compaction, _ := r.policy["compaction"].(map[string]any)
+		return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{
+			"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"],
+			"settled_enabled": settled["enabled"], "goal_lock_enabled": goalLock["enabled"], "compaction_deferred": compaction["deferred"],
+		}}, nil
+	}
+	r.policyMu.Unlock()
+	return r.rpcClient.WaitForPolicyApplied(ctx, generation, epoch)
 }
 
 func (r *nativeInlineAllowanceRPC) inlineCredit(toolName string) (int64, bool) {
@@ -260,6 +270,169 @@ func TestNativeInlineAllowanceControlAdmitsOnlyCurrentFencedRequestAndDeliversRe
 	require.NoError(t, err)
 	require.Equal(t, "ok", row.ResultStatus)
 	require.Equal(t, "native-inline-result", row.ReceiptEntryIdentity)
+}
+
+func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing.T) {
+	ctx := context.Background()
+	manager, binding, fence, rpc, requests, stdout := readyNativeInlineAllowanceFixture(t)
+	require.NoError(t, manager.SetManagedInlineTools(ctx, fence.AgentID, true))
+	rpc.policyMu.Lock()
+	rpc.useNativePipe = true
+	rpc.policyMu.Unlock()
+	manager.installBuiltinToolLifecycleReceiver(binding)
+
+	// Keep the direct mailbox turn open. d9 requires its receipt matcher to leave
+	// the following policy receipt for the fenced policy waiter.
+	attempt := directMailboxAttempt("message-a")
+	attempt.Fence = fence
+	events, err := binding.rpc.(DirectMailboxRPC).PromptManagedMailbox(ctx, attempt)
+	require.NoError(t, err)
+	mailboxPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": mailboxPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdout, map[string]any{"type": "message_end", "message": map[string]any{"id": "mailbox-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch}}}))
+	select {
+	case event := <-events:
+		require.NotNil(t, event.Receipt)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for direct mailbox receipt")
+	}
+
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var blockOnce sync.Once
+	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		if entry.Presentation.Kind != "tool" || entry.Presentation.Outcome != "active" {
+			return
+		}
+		blockOnce.Do(func() { close(blocked) })
+		<-release
+	})
+
+	var allowanceTool ManifestTool
+	for _, candidate := range manager.manifest.Tools {
+		if candidate.OperationID == "policy.inline_allowance" {
+			allowanceTool = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, allowanceTool.Name)
+	requestID := "123e4567-e89b-42d3-a456-426614174019"
+	require.NoError(t, writeRPC(stdout, map[string]any{"type": "custom_message", "customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{
+		"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "native-pipe-call", "capability_id": allowanceTool.CapabilityID, "tool_name": allowanceTool.Name,
+		"definition_id": allowanceTool.DefinitionID, "definition_sha256": allowanceTool.DefinitionSHA256, "operation_id": allowanceTool.OperationID, "manifest_sha256": fence.ManifestHash,
+		"runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "context_ref": "root", "arguments": map[string]any{"toolName": "bash", "usageCount": int64(1)},
+	}}))
+	policyPrompt := requireRequest(t, requests)
+
+	toolStartWritten := make(chan error, 1)
+	go func() {
+		toolStartWritten <- writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "bash-call", "toolName": "bash"})
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("builtin lifecycle handler did not enter its blocked persistence path")
+	}
+
+	framesDelivered := make(chan error, 1)
+	go func() {
+		if err := writeRPC(stdout, map[string]any{"id": policyPrompt["id"], "type": "response", "data": map[string]any{}}); err != nil {
+			framesDelivered <- err
+			return
+		}
+		policyReceipt := map[string]any{
+			"type": "message_end",
+			"message": map[string]any{
+				"customType": "mecha.policy.applied.v1",
+				"details": map[string]any{
+					"protocol": "mecha.policy/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch,
+					"applied": map[string]any{
+						"inline_enabled": true, "inline_credits": map[string]any{"bash": int64(1)}, "recall_content": "",
+						"settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
+					},
+				},
+			},
+		}
+		if err := writeRPC(stdout, policyReceipt); err != nil {
+			framesDelivered <- err
+			return
+		}
+		var appendPrompt map[string]any
+		select {
+		case appendPrompt = <-requests:
+			if appendPrompt == nil {
+				framesDelivered <- errors.New("managed root append prompt was unavailable")
+				return
+			}
+		case <-time.After(time.Second):
+			framesDelivered <- errors.New("timed out waiting for managed root append prompt")
+			return
+		}
+		if err := writeRPC(stdout, map[string]any{"id": appendPrompt["id"], "type": "response", "data": map[string]any{}}); err != nil {
+			framesDelivered <- err
+			return
+		}
+		command, commandOK := appendPrompt["message"].(string)
+		encoded := strings.TrimPrefix(command, "/mecha-control-result-v1 ")
+		payloadBytes, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		var payload map[string]any
+		if !commandOK || encoded == command || decodeErr != nil || json.Unmarshal(payloadBytes, &payload) != nil {
+			framesDelivered <- errors.New("managed root append payload was invalid")
+			return
+		}
+		content, contentOK := payload["content"].(string)
+		if !contentOK {
+			framesDelivered <- errors.New("managed root append payload had no content")
+			return
+		}
+		resultDetails := make(map[string]any, len(payload)-1)
+		for key, value := range payload {
+			if key != "content" {
+				resultDetails[key] = value
+			}
+		}
+		rootReceipt := map[string]any{"type": "custom_message", "id": "native-pipe-result", "customType": "mecha.control.result.v1", "display": false, "content": content, "details": resultDetails}
+		if err := writeRPC(stdout, rootReceipt); err != nil {
+			framesDelivered <- err
+			return
+		}
+		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "read-call", "toolName": "read"}); err != nil {
+			framesDelivered <- err
+			return
+		}
+		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_end", "toolCallId": "read-call", "toolName": "read", "isError": false}); err != nil {
+			framesDelivered <- err
+			return
+		}
+		framesDelivered <- writeRPC(stdout, map[string]any{"type": "tool_execution_end", "toolCallId": "bash-call", "toolName": "bash", "isError": false})
+	}()
+
+	select {
+	case err := <-framesDelivered:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("blocked builtin lifecycle work stalled the sole RPC stdout reader")
+	}
+	close(release)
+	require.NoError(t, <-toolStartWritten)
+	require.Eventually(t, func() bool {
+		row, lookupErr := manager.store.ManagedControlRequest(ctx, requestID)
+		return lookupErr == nil && row.State == "delivered" && row.ReceiptEntryIdentity == "native-pipe-result"
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		page, historyErr := manager.store.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+		if historyErr != nil {
+			return false
+		}
+		completed := map[string]bool{}
+		for _, entry := range page.Entries {
+			if entry.Presentation != nil && entry.Presentation.Outcome == "success" {
+				completed[entry.Presentation.ToolName] = true
+			}
+		}
+		return completed["read"] && completed["bash"]
+	}, time.Second, time.Millisecond)
 }
 
 func TestManagedInlineAllowanceProjectsRequestedCreditBeforeSuccess(t *testing.T) {

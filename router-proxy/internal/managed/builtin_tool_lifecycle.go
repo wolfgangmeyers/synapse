@@ -16,6 +16,11 @@ type builtinToolOrphanEnd struct {
 	received time.Time
 }
 
+type builtinToolLifecycleQueueItem struct {
+	event     BuiltinToolLifecycleEvent
+	reconcile bool
+}
+
 // installBuiltinToolLifecycleReceiver starts only after readiness has made the
 // binding current. Pi's stdout is the native ordered source; no extension
 // custom message is involved in active or terminal Complete state.
@@ -28,13 +33,114 @@ func (m *Manager) installBuiltinToolLifecycleReceiver(binding *managedBinding) {
 		return
 	}
 	rpc.SetBuiltinToolLifecycleEventHandler(func(event BuiltinToolLifecycleEvent) {
-		m.handleBuiltinToolLifecycleEvent(binding, event)
+		m.enqueueBuiltinToolLifecycle(binding, event)
 	})
 	if terminalRPC, ok := binding.rpc.(RPCReaderTerminalRPC); ok {
 		terminalRPC.SetRPCReaderTerminalHandler(func(err error) {
 			m.handleBuiltinToolLifecycleReaderTerminal(binding, err)
 		})
 	}
+}
+
+// enqueueBuiltinToolLifecycle keeps Pi's one stdout reader out of durable
+// lifecycle work. Each binding has one ordered worker, so start/end order stays
+// native while a SQLite, history, or goal-activity delay cannot stall controls.
+func (m *Manager) enqueueBuiltinToolLifecycle(binding *managedBinding, event BuiltinToolLifecycleEvent) {
+	m.enqueueBuiltinToolLifecycleItem(binding, builtinToolLifecycleQueueItem{event: event})
+}
+
+// enqueueBuiltinToolLifecycleReconciliation adds the loss boundary to the same
+// FIFO as source telemetry. A start immediately before EOF or parent settlement
+// must be recorded before the loss boundary interrupts it.
+func (m *Manager) enqueueBuiltinToolLifecycleReconciliation(binding *managedBinding) {
+	m.enqueueBuiltinToolLifecycleItem(binding, builtinToolLifecycleQueueItem{reconcile: true})
+}
+
+func (m *Manager) enqueueBuiltinToolLifecycleItem(binding *managedBinding, item builtinToolLifecycleQueueItem) {
+	if binding == nil {
+		return
+	}
+	binding.builtinToolQueueSerial.Lock()
+	if binding.builtinToolQueueStopped || binding.builtinToolOverflowed {
+		binding.builtinToolQueueSerial.Unlock()
+		return
+	}
+	if len(binding.builtinToolQueue) < maxQueuedManagedBuiltinToolLifecycle {
+		binding.builtinToolQueue = append(binding.builtinToolQueue, item)
+	} else {
+		// A dropped lifecycle frame cannot safely be inferred. Interrupt the exact
+		// fence, discard the uncertain tail, and accept a later fresh start.
+		binding.builtinToolQueue = nil
+		binding.builtinToolOverflowed = true
+	}
+	startDrain := !binding.builtinToolDraining
+	if startDrain {
+		binding.builtinToolDraining = true
+	}
+	binding.builtinToolQueueSerial.Unlock()
+	if !startDrain {
+		return
+	}
+	if m.startManagedTask(func() { m.drainBuiltinToolLifecycle(binding) }) {
+		return
+	}
+	binding.builtinToolQueueSerial.Lock()
+	binding.builtinToolQueue = nil
+	binding.builtinToolOverflowed = false
+	binding.builtinToolDraining = false
+	binding.builtinToolQueueStopped = true
+	binding.builtinToolQueueSerial.Unlock()
+}
+
+func (m *Manager) drainBuiltinToolLifecycle(binding *managedBinding) {
+	for {
+		binding.builtinToolQueueSerial.Lock()
+		if binding.builtinToolQueueStopped {
+			binding.builtinToolQueue = nil
+			binding.builtinToolOverflowed = false
+			binding.builtinToolDraining = false
+			binding.builtinToolQueueSerial.Unlock()
+			return
+		}
+		if binding.builtinToolOverflowed {
+			binding.builtinToolQueue = nil
+			binding.builtinToolOverflowed = false
+			binding.builtinToolQueueSerial.Unlock()
+			binding.serial.Lock()
+			fence := bindingFence(binding.agentID, binding)
+			binding.serial.Unlock()
+			m.interruptBuiltinToolInvocations(binding, fence)
+			continue
+		}
+		if len(binding.builtinToolQueue) == 0 {
+			binding.builtinToolDraining = false
+			binding.builtinToolQueueSerial.Unlock()
+			return
+		}
+		item := binding.builtinToolQueue[0]
+		binding.builtinToolQueue[0] = builtinToolLifecycleQueueItem{}
+		binding.builtinToolQueue = binding.builtinToolQueue[1:]
+		binding.builtinToolQueueSerial.Unlock()
+		if item.reconcile {
+			m.reconcileBuiltinToolTelemetryMissingInQueue(binding)
+			continue
+		}
+		m.handleBuiltinToolLifecycleEvent(binding, item.event)
+	}
+}
+
+// stopBuiltinToolLifecycleQueue drops only undurable buffered telemetry during
+// shutdown. The admitted drain worker exits after its current callback, and
+// Manager.Close waits for it through startWG before returning.
+func (m *Manager) stopBuiltinToolLifecycleQueue(binding *managedBinding) {
+	if binding == nil {
+		return
+	}
+	binding.builtinToolQueueSerial.Lock()
+	binding.builtinToolQueueStopped = true
+	binding.builtinToolQueue = nil
+	binding.builtinToolOverflowed = false
+	binding.builtinToolQueueSerial.Unlock()
 }
 
 func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event BuiltinToolLifecycleEvent) {
@@ -97,21 +203,19 @@ func (m *Manager) handleBuiltinToolLifecycleReaderTerminal(binding *managedBindi
 	if binding == nil || err == nil {
 		return
 	}
-	binding.serial.Lock()
-	fence := bindingFence(binding.agentID, binding)
-	binding.serial.Unlock()
-	m.startManagedTask(func() {
-		binding.lane.serial.Lock()
-		defer binding.lane.serial.Unlock()
-		m.interruptBuiltinToolInvocations(binding, fence)
-	})
+	m.enqueueBuiltinToolLifecycleReconciliation(binding)
 }
 
-// reconcileBuiltinToolTelemetryMissing runs synchronously on the native
-// stdout intake path. A settled parent turn does not prove a builtin success;
-// it only proves the tool stream can no longer provide its terminal event.
+// reconcileBuiltinToolTelemetryMissing preserves native stdout order by placing
+// parent settlement behind every earlier lifecycle event. A settled parent turn
+// does not prove a builtin success; it only proves the tool stream can no
+// longer provide its terminal event.
 func (m *Manager) reconcileBuiltinToolTelemetryMissing(binding *managedBinding) {
-	if binding == nil {
+	m.enqueueBuiltinToolLifecycleReconciliation(binding)
+}
+
+func (m *Manager) reconcileBuiltinToolTelemetryMissingInQueue(binding *managedBinding) {
+	if binding == nil || binding.lane == nil {
 		return
 	}
 	binding.lane.serial.Lock()
