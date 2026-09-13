@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
@@ -17,14 +17,40 @@ describe("ManagedAgentDialog", () => {
     const onLaunch = vi.fn(async () => undefined);
     const onListDirectories = vi.fn(async (path: string) => path === "/allowed" ? ({ path, parent: "", directories: [{ name: "project", path: "/allowed/project" }] }) : ({ path, parent: "/allowed", directories: [] }));
     render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={onListDirectories} />);
-    await user.type(screen.getByLabelText("Name"), "managed-alpha");
+    await user.type(screen.getByLabelText("Name"), "  My Agent  ");
     await user.type(screen.getByLabelText("Working folder"), "/allowed");
     await user.click(screen.getByRole("button", { name: "Browse folders" }));
     const folderBrowser = await screen.findByRole("dialog", { name: "Choose working folder" });
     await user.click(within(folderBrowser).getByRole("button", { name: "project" }));
     await user.click(within(folderBrowser).getByRole("button", { name: "Select folder" }));
     await user.click(screen.getByRole("button", { name: "Launch" }));
-    expect(onLaunch).toHaveBeenCalledWith({ name: "managed-alpha", cwd: "/allowed/project" });
+    expect(onLaunch).toHaveBeenCalledWith({ name: "My-Agent", cwd: "/allowed/project" });
+  });
+
+  it.each([
+    ["MY AGENT", "MY-AGENT"],
+    ["my-AGENT", "my-AGENT"],
+    ["My\t  Agent", "My-Agent"],
+  ])("normalizes %j only when submitting", async (typedName, submittedName) => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
+    const nameInput = screen.getByLabelText("Name");
+    fireEvent.change(nameInput, { target: { value: typedName } });
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed" } });
+    expect(nameInput).toHaveValue(typedName);
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({ name: submittedName, cwd: "/allowed" });
+  });
+
+  it.each(["My/Agent", "-My Agent", "My Agent-"])("preserves invalid candidate %j for server validation", async (typedName) => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: typedName } });
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed" } });
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({ name: typedName.replaceAll(" ", "-"), cwd: "/allowed" });
   });
 
   it("uses the searchable model picker and only submits available models", async () => {

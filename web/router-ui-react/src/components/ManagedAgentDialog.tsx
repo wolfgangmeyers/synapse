@@ -5,6 +5,8 @@ import { DialogShell } from "./DialogShell";
 import { ManagedDirectoryPicker } from "./ManagedDirectoryPicker";
 import { ModelPicker } from "./ModelPicker";
 
+export function normalizeManagedAgentName(name: string): string { return name.trim().replace(/\s+/g, "-"); }
+
 export interface ManagedAgentDialogProps {
   open: boolean;
   agent?: ManagedAgent;
@@ -37,7 +39,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
   }, [agent, onModels, open]);
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    void onLaunch({ name: name.trim(), cwd: cwd.trim(), ...(selectedModel ? { model: { provider: selectedModel.provider, id: selectedModel.id } } : {}), ...(instruction.trim() ? { initial_instruction: instruction } : {}) });
+    void onLaunch({ name: normalizeManagedAgentName(name), cwd: cwd.trim(), ...(selectedModel ? { model: { provider: selectedModel.provider, id: selectedModel.id } } : {}), ...(instruction.trim() ? { initial_instruction: instruction } : {}) });
   };
   const availableModels = (catalog?.models ?? []).filter((model) => model.available);
   return <DialogShell open={open} title={agent ? `Manage ${agent.agent_id}` : "Launch managed agent"} titleId="managed-agent-dialog-title" description="Router-managed agents run locally through the router." onClose={onClose} closeLabel="Close managed agent dialog" className="message-dialog managed-agent-dialog">
