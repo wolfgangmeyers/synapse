@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
@@ -205,7 +206,7 @@ func (p *execProcess) Wait() error {
 		if p.stderrTail != nil {
 			<-p.stderrTail.done
 			if p.waitErr != nil {
-				p.waitErr = managedProcessExitError{cause: p.waitErr, detail: p.stderrTail.summary()}
+				p.waitErr = &managedProcessExitError{cause: p.waitErr, detail: p.stderrTail.summary()}
 			}
 		}
 		_ = p.stderr.Close()
@@ -397,14 +398,50 @@ type managedProcessExitError struct {
 	detail string
 }
 
-func (err managedProcessExitError) Error() string {
+func (err *managedProcessExitError) Error() string {
+	if err == nil || err.cause == nil {
+		return "managed Pi exited"
+	}
 	if err.detail == "" {
 		return err.cause.Error()
 	}
 	return err.cause.Error() + ": " + err.detail
 }
 
-func (err managedProcessExitError) Unwrap() error { return err.cause }
+func (err *managedProcessExitError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+
+// ManagedProcessExitDiagnostic turns a confirmed child exit into the one
+// bounded failure message that may be stored and projected. It deliberately
+// describes only the OS outcome and the already-redacted stderr tail.
+func ManagedProcessExitDiagnostic(err error) string {
+	outcome := "managed Pi exited before readiness"
+	if err == nil {
+		outcome = "managed Pi exited with code 0"
+	} else {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				outcome = fmt.Sprintf("managed Pi exited after signal %s", status.Signal())
+			} else if code := exitErr.ExitCode(); code >= 0 {
+				outcome = fmt.Sprintf("managed Pi exited with code %d", code)
+			}
+		}
+	}
+	var processErr *managedProcessExitError
+	if !errors.As(err, &processErr) || processErr.detail == "" {
+		return outcome
+	}
+	detail := RedactedStderr(processErr.detail)
+	if detail == "" {
+		return outcome
+	}
+	return outcome + ": " + detail
+}
 
 func processStartMarker(pid int) (string, error) {
 	if pid <= 0 {
@@ -458,6 +495,10 @@ func RedactedStderr(value string) string {
 			}
 			continue
 		}
+		if managedDiagnosticPath(field) {
+			fields[index] = "[REDACTED]"
+			continue
+		}
 		if question := strings.IndexByte(field, '?'); question >= 0 {
 			fields[index] = field[:question] + "?[REDACTED]"
 		}
@@ -468,4 +509,15 @@ func RedactedStderr(value string) string {
 	}
 	return result
 }
+func managedDiagnosticPath(field string) bool {
+	lower := strings.ToLower(field)
+	if strings.HasPrefix(field, "/") || strings.HasPrefix(field, "~/") || strings.HasPrefix(lower, "file:") {
+		return true
+	}
+	if separator := strings.IndexAny(field, "=:"); separator >= 0 {
+		return strings.HasPrefix(field[separator+1:], "/") || strings.HasPrefix(field[separator+1:], "~/")
+	}
+	return false
+}
+
 func ValidateCwd(cwd string) (string, error) { return filepath.Abs(cwd) }

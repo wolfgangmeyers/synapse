@@ -101,9 +101,27 @@ func TestManagedStderrTailRetainsAUsefulRedactedExitReason(t *testing.T) {
 	require.Contains(t, summary, "last useful detail")
 	require.NotContains(t, summary, "do-not-retain")
 	require.Contains(t, summary, "[REDACTED]")
-	err := managedProcessExitError{cause: errors.New("exit status 1"), detail: summary}
+	err := &managedProcessExitError{cause: errors.New("exit status 1"), detail: summary}
 	require.Contains(t, err.Error(), "exit status 1")
 	require.Contains(t, err.Error(), "last useful detail")
+}
+
+func TestManagedProcessExitDiagnosticKeepsOnlySafeExitAndStderrDetails(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "exit 17")
+	exitErr := command.Run()
+	require.Error(t, exitErr)
+
+	diagnostic := ManagedProcessExitDiagnostic(&managedProcessExitError{cause: exitErr, detail: "fatal token=do-not-retain /private/router/session.json cwd=/tmp/managed"})
+	require.Contains(t, diagnostic, "code 17")
+	require.Contains(t, diagnostic, "fatal")
+	for _, forbidden := range []string{"do-not-retain", "/private/router/session.json", "/tmp/managed"} {
+		require.NotContains(t, diagnostic, forbidden)
+	}
+	require.Contains(t, diagnostic, "[REDACTED]")
+	signalCommand := exec.Command("/bin/sh", "-c", "kill -TERM $$")
+	signalErr := signalCommand.Run()
+	require.Error(t, signalErr)
+	require.Contains(t, ManagedProcessExitDiagnostic(&managedProcessExitError{cause: signalErr}), "signal terminated")
 }
 
 func TestProcessFactoryRejectsAnUnspecifiedSessionLaunchMode(t *testing.T) {

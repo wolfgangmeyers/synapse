@@ -1264,6 +1264,43 @@ func (s *Store) PendingManagedLaunches(ctx context.Context) ([]*ManagedAgentReco
 	return result, nil
 }
 
+// RecordManagedPreReadinessProcessExit atomically records a confirmed launch
+// child exit. The complete runtime fence and pending launch operation prevent a
+// stale waiter from failing a later binding or rewriting its immutable 202.
+func (s *Store) RecordManagedPreReadinessProcessExit(ctx context.Context, fence ManagedRuntimeFence, operationID, message string) error {
+	if !validManagedRuntimeFence(fence) || operationID == "" {
+		return errors.New("managed pre-readiness process exit is invalid")
+	}
+	message = RedactedManagedDiagnostic(message)
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='failed',accepting_prompts=0,slot_held=0,last_error_code='PROCESS_EXITED',last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='starting' AND activity_state='starting' AND accepting_prompts=0 AND slot_held=1 AND launch_operation_id=?`, append([]any{message, now, now}, append(managedFenceValues(fence), operationID)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='PROCESS_EXITED',terminal_message=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), message, operationID)
+		if err != nil {
+			return err
+		}
+		changed, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
 func (s *Store) TerminalizeRecoveredManagedLaunch(ctx context.Context, agentID, operationID, code, message string) error {
 	if (code != "LAUNCH_RECOVERY_CANCELLED" && code != "LAUNCH_RECOVERY_IDENTITY_UNSAFE") || message == "" {
 		return errors.New("managed launch recovery outcome is invalid")

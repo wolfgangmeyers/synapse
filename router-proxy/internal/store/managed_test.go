@@ -141,6 +141,42 @@ func TestFailedManagedRowsRemainDurableWhileTheirSlotIsReleased(t *testing.T) {
 	require.ErrorAs(t, durable.ReserveManagedLaunch(ctx, conflict, conflictOp), &nameConflict)
 }
 
+func TestRecordManagedPreReadinessProcessExitUsesExactFenceAndKeepsLaunchReceipt(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	launch, err := durable.ManagedOperation(ctx, "source-launch")
+	require.NoError(t, err)
+	immutableReceipt := append([]byte(nil), launch.ResponseBody...)
+
+	stale := fence
+	stale.ProcessIncarnation = "replaced"
+	require.ErrorAs(t, durable.RecordManagedPreReadinessProcessExit(ctx, stale, launch.OperationID, "managed Pi exited with code 17: token=do-not-retain /private/router"), new(*ManagedRestartStaleError))
+	afterStale, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, afterStale)
+
+	require.NoError(t, durable.RecordManagedPreReadinessProcessExit(ctx, fence, launch.OperationID, "managed Pi exited with code 17: token=do-not-retain /private/router"))
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", agent.LifecycleState)
+	require.Equal(t, "failed", agent.ActivityState)
+	require.False(t, agent.AcceptingPrompts)
+	require.False(t, agent.SlotHeld)
+	require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "code 17")
+	require.NotContains(t, agent.LastErrorMessage, "do-not-retain")
+	require.NotContains(t, agent.LastErrorMessage, "/private/router")
+	operation, err := durable.ManagedOperation(ctx, launch.OperationID)
+	require.NoError(t, err)
+	require.Equal(t, "terminal", operation.State)
+	require.Equal(t, immutableReceipt, operation.ResponseBody)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before+1, after)
+}
+
 func TestMarkManagedStoppedClearsLiveProjectionAndSlot(t *testing.T) {
 	ctx := context.Background()
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
