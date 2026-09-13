@@ -132,6 +132,40 @@ test("child delta delivery retries in order and bounds overflow into a recoverab
   assert.equal(overflow.length, MAX_BUFFERED_CHILD_DELTAS, "overflow replaces queued newest input and leaves one recovery gap");
 });
 
+test("clearing an old in-flight child delivery restarts draining for the replacement owner", async () => {
+  const firstStarted = Promise.withResolvers<void>();
+  const releaseFirst = Promise.withResolvers<void>();
+  const replacementDelivered = Promise.withResolvers<void>();
+  let currentOwner = "old-owner";
+  const delivered: number[] = [];
+  const buffer = new BoundedChildDeltaBuffer(
+    async (wire) => {
+      const sequence = wire.sequence;
+      if (typeof sequence !== "number") throw new Error("test sequence is invalid");
+      delivered.push(sequence);
+      if (sequence === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      }
+      if (sequence === 2) replacementDelivered.resolve();
+    },
+    (ownerSessionID) => ownerSessionID === currentOwner,
+  );
+
+  buffer.enqueue("old-owner", { sequence: 1 });
+  await firstStarted.promise;
+  currentOwner = "replacement-owner";
+  buffer.clear();
+  buffer.enqueue("replacement-owner", { sequence: 2 });
+  releaseFirst.resolve();
+
+  await Promise.race([
+    replacementDelivered.promise,
+    new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("replacement delta was stranded")), 100)),
+  ]);
+  assert.deepEqual(delivered, [1, 2]);
+});
+
 test("the extension preflights all 16 command names and registers no Mailbox bridge", () => {
   const current = fixture();
   assert.deepEqual([...current.commands.keys()], [

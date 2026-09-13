@@ -386,7 +386,9 @@ func (c *rpcClient) readLoop() {
 				}
 				c.mu.Unlock()
 				if childDeltaCallback != nil {
-					go childDeltaCallback(childDelta)
+					// Child receipt admission is a bounded in-memory FIFO. Keep it on
+					// this one stdout reader so later frames cannot win a mutex race.
+					childDeltaCallback(childDelta)
 				}
 				continue
 			}

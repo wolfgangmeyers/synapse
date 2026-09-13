@@ -955,6 +955,55 @@ func TestRPCClientDeliversParentActivityWithoutBlockingDirectSettlement(t *testi
 	}, time.Second, time.Millisecond)
 }
 
+func TestRPCClientDeliversChildDeltasInStdoutOrder(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	client.SetChildDeltaEventHandler(func(delta map[string]any) {
+		sequence := delta["sequence"].(int64)
+		if sequence == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return
+		}
+		close(secondStarted)
+	})
+	delta := func(sequence int64) map[string]any {
+		return map[string]any{"protocol": "mecha.children/v1", "owner_session_id": "owner", "sequence": sequence, "task_id": "task", "run_id": "run", "parent_entry_id": "entry", "changes": map[string]any{"lifecycle_state": "running"}}
+	}
+	writeDelta := func(sequence int64) error {
+		return writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.child.delta.v1", "content": "Managed child lifecycle updated.", "display": false, "details": delta(sequence)}})
+	}
+	require.NoError(t, writeDelta(1))
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first child delta")
+	}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- writeDelta(2) }()
+	select {
+	case <-secondStarted:
+		t.Fatal("later child delta overtook the first callback")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseFirst)
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out writing second child delta")
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second child delta")
+	}
+}
+
 func TestRPCClientDeliversOnlyValidChildDeltasOutsideReadinessBacklog(t *testing.T) {
 	stdoutReader, stdoutWriter := io.Pipe()
 	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
