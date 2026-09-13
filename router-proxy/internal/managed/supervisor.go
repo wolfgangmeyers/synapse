@@ -2135,8 +2135,12 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		// keep this lane with the turn until Pi settles so a second direct command
 		// cannot overtake the first response.
 		receiptCtx, cancelReceipt := context.WithTimeout(m.runCtx, 30*time.Second)
+		// Keep the context ownership local to this turn. Explicit early cancels
+		// below stop Pi promptly; the defers cover every retry/startup exit.
+		defer cancelReceipt()
 		receiptDone := receiptCtx.Done()
 		turnCtx, cancelTurn := context.WithCancel(m.runCtx)
+		defer cancelTurn()
 		events, err := rpc.PromptManagedMailbox(turnCtx, *attempt)
 		if err != nil {
 			cancelTurn()

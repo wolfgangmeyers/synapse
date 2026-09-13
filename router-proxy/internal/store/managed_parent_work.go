@@ -11,7 +11,11 @@ import (
 	"unicode/utf8"
 )
 
-const managedFinalDeliveryMaxAttempts = 5
+const (
+	managedFinalDeliveryMaxAttempts    = 5
+	managedParentWorkTerminalPerAgent  = 200
+	managedParentWorkTerminalRetention = 30 * 24 * time.Hour
+)
 
 // ManagedFinalDelivery is the durable source-backed reply passed to the
 // existing conversation publisher. The publisher's successful return is the
@@ -140,9 +144,23 @@ func (s *Store) RecoverManagedFinalDeliveries(ctx context.Context, fence Managed
 			return nil
 		}
 		now := formatTimestamp(s.clock.Now())
+		// A crashed fifth publisher attempt has already consumed the retry budget.
+		// Terminalize it here instead of making it pending-but-unclaimable forever.
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_final_deliveries SET state='failed',failure_code='reply_recovery_attempts_exhausted',next_attempt_at=NULL,terminal_at=?
+			WHERE state='delivering' AND attempt_count>=? AND work_id IN (SELECT work_id FROM managed_parent_work WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=? AND state='final_delivery_pending')`, append([]any{now, managedFinalDeliveryMaxAttempts}, managedParentFenceArgs(fence)...)...); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='final_delivery_failed',terminal_at=? WHERE work_id IN (
+			SELECT work_id FROM managed_parent_work WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=? AND state='final_delivery_pending'
+		) AND NOT EXISTS (SELECT 1 FROM managed_parent_final_deliveries d WHERE d.work_id=managed_parent_work.work_id AND d.state IN ('pending','delivering'))`, append([]any{now}, managedParentFenceArgs(fence)...)...); err != nil {
+			return err
+		}
 		_, err := s.db.ExecContext(ctx, `UPDATE managed_parent_final_deliveries SET state='pending',next_attempt_at=?
-			WHERE state='delivering' AND work_id IN (SELECT work_id FROM managed_parent_work WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=? AND state='final_delivery_pending')`, append([]any{now}, managedParentFenceArgs(fence)...)...)
-		return err
+			WHERE state='delivering' AND attempt_count<? AND work_id IN (SELECT work_id FROM managed_parent_work WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=? AND state='final_delivery_pending')`, append([]any{now, managedFinalDeliveryMaxAttempts}, managedParentFenceArgs(fence)...)...)
+		if err != nil {
+			return err
+		}
+		return s.recomputeManagedParentActivityTx(ctx, fence)
 	})
 }
 
@@ -192,7 +210,9 @@ func (s *Store) FailManagedFinalDelivery(ctx context.Context, delivery ManagedFi
 			return err
 		}
 		if terminal {
-			if _, err = s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='final_delivery_failed',terminal_at=? WHERE work_id=? AND state='final_delivery_pending'`, terminalAt, delivery.WorkID); err != nil {
+			// One work row can retain more than one source observation. Do not let
+			// one exhausted publisher hide a different final that is still due.
+			if _, err = s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='final_delivery_failed',terminal_at=? WHERE work_id=? AND state='final_delivery_pending' AND NOT EXISTS (SELECT 1 FROM managed_parent_final_deliveries WHERE work_id=? AND state IN ('pending','delivering'))`, terminalAt, delivery.WorkID, delivery.WorkID); err != nil {
 				return err
 			}
 		}
@@ -377,7 +397,22 @@ func (s *Store) NextManagedFinalDeliveryRetry(ctx context.Context, agentID strin
 	value, err := time.Parse("2006-01-02T15:04:05.000Z", due)
 	return value, err == nil, err
 }
-func (s *Store) pruneManagedParentWorkTx(ctx context.Context, _ string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM managed_parent_work WHERE state IN ('settled','completed','final_delivery_failed','interrupted') AND rowid NOT IN (SELECT rowid FROM managed_parent_work ORDER BY CASE WHEN state IN ('settled','completed','final_delivery_failed','interrupted') THEN 0 ELSE 1 END, terminal_at DESC, rowid DESC LIMIT ?)`, maxManagedHistoryEntries)
+func (s *Store) pruneManagedParentWorkTx(ctx context.Context, now string) error {
+	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", now)
+	if err != nil {
+		return err
+	}
+	terminal := `state IN ('settled','completed','final_delivery_failed','interrupted')`
+	if _, err = s.db.ExecContext(ctx, `DELETE FROM managed_parent_work WHERE `+terminal+` AND terminal_at IS NOT NULL AND terminal_at<=?`, formatTimestamp(parsed.Add(-managedParentWorkTerminalRetention))); err != nil {
+		return err
+	}
+	// Keep a bounded terminal archive per agent. Deleting the parent cascades
+	// its redacted final-delivery rows, while live work remains outside retention.
+	_, err = s.db.ExecContext(ctx, `DELETE FROM managed_parent_work WHERE work_id IN (
+		SELECT work_id FROM (
+			SELECT work_id,ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY terminal_at DESC,work_id DESC) AS ordinal
+			FROM managed_parent_work WHERE `+terminal+`
+		) WHERE ordinal>?
+	)`, managedParentWorkTerminalPerAgent)
 	return err
 }

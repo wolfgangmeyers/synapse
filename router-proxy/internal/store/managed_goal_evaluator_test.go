@@ -129,6 +129,27 @@ func TestManagedGoalCompletionAndDisableStopFurtherEvaluation(t *testing.T) {
 	require.Empty(t, policy.LastOutcome)
 }
 
+func TestGoalCompletionDoesNotCloseDirectParentWork(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, _ := readyManagedGoalEvaluatorFixture(t)
+	_, claimed, err := durable.ClaimManagedGoalEvaluation(ctx, fence, 10)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	attempt := parentWorkAttempt(fence, "goal-completion-direct-work")
+	openParentWorkForTest(t, durable, attempt)
+	_, err = durable.RecomputeManagedParentActivity(ctx, fence)
+	require.NoError(t, err)
+	policy, changed, err := durable.CompleteManagedGoalEvaluation(ctx, fence, 10, ManagedGoalEvaluationCompleted)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "done", policy.EvaluatorState)
+	require.Equal(t, "pending_turn", parentWorkState(t, durable, attempt))
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+}
+
 func TestManagedGoalEvaluationWaitsForChildrenAndCompaction(t *testing.T) {
 	ctx := context.Background()
 	durable, fence, _ := readyManagedGoalEvaluatorFixture(t)
