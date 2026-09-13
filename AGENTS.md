@@ -120,7 +120,7 @@ For any production-code implementation or change, the canonical `dev-loop` workf
 
 ## Automated testing policy
 
-Prioritize deterministic behavioral tests that join as many system-owned components and boundaries as practical. Automated tests must not use LLMs or external services; they must prove the software's behavior and satisfy and map every applicable requirement. Isolated unit tests are supporting evidence, not sufficient when an owned cross-component path can be exercised.
+Prioritize behavioral functional tests that put as many system-owned components and boundaries together as practical, with dependencies mocked as necessary, and prove the software works. Automated tests must not call LLMs or external services; replace those dependencies with deterministic mocks at the external boundary. Tests must satisfy and map every applicable requirement. Isolated unit tests are supporting evidence, not sufficient when an owned cross-component path can be exercised.
 
 ## TypeScript Type Safety
 
