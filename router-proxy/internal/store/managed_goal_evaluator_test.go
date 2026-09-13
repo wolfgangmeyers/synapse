@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -254,7 +255,7 @@ func TestManagedGoalClaimAndRearmAreAtomic(t *testing.T) {
 		go func() {
 			defer rearmWG.Done()
 			<-startRearms
-			_, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, fence)
+			_, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, fence, ManagedGoalActivity{Kind: "tool", ID: fmt.Sprintf("concurrent-%d", worker)})
 			require.NoError(t, err)
 			if rearmed {
 				resultsMu.Lock()
@@ -311,12 +312,12 @@ func TestManagedGoalSnoozeAndRearmAreDurable(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, claimed, "the NOT_DONE bound must survive a scheduled wake attempt")
 	for index := 0; index < 2; index++ {
-		policy, rearmed, activityErr := durable.RecordManagedGoalMeaningfulActivity(ctx, fence)
+		policy, rearmed, activityErr := durable.RecordManagedGoalMeaningfulActivity(ctx, fence, ManagedGoalActivity{Kind: "tool", ID: fmt.Sprintf("durable-%d", index)})
 		require.NoError(t, activityErr)
 		require.False(t, rearmed)
 		require.Equal(t, "scheduled", policy.EvaluatorState)
 	}
-	policy, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, fence)
+	policy, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, fence, ManagedGoalActivity{Kind: "tool", ID: "durable-final"})
 	require.NoError(t, err)
 	require.True(t, rearmed)
 	require.EqualValues(t, 0, policy.NotDoneWakeups)
@@ -325,4 +326,71 @@ func TestManagedGoalSnoozeAndRearmAreDurable(t *testing.T) {
 	_, claimed, err = durable.ClaimManagedGoalEvaluation(ctx, fence, 1_011)
 	require.NoError(t, err)
 	require.True(t, claimed, "a meaningful-activity rearm must also reopen the bounded evaluator budget")
+}
+
+func TestManagedGoalActivityDedupesPersistedIDsUnderTheFullFence(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, _ := readyManagedGoalEvaluatorFixture(t)
+	require.NoError(t, durable.db.QueryRow(`UPDATE managed_agent_policies SET evaluator_state='scheduled',not_done_wakeups=1000,rearm_activity_count=0 WHERE agent_id=? RETURNING 1`, fence.AgentID).Scan(new(int)))
+
+	activity := ManagedGoalActivity{Kind: "child", ID: "task:run:entry"}
+	for attempt := 0; attempt < 3; attempt++ {
+		policy, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, fence, activity)
+		require.NoError(t, err)
+		require.False(t, rearmed)
+		if attempt == 0 {
+			require.NotNil(t, policy)
+			require.EqualValues(t, 1, policy.RearmActivityCount)
+		} else {
+			require.Nil(t, policy)
+		}
+	}
+	stale := fence
+	stale.ProcessIncarnation = "stale-incarnation"
+	policy, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, stale, ManagedGoalActivity{Kind: "tool", ID: "stale-tool"})
+	require.NoError(t, err)
+	require.False(t, rearmed)
+	require.Nil(t, policy)
+
+	policy, rearmed, err = durable.RecordManagedGoalMeaningfulActivity(ctx, fence, ManagedGoalActivity{Kind: "tool", ID: "request-a"})
+	require.NoError(t, err)
+	require.False(t, rearmed)
+	require.EqualValues(t, 2, policy.RearmActivityCount)
+	policy, rearmed, err = durable.RecordManagedGoalMeaningfulActivity(ctx, fence, ManagedGoalActivity{Kind: "builtin", ID: "entry-a"})
+	require.NoError(t, err)
+	require.True(t, rearmed)
+	require.Equal(t, "idle", policy.EvaluatorState)
+
+	var rows int
+	require.NoError(t, durable.db.QueryRow(`SELECT COUNT(*) FROM managed_goal_activity WHERE agent_id=?`, fence.AgentID).Scan(&rows))
+	require.Equal(t, 3, rows)
+}
+
+func TestManagedGoalSnoozeFenceRecoveryClearsStaleTimerState(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, clock := readyManagedGoalEvaluatorFixture(t)
+	policy, snoozed, err := durable.SnoozeManagedGoalPolicy(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, snoozed)
+	require.True(t, ManagedGoalSnoozeFenceMatches(policy, fence))
+
+	replacement := fence
+	replacement.ProcessPID++
+	replacement.ProcessIncarnation = "replacement-incarnation"
+	replacement.RuntimeGeneration = "replacement-generation"
+	require.NoError(t, durable.db.QueryRow(`UPDATE managed_agents SET process_pid=?,process_incarnation=?,runtime_generation=? WHERE agent_id=? RETURNING 1`, replacement.ProcessPID, replacement.ProcessIncarnation, replacement.RuntimeGeneration, fence.AgentID).Scan(new(int)))
+	changed, err := durable.RecoverManagedGoalEvaluationForFence(ctx, replacement)
+	require.NoError(t, err)
+	require.True(t, changed)
+	policy, err = durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", policy.EvaluatorState)
+	require.Empty(t, policy.SnoozedUntil)
+	require.Empty(t, policy.WakeupMessageID)
+
+	require.NoError(t, clock.Advance(time.Hour))
+	policy, woke, err := durable.WakeSnoozedManagedGoalPolicy(ctx, fence)
+	require.NoError(t, err)
+	require.False(t, woke)
+	require.Nil(t, policy)
 }

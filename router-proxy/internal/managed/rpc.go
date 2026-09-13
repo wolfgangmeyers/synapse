@@ -133,6 +133,15 @@ type ParentActivityRPC interface {
 	SetParentActivityEventHandler(func(map[string]any))
 }
 
+// QualifiedGoalActivityRPC is the C4 handoff for native Pi builtin completion
+// telemetry. The installed Pi stream currently has no completion event with a
+// stable builtin identity, so rpcClient intentionally does not implement it.
+// When C4 supplies that authoritative event, this receiver is the only path
+// allowed to turn it into qualified goal activity.
+type QualifiedGoalActivityRPC interface {
+	SetQualifiedGoalActivityEventHandler(func(store.ManagedGoalActivity))
+}
+
 type DirectMailboxReceipt struct{ EntryIdentity string }
 
 // DirectMailboxReply is the final visible assistant text from one direct
