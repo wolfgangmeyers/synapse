@@ -82,8 +82,7 @@ describe("ManagedAgentDialog", () => {
   it("explains an active-name collision without clearing the launch form", async () => {
     const user = userEvent.setup();
     render(<ManagedAgentDialog open error="That name is in use by an active or launching agent. Choose another name or wait for it to stop." onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await user.type(screen.getByLabelText("Name"), "managed-alpha");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "managed-alpha" } });
     expect(screen.getByRole("alert")).toHaveTextContent("That name is in use by an active or launching agent. Choose another name or wait for it to stop.");
     expect(screen.getByLabelText("Name")).toHaveValue("managed-alpha");
   });

@@ -85,6 +85,76 @@ describe("Selected-agent conversation modes", () => {
     expect(screen.getByText("Wait twenty seconds · Completed in 20 seconds")).toBeInTheDocument();
   });
 
+  it.each([
+    { outcome: "success" as const, label: "Ran bash", detail: "Command completed", tone: "teal" as const },
+    { outcome: "error" as const, label: "Bash failed", detail: "Command failed", tone: "danger" as const },
+    { outcome: "interrupted" as const, label: "Bash interrupted", detail: "Stopped by user", tone: "danger" as const },
+  ])("keeps a terminal builtin activity in the same timeline position for $outcome", ({ outcome, label, detail, tone }) => {
+    const activity = (id: string, presentation: { kind: "tool"; tool_name: "bash"; outcome: "active" | "success" | "error" | "interrupted" }, message: string) => ({ id, agent_id: "managed-worker", at: "2030-01-01T10:01:00.000Z", message, presentation });
+    const before = activity("complete:1", { kind: "tool", tool_name: "bash", outcome: "success" }, "Before");
+    const active = activity("complete:2", { kind: "tool", tool_name: "bash", outcome: "active" }, "Running bash");
+    const after = activity("complete:3", { kind: "tool", tool_name: "bash", outcome: "success" }, "After");
+    const { container, rerender } = render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[before, active, after]} />);
+    const initialArticle = container.querySelector<HTMLElement>('[data-activity-id="complete:2"]');
+    const initialItem = initialArticle?.closest("li.timeline-item");
+    if (!initialArticle || !(initialItem instanceof HTMLElement)) throw new Error("Active activity was not rendered");
+    const timelineItems = (): Element[] => Array.from(container.querySelectorAll("li.timeline-item"));
+
+    expect(timelineItems().indexOf(initialItem)).toBe(1);
+    expect(container.querySelectorAll("article")).toHaveLength(3);
+
+    rerender(<MessageList messages={[]} peerId="managed-worker" activityEntries={[
+      before,
+      { ...active, message: label, presentation: { kind: "tool", tool_name: "bash", outcome, summary: detail } },
+      after,
+    ]} />);
+
+    const terminalArticle = container.querySelector<HTMLElement>('[data-activity-id="complete:2"]');
+    const terminalItem = terminalArticle?.closest("li.timeline-item");
+    if (!terminalArticle || !terminalItem) throw new Error("Terminal activity was not rendered");
+    expect(terminalArticle).toBe(initialArticle);
+    expect(terminalItem).toBe(initialItem);
+    expect(timelineItems().indexOf(terminalItem)).toBe(1);
+    expect(container.querySelectorAll("article")).toHaveLength(3);
+    expect([...container.querySelectorAll<HTMLElement>("[data-activity-id]")].map((item) => item.dataset.activityId)).toEqual(["complete:1", "complete:2", "complete:3"]);
+    expect(terminalArticle).toHaveClass(`activity-entry--${tone}`);
+    expect(terminalArticle).not.toHaveClass("activity-entry--active");
+    expect(terminalArticle).toHaveTextContent(label);
+    expect(terminalArticle).toHaveTextContent(detail);
+  });
+
+  it("keeps queued child lifecycle rows out of Complete until their same-ID terminal outcome arrives", () => {
+    const queued = { id: "complete:child", agent_id: "managed-worker", message: "Child queued", presentation: { kind: "child" as const, child_state: "queued" as const, outcome: "active" as const } };
+    const { container, rerender } = render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[queued]} />);
+    expect(container.querySelectorAll("[data-activity-id]")).toHaveLength(0);
+
+    rerender(<MessageList messages={[]} peerId="managed-worker" activityEntries={[{ ...queued, message: "Child completed", presentation: { kind: "child", child_state: "completed", outcome: "completed", child_label: "Native child", summary: "Completed successfully" } }]} />);
+
+    expect(container.querySelectorAll("[data-activity-id]")).toHaveLength(1);
+    expect(container.querySelector('[data-activity-id="complete:child"]')).toBeInTheDocument();
+    const terminalArticle = container.querySelector<HTMLElement>('[data-activity-id="complete:child"]');
+    if (!terminalArticle) throw new Error("Terminal child activity was not rendered");
+    expect(terminalArticle).toHaveTextContent("Subagent finished");
+    expect(terminalArticle).toHaveTextContent("Native child · Completed successfully");
+  });
+
+  it("orders equal-timestamp messages and Complete activities by numeric sequence with a deterministic tie", () => {
+    const at = "2030-01-01T10:00:00.000Z";
+    render(<MessageList
+      messages={[{ id: "message-seq-2", sequence: 2, created_at: at, body: "Message sequence two" }]}
+      peerId="managed-worker"
+      activityEntries={[
+        { id: "complete:10", agent_id: "managed-worker", at, message: "Activity ten", presentation: { kind: "tool", tool_name: "bash", outcome: "success" } },
+        { id: "complete:2", agent_id: "managed-worker", at, message: "Activity two", presentation: { kind: "tool", tool_name: "bash", outcome: "success" } },
+        { id: "complete:1", agent_id: "managed-worker", at, message: "Activity one", presentation: { kind: "tool", tool_name: "bash", outcome: "success" } },
+      ]}
+    />);
+
+    const timeline = document.querySelector<HTMLOListElement>("ol.complete-timeline");
+    if (!timeline) throw new Error("Complete timeline was not rendered");
+    expect([...timeline.querySelectorAll<HTMLElement>("[data-message-id], [data-activity-id]")].map((item) => item.dataset.messageId ?? item.dataset.activityId)).toEqual(["complete:1", "complete:2", "message-seq-2", "complete:10"]);
+  });
+
   it("reports a failed managed agent in the selected-agent header", () => {
     const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "failed", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed process exited before readiness", at: "2030-01-01T00:01:00.000Z" } };
     render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "failed", managed_agent: managedAgent }} />);
