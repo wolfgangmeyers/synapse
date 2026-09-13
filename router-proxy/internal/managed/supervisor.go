@@ -2208,6 +2208,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					m.publishDirectReply(*attempt, *event.Reply)
 				}
 				if acknowledged && event.Settled {
+					_ = m.store.SettleManagedParentDirectTurn(context.Background(), *attempt)
 					clearDirectPromptActivity()
 					cancelTurn()
 					for range events {
@@ -2303,6 +2304,14 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	binding.serial.Unlock()
 	if !bindingLive || !supported {
 		return nil
+	}
+	// A router restart can happen after source persistence but before the
+	// conversation enqueue acknowledgement. Replay the deterministic source
+	// through the ordinary publisher; it remains pending on any new failure.
+	if deliveries, deliveryErr := m.store.PendingManagedFinalDeliveries(ctx, currentFence); deliveryErr == nil {
+		for _, delivery := range deliveries {
+			m.publishDirectReply(delivery.Attempt, DirectMailboxReply{EntryIdentity: delivery.EntryID, Body: delivery.Body})
+		}
 	}
 	for _, attempt := range attempts {
 		if attempt.State == "direct_pending" {

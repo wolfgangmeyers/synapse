@@ -46,10 +46,21 @@ func (s *Store) SetManagedDirectPromptActivity(ctx context.Context, fence Manage
 			}
 			return err
 		}
-		// A final reply can arrive before Pi's agent_settled event. Clearing the
-		// direct-delivery affordance must reveal that native activity again rather
-		// than briefly marking an still-running turn idle.
-		activity := managedParentProjectedActivity(compacting != 0, active || nativeActive != 0)
+		// Legacy callers may ask for an immediate affordance before a direct turn
+		// has been durably admitted. Once they clear it, derive state from every
+		// durable source instead of allowing a reply receipt to clear child/tool
+		// work or an unacknowledged final delivery.
+		if !active {
+			if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+				return err
+			}
+			if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+				return err
+			}
+			updated = true
+			return nil
+		}
+		activity := managedParentProjectedActivity(compacting != 0, nativeActive != 0 || active)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')`, append([]any{activity, formatTimestamp(s.clock.Now())}, managedFenceValues(fence)...)...)
 		if err != nil {
 			return err
@@ -105,17 +116,17 @@ func (s *Store) ApplyManagedParentActivity(ctx context.Context, fence ManagedRun
 		if err != nil {
 			return err
 		}
-		activity := managedParentProjectedActivity(compacting != 0, active != 0)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')`, append([]any{activity, now}, managedFenceValues(fence)...)...)
-		if err != nil {
-			return err
+		if event.State == "idle" {
+			// Native settled is the authoritative turn boundary. Keep an already
+			// queued final source active, but otherwise make the direct work a
+			// non-active settled row that can be retained or completed safely.
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='settled',settled_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?
+				AND (state='pending_turn' OR (state='final_delivery_pending' AND NOT EXISTS (SELECT 1 FROM managed_parent_final_deliveries d WHERE d.work_id=managed_parent_work.work_id AND d.state='pending')))`, append([]any{now}, managedFenceValues(fence)...)...); err != nil {
+				return err
+			}
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
+		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
 			return err
-		}
-		if changed != 1 {
-			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		if err == nil {
