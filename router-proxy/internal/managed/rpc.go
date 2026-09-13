@@ -43,6 +43,14 @@ type readinessSourceRPC interface {
 	WaitForChildSnapshot(context.Context) (map[string]any, error)
 }
 
+// ManagedGoalEvaluationRPC is the narrow internal evaluator channel. It uses
+// the existing policy command and custom receipt type, but accepts no model
+// input beyond the router-fenced goal evaluation envelope.
+type ManagedGoalEvaluationRPC interface {
+	StartManagedGoalEvaluation(context.Context, store.ManagedRuntimeFence, store.ManagedGoalPolicy) error
+	WaitForManagedGoalEvaluation(context.Context) (string, string, error)
+}
+
 // RestartTurnSettler is deliberately narrower than RPC. Existing launch-only
 // callers remain source-compatible; controlled active restart requires this
 // binding-scoped stdout capability.
@@ -165,6 +173,13 @@ type restartSettlementToken struct {
 	watermark uint64
 	consumed  bool
 }
+type managedGoalEvaluationToken struct {
+	evaluationID string
+	goalRevision int64
+	settled      int64
+	fence        store.ManagedRuntimeFence
+	watermark    uint64
+}
 type directMailboxToken struct {
 	messageID   string
 	generation  string
@@ -237,12 +252,14 @@ type rpcClient struct {
 	policyWatermark                     *uint64
 	snapshotWatermark                   *uint64
 	settlementToken                     *restartSettlementToken
+	goalEvaluationToken                 *managedGoalEvaluationToken
 	directMailbox                       *directMailboxToken
 	rootControlHandler                  func(RootControlEvent)
 	childDeltaHandler                   func(map[string]any)
 	parentCompactionHandler             func(map[string]any)
 	parentCompactionNotificationHandler func(map[string]any)
 	parentActivityHandler               func(map[string]any)
+	suppressNextEvaluatorSettled        bool
 	rootResult                          *rootResultToken
 
 	closeOnce sync.Once
@@ -300,6 +317,7 @@ func (c *rpcClient) readLoop() {
 		var parentActivityCallback func(map[string]any)
 		var parentActivity map[string]any
 		var parentActivityCandidate bool
+		var evaluatorSettledSuppressed bool
 		c.mu.Lock()
 		terminal := c.terminal != nil
 		if !terminal {
@@ -356,7 +374,13 @@ func (c *rpcClient) readLoop() {
 			}
 			if event, candidate := classifyParentActivityEvent(raw, c.eventSequence); candidate {
 				parentActivityCandidate = true
-				if event != nil && c.parentActivityHandler != nil {
+				if event != nil && event["state"] == "idle" && c.suppressNextEvaluatorSettled {
+					// The hidden evaluator owns this model turn. Its settled boundary
+					// must never become an ordinary goal/rearm trigger.
+					c.suppressNextEvaluatorSettled = false
+					parentActivityCandidate = false
+					evaluatorSettledSuppressed = true
+				} else if event != nil && c.parentActivityHandler != nil {
 					parentActivityCallback, parentActivity = c.parentActivityHandler, event
 				}
 			}
@@ -369,6 +393,10 @@ func (c *rpcClient) readLoop() {
 				default:
 				}
 				c.signalLocked()
+				c.mu.Unlock()
+				continue
+			}
+			if evaluatorSettledSuppressed {
 				c.mu.Unlock()
 				continue
 			}
@@ -641,6 +669,102 @@ func (c *rpcClient) ApplyPolicy(ctx context.Context, envelope map[string]any) (m
 	}
 	c.setReceiptWatermark(&c.policyWatermark, watermark)
 	return value, nil
+}
+
+func (c *rpcClient) StartManagedGoalEvaluation(ctx context.Context, fence store.ManagedRuntimeFence, policy store.ManagedGoalPolicy) error {
+	if !validRestartFence(fence) || policy.EvaluatorID == "" || policy.EvaluatorGoalRevision < 1 || policy.EvaluatorSettledSequence < 1 || policy.Config.Goal == "" {
+		return errors.New("managed goal evaluation is invalid")
+	}
+	envelope := map[string]any{
+		"protocol": "mecha.policy/v1", "policy": map[string]any{}, "runtime_generation": fence.RuntimeGeneration,
+		"session_epoch": fence.SessionEpoch, "manifest_sha256": fence.ManifestHash,
+		"evaluator": map[string]any{"evaluation_id": policy.EvaluatorID, "goal_revision": policy.EvaluatorGoalRevision,
+			"settled_sequence": policy.EvaluatorSettledSequence, "goal": policy.Config.Goal},
+	}
+	_, watermark, err := c.privateCommand(ctx, "mecha-policy-apply-v1", envelope)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminal != nil {
+		return c.terminal
+	}
+	if c.goalEvaluationToken != nil {
+		return errors.New("managed goal evaluation is already armed")
+	}
+	c.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: policy.EvaluatorID, goalRevision: policy.EvaluatorGoalRevision, settled: policy.EvaluatorSettledSequence, fence: fence, watermark: watermark}
+	return nil
+}
+
+func (c *rpcClient) WaitForManagedGoalEvaluation(ctx context.Context) (string, string, error) {
+	c.mu.Lock()
+	token := c.goalEvaluationToken
+	c.mu.Unlock()
+	if token == nil {
+		return "", "", errors.New("managed goal evaluation is not armed")
+	}
+	defer func() {
+		c.mu.Lock()
+		if c.goalEvaluationToken == token {
+			c.goalEvaluationToken = nil
+		}
+		c.mu.Unlock()
+	}()
+	for {
+		c.mu.Lock()
+		if c.terminal != nil {
+			err := c.terminal
+			c.mu.Unlock()
+			return "", "", err
+		}
+		consumed := false
+		for index, item := range c.backlog {
+			if receiptCustomType(item.value) != "mecha.policy.applied.v1" {
+				continue
+			}
+			details := receiptDetails(item.value)
+			evaluator, isEvaluator := map[string]any(nil), false
+			if details != nil {
+				evaluator, isEvaluator = details["evaluator"].(map[string]any)
+			}
+			if !isEvaluator {
+				continue
+			}
+			// Evaluator receipts are isolated from ordinary policy application.
+			// A stale or mismatched result is consumed and cannot poison the next
+			// evaluation on this runtime.
+			c.backlog = append(c.backlog[:index], c.backlog[index+1:]...)
+			consumed = true
+			if item.sequence <= token.watermark || evaluator["evaluation_id"] != token.evaluationID || !sameEpoch(evaluator["goal_revision"], token.goalRevision) || !sameEpoch(evaluator["settled_sequence"], token.settled) {
+				break
+			}
+			phase, _ := evaluator["phase"].(string)
+			if phase == "requested" || phase != "result" || details["runtime_generation"] != token.fence.RuntimeGeneration || !sameEpoch(details["session_epoch"], token.fence.SessionEpoch) || details["manifest_sha256"] != token.fence.ManifestHash {
+				break
+			}
+			outcome, outcomeOK := evaluator["outcome"].(string)
+			reason, reasonOK := evaluator["reason"].(string)
+			c.suppressNextEvaluatorSettled = true
+			c.mu.Unlock()
+			if !outcomeOK || !reasonOK || (outcome != "DONE" && outcome != store.ManagedGoalEvaluationNotDone) || len(reason) == 0 || len(reason) > 512 {
+				return "", "", errors.New("managed goal evaluation result is invalid")
+			}
+			if outcome == "DONE" {
+				outcome = store.ManagedGoalEvaluationCompleted
+			}
+			return outcome, reason, nil
+		}
+		c.mu.Unlock()
+		if consumed {
+			continue
+		}
+		select {
+		case <-c.notified:
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		}
+	}
 }
 func (c *rpcClient) RequestChildSnapshot(ctx context.Context, envelope map[string]any) (map[string]any, error) {
 	value, watermark, err := c.privateCommand(ctx, "mecha-child-snapshot-v1", envelope)

@@ -21,6 +21,7 @@ type goalProjectionRPC struct {
 	stale        bool
 	fail         bool
 	directBodies chan string
+	evaluation   func(context.Context, store.ManagedGoalPolicy) (string, string, error)
 }
 
 func (r *goalProjectionRPC) ApplyPolicy(ctx context.Context, envelope map[string]any) (map[string]any, error) {
@@ -56,6 +57,15 @@ func (r *goalProjectionRPC) PromptManagedMailbox(_ context.Context, attempt stor
 }
 func (r *goalProjectionRPC) RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
 	return DirectMailboxRecovery{}, nil
+}
+func (r *goalProjectionRPC) StartManagedGoalEvaluation(context.Context, store.ManagedRuntimeFence, store.ManagedGoalPolicy) error {
+	return nil
+}
+func (r *goalProjectionRPC) WaitForManagedGoalEvaluation(ctx context.Context) (string, string, error) {
+	if r.evaluation == nil {
+		return "", "", errors.New("no evaluator result")
+	}
+	return r.evaluation(ctx, store.ManagedGoalPolicy{})
 }
 
 func (r *goalProjectionRPC) WaitForPolicyApplied(ctx context.Context, generation string, epoch int64) (map[string]any, error) {
@@ -117,8 +127,8 @@ func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t 
 	ctx := context.Background()
 	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
 	rpc.directBodies = make(chan string, 1)
-	manager.goalEvaluator = func(context.Context, store.ManagedGoalPolicy) (string, error) {
-		return store.ManagedGoalEvaluationNotDone, nil
+	rpc.evaluation = func(context.Context, store.ManagedGoalPolicy) (string, string, error) {
+		return store.ManagedGoalEvaluationNotDone, "keep working", nil
 	}
 	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
 		RequestID: "123e4567-e89b-42d3-a456-426614174000", OperationID: "goal.control",
@@ -155,10 +165,10 @@ func TestManagedGoalNotDoneWakeupCannotRetargetReplacement(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	manager.goalEvaluator = func(context.Context, store.ManagedGoalPolicy) (string, error) {
+	rpc.evaluation = func(context.Context, store.ManagedGoalPolicy) (string, string, error) {
 		once.Do(func() { close(started) })
 		<-release
-		return store.ManagedGoalEvaluationNotDone, nil
+		return store.ManagedGoalEvaluationNotDone, "keep working", nil
 	}
 	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174006", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence})
 	require.NoError(t, err)

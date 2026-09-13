@@ -224,9 +224,24 @@ func (m *Manager) recoverManagedGoalProjection(binding *managedBinding) {
 		return
 	}
 	m.startManagedTask(func() {
+		fence := bindingFence(binding.agentID, binding)
+		if !m.rootBindingCurrent(m.runCtx, binding, fence) {
+			return
+		}
+		// A router or process replacement cannot inherit an in-flight evaluator.
+		// Its old result remains fenced; a later native settled boundary decides
+		// whether the current runtime needs a new evaluation.
+		if changed, err := m.store.RecoverManagedGoalEvaluationForFence(context.Background(), fence); err == nil && changed {
+			m.publishProjection()
+		}
+		m.startManagedGoalProjectionRecovery(binding, fence)
+	})
+}
+
+func (m *Manager) startManagedGoalProjectionRecovery(binding *managedBinding, fence store.ManagedRuntimeFence) {
+	m.startManagedTask(func() {
 		binding.serial.Lock()
 		defer binding.serial.Unlock()
-		fence := bindingFence(binding.agentID, binding)
 		if !m.rootBindingCurrent(m.runCtx, binding, fence) {
 			return
 		}

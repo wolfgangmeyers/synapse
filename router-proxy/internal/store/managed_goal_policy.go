@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 )
 
 const (
@@ -49,6 +52,10 @@ type ManagedGoalPolicy struct {
 	EvaluatorAttempts, NotDoneWakeups, RearmActivityCount, LastSettledSequence int64
 	NextWakeupAt, SnoozedUntil, EvaluatorLeaseUntil                            string
 	EvaluatorID, EvaluatorReason, WakeupMessageID                              string
+	EvaluatorGoalRevision, EvaluatorSettledSequence                             int64
+	EvaluatorPiSessionID, EvaluatorProcessStartMarker                           string
+	EvaluatorSessionEpoch, EvaluatorProcessPID                                  int64
+	EvaluatorProcessIncarnation, EvaluatorRuntimeGeneration                     string
 	CreatedAt, UpdatedAt                                                       string
 }
 
@@ -85,11 +92,12 @@ func scanManagedGoalPolicy(scanner interface{ Scan(...any) error }) (*ManagedGoa
 	var result ManagedGoalPolicy
 	var enabled int
 	var settingsJSON string
-	var nextProjection, errorCode, errorMessage, errorAt, evaluatorLease, lastOutcome, nextWakeup, snoozed, evaluatorID, evaluatorReason, wakeupMessageID sql.NullString
+	var nextProjection, errorCode, errorMessage, errorAt, evaluatorLease, lastOutcome, nextWakeup, snoozed, evaluatorID, evaluatorPiSessionID, evaluatorProcessStartMarker, evaluatorProcessIncarnation, evaluatorRuntimeGeneration, evaluatorReason, wakeupMessageID sql.NullString
+	var evaluatorGoalRevision, evaluatorSettledSequence, evaluatorSessionEpoch, evaluatorProcessPID sql.NullInt64
 	err := scanner.Scan(&result.AgentID, &result.HistoryScopeID, &result.DesiredRevision, &result.AppliedRevision,
 		&enabled, &result.Config.Goal, &settingsJSON, &result.ProjectionState, &result.ProjectionAttempts,
 		&nextProjection, &errorCode, &errorMessage, &errorAt, &result.EvaluatorState, &evaluatorLease, &lastOutcome, &result.EvaluatorAttempts,
-		&result.NotDoneWakeups, &result.RearmActivityCount, &nextWakeup, &snoozed, &result.LastSettledSequence, &evaluatorID, &evaluatorReason, &wakeupMessageID, &result.CreatedAt, &result.UpdatedAt)
+		&result.NotDoneWakeups, &result.RearmActivityCount, &nextWakeup, &snoozed, &result.LastSettledSequence, &evaluatorID, &evaluatorGoalRevision, &evaluatorSettledSequence, &evaluatorPiSessionID, &evaluatorSessionEpoch, &evaluatorProcessPID, &evaluatorProcessStartMarker, &evaluatorProcessIncarnation, &evaluatorRuntimeGeneration, &evaluatorReason, &wakeupMessageID, &result.CreatedAt, &result.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -100,11 +108,15 @@ func scanManagedGoalPolicy(scanner interface{ Scan(...any) error }) (*ManagedGoa
 	result.NextProjectionAt, result.LastErrorCode, result.LastErrorMessage, result.LastErrorAt = nextProjection.String, errorCode.String, errorMessage.String, errorAt.String
 	result.EvaluatorLeaseUntil, result.LastOutcome = evaluatorLease.String, lastOutcome.String
 	result.NextWakeupAt, result.SnoozedUntil = nextWakeup.String, snoozed.String
-	result.EvaluatorID, result.EvaluatorReason, result.WakeupMessageID = evaluatorID.String, evaluatorReason.String, wakeupMessageID.String
+	result.EvaluatorID, result.EvaluatorPiSessionID, result.EvaluatorProcessStartMarker = evaluatorID.String, evaluatorPiSessionID.String, evaluatorProcessStartMarker.String
+	result.EvaluatorProcessIncarnation, result.EvaluatorRuntimeGeneration = evaluatorProcessIncarnation.String, evaluatorRuntimeGeneration.String
+	result.EvaluatorGoalRevision, result.EvaluatorSettledSequence = evaluatorGoalRevision.Int64, evaluatorSettledSequence.Int64
+	result.EvaluatorSessionEpoch, result.EvaluatorProcessPID = evaluatorSessionEpoch.Int64, evaluatorProcessPID.Int64
+	result.EvaluatorReason, result.WakeupMessageID = evaluatorReason.String, wakeupMessageID.String
 	return &result, nil
 }
 
-const managedGoalPolicyColumns = `agent_id,history_scope_id,desired_revision,applied_revision,goal_enabled,goal_text,settings_json,projection_state,projection_attempts,next_projection_at,last_error_code,last_error_message,last_error_at,evaluator_state,evaluator_lease_until,last_outcome,evaluator_attempts,not_done_wakeups,rearm_activity_count,next_wakeup_at,snoozed_until,last_settled_sequence,evaluator_id,evaluator_reason,wakeup_message_id,created_at,updated_at`
+const managedGoalPolicyColumns = `agent_id,history_scope_id,desired_revision,applied_revision,goal_enabled,goal_text,settings_json,projection_state,projection_attempts,next_projection_at,last_error_code,last_error_message,last_error_at,evaluator_state,evaluator_lease_until,last_outcome,evaluator_attempts,not_done_wakeups,rearm_activity_count,next_wakeup_at,snoozed_until,last_settled_sequence,evaluator_id,evaluator_goal_revision,evaluator_settled_sequence,evaluator_pi_session_id,evaluator_session_epoch,evaluator_process_pid,evaluator_process_start_marker,evaluator_process_incarnation,evaluator_runtime_generation,evaluator_reason,wakeup_message_id,created_at,updated_at`
 
 func (s *Store) ManagedGoalPolicyFor(ctx context.Context, agentID string) (*ManagedGoalPolicy, error) {
 	if agentID == "" {
@@ -352,6 +364,31 @@ func (s *Store) ClaimManagedGoalEvaluation(ctx context.Context, fence ManagedRun
 	return policy, claimed, err
 }
 
+// RecoverManagedGoalEvaluationForFence releases an evaluator owned by a prior
+// process after the router has made a new runtime ready. Its old result stays
+// fenced and is discarded; the next native settled boundary may claim again.
+func (s *Store) RecoverManagedGoalEvaluationForFence(ctx context.Context, fence ManagedRuntimeFence) (bool, error) {
+	if !validManagedRuntimeFence(fence) {
+		return false, errors.New("managed goal recovery fence is invalid")
+	}
+	changed := false
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		args := append([]any{now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='idle',evaluator_lease_until=NULL,evaluator_reason='evaluation interrupted',updated_at=?
+			WHERE agent_id=? AND evaluator_state='evaluating' AND evaluator_id IS NOT NULL
+			AND NOT (evaluator_pi_session_id=? AND evaluator_session_epoch=? AND evaluator_process_pid=? AND evaluator_process_start_marker=? AND evaluator_process_incarnation=? AND evaluator_runtime_generation=?)
+			AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, args...)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		changed = err == nil && count == 1
+		return err
+	})
+	return changed, err
+}
+
 func managedGoalSnapshotHasActiveChild(canonical []byte) bool {
 	var snapshot struct {
 		Runs []struct {
@@ -420,13 +457,37 @@ func (s *Store) CompleteManagedGoalEvaluationWithWakeup(ctx context.Context, fen
 		if count != 1 {
 			return nil
 		}
+		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		if err != nil {
+			return err
+		}
 		if outcome == ManagedGoalEvaluationNotDone {
-			_, err = s.db.ExecContext(ctx, `INSERT INTO managed_goal_wakeups(message_id,evaluation_id,agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, wakeupMessageID, evaluationID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, now)
-			if err != nil {
+			// The verdict, ordinary source-marked row, immutable recipient snapshot,
+			// and exact delivery reservation commit together. A crash leaves either
+			// the whole wakeup or none of it; a replacement cannot retarget it.
+			expires, expiryErr := protocol.TimestampAfter(now, time.Hour)
+			if expiryErr != nil {
+				return expiryErr
+			}
+			incarnation := "goal-wakeup-v1:" + wakeupMessageID
+			body := fmt.Sprintf("NOT_DONE: Review %s and take the next concrete action now.", strings.TrimSpace(policy.Config.Goal))
+			if _, err = s.db.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES (?,?) ON CONFLICT(agent_id) DO NOTHING`, fence.AgentID, now); err != nil {
+				return err
+			}
+			if _, err = s.db.ExecContext(ctx, `INSERT INTO messages(id,sender,recipient,body,created_at,expires_at,message_incarnation_id,source_kind,state) VALUES (?,?,?,?,?,?,?,?, 'queued')`, wakeupMessageID, "router", fence.AgentID, body, now, expires, incarnation, "system"); err != nil {
+				return err
+			}
+			var sourceKind, owner string
+			if err = s.db.QueryRowContext(ctx, `SELECT source_kind,owner_identity FROM recipient_sources WHERE recipient_name=? AND source_kind='managed' AND owner_identity=? AND state='active'`, fence.AgentID, fence.AgentID).Scan(&sourceKind, &owner); err != nil {
+				return err
+			}
+			if _, err = s.db.ExecContext(ctx, `INSERT INTO message_target_snapshots(snapshot_id,message_id,message_incarnation_id,recipient_name,source_kind,owner_identity,created_at) VALUES (?,?,?,?,?,?,?)`, "target-v1:"+incarnation, wakeupMessageID, incarnation, fence.AgentID, sourceKind, owner, now); err != nil {
+				return err
+			}
+			if _, err = s.db.ExecContext(ctx, `INSERT INTO managed_goal_wakeups(message_id,evaluation_id,agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, wakeupMessageID, evaluationID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, now); err != nil {
 				return err
 			}
 		}
-		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
 		changed = err == nil
 		return err
 	})

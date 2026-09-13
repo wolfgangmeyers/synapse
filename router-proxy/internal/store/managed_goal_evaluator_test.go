@@ -84,6 +84,16 @@ func TestManagedGoalEvaluationOnlyClaimsASettledBoundaryOnce(t *testing.T) {
 	require.True(t, changed)
 	require.Equal(t, "idle", policy.EvaluatorState)
 	require.EqualValues(t, 1, policy.NotDoneWakeups)
+	require.NotEmpty(t, policy.WakeupMessageID)
+	wakeup, err := durable.MessageFor(ctx, policy.WakeupMessageID)
+	require.NoError(t, err)
+	require.Equal(t, "system", wakeup.Source.Kind)
+	target, err := durable.MessageTargetSnapshot(ctx, policy.WakeupMessageID)
+	require.NoError(t, err)
+	require.Equal(t, fence.AgentID, target.OwnerIdentity)
+	var reserved int
+	require.NoError(t, durable.db.QueryRow(`SELECT COUNT(*) FROM managed_goal_wakeups WHERE message_id=? AND evaluation_id=?`, policy.WakeupMessageID, policy.EvaluatorID).Scan(&reserved))
+	require.Equal(t, 1, reserved)
 
 	_, claimed, err = durable.ClaimManagedGoalEvaluation(ctx, fence, 10)
 	require.NoError(t, err)
