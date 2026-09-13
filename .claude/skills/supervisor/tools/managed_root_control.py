@@ -14,12 +14,15 @@ import base64
 import hashlib
 import json
 import os
-from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from datetime import datetime, timezone
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -107,8 +110,8 @@ def command(arguments: list[str]) -> str:
     return output[:MAX_OUTPUT_BYTES]
 
 
-def text(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > 4000:
+def text(value: Any, name: str, maximum: int = 4000) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(f"{name} is invalid")
     return value.strip()
 
@@ -274,6 +277,7 @@ def request_router(path: str, method: str = "GET", payload: dict[str, Any] | Non
             status = response.status
     except HTTPError as error:
         raw, status = error.read(MAX_OUTPUT_BYTES + 1), error.code
+        error.close()
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -285,7 +289,151 @@ def request_router(path: str, method: str = "GET", payload: dict[str, Any] | Non
     return result("ok", canonical(decoded), decoded if isinstance(decoded, dict) else {"value": decoded})
 
 
-def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str, settings: dict[str, Any], request_id: str) -> dict[str, Any]:
+def reminder_clock_time() -> datetime:
+    return datetime.fromtimestamp(time.time(), timezone.utc)
+
+
+def reminder_scheduled_time(value: Any) -> str:
+    raw = text(value, "scheduledAt", 64)
+    if re.search(r"(?:Z|[+-]\d{2}:?\d{2})$", raw, re.IGNORECASE) is None:
+        raise ValueError("scheduledAt must include an explicit timezone offset or Z")
+    try:
+        parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw)
+    except ValueError as exc:
+        raise ValueError("scheduledAt must be a valid ISO 8601 datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("scheduledAt must include an explicit timezone offset or Z")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def reminder_due_after(created: datetime, minutes: int) -> str:
+    return datetime.fromtimestamp(created.timestamp() + minutes * 60, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def reminder_minutes(value: Any, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > 10_080:
+        raise ValueError(f"{name} is invalid")
+    return value
+
+
+def reminder_row(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("router returned an invalid reminder")
+    required = ("id", "target", "creator", "body", "created_at", "next_due_at", "interval_ms")
+    if any(key not in payload for key in required):
+        raise RuntimeError("router returned an invalid reminder")
+    identifier(payload["id"], "reminder id")
+    for key in ("target", "creator", "body", "created_at", "next_due_at"):
+        text(payload[key], key)
+    interval = payload["interval_ms"]
+    if interval is not None and (not isinstance(interval, int) or isinstance(interval, bool) or interval < 1):
+        raise RuntimeError("router returned an invalid reminder")
+    return payload
+
+
+def reminder_payload(response: dict[str, Any]) -> dict[str, Any]:
+    if response.get("status") != "ok":
+        raise RuntimeError(response.get("error_message") or "router reminder request failed")
+    payload = response.get("details")
+    if not isinstance(payload, dict):
+        raise RuntimeError("router returned an invalid reminder response")
+    return payload
+
+
+def managed_reminder(arguments: dict[str, Any], fence: dict[str, Any]) -> dict[str, Any]:
+    action = arguments.get("action")
+    allowed = {
+        "list": {"action"},
+        "create": {"action", "message", "subject", "delayMinutes", "scheduledAt", "intervalMinutes"},
+        "update": {"action", "reminderId", "message", "subject", "delayMinutes", "scheduledAt", "intervalMinutes"},
+        "delete": {"action", "reminderId"},
+    }
+    if action not in allowed:
+        raise ValueError("reminder action is invalid")
+    if set(arguments) - allowed[action]:
+        raise ValueError("unsupported reminder field(s)")
+    target = identifier(fence.get("agent_id"), "reminder target")
+    timing = ("delayMinutes", "scheduledAt", "intervalMinutes")
+    provided_timing = [name for name in timing if name in arguments]
+    if action == "create" and len(provided_timing) != 1:
+        raise ValueError("create requires exactly one of delayMinutes, scheduledAt, or intervalMinutes")
+    if action == "update" and len(provided_timing) > 1:
+        raise ValueError("update accepts at most one of delayMinutes, scheduledAt, or intervalMinutes")
+
+    if action == "list":
+        payload = reminder_payload(request_router("/v1/reminders"))
+        reminders = payload.get("reminders")
+        if not isinstance(reminders, list):
+            raise RuntimeError("router returned an invalid reminder list")
+        rows = [reminder_row(row) for row in reminders]
+        owned = [row for row in rows if row["target"] == target]
+        details = {**payload, "reminders": owned}
+        return result("ok", canonical(details), details)
+
+    if action == "create":
+        message = text(arguments.get("message"), "message")
+        created = reminder_clock_time()
+        has_delay = "delayMinutes" in arguments
+        has_interval = "intervalMinutes" in arguments
+        interval_ms: int | None = None
+        if has_delay or has_interval:
+            name = "delayMinutes" if has_delay else "intervalMinutes"
+            minutes = reminder_minutes(arguments[name], name)
+            due = reminder_due_after(created, minutes)
+            if has_interval:
+                interval_ms = minutes * 60_000
+        else:
+            due = reminder_scheduled_time(arguments.get("scheduledAt"))
+        payload: dict[str, Any] = {
+            "id": identifier(str(uuid.uuid4()), "generated reminder ID"),
+            "target": target,
+            "creator": target,
+            "body": message,
+            "created_at": created.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "next_due_at": due,
+            "interval_ms": interval_ms,
+        }
+        if "subject" in arguments:
+            payload["subject"] = text(arguments["subject"], "subject", 200)
+        response = reminder_payload(request_router("/v1/reminders", "POST", payload))
+        row = reminder_row(response.get("reminder"))
+        if row["id"] != payload["id"] or row["target"] != target or row["creator"] != target:
+            raise RuntimeError("router returned an invalid persisted reminder")
+        return result("ok", "Reminder accepted.", {"reminder": row})
+
+    reminder_id = identifier(arguments.get("reminderId"), "reminderId")
+    owned_response = reminder_payload(request_router(f"/v1/reminders/{quote(reminder_id, safe='')}"))
+    owned = reminder_row(owned_response.get("reminder"))
+    if owned["id"] != reminder_id or owned["target"] != target:
+        raise RuntimeError("reminder belongs to another agent")
+    if action == "delete":
+        response = request_router(f"/v1/reminders/{quote(reminder_id, safe='')}", "DELETE")
+        reminder_payload(response)
+        return result("ok", "Reminder canceled.", {"reminder_id": reminder_id})
+
+    patch: dict[str, Any] = {}
+    if "message" in arguments:
+        patch["body"] = text(arguments["message"], "message")
+    if "subject" in arguments:
+        patch["subject"] = text(arguments["subject"], "subject", 200)
+    if provided_timing:
+        timing_name = provided_timing[0]
+        if timing_name == "scheduledAt":
+            patch["next_due_at"] = reminder_scheduled_time(arguments["scheduledAt"])
+        else:
+            minutes = reminder_minutes(arguments[timing_name], timing_name)
+            patch["next_due_at"] = reminder_due_after(reminder_clock_time(), minutes)
+            patch["interval_ms"] = None if timing_name == "delayMinutes" else minutes * 60_000
+    if not patch:
+        raise ValueError("update requires at least one field to change")
+    response = reminder_payload(request_router(f"/v1/reminders/{quote(reminder_id, safe='')}", "PATCH", patch))
+    row = reminder_row(response.get("reminder"))
+    if row["id"] != reminder_id or row["target"] != target:
+        raise RuntimeError("router returned an invalid persisted reminder")
+    return result("ok", "Reminder updated.", {"reminder": row})
+
+
+def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str, settings: dict[str, Any], request_id: str, fence: dict[str, Any]) -> dict[str, Any]:
     action = arguments.get("action")
     if operation == "ops.state":
         if action == "query":
@@ -361,6 +509,8 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
             return request_router("/v1/health")
         message_id = identifier(arguments.get("messageId"), "messageId")
         return request_router("/v1/messages/" + message_id + ("/retry" if action == "retry" else ""), "POST" if action == "retry" else "DELETE")
+    if operation == "reminder.control":
+        return managed_reminder(arguments, fence)
     # Goal state is router-managed durable product state even though the small
     # host adapter carries it between current managed process instances. Keep a
     # stable read projection so the Web UI can reopen the shared goal editor.
@@ -431,7 +581,7 @@ def run(mode: str, home: Path) -> int:
                 print(canonical(result("error", "The root operation has no recoverable host record.", {}, "ROOT_OPERATION_UNKNOWN", "the root operation has no recoverable host record")))
                 return 0
             try:
-                completed = execute_supervisor(operation, arguments, fence["agent_id"], state["settings"], request_id)
+                completed = execute_supervisor(operation, arguments, fence["agent_id"], state["settings"], request_id, fence)
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
                 completed = result("error", "The root operation could not be completed.", {}, "ROOT_OPERATION_FAILED", str(exc)[:2000])
             state["requests"][request_id] = {"fingerprint": fingerprint, "recorded_at": now, "result": completed}
