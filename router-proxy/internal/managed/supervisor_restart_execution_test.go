@@ -32,18 +32,33 @@ func (input *restartExecutionInput) Close() error {
 }
 
 type restartExecutionProcess struct {
-	identity  ProcessIdentity
-	input     *restartExecutionInput
-	done      chan struct{}
-	once      sync.Once
-	mu        sync.Mutex
-	stopCalls int
+	identity     ProcessIdentity
+	input        *restartExecutionInput
+	done         chan struct{}
+	once         sync.Once
+	waitEntered  chan struct{}
+	waitRelease  chan struct{}
+	waitReturned chan struct{}
+	mu           sync.Mutex
+	stopCalls    int
 }
 
 func (p *restartExecutionProcess) Identity() ProcessIdentity { return p.identity }
 func (p *restartExecutionProcess) Stdin() io.WriteCloser     { return p.input }
 func (p *restartExecutionProcess) Stdout() io.ReadCloser     { return io.NopCloser(nilReader{}) }
-func (p *restartExecutionProcess) Wait() error               { <-p.done; return nil }
+func (p *restartExecutionProcess) Wait() error {
+	<-p.done
+	if p.waitEntered != nil {
+		close(p.waitEntered)
+	}
+	if p.waitRelease != nil {
+		<-p.waitRelease
+	}
+	if p.waitReturned != nil {
+		close(p.waitReturned)
+	}
+	return nil
+}
 func (p *restartExecutionProcess) Stop(context.Context) error {
 	p.mu.Lock()
 	p.stopCalls++
