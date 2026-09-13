@@ -290,8 +290,9 @@ function configureDeterministicProvider(home: string, baseUrl: string): void {
   }), "utf8");
 }
 
-async function startDeterministicProvider(options: { firstToolCall?: boolean; evaluatorOutput?: string } = {}): Promise<{ baseUrl: string; requests: JsonRecord[]; stop: () => Promise<void> }> {
+async function startDeterministicProvider(options: { firstToolCall?: boolean; evaluatorOutput?: string; attemptEvaluatorToolWhenAdvertised?: string } = {}): Promise<{ baseUrl: string; requests: JsonRecord[]; attemptedEvaluatorTools: string[]; stop: () => Promise<void> }> {
   const requests: JsonRecord[] = [];
+  const attemptedEvaluatorTools: string[] = [];
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404).end();
@@ -303,8 +304,15 @@ async function startDeterministicProvider(options: { firstToolCall?: boolean; ev
     if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) requests.push(parsed as JsonRecord);
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     if (requests.length === 1 && options.evaluatorOutput !== undefined) {
-      response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", content: options.evaluatorOutput }, finish_reason: null }] })}\n\n`);
-      response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+      const advertisedTool = options.attemptEvaluatorToolWhenAdvertised;
+      if (advertisedTool !== undefined && requestToolNames(parsed as JsonRecord).has(advertisedTool)) {
+        attemptedEvaluatorTools.push(advertisedTool);
+        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "evaluator-advertised-tool", type: "function", function: { name: advertisedTool, arguments: JSON.stringify({ action: "status" }) } }] }, finish_reason: null }] })}\n\n`);
+        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
+      } else {
+        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", content: options.evaluatorOutput }, finish_reason: null }] })}\n\n`);
+        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+      }
     } else if (requests.length === 1 && options.firstToolCall !== false) {
       response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "raw-goal-call", type: "function", function: { name: "goal", arguments: JSON.stringify({ action: "status" }) } }] }, finish_reason: null }] })}\n\n`);
       response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
@@ -323,6 +331,7 @@ async function startDeterministicProvider(options: { firstToolCall?: boolean; ev
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requests,
+    attemptedEvaluatorTools,
     stop: () => new Promise<void>((resolveStop, rejectStop) => server.close((error) => error === undefined ? resolveStop() : rejectStop(error))),
   };
 }
@@ -1074,7 +1083,10 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
 
 test("stock Pi 0.85 isolates managed goal evaluation from tools and restores them for the next prompt", { timeout: 30_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-goal-evaluator-"));
-  const provider = await startDeterministicProvider({ evaluatorOutput: "DONE\nREASON: The goal is complete." });
+  const provider = await startDeterministicProvider({
+    evaluatorOutput: "DONE\nREASON: The goal is complete.",
+    attemptEvaluatorToolWhenAdvertised: "goal",
+  });
   const rpc = new StockPiRpc(home, provider.baseUrl, { managedActiveOnly: true, enableBuiltinTools: true });
   try {
     const manifest = readManifest();
@@ -1087,6 +1099,7 @@ test("stock Pi 0.85 isolates managed goal evaluation from tools and restores the
 
     const evaluatorRequest = await waitFor(() => provider.requests[0], "isolated evaluator provider request");
     assert.deepEqual(requestToolNames(evaluatorRequest), new Set(), "the evaluator provider request must advertise no tools");
+    assert.deepEqual(provider.attemptedEvaluatorTools, [], "the deterministic provider can attempt its evaluator tool only when Pi advertises it");
     assert.match(JSON.stringify(evaluatorRequest), /Goal: finish the evaluator isolation fix/);
     assert.match(JSON.stringify(evaluatorRequest), /DONE\|NOT_DONE\\nREASON: <concise reason>/);
     const evaluatorReceipt = await waitFor(() => customMessages(rpc.events, "mecha.policy.applied.v1").find((event) => {

@@ -309,9 +309,10 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     goal: string;
     activeTools: string[];
     assistantText: string;
-    phase: "armed" | "running";
-    turnFence: string;
-    activeTurnFence?: string;
+    // Pi lifecycle events do not identify the turn that emitted them. Keep
+    // this slot occupied through cancellation and only replace it after its
+    // terminal event has restored the exact tool snapshot it captured.
+    phase: "armed" | "running" | "cancelled";
     runtimeGeneration: string;
     sessionEpoch: number;
   };
@@ -323,10 +324,20 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     && evaluator.manifestHash === acceptedHash;
   const clearGoalEvaluationTurn = (evaluator: GoalEvaluationTurn | undefined = goalEvaluationTurn): void => {
     if (evaluator === undefined || goalEvaluationTurn !== evaluator) return;
-    // Clear first so a queued or stale lifecycle event cannot restore this
-    // evaluator's tool snapshot after another evaluator has been armed.
+    // The slot becomes available only after its owner restores the snapshot.
+    // This is deliberately single-flight: lifecycle events contain no turn ID.
     goalEvaluationTurn = undefined;
     pi.setActiveTools?.(evaluator.activeTools);
+  };
+  const cancelGoalEvaluationTurn = (goalRevision: number | undefined): void => {
+    const evaluator = goalEvaluationTurn;
+    if (evaluator === undefined) return;
+    // A repeated policy projection for this exact revision is idempotent.
+    if (goalRevision !== undefined && evaluator.goalRevision === goalRevision) return;
+    // Do not clear the slot yet. A queued lifecycle event still belongs to this
+    // evaluator and must be allowed to reach the path that restores its tools.
+    evaluator.phase = "cancelled";
+    evaluator.assistantText = "";
   };
   const boundedGoalEvaluation = (text: string): { outcome: "DONE" | "NOT_DONE"; reason: string } => {
     const lines = text.split(/\r?\n/);
@@ -689,10 +700,15 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
       if (envelope.evaluator !== undefined) {
         const request = envelope.evaluator;
-        if (!isRecord(request) || goalEvaluationTurn !== undefined || acceptedHash === undefined || envelope.manifest_sha256 !== acceptedHash) throw new TypeError("Managed goal evaluator is unavailable.");
+        if (!isRecord(request) || acceptedHash === undefined || envelope.manifest_sha256 !== acceptedHash) throw new TypeError("Managed goal evaluator is unavailable.");
+        // A second request is rejected, not overwritten or queued. Pi omits
+        // turn identity from lifecycle events, so one live evaluator is the
+        // only deterministic ownership model. The router keeps this request
+        // recoverable by retrying after the active evaluator settles.
+        if (goalEvaluationTurn !== undefined) throw new TypeError("Managed goal evaluator is busy; retry after the active evaluator settles.");
         const evaluator: GoalEvaluationTurn = {
           evaluationId: String(request.evaluation_id), goalRevision: Number(request.goal_revision), settledSequence: Number(request.settled_sequence), manifestHash: acceptedHash, goal: String(request.goal),
-          activeTools: pi.getActiveTools?.() ?? [], assistantText: "", phase: "armed", turnFence: randomUUID(), runtimeGeneration: generation, sessionEpoch: epoch,
+          activeTools: pi.getActiveTools?.() ?? [], assistantText: "", phase: "armed", runtimeGeneration: generation, sessionEpoch: epoch,
         };
         // sendMessage({ triggerTurn: true }) starts a turn directly, without
         // before_agent_start. Isolate the evaluator before enqueuing its hidden
@@ -711,7 +727,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         return { queued: true };
       }
       const projection = policyBridge.apply(envelope.policy);
-      if (projection.goalControl !== undefined) clearGoalEvaluationTurn();
+      if (projection.goalControl !== undefined) cancelGoalEvaluationTurn(projection.goalControl.action === "set" ? projection.goalControl.revision : undefined);
       await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Managed policy applied.", {
         protocol: "mecha.policy/v1", runtime_generation: generation, session_epoch: epoch,
         applied: {
@@ -936,10 +952,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
 
   pi.on("agent_start", () => {
     const evaluator = goalEvaluationTurn;
-    if (evaluator !== undefined && evaluator.phase === "armed" && isCurrentGoalEvaluationTurn(evaluator)) {
-      evaluator.activeTurnFence = evaluator.turnFence;
-      evaluator.phase = "running";
-    }
+    if (evaluator !== undefined && evaluator.phase === "armed" && isCurrentGoalEvaluationTurn(evaluator)) evaluator.phase = "running";
   });
   pi.on("message_end", (event) => {
     const evaluator = goalEvaluationTurn;
@@ -973,11 +986,14 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   });
   pi.on("agent_settled", async () => {
     const evaluator = goalEvaluationTurn;
-    // agent_settled has no turn identifier. The armed/running phase and the
-    // evaluation/runtime fence keep an older settlement from consuming a
-    // replacement evaluator before its own agent_start boundary.
-    if (evaluator === undefined || evaluator.phase !== "running" || evaluator.activeTurnFence !== evaluator.turnFence || !isCurrentGoalEvaluationTurn(evaluator)) return;
+    if (evaluator === undefined || !isCurrentGoalEvaluationTurn(evaluator)) return;
+    // An armed evaluator has not observed its own start boundary. Do not let a
+    // normal or older settlement consume it. A cancelled armed evaluator keeps
+    // ownership until that terminal event arrives, then releases its snapshot.
+    if (evaluator.phase === "armed") return;
+    const completed = evaluator.phase === "running";
     clearGoalEvaluationTurn(evaluator);
+    if (!completed) return;
     const verdict = boundedGoalEvaluation(evaluator.assistantText);
     await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Managed goal evaluation completed.", {
       protocol: "mecha.policy/v1", manifest_sha256: evaluator.manifestHash, runtime_generation: evaluator.runtimeGeneration, session_epoch: evaluator.sessionEpoch,
