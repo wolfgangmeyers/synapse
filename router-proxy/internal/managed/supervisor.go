@@ -121,7 +121,10 @@ type ResetResult struct {
 // durable transition or either process group.
 type managedAgentLane struct{ serial sync.Mutex }
 
-const maxQueuedManagedChildDeltas = 64
+const (
+	maxQueuedManagedChildDeltas          = 64
+	maxQueuedManagedBuiltinToolLifecycle = 64
+)
 
 type managedBinding struct {
 	agentID string
@@ -129,32 +132,37 @@ type managedBinding struct {
 	serial  sync.Mutex
 	// Root controls can resolve an active direct turn. Keep their append path
 	// ordered without blocking the direct-delivery lane that needs that result.
-	rootControlSerial     sync.Mutex
-	childDeltaSerial      sync.Mutex
-	childDeltaQueue       []map[string]any
-	childDeltaDraining    bool
-	builtinToolSerial     sync.Mutex
-	builtinToolOrphanEnds map[string]builtinToolOrphanEnd
-	preparationWG         sync.WaitGroup
-	process               Process
-	rpc                   RPC
-	operationID           string
-	lifecycleAction       string
-	identity              ProcessIdentity
-	sessionID             string
-	sessionEpoch          int64
-	runtimeGeneration     string
-	manifestRevision      int
-	manifestHash          string
-	parentCompacting      *bool
-	reaped                bool
-	token                 string
-	waitDone              <-chan error
-	waitSignal            <-chan struct{}
-	waitErr               error
-	restartExecutionDone  bool
-	restartShutdownDone   bool
-	restartShutdownError  error
+	rootControlSerial       sync.Mutex
+	childDeltaSerial        sync.Mutex
+	childDeltaQueue         []map[string]any
+	childDeltaDraining      bool
+	builtinToolQueueSerial  sync.Mutex
+	builtinToolQueue        []builtinToolLifecycleQueueItem
+	builtinToolDraining     bool
+	builtinToolOverflowed   bool
+	builtinToolQueueStopped bool
+	builtinToolSerial       sync.Mutex
+	builtinToolOrphanEnds   map[string]builtinToolOrphanEnd
+	preparationWG           sync.WaitGroup
+	process                 Process
+	rpc                     RPC
+	operationID             string
+	lifecycleAction         string
+	identity                ProcessIdentity
+	sessionID               string
+	sessionEpoch            int64
+	runtimeGeneration       string
+	manifestRevision        int
+	manifestHash            string
+	parentCompacting        *bool
+	reaped                  bool
+	token                   string
+	waitDone                <-chan error
+	waitSignal              <-chan struct{}
+	waitErr                 error
+	restartExecutionDone    bool
+	restartShutdownDone     bool
+	restartShutdownError    error
 }
 
 type Manager struct {
@@ -2458,6 +2466,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		rpc, process := binding.rpc, binding.process
 		fence := bindingFence(binding.agentID, binding)
 		binding.serial.Unlock()
+		m.stopBuiltinToolLifecycleQueue(binding)
 		m.interruptBuiltinToolInvocations(binding, fence)
 		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 		if rpc != nil {
