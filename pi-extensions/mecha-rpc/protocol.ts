@@ -310,6 +310,7 @@ export function validatePolicyApplyEnvelope(value: unknown): JsonRecord {
   validateHiddenCommandFence(value);
   if (value.evaluator !== undefined) {
     if (!isRecord(value.evaluator)) protocolError("goal evaluator envelope is invalid");
+    if (typeof value.manifest_sha256 !== "string" || !SHA256.test(value.manifest_sha256)) protocolError("goal evaluator manifest fence is invalid");
     assertExactKeys(value.evaluator, ["evaluation_id", "goal_revision", "settled_sequence", "goal"]);
     if (!UUID.test(boundedString(value.evaluator.evaluation_id, "goal evaluation ID", 64))
       || safeInteger(value.evaluator.goal_revision, "goal revision") < 1
@@ -484,8 +485,8 @@ export function validateCustomMessageDetails(customType: CustomMessageType, deta
     boundedString(details.message_id, "message ID", 128);
   } else if (customType === "mecha.policy.applied.v1") {
     if (details.evaluator !== undefined) {
-      validateRuntimeFence(details, ["protocol", "runtime_generation", "session_epoch", "evaluator"]);
-      if (details.protocol !== "mecha.policy/v1" || !isRecord(details.evaluator)) protocolError("goal evaluator receipt is invalid");
+      validateRuntimeFence(details, ["protocol", "manifest_sha256", "runtime_generation", "session_epoch", "evaluator"]);
+      if (details.protocol !== "mecha.policy/v1" || typeof details.manifest_sha256 !== "string" || !SHA256.test(details.manifest_sha256) || !isRecord(details.evaluator)) protocolError("goal evaluator receipt is invalid");
       assertExactKeys(details.evaluator, ["evaluation_id", "goal_revision", "settled_sequence", "phase"], ["outcome", "reason"]);
       if (!UUID.test(boundedString(details.evaluator.evaluation_id, "goal evaluation ID", 64))
         || safeInteger(details.evaluator.goal_revision, "goal revision") < 1

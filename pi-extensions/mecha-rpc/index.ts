@@ -300,13 +300,13 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     },
   });
   const policyBridge = createPolicyBridge();
-  type GoalEvaluationTurn = { evaluationId: string; goalRevision: number; settledSequence: number; goal: string; activeTools: string[]; assistantText: string };
+  type GoalEvaluationTurn = { evaluationId: string; goalRevision: number; settledSequence: number; manifestHash: string; goal: string; activeTools: string[]; assistantText: string };
   let goalEvaluationTurn: GoalEvaluationTurn | undefined;
   const boundedGoalEvaluation = (text: string): { outcome: "DONE" | "NOT_DONE"; reason: string } => {
-    const lines = text.trim().split(/\r?\n/);
+    const lines = text.split(/\r?\n/);
     const verdict = lines.length === 2 ? /^(DONE|NOT_DONE)$/.exec(lines[0] ?? "")?.[1] : undefined;
-    const reason = lines.length === 2 ? /^REASON: (.*)$/.exec(lines[1] ?? "")?.[1]?.trim() : undefined;
-    if ((verdict !== "DONE" && verdict !== "NOT_DONE") || reason === undefined || reason.length === 0 || Buffer.byteLength(reason, "utf8") > 512) return { outcome: "NOT_DONE", reason: "invalid evaluator output" };
+    const reason = lines.length === 2 ? /^REASON: (.*)$/.exec(lines[1] ?? "")?.[1] : undefined;
+    if ((verdict !== "DONE" && verdict !== "NOT_DONE") || reason === undefined || reason.length === 0 || reason.trim() !== reason || Buffer.byteLength(reason, "utf8") > 512) return { outcome: "NOT_DONE", reason: "invalid evaluator output" };
     return { outcome: verdict, reason: reason.replace(/\s+/g, " ") };
   };
   let runtimeRegistrationFailed = false;
@@ -669,15 +669,15 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
       if (envelope.evaluator !== undefined) {
         const request = envelope.evaluator;
-        if (!isRecord(request) || goalEvaluationTurn !== undefined) throw new TypeError("Managed goal evaluator is unavailable.");
+        if (!isRecord(request) || goalEvaluationTurn !== undefined || acceptedHash === undefined || envelope.manifest_sha256 !== acceptedHash) throw new TypeError("Managed goal evaluator is unavailable.");
         goalEvaluationTurn = {
-          evaluationId: String(request.evaluation_id), goalRevision: Number(request.goal_revision), settledSequence: Number(request.settled_sequence), goal: String(request.goal),
+          evaluationId: String(request.evaluation_id), goalRevision: Number(request.goal_revision), settledSequence: Number(request.settled_sequence), manifestHash: acceptedHash, goal: String(request.goal),
           activeTools: [], assistantText: "",
         };
         // This is a hidden, bounded turn request. It uses the current Pi model
         // and credential context, and does not add a command, custom type, or tool.
         await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Evaluate the managed goal.", {
-          protocol: "mecha.policy/v1", runtime_generation: generation, session_epoch: epoch,
+          protocol: "mecha.policy/v1", manifest_sha256: goalEvaluationTurn.manifestHash, runtime_generation: generation, session_epoch: epoch,
           evaluator: { evaluation_id: goalEvaluationTurn.evaluationId, goal_revision: goalEvaluationTurn.goalRevision, settled_sequence: goalEvaluationTurn.settledSequence, phase: "requested" },
         }, { deliverAs: "followUp", triggerTurn: true });
         return { queued: true };
@@ -940,7 +940,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     pi.setActiveTools?.(evaluator.activeTools);
     const verdict = boundedGoalEvaluation(evaluator.assistantText);
     await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Managed goal evaluation completed.", {
-      protocol: "mecha.policy/v1", runtime_generation: generation, session_epoch: epoch,
+      protocol: "mecha.policy/v1", manifest_sha256: evaluator.manifestHash, runtime_generation: generation, session_epoch: epoch,
       evaluator: { evaluation_id: evaluator.evaluationId, goal_revision: evaluator.goalRevision, settled_sequence: evaluator.settledSequence, phase: "result", outcome: verdict.outcome, reason: verdict.reason },
     }, { triggerTurn: false });
   });

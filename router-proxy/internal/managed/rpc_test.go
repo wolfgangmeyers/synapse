@@ -68,6 +68,74 @@ func directMailboxAttempt(id string) store.ManagedDirectAttempt {
 	return store.ManagedDirectAttempt{MessageID: id, SessionEntryWatermark: "cursor-entry", Message: domain.Message{Body: "persisted body"}, Fence: store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}}
 }
 
+func TestRPCClientManagedGoalEvaluationConsumesOnlyItsExactFencedResult(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	policy := store.ManagedGoalPolicy{EvaluatorID: "123e4567-e89b-42d3-a456-426614174001", EvaluatorGoalRevision: 7, EvaluatorSettledSequence: 11, Config: store.ManagedGoalConfig{Goal: "finish the router"}}
+	started := make(chan error, 1)
+	go func() { started <- client.StartManagedGoalEvaluation(context.Background(), fence, policy) }()
+	request := requireRequest(t, requests)
+	require.Equal(t, "prompt", request["type"])
+	command := request["message"].(string)
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(command, "/mecha-policy-apply-v1 "))
+	require.NoError(t, err)
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(raw, &envelope))
+	require.Equal(t, policy.EvaluatorID, envelope["evaluator"].(map[string]any)["evaluation_id"])
+	require.Equal(t, fence.ManifestHash, envelope["manifest_sha256"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true}))
+	require.NoError(t, <-started)
+
+	result := make(chan struct{ outcome, reason string; err error }, 1)
+	go func() { outcome, reason, waitErr := client.WaitForManagedGoalEvaluation(context.Background()); result <- struct{ outcome, reason string; err error }{outcome, reason, waitErr} }()
+	// The matching request receipt and a stale result cannot settle the token.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": policy.EvaluatorID, "goal_revision": policy.EvaluatorGoalRevision, "settled_sequence": policy.EvaluatorSettledSequence, "phase": "requested"}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": "123e4567-e89b-42d3-a456-426614174002", "goal_revision": policy.EvaluatorGoalRevision, "settled_sequence": policy.EvaluatorSettledSequence, "phase": "result", "outcome": "DONE", "reason": "stale"}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": policy.EvaluatorID, "goal_revision": policy.EvaluatorGoalRevision, "settled_sequence": policy.EvaluatorSettledSequence, "phase": "result", "outcome": "NOT_DONE", "reason": "work remains"}}}}))
+	got := <-result
+	require.NoError(t, got.err)
+	require.Equal(t, store.ManagedGoalEvaluationNotDone, got.outcome)
+	require.Equal(t, "work remains", got.reason)
+}
+
+func TestRPCClientSuppressesEvaluatorSettledEvent(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	client.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: "123e4567-e89b-42d3-a456-426614174001", goalRevision: 1, settled: 3, fence: fence}
+	activity := make(chan map[string]any, 1)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	result := make(chan error, 1)
+	go func() { _, _, err := client.WaitForManagedGoalEvaluation(context.Background()); result <- err }()
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": "123e4567-e89b-42d3-a456-426614174001", "goal_revision": int64(1), "settled_sequence": int64(3), "phase": "result", "outcome": "DONE", "reason": "complete"}}}}))
+	require.NoError(t, <-result)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		t.Fatalf("evaluator settled event reached ordinary activity handling: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestRPCClientManagedGoalEvaluationTimeoutLeavesNoArmedToken(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	client.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: "id", goalRevision: 1, settled: 1}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, _, err := client.WaitForManagedGoalEvaluation(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	client.mu.Lock()
+	require.Nil(t, client.goalEvaluationToken)
+	client.mu.Unlock()
+}
+
 func TestRPCClientCompactUsesPiNativeCommand(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
