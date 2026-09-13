@@ -316,6 +316,7 @@ func (m *Manager) failColdRecoveryTarget(ctx context.Context, action *store.Mana
 }
 
 func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.ManagedAgentRecord, recipe store.ManagedLaunchRecipe, old store.ManagedRuntimeFence, action *store.ManagedRootRecoveryAction) error {
+	wasWaitingForCrashRetry := false
 	if action == nil {
 		return nil
 	}
@@ -353,6 +354,25 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		if _, err := m.store.RecordManagedParentProcessLost(ctx, old); err != nil {
 			return err
 		}
+		// An already-stopped row is a persisted retry from an earlier router
+		// owner; a live/idle row is the first crash observation for this recovery
+		// action. Planned/failed lifecycle exits already have an owning action and
+		// must not be converted into crash-policy history.
+		wasWaitingForCrashRetry = agent.ActivityState == "stopped"
+		current, err := m.store.ManagedAgent(ctx, agent.AgentID)
+		if err != nil {
+			return err
+		}
+		plannedProcessStop := current.LastErrorCode == "PROCESS_STOP_FAILED"
+		if current.LifecycleState != "failed" && !plannedProcessStop {
+			decision, err := m.store.RecordManagedUnexpectedExit(ctx, old, "", "managed Pi exited during router recovery")
+			if err != nil {
+				return err
+			}
+			if decision.CrashLoop {
+				return m.failColdRecoveryAction(ctx, action, "CRASH_LOOP", "managed agent entered crash loop")
+			}
+		}
 		m.interruptBuiltinToolInvocations(nil, old)
 		if err := m.store.AdvanceManagedRootRecovery(ctx, action.ActionID, "reaping", "stopped"); err != nil {
 			return err
@@ -372,6 +392,16 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	}
 	if action.Stage != "stopped" {
 		return nil
+	}
+	// The persisted backoff is authoritative after an unclean router restart;
+	// recheck it after the old process has been classified so a new crash gets
+	// the same delay as a live watcher. A first observation from an idle row is
+	// handled by this existing cold-recovery action and is not a duplicate.
+	if wasWaitingForCrashRetry {
+		due, err := m.store.ManagedCrashRecoveryDue(ctx, agent.AgentID)
+		if err != nil || !due {
+			return err
+		}
 	}
 	if err := m.store.BeginManagedRootRecoveryTarget(ctx, action.ActionID, action.TargetRuntimeGeneration); err != nil {
 		var stale *store.ManagedRootRecoveryTargetStaleError

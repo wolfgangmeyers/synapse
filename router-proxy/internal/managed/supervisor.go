@@ -721,7 +721,11 @@ func (m *Manager) recordPreReadinessProcessExit(binding *managedBinding, process
 	diagnostic := ManagedProcessExitDiagnostic(waitErr)
 	cleanupErr := m.stopPreReadinessProcess(process, identity)
 	if cleanupErr == nil {
-		if err := m.store.RecordManagedPreReadinessProcessExit(context.Background(), fence, operationID, diagnostic); err == nil {
+		_, recordErr := m.store.RecordManagedStartupExit(context.Background(), fence, operationID, diagnostic)
+		if errors.Is(recordErr, store.ErrManagedCrashRecoveryUnavailable) {
+			recordErr = m.store.RecordManagedPreReadinessProcessExit(context.Background(), fence, operationID, diagnostic)
+		}
+		if recordErr == nil {
 			binding.serial.Lock()
 			binding.reaped = true
 			binding.serial.Unlock()
@@ -1043,6 +1047,9 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	}
 	if admission.Replayed {
 		return RestartResult{Operation: admission.Operation, Replayed: true}, nil
+	}
+	if err := m.store.ClearManagedCrashHistory(ctx, request.AgentID); err != nil {
+		return RestartResult{}, err
 	}
 	binding.operationID, binding.lifecycleAction = admission.Action.ActionID, "restart"
 	m.mu.Lock()

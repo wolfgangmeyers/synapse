@@ -200,6 +200,11 @@ func TestRecoverManagedRootColdStartStoreFaultsLeavePriorStageRecoverable(t *tes
 			require.Equal(t, test.oldStage, action.Stage, test.triggered)
 			_, err = db.Exec("DROP TRIGGER reject_recovery_transition")
 			require.NoError(t, err)
+			// A crash-policy write commits before a later recovery-stage trigger
+			// can fail. Make that persisted retry due so this test exercises the
+			// same recovery transition after the injected fault is removed.
+			_, err = db.Exec("UPDATE managed_crash_recovery SET retry_at='1970-01-01T00:00:00.000Z'")
+			require.NoError(t, err)
 			require.NoError(t, manager.RecoverManagedRootColdStarts(context.Background()))
 			action, err = durable.ManagedRootRecoveryAction(context.Background(), agent.AgentID)
 			require.NoError(t, err)
