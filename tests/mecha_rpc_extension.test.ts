@@ -280,34 +280,65 @@ test("a failed evaluator enqueue restores tools and leaves no pending evaluator 
   assert.equal(current.sent.length, sentAfterFailure);
 });
 
-test("goal reset, replacement, deactivation, and stale settlement cannot restore a replacement evaluator's tools", async () => {
+test("single-flight goal evaluation keeps a replacement fenced until the prior terminal path restores tools", async () => {
   const current = fixture();
   await bootstrap(current);
   const activeBefore = current.pi.getActiveTools();
   const command = current.commands.get("mecha-policy-apply-v1")!;
+  const resultReceipts = () => current.sent.filter(({ message }) => {
+    const details = message.details;
+    return message.customType === "mecha.policy.applied.v1" && details !== null && typeof details === "object"
+      && !Array.isArray(details) && (details as RecordValue).evaluator !== undefined
+      && ((details as RecordValue).evaluator as RecordValue).phase === "result";
+  });
 
-  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174013", 1, 10)), current.context);
-  assert.deepEqual(current.pi.getActiveTools(), []);
+  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174013", 1, 10, "complete evaluator A")), current.context);
+  current.handlers.get("agent_start")!({}, current.context);
+  await command.handler(encodeHiddenEnvelope({
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("set", 1),
+  }), current.context);
+  assert.deepEqual(current.pi.getActiveTools(), [], "a duplicate goal policy cannot cancel its active evaluator");
   await command.handler(encodeHiddenEnvelope({
     protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
     manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("set", 2),
   }), current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "goal replacement restores the cancelled evaluator profile");
+  assert.deepEqual(current.pi.getActiveTools(), [], "a replacement policy leaves the cancelled evaluator isolated until it settles");
+  await assert.rejects(
+    () => command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174014", 2, 11, "complete evaluator B")), current.context),
+    /retry after the active evaluator settles/,
+  );
 
-  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174015", 2, 12)), current.context);
+  current.handlers.get("agent_start")!({}, current.context);
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: stale evaluator A output." }] } }, current.context);
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "the cancelled evaluator restores only its own tool snapshot");
+  assert.equal(resultReceipts().length, 0, "a cancelled evaluator cannot emit a result receipt");
+
+  current.handlers.get("agent_start")!({}, current.context);
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "an unrelated normal prompt between evaluations leaves tools alone");
+
+  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174014", 2, 11, "complete evaluator B")), current.context);
+  const replacementRequest = current.sent.at(-1);
+  assert.equal(replacementRequest?.message.content, "Evaluate the managed goal using the available conversation only.\nGoal: complete evaluator B\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.");
+  assert.deepEqual(current.pi.getActiveTools(), []);
+  current.handlers.get("agent_start")!({}, current.context);
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: evaluator B is complete." }] } }, current.context);
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+  assert.deepEqual(resultReceipts().map(({ message }) => ((message.details as RecordValue).evaluator as RecordValue).evaluation_id), ["123e4567-e89b-42d3-a456-426614174014"]);
+
+  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174015", 3, 12, "cancel pending evaluator C")), current.context);
   await command.handler(encodeHiddenEnvelope({
     protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
     manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("off", 3),
   }), current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "goal deactivation restores the cancelled evaluator profile");
-
-  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174017", 4, 14)), current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), [], "a prior settlement cannot finish an evaluator whose turn never started");
+  assert.deepEqual(current.pi.getActiveTools(), [], "deactivation waits for a pending evaluator terminal event");
   current.handlers.get("agent_start")!({}, current.context);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: Completed." }] } }, current.context);
   await current.handlers.get("agent_settled")!({}, current.context);
   assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+  assert.equal(resultReceipts().length, 1, "pending cancellation cannot emit or duplicate a receipt");
 });
 
 test("session shutdown restores evaluator tools and clears its turn", async () => {
