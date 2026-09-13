@@ -10,7 +10,7 @@
     },
     {
       "name": "Subagent guidance",
-      "body": "Important: Subagent Guidance\n\nUse subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. Do not abuse the inline tool allowance, or it will be disabled.\n\nAlso please set a 15 minute recurring reminder with the subagent guidance. Don't delete any existing reminders, just start this one up. Make sure to set the reminder on your own window, not the supervisor window.",
+      "body": "Important: Subagent Guidance\n\nUse subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. \n\nAlso consider the next steps towards your goal, and think about if you can parallelize any of them. If so, and if you are not currently running many things in parallel already, do so. It will speed up completion of the goal.\n\nDo not abuse the inline tool allowance, or it will be disabled.",
       "id": "ab33b08c-2a0d-405b-87fa-b2f033f88775",
       "updated_at": "2026-08-30T18:32:59.420Z"
     },
@@ -67,6 +67,30 @@
       "body": "Tell me at a high level so it's really easy to understand what everybody's status is right now. Is anyone blocked or has anyone come to a halt when they should be moving?",
       "id": "512f0ffd-148f-4a6b-9594-ae42e0f49c67",
       "updated_at": "2026-09-02T21:50:28.925Z"
+    },
+    {
+      "name": "PR Sweep",
+      "body": "Sweep only the configured org for open PRs (see ~/AGENTS.md) that need review. These should be PRs not authored by Wolfgang. Either Wolfgang has already reviewed them and they have new changes since, Wolfgang has been explicitly requested or re-requested. Those are the PRs to include in the sweep. For each PR, in sequence, do the following:\n\nUse the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
+      "id": "37749c5d-2488-43fe-9fbd-c6f7d3dbd9fa",
+      "updated_at": "2026-09-04T13:51:48.381Z"
+    },
+    {
+      "name": "Unblock Yourself",
+      "body": "Remember that you are authorized to make any and all decisions to become unblocked. If you discover any decisions that need to be made, use the wolfgang persona to make the best decision. You are authorized to install, change, push, or otherwise make mutations to proceed towards completion of the RPC project. Do not allow yourself to become blocked. To be clear: DO NOT WAIT ON THE USER FOR ANYTHING. you already have everything you need to get all the way to completion. Once you complete a phase, start the next phase until this project is fully completed.",
+      "id": "ca54388b-6a8a-42fe-adb8-91a841f99d20",
+      "updated_at": "2026-09-06T23:06:41.308Z"
+    },
+    {
+      "name": "Parallelize",
+      "body": "Consider the next steps towards your goal, and think about if you can parallelize any of them. If so, and if you are not currently running many things in parallel already, do so. It will speed up completion of the goal.",
+      "id": "4a85d3eb-429f-4cb0-ab6c-948048fbd575",
+      "updated_at": "2026-09-07T16:12:23.677Z"
+    },
+    {
+      "name": "Supervisor Sweep",
+      "body": "Run this in a subagent:\n\nEnumerate the list of all workers. For each worker, if they have an open PR, check it for the following: CI failures, merge conflicts, unaddressed feedback. If the PR has any of these, get the worker to set a goal to work on it. CI must be green and free of merge conflicts, and all new feedback must either be addressed (strongly preferred) or replied to if there is a good reason not to address it. All threads should be replied to, addressed feedback threads should be resolved.",
+      "id": "ed5b2b7c-4985-4327-b99a-56b0d4cb08be",
+      "updated_at": "2026-09-09T14:01:08.319Z"
     }
   ]
 }
