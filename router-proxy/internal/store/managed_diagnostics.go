@@ -1,14 +1,26 @@
 package store
 
 import (
+	"html"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
 // RedactedManagedDiagnostic produces the bounded local cause that may cross
 // the managed-worker HTTP/UI boundary. It is deliberately run again when a
 // durable row is projected because older rows may predate current redaction.
+var (
+	managedDiagnosticQuotedPath = regexp.MustCompile(`(?i)["'](?:file:(?://)?|~[\\/]|/|[a-z]:[\\/])[^"']*["']`)
+	managedDiagnosticFilePath   = regexp.MustCompile(`(?i)file:(?://)?(?:/[^\s"'<>]*|[a-z]:[\\/][^\s"'<>]*)`)
+	// A bare path needs a boundary so /host in https://host stays useful.
+	managedDiagnosticBarePath = regexp.MustCompile(`(?i)(^|[\s=:(])(?:~[\\/][^\s"'<>]*|/[^\s/"'<>][^\s"'<>]*|[a-z]:[\\/][^\s"'<>]*)`)
+)
+
 func RedactedManagedDiagnostic(value string) string {
+	// Diagnostics can be copied through HTML-bearing RPC/UI paths. Decode
+	// entities before matching so quoted local paths cannot evade redaction.
+	value = redactManagedDiagnosticPaths(html.UnescapeString(value))
 	fields := strings.Fields(value)
 	redactFollowing := 0
 	for index, field := range fields {
@@ -42,10 +54,6 @@ func RedactedManagedDiagnostic(value string) string {
 			}
 			continue
 		}
-		if managedDiagnosticPath(field) {
-			fields[index] = "[REDACTED]"
-			continue
-		}
 		if question := strings.IndexByte(field, '?'); question >= 0 {
 			fields[index] = field[:question] + "?[REDACTED]"
 		}
@@ -60,13 +68,8 @@ func RedactedManagedDiagnostic(value string) string {
 	return result
 }
 
-func managedDiagnosticPath(field string) bool {
-	lower := strings.ToLower(field)
-	if strings.HasPrefix(field, "/") || strings.HasPrefix(field, "~/") || strings.HasPrefix(lower, "file:") {
-		return true
-	}
-	if separator := strings.IndexAny(field, "=:"); separator >= 0 {
-		return strings.HasPrefix(field[separator+1:], "/") || strings.HasPrefix(field[separator+1:], "~/")
-	}
-	return false
+func redactManagedDiagnosticPaths(value string) string {
+	value = managedDiagnosticQuotedPath.ReplaceAllString(value, "[REDACTED]")
+	value = managedDiagnosticFilePath.ReplaceAllString(value, "[REDACTED]")
+	return managedDiagnosticBarePath.ReplaceAllString(value, "$1[REDACTED]")
 }

@@ -466,10 +466,11 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	waitSignal := make(chan struct{})
 	go func() {
 		waitErr := process.Wait()
-		binding.serial.Lock()
+		// waitSignal publishes waitErr before readiness may classify an EOF.
+		// It must not wait on binding.serial because readiness owns that lock
+		// while an RPC call can return the EOF that triggered this path.
 		binding.waitErr = waitErr
 		close(waitSignal)
-		binding.serial.Unlock()
 		waitDone <- waitErr
 	}()
 	binding.serial.Lock()
@@ -582,9 +583,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	case <-waitSignal:
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
-		binding.serial.Lock()
-		waitErr := binding.waitErr
-		binding.serial.Unlock()
+		waitErr, _ := completedBindingWait(binding)
 		m.recordReadyBindingProcessExitInLane(binding, fence, sanitizeError(waitErr))
 	case <-ctx.Done():
 		// Lifecycle-specific shutdown owners acquire the lane themselves. The
@@ -648,12 +647,13 @@ func completedBindingWait(binding *managedBinding) (error, bool) {
 		return nil, false
 	}
 	binding.serial.Lock()
-	defer binding.serial.Unlock()
-	if binding.waitSignal == nil {
+	waitSignal := binding.waitSignal
+	binding.serial.Unlock()
+	if waitSignal == nil {
 		return nil, false
 	}
 	select {
-	case <-binding.waitSignal:
+	case <-waitSignal:
 		return binding.waitErr, true
 	default:
 		return nil, false
@@ -1288,10 +1288,8 @@ func (m *Manager) watchRestartProcess(binding *managedBinding) {
 	binding.waitDone, binding.waitSignal = waitDone, waitSignal
 	go func() {
 		waitErr := binding.process.Wait()
-		binding.serial.Lock()
 		binding.waitErr = waitErr
 		close(waitSignal)
-		binding.serial.Unlock()
 		waitDone <- waitErr
 	}()
 }
@@ -1300,8 +1298,8 @@ func (m *Manager) watchReadyRestartTarget(target *managedBinding) {
 	m.startManagedTask(func() {
 		select {
 		case <-target.waitSignal:
+			waitErr, _ := completedBindingWait(target)
 			target.serial.Lock()
-			waitErr := target.waitErr
 			lifecycleOwned := target.lifecycleAction != "" || target.reaped
 			target.serial.Unlock()
 			// A reset/restart reaper owns this exit and advances its exact durable

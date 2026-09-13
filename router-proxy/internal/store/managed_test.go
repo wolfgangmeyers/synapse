@@ -141,6 +141,28 @@ func TestFailedManagedRowsRemainDurableWhileTheirSlotIsReleased(t *testing.T) {
 	require.ErrorAs(t, durable.ReserveManagedLaunch(ctx, conflict, conflictOp), &nameConflict)
 }
 
+func TestRedactedManagedDiagnosticRedactsLocalPathsAcrossDiagnosticEncodings(t *testing.T) {
+	for _, test := range []struct {
+		name, detail, forbidden string
+	}{
+		{"quoted Unix path", `exit status 17: cwd="/Users/wolfgang/project/output.log" token=secret-value permission denied`, "/Users/wolfgang/project/output.log"},
+		{"HTML-escaped quote path", `exit status 17: cwd=&quot;/Users/wolfgang/project/output.log&quot; token=secret-value permission denied`, "/Users/wolfgang/project/output.log"},
+		{"quoted path with spaces", `exit status 17: cwd="/Users/wolfgang/project/output log" token=secret-value permission denied`, "/Users/wolfgang/project/output log"},
+		{"file URL", `exit status 17: file:///Users/wolfgang/project/output.log token=secret-value permission denied`, "file:///Users/wolfgang/project/output.log"},
+		{"Windows-like path", `exit status 17: cwd="C:\Users\wolfgang\project\output log" token=secret-value permission denied`, `C:\Users\wolfgang\project\output log`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			diagnostic := RedactedManagedDiagnostic(test.detail)
+			require.NotContains(t, diagnostic, test.forbidden)
+			require.NotContains(t, diagnostic, "secret-value")
+			require.Contains(t, diagnostic, "exit status 17")
+			require.Contains(t, diagnostic, "permission denied")
+			require.Contains(t, diagnostic, "[REDACTED]")
+			require.LessOrEqual(t, len(diagnostic), 512)
+		})
+	}
+}
+
 func TestRecordManagedPreReadinessProcessExitUsesExactFenceAndKeepsLaunchReceipt(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readinessSourceFixture(t)
@@ -157,7 +179,8 @@ func TestRecordManagedPreReadinessProcessExitUsesExactFenceAndKeepsLaunchReceipt
 	require.NoError(t, err)
 	require.Equal(t, before, afterStale)
 
-	require.NoError(t, durable.RecordManagedPreReadinessProcessExit(ctx, fence, launch.OperationID, "managed Pi exited with code 17: token=do-not-retain /private/router"))
+	unsafeDiagnostic := `managed Pi exited with code 17: cwd="/Users/wolfgang/project/output.log" cwd=&quot;/Users/wolfgang/project/output.log&quot; cwd="/Users/wolfgang/project/output log" file:///Users/wolfgang/project/output.log cwd="C:\Users\wolfgang\project\output log" token=do-not-retain permission denied`
+	require.NoError(t, durable.RecordManagedPreReadinessProcessExit(ctx, fence, launch.OperationID, unsafeDiagnostic))
 	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "failed", agent.LifecycleState)
@@ -166,8 +189,11 @@ func TestRecordManagedPreReadinessProcessExitUsesExactFenceAndKeepsLaunchReceipt
 	require.False(t, agent.SlotHeld)
 	require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
 	require.Contains(t, agent.LastErrorMessage, "code 17")
-	require.NotContains(t, agent.LastErrorMessage, "do-not-retain")
-	require.NotContains(t, agent.LastErrorMessage, "/private/router")
+	for _, forbidden := range []string{"do-not-retain", "/Users/wolfgang/project/output.log", "/Users/wolfgang/project/output log", "file:///Users/wolfgang/project/output.log", `C:\Users\wolfgang\project\output log`} {
+		require.NotContains(t, agent.LastErrorMessage, forbidden)
+	}
+	require.Contains(t, agent.LastErrorMessage, "permission denied")
+	require.LessOrEqual(t, len(agent.LastErrorMessage), 512)
 	operation, err := durable.ManagedOperation(ctx, launch.OperationID)
 	require.NoError(t, err)
 	require.Equal(t, "terminal", operation.State)
