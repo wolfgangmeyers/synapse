@@ -91,6 +91,24 @@ function bootstrap(current: ReturnType<typeof fixture>) {
   return current.commands.get("mecha-bootstrap-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
 }
 
+function evaluatorEnvelope(current: ReturnType<typeof fixture>, evaluationId: string, goalRevision: number, settledSequence: number, goal = "finish the migration"): RecordValue {
+  return {
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()), policy: {},
+    evaluator: { evaluation_id: evaluationId, goal_revision: goalRevision, settled_sequence: settledSequence, goal },
+  };
+}
+
+function goalPolicy(action: "set" | "off", revision: number): RecordValue {
+  return {
+    goal: {
+      action, control_id: `goal-${revision}`, target_instance_id: "goal-agent", revision,
+      ...(action === "set" ? { goal: `finish revision ${revision}` } : {}),
+      settings: { goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null, snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000 },
+    },
+  };
+}
+
 test("child delta delivery retries in order and bounds overflow into a recoverable gap", async () => {
   const delivered: number[] = [];
   let firstAttempts = 0;
@@ -198,49 +216,110 @@ test("a managed goal policy acknowledges the validated policy revision", async (
   });
 });
 
-test("a managed goal evaluator uses one hidden no-tools turn and emits an exact fenced result", async () => {
-  const current = fixture();
-  await bootstrap(current);
-  const before = current.handlers.get("before_agent_start")!({ systemPrompt: "base prompt" }, current.context) as RecordValue;
-  assert.equal(before, undefined);
-  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
-    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: {},
-    evaluator: { evaluation_id: "123e4567-e89b-42d3-a456-426614174009", goal_revision: 1, settled_sequence: 7, goal: "finish the migration" },
-  }), current.context);
-  const evaluatorStart = current.sent.at(-1);
-  assert.equal(evaluatorStart?.message.customType, "mecha.policy.applied.v1");
-  assert.deepEqual(evaluatorStart?.options, { deliverAs: "followUp", triggerTurn: true });
-  const evaluatorPrompt = current.handlers.get("before_agent_start")!({ systemPrompt: "base prompt" }, current.context) as RecordValue;
-  assert.match(String(evaluatorPrompt.systemPrompt), /Return exactly two lines: DONE\|NOT_DONE/);
-  assert.deepEqual(current.pi.getActiveTools(), []);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: The migration is complete." }] } }, current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  const evaluatorResult = current.sent.at(-1);
-  assert.equal((evaluatorResult?.message.details as RecordValue).manifest_sha256, current.extension.hashManifest(manifest()));
-  assert.deepEqual((evaluatorResult?.message.details as RecordValue).evaluator, {
-    evaluation_id: "123e4567-e89b-42d3-a456-426614174009", goal_revision: 1, settled_sequence: 7,
-    phase: "result", outcome: "DONE", reason: "The migration is complete.",
-  });
-  assert.ok(current.pi.getActiveTools().length > 0);
+test("a managed goal evaluator arms no tools before its hidden turn and returns valid DONE and NOT_DONE receipts", async () => {
+  for (const [outcome, reason] of [["DONE", "The migration is complete."], ["NOT_DONE", "The migration still has work."]] as const) {
+    const current = fixture();
+    await bootstrap(current);
+    const activeBefore = current.pi.getActiveTools();
+    const evaluationId = outcome === "DONE" ? "123e4567-e89b-42d3-a456-426614174009" : "123e4567-e89b-42d3-a456-426614174010";
+    await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, evaluationId, 1, 7, "finish the migration exactly")), current.context);
+
+    const evaluatorStart = current.sent.at(-1);
+    assert.equal(evaluatorStart?.message.customType, "mecha.policy.applied.v1");
+    assert.equal(evaluatorStart?.message.content, "Evaluate the managed goal using the available conversation only.\nGoal: finish the migration exactly\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.");
+    assert.deepEqual(evaluatorStart?.options, { deliverAs: "followUp", triggerTurn: true });
+    assert.deepEqual(current.pi.getActiveTools(), [], "the evaluator must lose tools before triggerTurn starts it");
+    current.handlers.get("agent_start")!({}, current.context);
+    assert.deepEqual(current.handlers.get("tool_call")!({ toolCallId: "evaluator-tool", toolName: "goal" }, current.context), {
+      block: true,
+      reason: "Managed goal evaluation cannot call tools.",
+    });
+
+    current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `${outcome}\nREASON: ${reason}` }] } }, current.context);
+    await current.handlers.get("agent_settled")!({}, current.context);
+    const evaluatorResult = current.sent.at(-1);
+    assert.equal((evaluatorResult?.message.details as RecordValue).manifest_sha256, current.extension.hashManifest(manifest()));
+    assert.deepEqual((evaluatorResult?.message.details as RecordValue).evaluator, {
+      evaluation_id: evaluationId, goal_revision: 1, settled_sequence: 7,
+      phase: "result", outcome, reason,
+    });
+    assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+    const sentAfterResult = current.sent.length;
+    await current.handlers.get("agent_settled")!({}, current.context);
+    assert.equal(current.sent.length, sentAfterResult, "the evaluator receipt must not recursively settle another evaluator");
+  }
 });
 
-test("a managed goal evaluator rejects padded output and restores its no-tools profile", async () => {
+test("a managed goal evaluator rejects malformed output without before_agent_start", async () => {
   const current = fixture();
   await bootstrap(current);
-  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
-    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: {},
-    evaluator: { evaluation_id: "123e4567-e89b-42d3-a456-426614174010", goal_revision: 1, settled_sequence: 8, goal: "finish the migration" },
-  }), current.context);
-  current.handlers.get("before_agent_start")!({ systemPrompt: "base prompt" }, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), []);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "\nDONE\nREASON: padded\n" }] } }, current.context);
+  const activeBefore = current.pi.getActiveTools();
+  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174011", 1, 8)), current.context);
+  current.handlers.get("agent_start")!({}, current.context);
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "GOAL_DONE" }] } }, current.context);
   await current.handlers.get("agent_settled")!({}, current.context);
   const result = current.sent.at(-1)?.message.details as RecordValue;
   assert.equal((result.evaluator as RecordValue).outcome, "NOT_DONE");
   assert.equal((result.evaluator as RecordValue).reason, "invalid evaluator output");
-  assert.ok(current.pi.getActiveTools().length > 0);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+});
+
+test("a failed evaluator enqueue restores tools and leaves no pending evaluator settlement", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const activeBefore = current.pi.getActiveTools();
+  const originalSend = current.pi.sendMessage;
+  current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+    if (message.content === "Evaluate the managed goal using the available conversation only.\nGoal: finish the migration\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.") return Promise.reject(new Error("evaluator enqueue failed"));
+    return originalSend(message, options);
+  };
+  await assert.rejects(() => current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174012", 1, 9))));
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+  const sentAfterFailure = current.sent.length;
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.equal(current.sent.length, sentAfterFailure);
+});
+
+test("goal reset, replacement, deactivation, and stale settlement cannot restore a replacement evaluator's tools", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const activeBefore = current.pi.getActiveTools();
+  const command = current.commands.get("mecha-policy-apply-v1")!;
+
+  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174013", 1, 10)), current.context);
+  assert.deepEqual(current.pi.getActiveTools(), []);
+  await command.handler(encodeHiddenEnvelope({
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("set", 2),
+  }), current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "goal replacement restores the cancelled evaluator profile");
+
+  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174015", 2, 12)), current.context);
+  await command.handler(encodeHiddenEnvelope({
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("off", 3),
+  }), current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "goal deactivation restores the cancelled evaluator profile");
+
+  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174017", 4, 14)), current.context);
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.deepEqual(current.pi.getActiveTools(), [], "a prior settlement cannot finish an evaluator whose turn never started");
+  current.handlers.get("agent_start")!({}, current.context);
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: Completed." }] } }, current.context);
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+});
+
+test("session shutdown restores evaluator tools and clears its turn", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const activeBefore = current.pi.getActiveTools();
+  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174018", 1, 15)), current.context);
+  current.handlers.get("session_shutdown")!({}, current.context);
+  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
+  const sentAfterShutdown = current.sent.length;
+  await current.handlers.get("agent_settled")!({}, current.context);
+  assert.equal(current.sent.length, sentAfterShutdown);
 });
 
 test("a managed goal policy rejects malformed goal settings before it acknowledges the revision", async () => {
