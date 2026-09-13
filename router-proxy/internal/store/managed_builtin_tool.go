@@ -12,6 +12,7 @@ import (
 
 var ErrManagedBuiltinInvocationNotFound = errors.New("managed builtin invocation was not found")
 var ErrManagedBuiltinInvocationConflict = errors.New("managed builtin invocation has a conflicting terminal outcome")
+var ErrManagedBuiltinInvocationFenceInactive = errors.New("managed builtin invocation fence is not current and running")
 
 type ManagedBuiltinToolOutcome string
 
@@ -155,7 +156,14 @@ func (s *Store) FinishManagedBuiltinInvocation(ctx context.Context, fence Manage
 	err := s.runImmediate(ctx, func() error {
 		var tool, state string
 		var sequence int64
-		err := s.db.QueryRowContext(ctx, `SELECT tool_name,state,complete_sequence FROM managed_builtin_tool_invocations WHERE invocation_key=?`, key).Scan(&tool, &state, &sequence)
+		current, err := managedBuiltinFenceIsCurrentTx(ctx, s.db, fence)
+		if err != nil {
+			return err
+		}
+		if !current {
+			return ErrManagedBuiltinInvocationFenceInactive
+		}
+		err = s.db.QueryRowContext(ctx, `SELECT tool_name,state,complete_sequence FROM managed_builtin_tool_invocations WHERE invocation_key=?`, key).Scan(&tool, &state, &sequence)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrManagedBuiltinInvocationNotFound
 		}

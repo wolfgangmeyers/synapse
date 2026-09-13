@@ -955,6 +955,37 @@ func TestRPCClientDeliversParentActivityWithoutBlockingDirectSettlement(t *testi
 	}, time.Second, time.Millisecond)
 }
 
+func TestRPCClientReportsReaderEOFSeparatelyFromExplicitClose(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	terminal := make(chan error, 1)
+	client.SetRPCReaderTerminalHandler(func(err error) { terminal <- err })
+	require.NoError(t, stdoutWriter.Close())
+	select {
+	case err := <-terminal:
+		require.ErrorIs(t, err, io.EOF)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for RPC reader EOF")
+	}
+	require.NoError(t, client.Close())
+}
+
+func TestRPCClientReportsReaderMalformedFrame(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	terminal := make(chan error, 1)
+	client.SetRPCReaderTerminalHandler(func(err error) { terminal <- err })
+	_, err := stdoutWriter.Write([]byte("not json\n"))
+	require.NoError(t, err)
+	select {
+	case err := <-terminal:
+		require.EqualError(t, err, "Pi emitted malformed RPC JSON")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for RPC reader error")
+	}
+	require.NoError(t, client.Close())
+}
+
 func TestRPCClientDeliversChildDeltasInStdoutOrder(t *testing.T) {
 	stdoutReader, stdoutWriter := io.Pipe()
 	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)

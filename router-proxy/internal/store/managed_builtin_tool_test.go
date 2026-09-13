@@ -49,6 +49,25 @@ func TestManagedBuiltinToolLifecycleMutatesOneCompleteEntry(t *testing.T) {
 	require.Equal(t, terminal, page.Entries[0])
 }
 
+func TestManagedBuiltinToolLifecycleRejectsTerminalAfterDurableFailure(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := builtinToolFixture(t)
+	_, _, err := durable.BeginManagedBuiltinInvocation(ctx, fence, "call-1", "bash")
+	require.NoError(t, err)
+	require.NoError(t, durable.MarkManagedFailed(ctx, fence.AgentID, "PROCESS_EXITED", "process exited"))
+
+	_, changed, err := durable.FinishManagedBuiltinInvocation(ctx, fence, "call-1", ManagedBuiltinToolSucceeded)
+	require.ErrorIs(t, err, ErrManagedBuiltinInvocationFenceInactive)
+	require.False(t, changed)
+
+	entries, err := durable.InterruptActiveManagedBuiltinInvocations(ctx, fence)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	_, changed, err = durable.FinishManagedBuiltinInvocation(ctx, fence, "call-1", ManagedBuiltinToolSucceeded)
+	require.ErrorIs(t, err, ErrManagedBuiltinInvocationFenceInactive)
+	require.False(t, changed)
+}
+
 func TestManagedBuiltinToolLifecycleRejectsStaleFenceAndEvictsLinkedInvocation(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := builtinToolFixture(t)

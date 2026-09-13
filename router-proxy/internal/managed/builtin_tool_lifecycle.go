@@ -30,6 +30,11 @@ func (m *Manager) installBuiltinToolLifecycleReceiver(binding *managedBinding) {
 	rpc.SetBuiltinToolLifecycleEventHandler(func(event BuiltinToolLifecycleEvent) {
 		m.handleBuiltinToolLifecycleEvent(binding, event)
 	})
+	if terminalRPC, ok := binding.rpc.(RPCReaderTerminalRPC); ok {
+		terminalRPC.SetRPCReaderTerminalHandler(func(err error) {
+			m.handleBuiltinToolLifecycleReaderTerminal(binding, err)
+		})
+	}
 }
 
 func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event BuiltinToolLifecycleEvent) {
@@ -83,6 +88,41 @@ func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event
 			m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "builtin", ID: terminal.ID})
 		}
 	}
+}
+
+// handleBuiltinToolLifecycleReaderTerminal reconciles only the exact stream
+// fence. EOF is missing telemetry, not process loss, so it must not stop or
+// otherwise alter the managed process lifecycle.
+func (m *Manager) handleBuiltinToolLifecycleReaderTerminal(binding *managedBinding, err error) {
+	if binding == nil || err == nil {
+		return
+	}
+	binding.serial.Lock()
+	fence := bindingFence(binding.agentID, binding)
+	binding.serial.Unlock()
+	m.startManagedTask(func() {
+		binding.lane.serial.Lock()
+		defer binding.lane.serial.Unlock()
+		m.interruptBuiltinToolInvocations(binding, fence)
+	})
+}
+
+// reconcileBuiltinToolTelemetryMissing runs synchronously on the native
+// stdout intake path. A settled parent turn does not prove a builtin success;
+// it only proves the tool stream can no longer provide its terminal event.
+func (m *Manager) reconcileBuiltinToolTelemetryMissing(binding *managedBinding) {
+	if binding == nil {
+		return
+	}
+	binding.lane.serial.Lock()
+	defer binding.lane.serial.Unlock()
+	binding.serial.Lock()
+	fence := bindingFence(binding.agentID, binding)
+	binding.serial.Unlock()
+	if !m.runningBindingCurrent(context.Background(), binding, fence) {
+		return
+	}
+	m.interruptBuiltinToolInvocations(binding, fence)
 }
 
 func builtinToolTerminalOutcome(isError bool) store.ManagedBuiltinToolOutcome {
