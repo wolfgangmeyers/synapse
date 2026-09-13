@@ -24,9 +24,11 @@ func TestManagedRootRecoveryMigrationUpgradesExistingManagedRows(t *testing.T) {
 	stored, err := after.ManagedAgent(ctx, agent.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, agent.PiSessionID, stored.PiSessionID)
-	var recipeCount, actionCount int
+	var recipeCount, actionCount, retryRows int
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM managed_launch_recipes`).Scan(&recipeCount))
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM managed_root_recovery_actions`).Scan(&actionCount))
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM managed_crash_recovery WHERE agent_id=?`, agent.AgentID).Scan(&retryRows))
 	require.Zero(t, recipeCount, "legacy rows remain fail-closed without a recipe")
 	require.Zero(t, actionCount)
+	require.Equal(t, 1, retryRows, "migration creates one bounded retry row per managed agent")
 }

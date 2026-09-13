@@ -521,6 +521,9 @@ func (s *Store) CompleteManagedRootRecoveryReady(ctx context.Context, agentID st
 			}
 			return &ManagedReadinessSourceStaleError{AgentID: agentID}
 		}
+		if err := markManagedCrashReadyTx(ctx, s.db, agentID, now, s.clock.Now()); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state='active',updated_at=? WHERE source_kind='managed' AND owner_identity=? AND state='reserved'`, now, agentID); err != nil {
 			return err
 		}

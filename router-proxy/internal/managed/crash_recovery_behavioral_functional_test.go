@@ -138,6 +138,20 @@ func TestManagedCrashRecoveryBehavioralFunctional_PersistedBackoffResumesAfterRo
 	case <-time.After(2 * time.Second):
 		t.Fatal("manager did not publish the durable crash transition")
 	}
+	stored, err := durable.ManagedAgent(ctx, "crash-agent")
+	require.NoError(t, err)
+	retryBefore, err := durable.ManagedCrashRecovery(ctx, stored.AgentID)
+	require.NoError(t, err)
+	versionBefore, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	_, err = durable.RecordManagedUnexpectedExit(ctx, storedAgentFence(stored), "launch-1", "duplicate exit callback")
+	require.NoError(t, err)
+	retryAfter, err := durable.ManagedCrashRecovery(ctx, stored.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, retryBefore.RetryAt, retryAfter.RetryAt)
+	versionAfter, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, versionBefore, versionAfter, "duplicate exit callback must not publish a second transition")
 	require.NoError(t, manager.Close(ctx))
 	require.NoError(t, durable.Close())
 
@@ -147,22 +161,56 @@ func TestManagedCrashRecoveryBehavioralFunctional_PersistedBackoffResumesAfterRo
 	require.NoError(t, err)
 	defer durable.Close()
 	rpc = &launchRPC{active: expectedManagedActiveTools(manifest)}
+	readinessStarted := make(chan struct{})
+	releaseReadiness := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseReadiness:
+		default:
+			close(releaseReadiness)
+		}
+	})
+	rpc.beforeState = func() {
+		close(readinessStarted)
+		<-releaseReadiness
+	}
 	factory = &crashRecoveryProcessFactory{processes: []Process{second}, rpc: rpc, started: make(chan CommandSpec, 2)}
 	manager = newCrashRecoveryManager(t, durable, config, manifest, clock, deterministic.NewSequenceIDSource("recovery-runtime"), factory, rpc, ops)
 	defer manager.Close(ctx)
 
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	require.Equal(t, 0, factory.StartCalls(), "recovery must honor the persisted first-crash backoff")
-	require.NoError(t, clock.Advance(time.Second))
+	require.NoError(t, clock.Advance(time.Second-time.Millisecond))
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+	require.Equal(t, 0, factory.StartCalls(), "recovery must wait until the exact due timestamp")
+	require.NoError(t, clock.Advance(time.Millisecond))
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- manager.RecoverManagedRootColdStarts(ctx) }()
+	var startedSpec CommandSpec
 	select {
-	case spec := <-factory.started:
-		require.Equal(t, ResumeExisting, spec.LaunchMode)
-		require.Equal(t, "session-1", spec.SessionID)
+	case startedSpec = <-factory.started:
 	case <-time.After(2 * time.Second):
 		current, readErr := durable.ManagedAgent(ctx, "crash-agent")
 		t.Fatalf("persisted crash backoff did not resume at its exact due time (read error: %v, agent: %+v, process starts: %d)", readErr, current, factory.StartCalls())
 	}
+	require.Equal(t, ResumeExisting, startedSpec.LaunchMode)
+	require.Equal(t, "session-1", startedSpec.SessionID)
+	select {
+	case <-readinessStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacement did not reach the readiness barrier")
+	}
+	current, err := durable.ManagedAgent(ctx, "crash-agent")
+	require.NoError(t, err)
+	require.False(t, current.AcceptingPrompts, "replacement cannot accept before readiness")
+	require.Equal(t, "starting", current.LifecycleState)
+	require.Equal(t, "starting", current.ActivityState)
+	close(releaseReadiness)
+	require.NoError(t, <-recoveryDone)
+	current, err = durable.ManagedAgent(ctx, "crash-agent")
+	require.NoError(t, err)
+	require.True(t, current.AcceptingPrompts)
+	require.Equal(t, "running", current.LifecycleState)
 	// Re-running the recovery scan at the same clock position must not start a
 	// second process for the same persisted retry.
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))

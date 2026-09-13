@@ -94,6 +94,13 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		if _, bound := m.bindingFor(agent.AgentID); bound {
 			continue
 		}
+		due, dueErr := m.store.ManagedCrashRecoveryDue(ctx, agent.AgentID)
+		if dueErr != nil {
+			return dueErr
+		}
+		if !due {
+			continue
+		}
 		// A crash after the target fence was installed leaves the durable row in
 		// starting. Let recovery close that incomplete target; pending launches
 		// remain owned by RecoverPendingManagedLaunches below this pass.

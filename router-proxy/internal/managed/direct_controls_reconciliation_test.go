@@ -40,11 +40,14 @@ func TestDirectControlReconcilesUnownedReadyBindingWithoutWaitSignal(t *testing.
 
 			agent, err := manager.store.ManagedAgent(ctx, fence.AgentID)
 			require.NoError(t, err)
-			require.Equal(t, "failed", agent.LifecycleState)
-			require.Equal(t, "failed", agent.ActivityState)
+			require.Equal(t, "running", agent.LifecycleState)
+			require.Equal(t, "stopped", agent.ActivityState)
 			require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
 			require.False(t, agent.AcceptingPrompts)
-			require.False(t, agent.SlotHeld)
+			require.True(t, agent.SlotHeld)
+			retry, retryErr := manager.store.ManagedCrashRecovery(ctx, fence.AgentID)
+			require.NoError(t, retryErr)
+			require.NotEmpty(t, retry.RetryAt)
 			require.Equal(t, "The managed process is no longer available.", agent.LastErrorMessage)
 			requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
 
