@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
-import { unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -120,13 +120,43 @@ async function launch(router: FunctionalRouter, name: string): Promise<JsonRecor
   return body;
 }
 
-async function sendManagedMessage(router: FunctionalRouter, agentID: string): Promise<void> {
+async function sendManagedMessage(router: FunctionalRouter, agentID: string, body = "Run the deterministic tool"): Promise<void> {
   const { response } = await jsonRequest(router, "/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id: "functional-message", from: "web-ui", to: agentID, body: "Run the deterministic tool", created_at: FIXED_TIME, source: { kind: "web_ui" } }),
+    body: JSON.stringify({ id: `functional-message-${body.replaceAll(" ", "-").toLowerCase()}`, from: "web-ui", to: agentID, body, created_at: FIXED_TIME, source: { kind: "web_ui" } }),
   });
   expect(response.status).toBe(201);
+}
+
+async function waitForChildReceipt(router: FunctionalRouter, agentID: string, sequence: number, initialChild: JsonRecord): Promise<{ marker: JsonRecord; child: JsonRecord }> {
+  let marker: JsonRecord | undefined;
+  let child: JsonRecord | undefined;
+  await waitFor(async () => {
+    const text = await readFile(`${router.sessionRoot}/child-receipt-${sequence}.json`, "utf8");
+    marker = record(JSON.parse(text));
+    const receipt = record(marker.receipt);
+    const message = record(receipt.message);
+    const details = record(message.details);
+    expect(receipt.type).toBe("message_end");
+    expect(message).toMatchObject({ id: `functional-child-delta-${sequence}`, customType: "mecha.child.delta.v1", display: false, content: "Managed child lifecycle updated." });
+    expect(details).toMatchObject({ protocol: "mecha.children/v1", task_id: initialChild.task_id, run_id: initialChild.run_id, parent_entry_id: initialChild.parent_entry_id, sequence });
+    const publicSnapshot = await jsonRequest(router, `/v1/managed-agents/${agentID}/children`, { method: "GET", credentials: "omit" });
+    expect(publicSnapshot.response.status).toBe(200);
+    if (Number(publicSnapshot.body.lifecycle_version) !== sequence) {
+      const currentAgent = await jsonRequest(router, `/v1/managed-agents/${agentID}`, { method: "GET", credentials: "omit" });
+      throw new Error(`child receipt ${sequence} was emitted but not applied: ${JSON.stringify({ marker, children: publicSnapshot.body, agent: currentAgent.body })}`);
+    }
+    const match = list(publicSnapshot.body.children).find((value) => {
+      const candidate = record(value);
+      return candidate.task_id === initialChild.task_id && candidate.run_id === initialChild.run_id && candidate.parent_entry_id === initialChild.parent_entry_id;
+    });
+    child = record(match);
+    expect(child.sequence).toBe(sequence);
+    expect(child.id).toBe(initialChild.id);
+  });
+  if (marker === undefined || child === undefined) throw new Error(`child receipt ${sequence} did not produce a public projection`);
+  return { marker, child };
 }
 
 async function waitForManagedFrame(probe: UILiveProbe, agentID: string, state: string): Promise<JsonRecord> {
@@ -234,6 +264,84 @@ describe("real managed router to React WebUI behavioral seam", () => {
     expect(complete.response.status).toBe(200);
     expect(list(quiet.body.entries).some((entry) => record(entry).id === activeID)).toBe(false);
     expect(list(complete.body.entries).some((entry) => record(entry).id === activeID)).toBe(true);
+  }, 60_000);
+
+  it("keeps child and parent compaction cards stable across active-to-terminal updates", async () => {
+    router = await startManagedGoRouter();
+    probe = await connectUILiveProbe(router.httpUrl);
+    await probe.next((frame) => frame.type === "managed_agents_snapshot");
+    render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
+    await launch(router, "functional-compaction");
+    await waitForManagedFrame(probe, "functional-compaction", "running");
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Compaction (functional-compaction)" }));
+    const initialChildren = await jsonRequest(router, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
+    expect(initialChildren.response.status).toBe(200);
+    const initialProjection = initialChildren.body;
+    const initialChild = record(list(initialProjection.children)[0]);
+    expect(initialProjection).toMatchObject({ agent_id: "functional-compaction", source: "router-managed", lifecycle_version: 0, recovery_state: "current" });
+    expect(initialChild).toMatchObject({ task_id: "functional-child-task", run_id: "functional-child-run", parent_entry_id: "functional-parent-entry", sequence: 0 });
+
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Complete messages and activity" }));
+    await sendManagedMessage(router, "functional-compaction", "Run structured child lifecycle");
+    // The fake command also emits a normal direct turn. Release its tool
+    // barrier so the child FIFO can acquire the serialized binding lane.
+    await writeFile(`${router.sessionRoot}/allow-tool-end`, "release direct tool\n", { mode: 0o600 });
+
+    const childCompactionActivePromise = probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).kind === "compaction" && record(record(frame.entry).presentation).child_label === "Child" && record(record(frame.entry).presentation).outcome === "compacting");
+    let previousOuterSequence = 0;
+    for (const [sequence, expected] of [[1, "running"], [2, "compacting"], [3, "idle"], [4, "completed"]] as const) {
+      const observed = await waitForChildReceipt(router, "functional-compaction", sequence, initialChild);
+      const details = record(record(record(observed.marker.receipt).message).details);
+      const fence = record(observed.marker.fence);
+      expect(Number(observed.marker.outer_rpc_sequence)).toBeGreaterThan(previousOuterSequence);
+      previousOuterSequence = Number(observed.marker.outer_rpc_sequence);
+      expect(fence.owner_session_id).toBe(details.owner_session_id);
+      expect(details).toMatchObject({ task_id: initialChild.task_id, run_id: initialChild.run_id, parent_entry_id: initialChild.parent_entry_id, sequence });
+      expect(observed.child).toMatchObject({ task_id: initialChild.task_id, run_id: initialChild.run_id, parent_entry_id: initialChild.parent_entry_id, sequence });
+      if (sequence === 1) expect(observed.child.status).toBe(expected);
+      if (sequence === 2) expect(record(observed.child.compaction).state).toBe(expected);
+      if (sequence === 3) expect(record(observed.child.compaction).last_outcome).toBe("completed");
+      if (sequence === 4) expect(observed.child.status).toBe(expected);
+      await writeFile(`${router.sessionRoot}/allow-child-${sequence}`, "release child receipt\n", { mode: 0o600 });
+    }
+
+    const childCompactionActive = await childCompactionActivePromise;
+    const childActiveEntry = record(childCompactionActive.entry);
+    const childActiveID = String(childActiveEntry.id);
+    const childCard = await waitFor(() => {
+      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childActiveID}"]`);
+      expect(card).toBeInTheDocument();
+      expect(card).toHaveClass("activity-entry--purple");
+      return card;
+    });
+    const childTerminal = await probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).kind === "compaction" && record(record(frame.entry).presentation).child_label === "Child" && record(record(frame.entry).presentation).outcome === "completed");
+    const childTerminalEntry = record(childTerminal.entry);
+    const childTerminalID = String(childTerminalEntry.id);
+    expect(childTerminalID).not.toBe(childActiveID);
+    await waitFor(() => {
+      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childTerminalID}"]`);
+      expect(card).toBeInTheDocument();
+      expect(card).toHaveTextContent("Child context compacted");
+      expect(card).not.toHaveClass("activity-entry--active");
+    });
+    expect(document.querySelectorAll(`[data-activity-id="${childActiveID}"], [data-activity-id="${childTerminalID}"]`)).toHaveLength(2);
+
+    const parentCompaction = await probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).kind === "compaction" && record(record(frame.entry).presentation).outcome === "completed" && !Object.prototype.hasOwnProperty.call(record(record(frame.entry).presentation), "child_label"));
+    const parentEntry = record(parentCompaction.entry);
+    const parentID = String(parentEntry.id);
+    const parentCard = await waitFor(() => {
+      const card = document.querySelector<HTMLElement>(`[data-activity-id="${parentID}"]`);
+      expect(card).toBeInTheDocument();
+      expect(card).toHaveTextContent("Context compacted");
+      return card;
+    });
+    expect(document.querySelectorAll(`[data-activity-id="${parentID}"]`)).toHaveLength(1);
+
+    const currentTerminal = await jsonRequest(router, "/v1/history?agent_id=functional-compaction&view=complete", { method: "GET", credentials: "omit" });
+    expect(list(currentTerminal.body.entries).filter((entry) => record(entry).id === childActiveID)).toHaveLength(1);
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Quiet messages" }));
+    expect(document.querySelector(`[data-activity-id="${childActiveID}"]`)).not.toBeInTheDocument();
+    expect(document.querySelector(`[data-activity-id="${parentID}"]`)).not.toBeInTheDocument();
   }, 60_000);
 
   it("does not resurrect a removed row after same-DB restart and retries a failed control truthfully", async () => {
