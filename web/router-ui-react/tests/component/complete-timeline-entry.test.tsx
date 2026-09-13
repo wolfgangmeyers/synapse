@@ -9,17 +9,24 @@ afterEach(cleanup);
 
 describe("Complete timeline entry", () => {
   it.each([
-    [{ kind: "tool" as const, tool_name: "bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--teal"],
-    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--teal"],
-    [{ kind: "tool" as const, tool_name: "goal", outcome: "success" as const }, "Updated goal", "fa-flag", "activity-entry--purple"],
-    [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-clock", "activity-entry--yellow"],
-    [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-wrench", "activity-entry--blue"],
-    [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-wrench", "activity-entry--blue"],
-  ] as const)("renders %s with the canonical visual mapping", (presentation, label, icon, tone) => {
+    [{ kind: "tool" as const, tool_name: "read", outcome: "active" as const }, "Running read", "fa-wrench", "activity-entry--blue", true],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true],
+    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--teal", false],
+    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--teal", false],
+    [{ kind: "tool" as const, tool_name: "goal", outcome: "success" as const }, "Updated goal", "fa-flag", "activity-entry--purple", false],
+    [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-clock", "activity-entry--yellow", false],
+    [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-wrench", "activity-entry--blue", false],
+    [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-wrench", "activity-entry--blue", false],
+    [{ kind: "tool" as const, tool_name: "read", outcome: "failed" as const, error: { code: "FAILED", retryable: false, detail_available: false } }, "Read failed", "fa-wrench", "activity-entry--danger", false],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "interrupted" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } }, "Bash interrupted", "fa-terminal", "activity-entry--danger", false],
+  ] as const)("renders %s with the canonical visual mapping", (presentation, label, icon, tone, active) => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: `complete:${label}`, agent_id: "managed-worker", at, message: "ignored presentation text", presentation }} />);
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(container.querySelector(`.${icon}`)).toBeInTheDocument();
     expect(container.querySelector(`.${tone}`)).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--active")).toBe(active ? container.querySelector("article") : null);
+    if (presentation.outcome === "failed" || presentation.outcome === "interrupted") expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
   });
 
   it("renders an old unstructured payload as a named activity, not the generic legacy card", () => {
@@ -29,14 +36,26 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector("[data-event-kind='message']")).toBeInTheDocument();
   });
 
-  it("keeps a failed tool recognizable and exposes no unsafe detail affordance", () => {
+  it("keeps error failures recognizable and exposes no unsafe detail affordance", () => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: "complete:failed", agent_id: "managed-worker", at, message: "Bash failed", presentation: { kind: "tool", tool_name: "bash", outcome: "error", error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } } }} />);
     expect(screen.getByText("Bash failed")).toBeInTheDocument();
     expect(screen.getByText("The operation could not be completed.")).toBeInTheDocument();
     expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
     expect(container.querySelector(".fa-terminal")).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--danger")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--active")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /details/i })).not.toBeInTheDocument();
+  });
+
+  it("replaces an active tool card with its interrupted terminal state", () => {
+    const entry = { id: "complete:replace", agent_id: "managed-worker", at, message: "ignored presentation text" };
+    const { container, rerender } = render(<CompleteTimelineEntry entry={{ ...entry, presentation: { kind: "tool", tool_name: "read", outcome: "active" } }} />);
+    rerender(<CompleteTimelineEntry entry={{ ...entry, presentation: { kind: "tool", tool_name: "read", outcome: "interrupted" } }} />);
+    expect(container.querySelectorAll("article")).toHaveLength(1);
+    expect(container.querySelector("[data-activity-id='complete:replace']")).toBeInTheDocument();
+    expect(screen.getByText("Read interrupted")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--danger")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--active")).not.toBeInTheDocument();
   });
 
   it("renders compaction, recovery, and terminal child outcomes as distinct facts", () => {
