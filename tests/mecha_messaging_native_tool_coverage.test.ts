@@ -5,8 +5,8 @@ import {
   createInlineToolPolicy,
   createMechaMessagingExtension,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
-} from "./index.js";
-import { createMailboxClient } from "./mailbox-client.js";
+} from "../pi-extensions/mecha-messaging/index.ts";
+import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.ts";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonObject | JsonValue[] | undefined;
