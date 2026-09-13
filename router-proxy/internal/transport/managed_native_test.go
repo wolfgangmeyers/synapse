@@ -411,7 +411,11 @@ func managedDirectCandidateContentSHA256(t *testing.T, root string) string {
 func writeNativeManagedDirectArtifact(t *testing.T, root, pi, mecha, subagents string, manifest managed.Manifest, snapshotID, ownerID, proof string, directCommandCounter *nativeDirectCommandCounter) {
 	t.Helper()
 	directCommands := directCommandCounter.Count()
-	require.Equal(t, 1, directCommands, "native proof must send exactly one direct mailbox command")
+	wantDirectCommands := 1
+	if proof == "recovery" {
+		wantDirectCommands = 2
+	}
+	require.Equal(t, wantDirectCommands, directCommands, "native proof direct command count")
 	var random [8]byte
 	_, err := rand.Read(random[:])
 	require.NoError(t, err)
@@ -770,8 +774,15 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 			if !recovery {
 				return nil
 			}
-			interruptAppend.Do(func() { close(appendBeforeAck) })
-			return errors.New("native append-before-ack interruption")
+			interrupted := false
+			interruptAppend.Do(func() {
+				close(appendBeforeAck)
+				interrupted = true
+			})
+			if interrupted {
+				return errors.New("native append-before-ack interruption")
+			}
+			return nil
 		},
 		Config: managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775",
 			ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: mecha,
@@ -871,9 +882,9 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 	require.Equal(t, "managed", target.SourceKind)
 
 	if recovery {
-		// The hook fires after the installed Pi persisted its hidden append but
-		// before the router ACK transaction. Restart recovery must query the same
-		// Pi session after the stored cursor and settle without another command.
+		// The hook interrupts only the old-fence ACK. Recovery may offer the
+		// message once under the replacement fence, then must settle that exact
+		// replacement attempt without a further prompt.
 		select {
 		case <-appendBeforeAck:
 		case <-ctx.Done():
