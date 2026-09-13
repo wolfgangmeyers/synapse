@@ -26,13 +26,30 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, "/tmp/router.db.jsonl", parsed.logPath)
 	require.Equal(t, "127.0.0.1", parsed.host)
 	require.Equal(t, 8765, parsed.port)
-	require.Equal(t, "supervisor", parsed.auditSupervisorTarget)
-	require.Equal(t, "mecha", parsed.auditTmuxSession)
+	require.Empty(t, parsed.auditSupervisorTarget)
+	require.Empty(t, parsed.auditTmuxSession)
 	require.Equal(t, transport.DefaultPolicyTimeout, parsed.policyTimeout)
 	require.True(t, parsed.managed.Enabled)
 	home, homeErr := os.UserHomeDir()
 	require.NoError(t, homeErr)
 	require.Equal(t, []string{home}, parsed.managed.AllowedWorkingDirectoryRoots)
+}
+
+func TestParseConfigRejectsHalfConfiguredTmuxAudit(t *testing.T) {
+	for _, args := range [][]string{
+		{"--database", "/tmp/router.db", "--audit-supervisor-target", "supervisor"},
+		{"--database", "/tmp/router.db", "--audit-tmux-session", "mecha"},
+	} {
+		_, err := parseConfig(args)
+		require.EqualError(t, err, "--audit-supervisor-target and --audit-tmux-session must be provided together")
+	}
+}
+
+func TestParseConfigPreservesExplicitTmuxAuditPair(t *testing.T) {
+	parsed, err := parseConfig([]string{"--database", "/tmp/router.db", "--audit-supervisor-target", "audit-target", "--audit-tmux-session", "audit-session"})
+	require.NoError(t, err)
+	require.Equal(t, "audit-target", parsed.auditSupervisorTarget)
+	require.Equal(t, "audit-session", parsed.auditTmuxSession)
 }
 
 func TestParseConfigAllowsExplicitManagedOptOutAndRejectsInvalidValue(t *testing.T) {

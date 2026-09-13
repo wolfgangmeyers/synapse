@@ -122,12 +122,15 @@ type Options struct {
 	LifecycleAvailable     bool
 	EventLogger            func(string, map[string]any)
 	NativePolicies         []NativePolicy
-	EnableTmuxRouterAudit  bool
-	AuditSupervisorTarget  string
-	AuditTmuxSession       string
-	PolicyTimeout          time.Duration
-	PolicySender           PolicySender
-	Managed                *managed.Manager
+	// The audit target and session form one optional pair. Leave both empty to
+	// keep managed startup independent of tmux; a half-configured pair is
+	// rejected by New. Legacy tmux routes still use Tmux regardless.
+	EnableTmuxRouterAudit bool
+	AuditSupervisorTarget string
+	AuditTmuxSession      string
+	PolicyTimeout         time.Duration
+	PolicySender          PolicySender
+	Managed               *managed.Manager
 	// ProviderAuth shares the managed Pi auth context and emits non-secret
 	// status/prompt frames through the existing direct UI-live channel.
 	ProviderAuth *managed.ProviderAuthCoordinator
@@ -453,21 +456,20 @@ func New(options Options) (*Router, error) {
 		return nil, errors.New("policy timeout must be positive")
 	}
 	auditTarget := options.AuditSupervisorTarget
-	if auditTarget == "" {
-		auditTarget = "supervisor"
-	}
-	if !agentIDRE.MatchString(auditTarget) {
-		return nil, errors.New("audit supervisor target is invalid")
-	}
 	auditTmux := options.AuditTmuxSession
-	if auditTmux == "" {
-		auditTmux = "mecha"
+	if (auditTarget == "") != (auditTmux == "") {
+		return nil, errors.New("audit supervisor target and tmux session must be provided together")
 	}
-	if strings.TrimSpace(auditTmux) == "" {
-		return nil, errors.New("audit tmux session is required")
+	if auditTarget != "" {
+		if !agentIDRE.MatchString(auditTarget) {
+			return nil, errors.New("audit supervisor target is invalid")
+		}
+		if strings.TrimSpace(auditTmux) == "" {
+			return nil, errors.New("audit tmux session is required")
+		}
 	}
 	policies := append([]NativePolicy(nil), options.NativePolicies...)
-	if options.EnableTmuxRouterAudit {
+	if options.EnableTmuxRouterAudit && auditTarget != "" {
 		policies = append(policies, NewTmuxRouterAuditPolicy(auditTarget, auditTmux))
 	}
 	policies, err = nativePolicies(policies)
