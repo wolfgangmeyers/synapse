@@ -314,6 +314,53 @@ func TestManagedDirectReceiptDiagnostics(t *testing.T) {
 	require.ElementsMatch(t, []string{"stale_receipt", "malformed_receipt", "mismatched_receipt", "duplicate_receipt"}, codes)
 }
 
+func TestManagedDirectMailboxLeavesPolicyReceiptForItsFencedWaiter(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	direct := DirectMailboxRPC(client)
+	requests := readJSONLRequests(stdinReader)
+
+	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	mailboxPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": mailboxPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "mailbox-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	select {
+	case event := <-events:
+		require.NotNil(t, event.Receipt)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for direct mailbox receipt")
+	}
+
+	applied := make(chan error, 1)
+	go func() {
+		_, applyErr := client.ApplyPolicy(context.Background(), map[string]any{"protocol": "mecha.policy/v1"})
+		applied <- applyErr
+	}()
+	policyPrompt := requireRequest(t, requests)
+	require.True(t, strings.HasPrefix(policyPrompt["message"].(string), "/mecha-policy-apply-v1 "))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": policyPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, <-applied)
+
+	waited := make(chan struct {
+		receipt map[string]any
+		err     error
+	}, 1)
+	go func() {
+		receipt, waitErr := client.WaitForPolicyApplied(context.Background(), "generation", 2)
+		waited <- struct {
+			receipt map[string]any
+			err     error
+		}{receipt: receipt, err: waitErr}
+	}()
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": policyDetails("generation", 2)}}))
+	result := <-waited
+	require.NoError(t, result.err)
+	require.Equal(t, "generation", result.receipt["runtime_generation"])
+}
+
 func TestManagedDirectMailboxCapturesAssistantReplyUntilSettled(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()

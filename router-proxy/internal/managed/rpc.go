@@ -421,7 +421,11 @@ func (c *rpcClient) readLoop() {
 				c.mu.Unlock()
 				continue
 			}
-			if token := c.directMailbox; token != nil {
+			// Readiness receipts are consumed by their fenced waiters, even while a
+			// direct mailbox turn remains open for a root-control follow-up. Letting
+			// that turn classify them first drops the policy-applied receipt and
+			// leaves the allowance handler waiting forever.
+			if token := c.directMailbox; token != nil && !knownReadinessReceipt(receiptCustomType(raw)) {
 				if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
 					c.sendDirectMailboxResultLocked(token, result)
 					c.signalLocked()
