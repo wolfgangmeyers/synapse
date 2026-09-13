@@ -74,7 +74,7 @@ export function ReminderDialog({ open, peer, creator, reminders, locks, pendingI
     }
     if (!validateReminderDelay(state.delay)) { setError("Enter a delay from 1 to 10080 minutes."); return; }
     const options = { recurring: state.recurring, ...(state.subject.trim() ? { subject: state.subject.trim() } : {}) };
-    try { await onCreate(createReminderPayload(peer, creator, trimmed, state.delay, options), state.lockAfterCreate); }
+    try { await onCreate(createReminderPayload(peer, creator, trimmed, state.delay, options), state.lockAfterCreate); updateState({ mode: "list", editing: undefined }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Reminder could not be created."); }
   };
   const title = state.mode === "list" ? "Reminders" : state.mode === "edit" ? "Edit reminder" : "New reminder";
