@@ -325,6 +325,16 @@ type ManagedProcessIdentity struct {
 	StartMarker, Incarnation string
 }
 
+// ManagedRootRecoveryTargetStaleError reports the expected ownership race at
+// the one external target-start boundary. Callers may safely abandon their
+// start attempt when this error is returned; database errors must propagate.
+type ManagedRootRecoveryTargetStaleError struct{ ActionID string }
+
+func (e *ManagedRootRecoveryTargetStaleError) Error() string {
+	return "managed root recovery target reservation is stale"
+}
+func (e *ManagedRootRecoveryTargetStaleError) Code() string { return "stale" }
+
 // BeginManagedRootRecoveryTarget reserves the one external start boundary.
 // The starting stage with no target identity means a process may be created by
 // the current owner; a later router must fail closed instead of starting twice.
@@ -345,11 +355,11 @@ func (s *Store) BeginManagedRootRecoveryTarget(ctx context.Context, actionID, ta
 			return err
 		}
 		changed, err := result.RowsAffected()
-		if err != nil || changed != 1 {
-			if err != nil {
-				return err
-			}
-			return errors.New("managed root recovery target is stale")
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRootRecoveryTargetStaleError{ActionID: actionID}
 		}
 		return nil
 	})
@@ -414,6 +424,41 @@ func (s *Store) InstallManagedRootRecoveryFence(ctx context.Context, old, target
 		}
 		if err := s.rollManagedReadinessSourceFenceTx(ctx, target); err != nil {
 			return err
+		}
+		return nil
+	})
+}
+
+// SupersedeManagedRootRecovery closes a retained ready action when its target
+// belongs to a router instance that no longer has the native RPC binding.
+// Retaining the row as failed preserves diagnostics while freeing the active
+// recovery owner for a fresh fence and generation.
+func (s *Store) SupersedeManagedRootRecovery(ctx context.Context, actionID string) error {
+	if actionID == "" {
+		return errors.New("managed root recovery action is required")
+	}
+	return s.runImmediate(ctx, func() error {
+		action, err := managedRootRecoveryActionForIDTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		if action.Stage == "failed" {
+			return nil
+		}
+		if action.Stage != "ready" {
+			return errors.New("managed root recovery action is stale")
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET stage='failed',failure_code='RECOVERY_SUPERSEDED',failure_message='ready target belonged to a prior router',updated_at=?,expires_at=? WHERE action_id=? AND stage='ready'`, now, formatTimestamp(s.clock.Now().Add(managedRootRecoveryRetention)), actionID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return errors.New("managed root recovery action is stale")
 		}
 		return nil
 	})

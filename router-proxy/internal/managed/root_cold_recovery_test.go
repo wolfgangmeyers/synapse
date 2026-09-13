@@ -125,7 +125,7 @@ func TestRecoverManagedRootColdStartDoesNotStartAfterReadyTargetOnSecondRouter(t
 	recipe, err := (&Manager{config: config}).managedLaunchRecipe(old)
 	require.NoError(t, err)
 	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, old.AgentID, recipe))
-	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{old.ProcessPID: ProcessAbsent, 902: ProcessOwned}}
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{old.ProcessPID: ProcessAbsent, 902: ProcessOwned, 903: ProcessOwned}}
 	rpc := &launchRPC{active: expectedManagedActiveTools(manifest)}
 	first, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("target-runtime"), ProcessFactory: &launchFactory{process: &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
@@ -137,16 +137,28 @@ func TestRecoverManagedRootColdStartDoesNotStartAfterReadyTargetOnSecondRouter(t
 	require.NoError(t, err)
 	require.Equal(t, "ready", action.Stage)
 
-	second, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: ProcessFactoryFunc(func(context.Context, CommandSpec) (Process, error) {
-		t.Fatal("a ready recovery target must not be started again")
-		return nil, nil
-	}), RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
+	secondProcess := &launchProcess{identity: ProcessIdentity{PID: 903, StartMarker: "second-start", Incarnation: "second-inc"}, stopped: make(chan struct{})}
+	second, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("second-runtime"), ProcessFactory: &launchFactory{process: secondProcess, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
 	require.NoError(t, second.RecoverManagedRootColdStarts(ctx))
 	current, err := durable.ManagedAgent(ctx, old.AgentID)
 	require.NoError(t, err)
-	require.Equal(t, target.ProcessIncarnation, current.ProcessIncarnation)
-	require.Equal(t, target.RuntimeGeneration, current.RuntimeGeneration)
+	require.Equal(t, "running", current.LifecycleState)
+	require.True(t, current.AcceptingPrompts)
+	require.Equal(t, 903, current.ProcessPID)
+	require.Equal(t, "second-inc", current.ProcessIncarnation)
+	require.Equal(t, "second-runtime", current.RuntimeGeneration)
+	_, bound := second.bindingFor(old.AgentID)
+	require.True(t, bound, "a running recovered agent must have a live binding")
+	secondAction, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "ready", secondAction.Stage)
+	require.Equal(t, 903, secondAction.TargetProcessPID)
+	priorAction, err := durable.ManagedRootRecoveryActionByID(ctx, action.ActionID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", priorAction.Stage)
+	require.Equal(t, "RECOVERY_SUPERSEDED", priorAction.FailureCode)
+	require.NotEqual(t, priorAction.ActionID, secondAction.ActionID)
 	require.NoError(t, first.Close(ctx))
 	require.NoError(t, second.Close(ctx))
 }

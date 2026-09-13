@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strconv"
 	"strings"
@@ -95,43 +96,51 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 }
 
 func (m *Manager) recoverManagedRoot(ctx context.Context, agent *store.ManagedAgentRecord) error {
-	if agent.LaunchRecipe == nil {
-		m.failColdRecovery(agent.AgentID, "RECOVERY_RECIPE_MISSING", "managed launch recipe is unavailable")
-		return nil
+	// Derive and probe the old identity before reading any restart recipe or
+	// current manager configuration. A malformed preflight input must not make
+	// us lose the only safe opportunity to reap the exact old process.
+	old := storedAgentFence(agent)
+	oldProbe := m.processOps.Probe(oldFenceIdentity(old)).State
+	if err := m.validateColdRecoveryPreflight(ctx, agent, old, oldProbe); err != nil {
+		return err
 	}
 	recipe := *agent.LaunchRecipe
-	if err := store.ValidateManagedLaunchRecipe(recipe); err != nil {
-		m.failColdRecovery(agent.AgentID, "RECOVERY_RECIPE_MISMATCH", "managed launch recipe is invalid")
-		return nil
-	}
-	expected, err := m.managedLaunchRecipe(*agent)
-	if err != nil || expected.SHA256 != recipe.SHA256 {
-		m.failColdRecovery(agent.AgentID, "RECOVERY_RECIPE_MISMATCH", "managed launch recipe does not match current manager configuration")
-		return nil
-	}
-	old := storedAgentFence(agent)
-	if !validRestartFence(old) || m.manifest.CanonicalSHA256 != old.ManifestHash || manifestRevision(m.manifest) != old.ManifestRevision {
-		m.failColdRecovery(agent.AgentID, "ORPHAN_IDENTITY_UNSAFE", "managed process identity or manifest could not be verified")
-		return nil
-	}
 
 	action, actionErr := m.store.ManagedRootRecoveryAction(ctx, agent.AgentID)
+	if actionErr != nil && !errors.Is(actionErr, sql.ErrNoRows) {
+		return actionErr
+	}
 	if actionErr == nil {
 		switch {
-		case rootRecoveryActionFence(action) == old:
-			if action.Stage == "ready" || action.Stage == "failed" {
-				return nil
+		case action.Stage == "ready" && rootRecoveryActionTargetsFence(action, old):
+			// A ready target belongs to the previous router, whose native RPC pipe
+			// cannot be reconstructed. Reap only an exactly owned target and run a
+			// fresh generation so this router cannot expose a binding-less agent.
+			switch oldProbe {
+			case ProcessOwned:
+				if !m.reapRestartGroup(ctx, oldFenceIdentity(old), nil) {
+					return m.failColdRecovery(agent.AgentID, "ORPHAN_IDENTITY_UNSAFE", "ready recovery target could not be reaped")
+				}
+			case ProcessAbsent:
+			default:
+				return m.failColdRecovery(agent.AgentID, "ORPHAN_IDENTITY_UNSAFE", "ready recovery target identity could not be verified")
 			}
+			if err := m.store.SupersedeManagedRootRecovery(ctx, action.ActionID); err != nil {
+				return err
+			}
+			action = nil
+		case action.Stage == "failed" && (action.FailureCode == "RECOVERY_SUPERSEDED" || rootRecoveryActionFence(action) == old):
+			// A concurrent router may have terminalized the prior ready action;
+			// this fence can still claim one fresh attempt.
+			action = nil
+		case action.Stage == "ready" || action.Stage == "failed":
+			return m.failColdRecovery(agent.AgentID, "RECOVERY_READINESS_FAILED", "persisted recovery state has no attachable binding")
 		case rootRecoveryActionTargetsFence(action, old):
-			if action.Stage == "ready" || action.Stage == "failed" {
-				return nil
-			}
 			// The prior router installed the target fence before it stopped. Its
 			// pipes cannot be reattached, so reap that exact target and publish a
 			// truthful failed projection. Crucially, do not claim or start again.
-			m.failColdRecoveryTarget(action, old)
-			return nil
-		default:
+			return m.failColdRecoveryTarget(ctx, action, old)
+		case rootRecoveryActionFence(action) != old:
 			action = nil
 		}
 	}
@@ -164,17 +173,56 @@ func rootRecoveryActionTargetsFence(action *store.ManagedRootRecoveryAction, fen
 	return action != nil && action.AgentID == fence.AgentID && action.OldPiSessionID == fence.PiSessionID && action.OldSessionEpoch == int(fence.SessionEpoch) && action.OldManifestRevision == fence.ManifestRevision && action.OldManifestHash == fence.ManifestHash && action.TargetProcessPID == fence.ProcessPID && action.TargetProcessStartMarker == fence.ProcessStartMarker && action.TargetProcessIncarnation == fence.ProcessIncarnation && action.TargetRuntimeGeneration == fence.RuntimeGeneration
 }
 
+func (m *Manager) validateColdRecoveryPreflight(ctx context.Context, agent *store.ManagedAgentRecord, old store.ManagedRuntimeFence, oldProbe ProcessProbeState) error {
+	var code, message string
+	if agent.LaunchRecipe == nil {
+		code, message = "RECOVERY_RECIPE_MISSING", "managed launch recipe is unavailable"
+	} else if err := store.ValidateManagedLaunchRecipe(*agent.LaunchRecipe); err != nil {
+		code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe is invalid"
+	} else if expected, err := m.managedLaunchRecipe(*agent); err != nil || store.ValidateManagedLaunchRecipe(expected) != nil || expected.SHA256 != agent.LaunchRecipe.SHA256 {
+		code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe does not match current manager configuration"
+	} else if !validRestartFence(old) || m.manifest.CanonicalSHA256 != old.ManifestHash || manifestRevision(m.manifest) != old.ManifestRevision {
+		code, message = "ORPHAN_IDENTITY_UNSAFE", "managed process identity or manifest could not be verified"
+	}
+	if code == "" {
+		return nil
+	}
+
+	// The old fence was probed before this validation. Only that exact owned
+	// identity can be signaled. Unsafe probe results remain untouched.
+	if oldProbe == ProcessOwned && !m.reapRestartGroup(ctx, oldFenceIdentity(old), nil) {
+		code, message = "ORPHAN_IDENTITY_UNSAFE", "managed orphan process group could not be reaped"
+	}
+
+	action, err := m.store.ManagedRootRecoveryAction(ctx, agent.AgentID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && action.Stage != "ready" && action.Stage != "failed" {
+		if action.TargetProcessPID > 0 {
+			target := ProcessIdentity{PID: action.TargetProcessPID, StartMarker: action.TargetProcessStartMarker, Incarnation: action.TargetProcessIncarnation}
+			if target != oldFenceIdentity(old) && m.processOps.Probe(target).State == ProcessOwned && !m.reapRestartGroup(ctx, target, nil) {
+				code, message = "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped"
+			}
+		}
+		if err := m.failColdRecoveryAction(ctx, action, code, message); err != nil {
+			return err
+		}
+	}
+	return m.failColdRecovery(agent.AgentID, code, message)
+}
+
 func (m *Manager) hasColdRecoveryTarget(ctx context.Context, agent *store.ManagedAgentRecord) bool {
 	action, err := m.store.ManagedRootRecoveryAction(ctx, agent.AgentID)
 	return err == nil && action.Stage == "starting" && rootRecoveryActionTargetsFence(action, storedAgentFence(agent))
 }
 
-func (m *Manager) failColdRecoveryTarget(action *store.ManagedRootRecoveryAction, target store.ManagedRuntimeFence) {
+func (m *Manager) failColdRecoveryTarget(ctx context.Context, action *store.ManagedRootRecoveryAction, target store.ManagedRuntimeFence) error {
 	identity := oldFenceIdentity(target)
-	if m.processOps.Probe(identity).State == ProcessOwned {
-		_ = m.reapRestartGroup(context.Background(), identity, nil)
+	if m.processOps.Probe(identity).State == ProcessOwned && !m.reapRestartGroup(ctx, identity, nil) {
+		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
 	}
-	m.failColdRecoveryAction(action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
+	return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
 }
 
 func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.ManagedAgentRecord, recipe store.ManagedLaunchRecipe, old store.ManagedRuntimeFence, action *store.ManagedRootRecoveryAction) error {
@@ -183,7 +231,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	}
 	if action.Stage == "claimed" {
 		if err := m.store.AdvanceManagedRootRecovery(ctx, action.ActionID, "claimed", "reaping"); err != nil {
-			return nil
+			return err
 		}
 		action.Stage = "reaping"
 	}
@@ -191,17 +239,17 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		probe := m.processOps.Probe(oldFenceIdentity(old)).State
 		switch probe {
 		case ProcessAbsent:
-			_ = m.store.RecordManagedRootRecoveryUnexpectedExit(ctx, action.ActionID)
+			if err := m.store.RecordManagedRootRecoveryUnexpectedExit(ctx, action.ActionID); err != nil {
+				return err
+			}
 		case ProcessOwned:
 			if !m.reapRestartGroup(ctx, oldFenceIdentity(old), nil) {
-				m.failColdRecoveryAction(action, "ORPHAN_IDENTITY_UNSAFE", "managed orphan process group could not be reaped")
-				return nil
+				return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "managed orphan process group could not be reaped")
 			}
 		default:
 			// Present, mismatch, and unknown all fail closed. In particular, no
 			// signal is sent after the PID/start-marker/group proof is lost.
-			m.failColdRecoveryAction(action, "ORPHAN_IDENTITY_UNSAFE", "managed orphan process identity could not be verified")
-			return nil
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "managed orphan process identity could not be verified")
 		}
 		if err := m.store.InterruptManagedParentWork(ctx, old); err != nil {
 			return err
@@ -217,7 +265,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		m.interruptBuiltinToolInvocations(nil, old)
 		if err := m.store.AdvanceManagedRootRecovery(ctx, action.ActionID, "reaping", "stopped"); err != nil {
-			return nil
+			return err
 		}
 		action.Stage = "stopped"
 	}
@@ -230,38 +278,37 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 				_ = m.reapRestartGroup(ctx, identity, nil)
 			}
 		}
-		m.failColdRecoveryAction(action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
 	}
 	if action.Stage != "stopped" {
 		return nil
 	}
 	if err := m.store.BeginManagedRootRecoveryTarget(ctx, action.ActionID, action.TargetRuntimeGeneration); err != nil {
-		return nil
+		var stale *store.ManagedRootRecoveryTargetStaleError
+		if errors.As(err, &stale) {
+			return nil
+		}
+		return err
 	}
 	process, err := m.processFactory.Start(m.runCtx, CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)})
 	if err != nil {
-		m.failColdRecoveryAction(action, "RECOVERY_TARGET_START_FAILED", "replacement process did not start")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process did not start")
 	}
 	if process == nil {
-		m.failColdRecoveryAction(action, "RECOVERY_TARGET_START_FAILED", "replacement process did not start")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process did not start")
 	}
 	identity := process.Identity()
 	if ValidateIdentity(identity) != nil || m.processOps.Probe(identity).State != ProcessOwned || identity.Incarnation == old.ProcessIncarnation {
 		// A returned process handle is cleaned up only after its exact group is
 		// proved owned. Unknown or mismatched identities are never signaled.
 		_ = m.cleanupUninstalledTarget(process, identity, nil)
-		m.failColdRecoveryAction(action, "ORPHAN_IDENTITY_UNSAFE", "replacement process identity could not be verified")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process identity could not be verified")
 	}
 	if err := m.store.InstallManagedRootRecoveryTarget(ctx, action.ActionID, store.ManagedProcessIdentity{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}, action.TargetRuntimeGeneration); err != nil {
 		if m.processOps.Probe(identity).State == ProcessOwned {
 			_ = m.reapRestartGroup(ctx, identity, nil)
 		}
-		m.failColdRecoveryAction(action, "RECOVERY_TARGET_START_FAILED", "replacement process target could not be recorded")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process target could not be recorded")
 	}
 	targetFence := old
 	targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation = identity.PID, identity.StartMarker, identity.Incarnation
@@ -270,37 +317,32 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		if m.processOps.Probe(identity).State == ProcessOwned {
 			_ = m.reapRestartGroup(ctx, identity, nil)
 		}
-		m.failColdRecoveryAction(action, "RECOVERY_TARGET_START_FAILED", "replacement process fence could not be installed")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process fence could not be installed")
 	}
 	target := &managedBinding{agentID: agent.AgentID, lane: m.laneFor(agent.AgentID), operationID: action.ActionID, lifecycleAction: "root-recovery", token: targetFence.RuntimeGeneration, process: process, identity: identity, sessionID: targetFence.PiSessionID, sessionEpoch: targetFence.SessionEpoch, runtimeGeneration: targetFence.RuntimeGeneration, manifestRevision: targetFence.ManifestRevision, manifestHash: targetFence.ManifestHash}
 	m.watchRestartProcess(target)
 	targetRPC, err := m.rpcFactory.Open(m.runCtx, process)
 	if err != nil {
 		m.cleanupRecoveredTarget(target, targetFence)
-		m.failColdRecoveryAction(action, "RECOVERY_READINESS_FAILED", "replacement RPC could not open")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement RPC could not open")
 	}
 	target.rpc = targetRPC
 	if !m.installBinding(target) {
 		_ = targetRPC.Close()
 		m.cleanupRecoveredTarget(target, targetFence)
-		m.failColdRecoveryAction(action, "RECOVERY_READINESS_FAILED", "replacement binding could not be installed")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement binding could not be installed")
 	}
 	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
 		_ = targetRPC.Close()
 		m.cleanupRecoveredTarget(target, targetFence)
 		m.clearBinding(target)
-		m.failColdRecoveryAction(action, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
 	}
 	if err := m.store.CompleteManagedRootRecoveryReady(ctx, agent.AgentID, targetFence); err != nil {
 		_ = targetRPC.Close()
 		m.cleanupRecoveredTarget(target, targetFence)
 		m.clearBinding(target)
-		m.failColdRecoveryAction(action, "RECOVERY_READINESS_FAILED", "replacement readiness could not be committed")
-		return nil
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness could not be committed")
 	}
 	target.serial.Lock()
 	target.lifecycleAction = ""
@@ -348,15 +390,22 @@ func (m *Manager) startRecoveredRootWatcher(binding *managedBinding, fence store
 	})
 }
 
-func (m *Manager) failColdRecoveryAction(action *store.ManagedRootRecoveryAction, code, message string) {
+func (m *Manager) failColdRecoveryAction(ctx context.Context, action *store.ManagedRootRecoveryAction, code, message string) error {
 	if action == nil {
-		return
+		return m.failColdRecovery("", code, message)
 	}
-	_ = m.store.FailManagedRootRecovery(context.Background(), action.ActionID, code, message)
-	m.failColdRecovery(action.AgentID, code, message)
+	if err := m.store.FailManagedRootRecovery(ctx, action.ActionID, code, message); err != nil {
+		return err
+	}
+	return m.failColdRecovery(action.AgentID, code, message)
 }
 
-func (m *Manager) failColdRecovery(agentID, code, message string) {
-	_ = m.store.MarkManagedFailed(context.Background(), agentID, code, message)
+func (m *Manager) failColdRecovery(agentID, code, message string) error {
+	if agentID != "" {
+		if err := m.store.MarkManagedFailed(context.Background(), agentID, code, message); err != nil {
+			return err
+		}
+	}
 	m.publishProjection()
+	return nil
 }

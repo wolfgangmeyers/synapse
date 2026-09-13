@@ -150,6 +150,9 @@ func TestManagedRootRecoveryTransitionsAreFencedWriteOnceAndRetained(t *testing.
 	require.NoError(t, durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "reaping", "stopped"))
 	require.Error(t, durable.InstallManagedRootRecoveryTarget(ctx, action.ActionID, ManagedProcessIdentity{PID: 72, StartMarker: "start-2", Incarnation: "inc-2"}, "target-1"))
 	require.NoError(t, durable.BeginManagedRootRecoveryTarget(ctx, action.ActionID, "target-1"))
+	var stale *ManagedRootRecoveryTargetStaleError
+	require.ErrorAs(t, durable.BeginManagedRootRecoveryTarget(ctx, action.ActionID, "target-1"), &stale)
+	require.Equal(t, action.ActionID, stale.ActionID)
 	require.NoError(t, durable.InstallManagedRootRecoveryTarget(ctx, action.ActionID, ManagedProcessIdentity{PID: 72, StartMarker: "start-2", Incarnation: "inc-2"}, "target-1"))
 	target := fence
 	target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation, target.RuntimeGeneration = 72, "start-2", "inc-2", "target-1"
