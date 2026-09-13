@@ -560,6 +560,29 @@ func (s *Store) ManagedRootRecoveryActionByID(ctx context.Context, actionID stri
 	return managedRootRecoveryActionForIDTx(ctx, s.db, actionID)
 }
 
+// ClearManagedRootRecoveryTargetAfterVerifiedAbsence removes a failed action's
+// exact target identity only after its process group has been proved absent.
+// The failure fields remain as the retry record for the next recovery pass.
+func (s *Store) ClearManagedRootRecoveryTargetAfterVerifiedAbsence(ctx context.Context, actionID string, identity ManagedProcessIdentity) error {
+	if actionID == "" || identity.PID <= 0 || identity.StartMarker == "" || identity.Incarnation == "" {
+		return errors.New("managed root recovery target identity is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET target_process_pid=NULL,target_process_start_marker=NULL,target_process_incarnation=NULL,updated_at=? WHERE action_id=? AND stage='failed' AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=?`, formatTimestamp(s.clock.Now()), actionID, identity.PID, identity.StartMarker, identity.Incarnation)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return errors.New("managed root recovery target is stale")
+		}
+		return nil
+	})
+}
+
 func (s *Store) FailManagedRootRecovery(ctx context.Context, actionID, code, message string) error {
 	if actionID == "" || code == "" || len([]byte(code)) > 128 || message == "" {
 		return errors.New("managed root recovery failure is invalid")
@@ -628,7 +651,7 @@ func (s *Store) InterruptManagedGoalEvaluation(ctx context.Context, fence Manage
 func (s *Store) PruneManagedRootRecovery(ctx context.Context) (int, error) {
 	var removed int
 	err := s.runImmediate(ctx, func() error {
-		result, err := s.db.ExecContext(ctx, `DELETE FROM managed_root_recovery_actions WHERE stage IN ('ready','failed') AND expires_at IS NOT NULL AND expires_at <= ?`, formatTimestamp(s.clock.Now()))
+		result, err := s.db.ExecContext(ctx, `DELETE FROM managed_root_recovery_actions WHERE stage IN ('ready','failed') AND expires_at IS NOT NULL AND expires_at <= ? AND target_process_pid IS NULL AND target_process_start_marker IS NULL AND target_process_incarnation IS NULL`, formatTimestamp(s.clock.Now()))
 		if err != nil {
 			return err
 		}

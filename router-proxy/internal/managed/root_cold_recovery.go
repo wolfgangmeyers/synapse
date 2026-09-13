@@ -70,7 +70,14 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
-		if agent == nil || agent.DesiredState != "running" {
+		if agent == nil {
+			continue
+		}
+		cleanupOnly, cleanupErr := m.cleanupFailedColdRecoveryTarget(ctx, agent.AgentID)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		if cleanupOnly || agent.DesiredState != "running" {
 			continue
 		}
 		if _, bound := m.bindingFor(agent.AgentID); bound {
@@ -93,6 +100,40 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// cleanupFailedColdRecoveryTarget is a cleanup-only startup pass. A failed
+// action's target identity is authoritative for this decision even when the
+// agent row now carries a different fence or lifecycle stage. Unsafe probes
+// stay retained so a later owner can retry without signalling another process.
+func (m *Manager) cleanupFailedColdRecoveryTarget(ctx context.Context, agentID string) (bool, error) {
+	action, err := m.store.ManagedRootRecoveryAction(ctx, agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if action.Stage != "failed" || action.TargetProcessPID <= 0 {
+		return false, nil
+	}
+	identity := ProcessIdentity{PID: action.TargetProcessPID, StartMarker: action.TargetProcessStartMarker, Incarnation: action.TargetProcessIncarnation}
+	if ValidateIdentity(identity) != nil {
+		return true, nil
+	}
+	switch m.processOps.Probe(identity).State {
+	case ProcessOwned:
+		if !m.reapRestartGroup(ctx, identity, nil) {
+			return true, nil
+		}
+	case ProcessAbsent:
+	default:
+		return true, nil
+	}
+	if err := m.store.ClearManagedRootRecoveryTargetAfterVerifiedAbsence(ctx, action.ActionID, store.ManagedProcessIdentity{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func (m *Manager) recoverManagedRoot(ctx context.Context, agent *store.ManagedAgentRecord) error {

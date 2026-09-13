@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -711,6 +712,138 @@ func TestLockedLifecycleRestartRecoveryMatrix(t *testing.T) {
 	require.Zero(t, matrix.markedRecoverySignals)
 	require.Zero(t, matrix.markedTargetStopCalls)
 	writeNativeLifecycleRestartArtifact(t, root, lockedPi, matrix)
+}
+
+type listenRecoveryFactory struct {
+	mu        sync.Mutex
+	processes []*managedTestProcess
+	session   string
+	next      int
+}
+
+func (f *listenRecoveryFactory) Start(_ context.Context, spec managed.CommandSpec) (managed.Process, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.next >= len(f.processes) {
+		return nil, errors.New("unexpected recovery process start")
+	}
+	f.session = spec.SessionID
+	process := f.processes[f.next]
+	f.next++
+	return process, nil
+}
+
+type listenRecoveryProcessOps struct {
+	mu      sync.Mutex
+	states  map[int]managed.ProcessProbeState
+	closed  []managed.ProcessIdentity
+	signals []managed.ProcessIdentity
+}
+
+func (o *listenRecoveryProcessOps) Probe(identity managed.ProcessIdentity) managed.ProcessProbe {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return managed.ProcessProbe{State: o.states[identity.PID]}
+}
+func (o *listenRecoveryProcessOps) CloseProcessInput(process managed.Process) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.closed = append(o.closed, process.Identity())
+	return nil
+}
+func (o *listenRecoveryProcessOps) SignalVerifiedProcessGroup(identity managed.ProcessIdentity, _ syscall.Signal) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.signals = append(o.signals, identity)
+	return nil
+}
+func (o *listenRecoveryProcessOps) WaitForProcessGroupEmpty(_ context.Context, identity managed.ProcessIdentity, _ <-chan error) managed.ProcessProbe {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.states[identity.PID] = managed.ProcessAbsent
+	return managed.ProcessProbe{State: managed.ProcessAbsent}
+}
+
+func seedListenColdAgent(t *testing.T, durable *store.Store, config managed.Config, manifest managed.Manifest, agentID string, pid int) {
+	t.Helper()
+	ctx := context.Background()
+	session := "old-" + agentID
+	marker := "old-marker-" + agentID
+	incarnation := "old-incarnation-" + agentID
+	generation := "old-generation-" + agentID
+	agent := store.ManagedAgentRecord{AgentID: agentID, Name: agentID, SlotHeld: true, Cwd: config.AllowedWorkingDirectoryRoots[0], SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: session, SessionEpoch: 1, ManifestRevision: manifest.Revision, ManifestHash: manifest.CanonicalSHA256}
+	op := store.ManagedOperation{OperationID: "launch-" + agentID, Method: http.MethodPost, CanonicalPath: "/v1/managed-agents", RequestID: "launch-" + agentID, CanonicalBodyHash: "body-" + agentID, State: "pending", ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, durable.ReserveManagedLaunch(ctx, agent, op))
+	require.NoError(t, durable.UpdateManagedAgentStarting(ctx, agentID, session, store.ProcessIdentityRecord{PID: pid, StartMarker: marker, Incarnation: incarnation}, generation))
+	fence := store.ManagedRuntimeFence{AgentID: agentID, PiSessionID: session, SessionEpoch: 1, ProcessPID: pid, ProcessStartMarker: marker, ProcessIncarnation: incarnation, RuntimeGeneration: generation, ManifestRevision: manifest.Revision, ManifestHash: manifest.CanonicalSHA256}
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, store.DefaultManagedReadinessPolicy()))
+	canonical := []byte(`{"owner_session_id":"` + session + `","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"seed-` + agentID + `"}`)
+	sum := sha256.Sum256(canonical)
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, store.ManagedChildSnapshot{SnapshotID: "seed-" + agentID, OwnerSessionID: session, Sequence: 0, Canonical: canonical, SHA256: hex.EncodeToString(sum[:])}))
+	require.NoError(t, durable.MarkManagedReady(ctx, agentID))
+	environment := managed.ChildEnvironmentFor(config, "", agent.SessionEpoch)
+	stable := make([]string, 0, len(environment))
+	for _, value := range environment {
+		key, _, _ := strings.Cut(value, "=")
+		if store.IsManagedLaunchEnvironmentKey(key) {
+			stable = append(stable, value)
+		}
+	}
+	recipe, err := store.ManagedLaunchRecipeDigest(store.ManagedLaunchRecipe{PiExecutable: config.PiExecutable, SessionRoot: config.SessionRoot, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: config.MechaRPCExtension, PiSubagentsExtension: config.PiSubagentsExtension, CursorExtension: config.CursorExtension, Environment: stable})
+	require.NoError(t, err)
+	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, agentID, recipe))
+}
+
+func expectedManagedActiveToolsForTransport(manifest managed.Manifest) []string {
+	active := []string{"subagent", "get_subagent_result", "steer_subagent"}
+	for _, tool := range manifest.Tools {
+		active = append(active, tool.Name)
+	}
+	sort.Strings(active)
+	return active
+}
+
+func TestListenColdRecoveryGlobalStoreFailureCleansPriorBindings(t *testing.T) {
+	ctx := context.Background()
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	home := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "sessions"), 0o700))
+	manifest, _, err := managed.LoadManifest(filepath.Join(root, "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	config := managed.Config{Enabled: true, PiExecutable: "/bin/sh", ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: filepath.Join(home, "sessions"), RouterURL: "http://127.0.0.1:1", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"}
+	seedListenColdAgent(t, durable, config, manifest, "first", 9101)
+	seedListenColdAgent(t, durable, config, manifest, "second", 9102)
+	faultDB, err := sql.Open("sqlite", databasePath)
+	require.NoError(t, err)
+	defer faultDB.Close()
+	_, err = faultDB.Exec(`CREATE TRIGGER reject_second_recovery BEFORE UPDATE OF stage ON managed_root_recovery_actions WHEN NEW.agent_id='second' AND OLD.stage='reaping' AND NEW.stage='stopped' BEGIN SELECT RAISE(FAIL, 'injected global store failure'); END`)
+	require.NoError(t, err)
+
+	factory := &listenRecoveryFactory{processes: []*managedTestProcess{
+		{identity: managed.ProcessIdentity{PID: 9201, StartMarker: "target-first", Incarnation: "target-first-inc"}, stopped: make(chan struct{})},
+		{identity: managed.ProcessIdentity{PID: 9202, StartMarker: "target-second", Incarnation: "target-second-inc"}, stopped: make(chan struct{})},
+	}}
+	ops := &listenRecoveryProcessOps{states: map[int]managed.ProcessProbeState{9101: managed.ProcessAbsent, 9102: managed.ProcessAbsent, 9201: managed.ProcessOwned, 9202: managed.ProcessOwned}}
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: factory, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &factory.session, active: expectedManagedActiveToolsForTransport(manifest)}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
+	require.NoError(t, err)
+	listenErr := router.Listen(ctx)
+	require.ErrorContains(t, listenErr, "injected global store failure")
+	require.Nil(t, router.listener)
+	select {
+	case <-factory.processes[0].stopped:
+	case <-time.After(time.Second):
+		t.Fatal("first recovered process was not stopped after startup failure")
+	}
+	managerProcesses := manager
+	_ = managerProcesses
 }
 
 func TestListenRecoversManagedRestartTransitionsBeforeBind(t *testing.T) {

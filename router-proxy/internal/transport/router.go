@@ -576,9 +576,16 @@ func (r *Router) Listen(ctx context.Context) error {
 	}
 	listenerPublished := false
 	defer func() {
-		if !listenerPublished {
-			_ = listener.Close()
+		if listenerPublished {
+			return
 		}
+		// Recovery may have published managed bindings before a later durable
+		// startup step failed. Tear those resources down here; callers may never
+		// reach Router.Close after Listen returns an error.
+		if r.managed != nil {
+			_ = r.managed.AbortStartup(context.Background())
+		}
+		_ = listener.Close()
 	}()
 	if r.managed != nil {
 		routerURL, urlErr := managed.ManagedRouterURLForListener(r.host, listener.Addr().(*net.TCPAddr).Port)
