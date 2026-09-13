@@ -159,7 +159,7 @@ test("a managed goal evaluator rejects padded output and restores its no-tools p
   }), current.context);
   current.handlers.get("before_agent_start")!({ systemPrompt: "base prompt" }, current.context);
   assert.deepEqual(current.pi.getActiveTools(), []);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "\\nDONE\\nREASON: padded" }] } }, current.context);
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "\nDONE\nREASON: padded\n" }] } }, current.context);
   await current.handlers.get("agent_settled")!({}, current.context);
   const result = current.sent.at(-1)?.message.details as RecordValue;
   assert.equal((result.evaluator as RecordValue).outcome, "NOT_DONE");

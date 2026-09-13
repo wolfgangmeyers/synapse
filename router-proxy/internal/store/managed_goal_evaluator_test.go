@@ -199,6 +199,25 @@ func TestManagedGoalClaimRecoversAnExpiredDurableLease(t *testing.T) {
 	require.Equal(t, "evaluating", policy.EvaluatorState)
 }
 
+func TestManagedGoalRecoveryDropsInterruptedEvaluatorAfterReplacement(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, _ := readyManagedGoalEvaluatorFixture(t)
+	_, claimed, err := durable.ClaimManagedGoalEvaluation(ctx, fence, 10)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	// A replacement is the only recovery point: a lost evaluator cannot be
+	// completed by its former process after the new runtime is ready.
+	require.NoError(t, durable.db.QueryRow(`UPDATE managed_agent_policies SET evaluator_pi_session_id='prior-session', evaluator_process_incarnation='prior-incarnation' WHERE agent_id=? RETURNING 1`, fence.AgentID).Scan(new(int)))
+	changed, err := durable.RecoverManagedGoalEvaluationForFence(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, changed)
+	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", policy.EvaluatorState)
+	require.Equal(t, "evaluation interrupted", policy.EvaluatorReason)
+}
+
 func TestManagedGoalClaimAndRearmAreAtomic(t *testing.T) {
 	ctx := context.Background()
 	durable, fence, _ := readyManagedGoalEvaluatorFixture(t)

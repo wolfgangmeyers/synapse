@@ -217,6 +217,12 @@ func (m *Manager) executeRootControlHandler(ctx context.Context, binding *manage
 		}
 		return m.executeManagedGoalControl(ctx, binding, invocation)
 	}
+	if invocation.OperationID == "goal.snooze" {
+		if reconcile {
+			return m.managedGoalStatus(ctx, invocation.Fence.AgentID)
+		}
+		return m.executeManagedGoalSnooze(ctx, binding, invocation)
+	}
 	if invocation.OperationID != "context.control" {
 		if reconcile {
 			return handler.Reconcile(ctx, invocation)
@@ -324,6 +330,9 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 			outcome = "error"
 		}
 		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, outcome, claim.Request.RequestID)
+		if result.Status == "ok" && claim.Request.OperationID == "web.search" {
+			m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "tool", ID: claim.Request.RequestID})
+		}
 		m.appendRootControlResult(ctx, binding, *completed)
 	}
 }
