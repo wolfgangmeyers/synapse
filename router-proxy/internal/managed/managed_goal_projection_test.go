@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -128,6 +129,115 @@ func readyGoalProjectionFixture(t *testing.T) (*Manager, *store.Store, *managedB
 	t.Cleanup(func() { _ = manager.Close(context.Background()); _ = durable.Close() })
 	return manager, durable, binding, fence, rpc
 }
+
+type managedGoalStatusRootControlRPC struct {
+	*goalProjectionRPC
+	handler   func(RootControlEvent)
+	submitted chan map[string]any
+}
+
+type managedGoalStatusResultToken struct{}
+
+func (managedGoalStatusResultToken) Watermark() uint64 { return 0 }
+func (managedGoalStatusResultToken) Release()          {}
+
+func (r *managedGoalStatusRootControlRPC) SetRootControlEventHandler(handler func(RootControlEvent)) {
+	r.handler = handler
+}
+
+func (r *managedGoalStatusRootControlRPC) ArmRootControlResult(string, string) (RootControlAppendToken, error) {
+	return managedGoalStatusResultToken{}, nil
+}
+
+func (r *managedGoalStatusRootControlRPC) SubmitRootControlResult(_ context.Context, _ RootControlAppendToken, payload map[string]any) (<-chan RootControlResultReceipt, error) {
+	r.submitted <- payload
+	details := make(map[string]any, len(payload)-1)
+	for key, value := range payload {
+		if key != "content" {
+			details[key] = value
+		}
+	}
+	receipts := make(chan RootControlResultReceipt, 1)
+	receipts <- RootControlResultReceipt{Event: map[string]any{"id": "goal-status-result", "customType": "mecha.control.result.v1", "display": false, "content": payload["content"], "details": details}, Watermark: 1}
+	close(receipts)
+	return receipts, nil
+}
+
+func (r *managedGoalStatusRootControlRPC) GetRootControlEntry(context.Context, string) (map[string]any, error) {
+	return nil, errors.New("goal status result lookup should not be needed")
+}
+
+func TestManagedGoalStatusCanonicalizesNullableSettings(t *testing.T) {
+	for _, test := range []struct {
+		name, wantTurnLimit, wantBudget string
+		turnLimit, budget               *int64
+	}{
+		{name: "nil optional settings", wantTurnLimit: "null", wantBudget: "null"},
+		{name: "integer optional settings", wantTurnLimit: "3", wantBudget: "300000", turnLimit: int64Pointer(3), budget: int64Pointer(300_000)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			manager, durable, binding, fence, _ := readyGoalProjectionFixture(t)
+			_, err := durable.UpdateManagedGoalPolicy(ctx, fence, store.ManagedGoalConfig{Enabled: true, Goal: "finish the migration", Settings: store.ManagedGoalSettings{SnoozeEnabled: true, SnoozeDurationMS: 60_000, SnoozeTurnLimit: test.turnLimit, SnoozeBudgetCapMS: test.budget, SnoozeRefillYieldMS: 30_000, SnoozeRefillElapsedMS: 60_000}})
+			require.NoError(t, err)
+
+			result, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174020", OperationID: "goal.control", Arguments: map[string]any{"action": "status"}, Fence: fence})
+			require.NoError(t, err)
+			canonical, err := canonicalJSON(result.Details)
+			require.NoError(t, err)
+			require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":`+test.wantTurnLimit+`,"snooze_budget_cap_ms":`+test.wantBudget+`,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, string(canonical))
+		})
+	}
+}
+
+func TestManagedGoalStatusDynamicRootControlPersistsAndDeliversSuccess(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, baseRPC := readyGoalProjectionFixture(t)
+	rpc := &managedGoalStatusRootControlRPC{goalProjectionRPC: baseRPC, submitted: make(chan map[string]any, 1)}
+	binding.rpc = rpc
+	manager.installRootControlReceiver(binding)
+	_, err := durable.UpdateManagedGoalPolicy(ctx, fence, store.ManagedGoalConfig{Enabled: true, Goal: "finish the migration", Settings: store.DefaultManagedGoalSettings()})
+	require.NoError(t, err)
+
+	var tool ManifestTool
+	for _, candidate := range manager.manifest.Tools {
+		if candidate.OperationID == "goal.control" {
+			tool = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, tool.Name)
+	requestID := "123e4567-e89b-42d3-a456-426614174021"
+	rpc.handler(RootControlEvent{RequestID: requestID, ToolCallID: "goal-status-call", CapabilityID: tool.CapabilityID, ToolName: tool.Name, DefinitionID: tool.DefinitionID, DefinitionSHA256: tool.DefinitionSHA256, OperationID: tool.OperationID, ManifestSHA256: fence.ManifestHash, RuntimeGeneration: fence.RuntimeGeneration, SessionEpoch: fence.SessionEpoch, Arguments: map[string]any{"action": "status"}})
+
+	var payload map[string]any
+	select {
+	case payload = <-rpc.submitted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for goal status delivery")
+	}
+	encoded, err := json.Marshal(payload)
+	require.NoError(t, err)
+	var delivered map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &delivered))
+	require.Equal(t, requestID, delivered["request_id"])
+	require.Equal(t, "ok", delivered["status"])
+	require.Equal(t, "Goal is active.", delivered["content"])
+	deliveredDetails, err := json.Marshal(delivered["details"])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, string(deliveredDetails))
+	require.Eventually(t, func() bool {
+		row, lookupErr := durable.ManagedControlRequest(ctx, requestID)
+		return lookupErr == nil && row.State == "delivered"
+	}, time.Second, time.Millisecond)
+	row, err := durable.ManagedControlRequest(ctx, requestID)
+	require.NoError(t, err)
+	require.Equal(t, "ok", row.ResultStatus)
+	require.Empty(t, row.ErrorCode)
+	require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, row.ResultDetailsJSON)
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t *testing.T) {
 	ctx := context.Background()

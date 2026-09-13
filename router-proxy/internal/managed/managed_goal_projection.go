@@ -121,11 +121,21 @@ func managedGoalStatusDetails(policy *store.ManagedGoalPolicy) map[string]any {
 	result["goal_lock_enabled"] = settings.GoalLockEnabled
 	result["snooze_enabled"] = settings.SnoozeEnabled
 	result["snooze_duration_ms"] = settings.SnoozeDurationMS
-	result["snooze_turn_limit"] = settings.SnoozeTurnLimit
-	result["snooze_budget_cap_ms"] = settings.SnoozeBudgetCapMS
+	result["snooze_turn_limit"] = nullableInt64Value(settings.SnoozeTurnLimit)
+	result["snooze_budget_cap_ms"] = nullableInt64Value(settings.SnoozeBudgetCapMS)
 	result["snooze_refill_yield_ms"] = settings.SnoozeRefillYieldMS
 	result["snooze_refill_elapsed_ms"] = settings.SnoozeRefillElapsedMS
 	return result
+}
+
+// nullableInt64Value keeps optional goal settings in the JSON-only shape
+// required by root-control results. A typed nil pointer in an interface is not
+// JSON null and is rejected by the canonical result boundary.
+func nullableInt64Value(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func managedGoalProjectionValue(policy *store.ManagedGoalPolicy, controlID string) map[string]any {
