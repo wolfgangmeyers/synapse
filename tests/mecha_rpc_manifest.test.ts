@@ -261,6 +261,126 @@ test("registry exceptions at positions 1, 8, and 17 make every partial manifest 
   }
 });
 
+test("root dispatch acknowledges before its Pi send promise settles", async () => {
+  const pi = fakePi();
+  const pending = new Set<string>();
+  let prepared = false;
+  let emissionCalls = 0;
+  const emission = Promise.withResolvers<void>();
+  const registry = createToolRegistry(pi, {
+    emitControl: (request) => {
+      assert.equal(prepared, true, "root request must be registered before emission");
+      emissionCalls++;
+      return emission.promise;
+    },
+    getRuntime: () => ({ runtimeGeneration: "123e4567-e89b-42d3-a456-426614174000", manifestSha256: hashCanonicalJson(manifest()), sessionEpoch: 1 }),
+    getContextRef: () => "root",
+    onRootRequestPrepared: (request) => {
+      prepared = true;
+      assert.equal(typeof request.request_id, "string");
+      pending.add(String(request.request_id));
+    },
+    onRootRequestSendFailed: (request) => { pending.delete(String(request.request_id)); },
+  });
+  const desired = manifest();
+  registry.installFull({
+    protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174060",
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    desired_manifest: desired, manifest_sha256: hashCanonicalJson(desired), restored_request_ids: [],
+    inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+  });
+  const tool = pi.tools.find((candidate) => candidate.name === "goal");
+  assert.ok(tool);
+  registry.captureRaw("root-call", "goal", { action: "status" });
+  const execute = tool!.execute as (toolCallId: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+  const queued = await execute("root-call", { action: "status" }, undefined, undefined, {});
+  assert.equal(queued.isError, undefined);
+  assert.equal(queued.details !== undefined && (queued.details as RecordValue).status, "queued");
+  assert.equal(emissionCalls, 1);
+  assert.equal(pending.size, 1);
+  emission.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(emissionCalls, 1, "send settlement must not emit a second request");
+  assert.equal(pending.size, 1, "successful send settlement leaves correlation for the domain result");
+});
+
+test("root send rejection rolls back only its pending request", async () => {
+  const pi = fakePi();
+  const pending = new Set<string>();
+  const failed: string[] = [];
+  const emissions = new Map<string, PromiseWithResolvers<void>>();
+  const registry = createToolRegistry(pi, {
+    emitControl: (request) => {
+      const requestId = String(request.request_id);
+      const deferred = Promise.withResolvers<void>();
+      emissions.set(requestId, deferred);
+      return deferred.promise;
+    },
+    getRuntime: () => ({ runtimeGeneration: "123e4567-e89b-42d3-a456-426614174000", manifestSha256: hashCanonicalJson(manifest()), sessionEpoch: 1 }),
+    getContextRef: () => "root",
+    onRootRequestPrepared: (request) => { pending.add(String(request.request_id)); },
+    onRootRequestSendFailed: (request) => {
+      const requestId = String(request.request_id);
+      if (pending.delete(requestId)) failed.push(requestId);
+    },
+  });
+  const desired = manifest();
+  registry.installFull({
+    protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174061",
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    desired_manifest: desired, manifest_sha256: hashCanonicalJson(desired), restored_request_ids: [],
+    inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+  });
+  const tool = pi.tools.find((candidate) => candidate.name === "goal");
+  assert.ok(tool);
+  const execute = tool!.execute as (toolCallId: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+  registry.captureRaw("first-root-call", "goal", { action: "status" });
+  registry.captureRaw("second-root-call", "goal", { action: "status" });
+  await execute("first-root-call", { action: "status" }, undefined, undefined, {});
+  await execute("second-root-call", { action: "status" }, undefined, undefined, {});
+  const requestIds = [...emissions.keys()];
+  assert.equal(requestIds.length, 2);
+  emissions.get(requestIds[0]!)!.reject(new Error("send failed"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual([...pending], [requestIds[1]]);
+  assert.deepEqual(failed, [requestIds[0]]);
+  emissions.get(requestIds[1]!)!.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual([...pending], [requestIds[1]], "the other request remains correlated until its result");
+});
+
+test("child dispatch remains awaiting its Pi send before queue acknowledgement", async () => {
+  const pi = fakePi();
+  const emission = Promise.withResolvers<void>();
+  let queued = false;
+  const registry = createToolRegistry(pi, {
+    emitControl: () => emission.promise,
+    getRuntime: () => ({ runtimeGeneration: "123e4567-e89b-42d3-a456-426614174000", manifestSha256: hashCanonicalJson(manifest()), sessionEpoch: 1 }),
+    getContextRef: () => "ctx1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    onRequestQueued: () => { queued = true; },
+  });
+  const desired = manifest();
+  registry.installFull({
+    protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174062",
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    desired_manifest: desired, manifest_sha256: hashCanonicalJson(desired), restored_request_ids: [],
+    inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+  });
+  const tool = pi.tools.find((candidate) => candidate.name === "goal");
+  assert.ok(tool);
+  registry.captureRaw("child-call", "goal", { action: "status" });
+  const execute = tool!.execute as (toolCallId: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+  let settled = false;
+  const result = execute("child-call", { action: "status" }, undefined, undefined, {}).then((value) => { settled = true; return value; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(queued, false);
+  emission.resolve();
+  const acknowledged = await result;
+  assert.equal(acknowledged.isError, undefined);
+  assert.equal(queued, true);
+});
+
 test("a registry exception makes a partial manifest terminal before model use", async () => {
   const pi = fakePi([], 8);
   let fatal: unknown;

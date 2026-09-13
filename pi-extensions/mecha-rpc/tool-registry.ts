@@ -218,8 +218,17 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
             options.onRootRequestPrepared?.(request);
             rootRegistered = true;
           }
-          await options.emitControl(request);
-          if (contextRef !== "root") options.onRequestQueued(request);
+          const emission = options.emitControl(request);
+          if (contextRef === "root") {
+            // Root tools acknowledge after local enqueue. Waiting for Pi's send
+            // promise would hold the current turn and deadlock an external reset
+            // that needs that turn to settle before it can replace the session.
+            void Promise.resolve(emission).catch(() => { options.onRootRequestSendFailed?.(request); });
+            return toolResult(tool.name, requestId);
+          }
+          // Child result delivery remains ordered behind the bridge's send.
+          await emission;
+          options.onRequestQueued(request);
           return toolResult(tool.name, requestId);
         } catch {
           if (rootRegistered) options.onRootRequestSendFailed?.(request);
@@ -334,21 +343,9 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
       };
       options.onRootRequestPrepared?.(request);
       const emission = options.emitControl(request);
-      // The locked native proof detaches only its test probe's caller from the
-      // shared emission promise. Pi can then deliver the completed request and
-      // the router can return its result while that promise remains held. The
-      // registered request and rollback behavior are unchanged from the normal
-      // awaited production path.
-      if (process.env.MECHA_RPC_TEST_ROOT_CONTROL_DETACH_EMISSION === "1") {
-        void Promise.resolve(emission).catch(() => { options.onRootRequestSendFailed?.(request); });
-        return requestId;
-      }
-      try {
-        await emission;
-      } catch (error) {
-        options.onRootRequestSendFailed?.(request);
-        throw error;
-      }
+      // This fixture follows the production root contract: return after local
+      // enqueue while the shared send promise settles in the background.
+      void Promise.resolve(emission).catch(() => { options.onRootRequestSendFailed?.(request); });
       return requestId;
     },
   };
