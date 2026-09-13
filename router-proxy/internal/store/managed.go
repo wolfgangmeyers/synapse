@@ -99,6 +99,8 @@ type ManagedAgentRecord struct {
 	// LaunchOperationID is a private 027 reverse-protection link. It is never
 	// exposed by the managed HTTP projection.
 	LaunchOperationID string
+	// LaunchRecipe is private durable input for router cold recovery.
+	LaunchRecipe *ManagedLaunchRecipe
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -669,6 +671,11 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 				return &ManagedNameConflictError{Name: agent.Name}
 			}
 			return err
+		}
+		if agent.LaunchRecipe != nil {
+			if err := s.putManagedLaunchRecipeTx(ctx, *agent.LaunchRecipe, agent.AgentID, agent.CreatedAt); err != nil {
+				return err
+			}
 		}
 		if err := s.reserveManagedHistoryBoundaryTx(ctx, agent.AgentID, operation.OperationID, agent.CreatedAt); err != nil {
 			return err
@@ -3794,6 +3801,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedLaunchOperationTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedLaunchRecipeTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -3823,6 +3833,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
+		if err := loadManagedLaunchRecipeTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
@@ -3850,6 +3863,21 @@ func scanManagedAgent(scanner interface{ Scan(...any) error }, _ any) (*ManagedA
 	result.LastErrorAt = errorAt.String
 	result.StartedAt = started.String
 	return &result, nil
+}
+
+func loadManagedLaunchRecipeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	if agent == nil {
+		return nil
+	}
+	recipe, err := loadManagedLaunchRecipeQuery(ctx, db, agent.AgentID)
+	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	agent.LaunchRecipe = recipe
+	return nil
 }
 
 func loadManagedLaunchOperationTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {

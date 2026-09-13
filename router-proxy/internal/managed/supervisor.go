@@ -366,6 +366,13 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 	}
 	now := formatManagedTime(m.clock.Now())
 	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: cwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now}
+	if m.config.Enabled {
+		recipe, recipeErr := m.managedLaunchRecipe(agent)
+		if recipeErr != nil {
+			return LaunchResult{}, recipeErr
+		}
+		agent.LaunchRecipe = &recipe
+	}
 	public := PublicAgent(&agent)
 	body, err := json.Marshal(map[string]any{"operation_id": request.RequestID, "agent": public})
 	if err != nil {
