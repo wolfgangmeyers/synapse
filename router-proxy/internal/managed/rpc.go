@@ -802,11 +802,21 @@ func (c *rpcClient) callSerializedWithHookAndRestartAdmission(ctx context.Contex
 	response := make(chan rpcResponse, 1)
 	c.pending[id] = response
 	if admissionFence != nil {
-		if c.admittedRestartTurn != nil {
-			delete(c.pending, id)
-			c.mu.Unlock()
-			return nil, 0, errors.New("restart turn admission is already armed")
+		if admitted := c.admittedRestartTurn; admitted != nil {
+			if admitted.fence != *admissionFence {
+				delete(c.pending, id)
+				c.mu.Unlock()
+				return nil, 0, errors.New("restart turn admission fence does not match armed turn")
+			}
+			if admitted.settledSequence <= admitted.watermark {
+				delete(c.pending, id)
+				c.mu.Unlock()
+				return nil, 0, errors.New("restart turn admission is already armed")
+			}
 		}
+		// A decoded settled frame closes this exact prior admission even if its
+		// semantic activity callback remains delayed. Replace it with a fresh
+		// identity and current watermark so a later reset must drain the new turn.
 		c.admittedRestartTurn = &admittedRestartTurn{fence: *admissionFence, watermark: c.eventSequence}
 		c.consumedAdmittedRestartFence = nil
 	}
@@ -1366,6 +1376,7 @@ func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.M
 			c.mu.Unlock()
 			return err
 		}
+		admissionWatermark := uint64(0)
 		if admitted := c.admittedRestartTurn; admitted != nil {
 			if admitted.fence != fence {
 				if c.settlementToken == token {
@@ -1385,9 +1396,17 @@ func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.M
 				c.mu.Unlock()
 				return nil
 			}
+			admissionWatermark = admitted.watermark
 		}
 		settled := -1
-		for index, item := range c.backlog {			if !agentSettledType(item.value) {
+		for index, item := range c.backlog {
+			// A current admitted turn owns only frames decoded after its prompt
+			// watermark. Retain an earlier turn's frame for normal processing, but
+			// do not let it fail this new turn as a stale restart settlement.
+			if admissionWatermark > 0 && item.sequence <= admissionWatermark {
+				continue
+			}
+			if !agentSettledType(item.value) {
 				continue
 			}
 			if !agentSettledFrame(item.value) {

@@ -54,6 +54,30 @@ func requireRequest(t *testing.T, requests <-chan map[string]any) map[string]any
 	}
 }
 
+type rpcWriteCounter struct {
+	mu         sync.Mutex
+	writer     io.Writer
+	count      int
+	writeLimit int
+}
+
+func (w *rpcWriteCounter) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	w.count++
+	count := w.count
+	w.mu.Unlock()
+	if w.writeLimit > 0 && count > w.writeLimit {
+		return 0, errors.New("unexpected RPC write")
+	}
+	return w.writer.Write(value)
+}
+
+func (w *rpcWriteCounter) Count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.count
+}
+
 func policyDetails(generation string, epoch int64) map[string]any {
 	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{
 		"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
@@ -1538,7 +1562,9 @@ func TestRestartTurnSettlerConsumesDecodedAdmittedSettlement(t *testing.T) {
 	t.Cleanup(func() { _ = other.Close() })
 	requests = readJSONLRequests(stdinReader)
 	prompted = make(chan error, 1)
-	go func() { prompted <- other.PromptAdmittedRestartTurn(context.Background(), "other admitted prompt", fence) }()
+	go func() {
+		prompted <- other.PromptAdmittedRestartTurn(context.Background(), "other admitted prompt", fence)
+	}()
 	request = requireRequest(t, requests)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true}))
 	require.NoError(t, <-prompted)
@@ -1554,6 +1580,80 @@ func TestRestartTurnSettlerConsumesDecodedAdmittedSettlement(t *testing.T) {
 	other.mu.Lock()
 	require.NotNil(t, other.admittedRestartTurn, "stale generation must leave the matching settlement intact")
 	other.mu.Unlock()
+}
+
+func TestRPCClientManagerAuthorizedPromptReplacesOnlySettledRestartAdmission(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.PromptAdmittedRestartTurn(context.Background(), "first prompt", fence) }()
+	firstRequest := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstRequest["id"], "type": "response", "success": true}))
+	require.NoError(t, <-firstResult)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+
+	var firstAdmission *admittedRestartTurn
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		if client.admittedRestartTurn == nil || client.admittedRestartTurn.settledSequence <= client.admittedRestartTurn.watermark {
+			return false
+		}
+		firstAdmission = client.admittedRestartTurn
+		return true
+	}, time.Second, time.Millisecond)
+
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- client.PromptAdmittedRestartTurn(context.Background(), "second prompt", fence) }()
+	secondRequest := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondRequest["id"], "type": "response", "success": true}))
+	require.NoError(t, <-secondResult)
+
+	client.mu.Lock()
+	secondAdmission := client.admittedRestartTurn
+	client.mu.Unlock()
+	require.NotNil(t, secondAdmission)
+	require.NotSame(t, firstAdmission, secondAdmission)
+	require.Equal(t, fence, secondAdmission.fence)
+	require.Greater(t, secondAdmission.watermark, firstAdmission.watermark)
+	require.Zero(t, secondAdmission.settledSequence, "the second prompt must not inherit the first prompt's settlement")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, client.SettlePreparedRestartTurn(canceled, fence), context.Canceled, "the second prompt must not consume the first prompt's settlement")
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.NoError(t, client.SettlePreparedRestartTurn(context.Background(), fence))
+}
+
+func TestRPCClientRejectsOverlappingUnsettledRestartAdmission(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	countedStdin := &rpcWriteCounter{writer: stdinWriter, writeLimit: 1}
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(countedStdin, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.PromptAdmittedRestartTurn(context.Background(), "first prompt", fence) }()
+	firstRequest := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstRequest["id"], "type": "response", "success": true}))
+	require.NoError(t, <-firstResult)
+	require.Equal(t, 1, countedStdin.Count())
+	client.mu.Lock()
+	firstAdmission := client.admittedRestartTurn
+	client.mu.Unlock()
+
+	require.Error(t, client.PromptAdmittedRestartTurn(context.Background(), "overlapping prompt", fence))
+	require.Equal(t, 1, countedStdin.Count(), "unsettled overlapping admission wrote a second prompt")
+	client.mu.Lock()
+	require.Same(t, firstAdmission, client.admittedRestartTurn)
+	client.mu.Unlock()
 }
 
 func TestRPCClientSettlePreparedRestartTurnRejectsUnadmittedQueuedSettlement(t *testing.T) {
