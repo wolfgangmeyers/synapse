@@ -6,6 +6,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
 import type { SocketEvent, WebSocketFactory, WebSocketLike } from "../../src/transport/websocket-client";
+import { createUILiveClient, type UILiveClient } from "../../src/transport/ui-live-client";
 import { startManagedGoRouter } from "./managed-go-router.mjs";
 
 interface JsonRecord { [key: string]: unknown }
@@ -84,9 +85,12 @@ async function waitForManagedAgentReady(router: FunctionalRouter, agentID: strin
 }
 
 let router: FunctionalRouter | undefined;
+let historyObserver: UILiveClient | undefined;
 
 afterEach(async () => {
   cleanup();
+  historyObserver?.close();
+  historyObserver = undefined;
   if (router !== undefined) {
     const closed = await router.close();
     expect(closed.rootRemoved).toBe(true);
@@ -135,6 +139,34 @@ describe("real managed router to React WebUI behavioral seam", () => {
     // separation. The Go fake process emits the same ordered RPC lifecycle
     // frames that the managed handler consumes; no browser or provider is used.
     router = await startManagedGoRouter();
+    let terminalActivityID = "";
+    let resolveObserverReady: () => void = () => {};
+    let rejectObserverReady: (error: Error) => void = () => {};
+    let resolveTerminalFrame: () => void = () => {};
+    let rejectTerminalFrame: (error: Error) => void = () => {};
+    const observerReady = new Promise<void>((resolve, reject) => { resolveObserverReady = resolve; rejectObserverReady = reject; });
+    const terminalFrame = new Promise<void>((resolve, reject) => { resolveTerminalFrame = resolve; rejectTerminalFrame = reject; });
+    // The terminal promise is awaited after the tool is released. Attach its
+    // rejection handler now so an earlier socket failure cannot go unhandled.
+    void terminalFrame.catch(() => undefined);
+    historyObserver = createUILiveClient({
+      routerUrl: router.httpUrl,
+      webSocketFactory: realBrowserWebSocketFactory(),
+      onFrame: (frame) => {
+        if (frame.type === "managed_agents_snapshot") resolveObserverReady();
+        if (frame.type !== "history_entry" || frame.view !== "complete" || frame.entry.id !== terminalActivityID) return;
+        const outcome = frame.entry.presentation?.outcome;
+        if (outcome === "active") return;
+        if (outcome === "success") resolveTerminalFrame();
+        else rejectTerminalFrame(new Error(`expected successful terminal tool history, received ${outcome ?? "missing outcome"}`));
+      },
+      onError: (error) => {
+        rejectObserverReady(error);
+        rejectTerminalFrame(error);
+      },
+    });
+    historyObserver.connect();
+    await observerReady;
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
     await launch(router, "functional-card");
     await screen.findByRole("button", { name: "Functional Card (functional-card)" });
@@ -150,7 +182,9 @@ describe("real managed router to React WebUI behavioral seam", () => {
     const activeID = activeCard.dataset.activityId ?? "";
     expect(activeID).not.toBe("");
     const stableCard = activeCard;
+    terminalActivityID = activeID;
     await writeFile(`${router.sessionRoot}/allow-tool-end`, "release deterministic tool barrier\n", { mode: 0o600 });
+    await terminalFrame;
     await waitFor(() => {
       const terminalCard = document.querySelector<HTMLElement>(`[data-activity-id="${activeID}"]`);
       expect(terminalCard).toBe(stableCard);
