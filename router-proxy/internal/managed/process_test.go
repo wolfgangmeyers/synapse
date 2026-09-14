@@ -253,6 +253,7 @@ type stopRaceOps struct {
 	signalErr          error
 	leaderlessErr      error
 	cancelOnLeaderless context.CancelFunc
+	cancelOnWait       context.CancelFunc
 	signals            []syscall.Signal
 	leaderlessCalls    int
 	waitState          ProcessProbeState
@@ -267,11 +268,11 @@ func (ops *stopRaceOps) Probe(ProcessIdentity) ProcessProbe {
 	return ProcessProbe{State: ops.states[index]}
 }
 func (ops *stopRaceOps) CloseProcessInput(Process) error { return nil }
-func (ops *stopRaceOps) SignalVerifiedProcessGroup(ProcessIdentity, syscall.Signal) error {
+func (ops *stopRaceOps) SignalVerifiedProcessGroup(_ ProcessIdentity, signal syscall.Signal) error {
 	if ops.signalErr != nil {
 		return ops.signalErr
 	}
-	ops.signals = append(ops.signals, syscall.SIGTERM)
+	ops.signals = append(ops.signals, signal)
 	return nil
 }
 func (ops *stopRaceOps) SignalVerifiedProcessGroupAfterLeaderExit(ProcessIdentity) error {
@@ -286,6 +287,10 @@ func (ops *stopRaceOps) SignalVerifiedProcessGroupAfterLeaderExit(ProcessIdentit
 	return nil
 }
 func (ops *stopRaceOps) WaitForProcessGroupEmpty(context.Context, ProcessIdentity, <-chan error) ProcessProbe {
+	if ops.cancelOnWait != nil {
+		ops.cancelOnWait()
+		ops.cancelOnWait = nil
+	}
 	state := ops.waitState
 	if state == "" {
 		state = ProcessAbsent
@@ -462,22 +467,30 @@ func TestExecProcessStopRequiresCompleteGroupAbsence(t *testing.T) {
 }
 
 func TestExecProcessStopRetryAfterDeadlineDoesNotSignalLeaderlessGroup(t *testing.T) {
-	handshake := startHandshakeProcess(t, `(trap '' TERM HUP; printf 'desc-ready\n' >&3; IFS= read release <&4; printf 'desc-exit\n' >&3; exit 0) & child=$!; trap 'printf "leader-term\n" >&3; exit 0' TERM; printf 'leader-ready\n' >&3; wait "$child"`)
-	requireHandshakeSet(t, handshake.reader, "desc-ready", "leader-ready")
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	ops := &stopRaceOps{
+		states:       []ProcessProbeState{ProcessOwned, ProcessOwned, ProcessOwned, ProcessPresent},
+		waitState:    ProcessPresent,
+		cancelOnWait: cancelFirst,
+	}
+	process := newExitedProcessForStopTest(t, ops)
 
-	short, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	firstErr := handshake.process.Stop(short)
-	cancel()
-	require.NoError(t, firstErr)
-	requireHandshake(t, handshake.reader, "leader-term")
-	require.Equal(t, ProcessAbsent, DefaultProcessGroupOps().Probe(handshake.process.identity).State)
+	firstErr := process.Stop(firstContext)
+	var firstCleanupErr *ProcessCleanupError
+	require.ErrorAs(t, firstErr, &firstCleanupErr)
+	require.Equal(t, ProcessPresent, firstCleanupErr.State)
+	require.ErrorIs(t, firstErr, context.Canceled)
 
-	// A later Stop call can observe the already-absent group, but it cannot
-	// inherit the first call's TERM proof to signal a leaderless group.
-	long, cancel := context.WithTimeout(context.Background(), time.Second)
-	secondErr := handshake.process.Stop(long)
-	cancel()
-	require.NoError(t, secondErr)
+	// A later Stop call cannot inherit the first call's TERM proof to signal a
+	// leaderless group, even though that earlier cleanup did not finish.
+	secondErr := process.Stop(context.Background())
+	var secondCleanupErr *ProcessCleanupError
+	require.ErrorAs(t, secondErr, &secondCleanupErr)
+	require.Equal(t, ProcessPresent, secondCleanupErr.State)
+	require.ErrorContains(t, secondErr, "process cleanup requires the original stop attempt")
+	require.Equal(t, []syscall.Signal{syscall.SIGTERM}, ops.signals)
+	require.Zero(t, ops.leaderlessCalls)
+	require.Equal(t, 4, ops.probes)
 }
 
 func TestExecProcessStopDoesNotSignalUnownedGroup(t *testing.T) {
