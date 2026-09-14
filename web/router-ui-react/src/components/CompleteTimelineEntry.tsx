@@ -145,7 +145,9 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const active = isActivePresentation(presentation);
   const terminalSuccess = isTerminalSuccessPresentation(presentation);
   const terminalDanger = isTerminalDangerPresentation(presentation);
-  return <article className={`activity-entry activity-entry--${visual.tone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
+  // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
+  const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
+  return <article className={`activity-entry activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
     <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
     <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
   </article>;
