@@ -22,12 +22,13 @@ function titleCase(value: string): string {
 
 function toolVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
   const toolName = normalizedToolName(presentation.tool_name);
+  const succeeded = presentation.outcome === "success";
   const failed = presentation.outcome === "error" || presentation.outcome === "failed";
   const interrupted = presentation.outcome === "interrupted";
   const active = presentation.outcome === "active";
   const unknown = presentation.outcome === "warning" || presentation.outcome === "unknown";
-  const tone: CompleteTimelineTone = failed || interrupted ? "danger" : unknown ? "amber" : toolName === "bash" ? "teal" : toolName === "goal" ? "purple" : toolName === "reminder" ? "yellow" : "blue";
-  const icon = toolName === "bash" ? "fa-solid fa-terminal" : toolName === "goal" ? "fa-solid fa-flag" : toolName === "reminder" ? "fa-solid fa-clock" : "fa-solid fa-wrench";
+  const tone: CompleteTimelineTone = succeeded ? "green" : failed || interrupted ? "danger" : unknown ? "amber" : toolName === "bash" ? "teal" : toolName === "goal" ? "purple" : toolName === "reminder" ? "yellow" : "blue";
+  const icon = succeeded ? "fa-solid fa-check" : toolName === "bash" ? "fa-solid fa-terminal" : toolName === "goal" ? "fa-solid fa-flag" : toolName === "reminder" ? "fa-solid fa-clock" : "fa-solid fa-wrench";
   if (failed || interrupted) {
     const outcome = interrupted ? "interrupted" : "failed";
     const label = toolName === undefined ? `Tool ${outcome}` : `${titleCase(toolName)} ${outcome}`;
@@ -51,8 +52,11 @@ function childVisual(presentation: ManagedHistoryPresentation): CompleteTimeline
   };
   const label = labels[state ?? ""] ?? (recovery ? "Subagent recovery" : "Subagent updated");
   const detail = [presentation.child_label, presentation.summary].filter((value): value is string => value !== undefined && value !== "").join(" · ");
-  const tone: CompleteTimelineTone = state === "error" ? "danger" : state === "steered" || state === "interrupted_unknown" ? "amber" : recovery ? "teal" : "blue";
-  return { icon: recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project", tone, label, ...(detail ? { detail } : {}), isHighValue: recovery || ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
+  const succeeded = state === "completed" || state === "steered";
+  const terminalFailure = state === "aborted" || state === "stopped" || state === "error" || state === "interrupted_unknown";
+  const tone: CompleteTimelineTone = terminalFailure ? "danger" : succeeded ? "green" : recovery ? "teal" : "blue";
+  const icon = succeeded ? "fa-solid fa-check" : recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project";
+  return { icon, tone, label, ...(detail ? { detail } : {}), isHighValue: recovery || ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
 }
 
 function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
@@ -61,17 +65,21 @@ function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTim
     compacting: "Child compacting",
     completed: "Child context compacted",
     failed: "Child compaction failed",
+    interrupted: "Child compaction interrupted — outcome unknown",
     aborted: "Child compaction interrupted — outcome unknown",
     reconciled_unknown: "Child compaction interrupted — outcome unknown",
   } : {
     compacting: "Compacting context",
     completed: "Context compacted",
     failed: "Context compaction failed",
+    interrupted: "Context compaction interrupted — outcome unknown",
     aborted: "Context compaction interrupted — outcome unknown",
     reconciled_unknown: "Context compaction interrupted — outcome unknown",
   };
   const outcome = presentation.outcome ?? "compacting";
-  return { icon: "fa-solid fa-compress", tone: outcome === "failed" ? "danger" : outcome === "aborted" || outcome === "reconciled_unknown" ? "amber" : "purple", label: labels[outcome] ?? (child ? "Child compaction" : "Context compaction"), ...(presentation.summary ? { detail: presentation.summary } : {}), isHighValue: outcome !== "compacting" };
+  const terminalFailure = outcome === "failed" || outcome === "interrupted" || outcome === "aborted" || outcome === "reconciled_unknown";
+  const icon = outcome === "completed" ? "fa-solid fa-check" : "fa-solid fa-compress";
+  return { icon, tone: terminalFailure ? "danger" : outcome === "completed" ? "green" : "purple", label: labels[outcome] ?? (child ? "Child compaction" : "Context compaction"), ...(presentation.summary ? { detail: presentation.summary } : {}), isHighValue: outcome !== "compacting" };
 }
 
 export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTimelineVisual {
@@ -94,6 +102,34 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   return { icon: "fa-solid fa-circle-play", tone: "blue", label: entry.message || "Agent activity", ...(presentation.summary ? { detail: presentation.summary } : {}), isHighValue: false };
 }
 
+function isChildOrRecoveryPresentation(presentation: ManagedHistoryPresentation | undefined): presentation is ManagedHistoryPresentation & { kind: "child" | "recovery" } {
+  return presentation?.kind === "child" || presentation?.kind === "recovery";
+}
+
+function isActivePresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
+  if (presentation === undefined) return false;
+  if (presentation.kind === "compaction") return presentation.outcome === "compacting";
+  if (isChildOrRecoveryPresentation(presentation)) return presentation.child_state === "queued" || presentation.child_state === "running";
+  return presentation.outcome === "active";
+}
+
+function isTerminalSuccessPresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
+  if (presentation?.kind === "compaction") return presentation.outcome === "completed";
+  if (presentation?.kind === "tool") return presentation.outcome === "success";
+  return isChildOrRecoveryPresentation(presentation) && (presentation.child_state === "completed" || presentation.child_state === "steered");
+}
+
+function isTerminalDangerPresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
+  if (presentation?.kind === "compaction") {
+    return presentation.outcome === "failed" || presentation.outcome === "interrupted" || presentation.outcome === "aborted" || presentation.outcome === "reconciled_unknown";
+  }
+  if (presentation?.kind === "tool") return presentation.outcome === "error" || presentation.outcome === "failed" || presentation.outcome === "interrupted";
+  if (isChildOrRecoveryPresentation(presentation)) {
+    return presentation.child_state === "aborted" || presentation.child_state === "stopped" || presentation.child_state === "error" || presentation.child_state === "interrupted_unknown";
+  }
+  return false;
+}
+
 function formattedTime(entry: ManagedHistoryEntry): { dateTime?: string; label?: string; title?: string } {
   if (entry.at === undefined || !Number.isFinite(Date.parse(entry.at))) return {};
   const date = new Date(entry.at);
@@ -105,8 +141,11 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
   const accessibleName = [visual.label, visual.detail, time.title].filter((value): value is string => value !== undefined && value !== "").join(". ");
-  const active = entry.presentation?.kind === "tool" && entry.presentation.outcome === "active";
-  return <article className={`activity-entry activity-entry--${visual.tone}${active ? " activity-entry--active" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
+  const presentation = entry.presentation;
+  const active = isActivePresentation(presentation);
+  const terminalSuccess = isTerminalSuccessPresentation(presentation);
+  const terminalDanger = isTerminalDangerPresentation(presentation);
+  return <article className={`activity-entry activity-entry--${visual.tone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
     <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
     <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
   </article>;
