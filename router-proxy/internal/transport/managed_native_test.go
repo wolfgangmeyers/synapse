@@ -369,8 +369,97 @@ func (w *nativeDirectCommandWriter) Close() error { return w.target.Close() }
 // nativeObservedRPCFactory retains the production RPC client and installed Pi
 // process. It adds only a post-write observation point for the native proof.
 type nativeObservedRPCFactory struct {
-	counter *nativeDirectCommandCounter
-	opened  chan<- managed.RPC
+	counter       *nativeDirectCommandCounter
+	opened        chan<- managed.RPC
+	settleEntered chan<- struct{}
+	settleRelease <-chan struct{}
+	settleDone    chan<- struct{}
+}
+
+// nativeSettlementBarrierRPC keeps the production RPC client and Pi stdout
+// path intact. The barrier pauses immediately before the real settle call, so
+// the recovery test can read the durable source_settle state first.
+type nativeSettlementBarrierRPC struct {
+	managed.RPC
+	settleEntered chan<- struct{}
+	settleRelease <-chan struct{}
+	settleDone    chan<- struct{}
+	enteredOnce   sync.Once
+	doneOnce      sync.Once
+}
+
+func (r *nativeSettlementBarrierRPC) SettlePreparedRestartTurn(ctx context.Context, fence store.ManagedRuntimeFence) error {
+	r.enteredOnce.Do(func() { close(r.settleEntered) })
+	select {
+	case <-r.settleRelease:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	settler, ok := r.RPC.(managed.RestartTurnSettler)
+	if !ok {
+		return errors.New("installed Pi RPC does not support restart settlement")
+	}
+	err := settler.SettlePreparedRestartTurn(ctx, fence)
+	r.doneOnce.Do(func() { close(r.settleDone) })
+	return err
+}
+
+func (r *nativeSettlementBarrierRPC) ApplyPolicy(ctx context.Context, value map[string]any) (map[string]any, error) {
+	source, ok := r.RPC.(interface {
+		ApplyPolicy(context.Context, map[string]any) (map[string]any, error)
+	})
+	if !ok {
+		return nil, errors.New("installed Pi RPC does not support readiness policy")
+	}
+	return source.ApplyPolicy(ctx, value)
+}
+func (r *nativeSettlementBarrierRPC) WaitForPolicyApplied(ctx context.Context, generation string, epoch int64) (map[string]any, error) {
+	source, ok := r.RPC.(interface {
+		WaitForPolicyApplied(context.Context, string, int64) (map[string]any, error)
+	})
+	if !ok {
+		return nil, errors.New("installed Pi RPC does not support readiness policy")
+	}
+	return source.WaitForPolicyApplied(ctx, generation, epoch)
+}
+func (r *nativeSettlementBarrierRPC) RequestChildSnapshot(ctx context.Context, value map[string]any) (map[string]any, error) {
+	source, ok := r.RPC.(interface {
+		RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error)
+	})
+	if !ok {
+		return nil, errors.New("installed Pi RPC does not support readiness snapshot")
+	}
+	return source.RequestChildSnapshot(ctx, value)
+}
+func (r *nativeSettlementBarrierRPC) WaitForChildSnapshot(ctx context.Context) (map[string]any, error) {
+	source, ok := r.RPC.(interface {
+		WaitForChildSnapshot(context.Context) (map[string]any, error)
+	})
+	if !ok {
+		return nil, errors.New("installed Pi RPC does not support readiness snapshot")
+	}
+	return source.WaitForChildSnapshot(ctx)
+}
+func (r *nativeSettlementBarrierRPC) PrepareManagedMailbox(ctx context.Context) (string, error) {
+	direct, ok := r.RPC.(managed.DirectMailboxRPC)
+	if !ok {
+		return "", errors.New("installed Pi RPC does not support direct mail")
+	}
+	return direct.PrepareManagedMailbox(ctx)
+}
+func (r *nativeSettlementBarrierRPC) PromptManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (<-chan managed.DirectMailboxEvent, error) {
+	direct, ok := r.RPC.(managed.DirectMailboxRPC)
+	if !ok {
+		return nil, errors.New("installed Pi RPC does not support direct mail")
+	}
+	return direct.PromptManagedMailbox(ctx, attempt)
+}
+func (r *nativeSettlementBarrierRPC) RecoverManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (managed.DirectMailboxRecovery, error) {
+	direct, ok := r.RPC.(managed.DirectMailboxRPC)
+	if !ok {
+		return managed.DirectMailboxRecovery{}, errors.New("installed Pi RPC does not support direct mail")
+	}
+	return direct.RecoverManagedMailbox(ctx, attempt)
 }
 
 func (f nativeObservedRPCFactory) Open(_ context.Context, process managed.Process) (managed.RPC, error) {
@@ -378,6 +467,12 @@ func (f nativeObservedRPCFactory) Open(_ context.Context, process managed.Proces
 		return nil, errors.New("managed process pipes are unavailable")
 	}
 	rpc := managed.NewRPCClient(&nativeDirectCommandWriter{target: process.Stdin(), counter: f.counter}, process.Stdout(), func() error { return nil })
+	if f.settleEntered != nil {
+		if f.settleRelease == nil || f.settleDone == nil {
+			return nil, errors.New("native settlement barrier is incomplete")
+		}
+		rpc = &nativeSettlementBarrierRPC{RPC: rpc, settleEntered: f.settleEntered, settleRelease: f.settleRelease, settleDone: f.settleDone}
+	}
 	if f.opened != nil {
 		f.opened <- rpc
 	}
@@ -954,10 +1049,25 @@ func TestManagedDirectMailboxRecovery(t *testing.T) {
 	runManagedDirectMailboxNativeProof(t, true, false)
 }
 
+func requireManagedNativeProofPi(t *testing.T, root string) managedResetLockedPi {
+	t.Helper()
+	lockPath, packageRoot, executable := os.Getenv("MECHA_PI_SOURCE_LOCK"), os.Getenv("MECHA_PI_PACKAGE_ROOT"), os.Getenv("MECHA_PI_BIN")
+	if lockPath == "" && packageRoot == "" && executable == "" {
+		return requireManagedResetLockedPi(t, root)
+	}
+	require.NotEmpty(t, lockPath, "MECHA_PI_SOURCE_LOCK is required with canonical installed-Pi provenance")
+	require.NotEmpty(t, packageRoot, "MECHA_PI_PACKAGE_ROOT is required with canonical installed-Pi provenance")
+	require.NotEmpty(t, executable, "MECHA_PI_BIN is required with canonical installed-Pi provenance")
+	lockedPi := requireManagedResetLockedPiFromLock(t, root, lockPath)
+	require.Equal(t, packageRoot, lockedPi.packageRoot)
+	require.Equal(t, executable, lockedPi.executable)
+	return lockedPi
+}
+
 func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) {
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)
-	lockedPi := requireManagedResetLockedPi(t, root)
+	lockedPi := requireManagedNativeProofPi(t, root)
 	pi, subagents := lockedPi.executable, lockedPi.subagentsEntry
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -983,6 +1093,16 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 	var appendBeforeAck chan struct{}
 	var ackRelease chan struct{}
 	var interruptAppend sync.Once
+	releaseAck := func() {
+		if ackRelease == nil {
+			return
+		}
+		select {
+		case <-ackRelease:
+		default:
+			close(ackRelease)
+		}
+	}
 	options := managed.ManagerOptions{
 		Store: durable,
 		BeforeManagedDirectAcknowledge: func(context.Context, store.ManagedDirectAttempt) error {
@@ -1004,22 +1124,42 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 	if recovery {
 		appendBeforeAck = make(chan struct{})
 		ackRelease = make(chan struct{})
+		t.Cleanup(releaseAck)
+	}
+	directCommandCounter := &nativeDirectCommandCounter{}
+	var settleEntered chan struct{}
+	var settleRelease chan struct{}
+	var settleDone chan struct{}
+	if recovery {
+		settleEntered = make(chan struct{})
+		settleRelease = make(chan struct{})
+		settleDone = make(chan struct{})
 		t.Cleanup(func() {
 			select {
-			case <-ackRelease:
+			case <-settleRelease:
 			default:
-				close(ackRelease)
+				close(settleRelease)
 			}
 		})
 	}
-	directCommandCounter := &nativeDirectCommandCounter{}
-	options.RPCFactory = nativeObservedRPCFactory{counter: directCommandCounter}
+	options.RPCFactory = nativeObservedRPCFactory{
+		counter:       directCommandCounter,
+		settleEntered: settleEntered,
+		settleRelease: settleRelease,
+		settleDone:    settleDone,
+	}
 	manager, err := managed.NewManager(options)
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
 	require.NoError(t, err)
 	require.NoError(t, router.Listen(ctx))
-	defer func() { _ = router.Close(context.Background()) }()
+	defer func() {
+		// Release the deliberately blocked pre-ACK hook before Manager.Close so
+		// cleanup can join the direct-delivery task after either a pass or failure.
+		releaseAck()
+		require.NoError(t, manager.Close(context.Background()))
+		require.NoError(t, router.Close(context.Background()))
+	}()
 	httpURL, _ := router.URLs()
 	launchBody, err := json.Marshal(map[string]string{"name": "native-alpha", "cwd": root})
 	require.NoError(t, err)
@@ -1122,13 +1262,26 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 		require.NoError(t, err)
 		defer restartResponse.Body.Close()
 		require.Equal(t, http.StatusAccepted, restartResponse.StatusCode)
-		var action *store.ManagedLifecycleAction
-		var actionErr error
-		require.Eventually(t, func() bool {
-			action, actionErr = durable.ManagedLifecycleAction(ctx, "123e4567-e89b-42d3-a456-426614174082")
-			return actionErr == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
-		}, 5*time.Second, time.Millisecond)
+		// The executor records source_settle before calling the real Pi settler.
+		// Pause at that call boundary, observe the durable transient state, then
+		// release the ACK and let the installed Pi emit and the RPC consume its
+		// real agent_settled event.
+		select {
+		case <-settleEntered:
+		case <-ctx.Done():
+			t.Fatal("installed Pi restart did not reach the real settlement call")
+		}
+		action, err := durable.ManagedLifecycleAction(ctx, "123e4567-e89b-42d3-a456-426614174082")
+		require.NoError(t, err)
+		require.Equal(t, "awaiting_settle", action.State)
+		require.Equal(t, "source_settle", action.Stage)
 		close(ackRelease)
+		close(settleRelease)
+		select {
+		case <-settleDone:
+		case <-ctx.Done():
+			t.Fatal("installed Pi settlement did not consume agent_settled")
+		}
 		require.Eventually(t, func() bool {
 			agent, agentErr := durable.ManagedAgent(ctx, "native-alpha")
 			return agentErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts && agent.RuntimeGeneration != oldGeneration

@@ -88,13 +88,59 @@ func (m *Manager) attachLifecycleRestartArtifact(binding *managedBinding, action
 	return artifact, nil
 }
 
+// attachExistingLifecycleRestartArtifact is the process-absent handoff. The
+// source RPC cannot provide new state after its process is gone, so recovery
+// accepts only the exact artifact already retained by the store and rechecks
+// its filesystem identity before attaching it from source_settle.
+func (m *Manager) attachExistingLifecycleRestartArtifact(actionID string, source store.ManagedRuntimeFence) error {
+	action, err := m.lifecycleRestartAction(actionID, source)
+	if err != nil {
+		return err
+	}
+	if action.TargetArtifactID != "" {
+		_, err := m.verifyLifecycleRestartArtifact(action, source)
+		return err
+	}
+	artifact, err := m.store.ManagedSessionArtifactForSession(context.Background(), source.AgentID, source.SessionEpoch, source.PiSessionID)
+	if err != nil {
+		return err
+	}
+	if artifact.DiscoveryState != "materialized" || artifact.CleanupState != "retained" {
+		return errors.New("managed restart continuation artifact is not retained")
+	}
+	if _, err := m.artifacts.verifyRetainedMaterialized(context.Background(), artifact.ArtifactID, source.AgentID, source.PiSessionID, source.SessionEpoch); err != nil {
+		return err
+	}
+	if err := m.store.AttachManagedLifecycleRestartResumeArtifact(context.Background(), actionID, source, artifact.ArtifactID); err != nil {
+		current, readErr := m.lifecycleRestartAction(actionID, source)
+		if readErr == nil && current.TargetArtifactID == artifact.ArtifactID {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// prepareAbsentLifecycleRestart advances admission to the durable settle
+// permission and attaches only an already-proven exact source artifact.
+func (m *Manager) prepareAbsentLifecycleRestart(actionID string, source store.ManagedRuntimeFence) error {
+	action, err := m.lifecycleRestartAction(actionID, source)
+	if err != nil {
+		return err
+	}
+	if action.State == "admitted" && action.Stage == "admission" {
+		if err := m.store.AdvanceManagedLifecycleRestartToSettle(context.Background(), actionID, source); err != nil {
+			return err
+		}
+	} else if action.State != "awaiting_settle" || action.Stage != "source_settle" {
+		return &store.ManagedRestartStaleError{AgentID: source.AgentID}
+	}
+	return m.attachExistingLifecycleRestartArtifact(actionID, source)
+}
+
 func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionID string, source store.ManagedRuntimeFence) {
 	action, err := m.lifecycleRestartAction(actionID, source)
 	if err != nil || action.State != "admitted" || action.Stage != "admission" {
-		return
-	}
-	if _, err := m.attachLifecycleRestartArtifact(binding, actionID, source); err != nil {
-		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_PREPARATION_FAILED", source)
 		return
 	}
 	binding.serial.Lock()
@@ -103,8 +149,29 @@ func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionI
 		return
 	}
 	sourceRPC, sourceProcess, sourceWait := binding.rpc, binding.process, binding.waitDone
+	turnAdmitted := binding.turnAdmitted
 	binding.serial.Unlock()
 	if sourceRPC == nil || sourceProcess == nil || sourceWait == nil {
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
+		return
+	}
+	if probe := m.processOps.Probe(oldFenceIdentity(source)).State; probe == ProcessAbsent {
+		if err := m.prepareAbsentLifecycleRestart(actionID, source); err != nil {
+			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_PREPARATION_FAILED", source)
+			return
+		}
+		if err := m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), actionID, source); err != nil {
+			return
+		}
+		if !m.stopLifecycleRestartSourceInLane(binding, actionID, source, sourceRPC, sourceProcess, sourceWait) {
+			return
+		}
+		if m.isClosed() {
+			return
+		}
+		m.startLifecycleRestartTargetInLane(actionID, source)
+		return
+	} else if probe != ProcessOwned {
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
 	}
@@ -113,7 +180,7 @@ func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionI
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
 	}
-	if agent.ActivityState == "active" {
+	if turnAdmitted || agent.ActivityState == "active" {
 		if err := m.store.AdvanceManagedLifecycleRestartToSettle(context.Background(), actionID, source); err != nil {
 			return
 		}
@@ -137,6 +204,16 @@ func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionI
 		if !current {
 			return
 		}
+		binding.serial.Lock()
+		binding.turnAdmitted = false
+		binding.serial.Unlock()
+	}
+	// Discover only after an active source has settled. Pi may not answer
+	// GetState while a model turn is still in flight; the durable settle stage
+	// must therefore be the first restart boundary visible to concurrent callers.
+	if _, err := m.attachLifecycleRestartArtifact(binding, actionID, source); err != nil {
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_PREPARATION_FAILED", source)
+		return
 	}
 	if err := m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), actionID, source); err != nil {
 		return
@@ -420,22 +497,35 @@ func (m *Manager) shutdownLifecycleRestartBinding(ctx context.Context, binding *
 		}
 		return true, m.store.ResetManagedLifecycleRestartTargetToStopped(context.Background(), action.ActionID, *action.SourceFence, fence)
 	}
-	if action.State == "admitted" && action.Stage == "admission" && action.TargetArtifactID == "" {
-		if _, attachErr := m.attachLifecycleRestartArtifact(binding, action.ActionID, fence); attachErr != nil {
-			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", fence)
-			return true, m.reapLifecycleRestartBinding(ctx, binding, fence, process, rpc, waitDone, true)
-		}
-		action, err = m.store.ManagedLifecycleAction(context.Background(), action.ActionID)
-		if err != nil {
-			return true, err
-		}
-	}
 	if action.Stage == "admission" || action.Stage == "source_settle" {
+		probe := m.processOps.Probe(oldFenceIdentity(fence)).State
+		if probe == ProcessAbsent {
+			if err := m.prepareAbsentLifecycleRestart(action.ActionID, fence); err != nil {
+				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", fence)
+				return true, m.reapLifecycleRestartBinding(ctx, binding, fence, process, rpc, waitDone, false)
+			}
+			action, err = m.store.ManagedLifecycleAction(context.Background(), action.ActionID)
+			if err != nil {
+				return true, err
+			}
+			if err := m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, fence); err != nil {
+				return true, err
+			}
+			_ = m.stopLifecycleRestartSourceInLane(binding, action.ActionID, fence, rpc, process, waitDone)
+			return true, nil
+		}
+		if probe != ProcessOwned {
+			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_IDENTITY_UNSAFE", fence)
+			return true, nil
+		}
 		agent, agentErr := m.store.ManagedAgent(context.Background(), fence.AgentID)
 		if agentErr != nil {
 			return true, agentErr
 		}
-		if agent.ActivityState == "active" {
+		binding.serial.Lock()
+		turnAdmitted := binding.turnAdmitted
+		binding.serial.Unlock()
+		if turnAdmitted || agent.ActivityState == "active" {
 			if action.Stage == "admission" {
 				if err := m.store.AdvanceManagedLifecycleRestartToSettle(context.Background(), action.ActionID, fence); err != nil {
 					return true, err
@@ -452,6 +542,23 @@ func (m *Manager) shutdownLifecycleRestartBinding(ctx context.Context, binding *
 			if settleErr != nil {
 				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_RECOVERY_NEEDS_SETTLE", fence)
 				return true, m.reapLifecycleRestartBinding(ctx, binding, fence, process, rpc, waitDone, true)
+			}
+			binding.serial.Lock()
+			if binding.turnAdmitted {
+				clearManagedTurnLocked(binding)
+			}
+			binding.serial.Unlock()
+		}
+		// GetState and artifact discovery are allowed only after any marked or
+		// durable active source turn has settled.
+		if (action.Stage == "admission" || action.Stage == "source_settle") && action.TargetArtifactID == "" {
+			if _, attachErr := m.attachLifecycleRestartArtifact(binding, action.ActionID, fence); attachErr != nil {
+				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", fence)
+				return true, m.reapLifecycleRestartBinding(ctx, binding, fence, process, rpc, waitDone, true)
+			}
+			action, err = m.store.ManagedLifecycleAction(context.Background(), action.ActionID)
+			if err != nil {
+				return true, err
 			}
 		}
 		if err := m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, fence); err != nil {
@@ -542,7 +649,13 @@ func (m *Manager) handleLifecycleRestartExitInLane(binding *managedBinding, acti
 		return
 	}
 	if action.Stage == "admission" || action.Stage == "source_settle" {
-		_ = m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), actionID, fence)
+		if err := m.prepareAbsentLifecycleRestart(actionID, fence); err != nil {
+			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_PREPARATION_FAILED", fence)
+			return
+		}
+		if err := m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), actionID, fence); err != nil {
+			return
+		}
 	}
 	if action.Stage == "source_stop" || action.Stage == "admission" || action.Stage == "source_settle" {
 		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
@@ -594,24 +707,29 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 		return
 	}
 	if action.Stage == "admission" {
-		if _, err := m.verifyLifecycleRestartArtifact(action, source); err != nil {
-			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", source)
-			return
-		}
 		probe := m.processOps.Probe(oldFenceIdentity(source)).State
 		agent, agentErr := m.store.ManagedAgent(context.Background(), source.AgentID)
 		if agentErr != nil {
 			return
 		}
 		if probe == ProcessAbsent {
-			_ = m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source)
-			_ = m.store.InterruptManagedParentWork(context.Background(), source)
-			if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
-				m.startLifecycleRestartTargetInLane(action.ActionID, source)
+			if err := m.prepareAbsentLifecycleRestart(action.ActionID, source); err != nil {
+				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", source)
+				return
+			}
+			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil {
+				_ = m.store.InterruptManagedParentWork(context.Background(), source)
+				if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
+					m.startLifecycleRestartTargetInLane(action.ActionID, source)
+				}
 			}
 			return
 		}
 		if probe == ProcessOwned && agent.ActivityState == "idle" {
+			if _, err := m.verifyLifecycleRestartArtifact(action, source); err != nil {
+				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", source)
+				return
+			}
 			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil && m.reapRestartGroup(context.Background(), oldFenceIdentity(source), nil) {
 				_ = m.store.InterruptManagedParentWork(context.Background(), source)
 				if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {
@@ -631,6 +749,10 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 	}
 	if action.Stage == "source_settle" {
 		if m.processOps.Probe(oldFenceIdentity(source)).State == ProcessAbsent {
+			if err := m.prepareAbsentLifecycleRestart(action.ActionID, source); err != nil {
+				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", source)
+				return
+			}
 			if m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source) == nil {
 				_ = m.store.InterruptManagedParentWork(context.Background(), source)
 				if m.store.MarkManagedLifecycleRestartSourceStopped(context.Background(), action.ActionID, source) == nil {

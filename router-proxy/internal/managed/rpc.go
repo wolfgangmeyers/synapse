@@ -20,6 +20,8 @@ var ErrReadinessBacklogFull = errors.New("managed readiness receipt backlog is f
 var ErrSemanticQueueFull = errors.New("managed RPC semantic dispatcher queue is full")
 var ErrAbortResponseMalformed = errors.New("Pi Abort response is malformed")
 var ErrAbortResponseRejected = errors.New("Pi Abort response was not successful")
+var ErrManagedGoalEvaluationCleanupStale = errors.New("managed goal evaluation cleanup token is stale")
+var ErrManagedGoalEvaluationSettledNotObserved = errors.New("managed goal evaluation settled event was not observed")
 var rootControlUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type RPC interface {
@@ -52,11 +54,29 @@ type ManagedGoalEvaluationRPC interface {
 	WaitForManagedGoalEvaluation(context.Context) (string, string, error)
 }
 
+// ManagedGoalEvaluationCleanupRPC is the evaluator-only Abort/reconcile seam.
+// Public Abort remains side-effect free because lifecycle termination does not
+// own an evaluator suppression lease.
+type ManagedGoalEvaluationCleanupRPC interface {
+	ReconcileManagedGoalEvaluation(context.Context, store.ManagedRuntimeFence, string, int64, int64) error
+}
+
+type managedGoalEvaluationCleanupStateRPC interface {
+	ManagedGoalEvaluationCleanupPending() bool
+}
+
 // RestartTurnSettler is deliberately narrower than RPC. Existing launch-only
 // callers remain source-compatible; controlled active restart requires this
 // binding-scoped stdout capability.
 type RestartTurnSettler interface {
 	SettlePreparedRestartTurn(context.Context, store.ManagedRuntimeFence) error
+}
+
+// RestartTurnAdmissionRPC atomically records the source-turn watermark with
+// its prompt write. The settlement waiter can then consume the exact decoded
+// native boundary even if durable activity has not caught up yet.
+type RestartTurnAdmissionRPC interface {
+	PromptAdmittedRestartTurn(context.Context, string, store.ManagedRuntimeFence) error
 }
 
 // DirectMailboxRPC is private to managed delivery. It deliberately does not
@@ -134,6 +154,13 @@ type ParentActivityRPC interface {
 	SetParentActivityEventHandler(func(map[string]any))
 }
 
+// ParentActivitySequenceRPC exposes the reader's decoded stdout watermark for
+// prompt admission. It is separate from the callback so queued semantic work
+// cannot make admission mistake callback progress for stream progress.
+type ParentActivitySequenceRPC interface {
+	ParentActivitySequence() uint64
+}
+
 // BuiltinToolLifecycleEvent is the narrow, redacted native Pi lifecycle fact.
 // Its payload intentionally has no arguments, result, output, or diagnostics.
 type BuiltinToolLifecycleEvent struct {
@@ -204,12 +231,27 @@ type restartSettlementToken struct {
 	watermark uint64
 	consumed  bool
 }
+
+type admittedRestartTurn struct {
+	fence           store.ManagedRuntimeFence
+	watermark       uint64
+	settledSequence uint64
+}
 type managedGoalEvaluationToken struct {
-	evaluationID string
-	goalRevision int64
-	settled      int64
-	fence        store.ManagedRuntimeFence
-	watermark    uint64
+	evaluationID    string
+	goalRevision    int64
+	settled         int64
+	fence           store.ManagedRuntimeFence
+	watermark       uint64
+	settledObserved bool
+	admitted        bool
+}
+
+type managedGoalEvaluationCleanup struct {
+	token                 *managedGoalEvaluationToken
+	abortBoundary         bool
+	abortBoundarySequence uint64
+	barrier               <-chan struct{}
 }
 type directMailboxToken struct {
 	messageID       string
@@ -263,6 +305,8 @@ type rpcResponse struct {
 	err   error
 }
 
+type rpcResponseHook func(map[string]any, error) error
+
 const rpcSemanticQueueCapacity = 128
 
 type rpcSemanticTask struct {
@@ -274,10 +318,11 @@ type rpcClient struct {
 	stdout  io.Reader
 	closeFn func() error
 
-	mu          sync.Mutex
-	pending     map[string]chan rpcResponse
-	nextID      int64
-	activeTools []string
+	mu           sync.Mutex
+	pending      map[string]chan rpcResponse
+	pendingHooks map[string]rpcResponseHook
+	nextID       int64
+	activeTools  []string
 
 	// The matcher is owned under mu. Responses never occupy this bounded FIFO.
 	// A terminal error lives separately so a retained notification can never
@@ -290,7 +335,10 @@ type rpcClient struct {
 	policyWatermark                     *uint64
 	snapshotWatermark                   *uint64
 	settlementToken                     *restartSettlementToken
+	admittedRestartTurn                 *admittedRestartTurn
+	consumedAdmittedRestartFence        *store.ManagedRuntimeFence
 	goalEvaluationToken                 *managedGoalEvaluationToken
+	goalEvaluationCleanup               *managedGoalEvaluationCleanup
 	directMailbox                       *directMailboxToken
 	rootControlHandler                  func(RootControlEvent)
 	childDeltaHandler                   func(map[string]any)
@@ -325,7 +373,7 @@ func NewRPCClient(stdin io.Writer, stdout io.Reader, closeFn func() error) RPC {
 	terminalHandlerDone := make(chan struct{})
 	close(terminalHandlerDone)
 	client := &rpcClient{
-		stdin: stdin, stdout: stdout, closeFn: closeFn, pending: map[string]chan rpcResponse{}, notified: make(chan struct{}, 1),
+		stdin: stdin, stdout: stdout, closeFn: closeFn, pending: map[string]chan rpcResponse{}, pendingHooks: map[string]rpcResponseHook{}, notified: make(chan struct{}, 1),
 		semanticQueue: make(chan rpcSemanticTask, rpcSemanticQueueCapacity), semanticDone: make(chan struct{}),
 		readerDone: make(chan struct{}), terminalHandlerDone: terminalHandlerDone,
 	}
@@ -403,13 +451,20 @@ func (c *rpcClient) readLoop() {
 				c.mu.Lock()
 				ch := c.pending[id]
 				delete(c.pending, id)
+				hook := c.pendingHooks[id]
+				delete(c.pendingHooks, id)
+				var responseErr error
+				if value, hasError := raw["error"]; hasError && value != nil {
+					responseErr = fmt.Errorf("Pi RPC error: %v", value)
+				}
+				if hook != nil && ch != nil {
+					if hookErr := hook(raw, responseErr); hookErr != nil {
+						responseErr = hookErr
+					}
+				}
 				c.mu.Unlock()
 				if ch != nil {
-					if value, hasError := raw["error"]; hasError && value != nil {
-						ch <- rpcResponse{err: fmt.Errorf("Pi RPC error: %v", value)}
-					} else {
-						ch <- rpcResponse{value: raw}
-					}
+					ch <- rpcResponse{value: raw, err: responseErr}
 				}
 				// A response belongs only to its request-ID waiter. Timed-out and
 				// unknown responses are never notifications, so they cannot consume
@@ -507,9 +562,25 @@ func (c *rpcClient) readLoop() {
 				}
 				continue
 			}
+			if agentSettledFrame(raw) && c.admittedRestartTurn != nil && c.eventSequence > c.admittedRestartTurn.watermark && c.admittedRestartTurn.settledSequence == 0 {
+				// This is recorded in stdout order before the semantic callback can
+				// be delayed behind durable activity projection. It is binding-scoped
+				// by the full fence captured atomically with the prompt write.
+				c.admittedRestartTurn.settledSequence = c.eventSequence
+				c.signalLocked()
+			}
 			if event, candidate := classifyParentActivityEvent(raw, c.eventSequence); candidate {
 				parentActivityCandidate = true
-				if event != nil && event["state"] == "idle" && c.suppressNextEvaluatorSettled {
+				cleanupBoundary := c.goalEvaluationCleanup != nil && c.goalEvaluationCleanup.abortBoundary
+				if event != nil && event["state"] == "active" && !cleanupBoundary {
+					if c.goalEvaluationToken != nil {
+						c.goalEvaluationToken.admitted = true
+					}
+					if c.goalEvaluationCleanup != nil && c.goalEvaluationCleanup.token != nil {
+						c.goalEvaluationCleanup.token.admitted = true
+					}
+				}
+				if event != nil && event["state"] == "idle" && c.suppressNextEvaluatorSettled && !cleanupBoundary {
 					// The hidden evaluator owns this model turn. Its settled boundary
 					// must never become an ordinary goal/rearm trigger. Pi emits that
 					// lifecycle frame before the evaluator's policy receipt, so arm this
@@ -517,6 +588,12 @@ func (c *rpcClient) readLoop() {
 					// was consumed before the receipt waiter runs.
 					c.suppressNextEvaluatorSettled = false
 					c.evaluatorSettledObserved = true
+					if c.goalEvaluationToken != nil {
+						c.goalEvaluationToken.settledObserved = true
+					}
+					if c.goalEvaluationCleanup != nil && c.goalEvaluationCleanup.token != nil {
+						c.goalEvaluationCleanup.token.settledObserved = true
+					}
 					parentActivityCandidate = false
 					evaluatorSettledSuppressed = true
 				} else if event != nil && c.parentActivityHandler != nil {
@@ -676,6 +753,7 @@ func (c *rpcClient) terminalizeLocked(err error) {
 	}
 	for id, ch := range c.pending {
 		delete(c.pending, id)
+		delete(c.pendingHooks, id)
 		ch <- rpcResponse{err: err}
 	}
 	if !c.semanticQueueClosed {
@@ -696,6 +774,14 @@ func (c *rpcClient) call(ctx context.Context, typ string, values map[string]any)
 // watermark in this same critical section, so a receipt cannot be appended
 // between the watermark and the command write.
 func (c *rpcClient) callSerialized(ctx context.Context, typ string, values map[string]any, captureWatermark bool) (map[string]any, uint64, error) {
+	return c.callSerializedWithHook(ctx, typ, values, captureWatermark, nil)
+}
+
+func (c *rpcClient) callSerializedWithHook(ctx context.Context, typ string, values map[string]any, captureWatermark bool, hook rpcResponseHook) (map[string]any, uint64, error) {
+	return c.callSerializedWithHookAndRestartAdmission(ctx, typ, values, captureWatermark, hook, nil)
+}
+
+func (c *rpcClient) callSerializedWithHookAndRestartAdmission(ctx context.Context, typ string, values map[string]any, captureWatermark bool, hook rpcResponseHook, admissionFence *store.ManagedRuntimeFence) (map[string]any, uint64, error) {
 	c.mu.Lock()
 	if c.terminal != nil {
 		err := c.terminal
@@ -715,9 +801,25 @@ func (c *rpcClient) callSerialized(ctx context.Context, typ string, values map[s
 	}
 	response := make(chan rpcResponse, 1)
 	c.pending[id] = response
+	if admissionFence != nil {
+		if c.admittedRestartTurn != nil {
+			delete(c.pending, id)
+			c.mu.Unlock()
+			return nil, 0, errors.New("restart turn admission is already armed")
+		}
+		c.admittedRestartTurn = &admittedRestartTurn{fence: *admissionFence, watermark: c.eventSequence}
+		c.consumedAdmittedRestartFence = nil
+	}
+	if hook != nil {
+		c.pendingHooks[id] = hook
+	}
 	watermark := c.eventSequence
 	if _, err = fmt.Fprintf(c.stdin, "%s\n", encoded); err != nil {
 		delete(c.pending, id)
+		delete(c.pendingHooks, id)
+		if admissionFence != nil && c.admittedRestartTurn != nil && c.admittedRestartTurn.fence == *admissionFence {
+			c.admittedRestartTurn = nil
+		}
 		c.terminalizeLocked(err)
 		c.mu.Unlock()
 		return nil, 0, err
@@ -732,6 +834,7 @@ func (c *rpcClient) callSerialized(ctx context.Context, typ string, values map[s
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
+		delete(c.pendingHooks, id)
 		c.mu.Unlock()
 		return nil, watermark, ctx.Err()
 	}
@@ -875,16 +978,23 @@ func (c *rpcClient) StartManagedGoalEvaluation(ctx context.Context, fence store.
 	if !validRestartFence(fence) || policy.EvaluatorID == "" || policy.EvaluatorGoalRevision < 1 || policy.EvaluatorSettledSequence < 1 || policy.Config.Goal == "" {
 		return errors.New("managed goal evaluation is invalid")
 	}
+	token := &managedGoalEvaluationToken{evaluationID: policy.EvaluatorID, goalRevision: policy.EvaluatorGoalRevision, settled: policy.EvaluatorSettledSequence, fence: fence}
 	c.mu.Lock()
 	if c.terminal != nil {
 		err := c.terminal
 		c.mu.Unlock()
 		return err
 	}
-	if c.goalEvaluationToken != nil {
+	if c.goalEvaluationToken != nil || c.goalEvaluationCleanup != nil {
 		c.mu.Unlock()
 		return errors.New("managed goal evaluation is already armed")
 	}
+	// Keep cleanup ownership before the hidden command is written. A response
+	// timeout (including one from Start itself) is ambiguous: Pi may already
+	// have activated the evaluator, so suppression must remain owned until the
+	// exact token is reconciled or the existing process-recovery path takes over.
+	c.goalEvaluationToken = token
+	c.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
 	// Pi emits the evaluator's native settled frame before the extension emits
 	// the policy result receipt. Arm suppression before asking Pi to trigger the
 	// hidden turn so that frame cannot start a second durable evaluation.
@@ -900,25 +1010,30 @@ func (c *rpcClient) StartManagedGoalEvaluation(ctx context.Context, fence store.
 	_, watermark, err := c.privateCommand(ctx, "mecha-policy-apply-v1", envelope)
 	if err != nil {
 		c.mu.Lock()
-		if c.goalEvaluationToken == nil && !c.evaluatorSettledObserved {
-			c.suppressNextEvaluatorSettled = false
+		if c.goalEvaluationToken == token {
+			// Start owns cleanup, but its response waiter is gone. Transfer the
+			// token to the cleanup owner so Reconcile can issue the typed Abort.
+			c.goalEvaluationToken = nil
 		}
 		c.mu.Unlock()
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.goalEvaluationToken != token || c.goalEvaluationCleanup == nil {
+		return ErrManagedGoalEvaluationCleanupStale
+	}
+	// The command watermark belongs to the attempt even when Start's response
+	// arrived after native activity frames were already decoded.
+	token.watermark = watermark
 	if c.terminal != nil {
+		c.goalEvaluationToken = nil
 		return c.terminal
 	}
-	if c.goalEvaluationToken != nil {
-		return errors.New("managed goal evaluation is already armed")
-	}
-	c.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: policy.EvaluatorID, goalRevision: policy.EvaluatorGoalRevision, settled: policy.EvaluatorSettledSequence, fence: fence, watermark: watermark}
 	return nil
 }
 
-func (c *rpcClient) WaitForManagedGoalEvaluation(ctx context.Context) (string, string, error) {
+func (c *rpcClient) WaitForManagedGoalEvaluation(ctx context.Context) (outcome, reason string, err error) {
 	c.mu.Lock()
 	token := c.goalEvaluationToken
 	c.mu.Unlock()
@@ -929,6 +1044,15 @@ func (c *rpcClient) WaitForManagedGoalEvaluation(ctx context.Context) (string, s
 		c.mu.Lock()
 		if c.goalEvaluationToken == token {
 			c.goalEvaluationToken = nil
+			if err == nil && c.goalEvaluationCleanup != nil && c.goalEvaluationCleanup.token == token {
+				c.goalEvaluationCleanup = nil
+			}
+			if err != nil && c.goalEvaluationCleanup == nil {
+				c.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
+			}
+			// Start installs the cleanup owner before writing the command. Keep it
+			// on every waiter/terminal error; only successful receipt validation
+			// proves that evaluator ownership can be released.
 		}
 		c.mu.Unlock()
 	}()
@@ -991,6 +1115,100 @@ func (c *rpcClient) WaitForManagedGoalEvaluation(ctx context.Context) (string, s
 		}
 	}
 }
+func managedGoalEvaluationTokenMatches(token *managedGoalEvaluationToken, fence store.ManagedRuntimeFence, evaluationID string, goalRevision, settled int64) bool {
+	return token != nil && token.fence == fence && token.evaluationID == evaluationID && token.goalRevision == goalRevision && token.settled == settled
+}
+
+func (c *rpcClient) ManagedGoalEvaluationCleanupPending() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.goalEvaluationCleanup != nil
+}
+
+func (c *rpcClient) finishManagedGoalEvaluationCleanup(ctx context.Context, owner *managedGoalEvaluationCleanup, fence store.ManagedRuntimeFence, evaluationID string, goalRevision, settled int64) error {
+	c.mu.Lock()
+	if c.goalEvaluationCleanup != owner || c.goalEvaluationToken != nil || owner == nil || !managedGoalEvaluationTokenMatches(owner.token, fence, evaluationID, goalRevision, settled) || !owner.abortBoundary || owner.barrier == nil {
+		c.mu.Unlock()
+		return ErrManagedGoalEvaluationCleanupStale
+	}
+	barrier := owner.barrier
+	c.mu.Unlock()
+
+	select {
+	case <-barrier:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.goalEvaluationCleanup != owner || c.goalEvaluationToken != nil || !managedGoalEvaluationTokenMatches(owner.token, fence, evaluationID, goalRevision, settled) {
+		return ErrManagedGoalEvaluationCleanupStale
+	}
+	if owner.token.admitted && !owner.token.settledObserved {
+		return ErrManagedGoalEvaluationSettledNotObserved
+	}
+	if !owner.token.settledObserved {
+		c.suppressNextEvaluatorSettled = false
+		c.evaluatorSettledObserved = false
+	}
+	c.goalEvaluationCleanup = nil
+	return nil
+}
+
+// ReconcileManagedGoalEvaluation sends the typed public Abort command with an
+// evaluator-specific response hook. A successful response admits a signal-only
+// task into the existing semantic FIFO before the response waiter is released.
+// That boundary keeps later ordinary activity visible while preserving an
+// already observed evaluator settled event.
+func (c *rpcClient) ReconcileManagedGoalEvaluation(ctx context.Context, fence store.ManagedRuntimeFence, evaluationID string, goalRevision, settled int64) error {
+	c.mu.Lock()
+	owner := c.goalEvaluationCleanup
+	if owner == nil || !managedGoalEvaluationTokenMatches(owner.token, fence, evaluationID, goalRevision, settled) {
+		c.mu.Unlock()
+		return ErrManagedGoalEvaluationCleanupStale
+	}
+	barrier := owner.barrier
+	abortBoundary := owner.abortBoundary
+	c.mu.Unlock()
+	if abortBoundary {
+		return c.finishManagedGoalEvaluationCleanup(ctx, owner, fence, evaluationID, goalRevision, settled)
+	}
+	if barrier != nil {
+		return ErrManagedGoalEvaluationCleanupStale
+	}
+
+	responseHook := func(value map[string]any, responseErr error) error {
+		if responseErr != nil {
+			return responseErr
+		}
+		if err := validateAbortResponse(value); err != nil {
+			return err
+		}
+		// The response hook runs under c.mu, so recording the boundary and
+		// admitting the barrier are one matcher-locked operation.
+		if c.goalEvaluationCleanup != owner || c.goalEvaluationToken != nil || !managedGoalEvaluationTokenMatches(owner.token, fence, evaluationID, goalRevision, settled) {
+			return ErrManagedGoalEvaluationCleanupStale
+		}
+		completion := make(chan struct{})
+		if !c.enqueueSemanticTaskLocked(rpcSemanticTask{fn: func() { close(completion) }}) {
+			if c.terminal != nil {
+				return c.terminal
+			}
+			return ErrSemanticQueueFull
+		}
+		owner.abortBoundary = true
+		owner.abortBoundarySequence = c.eventSequence
+		owner.barrier = completion
+		return nil
+	}
+	_, _, err := c.callSerializedWithHook(ctx, "abort", nil, false, responseHook)
+	if err != nil {
+		return err
+	}
+	return c.finishManagedGoalEvaluationCleanup(ctx, owner, fence, evaluationID, goalRevision, settled)
+}
+
 func (c *rpcClient) RequestChildSnapshot(ctx context.Context, envelope map[string]any) (map[string]any, error) {
 	value, watermark, err := c.privateCommand(ctx, "mecha-child-snapshot-v1", envelope)
 	if err != nil {
@@ -1104,6 +1322,26 @@ func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.M
 		c.mu.Unlock()
 		return errors.New("restart settlement is already armed")
 	}
+	if c.consumedAdmittedRestartFence != nil && *c.consumedAdmittedRestartFence == fence {
+		c.mu.Unlock()
+		return errors.New("admitted restart settlement was already consumed")
+	}
+	if admitted := c.admittedRestartTurn; admitted != nil {
+		if admitted.fence != fence {
+			c.mu.Unlock()
+			return errors.New("restart settlement fence does not match admitted turn")
+		}
+		if admitted.settledSequence > admitted.watermark {
+			// Consume the exact decoded settlement once. The event was captured
+			// before semantic activity projection, so a durable active row cannot
+			// make this boundary disappear by advancing the current watermark.
+			c.admittedRestartTurn = nil
+			consumedFence := fence
+			c.consumedAdmittedRestartFence = &consumedFence
+			c.mu.Unlock()
+			return nil
+		}
+	}
 	token := &restartSettlementToken{fence: fence, watermark: c.eventSequence}
 	c.settlementToken = token
 	// The direct matcher can receive Pi's settled frame while its owner is
@@ -1128,9 +1366,28 @@ func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.M
 			c.mu.Unlock()
 			return err
 		}
+		if admitted := c.admittedRestartTurn; admitted != nil {
+			if admitted.fence != fence {
+				if c.settlementToken == token {
+					c.settlementToken = nil
+				}
+				c.mu.Unlock()
+				return errors.New("restart settlement fence does not match admitted turn")
+			}
+			if admitted.settledSequence > admitted.watermark {
+				c.admittedRestartTurn = nil
+				consumedFence := fence
+				c.consumedAdmittedRestartFence = &consumedFence
+				token.consumed = true
+				if c.settlementToken == token {
+					c.settlementToken = nil
+				}
+				c.mu.Unlock()
+				return nil
+			}
+		}
 		settled := -1
-		for index, item := range c.backlog {
-			if !agentSettledType(item.value) {
+		for index, item := range c.backlog {			if !agentSettledType(item.value) {
 				continue
 			}
 			if !agentSettledFrame(item.value) {
@@ -1303,6 +1560,14 @@ func (c *rpcClient) GetActiveTools(_ context.Context) ([]string, error) {
 }
 func (c *rpcClient) Prompt(ctx context.Context, message string) error {
 	_, err := c.call(ctx, "prompt", map[string]any{"message": message})
+	return err
+}
+
+func (c *rpcClient) PromptAdmittedRestartTurn(ctx context.Context, message string, fence store.ManagedRuntimeFence) error {
+	if !validRestartFence(fence) {
+		return errors.New("restart turn admission fence is invalid")
+	}
+	_, _, err := c.callSerializedWithHookAndRestartAdmission(ctx, "prompt", map[string]any{"message": message}, false, nil, &fence)
 	return err
 }
 
@@ -1790,6 +2055,12 @@ func (c *rpcClient) SetParentActivityEventHandler(handler func(map[string]any)) 
 	c.mu.Lock()
 	c.parentActivityHandler = handler
 	c.mu.Unlock()
+}
+
+func (c *rpcClient) ParentActivitySequence() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.eventSequence
 }
 
 func (c *rpcClient) SetRPCReaderTerminalHandler(handler func(error)) {

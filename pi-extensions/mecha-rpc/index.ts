@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 
 import { getSubagentsService, type SubagentsService } from "@gotgenes/pi-subagents";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createChildBridge } from "./child-bridge.js";
 import { BoundedChildDeltaBuffer } from "./child-delta-buffer.js";
@@ -517,7 +518,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     // This closure intentionally captures only the cloned, parent-validated manifest.
     disposeChildFactory = service.registerChildExtensionV1({
       name: CHILD_FACTORY_NAME,
-      factory: (childPi) => {
+      factory: (childPi: ExtensionAPI) => {
         if (!isPiApi(childPi)) throw new TypeError("Pi child extension API is invalid.");
         createMechaRpcExtension(childPi, { initialAcceptedManifest: acceptedManifest });
       },

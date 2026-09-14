@@ -292,7 +292,7 @@ describe("App integration", () => {
     await user.type(screen.getByPlaceholderText("http://127.0.0.1:4000"), routerUrl);
     await user.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(screen.getByRole("button", { name: /Router persisted-router.test:43123/ })).toBeInTheDocument());
-    expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(routerUrl);
+    await waitFor(() => expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(routerUrl));
 
     cleanup();
     render(<App storage={storage} connect={false} />);

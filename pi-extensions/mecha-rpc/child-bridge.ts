@@ -1,11 +1,16 @@
-import { getSubagentsService, type ContextRefV1, type SubagentsService } from "@gotgenes/pi-subagents";
+import {
+  getSubagentsService,
+  type ContextRefV1,
+  type ControlResultAppendOutcomeV1,
+  type SubagentsService,
+} from "@gotgenes/pi-subagents";
 
 import type { JsonRecord } from "./manifest.js";
 import type { ControlResultPayload } from "./protocol.js";
 
 type LifecycleRun = JsonRecord & { task_id: string; run_id: string; parent_entry_id: string; context_ref?: string | null };
 type LifecycleSnapshot = JsonRecord & { protocol: "mecha.children/v1"; owner_session_id: string; runs: LifecycleRun[] };
-type AppendOutcome = { kind: "accepted" | "already_present" | "rejected"; result_id?: string; error?: JsonRecord };
+type AppendOutcome = ControlResultAppendOutcomeV1;
 type Service = Pick<SubagentsService, "getLifecycleSnapshotV2" | "getChildContextRefV1" | "appendControlResultV1">;
 type SessionIdentity = { sessionId: string; parentSessionId?: string };
 type PendingBinding = {

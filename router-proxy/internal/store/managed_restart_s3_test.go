@@ -65,6 +65,90 @@ func TestLifecycleRestartReservationOwnsNewDirectRestartWithout025(t *testing.T)
 	require.ErrorAs(t, err, &idempotency)
 }
 
+func TestLifecycleRestartSettleTransitionUsesExactAdmittedSourceFence(t *testing.T) {
+	// Exercise the stale-fence rejection while the action is still eligible for
+	// settlement. A failure after settlement would only prove the state check.
+	durable, ctx, agent, launch := restartFixture(t)
+	reservation := lifecycleRestartReservation(t, agent, launch, lifecycleUUID(705))
+	admission, err := durable.ReserveManagedLifecycleRestart(ctx, reservation)
+	require.NoError(t, err)
+	require.Equal(t, "admitted", admission.Action.State)
+	require.Equal(t, "admission", admission.Action.Stage)
+	require.Equal(t, "restart", admission.Action.Kind)
+	require.Equal(t, "lifecycle", admission.Action.ExecutionOwner)
+	require.Equal(t, reservation.SourceFence, *admission.Action.SourceFence)
+
+	stale := reservation.SourceFence
+	stale.ProcessIncarnation = "mutated-source-incarnation"
+	before := *admission.Action
+	var staleErr *ManagedRestartStaleError
+	require.ErrorAs(t, durable.AdvanceManagedLifecycleRestartToSettle(ctx, admission.Action.ActionID, stale), &staleErr)
+	after, err := durable.ManagedLifecycleAction(ctx, admission.Action.ActionID)
+	require.NoError(t, err)
+	require.Equal(t, before.State, after.State)
+	require.Equal(t, before.Stage, after.Stage)
+	require.Equal(t, before.SourceFence, after.SourceFence)
+
+	// Use a fresh action for the matching-fence transition so the success path
+	// is independently shown to work from the admitted/admission state.
+	durable, ctx, agent, launch = restartFixture(t)
+	reservation = lifecycleRestartReservation(t, agent, launch, lifecycleUUID(706))
+	admission, err = durable.ReserveManagedLifecycleRestart(ctx, reservation)
+	require.NoError(t, err)
+	require.NoError(t, durable.AdvanceManagedLifecycleRestartToSettle(ctx, admission.Action.ActionID, reservation.SourceFence))
+	settled, err := durable.ManagedLifecycleAction(ctx, admission.Action.ActionID)
+	require.NoError(t, err)
+	require.Equal(t, "awaiting_settle", settled.State)
+	require.Equal(t, "source_settle", settled.Stage)
+}
+
+func TestLifecycleRestartArtifactAttachFollowsIdleOrSettledSourceBoundary(t *testing.T) {
+	t.Run("active source must settle first", func(t *testing.T) {
+		durable, ctx, agent, launch := restartFixture(t)
+		_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id=?`, agent.AgentID)
+		require.NoError(t, err)
+		reservation := lifecycleRestartReservation(t, agent, launch, lifecycleUUID(707))
+		admission, err := durable.ReserveManagedLifecycleRestart(ctx, reservation)
+		require.NoError(t, err)
+		artifact := recordLifecycleRestartSourceArtifact(t, durable, ctx, agent)
+		source := reservation.SourceFence
+
+		var staleErr *ManagedRestartStaleError
+		require.ErrorAs(t, durable.AttachManagedLifecycleRestartResumeArtifact(ctx, admission.Action.ActionID, source, artifact.ArtifactID), &staleErr)
+		before, err := durable.ManagedLifecycleAction(ctx, admission.Action.ActionID)
+		require.NoError(t, err)
+		require.Empty(t, before.TargetArtifactID)
+		require.Equal(t, "admitted", before.State)
+		require.Equal(t, "admission", before.Stage)
+
+		require.NoError(t, durable.AdvanceManagedLifecycleRestartToSettle(ctx, admission.Action.ActionID, source))
+		stale := source
+		stale.ProcessIncarnation = "stale-source-incarnation"
+		require.ErrorAs(t, durable.AttachManagedLifecycleRestartResumeArtifact(ctx, admission.Action.ActionID, stale, artifact.ArtifactID), &staleErr)
+		require.Error(t, durable.AttachManagedLifecycleRestartResumeArtifact(ctx, admission.Action.ActionID, source, lifecycleUUID(708)))
+		require.NoError(t, durable.AttachManagedLifecycleRestartResumeArtifact(ctx, admission.Action.ActionID, source, artifact.ArtifactID))
+		attached, err := durable.ManagedLifecycleAction(ctx, admission.Action.ActionID)
+		require.NoError(t, err)
+		require.Equal(t, artifact.ArtifactID, attached.TargetArtifactID)
+		require.Equal(t, "awaiting_settle", attached.State)
+		require.Equal(t, "source_settle", attached.Stage)
+	})
+
+	t.Run("idle source attaches from admission", func(t *testing.T) {
+		durable, ctx, agent, launch := restartFixture(t)
+		reservation := lifecycleRestartReservation(t, agent, launch, lifecycleUUID(709))
+		admission, err := durable.ReserveManagedLifecycleRestart(ctx, reservation)
+		require.NoError(t, err)
+		artifact := recordLifecycleRestartSourceArtifact(t, durable, ctx, agent)
+		require.NoError(t, durable.AttachManagedLifecycleRestartResumeArtifact(ctx, admission.Action.ActionID, reservation.SourceFence, artifact.ArtifactID))
+		attached, err := durable.ManagedLifecycleAction(ctx, admission.Action.ActionID)
+		require.NoError(t, err)
+		require.Equal(t, artifact.ArtifactID, attached.TargetArtifactID)
+		require.Equal(t, "admitted", attached.State)
+		require.Equal(t, "admission", attached.Stage)
+	})
+}
+
 func TestLifecycleRestartArtifactMarkerAndTargetFenceAreFenced(t *testing.T) {
 	durable, ctx, agent, launch := restartFixture(t)
 	reservation := lifecycleRestartReservation(t, agent, launch, lifecycleUUID(710))

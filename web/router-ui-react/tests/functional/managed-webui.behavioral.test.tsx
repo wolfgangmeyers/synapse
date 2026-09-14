@@ -75,6 +75,14 @@ async function sendManagedMessage(router: FunctionalRouter, agentID: string, bod
   expect(response.status).toBe(201);
 }
 
+async function waitForManagedAgentReady(router: FunctionalRouter, agentID: string): Promise<void> {
+  await waitFor(async () => {
+    const { response, body } = await jsonRequest(router, `/v1/managed-agents/${agentID}`, { method: "GET", credentials: "omit" });
+    expect(response.status).toBe(200);
+    expect(record(body.agent)).toMatchObject({ agent_id: agentID, lifecycle_state: "running", accepting_prompts: true });
+  });
+}
+
 let router: FunctionalRouter | undefined;
 
 afterEach(async () => {
@@ -273,6 +281,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     await launch(router, "functional-retry");
     await screen.findByRole("button", { name: "Functional Retry (functional-retry)" });
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Retry (functional-retry)" }));
+    await waitForManagedAgentReady(router, "functional-retry");
 
     await writeFile(`${router.sessionRoot}/fail-abort`, "test-only control failure\n", { mode: 0o600 });
     const failedTermination = await jsonRequest(router, "/v1/managed-agents/functional-retry", {

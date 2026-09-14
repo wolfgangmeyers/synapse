@@ -408,6 +408,28 @@ func TestRestartExecution(t *testing.T) {
 	require.NotEmpty(t, targetSpec.SessionRoot)
 }
 
+func TestRestartAdmittedPromptSettlesBeforeArtifactState(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, 100*time.Millisecond)
+	fixture.oldRPC.settleRelease = make(chan struct{})
+	require.NoError(t, fixture.manager.AdmitPrompt(context.Background(), "restart-agent", "admitted-before-activity"))
+	_, err := fixture.manager.ReserveRestart(context.Background(), RestartRequest{AgentID: "restart-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/restart-agent/restart", RequestID: "restart", CanonicalBodyHash: "body"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
+		return err == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		select {
+		case <-fixture.oldRPC.settled:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	close(fixture.oldRPC.settleRelease)
+	fixture.waitReady(t)
+}
+
 func TestRestartSettlementInterruptsOldContinuation(t *testing.T) {
 	fixture := newRestartExecutionFixture(t, time.Millisecond)
 	fixture.reserve(t)
@@ -507,6 +529,14 @@ func TestRestartRecovery(t *testing.T) {
 	sourceAgent, err := fixture.durable.ManagedAgent(context.Background(), "restart-agent")
 	require.NoError(t, err)
 	sourceAttempt := queueManagedParentFinalForTest(t, fixture.durable, storedAgentFence(sourceAgent), "restart-recovery-source-turn")
+	// Recovery may lose the source after source_settle and has no RPC from
+	// which to discover a session file. Keep the exact retained artifact in the
+	// store before admission, without attaching it at the active boundary.
+	info, err := os.Stat(filepath.Join(fixture.root, "session.json"))
+	require.NoError(t, err)
+	device, inode, err := deviceInode(info)
+	require.NoError(t, err)
+	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(context.Background(), store.ManagedSessionArtifact{ArtifactID: "123e4567-e89b-42d3-a456-000000000097", AgentID: sourceAgent.AgentID, PiSessionID: sourceAgent.PiSessionID, SessionEpoch: sourceAgent.SessionEpoch, RootRelativePath: "session.json", PathSHA256: artifactPathHash("session.json"), DiscoveryState: "materialized", FileDevice: device, FileInode: inode, CleanupState: "retained", DiscoveredAt: formatManagedTime(time.Now()), CleanupUpdatedAt: formatManagedTime(time.Now())}))
 	fixture.oldRPC.settleRelease = make(chan struct{})
 	fixture.reserve(t)
 	require.Eventually(t, func() bool {

@@ -518,6 +518,263 @@ func TestRPCClientSuppressesEvaluatorSettledEventBeforeResultReceipt(t *testing.
 	}
 }
 
+func TestRPCClientResponseHookRunsBeforeResponseWaiter(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	hookEntered := make(chan struct{})
+	releaseHook := make(chan struct{})
+	callResult := make(chan error, 1)
+	go func() {
+		_, _, err := client.callSerializedWithHook(context.Background(), "abort", nil, false, func(map[string]any, error) error {
+			close(hookEntered)
+			<-releaseHook
+			return nil
+		})
+		callResult <- err
+	}()
+	request := requireRequest(t, requests)
+	writeResult := make(chan error, 1)
+	go func() {
+		writeResult <- writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true})
+	}()
+	select {
+	case <-hookEntered:
+	case <-time.After(time.Second):
+		t.Fatal("response hook did not run")
+	}
+	select {
+	case err := <-callResult:
+		t.Fatalf("response waiter was released before its hook: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseHook)
+	require.NoError(t, <-callResult)
+	require.NoError(t, <-writeResult)
+}
+
+func TestRPCClientEvaluatorAbortBoundaryKeepsImmediateOrdinaryIdleVisible(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	token := &managedGoalEvaluationToken{evaluationID: "123e4567-e89b-42d3-a456-426614174001", goalRevision: 1, settled: 3, fence: fence}
+	client.mu.Lock()
+	client.goalEvaluationToken = token
+	client.suppressNextEvaluatorSettled = true
+	client.mu.Unlock()
+
+	waitCtx, cancel := context.WithCancel(context.Background())
+	waitResult := make(chan error, 1)
+	go func() {
+		_, _, err := client.WaitForManagedGoalEvaluation(waitCtx)
+		waitResult <- err
+	}()
+	cancel()
+	require.ErrorIs(t, <-waitResult, context.Canceled)
+
+	cleanupResult := make(chan error, 1)
+	go func() {
+		cleanupResult <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
+	}()
+	abortRequest := requireRequest(t, requests)
+	require.Equal(t, "abort", abortRequest["type"])
+	activity := make(chan map[string]any, 1)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	// The ordinary idle is written immediately after the successful response.
+	// The response hook must establish the boundary before releasing the waiter.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": abortRequest["id"], "type": "response", "command": "abort", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("ordinary idle after the abort response was swallowed")
+	}
+	require.NoError(t, <-cleanupResult)
+	client.mu.Lock()
+	cleanupOwner := client.goalEvaluationCleanup
+	suppressed := client.suppressNextEvaluatorSettled
+	client.mu.Unlock()
+	require.Nil(t, cleanupOwner)
+	require.False(t, suppressed)
+}
+
+func TestRPCClientEvaluatorCleanupKeepsAdmittedSettledHidden(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	token := &managedGoalEvaluationToken{evaluationID: "123e4567-e89b-42d3-a456-426614174001", goalRevision: 1, settled: 3, fence: fence}
+	client.mu.Lock()
+	client.goalEvaluationToken = token
+	client.suppressNextEvaluatorSettled = true
+	client.mu.Unlock()
+	activity := make(chan map[string]any, 1)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	waitCtx, cancel := context.WithCancel(context.Background())
+	waitResult := make(chan error, 1)
+	go func() {
+		_, _, err := client.WaitForManagedGoalEvaluation(waitCtx)
+		waitResult <- err
+	}()
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	select {
+	case event := <-activity:
+		require.Equal(t, "active", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("evaluator admission event did not reach activity handling")
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		t.Fatalf("admitted evaluator settled event reached ordinary activity: %#v", event)
+	case <-time.After(25 * time.Millisecond):
+	}
+	cancel()
+	require.ErrorIs(t, <-waitResult, context.Canceled)
+
+	cleanupResult := make(chan error, 1)
+	go func() {
+		cleanupResult <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
+	}()
+	abortRequest := requireRequest(t, requests)
+	require.Equal(t, "abort", abortRequest["type"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": abortRequest["id"], "type": "response", "command": "abort", "success": true}))
+	require.NoError(t, <-cleanupResult)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("ordinary idle after admitted evaluator cleanup was swallowed")
+	}
+	client.mu.Lock()
+	cleanupOwner := client.goalEvaluationCleanup
+	client.mu.Unlock()
+	require.Nil(t, cleanupOwner)
+}
+
+func TestRPCClientAdmittedEvaluatorWithoutSettledFailsClosed(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	token := &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 1, settled: 3, fence: fence, admitted: true}
+	client.mu.Lock()
+	client.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
+	client.suppressNextEvaluatorSettled = true
+	client.mu.Unlock()
+	result := make(chan error, 1)
+	go func() {
+		result <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
+	}()
+	request := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "abort", "success": true}))
+	require.ErrorIs(t, <-result, ErrManagedGoalEvaluationSettledNotObserved)
+	client.mu.Lock()
+	cleanupOwner := client.goalEvaluationCleanup
+	suppressed := client.suppressNextEvaluatorSettled
+	client.mu.Unlock()
+	require.NotNil(t, cleanupOwner)
+	require.True(t, suppressed)
+}
+
+func TestRPCClientOldEvaluatorCleanupCannotClearReplacementSuppression(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	oldToken := &managedGoalEvaluationToken{evaluationID: "old-evaluation", goalRevision: 1, settled: 3, fence: fence}
+	client.mu.Lock()
+	client.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: oldToken}
+	client.suppressNextEvaluatorSettled = true
+	client.mu.Unlock()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	require.True(t, client.enqueueSemantic(func() { close(entered); <-release }))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("blocking semantic callback did not start")
+	}
+	cleanupResult := make(chan error, 1)
+	go func() {
+		cleanupResult <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, oldToken.evaluationID, oldToken.goalRevision, oldToken.settled)
+	}()
+	abortRequest := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": abortRequest["id"], "type": "response", "command": "abort", "success": true}))
+	// The exact response hook queues the signal-only barrier behind the blocked
+	// callback. Replace the owner before that barrier drains.
+	client.mu.Lock()
+	replacementFence := fence
+	replacementFence.RuntimeGeneration = "123e4567-e89b-42d3-a456-426614174002"
+	replacement := &managedGoalEvaluationToken{evaluationID: oldToken.evaluationID, goalRevision: 2, settled: 4, fence: replacementFence}
+	client.goalEvaluationCleanup.token = replacement
+	client.suppressNextEvaluatorSettled = true
+	client.mu.Unlock()
+	close(release)
+	require.Error(t, <-cleanupResult)
+	client.mu.Lock()
+	cleanupOwner := client.goalEvaluationCleanup
+	suppressed := client.suppressNextEvaluatorSettled
+	client.mu.Unlock()
+	require.NotNil(t, cleanupOwner)
+	require.Same(t, replacement, cleanupOwner.token)
+	require.True(t, suppressed)
+}
+
+func TestRPCClientEvaluatorCleanupRejectsMalformedOrRejectedAbort(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		response map[string]any
+		want     error
+	}{{name: "malformed", response: map[string]any{"type": "response", "command": "abort"}, want: ErrAbortResponseMalformed}, {name: "rejected", response: map[string]any{"type": "response", "command": "abort", "success": false}, want: ErrAbortResponseRejected}} {
+		t.Run(testCase.name, func(t *testing.T) {
+			stdinReader, stdinWriter := io.Pipe()
+			stdoutReader, stdoutWriter := io.Pipe()
+			client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+			t.Cleanup(func() { require.NoError(t, client.Close()) })
+			requests := readJSONLRequests(stdinReader)
+			fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+			token := &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 1, settled: 3, fence: fence}
+			client.mu.Lock()
+			client.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
+			client.suppressNextEvaluatorSettled = true
+			client.mu.Unlock()
+			result := make(chan error, 1)
+			go func() {
+				result <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
+			}()
+			request := requireRequest(t, requests)
+			response := make(map[string]any, len(testCase.response)+1)
+			for key, value := range testCase.response {
+				response[key] = value
+			}
+			response["id"] = request["id"]
+			require.NoError(t, writeRPC(stdoutWriter, response))
+			require.ErrorIs(t, <-result, testCase.want)
+			client.mu.Lock()
+			cleanupOwner := client.goalEvaluationCleanup
+			suppressed := client.suppressNextEvaluatorSettled
+			client.mu.Unlock()
+			require.NotNil(t, cleanupOwner)
+			require.True(t, suppressed)
+		})
+	}
+}
+
 func TestRPCClientManagedGoalEvaluationTimeoutLeavesNoArmedToken(t *testing.T) {
 	stdoutReader, stdoutWriter := io.Pipe()
 	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
@@ -1246,6 +1503,77 @@ func TestRestartTurnSettlerTreatsAgentSettledAsDrainBoundary(t *testing.T) {
 		require.NoError(t, writer.Close())
 		require.ErrorIs(t, <-result, io.EOF)
 	})
+}
+
+func TestRestartTurnSettlerConsumesDecodedAdmittedSettlement(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = client.Close() })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+
+	prompted := make(chan error, 1)
+	go func() { prompted <- client.PromptAdmittedRestartTurn(context.Background(), "admitted prompt", fence) }()
+	request := requireRequest(t, requests)
+	require.Equal(t, "prompt", request["type"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true}))
+	require.NoError(t, <-prompted)
+
+	// The native semantic frame is decoded before reset arms its current
+	// watermark. It belongs to this exact admitted fence and remains consumable.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.admittedRestartTurn != nil && client.admittedRestartTurn.settledSequence > client.admittedRestartTurn.watermark
+	}, time.Second, time.Millisecond)
+	require.NoError(t, client.SettlePreparedRestartTurn(context.Background(), fence))
+	require.Error(t, client.SettlePreparedRestartTurn(context.Background(), fence), "the binding-scoped decoded settlement is consumed exactly once")
+
+	// A generation mismatch must not consume the admitted binding's fact.
+	stdinReader, stdinWriter = io.Pipe()
+	stdoutReader, stdoutWriter = io.Pipe()
+	other := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = other.Close() })
+	requests = readJSONLRequests(stdinReader)
+	prompted = make(chan error, 1)
+	go func() { prompted <- other.PromptAdmittedRestartTurn(context.Background(), "other admitted prompt", fence) }()
+	request = requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true}))
+	require.NoError(t, <-prompted)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.Eventually(t, func() bool {
+		other.mu.Lock()
+		defer other.mu.Unlock()
+		return other.admittedRestartTurn != nil && other.admittedRestartTurn.settledSequence > 0
+	}, time.Second, time.Millisecond)
+	staleFence := fence
+	staleFence.RuntimeGeneration = "stale-generation"
+	require.Error(t, other.SettlePreparedRestartTurn(context.Background(), staleFence))
+	other.mu.Lock()
+	require.NotNil(t, other.admittedRestartTurn, "stale generation must leave the matching settlement intact")
+	other.mu.Unlock()
+}
+
+func TestRPCClientSettlePreparedRestartTurnRejectsUnadmittedQueuedSettlement(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+
+	// A decoded frame without an atomically admitted source turn is stale work,
+	// even if reset reaches the RPC after the reader has queued it.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 1 && len(client.backlog) == 1
+	}, time.Second, time.Millisecond)
+	require.Error(t, client.SettlePreparedRestartTurn(context.Background(), fence))
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	require.Len(t, client.backlog, 1, "rejected pre-admission settlement must remain unconsumed")
 }
 
 func TestRPCClientRejectsNonCanonicalManagedCommandBeforeReadiness(t *testing.T) {

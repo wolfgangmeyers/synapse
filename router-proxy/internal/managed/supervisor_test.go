@@ -896,6 +896,13 @@ func (r *restartPreparationRPC) Prompt(ctx context.Context, _ string) error {
 	}
 	return nil
 }
+
+// SettlePreparedRestartTurn models the native settlement boundary for the
+// prompt-admitting restart fixtures. The product path still invokes this
+// capability; this fixture has no provider work to drain.
+func (r *restartPreparationRPC) SettlePreparedRestartTurn(context.Context, store.ManagedRuntimeFence) error {
+	return nil
+}
 func (r *restartPreparationRPC) Abort(context.Context) error { return nil }
 func (r *restartPreparationRPC) Close() error {
 	r.mu.Lock()
@@ -1033,6 +1040,7 @@ func TestPromptAndRestartLinearizeAtOneAgentLane(t *testing.T) {
 
 	t.Run("reservation closes prompt admission", func(t *testing.T) {
 		manager, durable, rpc := readyRestartManager(t, nil)
+		manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 		rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
 		var releasePrepareOnce sync.Once
 		releasePrepare := func() { releasePrepareOnce.Do(func() { close(rpc.releasePrepare) }) }
@@ -1082,6 +1090,7 @@ func TestAdmitPromptReturnsStoreError(t *testing.T) {
 
 func TestReserveManagedRestartAtomicallyDisablesPromptAdmission(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, nil)
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	defer manager.Close(context.Background())
 	require.NoError(t, manager.AdmitPrompt(context.Background(), "restart-agent", "before"))
 	rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
@@ -1110,6 +1119,7 @@ func TestReserveRestartAtomicallyChangesTheReplacementModel(t *testing.T) {
 		Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true},
 		Model{Provider: "google", ID: "gemini-2.5-pro", Available: true},
 	)
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	defer manager.Close(context.Background())
 	rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
 	request := RestartRequest{AgentID: "restart-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/restart-agent/restart", RequestID: "restart-with-model", CanonicalBodyHash: "new-model", Model: &Model{Provider: "google", ID: "gemini-2.5-pro"}}
@@ -1126,6 +1136,7 @@ func TestReserveRestartAtomicallyChangesTheReplacementModel(t *testing.T) {
 
 func TestRestartPreparationFailurePersistsExactDurableError(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, errors.New("state failed"))
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	defer manager.Close(context.Background())
 	request := RestartRequest{AgentID: "restart-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/restart-agent/restart", RequestID: "restart-operation", CanonicalBodyHash: "empty-object"}
 	_, err := manager.ReserveRestart(context.Background(), request)
@@ -1241,6 +1252,7 @@ func TestRestartTransitionFirstAdmissionRejectsFreshManagerWithoutBinding(t *tes
 
 func TestRestartPreparationAttachesArtifactBeforeStoppingSource(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, nil)
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	defer manager.Close(context.Background())
 	_, err := manager.ReserveRestart(context.Background(), restartRequest())
 	require.NoError(t, err)
@@ -1263,6 +1275,7 @@ func TestRestartPreparationAttachesArtifactBeforeStoppingSource(t *testing.T) {
 
 func TestReserveManagedRestartReplaysExactOperationWithoutSecondPreparation(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, nil)
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	defer manager.Close(context.Background())
 	rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
 	request := restartRequest()
@@ -1300,6 +1313,7 @@ func TestReserveManagedRestartReplaysExactOperationWithoutSecondPreparation(t *t
 
 func TestRestartRollbackReopensPromptAdmissionAndReplaysImmutableOperation(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, errors.New("preparation failed"))
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	defer manager.Close(context.Background())
 	request := restartRequest()
 	first, err := manager.ReserveRestart(context.Background(), request)
@@ -1349,6 +1363,7 @@ func TestReserveManagedRestartRejectsPendingLaunchOperationWithoutEffects(t *tes
 
 func TestRestartShutdownStopsOnlyTheLifecycleOwnedSource(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, nil)
+	manager.processOps = &resetProcessOps{present: map[int]bool{321: true}}
 	rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
 	_, err := manager.ReserveRestart(context.Background(), restartRequest())
 	require.NoError(t, err)

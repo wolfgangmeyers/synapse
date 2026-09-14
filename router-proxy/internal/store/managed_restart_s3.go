@@ -254,8 +254,9 @@ func (s *Store) updateLifecycleRestartActionTx(ctx context.Context, db *sql.DB, 
 }
 
 // AttachManagedLifecycleRestartResumeArtifact records the one materialized,
-// retained source-session file that authorizes ResumeExisting.  The store
-// checks durable ownership while the source process is still fenced.
+// retained source-session file that authorizes ResumeExisting. An idle source
+// may attach directly from admission; an active source must first cross the
+// durable source_settle boundary.
 func (s *Store) AttachManagedLifecycleRestartResumeArtifact(ctx context.Context, actionID string, source ManagedRuntimeFence, artifactID string) error {
 	if !validManagedRuntimeFence(source) || !managedCanonicalUUIDRE.MatchString(artifactID) {
 		return errors.New("managed lifecycle restart artifact is invalid")
@@ -265,7 +266,9 @@ func (s *Store) AttachManagedLifecycleRestartResumeArtifact(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		if action.State != "admitted" || action.Stage != "admission" || action.TargetArtifactID != "" || !sameManagedRestartFence(*action.SourceFence, source) {
+		admission := action.State == "admitted" && action.Stage == "admission"
+		settled := action.State == "awaiting_settle" && action.Stage == "source_settle"
+		if (!admission && !settled) || action.TargetArtifactID != "" || !sameManagedRestartFence(*action.SourceFence, source) {
 			return &ManagedRestartStaleError{AgentID: source.AgentID}
 		}
 		var found string
@@ -275,7 +278,13 @@ func (s *Store) AttachManagedLifecycleRestartResumeArtifact(ctx context.Context,
 			}
 			return &ManagedRestartStaleError{AgentID: source.AgentID}
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET target_artifact_id=?,updated_at=? WHERE action_id=? AND operation_id=? AND kind='restart' AND execution_owner='lifecycle' AND state='admitted' AND stage='admission' AND target_artifact_id IS NULL AND `+managedLifecycleFenceWhere("source_"), append([]any{artifactID, formatTimestamp(s.clock.Now()), actionID, action.OperationID}, managedFenceValues(source)[1:]...)...)
+		// The admission branch is reserved for an idle source. Keeping this
+		// condition in the atomic update prevents a durable active row from
+		// racing the manager's Advance-to-settle transition.
+		args := []any{artifactID, formatTimestamp(s.clock.Now()), actionID, action.OperationID}
+		args = append(args, managedFenceValues(source)[1:]...)
+		args = append(args, managedFenceValues(source)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET target_artifact_id=?,updated_at=? WHERE action_id=? AND operation_id=? AND kind='restart' AND execution_owner='lifecycle' AND target_artifact_id IS NULL AND `+managedLifecycleFenceWhere("source_")+` AND ((state='admitted' AND stage='admission' AND EXISTS (SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("")+` AND activity_state='idle')) OR (state='awaiting_settle' AND stage='source_settle'))`, args...)
 		if err != nil {
 			return err
 		}
@@ -296,9 +305,9 @@ func (s *Store) AdvanceManagedLifecycleRestartToSettle(ctx context.Context, acti
 		if err != nil {
 			return err
 		}
-		if err := retainedRestartArtifactTx(ctx, s.db, action); err != nil {
-			return err
-		}
+		// The source artifact is attached only after an active turn settles. This
+		// transition is the durable boundary that permits that settlement, so it
+		// must be fenced by the admitted action and source runtime alone.
 		return s.updateLifecycleRestartActionTx(ctx, s.db, action, "admitted", "admission", "awaiting_settle", "source_settle", source)
 	})
 }
@@ -540,7 +549,7 @@ func restartFailureAllowed(code, stage string) bool {
 	}
 	switch code {
 	case "RESTART_PREPARATION_FAILED":
-		return stage == "admission"
+		return stage == "admission" || stage == "source_settle"
 	case "RESTART_RECOVERY_NEEDS_SETTLE":
 		return stage == "source_settle"
 	case "RESTART_STOP_FAILED":

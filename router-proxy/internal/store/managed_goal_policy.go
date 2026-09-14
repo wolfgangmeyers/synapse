@@ -295,6 +295,16 @@ func (s *Store) ClaimManagedGoalEvaluation(ctx context.Context, fence ManagedRun
 		if err != nil {
 			return err
 		}
+		// Lifecycle admission wins evaluator admission. Keep this check in the
+		// claim transaction so a restart cannot race a settled callback into a
+		// second source-side prompt.
+		var activeLifecycle int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_lifecycle_actions WHERE agent_id=? AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`, fence.AgentID).Scan(&activeLifecycle); err != nil {
+			return err
+		}
+		if activeLifecycle != 0 {
+			return nil
+		}
 		if current.EvaluatorState == "evaluating" {
 			// A crash can leave an admitted evaluator without a completion receipt.
 			// The lease is durable, so a later settled boundary can recover it safely.
