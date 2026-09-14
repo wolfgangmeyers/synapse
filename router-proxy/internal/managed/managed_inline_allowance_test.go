@@ -324,6 +324,42 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 		"runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "context_ref": "root", "arguments": map[string]any{"toolName": "bash", "usageCount": int64(1)},
 	}}))
 	policyPrompt := requireRequest(t, requests)
+	// The root callback owns this earlier policy receipt. Deliver it before waiting
+	// for the later builtin lifecycle callback, because the shared semantic FIFO
+	// cannot run that callback until the root callback has finished.
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": policyPrompt["id"], "type": "response", "data": map[string]any{}}))
+	policyReceipt := map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"customType": "mecha.policy.applied.v1",
+			"details": map[string]any{
+				"protocol": "mecha.policy/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch,
+				"applied": map[string]any{
+					"inline_enabled": true, "inline_credits": map[string]any{"bash": int64(1)}, "recall_content": "",
+					"settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
+				},
+			},
+		},
+	}
+	require.NoError(t, writeRPC(stdout, policyReceipt))
+	appendPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": appendPrompt["id"], "type": "response", "data": map[string]any{}}))
+	command, commandOK := appendPrompt["message"].(string)
+	encoded := strings.TrimPrefix(command, "/mecha-control-result-v1 ")
+	payloadBytes, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+	var payload map[string]any
+	require.True(t, commandOK && encoded != command && decodeErr == nil && json.Unmarshal(payloadBytes, &payload) == nil, "managed root append payload was invalid")
+	content, contentOK := payload["content"].(string)
+	require.True(t, contentOK, "managed root append payload had no content")
+	resultDetails := make(map[string]any, len(payload)-1)
+	for key, value := range payload {
+		if key != "content" {
+			resultDetails[key] = value
+		}
+	}
+	rootReceipt := map[string]any{"type": "custom_message", "id": "native-pipe-result", "customType": "mecha.control.result.v1", "display": false, "content": content, "details": resultDetails}
+	// Finish the earlier root callback before introducing the blocked builtin work.
+	require.NoError(t, writeRPC(stdout, rootReceipt))
 
 	toolStartWritten := make(chan error, 1)
 	go func() {
@@ -337,66 +373,6 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 
 	framesDelivered := make(chan error, 1)
 	go func() {
-		if err := writeRPC(stdout, map[string]any{"id": policyPrompt["id"], "type": "response", "data": map[string]any{}}); err != nil {
-			framesDelivered <- err
-			return
-		}
-		policyReceipt := map[string]any{
-			"type": "message_end",
-			"message": map[string]any{
-				"customType": "mecha.policy.applied.v1",
-				"details": map[string]any{
-					"protocol": "mecha.policy/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch,
-					"applied": map[string]any{
-						"inline_enabled": true, "inline_credits": map[string]any{"bash": int64(1)}, "recall_content": "",
-						"settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
-					},
-				},
-			},
-		}
-		if err := writeRPC(stdout, policyReceipt); err != nil {
-			framesDelivered <- err
-			return
-		}
-		var appendPrompt map[string]any
-		select {
-		case appendPrompt = <-requests:
-			if appendPrompt == nil {
-				framesDelivered <- errors.New("managed root append prompt was unavailable")
-				return
-			}
-		case <-time.After(time.Second):
-			framesDelivered <- errors.New("timed out waiting for managed root append prompt")
-			return
-		}
-		if err := writeRPC(stdout, map[string]any{"id": appendPrompt["id"], "type": "response", "data": map[string]any{}}); err != nil {
-			framesDelivered <- err
-			return
-		}
-		command, commandOK := appendPrompt["message"].(string)
-		encoded := strings.TrimPrefix(command, "/mecha-control-result-v1 ")
-		payloadBytes, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
-		var payload map[string]any
-		if !commandOK || encoded == command || decodeErr != nil || json.Unmarshal(payloadBytes, &payload) != nil {
-			framesDelivered <- errors.New("managed root append payload was invalid")
-			return
-		}
-		content, contentOK := payload["content"].(string)
-		if !contentOK {
-			framesDelivered <- errors.New("managed root append payload had no content")
-			return
-		}
-		resultDetails := make(map[string]any, len(payload)-1)
-		for key, value := range payload {
-			if key != "content" {
-				resultDetails[key] = value
-			}
-		}
-		rootReceipt := map[string]any{"type": "custom_message", "id": "native-pipe-result", "customType": "mecha.control.result.v1", "display": false, "content": content, "details": resultDetails}
-		if err := writeRPC(stdout, rootReceipt); err != nil {
-			framesDelivered <- err
-			return
-		}
 		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "read-call", "toolName": "read"}); err != nil {
 			framesDelivered <- err
 			return

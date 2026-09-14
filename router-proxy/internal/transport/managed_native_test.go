@@ -368,13 +368,20 @@ func (w *nativeDirectCommandWriter) Close() error { return w.target.Close() }
 
 // nativeObservedRPCFactory retains the production RPC client and installed Pi
 // process. It adds only a post-write observation point for the native proof.
-type nativeObservedRPCFactory struct{ counter *nativeDirectCommandCounter }
+type nativeObservedRPCFactory struct {
+	counter *nativeDirectCommandCounter
+	opened  chan<- managed.RPC
+}
 
 func (f nativeObservedRPCFactory) Open(_ context.Context, process managed.Process) (managed.RPC, error) {
 	if process == nil || process.Stdin() == nil || process.Stdout() == nil {
 		return nil, errors.New("managed process pipes are unavailable")
 	}
-	return managed.NewRPCClient(&nativeDirectCommandWriter{target: process.Stdin(), counter: f.counter}, process.Stdout(), func() error { return nil }), nil
+	rpc := managed.NewRPCClient(&nativeDirectCommandWriter{target: process.Stdin(), counter: f.counter}, process.Stdout(), func() error { return nil })
+	if f.opened != nil {
+		f.opened <- rpc
+	}
+	return rpc, nil
 }
 
 var managedDirectCandidatePaths = []string{
@@ -419,9 +426,6 @@ func writeNativeManagedDirectArtifact(t *testing.T, root, pi, mecha, subagents s
 	t.Helper()
 	directCommands := directCommandCounter.Count()
 	wantDirectCommands := 1
-	if proof == "recovery" {
-		wantDirectCommands = 2
-	}
 	require.Equal(t, wantDirectCommands, directCommands, "native proof direct command count")
 	var random [8]byte
 	_, err := rand.Read(random[:])
@@ -977,6 +981,7 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 		}
 	}()
 	var appendBeforeAck chan struct{}
+	var ackRelease chan struct{}
 	var interruptAppend sync.Once
 	options := managed.ManagerOptions{
 		Store: durable,
@@ -984,15 +989,11 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 			if !recovery {
 				return nil
 			}
-			interrupted := false
 			interruptAppend.Do(func() {
 				close(appendBeforeAck)
-				interrupted = true
 			})
-			if interrupted {
-				return errors.New("native append-before-ack interruption")
-			}
-			return nil
+			<-ackRelease
+			return errors.New("native append-before-ack interruption")
 		},
 		Config: managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775",
 			ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: mecha,
@@ -1002,6 +1003,14 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 	}
 	if recovery {
 		appendBeforeAck = make(chan struct{})
+		ackRelease = make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-ackRelease:
+			default:
+				close(ackRelease)
+			}
+		})
 	}
 	directCommandCounter := &nativeDirectCommandCounter{}
 	options.RPCFactory = nativeObservedRPCFactory{counter: directCommandCounter}
@@ -1092,9 +1101,9 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 	require.Equal(t, "managed", target.SourceKind)
 
 	if recovery {
-		// The hook interrupts only the old-fence ACK. Recovery may offer the
-		// message once under the replacement fence, then must settle that exact
-		// replacement attempt without a further prompt.
+		// Hold the old-fence ACK while a concurrent restart is admitted. The
+		// lifecycle executor must queue at source_settle, then release the ACK and
+		// consume Pi's real agent_settled frame before stopping the source.
 		select {
 		case <-appendBeforeAck:
 		case <-ctx.Done():
@@ -1113,17 +1122,19 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 		require.NoError(t, err)
 		defer restartResponse.Body.Close()
 		require.Equal(t, http.StatusAccepted, restartResponse.StatusCode)
-		deadline = time.Now().Add(20 * time.Second)
-		for {
-			agent, err = durable.ManagedAgent(ctx, "native-alpha")
-			if err == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts && agent.RuntimeGeneration != oldGeneration {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("managed Pi did not complete controlled replacement: %+v", agent)
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		var action *store.ManagedLifecycleAction
+		var actionErr error
+		require.Eventually(t, func() bool {
+			action, actionErr = durable.ManagedLifecycleAction(ctx, "123e4567-e89b-42d3-a456-426614174082")
+			return actionErr == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
+		}, 5*time.Second, time.Millisecond)
+		close(ackRelease)
+		require.Eventually(t, func() bool {
+			agent, agentErr := durable.ManagedAgent(ctx, "native-alpha")
+			return agentErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts && agent.RuntimeGeneration != oldGeneration
+		}, 20*time.Second, time.Millisecond)
+		agent, err = durable.ManagedAgent(ctx, "native-alpha")
+		require.NoError(t, err)
 		restartAction, err := durable.ManagedLifecycleAction(ctx, "123e4567-e89b-42d3-a456-426614174082")
 		require.NoError(t, err)
 		require.Equal(t, "lifecycle", restartAction.ExecutionOwner)
@@ -1142,6 +1153,8 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 		require.Equal(t, "retained", artifact.CleanupState)
 		_, legacyErr := durable.ManagedRestartTransition(ctx, "native-alpha")
 		require.Error(t, legacyErr, "a new direct restart must not create a 025 row")
+		require.NoError(t, manager.RecoverManagedDirectAttempts(ctx))
+		require.Equal(t, 1, directCommandCounter.Count(), "repeat recovery must not emit another direct command")
 	} else {
 		deadline = time.Now().Add(20 * time.Second)
 		for {

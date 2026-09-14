@@ -40,9 +40,6 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return TerminateResult{}, err
 	}
-	lane := m.laneFor(request.AgentID)
-	lane.serial.Lock()
-	defer lane.serial.Unlock()
 	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
 		if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
 			return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
@@ -86,11 +83,15 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 		return TerminateResult{}, err
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
+	lane := m.laneFor(request.AgentID)
+	lane.admission.Lock()
 	admission, err := m.store.ReserveManagedLifecycle(ctx, store.ManagedLifecycleReservation{AgentID: request.AgentID, Kind: "terminate", Source: "direct", Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Fence: source, RetryOf: retryOf, Operation: operation})
 	if err != nil {
+		lane.admission.Unlock()
 		return TerminateResult{}, err
 	}
 	if admission.Replayed {
+		lane.admission.Unlock()
 		return TerminateResult{Operation: admission.Operation, Replayed: true}, nil
 	}
 	// Admission is the durable point at which the selected worker becomes
@@ -100,9 +101,11 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 
 	var binding *managedBinding
 	if sourcePtr != nil {
-		if candidate, live := m.bindingFor(request.AgentID); live && m.liveBinding(agent, candidate) && sameBindingFence(bindingFence(request.AgentID, candidate), source) {
+		if candidate, live := m.bindingFor(request.AgentID); live {
 			candidate.serial.Lock()
-			if !candidate.reaped {
+			candidateLive := m.liveBinding(agent, candidate)
+			candidateSource := bindingFence(request.AgentID, candidate)
+			if candidateLive && sameBindingFence(candidateSource, source) && !candidate.reaped {
 				candidate.operationID, candidate.lifecycleAction = admission.Action.OperationID, "terminate"
 				binding = candidate
 			}
@@ -116,6 +119,7 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 			}
 		}
 	}
+	lane.admission.Unlock()
 	m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
@@ -180,7 +184,7 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			rpc := candidate.rpc
 			candidate.serial.Unlock()
 			if rpc != nil {
-				_ = rpc.Close()
+				_ = closeRPCAndWait(rpc)
 			}
 			// Once exact absence is proven, no retry may use this stale binding.
 			// Remaining work is durable direct-mail/artifact cleanup only.

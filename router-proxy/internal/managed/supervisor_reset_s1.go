@@ -10,9 +10,8 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
-// Reset resolves durable replay before inspecting a live binding. New work then
-// enters the persistent per-agent lane, so restart preparation, close, exit,
-// and reset execution cannot interleave their process ownership decisions.
+// Reset resolves replay before inspecting a live binding. The per-agent lane
+// serializes durable admission and is released before lifecycle execution.
 func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult, error) {
 	if request.AgentID == "" || request.Method == "" || request.CanonicalPath == "" || request.RequestID == "" || request.CanonicalBodyHash == "" {
 		return ResetResult{}, errors.New("managed reset request is incomplete")
@@ -25,11 +24,8 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return ResetResult{}, err
 	}
-	lane := m.laneFor(request.AgentID)
-	lane.serial.Lock()
-	defer lane.serial.Unlock()
-
-	// A second caller may have committed while this request waited for the lane.
+	// Recheck replay immediately before the live snapshot. The store repeats
+	// precedence and fence validation atomically during reservation.
 	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
 		if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
 			return ResetResult{}, &store.ManagedIdempotencyConflictError{}
@@ -96,7 +92,14 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 				return ResetResult{}, &store.ManagedResetConflictError{AgentID: request.AgentID}
 			}
 			candidate, live := m.bindingFor(request.AgentID)
-			if !live || !m.liveBinding(agent, candidate) || !sameBindingFence(bindingFence(request.AgentID, candidate), *predecessor.TargetFence) {
+			if !live {
+				return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+			}
+			candidate.serial.Lock()
+			candidateLive := m.liveBinding(agent, candidate)
+			candidateSource := bindingFence(request.AgentID, candidate)
+			candidate.serial.Unlock()
+			if !candidateLive || !sameBindingFence(candidateSource, *predecessor.TargetFence) {
 				return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 			}
 			binding, targetFence = candidate, predecessor.TargetFence
@@ -108,10 +111,19 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 		}
 	} else {
 		candidate, live := m.bindingFor(request.AgentID)
-		if live && m.liveBinding(agent, candidate) {
-			binding, source = candidate, bindingFence(request.AgentID, candidate)
-			liveFence = source
-		} else {
+		if live {
+			candidate.serial.Lock()
+			candidateLive := m.liveBinding(agent, candidate)
+			candidateSource := bindingFence(request.AgentID, candidate)
+			candidate.serial.Unlock()
+			if candidateLive {
+				binding, source = candidate, candidateSource
+				liveFence = source
+			} else {
+				live = false
+			}
+		}
+		if !live {
 			// S3 clears the source binding after source-stop and recovery starts
 			// without a binding. Reset still has to reach the store's precedence
 			// transaction for an admitted or later lifecycle restart; the durable
@@ -156,17 +168,22 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 		return ResetResult{}, err
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
+	lane := m.laneFor(request.AgentID)
+	lane.admission.Lock()
 	admission, err := m.store.ReserveManagedReset(ctx, store.ManagedResetReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, SourceFence: source, LiveFence: liveFence, TargetFence: targetFence, TargetArtifactID: targetArtifactID, RetryOf: retryOf, InitialState: initialState, InitialStage: initialStage, PlannedTargetRuntimeGeneration: targetGeneration, Operation: operation})
 	if err != nil {
+		lane.admission.Unlock()
 		return ResetResult{}, err
 	}
 	if admission.Replayed {
+		lane.admission.Unlock()
 		return ResetResult{Operation: admission.Operation, Replayed: true}, nil
 	}
 	if binding != nil {
 		binding.serial.Lock()
 		if !m.liveBindingForFence(context.Background(), binding, liveFence) {
 			binding.serial.Unlock()
+			lane.admission.Unlock()
 			_ = m.store.FailManagedReset(context.Background(), admission.Action.ActionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, liveFence)
 			return ResetResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 		}
@@ -178,6 +195,7 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 		}
 		m.mu.Unlock()
 	}
+	lane.admission.Unlock()
 	m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
@@ -344,7 +362,7 @@ func (m *Manager) executeResetInLane(sourceBinding *managedBinding, actionID str
 	if err := m.store.MarkManagedResetSourceStopped(context.Background(), actionID, source); err != nil {
 		return
 	}
-	_ = sourceRPC.Close()
+	_ = closeRPCAndWait(sourceRPC)
 	sourceBinding.serial.Lock()
 	sourceBinding.reaped = true
 	sourceBinding.serial.Unlock()
@@ -420,7 +438,7 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 	state, err := rpc.GetState(m.runCtx)
 	artifact, artifactErr := m.artifacts.discover(context.Background(), source.AgentID, epoch, targetSession, state)
 	if err != nil || artifactErr != nil || !stateSessionMatches(state, targetSession) {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		// Before BindManagedResetTarget no durable target fence exists. The
 		// bounded rule leaves this process untouched and never starts another.
 		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
@@ -428,29 +446,29 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 	}
 	target := bindingFence(source.AgentID, candidate)
 	if err := m.store.BindManagedResetTarget(context.Background(), actionID, source, target, artifact.ArtifactID); err != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
 		return
 	}
 	if !m.installBinding(candidate) {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupResetTarget(actionID, source, target, candidate, "RESET_TARGET_START_FAILED")
 		return
 	}
 	if err := m.readinessGate(m.runCtx, candidate, target); err != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupResetTarget(actionID, source, target, candidate, "RESET_TARGET_START_FAILED")
 		return
 	}
 	select {
 	case <-candidate.waitSignal:
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupResetTarget(actionID, source, target, candidate, "RESET_TARGET_START_FAILED")
 		return
 	default:
 	}
 	if err := m.store.MarkManagedResetTargetReady(context.Background(), actionID, target); err != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupResetTarget(actionID, source, target, candidate, "RESET_TARGET_START_FAILED")
 		return
 	}
@@ -663,7 +681,7 @@ func (m *Manager) shutdownResetBinding(ctx context.Context, binding *managedBind
 		return true, &store.ManagedRestartStaleError{AgentID: binding.agentID}
 	}
 	if rpc != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 	}
 	if !m.reapRestartGroup(ctx, oldFenceIdentity(fence), waitDone) {
 		return true, &store.ManagedRestartStaleError{AgentID: binding.agentID}

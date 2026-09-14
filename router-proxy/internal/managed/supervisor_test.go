@@ -788,20 +788,23 @@ func TestPhase1ReadinessGatesRemainUnchanged(t *testing.T) {
 }
 
 type restartPreparationRPC struct {
-	mu               sync.Mutex
-	session          string
-	active           []string
-	stateCalls       int
-	commandCalls     int
-	bootstrapCalls   int
-	receiptCalls     int
-	activeCalls      int
-	prepareStarted   chan struct{}
-	releasePrepare   chan struct{}
-	preparationError error
-	sessionFile      string
-	promptCalls      int
-	closeCalls       int
+	mu                     sync.Mutex
+	session                string
+	active                 []string
+	stateCalls             int
+	commandCalls           int
+	bootstrapCalls         int
+	receiptCalls           int
+	activeCalls            int
+	prepareStarted         chan struct{}
+	releasePrepare         chan struct{}
+	preparationError       error
+	sessionFile            string
+	promptCalls            int
+	closeCalls             int
+	promptEntered          chan struct{}
+	releasePrompt          chan struct{}
+	promptContextCancelled chan struct{}
 }
 
 func (r *restartPreparationRPC) GetState(ctx context.Context) (map[string]any, error) {
@@ -873,10 +876,24 @@ func (r *restartPreparationRPC) RequestChildSnapshot(context.Context, map[string
 func (r *restartPreparationRPC) WaitForChildSnapshot(context.Context) (map[string]any, error) {
 	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": r.session, "sequence": int64(0), "runs": []any{}}, nil
 }
-func (r *restartPreparationRPC) Prompt(context.Context, string) error {
+func (r *restartPreparationRPC) Prompt(ctx context.Context, _ string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.promptCalls++
+	entered, release, cancelled := r.promptEntered, r.releasePrompt, r.promptContextCancelled
+	r.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			if cancelled != nil {
+				close(cancelled)
+			}
+			<-release
+		}
+	}
 	return nil
 }
 func (r *restartPreparationRPC) Abort(context.Context) error { return nil }
@@ -935,6 +952,132 @@ func readyRestartManager(t *testing.T, preparationError error, models ...Model) 
 		return opErr == nil && op.State == "terminal"
 	}, 2*time.Second, time.Millisecond)
 	return manager, durable, rpc
+}
+
+func TestPromptAndRestartLinearizeAtOneAgentLane(t *testing.T) {
+	request := restartRequest()
+
+	t.Run("prompt reaches RPC before reservation", func(t *testing.T) {
+		manager, durable, rpc := readyRestartManager(t, nil)
+		promptEntered := make(chan struct{})
+		releasePrompt := make(chan struct{})
+		rpc.promptEntered, rpc.releasePrompt = promptEntered, releasePrompt
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releasePrompt) }) }
+		t.Cleanup(func() {
+			release()
+			require.NoError(t, manager.Close(context.Background()))
+		})
+
+		promptDone := make(chan error, 1)
+		go func() { promptDone <- manager.AdmitPrompt(context.Background(), request.AgentID, "racing-input") }()
+		select {
+		case <-promptEntered:
+		case <-time.After(time.Second):
+			t.Fatal("prompt did not reach the RPC boundary")
+		}
+		// The prompt keeps the short admission lock while its RPC call is
+		// outstanding. This barrier makes the lock ownership observable and
+		// catches a regression that leaves prompt admission unlocked.
+		admissionProbe := make(chan struct{}, 1)
+		go func() {
+			manager.laneFor(request.AgentID).admission.Lock()
+			admissionProbe <- struct{}{}
+			manager.laneFor(request.AgentID).admission.Unlock()
+		}()
+		select {
+		case <-admissionProbe:
+			t.Fatal("prompt released admission before its RPC call returned")
+		case <-time.After(25 * time.Millisecond):
+		}
+
+		restartDone := make(chan struct {
+			result RestartResult
+			err    error
+		}, 1)
+		go func() {
+			result, err := manager.ReserveRestart(context.Background(), request)
+			restartDone <- struct {
+				result RestartResult
+				err    error
+			}{result: result, err: err}
+		}()
+		// The prompt holds the agent lane at the RPC boundary. The restart
+		// reservation cannot return until this prompt releases that lane.
+		stored, err := durable.ManagedAgent(context.Background(), request.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, "running", stored.LifecycleState)
+		require.True(t, stored.AcceptingPrompts)
+
+		release()
+		select {
+		case err := <-promptDone:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("admitted prompt did not finish")
+		}
+		select {
+		case outcome := <-restartDone:
+			require.NoError(t, outcome.err)
+			require.False(t, outcome.result.Replayed)
+		case <-time.After(time.Second):
+			t.Fatal("restart reservation did not finish after the prompt")
+		}
+		stored, err = durable.ManagedAgent(context.Background(), request.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, "restarting", stored.LifecycleState)
+		require.False(t, stored.AcceptingPrompts)
+		_, _, _, _, _, prompts, _ := rpc.counts()
+		require.Equal(t, 1, prompts)
+	})
+
+	t.Run("reservation closes prompt admission", func(t *testing.T) {
+		manager, durable, rpc := readyRestartManager(t, nil)
+		rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
+		var releasePrepareOnce sync.Once
+		releasePrepare := func() { releasePrepareOnce.Do(func() { close(rpc.releasePrepare) }) }
+		t.Cleanup(func() {
+			releasePrepare()
+			require.NoError(t, manager.Close(context.Background()))
+		})
+		result, err := manager.ReserveRestart(context.Background(), request)
+		require.NoError(t, err)
+		require.False(t, result.Replayed)
+		stored, err := durable.ManagedAgent(context.Background(), request.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, "restarting", stored.LifecycleState)
+		require.False(t, stored.AcceptingPrompts)
+		select {
+		case <-rpc.prepareStarted:
+		case <-time.After(time.Second):
+			t.Fatal("restart preparation did not start")
+		}
+
+		promptDone := make(chan error, 1)
+		go func() { promptDone <- manager.AdmitPrompt(context.Background(), request.AgentID, "late-input") }()
+		var notReady *store.ManagedAgentNotReadyError
+		select {
+		case promptErr := <-promptDone:
+			require.ErrorAs(t, promptErr, &notReady)
+		case <-time.After(time.Second):
+			t.Fatal("concurrent prompt did not observe the lifecycle reservation")
+		}
+		_, _, _, _, _, prompts, _ := rpc.counts()
+		require.Zero(t, prompts)
+		releasePrepare()
+	})
+}
+
+func TestAdmitPromptReturnsStoreError(t *testing.T) {
+	manager, _, rpc := readyRestartManager(t, nil)
+	defer manager.Close(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := manager.AdmitPrompt(ctx, "restart-agent", "must not be admitted")
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, _, _, _, prompts, _ := rpc.counts()
+	require.Zero(t, prompts)
 }
 
 func TestReserveManagedRestartAtomicallyDisablesPromptAdmission(t *testing.T) {

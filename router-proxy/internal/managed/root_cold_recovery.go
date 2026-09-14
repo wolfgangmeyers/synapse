@@ -450,7 +450,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	}
 	target.rpc = targetRPC
 	if !m.installBinding(target) {
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
 		if !cleanupOK {
 			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
@@ -458,7 +458,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement binding could not be installed")
 	}
 	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
 		m.clearBinding(target)
 		if !cleanupOK {
@@ -467,7 +467,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
 	}
 	if err := m.store.CompleteManagedRootRecoveryReady(ctx, agent.AgentID, targetFence); err != nil {
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
 		m.clearBinding(target)
 		if !cleanupOK {
