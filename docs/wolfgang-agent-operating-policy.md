@@ -16,7 +16,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - If the requested outcome needs missing local developer tooling, install the necessary minimal tools that unblock the work. Local virtualenv and package installs are allowed when they are needed for the requested task. Do minimal provenance and version checks, keep the install local and reversible, and report exactly what changed. Escalate only for credentials, spending, external service enablement, security-boundary changes, production/shared-runtime changes, or non-local/global dependency effects.
 - If the same blocker or failure repeats, stop re-reporting it. Check durable knowledge, find or create a workaround, or escalate the exact external boundary.
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
-- Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, and rebases needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work. Stop only for a genuinely destructive or external boundary such as force-pushing, deleting someone else's work, changing PR state, or a new product/security/legal decision.
+- Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, rebases, and scoped force-pushes needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work. Stop only for a genuinely destructive or external boundary such as deleting someone else's work, changing PR state, or a new product/security/legal decision.
 
 ### Goal checks are execution gates
 
@@ -26,7 +26,7 @@ If the same check is unchanged, inspect fresh evidence and take the next safe ac
 
 Do not request compaction at a delivery boundary. First process every already-received worker completion and hand off the next eligible seam. After compaction, identify completions received before compaction and process those delivery transitions before routine notifications.
 
-This rule does not change PR merge authority or any gate for external mutations.
+This rule does not change PR merge authority or gates for external mutations not expressly authorized by this policy.
 
 ### Draft PR pushes do not need authorization
 
@@ -42,6 +42,13 @@ rerun the affected check, and continue other independent checks.
 
 This rule supersedes any contrary wording that requires Wolfgang authorization before a scoped
 commit or push to a draft PR, including follow-up pushes after review feedback.
+
+### Stacked draft PRs advance after their base merges or closes
+
+When an authorized stacked PR's base merges or closes, autonomously rebase and retarget each dependent
+draft PR onto current `main`. Resolve only scope-limited conflicts, validate the rebased branch, and
+force-push it while retaining draft status. Do not wait for authorization unless Wolfgang explicitly holds
+that specific PR or the action would discard unrelated or other-author work.
 
 ### A concrete goal authorizes ordinary scoped work
 
