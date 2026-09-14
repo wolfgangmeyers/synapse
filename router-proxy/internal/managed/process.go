@@ -230,7 +230,13 @@ func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process,
 	return process, nil
 }
 
-const processStopInternalGrace = 5 * time.Second
+const (
+	processStopInternalGrace = 5 * time.Second
+	// A leaderless group can disappear shortly after the owning caller reports
+	// it as Present. Observe that natural cleanup briefly without taking a
+	// signal action or changing the ownership proof.
+	processPresentDrainGrace = 100 * time.Millisecond
+)
 
 type execProcess struct {
 	cmd            *exec.Cmd
@@ -247,6 +253,7 @@ type execProcess struct {
 	stopGate       chan struct{}
 	stopStateMu    sync.Mutex
 	termSent       bool
+	processOps     ProcessGroupOps
 }
 
 func (p *execProcess) Identity() ProcessIdentity { return p.identity }
@@ -294,7 +301,10 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	stopCtx, stopCancel := processStopContext(ctx)
 	defer stopCancel()
 
-	ops := DefaultProcessGroupOps()
+	ops := p.processOps
+	if ops == nil {
+		ops = DefaultProcessGroupOps()
+	}
 	if err := stopCtx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended before probing", ProcessUnknown, err)
 	}
@@ -318,11 +328,24 @@ func (p *execProcess) Stop(ctx context.Context) error {
 		// the leader through the shared waiter, bounded by the stop context.
 		return p.awaitProcessWait(stopCtx, p.startWaiter(), probe.State)
 	}
+	if probe.State == ProcessPresent {
+		// Present on the initial probe is not ownership. The process may still
+		// be finishing cleanup, so observe absence briefly without signaling.
+		drainCtx, drainCancel := context.WithTimeout(stopCtx, processPresentDrainGrace)
+		probe = waitForProcessGroupAbsent(drainCtx, ops, p.identity)
+		drainCancel()
+		if probe.State == ProcessAbsent {
+			return p.awaitProcessWait(stopCtx, p.startWaiter(), probe.State)
+		}
+		if err := ctx.Err(); err != nil {
+			return newProcessCleanupError("stop context ended while observing cleanup", probe.State, err)
+		}
+	}
 	if probe.State != ProcessOwned {
 		return newProcessCleanupError("process identity is not owned", probe.State, nil)
 	}
 
-	if err := signalProcessGroupWithContext(stopCtx, ops, p.identity, syscall.SIGTERM); err != nil {
+	if err := signalProcessGroupAfterOwnedProofWithContext(stopCtx, ops, p.identity); err != nil {
 		return err
 	}
 	p.stopStateMu.Lock()
@@ -399,8 +422,21 @@ func signalProcessGroupAfterLeaderExitWithContext(ctx context.Context, ops Proce
 	if err := ctx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended before leaderless escalation", ProcessPresent, err)
 	}
-	if err := ops.SignalVerifiedProcessGroupAfterLeaderExit(identity); err != nil {
-		return newProcessCleanupError("leaderless process group signal failed", ProcessPresent, err)
+	if signalErr := ops.SignalVerifiedProcessGroupAfterLeaderExit(identity); signalErr != nil {
+		// EPERM can race the last descendant's natural exit. The failed signal
+		// is not cleanup proof; accept it only after the same stop attempt
+		// passively observes the group become absent.
+		drainCtx, drainCancel := context.WithTimeout(ctx, processPresentDrainGrace)
+		probe := waitForProcessGroupAbsent(drainCtx, ops, identity)
+		drainCancel()
+		cause := signalErr
+		if contextErr := ctx.Err(); contextErr != nil {
+			cause = errors.Join(signalErr, contextErr)
+		}
+		if probe.State == ProcessAbsent {
+			return nil
+		}
+		return newProcessCleanupError("leaderless process group signal failed", probe.State, cause)
 	}
 	return nil
 }
@@ -420,6 +456,72 @@ func signalProcessGroupWithContext(ctx context.Context, ops ProcessGroupOps, ide
 		return newProcessCleanupError("process group signal failed", probe.State, err)
 	}
 	return nil
+}
+
+// signalProcessGroupAfterOwnedProof keeps the initial Stop-call ownership
+// proof alive across the two probes performed by SignalVerifiedProcessGroup.
+// A leader can exit after the proof, but only that proof permits a leaderless
+// continuation. Present, mismatch, and unknown initial probes never reach this
+// helper.
+func signalProcessGroupAfterOwnedProofWithContext(ctx context.Context, ops ProcessGroupOps, identity ProcessIdentity) error {
+	if err := ctx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended before signaling", ProcessUnknown, err)
+	}
+	probe := ops.Probe(identity)
+	if err := ctx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended after signal probe", probe.State, err)
+	}
+	switch probe.State {
+	case ProcessAbsent:
+		return nil
+	case ProcessPresent:
+		return signalProcessGroupAfterLeaderExitWithContext(ctx, ops, identity)
+	case ProcessMismatch, ProcessUnknown:
+		return newProcessCleanupError("process identity is not owned for signal", probe.State, nil)
+	case ProcessOwned:
+	}
+
+	if err := signalProcessGroupWithContext(ctx, ops, identity, syscall.SIGTERM); err == nil {
+		return nil
+	} else {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return newProcessCleanupError("stop context ended after signal", ProcessUnknown, contextErr)
+		}
+		// SignalVerifiedProcessGroup may have observed the leader after this
+		// helper's proof. Re-probe once under the same bounded Stop call so a
+		// leaderless group can use the explicit continuation seam.
+		probe = ops.Probe(identity)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return newProcessCleanupError("stop context ended after signal re-probe", probe.State, contextErr)
+		}
+		switch probe.State {
+		case ProcessAbsent:
+			return nil
+		case ProcessPresent:
+			return signalProcessGroupAfterLeaderExitWithContext(ctx, ops, identity)
+		default:
+			return err
+		}
+	}
+}
+
+func waitForProcessGroupAbsent(ctx context.Context, ops ProcessGroupOps, identity ProcessIdentity) ProcessProbe {
+	if ctx == nil {
+		return ProcessProbe{State: ProcessUnknown}
+	}
+	interval := time.NewTicker(10 * time.Millisecond)
+	defer interval.Stop()
+	for {
+		probe := ops.Probe(identity)
+		if probe.State == ProcessAbsent {
+			return probe
+		}
+		select {
+		case <-ctx.Done():
+			return probe
+		case <-interval.C:
+		}
+	}
 }
 
 func (p *execProcess) awaitProcessWait(ctx context.Context, done <-chan error, state ProcessProbeState) error {

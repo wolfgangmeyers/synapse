@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -20,7 +21,10 @@ func (m *Manager) evaluateManagedGoalAtSettled(binding *managedBinding, fence st
 		return
 	}
 
-	rpc, ok := binding.rpc.(ManagedGoalEvaluationRPC)
+	binding.serial.Lock()
+	evaluatorRPC := binding.rpc
+	binding.serial.Unlock()
+	rpc, ok := evaluatorRPC.(ManagedGoalEvaluationRPC)
 	outcome, reason := store.ManagedGoalEvaluationNotDone, "evaluation unavailable"
 	if ok && m.liveBindingForFence(m.runCtx, binding, fence) {
 		ctx, cancel := context.WithTimeout(m.runCtx, managedGoalEvaluationTimeout)
@@ -28,14 +32,24 @@ func (m *Manager) evaluateManagedGoalAtSettled(binding *managedBinding, fence st
 		if err == nil {
 			outcome, reason, err = rpc.WaitForManagedGoalEvaluation(ctx)
 		}
-		if ctx.Err() != nil {
-			// Pi restores the temporary no-tools profile on its settled event. Do
-			// not leave a timed-out evaluator turn running behind normal work.
-			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = binding.rpc.Abort(abortCtx)
-			abortCancel()
+		if err != nil {
+			// Start may have written and activated Pi's evaluator before its own
+			// response timed out. Reconcile from attempted ownership, not from
+			// Start's return value. The exact evaluator seam keeps public Abort
+			// side-effect free for lifecycle termination.
+			cleanupErr := m.reconcileManagedGoalEvaluationCleanup(evaluatorRPC, fence, policy, err)
+			cancel()
+			if cleanupErr != nil {
+				// The durable claim must not be completed or rearmed while evaluator
+				// ownership is unresolved. Stop only the exact still-live binding on
+				// its existing lifecycle lane; a replacement or lifecycle owner wins
+				// without receiving a stale process signal.
+				m.recoverManagedGoalEvaluationCleanup(binding, fence, cleanupErr)
+				return
+			}
+		} else {
+			cancel()
 		}
-		cancel()
 		if err != nil || (outcome != store.ManagedGoalEvaluationCompleted && outcome != store.ManagedGoalEvaluationNotDone) {
 			outcome, reason = store.ManagedGoalEvaluationNotDone, "evaluation unavailable"
 		}
@@ -59,4 +73,71 @@ func (m *Manager) evaluateManagedGoalAtSettled(binding *managedBinding, fence st
 		// to a replacement runtime.
 		m.OfferDirect(fence.AgentID)
 	}
+}
+
+func (m *Manager) reconcileManagedGoalEvaluationCleanup(evaluatorRPC RPC, fence store.ManagedRuntimeFence, policy *store.ManagedGoalPolicy, evaluationErr error) error {
+	if evaluatorRPC == nil || policy == nil {
+		return evaluationErr
+	}
+	cleanupRPC, cleanupOK := evaluatorRPC.(ManagedGoalEvaluationCleanupRPC)
+	if !cleanupOK {
+		abortCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return evaluatorRPC.Abort(abortCtx)
+	}
+	abortCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cleanupErr := cleanupRPC.ReconcileManagedGoalEvaluation(abortCtx, fence, policy.EvaluatorID, policy.EvaluatorGoalRevision, policy.EvaluatorSettledSequence)
+	if errors.Is(cleanupErr, ErrManagedGoalEvaluationCleanupStale) {
+		if stateRPC, stateOK := evaluatorRPC.(managedGoalEvaluationCleanupStateRPC); stateOK && !stateRPC.ManagedGoalEvaluationCleanupPending() {
+			// A validation failure before the command was written has no evaluator
+			// ownership to reconcile. This is the one safe no-op case.
+			return nil
+		}
+	}
+	return cleanupErr
+}
+
+func (m *Manager) recoverManagedGoalEvaluationCleanup(binding *managedBinding, fence store.ManagedRuntimeFence, cleanupErr error) {
+	if binding == nil || binding.lane == nil {
+		return
+	}
+	m.startManagedTask(func() {
+		binding.lane.serial.Lock()
+		defer binding.lane.serial.Unlock()
+
+		binding.serial.Lock()
+		if binding.reaped || binding.lifecycleAction != "" || binding.process == nil || !sameBindingFence(bindingFence(binding.agentID, binding), fence) {
+			binding.serial.Unlock()
+			return
+		}
+		process := binding.process
+		binding.serial.Unlock()
+		if !m.liveBindingForFence(context.Background(), binding, fence) {
+			return
+		}
+
+		limit := m.config.Limits.GracefulStop
+		if limit <= 0 {
+			limit = DefaultLimits().GracefulStop
+		}
+		stopCtx, cancel := context.WithTimeout(context.Background(), limit)
+		stopErr := process.Stop(stopCtx)
+		cancel()
+		if stopErr == nil {
+			// Process.Stop owns the exact-group absence proof. The existing ready
+			// watcher now records process loss and routes durable evaluator recovery;
+			// do not duplicate that transition here.
+			return
+		}
+
+		// A failed stop is intentionally retained for the existing exact-fence
+		// process-stop/cold-recovery path. Keep the binding and evaluator claim
+		// visible rather than pretending cleanup succeeded.
+		binding.serial.Lock()
+		binding.retainBinding = true
+		binding.serial.Unlock()
+		message := "goal evaluator cleanup failed: " + sanitizeError(cleanupErr) + "; process stop failed: " + sanitizeError(stopErr)
+		_ = m.store.MarkManagedFailedForFence(context.Background(), fence, "PROCESS_STOP_FAILED", message)
+	})
 }

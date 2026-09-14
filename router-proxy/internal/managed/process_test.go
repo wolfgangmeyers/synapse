@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +220,234 @@ func requireHandshakeSet(t *testing.T, reader *bufio.Reader, expected ...string)
 	for _, value := range expected {
 		require.True(t, seen[value], "missing handshake %q", value)
 	}
+}
+
+type passiveProbeOps struct {
+	states  []ProcessProbeState
+	probes  int
+	signals []syscall.Signal
+}
+
+func (ops *passiveProbeOps) Probe(ProcessIdentity) ProcessProbe {
+	index := ops.probes
+	ops.probes++
+	if index >= len(ops.states) {
+		index = len(ops.states) - 1
+	}
+	return ProcessProbe{State: ops.states[index]}
+}
+func (ops *passiveProbeOps) CloseProcessInput(Process) error { return nil }
+func (ops *passiveProbeOps) SignalVerifiedProcessGroup(ProcessIdentity, syscall.Signal) error {
+	return errors.New("unexpected signal")
+}
+func (ops *passiveProbeOps) SignalVerifiedProcessGroupAfterLeaderExit(ProcessIdentity) error {
+	return errors.New("unexpected leaderless signal")
+}
+func (ops *passiveProbeOps) WaitForProcessGroupEmpty(context.Context, ProcessIdentity, <-chan error) ProcessProbe {
+	return ProcessProbe{State: ProcessPresent}
+}
+
+type stopRaceOps struct {
+	states             []ProcessProbeState
+	probes             int
+	signalErr          error
+	leaderlessErr      error
+	cancelOnLeaderless context.CancelFunc
+	signals            []syscall.Signal
+	leaderlessCalls    int
+	waitState          ProcessProbeState
+}
+
+func (ops *stopRaceOps) Probe(ProcessIdentity) ProcessProbe {
+	index := ops.probes
+	ops.probes++
+	if index >= len(ops.states) {
+		index = len(ops.states) - 1
+	}
+	return ProcessProbe{State: ops.states[index]}
+}
+func (ops *stopRaceOps) CloseProcessInput(Process) error { return nil }
+func (ops *stopRaceOps) SignalVerifiedProcessGroup(ProcessIdentity, syscall.Signal) error {
+	if ops.signalErr != nil {
+		return ops.signalErr
+	}
+	ops.signals = append(ops.signals, syscall.SIGTERM)
+	return nil
+}
+func (ops *stopRaceOps) SignalVerifiedProcessGroupAfterLeaderExit(ProcessIdentity) error {
+	ops.leaderlessCalls++
+	if ops.leaderlessErr != nil {
+		if ops.cancelOnLeaderless != nil {
+			ops.cancelOnLeaderless()
+		}
+		return ops.leaderlessErr
+	}
+	ops.signals = append(ops.signals, syscall.SIGKILL)
+	return nil
+}
+func (ops *stopRaceOps) WaitForProcessGroupEmpty(context.Context, ProcessIdentity, <-chan error) ProcessProbe {
+	state := ops.waitState
+	if state == "" {
+		state = ProcessAbsent
+	}
+	return ProcessProbe{State: state}
+}
+
+func newExitedProcessForStopTest(t *testing.T, ops ProcessGroupOps) *execProcess {
+	t.Helper()
+	command := exec.Command("/bin/sh", "-c", "exit 0")
+	require.NoError(t, command.Start())
+	process := &execProcess{
+		cmd: command, stdin: nopWriteCloser{io.Discard}, stdout: io.NopCloser(strings.NewReader("")), stderr: io.NopCloser(strings.NewReader("")),
+		identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: "test", Incarnation: "test"}, processOps: ops,
+		waitDone: make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = process.Wait() })
+	return process
+}
+
+func TestExecProcessStopOwnedProofHandlesLeaderExitRaces(t *testing.T) {
+	tests := []struct {
+		name           string
+		states         []ProcessProbeState
+		signalErr      error
+		wantState      ProcessProbeState
+		wantSignals    []syscall.Signal
+		wantLeaderless int
+		wantProbeCount int
+	}{
+		{
+			name:           "reprobe present uses only leaderless continuation",
+			states:         []ProcessProbeState{ProcessOwned, ProcessPresent},
+			wantSignals:    []syscall.Signal{syscall.SIGKILL},
+			wantLeaderless: 1,
+			wantProbeCount: 2,
+		},
+		{
+			name:           "signal method race reprobes present and continues",
+			states:         []ProcessProbeState{ProcessOwned, ProcessOwned, ProcessOwned, ProcessPresent},
+			signalErr:      errors.New("process identity is not owned for signal"),
+			wantSignals:    []syscall.Signal{syscall.SIGKILL},
+			wantLeaderless: 1,
+			wantProbeCount: 4,
+		},
+		{
+			name:           "initial present never signals",
+			states:         []ProcessProbeState{ProcessPresent, ProcessPresent, ProcessAbsent},
+			wantProbeCount: 3,
+		},
+		{
+			name:           "initial mismatch never signals",
+			states:         []ProcessProbeState{ProcessMismatch},
+			wantState:      ProcessMismatch,
+			wantProbeCount: 1,
+		},
+		{
+			name:           "initial absent succeeds",
+			states:         []ProcessProbeState{ProcessAbsent},
+			wantProbeCount: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ops := &stopRaceOps{states: test.states, signalErr: test.signalErr}
+			process := newExitedProcessForStopTest(t, ops)
+			err := process.Stop(context.Background())
+			if test.wantState == "" {
+				require.NoError(t, err)
+			} else {
+				var cleanupErr *ProcessCleanupError
+				require.ErrorAs(t, err, &cleanupErr)
+				require.Equal(t, test.wantState, cleanupErr.State)
+			}
+			require.Equal(t, test.wantSignals, ops.signals)
+			require.Equal(t, test.wantLeaderless, ops.leaderlessCalls)
+			require.Equal(t, test.wantProbeCount, ops.probes)
+		})
+	}
+}
+
+func TestExecProcessStopLeaderlessEPERMAcceptsNaturalAbsence(t *testing.T) {
+	ops := &stopRaceOps{
+		states:        []ProcessProbeState{ProcessOwned, ProcessPresent, ProcessAbsent},
+		leaderlessErr: syscall.EPERM,
+	}
+	process := newExitedProcessForStopTest(t, ops)
+	require.NoError(t, process.Stop(context.Background()))
+	require.Empty(t, ops.signals, "EPERM must not be treated as a successful signal")
+	require.Equal(t, 1, ops.leaderlessCalls)
+	require.Equal(t, 3, ops.probes)
+}
+
+func TestExecProcessStopLeaderlessEPERMRetainsPersistentPresentFailure(t *testing.T) {
+	ops := &stopRaceOps{
+		states:        []ProcessProbeState{ProcessOwned, ProcessPresent},
+		leaderlessErr: syscall.EPERM,
+	}
+	process := newExitedProcessForStopTest(t, ops)
+	started := time.Now()
+	err := process.Stop(context.Background())
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, err, &cleanupErr)
+	require.Equal(t, ProcessPresent, cleanupErr.State)
+	require.ErrorIs(t, err, syscall.EPERM)
+	require.Empty(t, ops.signals)
+	require.Equal(t, 1, ops.leaderlessCalls)
+	require.Less(t, time.Since(started), 500*time.Millisecond)
+}
+
+func TestExecProcessStopLeaderlessEPERMDrainHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ops := &stopRaceOps{
+		states:             []ProcessProbeState{ProcessOwned, ProcessPresent},
+		leaderlessErr:      syscall.EPERM,
+		cancelOnLeaderless: cancel,
+	}
+	process := newExitedProcessForStopTest(t, ops)
+	err := process.Stop(ctx)
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, err, &cleanupErr)
+	require.Equal(t, ProcessPresent, cleanupErr.State)
+	require.ErrorIs(t, err, syscall.EPERM)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, ops.signals)
+	require.Equal(t, 1, ops.leaderlessCalls)
+}
+
+func TestExecProcessStopPassivelyDrainsInitiallyPresentGroup(t *testing.T) {
+	ops := &passiveProbeOps{states: []ProcessProbeState{ProcessPresent, ProcessPresent, ProcessAbsent}}
+	process := newExitedProcessForStopTest(t, ops)
+	require.NoError(t, process.Stop(context.Background()))
+	require.Empty(t, ops.signals)
+	require.GreaterOrEqual(t, ops.probes, 3)
+}
+
+func TestExecProcessStopRetainsPersistentPresentWithoutSignals(t *testing.T) {
+	ops := &passiveProbeOps{states: []ProcessProbeState{ProcessPresent}}
+	process := newExitedProcessForStopTest(t, ops)
+	started := time.Now()
+	err := process.Stop(context.Background())
+	elapsed := time.Since(started)
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, err, &cleanupErr)
+	require.Equal(t, ProcessPresent, cleanupErr.State)
+	require.Empty(t, ops.signals)
+	require.Less(t, elapsed, 500*time.Millisecond)
+}
+
+func TestExecProcessStopPassiveDrainHonorsCancellation(t *testing.T) {
+	ops := &passiveProbeOps{states: []ProcessProbeState{ProcessPresent}}
+	process := newExitedProcessForStopTest(t, ops)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+	started := time.Now()
+	err := process.Stop(ctx)
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, err, &cleanupErr)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, time.Since(started), 500*time.Millisecond)
+	require.Empty(t, ops.signals)
 }
 
 func TestExecProcessStopRequiresCompleteGroupAbsence(t *testing.T) {

@@ -130,10 +130,26 @@ const (
 	maxQueuedManagedBuiltinToolLifecycle = 64
 )
 
+type managedDirectTurnIdentity struct {
+	fence         store.ManagedRuntimeFence
+	messageID     string
+	attemptNumber int
+}
+
 type managedBinding struct {
 	agentID string
 	lane    *managedAgentLane
 	serial  sync.Mutex
+	// These fields close the gap before native activity persistence. They are
+	// binding-local and fenced so delayed native callbacks cannot affect a later
+	// prompt.
+	turnAdmitted               bool
+	turnStarted                bool
+	turnGeneration             uint64
+	turnAdmissionSequence      int64
+	turnStartedSequence        int64
+	lastParentActivitySequence int64
+	turnDirectAttempt          *managedDirectTurnIdentity
 	// Root controls can resolve an active direct turn. Keep their append path
 	// ordered without blocking the direct-delivery lane that needs that result.
 	rootControlSerial sync.Mutex
@@ -904,7 +920,65 @@ func (m *Manager) bindingFor(agentID string) (*managedBinding, bool) {
 
 // clearBinding only removes the runtime maps when this immutable binding still
 // owns them. An old exit may arrive after a target has been installed.
+func clearManagedTurnLocked(binding *managedBinding) {
+	binding.turnAdmitted = false
+	binding.turnStarted = false
+	binding.turnAdmissionSequence = 0
+	binding.turnStartedSequence = 0
+	binding.turnDirectAttempt = nil
+}
+
+func managedParentActivityAdmissionSequence(binding *managedBinding) int64 {
+	sequence := binding.lastParentActivitySequence
+	if rpc, ok := binding.rpc.(ParentActivitySequenceRPC); ok {
+		decoded := rpc.ParentActivitySequence()
+		if decoded <= uint64(readinessMaxSafeInteger) {
+			sequence = int64(decoded)
+		}
+	}
+	return sequence
+}
+
+func admitManagedTurnLocked(binding *managedBinding, attempt *store.ManagedDirectAttempt, admissionSequence int64) (uint64, bool) {
+	if binding.turnAdmitted {
+		return 0, false
+	}
+	binding.turnGeneration++
+	binding.turnAdmitted = true
+	binding.turnStarted = false
+	binding.turnAdmissionSequence = admissionSequence
+	binding.turnStartedSequence = 0
+	binding.turnDirectAttempt = nil
+	if attempt != nil {
+		binding.turnDirectAttempt = &managedDirectTurnIdentity{fence: attempt.Fence, messageID: attempt.MessageID, attemptNumber: attempt.AttemptNumber}
+	}
+	return binding.turnGeneration, true
+}
+
+func clearManagedDirectTurnLocked(binding *managedBinding, attempt store.ManagedDirectAttempt) {
+	identity := binding.turnDirectAttempt
+	if !binding.turnAdmitted || identity == nil || identity.messageID != attempt.MessageID || identity.attemptNumber != attempt.AttemptNumber || !sameBindingFence(identity.fence, attempt.Fence) {
+		return
+	}
+	clearManagedTurnLocked(binding)
+}
+
+func (m *Manager) clearManagedDirectTurn(attempt store.ManagedDirectAttempt) {
+	binding, ok := m.bindingFor(attempt.Fence.AgentID)
+	if !ok {
+		return
+	}
+	binding.serial.Lock()
+	clearManagedDirectTurnLocked(binding, attempt)
+	binding.serial.Unlock()
+}
+
 func (m *Manager) clearBinding(binding *managedBinding) {
+	if binding != nil {
+		binding.serial.Lock()
+		clearManagedTurnLocked(binding)
+		binding.serial.Unlock()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.bindings[binding.agentID] != binding {
@@ -1240,7 +1314,21 @@ func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) erro
 	if !errors.Is(actionErr, sql.ErrNoRows) {
 		return actionErr
 	}
-	if err := binding.rpc.Prompt(ctx, message); err != nil {
+	generation, admitted := admitManagedTurnLocked(binding, nil, managedParentActivityAdmissionSequence(binding))
+	if !admitted {
+		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+	}
+	fence := bindingFence(agentID, binding)
+	var promptErr error
+	if admittedRPC, ok := binding.rpc.(RestartTurnAdmissionRPC); ok {
+		promptErr = admittedRPC.PromptAdmittedRestartTurn(ctx, message, fence)
+	} else {
+		promptErr = binding.rpc.Prompt(ctx, message)
+	}
+	if promptErr != nil {
+		if binding.turnAdmitted && binding.turnGeneration == generation {
+			clearManagedTurnLocked(binding)
+		}
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
 	return nil
@@ -2103,6 +2191,7 @@ func (m *Manager) recordManagedDeliveryFailure(attempt store.ManagedDirectAttemp
 func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code, detail string) {
 	terminal, err := m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
 	if err == nil {
+		m.clearManagedDirectTurn(attempt)
 		m.recordManagedDeliveryFailure(attempt, code)
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
@@ -2111,6 +2200,7 @@ func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code,
 	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
+		m.clearManagedDirectTurn(attempt)
 		return
 	}
 	var notReady *store.ManagedDirectNotReadyError
@@ -2128,6 +2218,7 @@ func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code,
 func (m *Manager) releaseManagedDirectRecovery(attempt store.ManagedDirectAttempt, code string) {
 	terminal, err := m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, code)
 	if err == nil {
+		m.clearManagedDirectTurn(attempt)
 		m.recordManagedDeliveryFailure(attempt, code)
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
@@ -2136,6 +2227,7 @@ func (m *Manager) releaseManagedDirectRecovery(attempt store.ManagedDirectAttemp
 	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
+		m.clearManagedDirectTurn(attempt)
 		return
 	}
 	_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "release_persistence_failed", "")
@@ -2172,6 +2264,7 @@ func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, 
 				terminal, err = m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
 			}
 			if err == nil {
+				m.clearManagedDirectTurn(attempt)
 				m.recordManagedDeliveryFailure(attempt, code)
 				if !terminal {
 					m.scheduleDirectRetry(attempt.Fence.AgentID)
@@ -2323,11 +2416,20 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		receiptDone := receiptCtx.Done()
 		turnCtx, cancelTurn := context.WithCancel(m.runCtx)
 		defer cancelTurn()
+		binding.serial.Lock()
+		_, admitted := admitManagedTurnLocked(binding, attempt, managedParentActivityAdmissionSequence(binding))
+		binding.serial.Unlock()
+		if !admitted {
+			m.releaseManagedDirect(*attempt, "prompt_admission_busy", "")
+			return
+		}
 		events, err := rpc.PromptManagedMailbox(turnCtx, *attempt)
 		if err != nil {
 			cancelTurn()
 			cancelReceipt()
 			m.releaseManagedDirect(*attempt, "prompt_failed", sanitizeError(err))
+			// PromptManagedMailbox can fail after the durable prompted marker is
+			// visible. Release owns exact marker cleanup, including retries.
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_failed", "")
 			return
 		}
@@ -2368,6 +2470,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 						_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_stream_closed", "")
 					} else {
 						_ = m.store.InterruptManagedParentTurn(context.Background(), *attempt)
+						m.clearManagedDirectTurn(*attempt)
 					}
 					return
 				}
@@ -2413,6 +2516,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					m.publishDirectReply(*attempt, *event.Reply)
 				}
 				if acknowledged && event.Settled {
+					m.clearManagedDirectTurn(*attempt)
 					_ = m.store.SettleManagedParentDirectTurn(context.Background(), *attempt)
 					clearDirectPromptActivity()
 					cancelTurn()
@@ -2519,9 +2623,14 @@ func (m *Manager) recoverManagedDirectAttemptsAsync(agentID string) {
 // recorded Pi cursor; an exact persisted marker settles the original row and
 // never emits another slash command.
 func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agentID string) error {
-	lane := m.laneFor(agentID)
-	lane.serial.Lock()
-	defer lane.serial.Unlock()
+	binding, live := m.bindingFor(agentID)
+	if !live {
+		return nil
+	}
+	// Recovery owns the direct-delivery serial before it reads durable attempts.
+	// It must not hold the lifecycle lane while RecoverManagedMailbox waits on Pi.
+	binding.directDeliverySerial.Lock()
+	defer binding.directDeliverySerial.Unlock()
 	if m.beforeManagedDirectRecovery != nil {
 		m.beforeManagedDirectRecovery(ctx, agentID)
 	}
@@ -2529,14 +2638,6 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	if err != nil {
 		return err
 	}
-	binding, live := m.bindingFor(agentID)
-	if !live {
-		return nil
-	}
-	// Recovery and live delivery share one command owner. Keep recovery from
-	// issuing a second slash command while an existing delivery is still open.
-	binding.directDeliverySerial.Lock()
-	defer binding.directDeliverySerial.Unlock()
 	binding.serial.Lock()
 	currentFence := bindingFence(agentID, binding)
 	rpc, supported := binding.rpc.(DirectMailboxRPC)

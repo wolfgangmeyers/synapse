@@ -24,6 +24,13 @@ import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-cl
 import { createDiagnosticJournal } from "../pi-extensions/mecha-messaging/diagnostics-history.js";
 
 const MAX_NOT_DONE_WAKEUPS = 1000;
+const activeFixtures = new Set<{ shutdown: () => Promise<void> }>();
+
+test.afterEach(async () => {
+  const fixtures = [...activeFixtures];
+  activeFixtures.clear();
+  for (const fixture of fixtures) await fixture.shutdown();
+});
 
 function createMessagingFixture({
   sendMessage = () => {},
@@ -121,7 +128,26 @@ function createMessagingFixture({
     }),
     ...(environment === undefined ? {} : { operationalTools: { environment } }),
   });
-  return { childHandlers, commands, context, createContext, emittedEvents, handlers, mailboxClients, modelSwitches, notifications, pi, sent, tools };
+  const startedContexts = [];
+  const shutdownContexts = new Set();
+  const startSession = async (event = {}, currentContext = context) => {
+    if (!startedContexts.includes(currentContext)) startedContexts.push(currentContext);
+    for (const handler of handlers.get("session_start") ?? []) await handler(event, currentContext);
+  };
+  const shutdownSession = async (currentContext = context) => {
+    if (!startedContexts.includes(currentContext) || shutdownContexts.has(currentContext)) return;
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, currentContext);
+    shutdownContexts.add(currentContext);
+  };
+  const fixture = {
+    childHandlers, commands, context, createContext, emittedEvents, handlers, mailboxClients, modelSwitches,
+    notifications, pi, sent, tools, startSession, shutdownSession,
+    async shutdown() {
+      for (const currentContext of [...startedContexts].reverse()) await shutdownSession(currentContext);
+    },
+  };
+  activeFixtures.add(fixture);
+  return fixture;
 }
 
 async function emitToolCalls(fixture, toolNames, context = fixture.context) {
@@ -406,7 +432,7 @@ test("allowance pool persists across agent runs and resets for a new session", a
   assert.equal(deniedDuringSameSession.details.remainingPool, 0);
 
   const newSessionContext = fixture.createContext("new-session");
-  for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, newSessionContext);
+  await sessionStart(fixture, newSessionContext);
   const grantedInNewSession = await allowanceTool.execute("call-3", { toolName: "bash", usageCount: 5 });
   assert.equal(grantedInNewSession.details.grantedCount, 5);
   assert.equal(grantedInNewSession.details.remainingPool, 0);
@@ -417,7 +443,7 @@ test("session-scoped allowance reset preserves context-threshold notifications",
     contextUsage: () => ({ tokens: 510_000, contextWindow: 1_000_000, percent: 51 }),
   });
 
-  for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, fixture.context);
+  await sessionStart(fixture);
   for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
   for (const handler of fixture.handlers.get("agent_settled") ?? []) await handler({}, fixture.context);
 
@@ -429,7 +455,7 @@ test("session-scoped allowance reset preserves context-threshold notifications",
 
 test("session-scoped allowance reset preserves mailbox delivery after agent start", async () => {
   const fixture = createMessagingFixture();
-  for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, fixture.context);
+  await sessionStart(fixture);
   for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
 
   assert.equal(fixture.mailboxClients.length, 1);
@@ -444,8 +470,8 @@ test("session-scoped allowance reset preserves mailbox delivery after agent star
   assert.deepEqual(mailboxMessage[1], { deliverAs: "steer", triggerTurn: true });
 });
 
-async function sessionStart(fixture, context = fixture.context) {
-  for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, context);
+async function sessionStart(fixture, context = fixture.context, event = {}) {
+  await fixture.startSession(event, context);
 }
 
 async function runHandlers(fixture, eventName, event = {}, context = fixture.context) {
@@ -455,9 +481,7 @@ async function runHandlers(fixture, eventName, event = {}, context = fixture.con
 test("managed workers receive their tmux identity on startup and resume", async () => {
   for (const [reason, agentId] of [["startup", "worker-start"], ["resume", "worker-resumed"]]) {
     const fixture = createMessagingFixture({ resolveCurrentAgentId: () => agentId });
-    for (const handler of fixture.handlers.get("session_start") ?? []) {
-      await handler({ reason }, fixture.context);
-    }
+    await sessionStart(fixture, fixture.context, { reason });
 
     assert.deepEqual(fixture.sent, [[{
       customType: "mecha-worker-identity",
@@ -1989,7 +2013,7 @@ test("disposed child shutdown skips parent capture cleanup", async () => {
     await sessionStart(fixture, childContext);
     fixture.childHandlers.get("subagents:child:disposed")({ sessionId: "child-session" });
 
-    for (const handler of fixture.handlers.get("session_shutdown") ?? []) await handler({}, childContext);
+    await fixture.shutdownSession(childContext);
 
     assert.equal(capturePolicyFetches, 0);
   } finally {
@@ -2011,13 +2035,13 @@ test("root teardown drains the shared diagnostic journal while child teardown ke
     fixture.childHandlers.get("subagents:child:session-created")?.({ sessionId: "journal-teardown-child" });
     const childContext = fixture.createContext("journal-teardown-child");
     await sessionStart(fixture, childContext);
-    await runHandlers(fixture, "session_shutdown", {}, childContext);
+    await fixture.shutdownSession(childContext);
     assert.equal(createDiagnosticJournal({ environment }), journal);
 
     const shutdownHandlers = fixture.handlers.get("session_shutdown") ?? [];
     const rootShutdown = shutdownHandlers.at(-1);
     assert.equal(typeof rootShutdown, "function");
-    await rootShutdown?.({}, fixture.context);
+    await fixture.shutdownSession(fixture.context);
     assert.equal(typeof journal.path, "string");
     if (typeof journal.path !== "string") throw new Error("diagnostic journal path is unavailable");
     const text = await readFile(journal.path, "utf8");

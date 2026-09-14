@@ -320,23 +320,22 @@ func (m *Manager) executeResetInLane(sourceBinding *managedBinding, actionID str
 		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
 		return
 	}
-	state, err := sourceRPC.GetState(m.runCtx)
-	if err != nil || !stateSessionMatches(state, source.PiSessionID) {
-		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
-		return
-	}
-	if _, err := m.artifacts.discover(context.Background(), source.AgentID, source.SessionEpoch, source.PiSessionID, state); err != nil {
-		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
-		return
-	}
-	if err := m.store.AdvanceManagedReset(context.Background(), actionID, "admitted", "admission", "awaiting_settle", "source_settle", source); err != nil {
-		return
-	}
+	// Durable activity projection is asynchronous. An admitted source turn is
+	// therefore a stronger active fact than the row while its semantic settled
+	// callback is queued. Record source_settle and drain that exact native turn
+	// before asking Pi for state or inspecting its session artifact.
+	sourceBinding.serial.Lock()
+	turnAdmitted := sourceBinding.turnAdmitted
+	sourceBinding.serial.Unlock()
 	agent, err := m.store.ManagedAgent(context.Background(), source.AgentID)
 	if err != nil {
 		return
 	}
-	if agent.ActivityState == "active" {
+	needsSettle := turnAdmitted || agent.ActivityState == "active"
+	if needsSettle {
+		if err := m.store.AdvanceManagedReset(context.Background(), actionID, "admitted", "admission", "awaiting_settle", "source_settle", source); err != nil {
+			return
+		}
 		settler, ok := sourceRPC.(RestartTurnSettler)
 		if !ok {
 			_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_RECOVERY_NEEDS_SETTLE", false, source)
@@ -347,6 +346,25 @@ func (m *Manager) executeResetInLane(sourceBinding *managedBinding, actionID str
 		cancel()
 		if err != nil {
 			_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_RECOVERY_NEEDS_SETTLE", false, source)
+			return
+		}
+		sourceBinding.serial.Lock()
+		if sourceBinding.turnAdmitted {
+			clearManagedTurnLocked(sourceBinding)
+		}
+		sourceBinding.serial.Unlock()
+	}
+	state, err := sourceRPC.GetState(m.runCtx)
+	if err != nil || !stateSessionMatches(state, source.PiSessionID) {
+		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
+		return
+	}
+	if _, err := m.artifacts.discover(context.Background(), source.AgentID, source.SessionEpoch, source.PiSessionID, state); err != nil {
+		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
+		return
+	}
+	if !needsSettle {
+		if err := m.store.AdvanceManagedReset(context.Background(), actionID, "admitted", "admission", "awaiting_settle", "source_settle", source); err != nil {
 			return
 		}
 	}

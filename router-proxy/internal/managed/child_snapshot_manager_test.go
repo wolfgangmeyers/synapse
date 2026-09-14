@@ -73,9 +73,12 @@ func TestChildDeltaReceiverBoundsPendingFIFOAndUsesOneDrainWorker(t *testing.T) 
 	}, time.Second, time.Millisecond)
 	require.LessOrEqual(t, runtime.NumGoroutine(), before+8, "one blocked binding must not create a goroutine per child arrival")
 	binding.lane.serial.Unlock()
-	require.Eventually(t, func() bool {
-		binding.childDeltaSerial.Lock()
-		defer binding.childDeltaSerial.Unlock()
-		return !binding.childDeltaDraining && len(binding.childDeltaQueue) == 0
-	}, time.Second, time.Millisecond)
+	// The bound and draining state prove that the worker was admitted before
+	// releasing the lane. Wait for that worker while the manager is still live;
+	// the separate FIFO test checks durable arrival order.
+	manager.startWG.Wait()
+	binding.childDeltaSerial.Lock()
+	require.False(t, binding.childDeltaDraining)
+	require.Empty(t, binding.childDeltaQueue)
+	binding.childDeltaSerial.Unlock()
 }

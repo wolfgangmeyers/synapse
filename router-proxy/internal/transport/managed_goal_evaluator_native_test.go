@@ -721,7 +721,9 @@ func TestManagedGoalEvaluatorInstalledPiCoreFunctionalSlice(t *testing.T) {
 				policy, err = waitNativeGoalPolicy(ctx, durable, "native-goal", func(value *store.ManagedGoalPolicy) bool { return value.NotDoneWakeups == 1 })
 				require.NoError(t, err)
 				require.EqualValues(t, 1, policy.NotDoneWakeups)
-				require.Equal(t, 0, nativeGoalCount(t, databasePath, "SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE agent_id=? AND state IN ('direct_pending','direct_prompted')", "native-goal"), "the acknowledged continuation must leave no active direct attempt")
+				require.Eventually(t, func() bool {
+					return nativeGoalCount(t, databasePath, "SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE agent_id=? AND state IN ('direct_pending','direct_prompted')", "native-goal") == 0
+				}, time.Second, 10*time.Millisecond, "the acknowledged continuation must leave no active direct attempt")
 				afterReleaseTrace := nativeGoalDirectAttemptTrace(t, databasePath, "native-goal")
 				t.Logf("NOT_DONE wakeup after provider release and settlement: direct_trace=%v", afterReleaseTrace)
 				require.Equal(t, 1, nativeGoalCount(t, databasePath, "SELECT COUNT(*) FROM native_goal_direct_attempt_trace WHERE agent_id=? AND event='state' AND state='acknowledged'", "native-goal"))

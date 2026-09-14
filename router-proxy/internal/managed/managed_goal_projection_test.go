@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -18,13 +19,18 @@ const managedGoalProjectionTestManifestHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 type goalProjectionRPC struct {
 	*launchRPC
-	revision     int64
-	policy       map[string]any
-	stale        bool
-	fail         bool
-	directBodies chan string
-	evaluation   func(context.Context, store.ManagedGoalPolicy) (string, string, error)
-	activity     func(store.ManagedGoalActivity)
+	revision         int64
+	policy           map[string]any
+	stale            bool
+	fail             bool
+	directBodies     chan string
+	evaluation       func(context.Context, store.ManagedGoalPolicy) (string, string, error)
+	evaluationStarts chan struct{}
+	startErr         error
+	cleanupErr       error
+	cleanupCalls     chan struct{}
+	decodedSequence  uint64
+	activity         func(store.ManagedGoalActivity)
 }
 
 func (r *goalProjectionRPC) ApplyPolicy(ctx context.Context, envelope map[string]any) (map[string]any, error) {
@@ -66,13 +72,40 @@ func (r *goalProjectionRPC) RecoverManagedMailbox(context.Context, store.Managed
 	return DirectMailboxRecovery{}, nil
 }
 func (r *goalProjectionRPC) StartManagedGoalEvaluation(context.Context, store.ManagedRuntimeFence, store.ManagedGoalPolicy) error {
-	return nil
+	if r.evaluationStarts != nil {
+		r.evaluationStarts <- struct{}{}
+	}
+	return r.startErr
 }
+func (r *goalProjectionRPC) ReconcileManagedGoalEvaluation(context.Context, store.ManagedRuntimeFence, string, int64, int64) error {
+	if r.cleanupCalls != nil {
+		r.cleanupCalls <- struct{}{}
+	}
+	return r.cleanupErr
+}
+func (r *goalProjectionRPC) ManagedGoalEvaluationCleanupPending() bool { return true }
+func (r *goalProjectionRPC) ParentActivitySequence() uint64 {
+	return r.decodedSequence
+}
+
 func (r *goalProjectionRPC) WaitForManagedGoalEvaluation(ctx context.Context) (string, string, error) {
 	if r.evaluation == nil {
 		return "", "", errors.New("no evaluator result")
 	}
 	return r.evaluation(ctx, store.ManagedGoalPolicy{})
+}
+
+type goalActivityRPC struct {
+	*goalProjectionRPC
+	source *rpcClient
+}
+
+func (r *goalActivityRPC) SetParentActivityEventHandler(handler func(map[string]any)) {
+	r.source.SetParentActivityEventHandler(handler)
+}
+
+func (r *goalActivityRPC) ParentActivitySequence() uint64 {
+	return r.source.ParentActivitySequence()
 }
 
 func (r *goalProjectionRPC) WaitForPolicyApplied(ctx context.Context, generation string, epoch int64) (map[string]any, error) {
@@ -128,6 +161,17 @@ func readyGoalProjectionFixture(t *testing.T) (*Manager, *store.Store, *managedB
 	manager.bindings[fence.AgentID] = binding
 	t.Cleanup(func() { _ = manager.Close(context.Background()); _ = durable.Close() })
 	return manager, durable, binding, fence, rpc
+}
+
+func readyGoalActivityFixture(t *testing.T) (*Manager, *store.Store, *managedBinding, store.ManagedRuntimeFence, *goalActivityRPC, *io.PipeWriter) {
+	t.Helper()
+	manager, durable, binding, fence, baseRPC := readyGoalProjectionFixture(t)
+	stdoutReader, stdoutWriter := io.Pipe()
+	source := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	rpc := &goalActivityRPC{goalProjectionRPC: baseRPC, source: source}
+	binding.rpc = rpc
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
+	return manager, durable, binding, fence, rpc, stdoutWriter
 }
 
 type managedGoalStatusRootControlRPC struct {
@@ -239,6 +283,202 @@ func TestManagedGoalStatusDynamicRootControlPersistsAndDeliversSuccess(t *testin
 
 func int64Pointer(value int64) *int64 { return &value }
 
+func TestManagedParentActivityDropsDecodedPriorTurnAfterAdmission(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc, stdoutWriter := readyGoalActivityFixture(t)
+	rpc.evaluation = func(context.Context, store.ManagedGoalPolicy) (string, string, error) {
+		return store.ManagedGoalEvaluationNotDone, "keep working", nil
+	}
+	rpc.evaluationStarts = make(chan struct{}, 1)
+	rpc.directBodies = make(chan string, 1)
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID: "123e4567-e89b-42d3-a456-426614174030", OperationID: "goal.control",
+		Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence,
+	})
+	require.NoError(t, err)
+	beforeVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	beforeAgent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+
+	callbackEntered := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	ParentCompactionRPC(rpc.source).SetParentCompactionEventHandler(func(map[string]any) {
+		close(callbackEntered)
+		<-callbackRelease
+	})
+	manager.installParentActivityReceiver(binding)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_start"}))
+	select {
+	case <-callbackEntered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for semantic FIFO blocker")
+	}
+	// These native parent frames are decoded and sequenced while the earlier
+	// semantic callback is blocked. Their callbacks have not run yet.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.Eventually(t, func() bool { return rpc.ParentActivitySequence() == 3 }, time.Second, time.Millisecond)
+
+	manager.installParentActivityReceiver(binding)
+	require.NoError(t, manager.AdmitPrompt(ctx, fence.AgentID, "new prompt"))
+	binding.serial.Lock()
+	require.True(t, binding.turnAdmitted)
+	require.False(t, binding.turnStarted)
+	require.Equal(t, uint64(1), binding.turnGeneration)
+	require.Equal(t, int64(3), binding.turnAdmissionSequence)
+	binding.serial.Unlock()
+	close(callbackRelease)
+	require.Eventually(t, func() bool {
+		binding.serial.Lock()
+		defer binding.serial.Unlock()
+		return binding.lastParentActivitySequence == 3
+	}, time.Second, time.Millisecond)
+	binding.serial.Lock()
+	require.True(t, binding.turnAdmitted, "delayed prior active/idle must not clear the new turn")
+	require.False(t, binding.turnStarted, "delayed prior active must not start the new turn")
+	binding.serial.Unlock()
+	afterAgent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	afterVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, beforeAgent.ActivityState, afterAgent.ActivityState)
+	require.Equal(t, beforeVersion, afterVersion, "stale active/idle must not apply durable activity")
+	require.Never(t, func() bool {
+		select {
+		case <-rpc.evaluationStarts:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, time.Millisecond)
+	require.Never(t, func() bool {
+		select {
+		case <-rpc.directBodies:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, time.Millisecond)
+
+	// A post-admission active/idle pair follows the same installed production
+	// callback and must start, settle, and evaluate the current turn.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	require.Eventually(t, func() bool {
+		agent, lookupErr := durable.ManagedAgent(ctx, fence.AgentID)
+		binding.serial.Lock()
+		started := binding.turnStarted
+		binding.serial.Unlock()
+		return lookupErr == nil && agent.ActivityState == "active" && started
+	}, time.Second, time.Millisecond)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.Eventually(t, func() bool {
+		binding.serial.Lock()
+		admitted := binding.turnAdmitted
+		binding.serial.Unlock()
+		agent, lookupErr := durable.ManagedAgent(ctx, fence.AgentID)
+		return lookupErr == nil && !admitted && agent.ActivityState == "idle"
+	}, 2*time.Second, time.Millisecond)
+	select {
+	case <-rpc.evaluationStarts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("current settled turn did not evaluate")
+	}
+	select {
+	case <-rpc.directBodies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("current settled turn did not wake the goal")
+	}
+}
+
+func TestManagedParentActivityGenerationChangeDropsQueuedWorker(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc, stdoutWriter := readyGoalActivityFixture(t)
+	manager.installParentActivityReceiver(binding)
+	binding.lane.serial.Lock()
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	require.Eventually(t, func() bool {
+		binding.serial.Lock()
+		defer binding.serial.Unlock()
+		return binding.lastParentActivitySequence == 1
+	}, time.Second, time.Millisecond)
+	// The callback has enqueued its worker, which is held behind lane.serial.
+	require.NoError(t, manager.AdmitPrompt(ctx, fence.AgentID, "new prompt"))
+	binding.lane.serial.Unlock()
+	require.Eventually(t, func() bool {
+		binding.serial.Lock()
+		defer binding.serial.Unlock()
+		return binding.turnAdmitted && !binding.turnStarted
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState, "queued prior event must be dropped after generation changes")
+	require.Nil(t, rpc.evaluationStarts)
+}
+
+func TestManagedGoalEvaluatorDoesNotCompleteClaimWhenCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID: "123e4567-e89b-42d3-a456-426614174090", OperationID: "goal.control",
+		Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence,
+	})
+	require.NoError(t, err)
+	rpc.startErr = errors.New("prompt response timeout")
+	rpc.cleanupErr = errors.New("abort response timeout")
+	rpc.cleanupCalls = make(chan struct{}, 1)
+	manager.evaluateManagedGoalAtSettled(binding, fence, 1)
+	select {
+	case <-rpc.cleanupCalls:
+	case <-time.After(time.Second):
+		t.Fatal("evaluator cleanup was not attempted after Start failed")
+	}
+	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "evaluating", policy.EvaluatorState)
+	require.Zero(t, policy.NotDoneWakeups)
+	require.Equal(t, 0, len(rpc.directBodies))
+	stored, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", stored.LifecycleState, "the lane cleanup is still responsible for the exact process")
+}
+
+func TestManagedGoalEvaluatorCleanupStopFailureRetainsExactBindingAndClaim(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID: "123e4567-e89b-42d3-a456-426614174091", OperationID: "goal.control",
+		Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence,
+	})
+	require.NoError(t, err)
+	rpc.startErr = errors.New("prompt response timeout")
+	rpc.cleanupErr = errors.New("abort response timeout")
+	rpc.cleanupCalls = make(chan struct{}, 1)
+	process := binding.process.(*launchProcess)
+	process.stopErr = errors.New("stop failed")
+	manager.evaluateManagedGoalAtSettled(binding, fence, 1)
+	select {
+	case <-rpc.cleanupCalls:
+	case <-time.After(time.Second):
+		t.Fatal("evaluator cleanup was not attempted after Start failed")
+	}
+	require.Eventually(t, func() bool {
+		stored, lookupErr := durable.ManagedAgent(ctx, fence.AgentID)
+		binding.serial.Lock()
+		retained := binding.retainBinding
+		binding.serial.Unlock()
+		return lookupErr == nil && stored.LastErrorCode == "PROCESS_STOP_FAILED" && retained
+	}, time.Second, time.Millisecond)
+	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "evaluating", policy.EvaluatorState)
+	require.Zero(t, policy.NotDoneWakeups)
+	stored, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Contains(t, stored.LastErrorMessage, "abort response timeout")
+	require.Contains(t, stored.LastErrorMessage, "stop failed")
+}
+
 func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t *testing.T) {
 	ctx := context.Background()
 	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
@@ -271,6 +511,107 @@ func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t 
 	case body := <-rpc.directBodies:
 		t.Fatalf("duplicate settled boundary woke goal again: %s", body)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestDelayedOldParentActivityCallbacksAreDroppedAfterPromptAdmission(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	rpc.decodedSequence = 5
+	rpc.directBodies = make(chan string, 1)
+	rpc.evaluationStarts = make(chan struct{}, 1)
+	rpc.evaluation = func(context.Context, store.ManagedGoalPolicy) (string, string, error) {
+		return store.ManagedGoalEvaluationNotDone, "keep working", nil
+	}
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID: "123e4567-e89b-42d3-a456-426614174030", OperationID: "goal.control",
+		Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence,
+	})
+	require.NoError(t, err)
+	_, err = durable.ApplyManagedParentActivity(ctx, fence, store.ManagedParentActivityEvent{Sequence: 5, State: "active"})
+	require.NoError(t, err)
+	beforeVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	// The callbacks have already been admitted to the worker queue. Holding the
+	// lane keeps their durable work behind the next prompt admission while their
+	// captured generation remains the old one.
+	binding.lane.serial.Lock()
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(6), "state": "active"})
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(7), "state": "idle"})
+	require.NoError(t, manager.AdmitPrompt(ctx, fence.AgentID, "new prompt"))
+	binding.lane.serial.Unlock()
+
+	require.Eventually(t, func() bool {
+		agent, lookupErr := durable.ManagedAgent(ctx, fence.AgentID)
+		return lookupErr == nil && agent.ActivityState == "active"
+	}, time.Second, time.Millisecond)
+	binding.serial.Lock()
+	require.True(t, binding.turnAdmitted, "stale callbacks must not clear the new prompt marker")
+	require.False(t, binding.turnStarted, "stale callbacks must not start the new prompt")
+	binding.serial.Unlock()
+	require.Never(t, func() bool {
+		select {
+		case <-rpc.directBodies:
+			return true
+		case <-rpc.evaluationStarts:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, 5*time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+	afterVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, beforeVersion, afterVersion, "stale callbacks must not apply durable activity")
+}
+
+func TestCurrentParentActivityActiveAndIdleStillSettleAndEvaluate(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	rpc.decodedSequence = 5
+	rpc.directBodies = make(chan string, 1)
+	rpc.evaluationStarts = make(chan struct{}, 1)
+	rpc.evaluation = func(context.Context, store.ManagedGoalPolicy) (string, string, error) {
+		return store.ManagedGoalEvaluationNotDone, "keep working", nil
+	}
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID: "123e4567-e89b-42d3-a456-426614174031", OperationID: "goal.control",
+		Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence,
+	})
+	require.NoError(t, err)
+	_, err = durable.ApplyManagedParentActivity(ctx, fence, store.ManagedParentActivityEvent{Sequence: 5, State: "active"})
+	require.NoError(t, err)
+	require.NoError(t, manager.AdmitPrompt(ctx, fence.AgentID, "new prompt"))
+
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(6), "state": "active"})
+	require.Eventually(t, func() bool {
+		binding.serial.Lock()
+		started := binding.turnStarted
+		binding.serial.Unlock()
+		return started
+	}, time.Second, time.Millisecond)
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(7), "state": "idle"})
+
+	require.Eventually(t, func() bool {
+		agent, lookupErr := durable.ManagedAgent(ctx, fence.AgentID)
+		return lookupErr == nil && agent.ActivityState == "idle"
+	}, time.Second, time.Millisecond)
+	binding.serial.Lock()
+	require.False(t, binding.turnAdmitted, "matching idle must clear the prompt marker")
+	binding.serial.Unlock()
+	select {
+	case <-rpc.evaluationStarts:
+	case <-time.After(time.Second):
+		t.Fatal("matching idle did not start goal evaluation")
+	}
+	select {
+	case body := <-rpc.directBodies:
+		require.Equal(t, "NOT_DONE: Review finish the migration and take the next concrete action now.", body)
+	case <-time.After(time.Second):
+		t.Fatal("matching idle did not wake the goal")
 	}
 }
 

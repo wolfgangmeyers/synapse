@@ -20,6 +20,30 @@ func (m *Manager) installParentActivityReceiver(binding *managedBinding) {
 	})
 }
 
+type managedParentActivityCapture struct {
+	generation        uint64
+	admissionSequence int64
+	admitted          bool
+}
+
+func parentActivityCaptureCurrentLocked(binding *managedBinding, capture managedParentActivityCapture, sequence int64, sequenceOK bool) bool {
+	if binding.turnGeneration != capture.generation {
+		return false
+	}
+	// A decoded frame at or before the current prompt boundary belongs to the
+	// previous stream position, even when its semantic callback was delayed.
+	if sequenceOK && binding.turnAdmitted && sequence <= binding.turnAdmissionSequence {
+		return false
+	}
+	// The current idle callback clears the marker before its durable task runs.
+	// The generation remains the identity of that completed turn. If a new
+	// marker is present, its boundary must still be the one captured here.
+	if capture.admitted && binding.turnAdmitted && binding.turnAdmissionSequence != capture.admissionSequence {
+		return false
+	}
+	return true
+}
+
 func (m *Manager) handleParentActivityEvent(binding *managedBinding, event map[string]any) {
 	if binding == nil {
 		return
@@ -27,21 +51,52 @@ func (m *Manager) handleParentActivityEvent(binding *managedBinding, event map[s
 	// This runs in Pi stdout order before a following terminal tool frame can
 	// claim success. The later asynchronous activity projection remains
 	// unchanged; this is only the missing-telemetry fallback for builtins.
-	_, sequenceOK := readinessInteger(event["sequence"])
+	sequence, sequenceOK := readinessInteger(event["sequence"])
 	state, stateOK := event["state"].(string)
+	var capture managedParentActivityCapture
+	if stateOK {
+		binding.serial.Lock()
+		capture = managedParentActivityCapture{
+			generation:        binding.turnGeneration,
+			admissionSequence: binding.turnAdmissionSequence,
+			admitted:          binding.turnAdmitted,
+		}
+		previousSequence := binding.lastParentActivitySequence
+		if sequenceOK && sequence > binding.lastParentActivitySequence {
+			binding.lastParentActivitySequence = sequence
+		}
+		stale := capture.admitted && sequenceOK && sequence <= capture.admissionSequence
+		if !stale && state == "active" && binding.turnAdmitted && (!sequenceOK || (sequence > binding.turnAdmissionSequence && sequence > previousSequence)) {
+			binding.turnStarted = true
+			binding.turnStartedSequence = sequence
+		} else if !stale && state == "idle" && binding.turnAdmitted && binding.turnStarted && (!sequenceOK || sequence > binding.turnStartedSequence) {
+			// An idle frame only closes a marker after its matching active frame.
+			// This keeps a delayed idle from an older turn from clearing a new one.
+			clearManagedTurnLocked(binding)
+		}
+		binding.serial.Unlock()
+		if stale {
+			return
+		}
+	}
 	if sequenceOK && stateOK && state == "idle" {
 		m.reconcileBuiltinToolTelemetryMissing(binding)
 	}
+	if !sequenceOK || !stateOK {
+		return
+	}
 	m.startManagedTask(func() {
 		binding.lane.serial.Lock()
-		defer binding.lane.serial.Unlock()
-		fence := bindingFence(binding.agentID, binding)
-		if !m.liveBindingForFence(m.runCtx, binding, fence) {
+		binding.serial.Lock()
+		if !parentActivityCaptureCurrentLocked(binding, capture, sequence, sequenceOK) {
+			binding.serial.Unlock()
+			binding.lane.serial.Unlock()
 			return
 		}
-		sequence, ok := readinessInteger(event["sequence"])
-		state, stateOK := event["state"].(string)
-		if !ok || !stateOK {
+		fence := bindingFence(binding.agentID, binding)
+		if !m.liveBindingForFence(m.runCtx, binding, fence) {
+			binding.serial.Unlock()
+			binding.lane.serial.Unlock()
 			return
 		}
 		updated, err := m.store.ApplyManagedParentActivity(context.Background(), fence, store.ManagedParentActivityEvent{
@@ -50,8 +105,21 @@ func (m *Manager) handleParentActivityEvent(binding *managedBinding, event map[s
 		})
 		if err == nil && updated {
 			m.publishProjection()
-			if state == "idle" {
-				m.wakeSnoozedGoalInLane(binding, fence)
+		}
+		binding.serial.Unlock()
+		binding.lane.serial.Unlock()
+		if err == nil && updated && state == "idle" {
+			binding.serial.Lock()
+			current := parentActivityCaptureCurrentLocked(binding, capture, sequence, sequenceOK)
+			binding.serial.Unlock()
+			if !current {
+				return
+			}
+			m.wakeSnoozedGoalInLane(binding, fence)
+			binding.serial.Lock()
+			current = parentActivityCaptureCurrentLocked(binding, capture, sequence, sequenceOK)
+			binding.serial.Unlock()
+			if current {
 				m.evaluateManagedGoalAtSettled(binding, fence, sequence)
 			}
 		}

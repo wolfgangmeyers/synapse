@@ -46,7 +46,7 @@ func prepareLifecycleRestartRecoveryAction(t *testing.T, fixture *restartExecuti
 
 // prepareLifecycleRestartRecoverySource leaves a retained restart action at
 // admission with direct parent work still owned by its exact live source.
-func prepareLifecycleRestartRecoverySource(t *testing.T, fixture *restartExecutionFixture, actionID string) (*store.ManagedLifecycleAction, store.ManagedRuntimeFence, store.ManagedDirectAttempt) {
+func prepareLifecycleRestartRecoverySource(t *testing.T, fixture *restartExecutionFixture, actionID string) (*store.ManagedLifecycleAction, store.ManagedRuntimeFence, store.ManagedDirectAttempt, store.ManagedSessionArtifact) {
 	t.Helper()
 	ctx := context.Background()
 	agent, err := fixture.durable.ManagedAgent(ctx, "restart-agent")
@@ -62,10 +62,9 @@ func prepareLifecycleRestartRecoverySource(t *testing.T, fixture *restartExecuti
 	require.NoError(t, err)
 	artifact := store.ManagedSessionArtifact{ArtifactID: "123e4567-e89b-42d3-a456-000000000098", AgentID: source.AgentID, PiSessionID: source.PiSessionID, SessionEpoch: source.SessionEpoch, RootRelativePath: "session.json", PathSHA256: artifactPathHash("session.json"), DiscoveryState: "materialized", FileDevice: device, FileInode: inode, CleanupState: "retained", DiscoveredAt: formatManagedTime(time.Now()), CleanupUpdatedAt: formatManagedTime(time.Now())}
 	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(ctx, artifact))
-	require.NoError(t, fixture.durable.AttachManagedLifecycleRestartResumeArtifact(ctx, actionID, source, artifact.ArtifactID))
 	action, err := fixture.durable.ManagedLifecycleAction(ctx, admission.Action.ActionID)
 	require.NoError(t, err)
-	return action, source, attempt
+	return action, source, attempt, artifact
 }
 
 func recoveredLifecycleRestartManager(t *testing.T, fixture *restartExecutionFixture) *Manager {
@@ -91,8 +90,10 @@ func TestLifecycleRestartRecoveryInterruptsParentWorkAtEverySourceStopEntry(t *t
 		t.Run(testCase.name, func(t *testing.T) {
 			fixture := newRestartExecutionFixture(t, time.Millisecond)
 			actionID := "source-stop-" + string(rune('a'+index))
-			action, source, attempt := prepareLifecycleRestartRecoverySource(t, fixture, actionID)
+			action, source, attempt, artifact := prepareLifecycleRestartRecoverySource(t, fixture, actionID)
 			if testCase.sourceStop {
+				require.NoError(t, fixture.durable.AdvanceManagedLifecycleRestartToSettle(context.Background(), action.ActionID, source))
+				require.NoError(t, fixture.durable.AttachManagedLifecycleRestartResumeArtifact(context.Background(), action.ActionID, source, artifact.ArtifactID))
 				require.NoError(t, fixture.durable.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), action.ActionID, source))
 			}
 			if testCase.idle {
@@ -101,6 +102,7 @@ func TestLifecycleRestartRecoveryInterruptsParentWorkAtEverySourceStopEntry(t *t
 				_, err = db.Exec(`UPDATE managed_agents SET activity_state='idle' WHERE agent_id='restart-agent'`)
 				require.NoError(t, err)
 				require.NoError(t, db.Close())
+				require.NoError(t, fixture.durable.AttachManagedLifecycleRestartResumeArtifact(context.Background(), action.ActionID, source, artifact.ArtifactID))
 			}
 			fixture.ops.mu.Lock()
 			fixture.ops.states[fixture.old.identity.PID] = testCase.process
@@ -118,7 +120,7 @@ func TestLifecycleRestartRecoveryInterruptsParentWorkAtEverySourceStopEntry(t *t
 
 func TestLifecycleRestartExitInterruptsParentWorkIdempotently(t *testing.T) {
 	fixture := newRestartExecutionFixture(t, time.Millisecond)
-	action, source, attempt := prepareLifecycleRestartRecoverySource(t, fixture, "restart-exit-source")
+	action, source, attempt, _ := prepareLifecycleRestartRecoverySource(t, fixture, "restart-exit-source")
 	binding, ok := fixture.manager.bindingFor(source.AgentID)
 	require.True(t, ok)
 	binding.serial.Lock()
@@ -141,6 +143,39 @@ func TestLifecycleRestartExitInterruptsParentWorkIdempotently(t *testing.T) {
 	requireManagedParentTerminalForTest(t, fixture.database, attempt, "interrupted", "interrupted")
 	require.True(t, fixture.manager.recordLifecycleRestartExit(binding))
 	requireManagedParentTerminalForTest(t, fixture.database, attempt, "interrupted", "interrupted")
+}
+
+func TestLifecycleRestartRecoveryAbsentSourceRequiresExactRetainedArtifact(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, time.Millisecond)
+	action, _, attempt, artifact := prepareLifecycleRestartRecoverySource(t, fixture, "restart-missing-artifact")
+	db, err := sql.Open("sqlite", fixture.database)
+	require.NoError(t, err)
+	_, err = db.Exec(`DELETE FROM managed_session_artifacts WHERE artifact_id=?`, artifact.ArtifactID)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	decoy := artifact
+	decoy.ArtifactID = "123e4567-e89b-42d3-a456-000000000096"
+	decoy.SessionEpoch++
+	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(context.Background(), decoy))
+	fixture.ops.mu.Lock()
+	fixture.ops.states[fixture.old.identity.PID] = ProcessAbsent
+	fixture.ops.mu.Unlock()
+
+	recovered := recoveredLifecycleRestartManager(t, fixture)
+	require.NoError(t, recovered.RecoverManagedLifecycleControls(context.Background()))
+	require.Eventually(t, func() bool {
+		stored, readErr := fixture.durable.ManagedLifecycleAction(context.Background(), action.ActionID)
+		return readErr == nil && stored.State == "failed"
+	}, time.Second, time.Millisecond)
+	stored, err := fixture.durable.ManagedLifecycleAction(context.Background(), action.ActionID)
+	require.NoError(t, err)
+	require.Equal(t, "RESTART_PREPARATION_FAILED", stored.TerminalCode)
+	fixture.factory.mu.Lock()
+	starts := fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 1, starts, "missing exact artifact must not start a target")
+	requireManagedParentTerminalForTest(t, fixture.database, attempt, "final_delivery_pending", "pending")
+	require.Empty(t, stored.TargetArtifactID)
 }
 
 func TestLifecycleRestartRecoveryPrebindMarkerFailsClosed(t *testing.T) {

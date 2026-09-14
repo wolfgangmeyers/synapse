@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   EXPECTED_CAPABILITIES,
   EXPECTED_GOAL_MIGRATIONS,
+  REPOSITORY_ROOT,
   fingerprintTaskResources,
   isLoopbackPortAvailable,
   startIsolatedGoRouter,
@@ -33,7 +34,7 @@ describe("isolated Go router fixture", () => {
     expect(router.logPath.startsWith(router.rootPath)).toBe(true);
     expect(router.attachmentsPath.startsWith(router.rootPath)).toBe(true);
     expect(router.port).not.toBe(8765);
-    expect(router.cwd).toContain("mecha-developer");
+    expect(router.cwd).toBe(REPOSITORY_ROOT);
     expect(router.pid).toBeGreaterThan(0);
     expect(taskFingerprint.files.some((file) => file.path.endsWith("go-router.db"))).toBe(true);
     expect(taskFingerprint.files.some((file) => file.path.endsWith("go-router.jsonl"))).toBe(true);
