@@ -91,6 +91,12 @@
       "body": "Run this in a subagent:\n\nEnumerate the list of all workers. For each worker, if they have an open PR, check it for the following: CI failures, merge conflicts, unaddressed feedback. If the PR has any of these, get the worker to set a goal to work on it. CI must be green and free of merge conflicts, and all new feedback must either be addressed (strongly preferred) or replied to if there is a good reason not to address it. All threads should be replied to, addressed feedback threads should be resolved.",
       "id": "ed5b2b7c-4985-4327-b99a-56b0d4cb08be",
       "updated_at": "2026-09-09T14:01:08.319Z"
+    },
+    {
+      "name": "Confidence Check",
+      "body": "Do you have high confidence that the requirements for ${ticket} is met? If not, what would be required to reach high confidence. Give your answer in plain English, and make it easy to understand.",
+      "id": "d00d417e-9bc4-4803-84d2-e324fddd5ae4",
+      "updated_at": "2026-09-14T16:09:33.890Z"
     }
   ]
 }
