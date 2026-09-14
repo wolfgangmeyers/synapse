@@ -723,6 +723,7 @@ func TestLockedLifecycleRestartRecoveryMatrix(t *testing.T) {
 type listenRecoveryFactory struct {
 	mu        sync.Mutex
 	processes []*managedTestProcess
+	started   []managed.ProcessIdentity
 	session   string
 	next      int
 }
@@ -735,6 +736,7 @@ func (f *listenRecoveryFactory) Start(_ context.Context, spec managed.CommandSpe
 	}
 	f.session = spec.SessionID
 	process := f.processes[f.next]
+	f.started = append(f.started, process.identity)
 	f.next++
 	return process, nil
 }
@@ -863,25 +865,62 @@ func TestListenColdRecoveryGlobalStoreFailureCleansPriorBindings(t *testing.T) {
 	require.Equal(t, managed.ProcessAbsent, ops.states[firstTarget.identity.PID])
 	require.Equal(t, managed.ProcessOwned, ops.states[secondTarget.identity.PID])
 	ops.mu.Unlock()
+	factory.mu.Lock()
+	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity}, factory.started)
+	factory.mu.Unlock()
+
+	secondAction, err := durable.ManagedRootRecoveryAction(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, "reaping", secondAction.Stage)
+	require.NotEmpty(t, secondAction.UpdatedAt)
+	secondRecovery, err := durable.ManagedCrashRecovery(ctx, "second")
+	require.NoError(t, err)
+	require.NotEmpty(t, secondRecovery.RetryAt, "the second recovery keeps its persisted crash backoff")
+	require.Len(t, secondRecovery.CrashTimes, 1)
+	due, err := durable.ManagedCrashRecoveryDue(ctx, "second")
+	require.NoError(t, err)
+	require.False(t, due, "the deferred second recovery is still before its persisted retry time")
+	secondAgent, err := manager.Agent(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, "running", secondAgent.LifecycleState)
+	require.Equal(t, "stopped", secondAgent.ActivityState)
+	require.False(t, secondAgent.AcceptingPrompts)
+	require.Equal(t, 9102, secondAgent.ProcessPID)
 
 	_, err = faultDB.Exec("DROP TRIGGER reject_second_recovery")
 	require.NoError(t, err)
 	require.NoError(t, router.Listen(ctx))
-	require.Equal(t, 3, factory.next)
+	factory.mu.Lock()
+	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity, firstRetryTarget.identity}, factory.started)
+	require.Equal(t, 2, factory.next)
+	factory.mu.Unlock()
 	require.NoError(t, manager.AdmitPrompt(ctx, "first", "retry must use the new binding"))
 	firstAgent, err := manager.Agent(ctx, "first")
 	require.NoError(t, err)
 	require.Equal(t, firstRetryTarget.identity.PID, firstAgent.ProcessPID)
-	secondAgent, err := manager.Agent(ctx, "second")
+	secondAgent, err = manager.Agent(ctx, "second")
 	require.NoError(t, err)
-	require.Equal(t, secondTarget.identity.PID, secondAgent.ProcessPID)
+	require.Equal(t, 9102, secondAgent.ProcessPID, "the deferred recovery keeps the old binding")
+	secondAction, err = durable.ManagedRootRecoveryAction(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, "reaping", secondAction.Stage, "the deferred recovery remains at its persisted pre-target stage")
+	secondRecoveryAfterRetry, err := durable.ManagedCrashRecovery(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, secondRecovery.RetryAt, secondRecoveryAfterRetry.RetryAt)
+	require.Equal(t, secondRecovery.CrashTimes, secondRecoveryAfterRetry.CrashTimes)
+	due, err = durable.ManagedCrashRecoveryDue(ctx, "second")
+	require.NoError(t, err)
+	require.False(t, due)
 	ops.mu.Lock()
 	require.Equal(t, managed.ProcessAbsent, ops.states[firstTarget.identity.PID])
 	require.Equal(t, managed.ProcessOwned, ops.states[firstRetryTarget.identity.PID])
-	require.Equal(t, managed.ProcessOwned, ops.states[secondTarget.identity.PID])
+	require.Equal(t, managed.ProcessOwned, ops.states[secondTarget.identity.PID], "the deferred target was never started")
+	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity}, ops.closed)
 	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity}, ops.waited)
-	require.Empty(t, ops.signals)
+	require.Empty(t, ops.signals, "the deferred second target is never signaled")
 	ops.mu.Unlock()
+
+	require.NoError(t, router.Close(ctx))
 }
 
 func TestListenRecoversManagedRestartTransitionsBeforeBind(t *testing.T) {
