@@ -23,12 +23,12 @@ describe("Complete timeline entry", () => {
     [{ kind: "tool" as const, tool_name: "read", outcome: "active" as const }, "Running read", "fa-wrench", "activity-entry--blue", true],
     [{ kind: "tool" as const, tool_name: "bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true],
     [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true],
-    [{ kind: "tool" as const, tool_name: "bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--teal", false],
-    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--teal", false],
-    [{ kind: "tool" as const, tool_name: "goal", outcome: "success" as const }, "Updated goal", "fa-flag", "activity-entry--purple", false],
-    [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-clock", "activity-entry--yellow", false],
-    [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-wrench", "activity-entry--blue", false],
-    [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-wrench", "activity-entry--blue", false],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "success" as const }, "Ran bash", "fa-check", "activity-entry--green", false],
+    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "success" as const }, "Ran bash", "fa-check", "activity-entry--green", false],
+    [{ kind: "tool" as const, tool_name: "goal", outcome: "success" as const }, "Updated goal", "fa-check", "activity-entry--green", false],
+    [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-check", "activity-entry--green", false],
+    [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-check", "activity-entry--green", false],
+    [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-check", "activity-entry--green", false],
     [{ kind: "tool" as const, tool_name: "read", outcome: "failed" as const, error: { code: "FAILED", retryable: false, detail_available: false } }, "Read failed", "fa-wrench", "activity-entry--danger", false],
     [{ kind: "tool" as const, tool_name: "bash", outcome: "interrupted" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } }, "Bash interrupted", "fa-terminal", "activity-entry--danger", false],
   ] as const)("renders %s with the canonical visual mapping", (presentation, label, icon, tone, active) => {
@@ -37,7 +37,11 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(`.${icon}`)).toBeInTheDocument();
     expect(container.querySelector(`.${tone}`)).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--active")).toBe(active ? container.querySelector("article") : null);
-    if (presentation.outcome === "failed" || presentation.outcome === "interrupted") expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
+    if (presentation.outcome === "success") expect(container.querySelector(".activity-entry--terminal-success")).toBeInTheDocument();
+    if (presentation.outcome === "failed" || presentation.outcome === "interrupted") {
+      expect(container.querySelector(".activity-entry--terminal-danger")).toBeInTheDocument();
+      expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
+    }
   });
 
   it("renders an old unstructured payload as a named activity, not the generic legacy card", () => {
@@ -54,15 +58,16 @@ describe("Complete timeline entry", () => {
     expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
     expect(container.querySelector(".fa-terminal")).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--danger")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--terminal-danger")).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--active")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /details/i })).not.toBeInTheDocument();
   });
 
   it.each([
-    { outcome: "success" as const, label: "Ran bash", detail: "Command completed", tone: "teal" as const },
-    { outcome: "error" as const, label: "Bash failed", detail: "Command failed", tone: "danger" as const, error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } },
-    { outcome: "interrupted" as const, label: "Bash interrupted", detail: "Stopped by user", tone: "danger" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } },
-  ])("updates one builtin bash card in place for $outcome", ({ outcome, label, detail, tone, error }) => {
+    { outcome: "success" as const, label: "Ran bash", detail: "Command completed", tone: "green" as const, terminalClass: "activity-entry--terminal-success", icon: "fa-check" },
+    { outcome: "error" as const, label: "Bash failed", detail: "Command failed", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger", icon: "fa-terminal", error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } },
+    { outcome: "interrupted" as const, label: "Bash interrupted", detail: "Stopped by user", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger", icon: "fa-terminal", error: { code: "INTERRUPTED", retryable: false, detail_available: false } },
+  ])("updates one builtin bash card in place for $outcome", ({ outcome, label, detail, tone, terminalClass, icon, error }) => {
     const id = "complete:bash";
     const { container, rerender } = render(<CompleteTimelineEntry entry={activityEntry(id, { kind: "tool", tool_name: "bash", outcome: "active" })} />);
     const initialArticle = activityArticle(container);
@@ -78,26 +83,28 @@ describe("Complete timeline entry", () => {
     expect(container.querySelectorAll("article")).toHaveLength(1);
     expect(terminalArticle).toHaveAttribute("data-activity-id", id);
     expect(terminalArticle).toHaveClass(`activity-entry--${tone}`);
+    expect(terminalArticle).toHaveClass(terminalClass);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
+    expect(terminalArticle.querySelector(`.${icon}`)).toBeInTheDocument();
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.getByText(detail)).toBeInTheDocument();
   });
 
   it.each([
-    { initial: "queued" as const, terminal: "completed" as const, outcome: "completed" as const, label: "Subagent finished", tone: "blue" as const },
-    { initial: "running" as const, terminal: "completed" as const, outcome: "completed" as const, label: "Subagent finished", tone: "blue" as const },
-    { initial: "running" as const, terminal: "aborted" as const, outcome: "aborted" as const, label: "Subagent stopped", tone: "blue" as const },
-    { initial: "running" as const, terminal: "error" as const, outcome: "error" as const, label: "Subagent failed", tone: "danger" as const },
-    { initial: "running" as const, terminal: "interrupted_unknown" as const, outcome: "unknown" as const, label: "Subagent interrupted — outcome unknown", tone: "amber" as const },
-  ])("updates one native subagent card from $initial to $terminal", ({ initial, terminal, outcome, label, tone }) => {
+    { initial: "queued" as const, terminal: "completed" as const, outcome: "completed" as const, label: "Subagent finished", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
+    { initial: "running" as const, terminal: "completed" as const, outcome: "completed" as const, label: "Subagent finished", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
+    { initial: "running" as const, terminal: "aborted" as const, outcome: "aborted" as const, label: "Subagent stopped", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { initial: "running" as const, terminal: "stopped" as const, outcome: "unknown" as const, label: "Subagent stopped", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { initial: "running" as const, terminal: "error" as const, outcome: "error" as const, label: "Subagent failed", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { initial: "running" as const, terminal: "interrupted_unknown" as const, outcome: "unknown" as const, label: "Subagent interrupted — outcome unknown", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+  ])("updates one native subagent card from $initial to $terminal", ({ initial, terminal, outcome, label, tone, terminalClass }) => {
     const id = "complete:subagent";
     const detail = "Native child · Native child finished";
     const { container, rerender } = render(<CompleteTimelineEntry entry={activityEntry(id, { kind: "child", child_state: initial, outcome: "active" })} />);
     const initialArticle = activityArticle(container);
 
     expect(initialArticle).toHaveAttribute("data-activity-id", id);
-    expect(initialArticle).toHaveClass("activity-entry--blue");
-    expect(initialArticle).not.toHaveClass("activity-entry--active");
+    expect(initialArticle).toHaveClass("activity-entry--blue", "activity-entry--active");
 
     rerender(<CompleteTimelineEntry entry={activityEntry(id, { kind: "child", child_state: terminal, outcome, child_label: "Native child", summary: "Native child finished" })} />);
 
@@ -105,26 +112,27 @@ describe("Complete timeline entry", () => {
     expect(terminalArticle).toBe(initialArticle);
     expect(container.querySelectorAll("article")).toHaveLength(1);
     expect(terminalArticle).toHaveAttribute("data-activity-id", id);
-    expect(terminalArticle).toHaveClass(`activity-entry--${tone}`);
+    expect(terminalArticle).toHaveClass(`activity-entry--${tone}`, terminalClass);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
+    if (terminalClass === "activity-entry--terminal-success") expect(terminalArticle.querySelector(".fa-check")).toBeInTheDocument();
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.getByText(detail)).toBeInTheDocument();
   });
 
   it.each([
-    { outcome: "completed" as const, label: "Context compacted", tone: "purple" as const },
-    { outcome: "failed" as const, label: "Context compaction failed", tone: "danger" as const },
-    { outcome: "aborted" as const, label: "Context compaction interrupted — outcome unknown", tone: "amber" as const },
-    { outcome: "reconciled_unknown" as const, label: "Context compaction interrupted — outcome unknown", tone: "amber" as const },
-  ])("updates one parent compaction card to $outcome", ({ outcome, label, tone }) => {
+    { outcome: "completed" as const, label: "Context compacted", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
+    { outcome: "failed" as const, label: "Context compaction failed", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { outcome: "interrupted" as const, label: "Context compaction interrupted — outcome unknown", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { outcome: "aborted" as const, label: "Context compaction interrupted — outcome unknown", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { outcome: "reconciled_unknown" as const, label: "Context compaction interrupted — outcome unknown", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+  ])("updates one parent compaction card to $outcome", ({ outcome, label, tone, terminalClass }) => {
     const id = "complete:compaction";
     const detail = "Compaction finished";
     const { container, rerender } = render(<CompleteTimelineEntry entry={activityEntry(id, { kind: "compaction", outcome: "compacting" })} />);
     const initialArticle = activityArticle(container);
 
     expect(initialArticle).toHaveAttribute("data-activity-id", id);
-    expect(initialArticle).toHaveClass("activity-entry--purple");
-    expect(initialArticle).not.toHaveClass("activity-entry--active");
+    expect(initialArticle).toHaveClass("activity-entry--purple", "activity-entry--active");
 
     rerender(<CompleteTimelineEntry entry={activityEntry(id, { kind: "compaction", outcome, summary: detail })} />);
 
@@ -132,8 +140,9 @@ describe("Complete timeline entry", () => {
     expect(terminalArticle).toBe(initialArticle);
     expect(container.querySelectorAll("article")).toHaveLength(1);
     expect(terminalArticle).toHaveAttribute("data-activity-id", id);
-    expect(terminalArticle).toHaveClass(`activity-entry--${tone}`);
+    expect(terminalArticle).toHaveClass(`activity-entry--${tone}`, terminalClass);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
+    if (terminalClass === "activity-entry--terminal-success") expect(terminalArticle.querySelector(".fa-check")).toBeInTheDocument();
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.getByText(detail)).toBeInTheDocument();
   });
