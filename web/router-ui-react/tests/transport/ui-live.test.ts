@@ -169,6 +169,11 @@ describe("direct UI-live transport", () => {
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
     expect(recoveries).toHaveBeenCalledTimes(1);
     expect(frames).toHaveLength(5);
+    sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 8, generated_at: "2030-01-01T00:00:02.000Z", agents: [agent] }) });
+    expect(recoveries).toHaveBeenCalledTimes(2);
+    expect(frames).toHaveLength(5);
+    vi.runAllTimers();
+    expect(sockets).toHaveLength(3);
     client.close();
     vi.useRealTimers();
   });
