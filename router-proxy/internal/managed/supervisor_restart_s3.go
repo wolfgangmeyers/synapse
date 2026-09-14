@@ -15,15 +15,22 @@ func (m *Manager) startLifecycleRestart(binding *managedBinding, actionID string
 	if binding == nil || binding.lane == nil {
 		return
 	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_PREPARATION_FAILED", source)
+		return
+	}
 	binding.preparationWG.Add(1)
-	if !m.startManagedTask(func() {
+	m.startWG.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.startWG.Done()
 		defer binding.preparationWG.Done()
 		binding.lane.serial.Lock()
 		defer binding.lane.serial.Unlock()
 		m.executeLifecycleRestartInLane(binding, actionID, source)
-	}) {
-		binding.preparationWG.Done()
-	}
+	}()
 }
 
 func (m *Manager) lifecycleRestartAction(actionID string, source store.ManagedRuntimeFence) (*store.ManagedLifecycleAction, error) {
@@ -167,7 +174,7 @@ func (m *Manager) stopLifecycleRestartSourceInLane(binding *managedBinding, acti
 		return false
 	}
 	if rpc != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 	}
 	if binding != nil {
 		binding.serial.Lock()
@@ -248,7 +255,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	candidate.serial.Unlock()
 	state, stateErr := rpc.GetState(m.runCtx)
 	if stateErr != nil || !stateSessionMatches(state, source.PiSessionID) {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = m.cleanupUninstalledTarget(process, identity, candidate.waitDone)
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
@@ -257,43 +264,43 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	// or inode is rejected by the artifact owner before we bind this target.
 	artifact, artifactErr := m.artifacts.discover(context.Background(), source.AgentID, source.SessionEpoch, source.PiSessionID, state)
 	if artifactErr != nil || artifact.ArtifactID != action.TargetArtifactID {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = m.cleanupUninstalledTarget(process, identity, candidate.waitDone)
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
 	}
 	if _, artifactErr = m.verifyLifecycleRestartArtifact(action, source); artifactErr != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = m.cleanupUninstalledTarget(process, identity, candidate.waitDone)
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
 	}
 	target := bindingFence(source.AgentID, candidate)
 	if err := m.store.InstallManagedLifecycleRestartTarget(context.Background(), actionID, attemptID, source, target); err != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = m.cleanupUninstalledTarget(process, identity, candidate.waitDone)
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
 	}
 	if !m.installBinding(candidate) {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupLifecycleRestartTarget(actionID, source, target, candidate)
 		return
 	}
 	if err := m.readinessGate(m.runCtx, candidate, target); err != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupLifecycleRestartTarget(actionID, source, target, candidate)
 		return
 	}
 	select {
 	case <-candidate.waitSignal:
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupLifecycleRestartTarget(actionID, source, target, candidate)
 		return
 	default:
 	}
 	if err := m.store.CompleteManagedLifecycleRestart(context.Background(), actionID, target); err != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		m.cleanupLifecycleRestartTarget(actionID, source, target, candidate)
 		return
 	}
@@ -355,7 +362,7 @@ func (m *Manager) reapLifecycleRestartBinding(ctx context.Context, binding *mana
 		return &store.ManagedRestartStaleError{AgentID: fence.AgentID}
 	}
 	if rpc != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 	}
 	binding.serial.Lock()
 	binding.reaped = true

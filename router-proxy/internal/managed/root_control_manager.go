@@ -32,13 +32,15 @@ func (m *Manager) handleRootControlEvent(binding *managedBinding, event RootCont
 	if binding == nil {
 		return
 	}
-	go func() {
-		binding.rootControlSerial.Lock()
-		defer binding.rootControlSerial.Unlock()
-		ctx, cancel := context.WithTimeout(m.runCtx, 45*time.Second)
-		defer cancel()
-		m.admitAndRunRootControl(ctx, binding, event)
-	}()
+	// The RPC client's shared semantic FIFO owns stdout order. Keep this
+	// callback synchronous so a later parent settled event cannot overtake root
+	// admission and policy application; the RPC reader remains independent and
+	// continues consuming receipts while this handler waits.
+	binding.rootControlSerial.Lock()
+	defer binding.rootControlSerial.Unlock()
+	ctx, cancel := context.WithTimeout(m.runCtx, 45*time.Second)
+	defer cancel()
+	m.admitAndRunRootControl(ctx, binding, event)
 }
 
 func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBinding, event RootControlEvent) {

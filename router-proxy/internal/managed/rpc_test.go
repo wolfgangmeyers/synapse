@@ -90,8 +90,17 @@ func TestRPCClientManagedGoalEvaluationConsumesOnlyItsExactFencedResult(t *testi
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true}))
 	require.NoError(t, <-started)
 
-	result := make(chan struct{ outcome, reason string; err error }, 1)
-	go func() { outcome, reason, waitErr := client.WaitForManagedGoalEvaluation(context.Background()); result <- struct{ outcome, reason string; err error }{outcome, reason, waitErr} }()
+	result := make(chan struct {
+		outcome, reason string
+		err             error
+	}, 1)
+	go func() {
+		outcome, reason, waitErr := client.WaitForManagedGoalEvaluation(context.Background())
+		result <- struct {
+			outcome, reason string
+			err             error
+		}{outcome, reason, waitErr}
+	}()
 	// The matching request receipt and a stale result cannot settle the token.
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": policy.EvaluatorID, "goal_revision": policy.EvaluatorGoalRevision, "settled_sequence": policy.EvaluatorSettledSequence, "phase": "requested"}}}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": "123e4567-e89b-42d3-a456-426614174002", "goal_revision": policy.EvaluatorGoalRevision, "settled_sequence": policy.EvaluatorSettledSequence, "phase": "result", "outcome": "DONE", "reason": "stale"}}}}))
@@ -100,6 +109,360 @@ func TestRPCClientManagedGoalEvaluationConsumesOnlyItsExactFencedResult(t *testi
 	require.NoError(t, got.err)
 	require.Equal(t, store.ManagedGoalEvaluationNotDone, got.outcome)
 	require.Equal(t, "work remains", got.reason)
+}
+
+func semanticRootControlFrame(requestID string) map[string]any {
+	definitionSHA := strings.Repeat("a", 64)
+	return map[string]any{"type": "custom_message", "customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{
+		"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "call-1", "capability_id": "goal", "tool_name": "goal",
+		"definition_id": "def_" + definitionSHA, "definition_sha256": definitionSHA, "operation_id": "goal.control", "manifest_sha256": strings.Repeat("b", 64),
+		"runtime_generation": "123e4567-e89b-42d3-a456-426614174000", "session_epoch": int64(1), "context_ref": "root", "arguments": map[string]any{"action": "set"},
+	}}
+}
+
+func TestRPCClientSemanticCallbacksPreserveRootActivityOrderWhileRootWaitsForReceipt(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	policyWatermark := uint64(0)
+	client.mu.Lock()
+	client.policyWatermark = &policyWatermark
+	client.mu.Unlock()
+	rootStarted := make(chan struct{})
+	policyReceived := make(chan struct{})
+	releaseRoot := make(chan struct{})
+	settled := make(chan struct{})
+	client.SetRootControlEventHandler(func(RootControlEvent) {
+		close(rootStarted)
+		_, err := client.WaitForPolicyApplied(context.Background(), "123e4567-e89b-42d3-a456-426614174000", 1)
+		require.NoError(t, err)
+		close(policyReceived)
+		<-releaseRoot
+	})
+	client.SetParentActivityEventHandler(func(event map[string]any) {
+		if event["state"] == "idle" {
+			close(settled)
+		}
+	})
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174001")))
+	select {
+	case <-rootStarted:
+	case <-time.After(time.Second):
+		t.Fatal("root callback did not start")
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": policyDetails("123e4567-e89b-42d3-a456-426614174000", 1)}}))
+	select {
+	case <-policyReceived:
+	case <-time.After(time.Second):
+		t.Fatal("policy receipt did not unblock the root callback")
+	}
+	select {
+	case <-settled:
+		t.Fatal("settled callback overtook the blocked root callback")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseRoot)
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("settled callback did not run after root callback")
+	}
+}
+
+func TestRPCClientSemanticCallbacksKeepFiftyRootActivityPairsInStdoutOrder(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	observed := make(chan string, 100)
+	client.SetRootControlEventHandler(func(RootControlEvent) { observed <- "root" })
+	client.SetParentActivityEventHandler(func(event map[string]any) {
+		if event["state"] == "idle" {
+			observed <- "settled"
+		}
+	})
+	for index := 1; index <= 50; index++ {
+		require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame(fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index))))
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	}
+	for index := 1; index <= 100; index++ {
+		select {
+		case kind := <-observed:
+			expected := "root"
+			if index%2 == 0 {
+				expected = "settled"
+			}
+			require.Equal(t, expected, kind)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for semantic event %d", index)
+		}
+	}
+}
+
+func TestRPCClientCloseDrainsAcceptedSemanticCallback(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	closeStarted := make(chan struct{})
+	client := NewRPCClient(io.Discard, stdoutReader, func() error {
+		close(closeStarted)
+		return stdoutWriter.Close()
+	}).(*rpcClient)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	completed := make(chan struct{})
+	secondCompleted := make(chan struct{})
+	allowReturn := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseCallback := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseCallback()
+		select {
+		case <-allowReturn:
+		default:
+			close(allowReturn)
+		}
+		require.NoError(t, client.Close())
+	})
+	callbackCount := 0
+	client.SetRootControlEventHandler(func(RootControlEvent) {
+		callbackCount++
+		if callbackCount == 1 {
+			close(entered)
+			<-release
+			close(completed)
+			<-allowReturn
+			return
+		}
+		close(secondCompleted)
+	})
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174001")))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("accepted semantic callback did not start")
+	}
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174003")))
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return len(client.semanticQueue) == 1
+	}, time.Second, time.Millisecond, "second semantic callback was not admitted before Close")
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not reach its shutdown boundary")
+	}
+	releaseCallback()
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("accepted semantic callback did not complete after release")
+	}
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+	close(allowReturn)
+	select {
+	case <-secondCompleted:
+	case <-time.After(time.Second):
+		t.Fatal("Close dropped an accepted queued semantic callback")
+	}
+	client.WaitForClose()
+}
+
+func TestRPCClientSemanticCallbackCanCloseItself(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	closed := make(chan struct{})
+	client.SetRootControlEventHandler(func(RootControlEvent) {
+		require.NoError(t, client.Close())
+		close(closed)
+	})
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174001")))
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("semantic callback deadlocked in Close")
+	}
+	client.WaitForClose()
+}
+
+func TestRPCClientExternalCloseUnblocksBlockedReceiptAndJoinsReader(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return nil }).(*rpcClient)
+	policyWatermark := uint64(0)
+	client.mu.Lock()
+	client.policyWatermark = &policyWatermark
+	client.mu.Unlock()
+	callbackStarted := make(chan struct{})
+	callbackDone := make(chan error, 1)
+	client.SetRootControlEventHandler(func(RootControlEvent) {
+		close(callbackStarted)
+		_, err := client.WaitForPolicyApplied(context.Background(), "123e4567-e89b-42d3-a456-426614174000", 1)
+		callbackDone <- err
+	})
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174001")))
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked semantic callback did not start")
+	}
+	require.NoError(t, client.Close())
+	select {
+	case err := <-callbackDone:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "managed RPC closed")
+	case <-time.After(time.Second):
+		t.Fatal("Close did not release the blocked receipt waiter")
+	}
+	client.WaitForClose()
+	select {
+	case <-client.readerDone:
+	default:
+		t.Fatal("WaitForClose returned before the stdout reader exited")
+	}
+}
+
+func TestRPCClientSemanticOverflowNotifiesTerminalHandlerExactlyOnce(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = client.Close(); client.WaitForClose() })
+	terminalCalls := make(chan error, 2)
+	client.SetRPCReaderTerminalHandler(func(err error) { terminalCalls <- err })
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	client.SetRootControlEventHandler(func(RootControlEvent) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	})
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174001")))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first semantic callback did not start")
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		for index := 2; index <= rpcSemanticQueueCapacity+2; index++ {
+			if err := writeRPC(stdoutWriter, semanticRootControlFrame(fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index))); err != nil {
+				writeDone <- err
+				return
+			}
+		}
+		writeDone <- nil
+	}()
+	require.Eventually(t, func() bool { return errors.Is(client.terminalError(), ErrSemanticQueueFull) }, time.Second, time.Millisecond)
+	close(release)
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("stdout writer remained blocked after semantic queue overflow")
+	}
+	select {
+	case err := <-terminalCalls:
+		require.ErrorIs(t, err, ErrSemanticQueueFull)
+	case <-time.After(time.Second):
+		t.Fatal("queue overflow did not notify the terminal handler")
+	}
+	client.WaitForClose()
+	select {
+	case err := <-terminalCalls:
+		t.Fatalf("terminal handler was called twice: %v", err)
+	default:
+	}
+}
+
+type eofSignalingReader struct {
+	io.Reader
+	eof  chan struct{}
+	once sync.Once
+}
+
+func (r *eofSignalingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		r.once.Do(func() { close(r.eof) })
+	}
+	return n, err
+}
+
+func TestRPCClientSemanticCallbackPanicNotifiesReaderTerminalHandlerOnce(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	readerExited := make(chan struct{})
+	client := NewRPCClient(io.Discard, &eofSignalingReader{Reader: stdoutReader, eof: readerExited}, func() error {
+		return stdoutWriter.Close()
+	}).(*rpcClient)
+	terminalCalls := make(chan error, 2)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	client.SetRPCReaderTerminalHandler(func(err error) { terminalCalls <- err })
+	client.SetRootControlEventHandler(func(RootControlEvent) { panic("semantic callback panic") })
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174002")))
+	select {
+	case err := <-terminalCalls:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "semantic handler panicked")
+	case <-time.After(time.Second):
+		t.Fatal("semantic callback panic did not notify the reader terminal handler")
+	}
+	require.NoError(t, stdoutWriter.Close())
+	select {
+	case <-readerExited:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not observe EOF after the panic")
+	}
+	select {
+	case err := <-terminalCalls:
+		t.Fatalf("reader exit duplicated terminal notification: %v", err)
+	default:
+	}
+}
+
+func TestRPCClientSemanticQueueOverflowTerminatesWithoutBlockingReader(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	client.SetRootControlEventHandler(func(RootControlEvent) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	})
+	require.NoError(t, writeRPC(stdoutWriter, semanticRootControlFrame("123e4567-e89b-42d3-a456-426614174001")))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first semantic callback did not start")
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		for index := 2; index <= rpcSemanticQueueCapacity+2; index++ {
+			if err := writeRPC(stdoutWriter, semanticRootControlFrame(fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index))); err != nil {
+				writeDone <- err
+				return
+			}
+		}
+		writeDone <- nil
+	}()
+	require.Eventually(t, func() bool { return errors.Is(client.terminalError(), ErrSemanticQueueFull) }, time.Second, time.Millisecond)
+	close(release)
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("stdout writer remained blocked after semantic queue overflow")
+	}
 }
 
 func TestRPCClientSuppressesEvaluatorSettledEvent(t *testing.T) {
@@ -119,6 +482,39 @@ func TestRPCClientSuppressesEvaluatorSettledEvent(t *testing.T) {
 	case event := <-activity:
 		t.Fatalf("evaluator settled event reached ordinary activity handling: %#v", event)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestRPCClientSuppressesEvaluatorSettledEventBeforeResultReceipt(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	client.mu.Lock()
+	client.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: "123e4567-e89b-42d3-a456-426614174001", goalRevision: 1, settled: 3, fence: fence}
+	client.suppressNextEvaluatorSettled = true
+	client.evaluatorSettledObserved = false
+	client.mu.Unlock()
+	activity := make(chan map[string]any, 1)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	result := make(chan error, 1)
+	go func() { _, _, err := client.WaitForManagedGoalEvaluation(context.Background()); result <- err }()
+	// Pi emits its native settled frame before the hidden evaluator receipt.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		t.Fatalf("evaluator settled event reached ordinary activity handling: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": map[string]any{"protocol": "mecha.policy/v1", "manifest_sha256": fence.ManifestHash, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "evaluator": map[string]any{"evaluation_id": "123e4567-e89b-42d3-a456-426614174001", "goal_revision": int64(1), "settled_sequence": int64(3), "phase": "result", "outcome": "DONE", "reason": "complete"}}}}))
+	require.NoError(t, <-result)
+	// The next ordinary settled event belongs to the next turn and must remain visible.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("ordinary settled event did not reach activity handling")
 	}
 }
 

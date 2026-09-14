@@ -35,6 +35,8 @@ type appendAckNativeRPC struct {
 	body          string
 	interrupt     func()
 	recoveryGate  func()
+	promptCalls   chan struct{}
+	promptRelease <-chan struct{}
 }
 
 func (r *appendAckNativeRPC) PrepareManagedMailbox(context.Context) (string, error) {
@@ -43,7 +45,17 @@ func (r *appendAckNativeRPC) PrepareManagedMailbox(context.Context) (string, err
 func (r *appendAckNativeRPC) PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
 	r.mu.Lock()
 	r.prompts++
+	promptCalls, promptRelease := r.promptCalls, r.promptRelease
 	r.mu.Unlock()
+	if promptCalls != nil {
+		select {
+		case promptCalls <- struct{}{}:
+		default:
+		}
+	}
+	if promptRelease != nil {
+		<-promptRelease
+	}
 	events := make(chan DirectMailboxEvent, 1)
 	events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: r.appendID}}
 	if r.interrupt != nil {
@@ -92,8 +104,13 @@ func TestManagedDeliveryAppendAckRecoveryNative(t *testing.T) {
 	require.NoError(t, err)
 	process := &appendAckNativeProcess{identity: ProcessIdentity{PID: 4101, StartMarker: "native-start", Incarnation: "native-incarnation"}}
 	interrupted := make(chan struct{})
+	promptCalls := make(chan struct{}, 2)
+	promptRelease := make(chan struct{})
+	var promptReleaseOnce sync.Once
+	releasePrompt := func() { promptReleaseOnce.Do(func() { close(promptRelease) }) }
+	t.Cleanup(releasePrompt)
 	var once sync.Once
-	rpc := &appendAckNativeRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, appendID: "pi-entry-fixed", body: "append ack body", interrupt: func() { once.Do(func() { close(interrupted) }) }}
+	rpc := &appendAckNativeRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, appendID: "pi-entry-fixed", body: "append ack body", interrupt: func() { once.Do(func() { close(interrupted) }) }, promptCalls: promptCalls, promptRelease: promptRelease}
 	factory := appendAckNativeFactory{process: process, rpc: rpc}
 	ackInterrupted := make(chan struct{})
 	startupRecoveryEntered := make(chan struct{})
@@ -131,13 +148,21 @@ func TestManagedDeliveryAppendAckRecoveryNative(t *testing.T) {
 	require.NoError(t, err)
 	manager.OfferDirect("append-agent")
 	select {
-	case <-interrupted:
+	case <-promptCalls:
 	case <-time.After(time.Second):
-		t.Fatal("direct prompt did not reach append boundary")
+		t.Fatal("direct prompt did not reach the native prompt boundary")
 	}
+	// PromptManagedMailbox is held after entry. This proves the durable prompted
+	// state exists before the native command/receipt is released.
 	attempt, err := durable.ManagedDirectAttempt(ctx, "123e4567-e89b-42d3-a456-426614174099", 1)
 	require.NoError(t, err)
 	require.Equal(t, "direct_prompted", attempt.State)
+	releasePrompt()
+	select {
+	case <-interrupted:
+	case <-time.After(time.Second):
+		t.Fatal("direct prompt did not return after its persisted-state barrier")
+	}
 	select {
 	case <-ackInterrupted:
 	case <-time.After(time.Second):
@@ -191,6 +216,11 @@ func TestManagedDeliveryAppendAckRecoveryNative(t *testing.T) {
 	close(release)
 	require.NoError(t, <-results)
 	require.NoError(t, <-results)
+	select {
+	case <-promptCalls:
+		t.Fatal("a recovery claimant prompted after the attempt was acknowledged")
+	default:
+	}
 	stored, err := durable.ManagedDirectAttempt(ctx, "123e4567-e89b-42d3-a456-426614174099", 1)
 	require.NoError(t, err)
 	require.Equal(t, "acknowledged", stored.State)

@@ -120,7 +120,10 @@ type ResetResult struct {
 // managedAgentLane survives a binding replacement. Restart execution, recovery,
 // close, and exit handling all acquire this one owner before they can touch the
 // durable transition or either process group.
-type managedAgentLane struct{ serial sync.Mutex }
+type managedAgentLane struct {
+	serial    sync.Mutex
+	admission sync.Mutex
+}
 
 const (
 	maxQueuedManagedChildDeltas          = 64
@@ -133,7 +136,12 @@ type managedBinding struct {
 	serial  sync.Mutex
 	// Root controls can resolve an active direct turn. Keep their append path
 	// ordered without blocking the direct-delivery lane that needs that result.
-	rootControlSerial       sync.Mutex
+	rootControlSerial sync.Mutex
+	// Direct delivery has one command/receipt owner, but it must not occupy the
+	// lifecycle lane while waiting for Pi or an acknowledgment hook. Lifecycle
+	// admission closes the durable fence; its executor then joins the lane and
+	// settles the exact source turn.
+	directDeliverySerial    sync.Mutex
 	childDeltaSerial        sync.Mutex
 	childDeltaQueue         []map[string]any
 	childDeltaDraining      bool
@@ -514,11 +522,11 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		// A result released by Stop belongs to manager cleanup and remains EOF.
 		if errors.Is(err, io.EOF) {
 			if waitErr, exited := completedBindingWait(binding); exited {
-				_ = rpc.Close() // diagnostic only; RPC closure does not decide ownership.
+				_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
 				m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr)
 				return
 			}
-			_ = rpc.Close() // diagnostic only; RPC closure does not decide ownership.
+			_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
 			limit := m.config.Limits.GracefulStop
 			if limit <= 0 {
 				limit = DefaultLimits().GracefulStop
@@ -560,27 +568,27 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 				return
 			}
 		}
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "READINESS_FAILED", sanitizeError(err))
 		return
 	}
 	if waitErr, exited := completedBindingWait(binding); exited {
-		_ = rpc.Close() // diagnostic only; RPC closure does not decide ownership.
+		_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
 		m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr)
 		return
 	}
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
 		binding.serial.Unlock()
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "READINESS_FAILED", "managed runtime binding changed before ready")
 		return
 	}
 	if err = m.store.MarkManagedReadyFromSources(durableCtx, fence); err != nil {
 		binding.serial.Unlock()
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(err))
 		return
@@ -591,7 +599,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	if binding.parentCompacting != nil {
 		if _, reconcileErr := m.store.ReconcileManagedParentCompaction(durableCtx, fence, *binding.parentCompacting); reconcileErr != nil {
 			binding.serial.Unlock()
-			_ = rpc.Close()
+			_ = closeRPCAndWait(rpc)
 			_ = process.Stop(context.Background())
 			m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(reconcileErr))
 			return
@@ -608,7 +616,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
 		binding.serial.Unlock()
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "READINESS_FAILED", "managed runtime binding changed before root control activation")
 		return
@@ -616,7 +624,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	if request.InitialInstruction != "" {
 		if err = rpc.Prompt(ctx, request.InitialInstruction); err != nil {
 			binding.serial.Unlock()
-			_ = rpc.Close()
+			_ = closeRPCAndWait(rpc)
 			_ = process.Stop(context.Background())
 			m.fail(agent.AgentID, "INITIAL_INSTRUCTION_FAILED", sanitizeError(err))
 			return
@@ -659,7 +667,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		}
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 		if stopErr := process.Stop(context.Background()); stopErr != nil {
 			m.fail(agent.AgentID, "PROCESS_STOP_FAILED", sanitizeError(stopErr))
 			return
@@ -981,11 +989,8 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 		return RestartResult{}, err
 	}
 
-	lane := m.laneFor(request.AgentID)
-	lane.serial.Lock()
-	defer lane.serial.Unlock()
-	// Replay is checked again after waiting for the stable agent lane. This is
-	// before any binding, process, or generation read.
+	// Recheck replay before the live binding snapshot so concurrent callers still
+	// receive the exact committed operation.
 	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
 		return replayRestartOperation(request, existing)
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -1003,8 +1008,11 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
 	binding.serial.Lock()
-	defer binding.serial.Unlock()
-	if !m.liveBinding(agent, binding) {
+	live := m.liveBinding(agent, binding)
+	currentOperationID := binding.operationID
+	source := bindingFence(request.AgentID, binding)
+	binding.serial.Unlock()
+	if !live {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
 	selectedModel := agent.SelectedModel
@@ -1024,8 +1032,11 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 		}
 		selectedModel = store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}
 	}
-	current, err := m.store.ManagedOperation(ctx, binding.operationID)
-	if err != nil || current.State != "terminal" || restartActionHigherPriority(binding.lifecycleAction) {
+	current, err := m.store.ManagedOperation(ctx, currentOperationID)
+	binding.serial.Lock()
+	lifecycleAction := binding.lifecycleAction
+	binding.serial.Unlock()
+	if err != nil || current.State != "terminal" || restartActionHigherPriority(lifecycleAction) {
 		return RestartResult{}, &store.ManagedLifecycleConflictError{AgentID: request.AgentID}
 	}
 	targetGeneration, err := m.ids.Next()
@@ -1040,20 +1051,26 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 		return RestartResult{}, err
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
-	source := bindingFence(request.AgentID, binding)
-	admission, err := m.store.ReserveManagedLifecycleRestart(ctx, store.ManagedLifecycleRestartReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Source: "direct", CurrentOperationID: binding.operationID, SourceFence: source, PlannedTargetRuntimeGeneration: targetGeneration, SelectedModel: selectedModel, Operation: operation})
+	lane := m.laneFor(request.AgentID)
+	lane.admission.Lock()
+	admission, err := m.store.ReserveManagedLifecycleRestart(ctx, store.ManagedLifecycleRestartReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Source: "direct", CurrentOperationID: currentOperationID, SourceFence: source, PlannedTargetRuntimeGeneration: targetGeneration, SelectedModel: selectedModel, Operation: operation})
 	if err != nil {
+		lane.admission.Unlock()
 		return RestartResult{}, err
 	}
 	if admission.Replayed {
+		lane.admission.Unlock()
 		return RestartResult{Operation: admission.Operation, Replayed: true}, nil
 	}
+	binding.serial.Lock()
 	binding.operationID, binding.lifecycleAction = admission.Action.ActionID, "restart"
+	binding.serial.Unlock()
 	m.mu.Lock()
 	if m.bindings[request.AgentID] == binding {
 		m.operationIDs[request.AgentID] = admission.Action.ActionID
 	}
 	m.mu.Unlock()
+	lane.admission.Unlock()
 	m.startLifecycleRestart(binding, admission.Action.ActionID, source)
 	return RestartResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 }
@@ -1200,6 +1217,9 @@ func (m *Manager) RestartAfterAuthChange(ctx context.Context, operationID string
 }
 
 func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) error {
+	lane := m.laneFor(agentID)
+	lane.admission.Lock()
+	defer lane.admission.Unlock()
 	binding, ok := m.bindingFor(agentID)
 	if !ok {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
@@ -1207,8 +1227,18 @@ func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) erro
 	binding.serial.Lock()
 	defer binding.serial.Unlock()
 	agent, err := m.store.ManagedAgent(ctx, agentID)
-	if err != nil || agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || !m.liveBinding(agent, binding) {
+	if err != nil {
+		return err
+	}
+	if agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || !m.liveBinding(agent, binding) {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+	}
+	_, actionErr := m.store.ActiveManagedLifecycleAction(ctx, agentID)
+	if actionErr == nil {
+		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+	}
+	if !errors.Is(actionErr, sql.ErrNoRows) {
+		return actionErr
 	}
 	if err := binding.rpc.Prompt(ctx, message); err != nil {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
@@ -1290,7 +1320,7 @@ func (m *Manager) executePreparedRestartInLane(binding *managedBinding, oldFence
 	// The old pipe is closed only after the stopped commit. A continuation that
 	// Pi begins after agent_settled stays on this old binding and cannot reach
 	// the replacement's readiness or prompt path.
-	_ = oldRPC.Close()
+	_ = closeRPCAndWait(oldRPC)
 	stopped, err := m.store.ManagedRestartTransition(context.Background(), oldFence.AgentID)
 	if err == nil {
 		m.startRestartTargetInLane(stopped)
@@ -1352,12 +1382,12 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	target.rpc = targetRPC
 	target.serial.Unlock()
 	if !m.installBinding(target) {
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		m.cleanupInstalledTarget(target, targetFence, operationID)
 		return
 	}
 	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		if m.cleanupInstalledTarget(target, targetFence, operationID) {
 			m.clearBinding(target)
 		}
@@ -1365,7 +1395,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	}
 	select {
 	case <-target.waitSignal:
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		if m.cleanupInstalledTarget(target, targetFence, operationID) {
 			m.clearBinding(target)
 		}
@@ -1373,7 +1403,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	default:
 	}
 	if err := m.store.CompleteManagedRestartReady(context.Background(), targetFence, operationID); err != nil {
-		_ = targetRPC.Close()
+		_ = closeRPCAndWait(targetRPC)
 		if m.cleanupInstalledTarget(target, targetFence, operationID) {
 			m.clearBinding(target)
 		}
@@ -1561,7 +1591,7 @@ func (m *Manager) shutdownRestartBinding(ctx context.Context, binding *managedBi
 			return finish(m.store.RecordManagedRestartFailure(context.Background(), fence, transition.OperationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete"))
 		}
 		if rpc != nil {
-			_ = rpc.Close()
+			_ = closeRPCAndWait(rpc)
 		}
 		binding.serial.Lock()
 		binding.reaped = true
@@ -1605,7 +1635,7 @@ func (m *Manager) shutdownRestartBinding(ctx context.Context, binding *managedBi
 		return finish(&store.ManagedRestartStaleError{AgentID: binding.agentID})
 	}
 	if rpc != nil {
-		_ = rpc.Close()
+		_ = closeRPCAndWait(rpc)
 	}
 	binding.serial.Lock()
 	binding.reaped = true
@@ -2041,16 +2071,21 @@ func (m *Manager) recoverManagedRestartTransitionInLane(ctx context.Context, age
 
 const managedDirectPersistenceRetry = 50 * time.Millisecond
 
-// OfferDirect wakes the managed agent's existing lane. Direct mailbox delivery
-// has no WebSocket registration, lease, tmux frame, or shared batch worker.
+// OfferDirect wakes the managed agent's one direct-delivery owner. The direct
+// owner serializes command/receipt work separately from the lifecycle lane so a
+// lifecycle request can be admitted and arm settlement while a receipt or ACK
+// is still pending.
 func (m *Manager) OfferDirect(agentID string) {
 	if agentID == "" {
 		return
 	}
-	lane := m.laneFor(agentID)
 	m.startManagedTask(func() {
-		lane.serial.Lock()
-		defer lane.serial.Unlock()
+		binding, ok := m.bindingFor(agentID)
+		if !ok {
+			return
+		}
+		binding.directDeliverySerial.Lock()
+		defer binding.directDeliverySerial.Unlock()
 		m.dispatchDirectInLane(agentID)
 	})
 }
@@ -2498,6 +2533,10 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	if !live {
 		return nil
 	}
+	// Recovery and live delivery share one command owner. Keep recovery from
+	// issuing a second slash command while an existing delivery is still open.
+	binding.directDeliverySerial.Lock()
+	defer binding.directDeliverySerial.Unlock()
 	binding.serial.Lock()
 	currentFence := bindingFence(agentID, binding)
 	rpc, supported := binding.rpc.(DirectMailboxRPC)
@@ -2608,7 +2647,7 @@ func (m *Manager) AbortStartup(ctx context.Context) error {
 		binding.serial.Unlock()
 		m.stopBuiltinToolLifecycleQueue(binding)
 		if rpc != nil {
-			if err := rpc.Close(); err != nil && firstErr == nil {
+			if err := closeRPCAndWait(rpc); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -2696,7 +2735,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.interruptBuiltinToolInvocations(binding, fence)
 		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 		if rpc != nil {
-			_ = rpc.Close()
+			_ = closeRPCAndWait(rpc)
 		}
 		if process != nil {
 			m.recordCloseError(process.Stop(ctx))

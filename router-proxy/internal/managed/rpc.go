@@ -17,6 +17,7 @@ import (
 )
 
 var ErrReadinessBacklogFull = errors.New("managed readiness receipt backlog is full")
+var ErrSemanticQueueFull = errors.New("managed RPC semantic dispatcher queue is full")
 var ErrAbortResponseMalformed = errors.New("Pi Abort response is malformed")
 var ErrAbortResponseRejected = errors.New("Pi Abort response was not successful")
 var rootControlUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -211,11 +212,12 @@ type managedGoalEvaluationToken struct {
 	watermark    uint64
 }
 type directMailboxToken struct {
-	messageID   string
-	generation  string
-	epoch       int64
-	watermark   uint64
-	receiptSeen bool
+	messageID       string
+	generation      string
+	epoch           int64
+	watermark       uint64
+	receiptSeen     bool
+	settledSequence uint64
 	// Root controls are completed on a later Pi follow-up turn. Retain direct
 	// ownership across the provisional settle so WebUI stays working until the
 	// result has driven that turn's final response.
@@ -261,6 +263,12 @@ type rpcResponse struct {
 	err   error
 }
 
+const rpcSemanticQueueCapacity = 128
+
+type rpcSemanticTask struct {
+	fn func()
+}
+
 type rpcClient struct {
 	stdin   io.Writer
 	stdout  io.Reader
@@ -291,21 +299,91 @@ type rpcClient struct {
 	parentActivityHandler               func(map[string]any)
 	builtinToolLifecycleHandler         func(BuiltinToolLifecycleEvent)
 	readerTerminalHandler               func(error)
+	readerTerminalHandlerCalled         bool
 	readerTerminal                      error
 	suppressNextEvaluatorSettled        bool
+	evaluatorSettledObserved            bool
 	rootResult                          *rootResultToken
+
+	// Semantic handlers run on one bounded FIFO. The stdout reader only parses,
+	// classifies, and enqueues; a handler may wait for a later receipt without
+	// preventing the reader from consuming that receipt. Queue admission and
+	// shutdown both happen under mu so overflow and close cannot race a send.
+	semanticQueue       chan rpcSemanticTask
+	semanticQueueClosed bool
+	semanticDone        chan struct{}
+
+	readerDone          chan struct{}
+	terminalHandlerDone chan struct{}
+	stdoutCloseOnce     sync.Once
 
 	closeOnce sync.Once
 	closeErr  error
 }
 
 func NewRPCClient(stdin io.Writer, stdout io.Reader, closeFn func() error) RPC {
-	client := &rpcClient{stdin: stdin, stdout: stdout, closeFn: closeFn, pending: map[string]chan rpcResponse{}, notified: make(chan struct{}, 1)}
+	terminalHandlerDone := make(chan struct{})
+	close(terminalHandlerDone)
+	client := &rpcClient{
+		stdin: stdin, stdout: stdout, closeFn: closeFn, pending: map[string]chan rpcResponse{}, notified: make(chan struct{}, 1),
+		semanticQueue: make(chan rpcSemanticTask, rpcSemanticQueueCapacity), semanticDone: make(chan struct{}),
+		readerDone: make(chan struct{}), terminalHandlerDone: terminalHandlerDone,
+	}
+	go client.semanticDispatchLoop()
 	go client.readLoop()
 	return client
 }
 
+// semanticDispatchLoop is the single execution lane for callbacks whose
+// meaning depends on neighboring stdout records. Terminalization closes the
+// queue only after failing waiters; every task already admitted is still
+// drained in stdout order. A handler panic is reported through the same reader
+// terminal path so the manager can reconcile the lost stream.
+func (c *rpcClient) semanticDispatchLoop() {
+	defer close(c.semanticDone)
+	for task := range c.semanticQueue {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					c.readerTerminalize(fmt.Errorf("managed RPC semantic handler panicked: %v", recovered))
+				}
+			}()
+			task.fn()
+		}()
+	}
+}
+
+func (c *rpcClient) enqueueSemantic(task func()) bool {
+	if task == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.enqueueSemanticLocked(task)
+}
+
+func (c *rpcClient) enqueueSemanticLocked(task func()) bool {
+	return c.enqueueSemanticTaskLocked(rpcSemanticTask{fn: task})
+}
+
+func (c *rpcClient) enqueueSemanticTaskLocked(task rpcSemanticTask) bool {
+	if task.fn == nil {
+		return true
+	}
+	if c.terminal != nil || c.semanticQueueClosed {
+		return false
+	}
+	select {
+	case c.semanticQueue <- task:
+		return true
+	default:
+		c.readerTerminalizeLocked(ErrSemanticQueueFull)
+		return false
+	}
+}
+
 func (c *rpcClient) readLoop() {
+	defer close(c.readerDone)
 	scanner := bufio.NewScanner(c.stdout)
 	scanner.Buffer(make([]byte, 4096), MaxRPCLineBytes+1)
 	for scanner.Scan() {
@@ -358,17 +436,18 @@ func (c *rpcClient) readLoop() {
 		if !terminal {
 			c.eventSequence++
 			if event, candidate := classifyBuiltinToolLifecycleEvent(raw, c.eventSequence); candidate {
-				// Native tool lifecycle is a separate ordered channel. Invalid and
-				// unsupported records are consumed here, never retained as readiness
-				// receipts or forwarded as raw tool data.
+				// Native tool lifecycle is semantic work. Invalid and unsupported
+				// records are consumed here, never retained as readiness receipts or
+				// forwarded as raw tool data. All semantic callbacks share the stdout
+				// FIFO, so this cannot overtake a neighboring root or activity event.
 				if event != nil && c.builtinToolLifecycleHandler != nil {
 					builtinToolLifecycleCallback, builtinToolLifecycleEvent = c.builtinToolLifecycleHandler, event
 				}
 				c.mu.Unlock()
-				if builtinToolLifecycleCallback != nil {
-					// Do not dispatch start/end in independent goroutines: one Pi stdout
-					// reader is the ordering authority for the same tool call.
+				if builtinToolLifecycleCallback != nil && !c.enqueueSemantic(func() {
 					builtinToolLifecycleCallback(*builtinToolLifecycleEvent)
+				}) {
+					return
 				}
 				continue
 			}
@@ -382,22 +461,25 @@ func (c *rpcClient) readLoop() {
 					}
 				}
 				c.mu.Unlock()
-				if rootCallback != nil {
-					go rootCallback(*rootEvent)
+				if rootCallback != nil && !c.enqueueSemantic(func() {
+					rootCallback(*rootEvent)
+				}) {
+					return
 				}
 				continue
 			}
 			if delta, candidate := classifyChildDeltaEvent(raw); candidate {
-				// Lifecycle deltas stay outside the readiness FIFO. Their consumer
-				// merges only a current, monotonically newer durable projection.
+				// Lifecycle deltas stay outside the readiness receipt backlog. They
+				// still use the shared semantic FIFO, while their consumer merges only
+				// a current, monotonically newer durable projection.
 				if delta != nil && c.childDeltaHandler != nil {
 					childDeltaCallback, childDelta = c.childDeltaHandler, delta
 				}
 				c.mu.Unlock()
-				if childDeltaCallback != nil {
-					// Child receipt admission is a bounded in-memory FIFO. Keep it on
-					// this one stdout reader so later frames cannot win a mutex race.
+				if childDeltaCallback != nil && !c.enqueueSemantic(func() {
 					childDeltaCallback(childDelta)
+				}) {
+					return
 				}
 				continue
 			}
@@ -406,11 +488,10 @@ func (c *rpcClient) readLoop() {
 					parentCompactionCallback, parentCompaction = c.parentCompactionHandler, event
 				}
 				c.mu.Unlock()
-				if parentCompactionCallback != nil {
-					// Persist this stream boundary before later EOF/process-loss work
-					// can reconcile it. The callback only performs a fenced SQLite
-					// transaction and publishes after it commits.
+				if parentCompactionCallback != nil && !c.enqueueSemantic(func() {
 					parentCompactionCallback(parentCompaction)
+				}) {
+					return
 				}
 				continue
 			}
@@ -419,8 +500,10 @@ func (c *rpcClient) readLoop() {
 					parentCompactionNotificationCallback, parentCompactionNotification = c.parentCompactionNotificationHandler, event
 				}
 				c.mu.Unlock()
-				if parentCompactionNotificationCallback != nil {
+				if parentCompactionNotificationCallback != nil && !c.enqueueSemantic(func() {
 					parentCompactionNotificationCallback(parentCompactionNotification)
+				}) {
+					return
 				}
 				continue
 			}
@@ -428,8 +511,12 @@ func (c *rpcClient) readLoop() {
 				parentActivityCandidate = true
 				if event != nil && event["state"] == "idle" && c.suppressNextEvaluatorSettled {
 					// The hidden evaluator owns this model turn. Its settled boundary
-					// must never become an ordinary goal/rearm trigger.
+					// must never become an ordinary goal/rearm trigger. Pi emits that
+					// lifecycle frame before the evaluator's policy receipt, so arm this
+					// suppression when the evaluator starts and remember that the frame
+					// was consumed before the receipt waiter runs.
 					c.suppressNextEvaluatorSettled = false
+					c.evaluatorSettledObserved = true
 					parentActivityCandidate = false
 					evaluatorSettledSuppressed = true
 				} else if event != nil && c.parentActivityHandler != nil {
@@ -465,23 +552,35 @@ func (c *rpcClient) readLoop() {
 				continue
 			}
 			// Readiness receipts are consumed by their fenced waiters, even while a
-			// direct mailbox turn remains open for a root-control follow-up. Letting
-			// that turn classify them first drops the policy-applied receipt and
-			// leaves the allowance handler waiting forever.
+			// semantic callback remains open for a root-control follow-up. The
+			// reader never waits on that callback, so a later policy receipt can
+			// still signal and unblock it.
 			if token := c.directMailbox; token != nil && !knownReadinessReceipt(receiptCustomType(raw)) {
-				if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
-					c.sendDirectMailboxResultLocked(token, result)
-					c.signalLocked()
-					c.mu.Unlock()
-					if parentActivityCallback != nil {
-						parentActivityCallback(parentActivity)
+				// A lifecycle executor may arm settlement while direct delivery is
+				// paused between the append receipt and its durable ACK. Let the
+				// settlement waiter own the native boundary in that case; otherwise
+				// the paused direct matcher would consume it and hide it from restart.
+				if !(agentSettledType(raw) && c.settlementToken != nil) {
+					if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
+						c.sendDirectMailboxResultLocked(token, result)
+						c.signalLocked()
+						c.mu.Unlock()
+						if parentActivityCallback != nil && !c.enqueueSemantic(func() {
+							parentActivityCallback(parentActivity)
+						}) {
+							return
+						}
+						continue
 					}
-					continue
 				}
 			}
 			if parentActivityCandidate && c.settlementToken == nil && parentActivityCallback != nil {
 				c.mu.Unlock()
-				parentActivityCallback(parentActivity)
+				if !c.enqueueSemantic(func() {
+					parentActivityCallback(parentActivity)
+				}) {
+					return
+				}
 				continue
 			}
 			// A controlled restart owns its agent_settled receipt. Keep that
@@ -489,7 +588,7 @@ func (c *rpcClient) readLoop() {
 			// consumes it. A client without a parent-activity subscriber retains
 			// the event too, preserving the restart waiter's stale-event proof.
 			if len(c.backlog) == 128 {
-				c.terminalizeLocked(ErrReadinessBacklogFull)
+				c.readerTerminalizeLocked(ErrReadinessBacklogFull)
 				terminal = true
 			} else {
 				c.backlog = append(c.backlog, receiptNotification{sequence: c.eventSequence, value: raw})
@@ -500,8 +599,10 @@ func (c *rpcClient) readLoop() {
 		if terminal {
 			return
 		}
-		if parentActivityCallback != nil {
+		if parentActivityCallback != nil && !c.enqueueSemantic(func() {
 			parentActivityCallback(parentActivity)
+		}) {
+			return
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -524,17 +625,36 @@ func (c *rpcClient) terminalize(err error) { c.mu.Lock(); c.terminalizeLocked(er
 // about the still-owned process.
 func (c *rpcClient) readerTerminalize(err error) {
 	c.mu.Lock()
+	c.readerTerminalizeLocked(err)
+	c.mu.Unlock()
+}
+
+// readerTerminalizeLocked records a reader-owned terminal boundary, schedules
+// the one terminal callback, and fails all waiters before closing the semantic
+// queue. The caller must hold mu.
+func (c *rpcClient) readerTerminalizeLocked(err error) {
 	if c.terminal != nil {
-		c.mu.Unlock()
 		return
 	}
 	c.readerTerminal = err
-	c.terminalizeLocked(err)
-	handler := c.readerTerminalHandler
-	c.mu.Unlock()
-	if handler != nil {
-		handler(err)
+	if c.readerTerminalHandler != nil && !c.readerTerminalHandlerCalled {
+		c.scheduleReaderTerminalNotificationLocked(c.readerTerminalHandler, err)
 	}
+	c.terminalizeLocked(err)
+}
+
+func (c *rpcClient) scheduleReaderTerminalNotificationLocked(handler func(error), err error) {
+	if handler == nil || c.readerTerminalHandlerCalled {
+		return
+	}
+	c.readerTerminalHandlerCalled = true
+	c.terminalHandlerDone = make(chan struct{})
+	done := c.terminalHandlerDone
+	go func() {
+		<-c.semanticDone
+		handler(err)
+		close(done)
+	}()
 }
 
 func (c *rpcClient) terminalizeLocked(err error) {
@@ -542,6 +662,9 @@ func (c *rpcClient) terminalizeLocked(err error) {
 		return
 	}
 	c.terminal = err
+	// Fail every waiter before closing the semantic queue. A semantic callback
+	// may be waiting for one of these receipts; it must be able to finish so the
+	// dispatcher can drain and Close can join it.
 	if token := c.directMailbox; token != nil {
 		c.directMailbox = nil
 		c.sendDirectMailboxResultLocked(token, directMailboxResult{err: err})
@@ -554,6 +677,10 @@ func (c *rpcClient) terminalizeLocked(err error) {
 	for id, ch := range c.pending {
 		delete(c.pending, id)
 		ch <- rpcResponse{err: err}
+	}
+	if !c.semanticQueueClosed {
+		c.semanticQueueClosed = true
+		close(c.semanticQueue)
 	}
 	c.signalLocked()
 }
@@ -748,6 +875,22 @@ func (c *rpcClient) StartManagedGoalEvaluation(ctx context.Context, fence store.
 	if !validRestartFence(fence) || policy.EvaluatorID == "" || policy.EvaluatorGoalRevision < 1 || policy.EvaluatorSettledSequence < 1 || policy.Config.Goal == "" {
 		return errors.New("managed goal evaluation is invalid")
 	}
+	c.mu.Lock()
+	if c.terminal != nil {
+		err := c.terminal
+		c.mu.Unlock()
+		return err
+	}
+	if c.goalEvaluationToken != nil {
+		c.mu.Unlock()
+		return errors.New("managed goal evaluation is already armed")
+	}
+	// Pi emits the evaluator's native settled frame before the extension emits
+	// the policy result receipt. Arm suppression before asking Pi to trigger the
+	// hidden turn so that frame cannot start a second durable evaluation.
+	c.suppressNextEvaluatorSettled = true
+	c.evaluatorSettledObserved = false
+	c.mu.Unlock()
 	envelope := map[string]any{
 		"protocol": "mecha.policy/v1", "policy": map[string]any{}, "runtime_generation": fence.RuntimeGeneration,
 		"session_epoch": fence.SessionEpoch, "manifest_sha256": fence.ManifestHash,
@@ -756,6 +899,11 @@ func (c *rpcClient) StartManagedGoalEvaluation(ctx context.Context, fence store.
 	}
 	_, watermark, err := c.privateCommand(ctx, "mecha-policy-apply-v1", envelope)
 	if err != nil {
+		c.mu.Lock()
+		if c.goalEvaluationToken == nil && !c.evaluatorSettledObserved {
+			c.suppressNextEvaluatorSettled = false
+		}
+		c.mu.Unlock()
 		return err
 	}
 	c.mu.Lock()
@@ -818,7 +966,11 @@ func (c *rpcClient) WaitForManagedGoalEvaluation(ctx context.Context) (string, s
 			}
 			outcome, outcomeOK := evaluator["outcome"].(string)
 			reason, reasonOK := evaluator["reason"].(string)
-			c.suppressNextEvaluatorSettled = true
+			if !c.evaluatorSettledObserved {
+				// Some Pi versions report the policy receipt before the native
+				// settled frame. Keep suppression armed for that ordering only.
+				c.suppressNextEvaluatorSettled = true
+			}
 			c.mu.Unlock()
 			if !outcomeOK || !reasonOK || (outcome != "DONE" && outcome != store.ManagedGoalEvaluationNotDone) || len(reason) == 0 || len(reason) > 512 {
 				return "", "", errors.New("managed goal evaluation result is invalid")
@@ -954,6 +1106,16 @@ func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.M
 	}
 	token := &restartSettlementToken{fence: fence, watermark: c.eventSequence}
 	c.settlementToken = token
+	// The direct matcher can receive Pi's settled frame while its owner is
+	// blocked in the append-before-ack boundary. Transfer that already observed
+	// frame to the lifecycle waiter instead of requiring the waiter to win the
+	// race with stdout.
+	if direct := c.directMailbox; direct != nil && direct.settledSequence > direct.watermark && direct.generation == fence.RuntimeGeneration && direct.epoch == fence.SessionEpoch {
+		token.consumed = true
+		c.settlementToken = nil
+		c.mu.Unlock()
+		return nil
+	}
 	c.mu.Unlock()
 
 	for {
@@ -1303,6 +1465,9 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 		if len(token.pendingRootRequests) != 0 {
 			return directMailboxResult{}, true
 		}
+		if token.receiptSeen {
+			token.settledSequence = c.eventSequence
+		}
 		return directMailboxResult{reply: token.reply, settled: token.receiptSeen}, true
 	}
 	if kind != "message_end" {
@@ -1630,11 +1795,10 @@ func (c *rpcClient) SetParentActivityEventHandler(handler func(map[string]any)) 
 func (c *rpcClient) SetRPCReaderTerminalHandler(handler func(error)) {
 	c.mu.Lock()
 	c.readerTerminalHandler = handler
-	terminal := c.readerTerminal
-	c.mu.Unlock()
-	if handler != nil && terminal != nil {
-		handler(terminal)
+	if handler != nil && c.readerTerminal != nil && !c.readerTerminalHandlerCalled {
+		c.scheduleReaderTerminalNotificationLocked(handler, c.readerTerminal)
 	}
+	c.mu.Unlock()
 }
 
 func (c *rpcClient) ArmRootControlResult(requestID, entryID string) (RootControlAppendToken, error) {
@@ -1791,11 +1955,41 @@ func (c *rpcClient) Close() error {
 		if closer, ok := c.stdin.(io.Closer); ok {
 			_ = closer.Close()
 		}
+		c.stdoutCloseOnce.Do(func() {
+			if closer, ok := c.stdout.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		})
 		if c.closeFn != nil {
 			c.closeErr = c.closeFn()
 		}
 	})
 	return c.closeErr
+}
+
+// WaitForClose joins the reader, terminal notification, and semantic callbacks
+// admitted before Close. It is separate from Close so a callback can close its
+// own RPC without waiting on its dispatcher.
+func (c *rpcClient) WaitForClose() {
+	<-c.semanticDone
+	c.mu.Lock()
+	handlerDone := c.terminalHandlerDone
+	c.mu.Unlock()
+	<-handlerDone
+	<-c.readerDone
+}
+
+// closeRPCAndWait is for external owners that are releasing an RPC binding.
+// A callback that closes itself must call Close only; it must not join here.
+func closeRPCAndWait(rpc RPC) error {
+	if rpc == nil {
+		return nil
+	}
+	err := rpc.Close()
+	if waiter, ok := rpc.(interface{ WaitForClose() }); ok {
+		waiter.WaitForClose()
+	}
+	return err
 }
 
 type processRPCFactory struct{}
