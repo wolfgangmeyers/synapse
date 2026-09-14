@@ -44,6 +44,10 @@ export function DialogShell({
         else dialog.setAttribute("open", "");
       }
       requestAnimationFrame(() => {
+        const active = dialog.ownerDocument.activeElement;
+        // The user may reach a control before this delayed autofocus runs.
+        // Keep their focus instead of moving it back to the first control.
+        if (active && active !== dialog && dialog.contains(active)) return;
         const first = dialog.querySelector<HTMLElement>("input, textarea, button, [tabindex='0']");
         first?.focus();
       });

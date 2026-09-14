@@ -6,11 +6,44 @@ import userEvent from "@testing-library/user-event";
 import { GoalEditorDialog } from "../../src/components/GoalEditorDialog";
 import { DEFAULT_GOAL_STATE } from "../../src/domain/goals";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("GoalEditorDialog", () => {
   it("validates enabled goals and converts editor units to milliseconds", async () => { const user = userEvent.setup(); const onSave = vi.fn(); render(<GoalEditorDialog open peer="agent-one" goalState={{ ...DEFAULT_GOAL_STATE }} onClose={vi.fn()} onSave={onSave} />); await user.click(screen.getByRole("button", { name: "Goal: OFF" })); await user.click(screen.getByRole("button", { name: "Save" })); expect(onSave).not.toHaveBeenCalled(); expect(screen.getByRole("alert")).toHaveTextContent("enter a description"); await user.type(screen.getByRole("textbox", { name: "What should this agent work toward?" }), "Ship it"); await user.click(screen.getByRole("button", { name: "Save" })); expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ action: "set", goal: "Ship it", settings: expect.objectContaining({ snooze_duration_ms: 60000, snooze_refill_yield_ms: 30000 }) })); });
-  it("preserves a draft through an equivalent goal-state refresh", async () => { const user = userEvent.setup(); const state = { ...DEFAULT_GOAL_STATE }; const { rerender } = render(<GoalEditorDialog open peer="agent-one" goalState={state} onClose={vi.fn()} onSave={vi.fn()} />); await user.click(screen.getByRole("button", { name: "Goal: OFF" })); const goal = screen.getByRole("textbox", { name: "What should this agent work toward?" }); await user.type(goal, "Keep this draft"); rerender(<GoalEditorDialog open peer="agent-one" goalState={{ ...state }} onClose={vi.fn()} onSave={vi.fn()} />); expect(goal).toHaveValue("Keep this draft"); });
+  it("autofocuses the first control when an opened dialog is untouched", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    render(<GoalEditorDialog open peer="agent-one" goalState={{ ...DEFAULT_GOAL_STATE }} onClose={vi.fn()} onSave={vi.fn()} />);
+    expect(frames).toHaveLength(1);
+    const frame = frames.shift();
+    if (!frame) throw new Error("dialog autofocus frame was not scheduled");
+    frame(0);
+    expect(screen.getByRole("button", { name: "Close goal editor" })).toHaveFocus();
+  });
+  it("preserves a draft through delayed autofocus and an equivalent goal-state refresh", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const user = userEvent.setup();
+    const state = { ...DEFAULT_GOAL_STATE };
+    const { rerender } = render(<GoalEditorDialog open peer="agent-one" goalState={state} onClose={vi.fn()} onSave={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Goal: OFF" }));
+    const goal = screen.getByRole("textbox", { name: "What should this agent work toward?" });
+    await user.click(goal);
+    for (const frame of frames) frame(0);
+    await user.keyboard("Keep this draft");
+    expect(goal).toHaveValue("Keep this draft");
+    rerender(<GoalEditorDialog open peer="agent-one" goalState={{ ...state }} onClose={vi.fn()} onSave={vi.fn()} />);
+    expect(goal).toHaveValue("Keep this draft");
+  });
   it("reinitializes the draft when the peer changes", async () => { const user = userEvent.setup(); const first = { ...DEFAULT_GOAL_STATE, goal: "First goal", enabled: true }; const second = { ...first }; const { rerender } = render(<GoalEditorDialog open peer="agent-one" goalState={first} onClose={vi.fn()} onSave={vi.fn()} />); const goal = screen.getByRole("textbox", { name: "What should this agent work toward?" }); await user.clear(goal); await user.type(goal, "Edited first goal"); rerender(<GoalEditorDialog open peer="agent-two" goalState={second} onClose={vi.fn()} onSave={vi.fn()} />); expect(screen.getByRole("textbox", { name: "What should this agent work toward?" })).toHaveValue("First goal"); });
   it("gates controls when the router does not advertise goal support", () => { render(<GoalEditorDialog open peer="agent-one" goalState={{ ...DEFAULT_GOAL_STATE }} capabilityAvailable={false} onClose={vi.fn()} onSave={vi.fn()} />); expect(screen.getByRole("alert")).toHaveTextContent("not available"); });
 });
