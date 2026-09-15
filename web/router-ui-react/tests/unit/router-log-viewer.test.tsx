@@ -49,39 +49,31 @@ describe("router log client and display", () => {
     expect(screen.queryByText("No matching router log records.")).not.toBeInTheDocument();
   });
 
-  it("retries an invalid cursor with the failed request values after live edits", async () => {
+  it("ignores a stale invalid-cursor failure after a filter edit", async () => {
     let rejectCursor: ((response: Response) => void) | undefined;
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL) => {
       if (fetchImpl.mock.calls.length === 1) return new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "bmV3" }], next_cursor: "stale", diagnostics: [] }), { status: 200 });
       if (fetchImpl.mock.calls.length === 2) return new Promise<Response>((resolve) => { rejectCursor = resolve; });
-      return new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "ZnJlc2g=" }], next_cursor: null, diagnostics: [] }), { status: 200 });
+      return new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "bmV3ZXI=" }], next_cursor: null, diagnostics: [] }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchImpl);
     render(<RouterLogViewer routerUrl="http://router.test" />);
     await waitFor(() => expect(screen.getByText("new")).toBeInTheDocument());
 
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "original query" } });
-    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2030-01-01T00:00" } });
-    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2030-01-02T00:00" } });
     fireEvent.click(screen.getByRole("button", { name: "Older" }));
     await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "new query" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(screen.getByText("newer")).toBeInTheDocument());
 
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "changed query" } });
-    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2031-03-04T05:06" } });
-    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2031-03-05T05:06" } });
     rejectCursor?.(new Response(JSON.stringify({ error: { code: "invalid_cursor", message: "The cursor is invalid." } }), { status: 400 }));
-
-    await waitFor(() => expect(screen.getByText("fresh")).toBeInTheDocument());
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fetchImpl).toHaveBeenCalledTimes(3);
-    const failedUrl = new URL(String(fetchImpl.mock.calls[1]?.[0]));
-    const retryUrl = new URL(String(fetchImpl.mock.calls[2]?.[0]));
-    expect(retryUrl.searchParams.get("query")).toBe(failedUrl.searchParams.get("query"));
-    expect(retryUrl.searchParams.get("from")).toBe(failedUrl.searchParams.get("from"));
-    expect(retryUrl.searchParams.get("to")).toBe(failedUrl.searchParams.get("to"));
-    expect(retryUrl.searchParams.get("query")).toBe("original query");
-    expect(retryUrl.searchParams.get("from")).toBe(new Date("2030-01-01T00:00").toISOString());
-    expect(retryUrl.searchParams.get("to")).toBe(new Date("2030-01-02T00:00").toISOString());
-    expect(retryUrl.searchParams.has("cursor")).toBe(false);
+    expect(screen.getByText("newer")).toBeInTheDocument();
+    expect(screen.queryByText("new")).not.toBeInTheDocument();
+    const newerUrl = new URL(String(fetchImpl.mock.calls[2]?.[0]));
+    expect(newerUrl.searchParams.get("query")).toBe("new query");
+    expect(newerUrl.searchParams.has("cursor")).toBe(false);
   });
 
   it("clears history and retries from the start after an invalid cursor", async () => {
