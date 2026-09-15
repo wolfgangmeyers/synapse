@@ -34,16 +34,16 @@ export function RouterLogViewer({ routerUrl }: { routerUrl: string }): ReactElem
   const [query, setQuery] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [pages, setPages] = useState<RouterLogResponse[]>([]);
-  const [pageIndex, setPageIndex] = useState(0);
+  const [pageState, setPageState] = useState<{ pages: RouterLogResponse[]; pageIndex: number }>({ pages: [], pageIndex: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const { pages, pageIndex } = pageState;
   const current = pages[pageIndex];
 
   const load = useCallback(async (request: RouterLogQuery): Promise<void> => {
     setLoading(true); setError(undefined);
-    try { const response = await client.routerLog(request); setPages([response]); setPageIndex(0); }
-    catch (cause) { setError(errorMessage(cause)); setPages([]); setPageIndex(0); }
+    try { const response = await client.routerLog(request); setPageState({ pages: [response], pageIndex: 0 }); }
+    catch (cause) { setError(errorMessage(cause)); setPageState({ pages: [], pageIndex: 0 }); }
     finally { setLoading(false); }
   }, [client]);
   useEffect(() => { void load(emptyQuery); }, [load]);
@@ -51,10 +51,12 @@ export function RouterLogViewer({ routerUrl }: { routerUrl: string }): ReactElem
   const older = (): void => {
     if (!current?.next_cursor || loading) return;
     setLoading(true); setError(undefined);
-    void client.routerLog({ query, from: timestampInput(from), to: timestampInput(to), cursor: current.next_cursor }).then((response) => { setPages((existing) => [...existing.slice(0, pageIndex + 1), response]); setPageIndex((index) => index + 1); }).catch(async (cause) => {
+    const request = { query, from: timestampInput(from), to: timestampInput(to), cursor: current.next_cursor };
+    void client.routerLog(request).then((response) => { setPageState((state) => ({ pages: [...state.pages.slice(0, pageIndex + 1), response], pageIndex: pageIndex + 1 })); }).catch(async (cause) => {
       if (cause instanceof HttpRequestError && cause.code === "invalid_cursor") {
-        setPages([]); setPageIndex(0);
-        await load({ query, from: timestampInput(from), to: timestampInput(to), cursor: null });
+        const retryRequest = { ...request, cursor: null };
+        setPageState({ pages: [], pageIndex: 0 });
+        await load(retryRequest);
       } else setError(errorMessage(cause));
     }).finally(() => setLoading(false));
   };
@@ -65,6 +67,6 @@ export function RouterLogViewer({ routerUrl }: { routerUrl: string }): ReactElem
     <p className="router-log-read-only">Read-only. Log records are shown as stored.</p>
     {loading ? <p role="status">Loading router logs…</p> : null}{error ? <p className="error" role="alert">{error}</p> : null}{current?.status === "source_unavailable" ? <p role="alert">Router log source unavailable. No records were loaded.</p> : null}{current?.status === "partial" ? <p role="status">Router log results are partial. Some records could not be read.</p> : null}{!loading && !error && current?.status === "complete" && current.lines.length === 0 ? <p role="status">No matching router log records.</p> : null}{current && current.diagnostics.length > 0 ? <aside aria-label="Router log diagnostics"><strong>Diagnostics</strong><ul>{current.diagnostics.map((diagnostic) => <li key={diagnostic.category}>{diagnosticLabel(diagnostic)}</li>)}</ul></aside> : null}
     <section className="router-log-panel" aria-label="Router log records">{current?.lines.map((line, index) => <div className="router-log-line" key={`${pageIndex}-${index}`}>{decodeRouterLogBytes(line.bytes_base64)}</div>)}</section>
-    <nav className="router-log-paging" aria-label="Router log pages"><button type="button" onClick={() => setPageIndex((index) => index - 1)} disabled={pageIndex === 0 || loading}>Newer</button><button type="button" onClick={older} disabled={!current?.next_cursor || loading}>Older</button></nav>
+    <nav className="router-log-paging" aria-label="Router log pages"><button type="button" onClick={() => setPageState((state) => ({ ...state, pageIndex: state.pageIndex - 1 }))} disabled={pageIndex === 0 || loading}>Newer</button><button type="button" onClick={older} disabled={!current?.next_cursor || loading}>Older</button></nav>
   </main>;
 }
