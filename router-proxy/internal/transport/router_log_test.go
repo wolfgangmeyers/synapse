@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -135,7 +136,12 @@ func TestConfiguredRouterLogReaderMarshals500LargeLinesWithinResponseBudget(t *t
 	reader.marshalLine = func(value any) ([]byte, error) { lineMarshals++; return defaultMarshalLine(value) }
 	reader.marshalEnvelope = func(value any) ([]byte, error) { envelopeMarshals++; return defaultMarshalEnvelope(value) }
 	reader.encodeCursor = func(value logCursor) (string, error) { cursorEncodes++; return defaultEncodeCursor(value) }
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	response, err := r.ReadRouterLog(context.Background(), RouterLogQuery{Query: "x"})
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
 	require.NoError(t, err)
 	require.Len(t, response.Lines, 500)
 	require.Equal(t, 500, base64Encodes)
@@ -143,6 +149,10 @@ func TestConfiguredRouterLogReaderMarshals500LargeLinesWithinResponseBudget(t *t
 	require.Equal(t, 500, envelopeMarshals)
 	require.Equal(t, 499, cursorEncodes)
 	require.LessOrEqual(t, cursorEncodes, maxRouterLogMatches)
+	if allocationBudgetEnabled {
+		require.LessOrEqual(t, allocated, uint64(384<<20), "500x70KiB request allocated %d bytes", allocated)
+	}
+	t.Logf("500x70KiB counters: base64=%d line_json=%d envelope=%d cursor=%d allocated=%d bytes", base64Encodes, lineMarshals, envelopeMarshals, cursorEncodes, allocated)
 	require.Nil(t, response.NextCursor)
 	require.Empty(t, response.Diagnostics)
 }
