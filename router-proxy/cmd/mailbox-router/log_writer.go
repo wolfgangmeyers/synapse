@@ -107,6 +107,14 @@ var safeEventFields = map[string]map[string]struct{}{
 	"reminder_failed":            {"reminder_id": {}, "scheduled_for": {}, "error_code": {}},
 }
 
+var closedEventValues = map[string]map[string]struct{}{
+	"error_code":      {"internal_error": {}, "sweep_failed": {}, "attachment_sweep_failed": {}, "lifecycle_projection_failed": {}, "projection_unavailable": {}, "native_policy_failed": {}, "delivery_timeout": {}, "invalid_candidate": {}, "invalid_reminder": {}, "queue_full": {}, "store_error": {}, "send_failed": {}},
+	"reason":          {"delivery_timeout": {}, "invalid_candidate": {}, "store_error": {}, "send_failed": {}},
+	"state":           {"pending": {}, "leased": {}, "sent": {}, "delivered": {}, "failed": {}, "dead_letter": {}, "dead_lettered": {}, "expired": {}},
+	"disposition":     {"accepted": {}, "duplicate": {}, "stale": {}, "rejected": {}, "persisted": {}},
+	"lifecycle_event": {"snapshot": {}, "agent_start": {}, "agent_settled": {}, "agent_end": {}, "message_start": {}, "message_end": {}},
+}
+
 func validateEvent(event string, fields map[string]any) error {
 	allowed, ok := safeEventFields[event]
 	if !ok {
@@ -118,11 +126,22 @@ func validateEvent(event string, fields map[string]any) error {
 		}
 		switch item := value.(type) {
 		case string:
-			if !utf8.ValidString(item) || len(item) > maxEventStringBytes || strings.IndexByte(item, 0) >= 0 {
+			if !utf8.ValidString(item) || len(item) > maxEventStringBytes || strings.IndexByte(item, 0) >= 0 || item == "" && key != "reason" {
 				return fmt.Errorf("field %q exceeds string bound", key)
 			}
+			if values, ok := closedEventValues[key]; ok {
+				if _, allowed := values[item]; !allowed {
+					return fmt.Errorf("field %q has an unknown closed value", key)
+				}
+			}
+			if key == "next_due_at" || key == "scheduled_for" {
+				parsed, err := time.Parse(time.RFC3339Nano, item)
+				if err != nil || parsed.UTC().Format(time.RFC3339Nano) != item {
+					return fmt.Errorf("field %q is not a normalized timestamp", key)
+				}
+			}
 		case int:
-			if item < 0 || item > maxEventCount {
+			if (key == "port" && (item < 1 || item > 65535)) || item < 0 || item > maxEventCount {
 				return fmt.Errorf("field %q exceeds numeric bound", key)
 			}
 		case int64:

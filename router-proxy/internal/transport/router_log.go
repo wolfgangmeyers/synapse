@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -28,6 +30,7 @@ const (
 	maxRouterLogResponse    = 48 << 20
 	maxRouterLogDiagnostics = 8
 	maxRouterLogChunk       = 16 << 20
+	maxRouterLogCursor      = 4096
 	routerLogCursorTTL      = 5 * time.Minute
 )
 
@@ -194,7 +197,7 @@ func parseRouterLogQuery(raw string) (RouterLogQuery, error) {
 				result.To = &v
 			}
 		case "cursor":
-			if value == "" || len([]byte(value)) > 4096 {
+			if value == "" || len([]byte(value)) > maxRouterLogCursor {
 				return result, errors.New("invalid cursor")
 			}
 			v := value
@@ -274,6 +277,7 @@ type routerLogMatch struct {
 type logCursor struct {
 	Version          uint8
 	Digest           [32]byte
+	InventoryDigest  [32]byte
 	Offset           uint32
 	Length           uint32
 	Tail             bool
@@ -292,16 +296,6 @@ type logCursor struct {
 	BoundaryKind     string
 	BoundaryOffset   uint32
 	SnapshotBoundary uint32
-	Generations      []cursorGeneration
-}
-type cursorGeneration struct {
-	Name             string `json:"name"`
-	Kind             string `json:"kind"`
-	Dev              uint64 `json:"dev"`
-	Ino              uint64 `json:"ino"`
-	Offset           uint32 `json:"offset"`
-	CapturedLength   uint32 `json:"captured_length"`
-	SnapshotBoundary uint32 `json:"snapshot_boundary"`
 }
 
 func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterLogQuery) (RouterLogResponse, error) {
@@ -316,7 +310,8 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 	pageEnd := -1 // The initial page is newest; a cursor moves toward older matches.
 	if q.Cursor != nil {
 		c, e := r.decode(*q.Cursor)
-		if e != nil || time.Now().UnixNano() >= c.Expires || !hmac.Equal(c.Digest[:], digest[:]) || c.Query != q.Query || c.From != optional(q.From) || c.To != optional(q.To) || int(c.Offset) > int(c.Length) || !cursorSourceClaimsMatch(c, files) {
+		inventory := inventoryDigest(files)
+		if e != nil || time.Now().UnixNano() >= c.Expires || !hmac.Equal(c.Digest[:], digest[:]) || !hmac.Equal(c.InventoryDigest[:], inventory[:]) || c.Query != q.Query || c.From != optional(q.From) || c.To != optional(q.To) || int(c.Offset) > int(c.Length) || !cursorSourceClaimsMatch(c, files) {
 			return RouterLogResponse{}, errRouterLogInvalidCursor
 		}
 		pageEnd = int(c.Offset)
@@ -359,13 +354,29 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 	if len(diags) > 0 {
 		status = "partial"
 	}
+	encodedMatches := make([]RouterLogLine, len(matches))
+	for i, m := range matches {
+		encodedMatches[i] = RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(m.line)}
+	}
 	var last RouterLogResponse
 	haveLast := false
-	for pageStart := pageEnd - 1; pageStart >= 0; pageStart-- {
-		out := RouterLogResponse{Status: status, Lines: make([]RouterLogLine, 0, pageEnd-pageStart), Diagnostics: diags}
-		for _, m := range matches[pageStart:pageEnd] {
-			out.Lines = append(out.Lines, RouterLogLine{base64.StdEncoding.EncodeToString(m.line)})
+	lineJSON := make([][]byte, len(encodedMatches))
+	for i := range encodedMatches {
+		var e error
+		lineJSON[i], e = json.Marshal(encodedMatches[i])
+		if e != nil {
+			return RouterLogResponse{}, e
 		}
+	}
+	joinedLines := 0
+	for pageStart := pageEnd - 1; pageStart >= 0; pageStart-- {
+		itemSize := len(lineJSON[pageStart])
+		if joinedLines > 0 {
+			itemSize++
+		}
+		joinedLines += itemSize
+		out := RouterLogResponse{Status: status, Lines: make([]RouterLogLine, 0, pageEnd-pageStart), Diagnostics: diags}
+		out.Lines = append(out.Lines, encodedMatches[pageStart:pageEnd]...)
 		if pageStart > 0 {
 			boundary := matches[pageStart]
 			c := cursorForByteBoundary(boundary, len(matches), digest, files, q)
@@ -375,11 +386,15 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 			}
 			out.NextCursor = &token
 		}
-		body, e := json.Marshal(out)
+		// The only growing part is the comma-separated encoded line list.
+		// Account for it incrementally, then marshal only the accepted page.
+		empty := out
+		empty.Lines = []RouterLogLine{}
+		emptyBody, e := json.Marshal(empty)
 		if e != nil {
 			return RouterLogResponse{}, e
 		}
-		if len(body) > maxRouterLogResponse {
+		if len(emptyBody)-2+joinedLines > maxRouterLogResponse {
 			if haveLast {
 				return last, nil
 			}
@@ -396,7 +411,12 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 func (r *configuredRouterLogReader) snapshot() ([]logFile, []RouterLogDiagnostic, error) {
 	dir := filepath.Dir(r.path)
 	base := filepath.Base(r.path)
-	entries, e := os.ReadDir(dir)
+	directory, e := os.Open(dir)
+	if e != nil {
+		return nil, nil, fmt.Errorf("open log directory: %w", e)
+	}
+	defer directory.Close()
+	entries, e := directory.ReadDir(-1)
 	if e != nil {
 		return nil, nil, fmt.Errorf("list log directory: %w", e)
 	}
@@ -431,22 +451,39 @@ func (r *configuredRouterLogReader) snapshot() ([]logFile, []RouterLogDiagnostic
 			diag["generation_unreadable"]++
 			continue
 		}
-		data, e := readBounded(full, info.Size())
-		if e != nil {
-			diag["generation_unreadable"]++
-			continue
-		}
-		endInfo, statErr := os.Lstat(full)
-		if statErr != nil {
-			if os.IsNotExist(statErr) {
+		// Open relative to the already-open directory. O_NOFOLLOW rejects a
+		// final-component symlink, and all subsequent identity and data checks
+		// stay bound to this descriptor instead of reopening the pathname.
+		file, openErr := openRouterLogFile(directory, name)
+		if openErr != nil {
+			if os.IsNotExist(openErr) {
 				diag["generation_disappeared"]++
 			} else {
 				diag["generation_unreadable"]++
 			}
 			continue
 		}
-		endDev, endIno := fileIdentity(endInfo)
+		openedInfo, statErr := file.Stat()
 		dev, ino := fileIdentity(info)
+		if statErr != nil || openedInfo == nil || openedInfo.Mode()&os.ModeSymlink != 0 || !openedInfo.Mode().IsRegular() {
+			_ = file.Close()
+			diag["snapshot_changed"]++
+			continue
+		}
+		openedDev, openedIno := fileIdentity(openedInfo)
+		if openedInfo.Size() != info.Size() || openedDev != dev || openedIno != ino {
+			_ = file.Close()
+			diag["snapshot_changed"]++
+			continue
+		}
+		data, readErr := readBoundedFile(file, info.Size())
+		endInfo, endStatErr := file.Stat()
+		closeErr := file.Close()
+		if readErr != nil || endStatErr != nil || endInfo == nil || endInfo.Mode()&os.ModeSymlink != 0 || !endInfo.Mode().IsRegular() || closeErr != nil {
+			diag["generation_unreadable"]++
+			continue
+		}
+		endDev, endIno := fileIdentity(endInfo)
 		if endInfo.Size() != info.Size() || endInfo.ModTime() != info.ModTime() || endDev != dev || endIno != ino {
 			diag["snapshot_changed"]++
 			continue
@@ -479,12 +516,24 @@ func minDiagnostic(n int) int {
 	}
 	return n
 }
+func openRouterLogFile(directory *os.File, name string) (*os.File, error) {
+	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(directory.Name(), name)), nil
+}
+
 func readBounded(path string, size int64) ([]byte, error) {
 	f, e := os.Open(path)
 	if e != nil {
 		return nil, e
 	}
 	defer f.Close()
+	return readBoundedFile(f, size)
+}
+
+func readBoundedFile(f *os.File, size int64) ([]byte, error) {
 	data := make([]byte, 0, size)
 	buf := make([]byte, maxRouterLogChunk)
 	for int64(len(data)) < size {
@@ -617,7 +666,7 @@ func activeTail(fs []logFile) bool {
 }
 
 func cursorForSnapshot(offset, length int, digest [32]byte, files []logFile, q RouterLogQuery) logCursor {
-	c := logCursor{Version: 1, Digest: digest, Offset: uint32(offset), Length: uint32(length), Tail: activeTail(files), Expires: time.Now().Add(routerLogCursorTTL).UnixNano(), Query: q.Query, From: optional(q.From), To: optional(q.To)}
+	c := logCursor{Version: 1, Digest: digest, InventoryDigest: inventoryDigest(files), Offset: uint32(offset), Length: uint32(length), Tail: activeTail(files), Expires: time.Now().Add(routerLogCursorTTL).UnixNano(), Query: q.Query, From: optional(q.From), To: optional(q.To)}
 	for _, f := range files {
 		if f.active {
 			c.Name, c.Kind = f.name, f.kind
@@ -635,23 +684,24 @@ func cursorForByteBoundary(m routerLogMatch, length int, digest [32]byte, files 
 	c.BoundaryName, c.BoundaryKind = f.name, f.kind
 	c.BoundaryOffset = uint32(m.offset)
 	c.SnapshotBoundary = uint32(f.length)
-	c.Generations = make([]cursorGeneration, len(files))
-	for i, g := range files {
-		c.Generations[i] = cursorGeneration{Name: g.name, Kind: g.kind, Dev: g.dev, Ino: g.ino, Offset: uint32(len(g.data)), CapturedLength: uint32(g.length), SnapshotBoundary: uint32(g.length)}
-	}
 	return c
 }
 
 func cursorSourceClaimsMatch(c logCursor, files []logFile) bool {
+	currentMatches := false
+	for _, f := range files {
+		if f.active {
+			currentMatches = c.Name == f.name && c.Kind == f.kind && c.Dev == f.dev && c.Ino == f.ino && c.FileLen == uint32(f.length) && c.FileOff == uint32(len(f.data)) && c.Tail == activeTail(files)
+			break
+		}
+	}
+	if !currentMatches {
+		currentMatches = c.Name == "" && c.Kind == "" && c.Dev == 0 && c.Ino == 0 && c.FileLen == 0 && c.FileOff == 0 && !c.Tail
+	}
+	if !currentMatches {
+		return false
+	}
 	if c.Direction == "older-byte" {
-		if len(c.Generations) != len(files) {
-			return false
-		}
-		for i, g := range files {
-			if g.name != c.Generations[i].Name || g.kind != c.Generations[i].Kind || g.dev != c.Generations[i].Dev || g.ino != c.Generations[i].Ino || uint32(g.length) != c.Generations[i].CapturedLength || uint32(len(g.data)) != c.Generations[i].Offset || c.Generations[i].SnapshotBoundary != uint32(g.length) {
-				return false
-			}
-		}
 		if c.SnapshotBoundary == 0 || c.BoundaryOffset > c.SnapshotBoundary {
 			return false
 		}
@@ -662,12 +712,22 @@ func cursorSourceClaimsMatch(c logCursor, files []logFile) bool {
 		}
 		return false
 	}
-	for _, f := range files {
-		if f.active {
-			return c.Name == f.name && c.Kind == f.kind && c.Dev == f.dev && c.Ino == f.ino && c.FileLen == uint32(f.length) && c.FileOff == uint32(len(f.data)) && c.Tail == activeTail(files)
-		}
+	return true
+}
+func inventoryDigest(fs []logFile) [32]byte {
+	h := sha256.New()
+	for _, f := range fs {
+		h.Write([]byte(f.name + "\x00" + f.kind))
+		var b [32]byte
+		binary.BigEndian.PutUint64(b[:8], uint64(f.length))
+		binary.BigEndian.PutUint64(b[8:16], uint64(f.mod))
+		binary.BigEndian.PutUint64(b[16:24], f.dev)
+		binary.BigEndian.PutUint64(b[24:], f.ino)
+		h.Write(b[:])
 	}
-	return c.Name == "" && c.Kind == "" && c.Dev == 0 && c.Ino == 0 && c.FileLen == 0 && c.FileOff == 0 && !c.Tail
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 func snapshotDigest(fs []logFile) [32]byte {
 	h := sha256.New()
@@ -692,6 +752,7 @@ func (r *configuredRouterLogReader) encode(c logCursor) (string, error) {
 	b := make([]byte, 0, 256)
 	b = append(b, c.Version)
 	b = append(b, c.Digest[:]...)
+	b = append(b, c.InventoryDigest[:]...)
 	var x [8]byte
 	binary.BigEndian.PutUint32(x[:4], c.Offset)
 	binary.BigEndian.PutUint32(x[4:], c.Length)
@@ -710,16 +771,30 @@ func (r *configuredRouterLogReader) encode(c logCursor) (string, error) {
 	} else {
 		b = append(b, 0)
 	}
-	generations, _ := json.Marshal(c.Generations)
-	b = append(b, []byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s", c.Name, c.Kind, c.Query, c.From, c.To, c.Direction, c.BoundaryName, c.BoundaryKind, c.BoundaryOffset, c.SnapshotBoundary, generations))...)
+	for _, value := range []string{c.Name, c.Kind, c.Query, c.From, c.To, c.Direction, c.BoundaryName, c.BoundaryKind} {
+		if len(value) > 65535 {
+			return "", errRouterLogInvalidCursor
+		}
+		binary.BigEndian.PutUint16(x[:2], uint16(len(value)))
+		b = append(b, x[:2]...)
+		b = append(b, value...)
+	}
+	binary.BigEndian.PutUint32(x[:4], c.BoundaryOffset)
+	b = append(b, x[:4]...)
+	binary.BigEndian.PutUint32(x[:4], c.SnapshotBoundary)
+	b = append(b, x[:4]...)
 	mac := hmac.New(sha256.New, r.key[:])
 	mac.Write(b)
 	b = append(b, mac.Sum(nil)...)
-	return base64.RawURLEncoding.EncodeToString(b), nil
+	token := base64.RawURLEncoding.EncodeToString(b)
+	if len(token) > maxRouterLogCursor {
+		return "", errRouterLogInvalidCursor
+	}
+	return token, nil
 }
 func (r *configuredRouterLogReader) decode(s string) (logCursor, error) {
 	b, e := base64.RawURLEncoding.DecodeString(s)
-	if e != nil || len(b) < 74+32 {
+	if e != nil || len(b) < 106+32 {
 		return logCursor{}, errRouterLogInvalidCursor
 	}
 	mac := hmac.New(sha256.New, r.key[:])
@@ -730,33 +805,47 @@ func (r *configuredRouterLogReader) decode(s string) (logCursor, error) {
 	var c logCursor
 	c.Version = b[0]
 	copy(c.Digest[:], b[1:33])
-	c.Offset = binary.BigEndian.Uint32(b[33:37])
-	c.Length = binary.BigEndian.Uint32(b[37:41])
-	c.Expires = int64(binary.BigEndian.Uint64(b[41:49]))
-	c.Dev = binary.BigEndian.Uint64(b[49:57])
-	c.Ino = binary.BigEndian.Uint64(b[57:65])
-	c.FileLen = binary.BigEndian.Uint32(b[65:69])
-	c.FileOff = binary.BigEndian.Uint32(b[69:73])
-	c.Tail = b[73] != 0
-	p := strings.Split(string(b[74:len(b)-32]), "\x00")
-	if c.Version != 1 || (len(p) != 5 && len(p) != 11) {
+	copy(c.InventoryDigest[:], b[33:65])
+	c.Offset = binary.BigEndian.Uint32(b[65:69])
+	c.Length = binary.BigEndian.Uint32(b[69:73])
+	c.Expires = int64(binary.BigEndian.Uint64(b[73:81]))
+	c.Dev = binary.BigEndian.Uint64(b[81:89])
+	c.Ino = binary.BigEndian.Uint64(b[89:97])
+	c.FileLen = binary.BigEndian.Uint32(b[97:101])
+	c.FileOff = binary.BigEndian.Uint32(b[101:105])
+	c.Tail = b[105] != 0
+	if c.Version != 1 {
 		return logCursor{}, errRouterLogInvalidCursor
 	}
-	c.Name, c.Kind, c.Query, c.From, c.To = p[0], p[1], p[2], p[3], p[4]
-	if len(p) == 11 {
-		c.Direction, c.BoundaryName, c.BoundaryKind = p[5], p[6], p[7]
-		if _, e := fmt.Sscanf(p[8], "%d", &c.BoundaryOffset); e != nil {
+	pos := 106
+	readString := func() (string, error) {
+		if pos+2 > len(b)-32 {
+			return "", errRouterLogInvalidCursor
+		}
+		n := int(binary.BigEndian.Uint16(b[pos : pos+2]))
+		pos += 2
+		if pos+n > len(b)-32 {
+			return "", errRouterLogInvalidCursor
+		}
+		value := string(b[pos : pos+n])
+		pos += n
+		return value, nil
+	}
+	values := make([]string, 8)
+	for i := range values {
+		values[i], e = readString()
+		if e != nil {
 			return logCursor{}, errRouterLogInvalidCursor
 		}
-		if _, e := fmt.Sscanf(p[9], "%d", &c.SnapshotBoundary); e != nil {
-			return logCursor{}, errRouterLogInvalidCursor
-		}
-		if e := json.Unmarshal([]byte(p[10]), &c.Generations); e != nil {
-			return logCursor{}, errRouterLogInvalidCursor
-		}
-		if c.Direction == "older-byte" && c.BoundaryName == "" {
-			return logCursor{}, errRouterLogInvalidCursor
-		}
+	}
+	c.Name, c.Kind, c.Query, c.From, c.To, c.Direction, c.BoundaryName, c.BoundaryKind = values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]
+	if pos+8 != len(b)-32 {
+		return logCursor{}, errRouterLogInvalidCursor
+	}
+	c.BoundaryOffset = binary.BigEndian.Uint32(b[pos : pos+4])
+	c.SnapshotBoundary = binary.BigEndian.Uint32(b[pos+4 : pos+8])
+	if c.Direction == "older-byte" && c.BoundaryName == "" {
+		return logCursor{}, errRouterLogInvalidCursor
 	}
 	return c, nil
 }

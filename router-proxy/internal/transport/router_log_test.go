@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +82,76 @@ func TestRouterLogEndpointReturnsClosedResponseAndPreservesRawLines(t *testing.T
 	require.Equal(t, []byte{}, decodeLineBytes(t, response.Lines[2]))
 	require.Equal(t, "last", decodeLine(t, response.Lines[3]))
 	require.Empty(t, response.Diagnostics)
+}
+
+func TestParseRouterLogQueryRejectsOversizedCursor(t *testing.T) {
+	_, err := parseRouterLogQuery("query=x&cursor=" + url.QueryEscape(strings.Repeat("a", maxRouterLogCursor+1)))
+	require.Error(t, err)
+}
+
+func TestConfiguredRouterLogSnapshotRejectsSymlinkEvenWhenTargetIsSameInode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.jsonl")
+	target := filepath.Join(dir, "target.jsonl")
+	require.NoError(t, os.WriteFile(target, []byte("secret\n"), 0o600))
+	require.NoError(t, os.Symlink(target, path))
+	targetInfo, err := os.Stat(target)
+	require.NoError(t, err)
+	pathInfo, err := os.Stat(path)
+	require.NoError(t, err)
+	targetDev, targetIno := fileIdentity(targetInfo)
+	pathDev, pathIno := fileIdentity(pathInfo)
+	require.Equal(t, targetDev, pathDev)
+	require.Equal(t, targetIno, pathIno)
+	directory, err := os.Open(dir)
+	require.NoError(t, err)
+	defer directory.Close()
+	_, err = openRouterLogFile(directory, "router.jsonl")
+	require.Error(t, err)
+	rawReader, err := NewConfiguredRouterLogReader(path)
+	require.NoError(t, err)
+	response, err := rawReader.ReadRouterLog(context.Background(), RouterLogQuery{Query: ""})
+	require.NoError(t, err)
+	require.Empty(t, response.Lines)
+	require.Contains(t, response.Diagnostics, RouterLogDiagnostic{Category: "generation_unreadable", Count: 1})
+}
+
+func TestConfiguredRouterLogReaderMarshals500LargeLinesWithinResponseBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.jsonl")
+	line := bytes.Repeat([]byte{'x'}, 70<<10)
+	for i := 0; i < 500; i++ {
+		name := fmt.Sprintf("router.jsonl.20260101T000000.000000000Z-%d", i+1)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), append(append([]byte{}, line...), '\n'), 0o600))
+	}
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	r, err := NewConfiguredRouterLogReader(path)
+	require.NoError(t, err)
+	response, err := r.ReadRouterLog(context.Background(), RouterLogQuery{Query: "x"})
+	require.NoError(t, err)
+	require.Len(t, response.Lines, 500)
+	require.Nil(t, response.NextCursor)
+	require.Empty(t, response.Diagnostics)
+}
+
+func TestConfiguredRouterLogReaderContinuesWith22Generations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.jsonl")
+	line := strings.Repeat("x", 3<<20)
+	for i := 0; i < 22; i++ {
+		name := fmt.Sprintf("router.jsonl.202601%02dT000000.000000000Z", i+1)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(line+"\n"), 0o600))
+	}
+	require.NoError(t, os.WriteFile(path, []byte(line+"\n"), 0o600))
+	r, err := NewConfiguredRouterLogReader(path)
+	require.NoError(t, err)
+	first, err := r.ReadRouterLog(context.Background(), RouterLogQuery{Query: "x"})
+	require.NoError(t, err)
+	require.NotNil(t, first.NextCursor)
+	require.LessOrEqual(t, len(*first.NextCursor), maxRouterLogCursor)
+	second, err := r.ReadRouterLog(context.Background(), RouterLogQuery{Query: "x", Cursor: first.NextCursor})
+	require.NoError(t, err)
+	require.NotEmpty(t, second.Lines)
 }
 
 func TestConfiguredRouterLogReaderGenerationsSearchAndTime(t *testing.T) {

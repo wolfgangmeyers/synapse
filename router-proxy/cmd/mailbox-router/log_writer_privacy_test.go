@@ -32,6 +32,25 @@ func TestValidateEventRejectsUnknownAndUnsafeFields(t *testing.T) {
 	}
 }
 
+func TestValidateEventAcceptsEveryProductionClosedCallSiteValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		event transport.Event
+	}{
+		{"delivery timed out dead letter", transport.DeliveryTimedOutEvent("message", "agent", 1, "dead_letter", "delivery_timeout")},
+		{"delivery timed out dead lettered", transport.DeliveryTimedOutEvent("message", "agent", 1, "dead_lettered", "delivery_timeout")},
+		{"reminder invalid", transport.ReminderFailedEvent("reminder", "2026-01-01T00:00:00Z", "invalid_reminder")},
+		{"reminder queue full", transport.ReminderFailedEvent("reminder", "2026-01-01T00:00:00Z", "queue_full")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, validateEvent(test.event.Name(), test.event.Fields()))
+		})
+	}
+	require.Error(t, validateEvent("delivery_timed_out", transport.DeliveryTimedOutEvent("message", "agent", 1, "arbitrary", "delivery_timeout").Fields()))
+	require.Error(t, validateEvent("reminder_failed", transport.ReminderFailedEvent("reminder", "2026-01-01T00:00:00Z", "arbitrary").Fields()))
+}
+
 func TestTypedEventLoggerWritesClosedBuilderEvents(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.jsonl")
 	writer, err := newLogWriter(path)
