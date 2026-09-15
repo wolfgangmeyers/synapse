@@ -69,64 +69,109 @@ func TestRouterLogEndpointReturnsClosedFixedErrors(t *testing.T) {
 }
 
 func TestRouterLogEndpointWritesExactlyTheValidatedResponseBytes(t *testing.T) {
-	// Two lines are needed to reach the envelope cap: one line may decode to at
-	// most 32 MiB, which leaves the single-line response below 48 MiB.
-	const maxEncodedLine = (maxRouterLogFileBytes + 2) / 3 * 4
-	firstLine := strings.Repeat("A", maxEncodedLine-1) + "="
-	var baseBody []byte
-	var secondEncodedBytes int
-	var nextCursor *string
-	for cursorLength := 0; cursorLength < 5; cursorLength++ {
-		if cursorLength == 0 {
-			nextCursor = nil
-		} else {
-			cursor := strings.Repeat("c", cursorLength)
-			nextCursor = &cursor
-		}
-		baseResponse := RouterLogResponse{
-			Status: "partial",
-			Lines: []RouterLogLine{
-				{BytesBase64: firstLine},
-				{BytesBase64: ""},
-			},
-			NextCursor:  nextCursor,
-			Diagnostics: []RouterLogDiagnostic{},
-		}
-		var err error
-		baseBody, err = json.Marshal(baseResponse)
-		require.NoError(t, err)
-		// Replacing the second line's empty string with N bytes adds N bytes.
-		secondEncodedBytes = maxRouterLogResponse - len(baseBody)
-		if secondEncodedBytes > 0 && secondEncodedBytes%4 == 0 {
-			break
-		}
+	const (
+		query = "qqqq"
+		from  = "2026-01-01T00:00:00Z"
+		to    = "2026-01-04T00:00:00Z"
+	)
+	line := func(timestamp string, length int) []byte {
+		prefix := []byte(`{"timestamp":"` + timestamp + `","event":"` + query)
+		prefix = append(prefix, strings.Repeat("q", length-len(prefix)-2)...)
+		return append(prefix, []byte(`"}`)...)
 	}
-	require.Greater(t, secondEncodedBytes, 0)
-	response := RouterLogResponse{
-		Status: "partial",
-		Lines: []RouterLogLine{
-			{BytesBase64: firstLine},
-			{BytesBase64: strings.Repeat("A", secondEncodedBytes)},
-		},
-		NextCursor:  nextCursor,
-		Diagnostics: []RouterLogDiagnostic{},
+	old := line("2026-01-01T00:00:00Z", 300)
+	middle := line("2026-01-02T00:00:00Z", 4_193_943)
+	active := line("2026-01-03T00:00:00Z", 33_554_430)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.jsonl")
+	files := []struct {
+		name string
+		line []byte
+	}{
+		{"router.jsonl.20260101T000000.000000000Z", old},
+		{"router.jsonl.20260102T000000.000000000Z", middle},
+		{"router.jsonl", active},
 	}
-	expectedBody, err := json.Marshal(response)
-	require.NoError(t, err)
-	require.Len(t, expectedBody, maxRouterLogResponse)
-	require.NoError(t, validateRouterLogResponse(response))
+	for _, file := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, file.name), append(append([]byte{}, file.line...), '\n'), 0o600))
+	}
 
-	router := &Router{ids: randomIDs{}, routerLogReader: RouterLogReaderFunc(func(context.Context, RouterLogQuery) (RouterLogResponse, error) {
-		return response, nil
-	})}
+	rawReader, err := NewConfiguredRouterLogReader(path)
+	require.NoError(t, err)
+	reader := rawReader.(*configuredRouterLogReader)
+	snapshot, diagnostics, err := reader.snapshot()
+	require.NoError(t, err)
+	require.Empty(t, diagnostics)
+	require.Len(t, snapshot, len(files))
+	for i, file := range files {
+		info, statErr := os.Stat(filepath.Join(dir, file.name))
+		require.NoError(t, statErr)
+		require.True(t, info.Mode().IsRegular())
+		require.Equal(t, int64(len(file.line)+1), info.Size())
+		require.Equal(t, file.name, snapshot[i].name)
+		require.Equal(t, len(file.line)+1, len(snapshot[i].data))
+		require.True(t, json.Valid(file.line))
+		require.Contains(t, string(file.line), query)
+		var record struct {
+			Timestamp string `json:"timestamp"`
+		}
+		require.NoError(t, json.Unmarshal(file.line, &record))
+		stamp, parseErr := time.Parse(time.RFC3339Nano, record.Timestamp)
+		require.NoError(t, parseErr)
+		fromTime, _ := time.Parse(time.RFC3339Nano, from)
+		toTime, _ := time.Parse(time.RFC3339Nano, to)
+		require.False(t, stamp.Before(fromTime) || !stamp.Before(toTime))
+	}
+
+	requestTarget := "/v1/router-log?query=" + query + "&from=" + url.QueryEscape(from) + "&to=" + url.QueryEscape(to)
+	router := &Router{ids: randomIDs{}, routerLogReader: rawReader}
 	recorder := httptest.NewRecorder()
-	router.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/router-log?query=", nil))
+	router.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, requestTarget, nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Len(t, recorder.Body.Bytes(), maxRouterLogResponse)
-	require.Equal(t, expectedBody, recorder.Body.Bytes())
-	require.NotEqual(t, byte('\n'), recorder.Body.Bytes()[len(recorder.Body.Bytes())-1])
+	body := recorder.Body.Bytes()
+	require.Len(t, body, maxRouterLogResponse)
+	require.NotEqual(t, byte('\n'), body[len(body)-1])
+	var response RouterLogResponse
+	require.NoError(t, json.Unmarshal(body, &response))
+	require.Equal(t, "complete", response.Status)
+	require.Empty(t, response.Diagnostics)
+	require.Len(t, response.Lines, 2)
+	require.Equal(t, 5_591_924, len(response.Lines[0].BytesBase64))
+	require.Equal(t, 44_739_240, len(response.Lines[1].BytesBase64))
+	require.Equal(t, middle, decodeLineBytes(t, response.Lines[0]))
+	require.Equal(t, active, decodeLineBytes(t, response.Lines[1]))
+	require.NotNil(t, response.NextCursor)
+	require.Len(t, *response.NextCursor, 379)
+	require.Equal(t, 484, len(body)-len(response.Lines[0].BytesBase64)-len(response.Lines[1].BytesBase64))
+	marshaled, err := json.Marshal(response)
+	require.NoError(t, err)
+	require.Equal(t, body, marshaled)
 	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
 	require.Equal(t, "nosniff", recorder.Header().Get("X-Content-Type-Options"))
+
+	candidate := RouterLogResponse{Status: "complete", Lines: []RouterLogLine{
+		{BytesBase64: base64.StdEncoding.EncodeToString(old)},
+		{BytesBase64: base64.StdEncoding.EncodeToString(middle)},
+		{BytesBase64: base64.StdEncoding.EncodeToString(active)},
+	}, NextCursor: nil, Diagnostics: []RouterLogDiagnostic{}}
+	candidateBody, err := json.Marshal(candidate)
+	require.NoError(t, err)
+	require.Len(t, candidateBody, 50_331_691)
+	require.Equal(t, maxRouterLogResponse+43, len(candidateBody))
+
+	continuationTarget := requestTarget + "&cursor=" + url.QueryEscape(*response.NextCursor)
+	continuedRecorder := httptest.NewRecorder()
+	router.handleHTTP(continuedRecorder, httptest.NewRequest(http.MethodGet, continuationTarget, nil))
+	require.Equal(t, http.StatusOK, continuedRecorder.Code)
+	var continued RouterLogResponse
+	require.NoError(t, json.Unmarshal(continuedRecorder.Body.Bytes(), &continued))
+	require.Equal(t, "complete", continued.Status)
+	require.Empty(t, continued.Diagnostics)
+	require.Equal(t, []RouterLogLine{{BytesBase64: base64.StdEncoding.EncodeToString(old)}}, continued.Lines)
+	require.Nil(t, continued.NextCursor)
+	continuedMarshaled, err := json.Marshal(continued)
+	require.NoError(t, err)
+	require.Equal(t, continuedMarshaled, continuedRecorder.Body.Bytes())
 }
 
 func TestRouterLogEndpointReturnsClosedResponseAndPreservesRawLines(t *testing.T) {
