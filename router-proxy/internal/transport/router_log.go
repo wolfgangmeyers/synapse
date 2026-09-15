@@ -108,7 +108,7 @@ func (r *Router) handleRouterLog(w http.ResponseWriter, req *http.Request) {
 		r.writeRouterLogError(w, 503, "source_unavailable")
 		return
 	}
-	r.writeJSONHeaders(w, 200, response, map[string]string{"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+	r.writeJSONBytesHeaders(w, 200, body, map[string]string{"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 }
 func validateRouterLogResponse(v RouterLogResponse) error {
 	if v.Status != "complete" && v.Status != "partial" && v.Status != "source_unavailable" {

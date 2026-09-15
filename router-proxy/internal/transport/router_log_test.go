@@ -68,6 +68,67 @@ func TestRouterLogEndpointReturnsClosedFixedErrors(t *testing.T) {
 	require.NotContains(t, recorder.Body.String(), "path")
 }
 
+func TestRouterLogEndpointWritesExactlyTheValidatedResponseBytes(t *testing.T) {
+	// Two lines are needed to reach the envelope cap: one line may decode to at
+	// most 32 MiB, which leaves the single-line response below 48 MiB.
+	const maxEncodedLine = (maxRouterLogFileBytes + 2) / 3 * 4
+	firstLine := strings.Repeat("A", maxEncodedLine-1) + "="
+	var baseBody []byte
+	var secondEncodedBytes int
+	var nextCursor *string
+	for cursorLength := 0; cursorLength < 5; cursorLength++ {
+		if cursorLength == 0 {
+			nextCursor = nil
+		} else {
+			cursor := strings.Repeat("c", cursorLength)
+			nextCursor = &cursor
+		}
+		baseResponse := RouterLogResponse{
+			Status: "partial",
+			Lines: []RouterLogLine{
+				{BytesBase64: firstLine},
+				{BytesBase64: ""},
+			},
+			NextCursor:  nextCursor,
+			Diagnostics: []RouterLogDiagnostic{},
+		}
+		var err error
+		baseBody, err = json.Marshal(baseResponse)
+		require.NoError(t, err)
+		// Replacing the second line's empty string with N bytes adds N bytes.
+		secondEncodedBytes = maxRouterLogResponse - len(baseBody)
+		if secondEncodedBytes > 0 && secondEncodedBytes%4 == 0 {
+			break
+		}
+	}
+	require.Greater(t, secondEncodedBytes, 0)
+	response := RouterLogResponse{
+		Status: "partial",
+		Lines: []RouterLogLine{
+			{BytesBase64: firstLine},
+			{BytesBase64: strings.Repeat("A", secondEncodedBytes)},
+		},
+		NextCursor:  nextCursor,
+		Diagnostics: []RouterLogDiagnostic{},
+	}
+	expectedBody, err := json.Marshal(response)
+	require.NoError(t, err)
+	require.Len(t, expectedBody, maxRouterLogResponse)
+	require.NoError(t, validateRouterLogResponse(response))
+
+	router := &Router{ids: randomIDs{}, routerLogReader: RouterLogReaderFunc(func(context.Context, RouterLogQuery) (RouterLogResponse, error) {
+		return response, nil
+	})}
+	recorder := httptest.NewRecorder()
+	router.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/router-log?query=", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Len(t, recorder.Body.Bytes(), maxRouterLogResponse)
+	require.Equal(t, expectedBody, recorder.Body.Bytes())
+	require.NotEqual(t, byte('\n'), recorder.Body.Bytes()[len(recorder.Body.Bytes())-1])
+	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+	require.Equal(t, "nosniff", recorder.Header().Get("X-Content-Type-Options"))
+}
+
 func TestRouterLogEndpointReturnsClosedResponseAndPreservesRawLines(t *testing.T) {
 	raw := []byte("first\r\n\xff\r\n\nlast")
 	router := &Router{ids: randomIDs{}, routerLogReader: RawRouterLogReader(raw)}

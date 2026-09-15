@@ -1165,6 +1165,16 @@ func (r *Router) writeJSONHeaders(w http.ResponseWriter, status int, value any, 
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
+
+func (r *Router) writeJSONBytesHeaders(w http.ResponseWriter, status int, body []byte, headers map[string]string) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	for key, value := range headers {
+		w.Header().Set(key, value)
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
 func (r *Router) writeNoContent(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
