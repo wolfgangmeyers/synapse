@@ -127,9 +127,22 @@ func TestConfiguredRouterLogReaderMarshals500LargeLinesWithinResponseBudget(t *t
 	require.NoError(t, os.WriteFile(path, nil, 0o600))
 	r, err := NewConfiguredRouterLogReader(path)
 	require.NoError(t, err)
+	reader := r.(*configuredRouterLogReader)
+	base64Encodes, lineMarshals, envelopeMarshals, cursorEncodes := 0, 0, 0, 0
+	defaultEncodeLine, defaultMarshalLine := reader.encodeLine, reader.marshalLine
+	defaultMarshalEnvelope, defaultEncodeCursor := reader.marshalEnvelope, reader.encodeCursor
+	reader.encodeLine = func(value []byte) string { base64Encodes++; return defaultEncodeLine(value) }
+	reader.marshalLine = func(value any) ([]byte, error) { lineMarshals++; return defaultMarshalLine(value) }
+	reader.marshalEnvelope = func(value any) ([]byte, error) { envelopeMarshals++; return defaultMarshalEnvelope(value) }
+	reader.encodeCursor = func(value logCursor) (string, error) { cursorEncodes++; return defaultEncodeCursor(value) }
 	response, err := r.ReadRouterLog(context.Background(), RouterLogQuery{Query: "x"})
 	require.NoError(t, err)
 	require.Len(t, response.Lines, 500)
+	require.Equal(t, 500, base64Encodes)
+	require.Equal(t, 500, lineMarshals)
+	require.Equal(t, 500, envelopeMarshals)
+	require.Equal(t, 499, cursorEncodes)
+	require.LessOrEqual(t, cursorEncodes, maxRouterLogMatches)
 	require.Nil(t, response.NextCursor)
 	require.Empty(t, response.Diagnostics)
 }

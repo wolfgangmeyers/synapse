@@ -51,6 +51,36 @@ func TestValidateEventAcceptsEveryProductionClosedCallSiteValue(t *testing.T) {
 	require.Error(t, validateEvent("reminder_failed", transport.ReminderFailedEvent("reminder", "2026-01-01T00:00:00Z", "arbitrary").Fields()))
 }
 
+func TestValidateEventAcceptsEveryLifecycleEmitterValue(t *testing.T) {
+	base := map[string]any{"agent_id": "agent", "event_id": "event", "client_sequence": 1, "subagent_count": 1}
+	for _, kind := range []string{"started", "terminal", "snapshot"} {
+		for _, event := range []string{"lifecycle_ingest_failed", "lifecycle_ingested", "lifecycle_persist_failed", "lifecycle_persisted", "lifecycle_ack_failed", "lifecycle_acknowledged"} {
+			fields := map[string]any{}
+			for key, value := range base {
+				fields[key] = value
+			}
+			fields["lifecycle_event"] = kind
+			if event == "lifecycle_ingest_failed" || event == "lifecycle_persist_failed" || event == "lifecycle_ack_failed" {
+				fields["reason"] = map[string]string{"lifecycle_ingest_failed": "invalid_candidate", "lifecycle_persist_failed": "store_error", "lifecycle_ack_failed": "send_failed"}[event]
+			}
+			if event == "lifecycle_persisted" || event == "lifecycle_acknowledged" {
+				fields["disposition"], fields["router_version"] = "applied", 1
+			}
+			require.NoError(t, validateEvent(event, fields), "%s %s", event, kind)
+		}
+	}
+	for _, disposition := range []string{"applied", "accepted_noop", "conflict", "duplicate", "stale"} {
+		fields := map[string]any{"lifecycle_event": "terminal", "disposition": disposition, "router_version": 1}
+		for _, event := range []string{"lifecycle_persisted", "lifecycle_acknowledged"} {
+			require.NoError(t, validateEvent(event, fields), "%s", disposition)
+		}
+	}
+	for _, event := range []string{"lifecycle_ingested", "lifecycle_persisted", "lifecycle_acknowledged"} {
+		require.Error(t, validateEvent(event, map[string]any{"lifecycle_event": "arbitrary"}))
+	}
+	require.Error(t, validateEvent("lifecycle_persisted", map[string]any{"disposition": "arbitrary"}))
+}
+
 func TestTypedEventLoggerWritesClosedBuilderEvents(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.jsonl")
 	writer, err := newLogWriter(path)

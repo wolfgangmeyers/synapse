@@ -241,6 +241,13 @@ func (r RawRouterLogReader) ReadRouterLog(context.Context, RouterLogQuery) (Rout
 type configuredRouterLogReader struct {
 	path string
 	key  [32]byte
+
+	// These function fields keep the hot-path operations replaceable in tests
+	// without adding counters or branches to production behavior.
+	encodeLine      func([]byte) string
+	marshalLine     func(any) ([]byte, error)
+	marshalEnvelope func(any) ([]byte, error)
+	encodeCursor    func(logCursor) (string, error)
 }
 
 func NewConfiguredRouterLogReader(path string) (RouterLogReader, error) {
@@ -251,7 +258,12 @@ func NewConfiguredRouterLogReader(path string) (RouterLogReader, error) {
 	if _, e := rand.Read(key[:]); e != nil {
 		return nil, e
 	}
-	return &configuredRouterLogReader{path: path, key: key}, nil
+	r := &configuredRouterLogReader{path: path, key: key}
+	r.encodeLine = base64.StdEncoding.EncodeToString
+	r.marshalLine = json.Marshal
+	r.marshalEnvelope = json.Marshal
+	r.encodeCursor = r.encode
+	return r, nil
 }
 
 type logFile struct {
@@ -356,14 +368,14 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 	}
 	encodedMatches := make([]RouterLogLine, len(matches))
 	for i, m := range matches {
-		encodedMatches[i] = RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(m.line)}
+		encodedMatches[i] = RouterLogLine{BytesBase64: r.encodeLine(m.line)}
 	}
 	var last RouterLogResponse
 	haveLast := false
 	lineJSON := make([][]byte, len(encodedMatches))
 	for i := range encodedMatches {
 		var e error
-		lineJSON[i], e = json.Marshal(encodedMatches[i])
+		lineJSON[i], e = r.marshalLine(encodedMatches[i])
 		if e != nil {
 			return RouterLogResponse{}, e
 		}
@@ -380,7 +392,7 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 		if pageStart > 0 {
 			boundary := matches[pageStart]
 			c := cursorForByteBoundary(boundary, len(matches), digest, files, q)
-			token, e := r.encode(c)
+			token, e := r.encodeCursor(c)
 			if e != nil {
 				return RouterLogResponse{}, e
 			}
@@ -390,7 +402,7 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 		// Account for it incrementally, then marshal only the accepted page.
 		empty := out
 		empty.Lines = []RouterLogLine{}
-		emptyBody, e := json.Marshal(empty)
+		emptyBody, e := r.marshalEnvelope(empty)
 		if e != nil {
 			return RouterLogResponse{}, e
 		}
