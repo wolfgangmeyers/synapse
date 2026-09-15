@@ -251,9 +251,11 @@ func TestEventLogRotatesAfterOneDay(t *testing.T) {
 	writer, err := newLogWriterAt(path, func() time.Time { return current })
 	require.NoError(t, err)
 	defer writer.Close()
-	require.NoError(t, writer.Log("first", nil))
+	requireSafeEventFixture(t, "router_started", nil)
+	require.NoError(t, writer.Log("router_started", nil))
 	current = current.Add(logRotationAge)
-	require.NoError(t, writer.Log("second", nil))
+	requireSafeEventFixture(t, "router_stopped", nil)
+	require.NoError(t, writer.Log("router_stopped", nil))
 
 	entries, err := os.ReadDir(directory)
 	require.NoError(t, err)
@@ -266,10 +268,10 @@ func TestEventLogRotatesAfterOneDay(t *testing.T) {
 	require.Len(t, rotated, 1)
 	rotatedBytes, err := os.ReadFile(filepath.Join(directory, rotated[0]))
 	require.NoError(t, err)
-	require.Contains(t, string(rotatedBytes), `"event":"first"`)
+	require.Contains(t, string(rotatedBytes), `"event":"router_started"`)
 	activeBytes, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Contains(t, string(activeBytes), `"event":"second"`)
+	require.Contains(t, string(activeBytes), `"event":"router_stopped"`)
 }
 
 func TestEventLogRefreshesGenerationTimestampAfterRotation(t *testing.T) {
@@ -280,11 +282,14 @@ func TestEventLogRefreshesGenerationTimestampAfterRotation(t *testing.T) {
 	require.NoError(t, err)
 	defer writer.Close()
 
-	require.NoError(t, writer.Log("first", nil))
+	requireSafeEventFixture(t, "router_started", nil)
+	require.NoError(t, writer.Log("router_started", nil))
 	current = current.Add(logRotationAge)
-	require.NoError(t, writer.Log("second", nil))
+	requireSafeEventFixture(t, "router_stopped", nil)
+	require.NoError(t, writer.Log("router_stopped", nil))
 	current = current.Add(time.Hour)
-	require.NoError(t, writer.Log("third", nil))
+	requireSafeEventFixture(t, "router_error", nil)
+	require.NoError(t, writer.Log("router_error", nil))
 
 	entries, err := os.ReadDir(directory)
 	require.NoError(t, err)
@@ -297,7 +302,8 @@ func TestEventLogRefreshesGenerationTimestampAfterRotation(t *testing.T) {
 	require.Len(t, rotated, 1)
 
 	current = current.Add(logRotationAge - time.Hour)
-	require.NoError(t, writer.Log("fourth", nil))
+	requireSafeEventFixture(t, "lifecycle_ingested", nil)
+	require.NoError(t, writer.Log("lifecycle_ingested", nil))
 	entries, err = os.ReadDir(directory)
 	require.NoError(t, err)
 	rotated = rotated[:0]
@@ -317,9 +323,9 @@ func TestEventLogRefreshesGenerationTimestampAfterRotation(t *testing.T) {
 		require.NoError(t, readErr)
 		retained.Write(contents)
 	}
-	require.Contains(t, retained.String(), `"event":"second"`)
-	require.Contains(t, retained.String(), `"event":"third"`)
-	require.Contains(t, retained.String(), `"event":"fourth"`)
+	require.Contains(t, retained.String(), `"event":"router_stopped"`)
+	require.Contains(t, retained.String(), `"event":"router_error"`)
+	require.Contains(t, retained.String(), `"event":"lifecycle_ingested"`)
 }
 
 func TestEventLogDropsActiveRecordsOlderThanRetention(t *testing.T) {
@@ -327,17 +333,18 @@ func TestEventLogDropsActiveRecordsOlderThanRetention(t *testing.T) {
 	path := filepath.Join(directory, "router.jsonl")
 	current := time.Now().UTC().Truncate(time.Millisecond)
 	old := current.Add(-logRetentionAge - time.Hour)
-	oldRecord := fmt.Sprintf(`{"event":"old","timestamp":%q}`+"\n", old.Format("2006-01-02T15:04:05.000Z"))
+	oldRecord := fmt.Sprintf(`{"event":"router_started","timestamp":%q}`+"\n", old.Format("2006-01-02T15:04:05.000Z"))
 	require.NoError(t, os.WriteFile(path, []byte(oldRecord), 0o600))
 	require.NoError(t, os.Chtimes(path, old, old))
 	writer, err := newLogWriterAt(path, func() time.Time { return current })
 	require.NoError(t, err)
 	defer writer.Close()
-	require.NoError(t, writer.Log("current", nil))
+	requireSafeEventFixture(t, "router_stopped", nil)
+	require.NoError(t, writer.Log("router_stopped", nil))
 	activeBytes, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.NotContains(t, string(activeBytes), `"event":"old"`)
-	require.Contains(t, string(activeBytes), `"event":"current"`)
+	require.NotContains(t, string(activeBytes), `"event":"router_started"`)
+	require.Contains(t, string(activeBytes), `"event":"router_stopped"`)
 }
 
 func TestEventLogRemovesRotationsOlderThanRetention(t *testing.T) {
@@ -352,7 +359,8 @@ func TestEventLogRemovesRotationsOlderThanRetention(t *testing.T) {
 	writer, err := newLogWriterAt(path, func() time.Time { return current })
 	require.NoError(t, err)
 	defer writer.Close()
-	require.NoError(t, writer.Log("current", nil))
+	requireSafeEventFixture(t, "router_stopped", nil)
+	require.NoError(t, writer.Log("router_stopped", nil))
 	_, err = os.Stat(oldPath)
 	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = os.Stat(newPath)
@@ -363,12 +371,13 @@ func TestEventLogBoundsEachRetainedFile(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "router.jsonl")
 	current := time.Now().UTC().Truncate(time.Millisecond)
+	// Exercise the pre-existing-file size guard with a bounded event fixture.
+	require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", maxLogBytes+1)), 0o600))
 	writer, err := newLogWriterAt(path, func() time.Time { return current })
 	require.NoError(t, err)
 	defer writer.Close()
-	payload := strings.Repeat("x", maxLogBytes/2-128)
-	require.NoError(t, writer.Log("first", map[string]any{"payload": payload}))
-	require.NoError(t, writer.Log("second", map[string]any{"payload": payload}))
+	requireSafeEventFixture(t, "router_stopped", nil)
+	require.NoError(t, writer.Log("router_stopped", nil))
 
 	entries, err := os.ReadDir(directory)
 	require.NoError(t, err)
@@ -387,8 +396,13 @@ func TestEventLoggerReportsWriteFailureWithoutRecursing(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 	var output strings.Builder
-	eventLogger(writer, &output)("router_stopped", nil)
+	eventLogger(writer, &output)(transport.RouterStoppedEvent())
 	require.Contains(t, output.String(), "event log write failed")
+}
+
+func requireSafeEventFixture(t *testing.T, event string, fields map[string]any) {
+	t.Helper()
+	require.NoError(t, validateEvent(event, fields))
 }
 
 func collectLines(reader io.Reader, lines chan<- string) {

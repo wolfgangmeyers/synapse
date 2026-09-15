@@ -79,10 +79,10 @@ func (r *Router) runPolicies(ctx context.Context) {
 		select {
 		case err := <-result:
 			if err != nil {
-				r.emit("router_error", map[string]any{"error_code": "native_policy_failed", "policy": policy.Name})
+				r.emitEvent(RouterErrorWithPolicyEvent("native_policy_failed", policy.Name))
 			}
 		case <-policyCtx.Done():
-			r.emit("router_error", map[string]any{"error_code": "native_policy_failed", "policy": policy.Name})
+			r.emitEvent(RouterErrorWithPolicyEvent("native_policy_failed", policy.Name))
 		}
 		stopLifecycle()
 		cancel()

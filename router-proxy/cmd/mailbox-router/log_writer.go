@@ -12,9 +12,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 )
 
 const (
+	maxEventStringBytes = 256
+	maxEventCount       = 1_000_000
+
 	logRotationAge  = 24 * time.Hour
 	logRetentionAge = 48 * time.Hour
 	// Match the supported JSONL logger's 16 MiB generation limit. The active
@@ -63,15 +69,85 @@ func newLogWriterAt(path string, now func() time.Time) (*logWriter, error) {
 
 // eventLogger keeps diagnostics best effort. Its error path writes directly to
 // the process stderr and never emits another router event.
-func eventLogger(writer *logWriter, errorWriter io.Writer) func(string, map[string]any) {
-	return func(event string, fields map[string]any) {
-		if err := writer.Log(event, fields); err != nil {
+func eventLogger(writer *logWriter, errorWriter io.Writer) transport.EventLogger {
+	return func(event transport.Event) {
+		if err := writer.LogEvent(event); err != nil {
 			_, _ = fmt.Fprintf(errorWriter, "mailbox-router: event log write failed: %v\n", err)
 		}
 	}
 }
 
+func typedEventLogger(writer *logWriter, errorWriter io.Writer) transport.EventLogger {
+	return func(event transport.Event) {
+		if err := writer.LogEvent(event); err != nil {
+			_, _ = fmt.Fprintf(errorWriter, "mailbox-router: event log write failed: %v\n", err)
+		}
+	}
+}
+
+var safeEventFields = map[string]map[string]struct{}{
+	"router_started":             {"host": {}, "port": {}},
+	"router_stopped":             {},
+	"router_error":               {"error_code": {}, "policy": {}, "agent_id": {}},
+	"lifecycle_ingest_failed":    {"agent_id": {}, "event_id": {}, "lifecycle_event": {}, "client_sequence": {}, "subagent_count": {}, "reason": {}},
+	"lifecycle_ingested":         {"agent_id": {}, "event_id": {}, "lifecycle_event": {}, "client_sequence": {}, "subagent_count": {}},
+	"lifecycle_persist_failed":   {"agent_id": {}, "event_id": {}, "lifecycle_event": {}, "client_sequence": {}, "subagent_count": {}, "reason": {}},
+	"lifecycle_persisted":        {"agent_id": {}, "event_id": {}, "lifecycle_event": {}, "client_sequence": {}, "subagent_count": {}, "disposition": {}, "router_version": {}},
+	"lifecycle_ack_failed":       {"agent_id": {}, "event_id": {}, "lifecycle_event": {}, "client_sequence": {}, "subagent_count": {}, "reason": {}},
+	"lifecycle_acknowledged":     {"agent_id": {}, "event_id": {}, "lifecycle_event": {}, "client_sequence": {}, "subagent_count": {}, "disposition": {}, "router_version": {}},
+	"lifecycle_broadcast_failed": {"agent_id": {}, "router_version": {}, "recipient_count": {}, "failure_count": {}, "reason": {}},
+	"ui_live_snapshot_failed":    {"error_code": {}},
+	"message_expired":            {"message_id": {}},
+	"delivery_timed_out":         {"message_id": {}, "agent_id": {}, "attempt": {}, "state": {}, "reason": {}},
+	"message_dead_lettered":      {"message_id": {}, "agent_id": {}, "attempt": {}, "reason": {}},
+	"recurring_reminder_rearmed": {"reminder_id": {}, "message_id": {}, "next_due_at": {}, "reason": {}},
+	"lifecycle_sweep_completed":  {"stale_agent_count": {}, "expired_message_count": {}, "timed_out_delivery_count": {}, "reminder_success_count": {}, "reminder_failure_count": {}, "server_job_success_count": {}, "server_job_failure_count": {}, "conversation_message_pruned_count": {}, "lifecycle_running_expired_count": {}, "lifecycle_tombstone_pruned_count": {}, "lifecycle_ledger_pruned_count": {}, "lifecycle_producer_pruned_count": {}, "goal_control_pruned_count": {}},
+	"reminder_started":           {"reminder_id": {}, "scheduled_for": {}},
+	"reminder_succeeded":         {"reminder_id": {}, "scheduled_for": {}, "linked_message_id": {}, "agent_id": {}},
+	"reminder_failed":            {"reminder_id": {}, "scheduled_for": {}, "error_code": {}},
+}
+
+func validateEvent(event string, fields map[string]any) error {
+	allowed, ok := safeEventFields[event]
+	if !ok {
+		return fmt.Errorf("unknown event %q", event)
+	}
+	for key, value := range fields {
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("unsafe or unknown field %q for event %q", key, event)
+		}
+		switch item := value.(type) {
+		case string:
+			if !utf8.ValidString(item) || len(item) > maxEventStringBytes || strings.IndexByte(item, 0) >= 0 {
+				return fmt.Errorf("field %q exceeds string bound", key)
+			}
+		case int:
+			if item < 0 || item > maxEventCount {
+				return fmt.Errorf("field %q exceeds numeric bound", key)
+			}
+		case int64:
+			if item < 0 || item > maxEventCount {
+				return fmt.Errorf("field %q exceeds numeric bound", key)
+			}
+		default:
+			return fmt.Errorf("field %q has unsafe type", key)
+		}
+	}
+	return nil
+}
+
+func (w *logWriter) LogEvent(event transport.Event) error {
+	return w.logFields(event.Name(), event.Fields())
+}
+
 func (w *logWriter) Log(event string, fields map[string]any) error {
+	return w.logFields(event, fields)
+}
+
+func (w *logWriter) logFields(event string, fields map[string]any) error {
+	if err := validateEvent(event, fields); err != nil {
+		return err
+	}
 	if w == nil {
 		return errors.New("event log writer is nil")
 	}

@@ -97,17 +97,17 @@ func validateStaticUIRoot(path string) error {
 	return nil
 }
 
-func acceptanceLogger(path string) (func(string, map[string]any), func() error, error) {
+func acceptanceLogger(path string) (transport.EventLogger, func() error, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, nil, err
 	}
 	var lock sync.Mutex
-	write := func(event string, fields map[string]any) {
+	write := func(event transport.Event) {
 		lock.Lock()
 		defer lock.Unlock()
-		line := map[string]any{"event": event, "at": time.Now().UTC().Format(time.RFC3339Nano)}
-		for key, value := range fields {
+		line := map[string]any{"event": event.Name(), "at": time.Now().UTC().Format(time.RFC3339Nano)}
+		for key, value := range event.Fields() {
 			line[key] = value
 		}
 		encoded, marshalErr := json.Marshal(line)
@@ -335,7 +335,8 @@ func main() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	signalValue := <-signals
-	logger("router_stopped", map[string]any{"signal": signalValue.String()})
+	_ = signalValue
+	logger(transport.RouterStoppedEvent())
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := router.Close(shutdown); err != nil {

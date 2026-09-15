@@ -182,7 +182,9 @@ func TestLifecycleSweepPublishesExpiredMessageAndDeliveryRecovery(t *testing.T) 
 	require.NoError(t, err)
 	defer durable.Close()
 	var events []map[string]any
-	router, err := New(Options{Store: durable, Clock: clock, SweepHeartbeatInterval: time.Hour, EventLogger: func(event string, fields map[string]any) {
+	router, err := New(Options{Store: durable, Clock: clock, SweepHeartbeatInterval: time.Hour, EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		record := map[string]any{"event": event}
 		for key, value := range fields {
 			record[key] = value
@@ -285,7 +287,7 @@ func TestLifecyclePrunePublishesTerminalProjectionToObservers(t *testing.T) {
 	seedLifecycleChild(t, database, start.Add(-8*24*time.Hour))
 
 	var sent []map[string]any
-	router, err := New(Options{Store: durable, Clock: clock, EventLogger: func(string, map[string]any) {}})
+	router, err := New(Options{Store: durable, Clock: clock, EventLogger: func(Event) {}})
 	require.NoError(t, err)
 	observer := &session{router: router, agentID: "observer", conversationSync: "v1", lifecycleEnabled: true, sendOverride: func(fields map[string]any) error {
 		sent = append(sent, fields)
@@ -310,7 +312,7 @@ func TestLifecyclePublishDoesNotRevertNewerConcurrentState(t *testing.T) {
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
-	router, err := New(Options{Store: durable, EventLogger: func(string, map[string]any) {}})
+	router, err := New(Options{Store: durable, EventLogger: func(Event) {}})
 	require.NoError(t, err)
 
 	var sent []map[string]any
@@ -381,7 +383,10 @@ func TestAttachmentSweepFailureDoesNotSuppressCoreSweep(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, clock.Advance(time.Hour+time.Second))
 	var events []string
-	router, err := New(Options{Store: durable, Clock: clock, SweepHeartbeatInterval: time.Hour, Attachments: attachmentStore, EventLogger: func(event string, _ map[string]any) { events = append(events, event) }})
+	router, err := New(Options{Store: durable, Clock: clock, SweepHeartbeatInterval: time.Hour, Attachments: attachmentStore, EventLogger: func(logged Event) {
+		event := logged.Name()
+		events = append(events, event)
+	}})
 	require.NoError(t, err)
 	_, err = router.sweep(context.Background())
 	require.NoError(t, err)
@@ -398,7 +403,8 @@ func TestConcurrentCloseWaitsForRouterStoppedRecord(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	var events []string
-	router, err := New(Options{Store: durable, EventLogger: func(event string, _ map[string]any) {
+	router, err := New(Options{Store: durable, EventLogger: func(logged Event) {
+		event := logged.Name()
 		if event != "router_stopped" {
 			return
 		}
@@ -428,7 +434,9 @@ func TestLifecycleDiagnosticsUseOnlyBoundedIdentifiersCountsAndReasons(t *testin
 	require.NoError(t, err)
 	defer durable.Close()
 	var events []map[string]any
-	router, err := New(Options{Store: durable, Clock: clock, EventLogger: func(event string, fields map[string]any) {
+	router, err := New(Options{Store: durable, Clock: clock, EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		record := map[string]any{"event": event}
 		for key, value := range fields {
 			record[key] = value
@@ -522,7 +530,9 @@ func TestLifecyclePersistenceFailureIsDiagnosticOnly(t *testing.T) {
 	require.NoError(t, err)
 	defer rawDB.Close()
 	var events []map[string]any
-	router, err := New(Options{Store: durable, EventLogger: func(event string, fields map[string]any) {
+	router, err := New(Options{Store: durable, EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		events = append(events, map[string]any{"event": event, "fields": fields})
 	}})
 	require.NoError(t, err)
@@ -555,7 +565,9 @@ func TestLifecycleAckFailureIsDiagnosticOnly(t *testing.T) {
 	require.NoError(t, err)
 	defer durable.Close()
 	var events []map[string]any
-	router, err := New(Options{Store: durable, EventLogger: func(event string, fields map[string]any) {
+	router, err := New(Options{Store: durable, EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		events = append(events, map[string]any{"event": event, "fields": fields})
 	}})
 	require.NoError(t, err)

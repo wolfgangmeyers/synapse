@@ -132,7 +132,10 @@ func createRecurringReminder(t *testing.T, durable *store.Store, target, id stri
 func TestRouterDoesNotRegisterTmuxAuditWithoutConfiguration(t *testing.T) {
 	var events []string
 	tmux := &auditTmux{sessionsErr: errors.New("tmux must not be called")}
-	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, EventLogger: func(event string, _ map[string]any) { events = append(events, event) }})
+	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, EventLogger: func(logged Event) {
+		event := logged.Name()
+		events = append(events, event)
+	}})
 	require.Empty(t, router.policies)
 	require.NoError(t, router.Listen(context.Background()))
 	require.Equal(t, []string{"router_started"}, events)
@@ -236,7 +239,9 @@ func TestTmuxRouterAuditMissingSessionDoesNotProvisionAndIsIsolated(t *testing.T
 	tmux := &auditTmux{sessions: []string{"other"}}
 	var events []map[string]any
 	after := false
-	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", EventLogger: func(event string, fields map[string]any) {
+	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		if event == "router_error" {
 			events = append(events, fields)
 		}
@@ -252,7 +257,9 @@ func TestTmuxRouterAuditMissingSessionDoesNotProvisionAndIsIsolated(t *testing.T
 func TestNativePolicyFailuresDoNotBlockCleanupOrFollowingPolicies(t *testing.T) {
 	var events []map[string]any
 	after := make(chan struct{})
-	router, durable, clock := newPolicyRouter(t, Options{PolicyTimeout: 5 * time.Millisecond, EventLogger: func(event string, fields map[string]any) {
+	router, durable, clock := newPolicyRouter(t, Options{PolicyTimeout: 5 * time.Millisecond, EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		if event == "router_error" {
 			events = append(events, fields)
 		}
@@ -288,7 +295,9 @@ func TestTmuxRouterAuditStoreAndSenderFailuresAreIsolated(t *testing.T) {
 			tmux := &auditTmux{sessions: []string{"mecha"}, windows: []TmuxWindow{{Name: "worker"}}}
 			var events []map[string]any
 			after := false
-			router, durable, clock := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", PolicySender: test.sender, EventLogger: func(event string, fields map[string]any) {
+			router, durable, clock := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", PolicySender: test.sender, EventLogger: func(logged Event) {
+				event := logged.Name()
+				fields := logged.Fields()
 				if event == "router_error" {
 					events = append(events, fields)
 				}
@@ -329,7 +338,9 @@ func TestTmuxRouterAuditIDSourceFailureIsIsolated(t *testing.T) {
 	ids := deterministic.NewSequenceIDSource()
 	var events []map[string]any
 	after := false
-	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", IDSource: ids, EventLogger: func(event string, fields map[string]any) {
+	router, _, _ := newPolicyRouter(t, Options{Tmux: tmux, EnableTmuxRouterAudit: true, AuditSupervisorTarget: "supervisor", AuditTmuxSession: "mecha", IDSource: ids, EventLogger: func(logged Event) {
+		event := logged.Name()
+		fields := logged.Fields()
 		if event == "router_error" {
 			events = append(events, fields)
 		}

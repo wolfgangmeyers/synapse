@@ -102,7 +102,7 @@ func (r *Router) readLoop(s *session) {
 		}
 		err = r.dispatch(s, frame)
 		if err != nil {
-			r.emit("router_error", map[string]any{"error_code": "internal_error"})
+			r.emitEvent(RouterErrorEvent("internal_error", ""))
 			_ = s.sendError("internal_error", frameString(frame, "frame_id"))
 			_ = s.close(websocket.StatusInternalError, "internal server error")
 			return
