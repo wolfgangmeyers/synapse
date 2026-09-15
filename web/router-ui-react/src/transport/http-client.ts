@@ -177,8 +177,11 @@ export function managedRequestErrorMessage(cause: unknown, fallback: string): st
   if (diagnostic?.cause) facts.push(`Cause: ${diagnostic.cause}`);
   return `${cause.message} (${facts.join(" · ")})`;
 }
-async function jsonBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+async function jsonBody(response: Response, maxBytes?: number): Promise<unknown> {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (maxBytes !== undefined && bytes.length > maxBytes) throw new HttpRequestError(response.status, "invalid_response", "Router returned an oversized response", bytes.byteLength, response.headers.get("x-correlation-id") ?? undefined);
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new HttpRequestError(response.status, "invalid_response", "Router returned invalid UTF-8", bytes.byteLength, response.headers.get("x-correlation-id") ?? undefined); }
   if (text === "") return {};
   try { return JSON.parse(text); } catch { throw new HttpRequestError(response.status, "invalid_response", "Router returned invalid JSON", text, response.headers.get("x-correlation-id") ?? undefined); }
 }
@@ -282,11 +285,20 @@ const routerLogDiagnosticCategories: readonly RouterLogDiagnosticCategory[] = ["
 function isRouterLogDiagnosticCategory(value: unknown): value is RouterLogDiagnosticCategory { return value === "source_unavailable" || value === "generation_unreadable" || value === "generation_disappeared" || value === "snapshot_changed" || value === "tail_unterminated" || value === "cursor_invalidated"; }
 function isRouterLogStatus(value: unknown): value is RouterLogStatus { return value === "complete" || value === "partial" || value === "source_unavailable"; }
 function utf8Length(value: string): number { return new TextEncoder().encode(value).length; }
+function strictUtcTimestamp(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+  const hour = Number(match[4]); const minute = Number(match[5]); const second = Number(match[6]);
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  const date = new Date(0); date.setUTCFullYear(year, month - 1, day); date.setUTCHours(hour, minute, second, 0);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day && date.getUTCHours() === hour && date.getUTCMinutes() === minute && date.getUTCSeconds() === second && Number.isFinite(Date.parse(value));
+}
 function routerLogQuery(value: unknown): value is RouterLogQuery {
   const item = recordValue(value);
   if (!item || Object.keys(item).length !== 4 || typeof item.query !== "string" || item.from !== null && typeof item.from !== "string" || item.to !== null && typeof item.to !== "string" || item.cursor !== null && typeof item.cursor !== "string") return false;
   if (utf8Length(item.query) > 128 || item.query.includes("\u0000") || (item.cursor !== null && (item.cursor.length === 0 || utf8Length(item.cursor) > 4096))) return false;
-  for (const bound of [item.from, item.to]) if (bound !== null && (bound.length === 0 || utf8Length(bound) > 64 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(bound) || Number.isNaN(Date.parse(bound)))) return false;
+  for (const bound of [item.from, item.to]) if (bound !== null && (bound.length === 0 || utf8Length(bound) > 64 || !strictUtcTimestamp(bound))) return false;
   return item.from === null || item.to === null || Date.parse(item.from) < Date.parse(item.to);
 }
 function validBase64(value: unknown): value is string { return typeof value === "string" && value.length % 4 === 0 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value); }
@@ -298,7 +310,6 @@ function routerLogResponse(value: unknown): RouterLogResponse {
   const diagnostics: RouterLogDiagnostic[] = [];
   const diagnosticNames = new Set<RouterLogDiagnosticCategory>();
   for (const candidate of root.diagnostics) { const diagnostic = recordValue(candidate); if (!diagnostic || Object.keys(diagnostic).length !== 2 || !isRouterLogDiagnosticCategory(diagnostic.category) || diagnosticNames.has(diagnostic.category) || !safeInteger(diagnostic.count) || diagnostic.count > 999) throw invalidResponse("Router returned invalid router-log diagnostics", value); diagnosticNames.add(diagnostic.category); diagnostics.push({ category: diagnostic.category, count: diagnostic.count }); }
-  if (JSON.stringify(value).length > 48 * 1024 * 1024) throw invalidResponse("Router returned an oversized router-log response", value);
   return { status: root.status, lines, next_cursor: root.next_cursor, diagnostics };
 }
 function managedOperation(value: unknown): ManagedOperationResponse {
@@ -359,9 +370,9 @@ export interface RouterHttpClient {
 
 export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): RouterHttpClient {
   const base = normalizeRouterUrl(routerUrl);
-  const request = async (path: string, init: RequestInit = {}): Promise<unknown> => {
+  const request = async (path: string, init: RequestInit = {}, maxResponseBytes?: number): Promise<unknown> => {
     const response = await fetchImpl(resolveHttpEndpoint(base, path), init);
-    const body = await jsonBody(response);
+    const body = await jsonBody(response, maxResponseBytes);
     if (!response.ok) throw responseError(body, response.status, response.headers.get("x-correlation-id"));
     return body;
   };
@@ -432,7 +443,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     // does not cache, log, return, or add it to a URL.
     respondProviderAuth: async (operationId, promptId, value) => managedOperation(await managedRequest(`/v1/provider-auth/operations/${encodeURIComponent(operationId)}/response`, "POST", { prompt_id: promptId, value })),
     setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
-    routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" })); },
+    routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
   };
 }
 
