@@ -94,6 +94,20 @@ p:empty { display: none; }
 }
 .status-dot.connected { background: var(--secondary); }
 .status-dot.connecting { background: #ffc57c; }
+.router-log-link { display: block; margin: 12px 0 18px; color: var(--primary); font-weight: 700; text-decoration: none; }
+.router-log-link:hover { text-decoration: underline; }
+.router-log-page { min-height: 100dvh; overflow: auto; background: var(--ink); padding: clamp(20px, 4vw, 56px); color: var(--text); }
+.router-log-header, .router-log-controls, .router-log-paging { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.router-log-header { justify-content: space-between; align-items: center; margin: 0 auto 28px; max-width: 1200px; }
+.router-log-header p { margin-top: 8px; }
+.router-log-controls { max-width: 1200px; margin: 0 auto 12px; }
+.router-log-controls label { flex: 1 1 180px; }
+.router-log-controls button { flex: 0 0 auto; }
+.router-log-read-only, .router-log-page > p { max-width: 1200px; margin: 10px auto; }
+.router-log-panel { max-width: 1200px; min-height: 240px; max-height: calc(100dvh - 300px); overflow: auto; margin: 18px auto; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: #0a0c12; color: #d9e2ff; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.router-log-line { min-width: max-content; }
+.router-log-paging { max-width: 1200px; margin: 0 auto; justify-content: space-between; }
+.router-log-paging button { min-width: 110px; }
 .router-selector {
   width: 100%;
   justify-content: space-between;

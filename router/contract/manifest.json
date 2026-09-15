@@ -19,6 +19,7 @@
     {"methods": ["OPTIONS"], "path": "/*", "source": "handleHttpRequest", "cors": "verified"},
     {"methods": ["GET"], "path": "/v1/health", "source": "handleHttpRequest"},
     {"methods": ["GET"], "path": "/v1/capabilities", "source": "handleHttpRequest"},
+    {"methods": ["GET"], "path": "/v1/router-log", "source": "handleRouterLog"},
     {"methods": ["GET"], "path": "/v1/memory/policy", "source": "handleHttpRequest"},
     {"methods": ["POST"], "path": "/v1/memory/rebuild", "source": "handleMemoryRequest"},
     {"methods": ["POST"], "path": "/v1/memory/lookup", "source": "handleMemoryRequest"},
