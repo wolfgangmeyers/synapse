@@ -41,6 +41,7 @@ import { DEFAULT_GOAL_STATE, goalErrorMessage, type GoalControlSettings, type Go
 import { withAbsoluteAttachmentUrls } from "./transport/attachment-urls";
 import { createHistoryThumbnail } from "./domain/images";
 import { cacheKeyForAttachment, saveCachedImage } from "./persistence/history-repository";
+import { RouterLogViewer } from "./components/RouterLogViewer";
 
 export interface AppProps {
   routerUrl?: string | undefined;
@@ -164,6 +165,7 @@ function ConfiguredApp(props: AppProps & { routerUrl: string; bootstrapRouterUrl
   }, [props.storage]);
   if (initializationError !== undefined) return <PersistenceStartupScreen error={initializationError} />;
   if (!ready) return <PersistenceStartupScreen />;
+  if (globalThis.location?.pathname === "/logs") return <RouterLogViewer routerUrl={props.routerUrl} />;
   return <ConfiguredAppContent {...props} />;
 }
 
@@ -684,3 +686,4 @@ export { Composer } from "./components/Composer";
 export { ImagePreview } from "./components/ImagePreview";
 export { EmptyState } from "./components/EmptyState";
 export { StatusMessage } from "./components/StatusMessage";
+export { RouterLogViewer } from "./components/RouterLogViewer";

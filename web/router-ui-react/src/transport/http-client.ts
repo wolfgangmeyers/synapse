@@ -29,6 +29,12 @@ export interface ProviderModel { provider: "openai-codex" | "google" | "cursor";
 export interface ProviderStatus { provider: "openai-codex" | "google" | "cursor"; label: "ChatGPT" | "Google" | "Cursor"; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
 export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
+export interface RouterLogQuery { query: string; from: string | null; to: string | null; cursor: string | null }
+export interface RouterLogLine { bytes_base64: string }
+export type RouterLogStatus = "complete" | "partial" | "source_unavailable";
+export type RouterLogDiagnosticCategory = "source_unavailable" | "generation_unreadable" | "generation_disappeared" | "snapshot_changed" | "tail_unterminated" | "cursor_invalidated";
+export interface RouterLogDiagnostic { category: RouterLogDiagnosticCategory; count: number }
+export interface RouterLogResponse { status: RouterLogStatus; lines: RouterLogLine[]; next_cursor: string | null; diagnostics: RouterLogDiagnostic[] }
 export interface DefaultModelResponse { operation_id: string; default_model: { provider: string; id: string; name?: string } | null; effective_fallback: ProviderModel }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -272,6 +278,29 @@ function defaultModel(value: unknown): DefaultModelResponse {
   if (!root || !nonEmptyString(root.operation_id) || saved === undefined || !providerModel(root.effective_fallback)) throw invalidResponse("Router returned invalid default model", value);
   return { operation_id: root.operation_id, default_model: saved, effective_fallback: root.effective_fallback };
 }
+const routerLogDiagnosticCategories: readonly RouterLogDiagnosticCategory[] = ["source_unavailable", "generation_unreadable", "generation_disappeared", "snapshot_changed", "tail_unterminated", "cursor_invalidated"];
+function isRouterLogDiagnosticCategory(value: unknown): value is RouterLogDiagnosticCategory { return value === "source_unavailable" || value === "generation_unreadable" || value === "generation_disappeared" || value === "snapshot_changed" || value === "tail_unterminated" || value === "cursor_invalidated"; }
+function isRouterLogStatus(value: unknown): value is RouterLogStatus { return value === "complete" || value === "partial" || value === "source_unavailable"; }
+function utf8Length(value: string): number { return new TextEncoder().encode(value).length; }
+function routerLogQuery(value: unknown): value is RouterLogQuery {
+  const item = recordValue(value);
+  if (!item || Object.keys(item).length !== 4 || typeof item.query !== "string" || item.from !== null && typeof item.from !== "string" || item.to !== null && typeof item.to !== "string" || item.cursor !== null && typeof item.cursor !== "string") return false;
+  if (utf8Length(item.query) > 128 || item.query.includes("\u0000") || (item.cursor !== null && (item.cursor.length === 0 || utf8Length(item.cursor) > 4096))) return false;
+  for (const bound of [item.from, item.to]) if (bound !== null && (bound.length === 0 || utf8Length(bound) > 64 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(bound) || Number.isNaN(Date.parse(bound)))) return false;
+  return item.from === null || item.to === null || Date.parse(item.from) < Date.parse(item.to);
+}
+function validBase64(value: unknown): value is string { return typeof value === "string" && value.length % 4 === 0 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value); }
+function routerLogResponse(value: unknown): RouterLogResponse {
+  const root = recordValue(value);
+  if (!root || Object.keys(root).length !== 4 || Object.keys(root).some((key) => !["status", "lines", "next_cursor", "diagnostics"].includes(key)) || !isRouterLogStatus(root.status) || !Array.isArray(root.lines) || root.lines.length > 500 || (root.next_cursor !== null && (typeof root.next_cursor !== "string" || root.next_cursor.length === 0)) || !Array.isArray(root.diagnostics) || root.diagnostics.length > 8) throw invalidResponse("Router returned an invalid router-log response", value);
+  const lines: RouterLogLine[] = [];
+  for (const candidate of root.lines) { const line = recordValue(candidate); if (!line || Object.keys(line).length !== 1 || !validBase64(line.bytes_base64)) throw invalidResponse("Router returned an invalid router-log line", value); try { atob(line.bytes_base64); } catch { throw invalidResponse("Router returned an invalid router-log line", value); } lines.push({ bytes_base64: line.bytes_base64 }); }
+  const diagnostics: RouterLogDiagnostic[] = [];
+  const diagnosticNames = new Set<RouterLogDiagnosticCategory>();
+  for (const candidate of root.diagnostics) { const diagnostic = recordValue(candidate); if (!diagnostic || Object.keys(diagnostic).length !== 2 || !isRouterLogDiagnosticCategory(diagnostic.category) || diagnosticNames.has(diagnostic.category) || !safeInteger(diagnostic.count) || diagnostic.count > 999) throw invalidResponse("Router returned invalid router-log diagnostics", value); diagnosticNames.add(diagnostic.category); diagnostics.push({ category: diagnostic.category, count: diagnostic.count }); }
+  if (JSON.stringify(value).length > 48 * 1024 * 1024) throw invalidResponse("Router returned an oversized router-log response", value);
+  return { status: root.status, lines, next_cursor: root.next_cursor, diagnostics };
+}
 function managedOperation(value: unknown): ManagedOperationResponse {
   const root = recordValue(value);
   if (!root || !nonEmptyString(root.operation_id)) throw invalidResponse("Router returned an invalid managed operation", value);
@@ -325,6 +354,7 @@ export interface RouterHttpClient {
   startProviderAuth(provider: ProviderModel["provider"], action: "login" | "logout"): Promise<ManagedOperationResponse>;
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
+  routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
 }
 
 export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): RouterHttpClient {
@@ -402,6 +432,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     // does not cache, log, return, or add it to a URL.
     respondProviderAuth: async (operationId, promptId, value) => managedOperation(await managedRequest(`/v1/provider-auth/operations/${encodeURIComponent(operationId)}/response`, "POST", { prompt_id: promptId, value })),
     setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
+    routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" })); },
   };
 }
 
