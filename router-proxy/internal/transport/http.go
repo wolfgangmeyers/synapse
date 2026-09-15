@@ -149,6 +149,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	switch {
+	case path == "/v1/router-log":
+		r.handleRouterLog(w, req)
+		return
 	case req.Method == http.MethodGet && path == "/v1/health":
 		r.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "v1", "schema_migrations": r.store.MigrationIDs(), "runtime": r.runtimeIdentity})
 		return
@@ -1074,7 +1077,7 @@ func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 	}()
 	outcomes, err := r.store.FireDueRemindersWithBefore(ctx, func(attempt store.ReminderFireAttempt) {
 		scheduledForByReminderID[attempt.ReminderID] = attempt.ScheduledFor
-		r.emit("reminder_started", map[string]any{"reminder_id": attempt.ReminderID, "scheduled_for": attempt.ScheduledFor})
+		r.emitEvent(ReminderStartedEvent(attempt.ReminderID, attempt.ScheduledFor))
 	}, func(attempt store.ReminderFireAttempt) {
 		reminder, err := r.store.ReminderFor(ctx, attempt.ReminderID)
 		if err == nil && reminder != nil {
@@ -1091,22 +1094,13 @@ func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 	for _, outcome := range outcomes {
 		if outcome.Message != nil {
 			succeeded++
-			r.emit("reminder_succeeded", map[string]any{
-				"reminder_id":       outcome.ReminderID,
-				"scheduled_for":     scheduledForByReminderID[outcome.ReminderID],
-				"linked_message_id": outcome.Message.ID,
-				"agent_id":          outcome.Message.To,
-			})
+			r.emitEvent(ReminderSucceededEvent(outcome.ReminderID, scheduledForByReminderID[outcome.ReminderID], outcome.Message.ID, outcome.Message.To))
 			r.afterEnqueue(store.EnqueueResult{Message: *outcome.Message, ConversationMessage: outcome.ConversationMessage, ConversationCreated: outcome.ConversationMessage != nil})
 			r.recordCompleteHistoryWithPresentation(ctx, outcome.Message.To, "reminder", "info", "Reminder delivered", "reminder:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID], &store.ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"})
 			continue
 		}
 		failed++
-		r.emit("reminder_failed", map[string]any{
-			"reminder_id":   outcome.ReminderID,
-			"scheduled_for": scheduledForByReminderID[outcome.ReminderID],
-			"error_code":    outcome.ErrorCode,
-		})
+		r.emitEvent(ReminderFailedEvent(outcome.ReminderID, scheduledForByReminderID[outcome.ReminderID], outcome.ErrorCode))
 		r.recordCompleteHistoryWithPresentation(ctx, outcome.Target, "reminder", "error", "Reminder delivery failed", "reminder-failed:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID], &store.ManagedHistoryPresentation{Kind: "reminder", Outcome: "error", Summary: "The reminder could not be delivered.", Error: &store.ManagedHistoryError{Code: "REMINDER_DELIVERY_FAILED", Retryable: false, DetailAvailable: false}})
 	}
 	return succeeded, failed

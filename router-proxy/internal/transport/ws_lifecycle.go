@@ -111,20 +111,16 @@ func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) er
 	}
 	candidate, err := lifecycleCandidateFromFrame(frame)
 	if err != nil {
-		r.emit("lifecycle_ingest_failed", lifecycleFrameFields(frame, map[string]any{"reason": "invalid_candidate"}))
+		r.emitEvent(lifecycleIngestFailedEvent(frame))
 		return err
 	}
-	r.emit("lifecycle_ingested", lifecycleCandidateFields(candidate))
+	r.emitEvent(lifecycleIngestedEvent(candidate))
 	result, err := r.store.ApplySubagentLifecycle(context.Background(), candidate, candidate.Snapshot)
 	if err != nil {
-		r.emit("lifecycle_persist_failed", lifecycleCandidateFields(candidate, map[string]any{"reason": "store_error"}))
+		r.emitEvent(lifecyclePersistFailedEvent(candidate))
 		return err
 	}
-	r.emit("lifecycle_persisted", lifecycleCandidateFields(candidate, map[string]any{
-		"disposition":    result.Disposition,
-		"router_version": result.RouterVersion,
-		"subagent_count": lifecycleCandidateCount(candidate),
-	}))
+	r.emitEvent(lifecyclePersistedEvent(candidate, result.Disposition, result.RouterVersion))
 	if result.Disposition == "applied" {
 		r.setLifecycleProjection(candidate.ParentAgentID, result.RouterVersion, result.Snapshot.Subagents)
 	}
@@ -145,13 +141,10 @@ func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) er
 		ack["applied_version"] = result.AppliedVersion
 	}
 	if err := s.send(ack); err != nil {
-		r.emit("lifecycle_ack_failed", lifecycleCandidateFields(candidate, map[string]any{"reason": "send_failed"}))
+		r.emitEvent(lifecycleAckFailedEvent(candidate))
 		return err
 	}
-	r.emit("lifecycle_acknowledged", lifecycleCandidateFields(candidate, map[string]any{
-		"disposition":    result.Disposition,
-		"router_version": result.RouterVersion,
-	}))
+	r.emitEvent(lifecycleAcknowledgedEvent(candidate, result.Disposition, result.RouterVersion))
 	if result.Disposition == "applied" {
 		return r.broadcastLifecycle(candidate.ParentAgentID, result.RouterVersion)
 	}
@@ -335,20 +328,14 @@ func (r *Router) broadcastLifecycle(agentID string, version int64) error {
 		}
 	}
 	if failureCount > 0 {
-		r.emit("lifecycle_broadcast_failed", map[string]any{
-			"agent_id":        agentID,
-			"router_version":  version,
-			"recipient_count": recipientCount,
-			"failure_count":   failureCount,
-			"reason":          "send_failed",
-		})
+		r.emitEvent(LifecycleBroadcastFailedEvent(agentID, version, recipientCount, failureCount, "send_failed"))
 	}
 	return nil
 }
 
 func lifecycleFrameFields(frame map[string]json.RawMessage, extra ...map[string]any) map[string]any {
 	fields := map[string]any{}
-	for _, key := range []string{"agent_id", "instance_id", "parent_session_id", "lease_id", "producer_epoch", "event_id", "frame_id", "lifecycle_event"} {
+	for _, key := range []string{"agent_id", "event_id", "lifecycle_event"} {
 		if value := frameString(frame, key); value != "" {
 			fields[key] = value
 		}
@@ -372,14 +359,10 @@ func lifecycleFrameFields(frame map[string]json.RawMessage, extra ...map[string]
 
 func lifecycleCandidateFields(candidate store.LifecycleCandidate, extra ...map[string]any) map[string]any {
 	fields := map[string]any{
-		"agent_id":          candidate.ParentAgentID,
-		"instance_id":       candidate.InstanceID,
-		"parent_session_id": candidate.ParentSessionID,
-		"lease_id":          candidate.LeaseID,
-		"producer_epoch":    candidate.ProducerEpoch,
-		"event_id":          candidate.EventID,
-		"client_sequence":   candidate.ClientSequence,
-		"subagent_count":    lifecycleCandidateCount(candidate),
+		"agent_id":        candidate.ParentAgentID,
+		"event_id":        candidate.EventID,
+		"client_sequence": candidate.ClientSequence,
+		"subagent_count":  lifecycleCandidateCount(candidate),
 	}
 	if candidate.EventKind != "" {
 		fields["lifecycle_event"] = candidate.EventKind
@@ -390,6 +373,38 @@ func lifecycleCandidateFields(candidate store.LifecycleCandidate, extra ...map[s
 		}
 	}
 	return fields
+}
+
+func lifecycleIngestFailedEvent(frame map[string]json.RawMessage) Event {
+	fields := lifecycleFrameFields(frame)
+	fields["reason"] = "invalid_candidate"
+	return newEvent("lifecycle_ingest_failed", fields)
+}
+func lifecycleIngestedEvent(candidate store.LifecycleCandidate) Event {
+	return newEvent("lifecycle_ingested", lifecycleCandidateFields(candidate))
+}
+func lifecyclePersistFailedEvent(candidate store.LifecycleCandidate) Event {
+	fields := lifecycleCandidateFields(candidate)
+	fields["reason"] = "store_error"
+	return newEvent("lifecycle_persist_failed", fields)
+}
+func lifecyclePersistedEvent(candidate store.LifecycleCandidate, disposition string, version int64) Event {
+	fields := lifecycleCandidateFields(candidate)
+	fields["disposition"], fields["router_version"] = disposition, version
+	return newEvent("lifecycle_persisted", fields)
+}
+func lifecycleAckFailedEvent(candidate store.LifecycleCandidate) Event {
+	fields := lifecycleCandidateFields(candidate)
+	fields["reason"] = "send_failed"
+	return newEvent("lifecycle_ack_failed", fields)
+}
+func lifecycleAcknowledgedEvent(candidate store.LifecycleCandidate, disposition string, version int64) Event {
+	fields := lifecycleCandidateFields(candidate)
+	fields["disposition"], fields["router_version"] = disposition, version
+	return newEvent("lifecycle_acknowledged", fields)
+}
+func LifecycleBroadcastFailedEvent(agentID string, version int64, recipients, failures int, reason string) Event {
+	return newEvent("lifecycle_broadcast_failed", map[string]any{"agent_id": agentID, "router_version": version, "recipient_count": recipients, "failure_count": failures, "reason": reason})
 }
 
 func lifecycleCandidateCount(candidate store.LifecycleCandidate) int {

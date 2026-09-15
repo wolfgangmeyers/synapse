@@ -97,6 +97,106 @@ type RuntimeIdentity struct {
 	SourceTree   string `json:"source_tree"`
 }
 
+// RouterLogReader is the read-only source behind GET /v1/router-log.
+// Implementations own source snapshots and cursor validation; the transport
+// validates the wire query before calling it.
+type RouterLogReader interface {
+	ReadRouterLog(context.Context, RouterLogQuery) (RouterLogResponse, error)
+}
+
+type RouterLogReaderFunc func(context.Context, RouterLogQuery) (RouterLogResponse, error)
+
+func (f RouterLogReaderFunc) ReadRouterLog(ctx context.Context, query RouterLogQuery) (RouterLogResponse, error) {
+	return f(ctx, query)
+}
+
+// Event is an immutable, closed router diagnostic. Callers can only create
+// events through the typed constructors below; arbitrary event names and field
+// maps are not part of the transport logger contract.
+type Event struct {
+	name   string
+	fields map[string]any
+}
+
+type EventLogger func(Event)
+
+func newEvent(name string, fields map[string]any) Event {
+	copy := make(map[string]any, len(fields))
+	for key, value := range fields {
+		copy[key] = value
+	}
+	return Event{name: name, fields: copy}
+}
+func (e Event) Name() string { return e.name }
+func (e Event) Fields() map[string]any {
+	copy := make(map[string]any, len(e.fields))
+	for key, value := range e.fields {
+		copy[key] = value
+	}
+	return copy
+}
+func RouterStartedEvent(port int) Event {
+	return newEvent("router_started", map[string]any{"port": port})
+}
+func RouterStoppedEvent() Event { return newEvent("router_stopped", nil) }
+func RouterErrorEvent(code, agentID string) Event {
+	fields := map[string]any{"error_code": code}
+	if agentID != "" {
+		fields["agent_id"] = agentID
+	}
+	return newEvent("router_error", fields)
+}
+func RouterErrorWithPolicyEvent(code, policy string) Event {
+	return newEvent("router_error", map[string]any{"error_code": code, "policy": policy})
+}
+func UILiveSnapshotFailedEvent(code string) Event {
+	return newEvent("ui_live_snapshot_failed", map[string]any{"error_code": code})
+}
+func MessageExpiredEvent(id string) Event {
+	return newEvent("message_expired", map[string]any{"message_id": id})
+}
+func DeliveryTimedOutEvent(id, agentID string, attempt int, state, reason string) Event {
+	return newEvent("delivery_timed_out", map[string]any{"message_id": id, "agent_id": agentID, "attempt": attempt, "state": state, "reason": reason})
+}
+func MessageDeadLetteredEvent(id, agentID string, attempt int, reason string) Event {
+	return newEvent("message_dead_lettered", map[string]any{"message_id": id, "agent_id": agentID, "attempt": attempt, "reason": reason})
+}
+func RecurringReminderRearmedEvent(reminderID, messageID, nextDueAt, reason string) Event {
+	return newEvent("recurring_reminder_rearmed", map[string]any{"reminder_id": reminderID, "message_id": messageID, "next_due_at": nextDueAt, "reason": reason})
+}
+
+type SweepCounts struct {
+	StaleAgents, ExpiredMessages, TimedOutDeliveries int
+	ReminderSuccess, ReminderFailure                 int
+	ConversationMessages, LifecycleExpired           int
+	LifecycleStates, LifecycleEvents                 int
+	LifecycleProducers, GoalControlStates            int
+}
+
+func LifecycleSweepCompletedEvent(counts SweepCounts) Event {
+	fields := map[string]any{
+		"stale_agent_count": counts.StaleAgents, "expired_message_count": counts.ExpiredMessages,
+		"timed_out_delivery_count": counts.TimedOutDeliveries, "reminder_success_count": counts.ReminderSuccess,
+		"reminder_failure_count": counts.ReminderFailure, "server_job_success_count": 0, "server_job_failure_count": 0,
+	}
+	optional := map[string]int{"conversation_message_pruned_count": counts.ConversationMessages, "lifecycle_running_expired_count": counts.LifecycleExpired, "lifecycle_tombstone_pruned_count": counts.LifecycleStates, "lifecycle_ledger_pruned_count": counts.LifecycleEvents, "lifecycle_producer_pruned_count": counts.LifecycleProducers, "goal_control_pruned_count": counts.GoalControlStates}
+	for key, value := range optional {
+		if value > 0 {
+			fields[key] = value
+		}
+	}
+	return newEvent("lifecycle_sweep_completed", fields)
+}
+func ReminderStartedEvent(id, scheduledFor string) Event {
+	return newEvent("reminder_started", map[string]any{"reminder_id": id, "scheduled_for": scheduledFor})
+}
+func ReminderSucceededEvent(id, scheduledFor, linkedID, agentID string) Event {
+	return newEvent("reminder_succeeded", map[string]any{"reminder_id": id, "scheduled_for": scheduledFor, "linked_message_id": linkedID, "agent_id": agentID})
+}
+func ReminderFailedEvent(id, scheduledFor, code string) Event {
+	return newEvent("reminder_failed", map[string]any{"reminder_id": id, "scheduled_for": scheduledFor, "error_code": code})
+}
+
 type Options struct {
 	Store                  *store.Store
 	Host                   string
@@ -120,7 +220,7 @@ type Options struct {
 	MaxPendingPerSource    int
 	GoalControlAvailable   bool
 	LifecycleAvailable     bool
-	EventLogger            func(string, map[string]any)
+	EventLogger            EventLogger
 	NativePolicies         []NativePolicy
 	// The audit target and session form one optional pair. Leave both empty to
 	// keep managed startup independent of tmux; a half-configured pair is
@@ -140,6 +240,7 @@ type Options struct {
 	// RuntimeIdentity is embedded by the deployment build so health can prove
 	// which checked source revision owns this listening process.
 	RuntimeIdentity RuntimeIdentity
+	RouterLogReader RouterLogReader
 }
 
 type Router struct {
@@ -163,7 +264,7 @@ type Router struct {
 	memory         MemoryCatalog
 	tmux           TmuxAdapter
 	attachments    *attachments.Store
-	log            func(string, map[string]any)
+	log            EventLogger
 	policies       []NativePolicy
 	policyTimeout  time.Duration
 	policySender   PolicySender
@@ -246,6 +347,7 @@ type Router struct {
 	managedPathCanonicalizer func(*http.Request) string
 	staticUI                 *staticUI
 	runtimeIdentity          RuntimeIdentity
+	routerLogReader          RouterLogReader
 	uiLive                   *uiLiveHub
 }
 
@@ -478,7 +580,7 @@ func New(options Options) (*Router, error) {
 	}
 	logger := options.EventLogger
 	if logger == nil {
-		logger = func(string, map[string]any) {}
+		logger = func(Event) {}
 	}
 	lifecycle := options.LifecycleAvailable
 	if !options.LifecycleAvailable {
@@ -490,7 +592,7 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader}
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
@@ -640,8 +742,7 @@ func (r *Router) Listen(ctx context.Context) error {
 	server := r.server
 	listenerPublished = true
 	r.mu.Unlock()
-	_, websocketURL := r.URLs()
-	r.log("router_started", map[string]any{"host": r.host, "port": listener.Addr().(*net.TCPAddr).Port, "router_url": websocketURL})
+	r.emitEvent(RouterStartedEvent(listener.Addr().(*net.TCPAddr).Port))
 	go func() { _ = server.Serve(listener); close(done) }()
 	go r.sweepLoop(sweepCtx, sweepDone)
 	return nil
@@ -754,7 +855,7 @@ func (r *Router) Close(ctx context.Context) error {
 	}
 	// The stopped record is part of the Close completion contract. Write it
 	// before releasing waiters from concurrent/idempotent Close calls.
-	r.log("router_stopped", nil)
+	r.emitEvent(RouterStoppedEvent())
 	r.mu.Lock()
 	r.closeErr = err
 	close(done)
@@ -791,7 +892,9 @@ func (s *session) lifecycleEnabledNow() bool {
 	return s.lifecycleEnabled
 }
 
-func (r *Router) nextID() (string, error)                  { return r.ids.Next() }
-func (r *Router) now() time.Time                           { return r.clock.Now().UTC() }
-func timestamp(value time.Time) string                     { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
-func (r *Router) emit(event string, fields map[string]any) { r.log(event, fields) }
+func (r *Router) nextID() (string, error) { return r.ids.Next() }
+func (r *Router) now() time.Time          { return r.clock.Now().UTC() }
+func timestamp(value time.Time) string    { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
+
+// emitEvent is the closed diagnostic path used by typed producers.
+func (r *Router) emitEvent(event Event) { r.log(event) }

@@ -168,7 +168,7 @@ func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {
 			return
 		case <-ticker.C:
 			if err := r.runSweep(ctx); err != nil {
-				r.emit("router_error", map[string]any{"error_code": "sweep_failed"})
+				r.emitEvent(RouterErrorEvent("sweep_failed", ""))
 			}
 		}
 	}
@@ -441,37 +441,19 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 		return store.SweepResult{}, err
 	}
 	for _, messageID := range expired {
-		r.emit("message_expired", map[string]any{"message_id": messageID})
+		r.emitEvent(MessageExpiredEvent(messageID))
 	}
 	timedOut, err := r.store.RecoverTimedOutDeliveries(ctx, r.maxAttempts)
 	if err != nil {
 		return store.SweepResult{}, err
 	}
 	for _, outcome := range timedOut {
-		r.emit("delivery_timed_out", map[string]any{
-			"message_id": outcome.MessageID,
-			"agent_id":   outcome.AgentID,
-			"attempt":    outcome.Attempt,
-			"lease_id":   outcome.LeaseID,
-			"state":      outcome.State,
-			"reason":     "delivery_timeout",
-		})
+		r.emitEvent(DeliveryTimedOutEvent(outcome.MessageID, outcome.AgentID, outcome.Attempt, outcome.State, "delivery_timeout"))
 		r.recordCompleteHistoryWithPresentation(ctx, outcome.AgentID, "delivery", "error", "Message delivery failed", "delivery-timeout:"+outcome.MessageID+":"+strconv.Itoa(outcome.Attempt), &store.ManagedHistoryPresentation{Kind: "error", Summary: "The message could not be delivered.", Error: &store.ManagedHistoryError{Code: "DELIVERY_TIMEOUT", Retryable: false, DetailAvailable: false}})
 		if outcome.State == "dead_letter" {
-			r.emit("message_dead_lettered", map[string]any{
-				"message_id": outcome.MessageID,
-				"agent_id":   outcome.AgentID,
-				"attempt":    outcome.Attempt,
-				"lease_id":   outcome.LeaseID,
-				"reason":     "delivery_timeout",
-			})
+			r.emitEvent(MessageDeadLetteredEvent(outcome.MessageID, outcome.AgentID, outcome.Attempt, "delivery_timeout"))
 			for _, reminder := range outcome.RecurringReminderRearmed {
-				r.emit("recurring_reminder_rearmed", map[string]any{
-					"reminder_id": reminder.ReminderID,
-					"message_id":  outcome.MessageID,
-					"next_due_at": reminder.NextDueAt,
-					"reason":      "delivery_timeout",
-				})
+				r.emitEvent(RecurringReminderRearmedEvent(reminder.ReminderID, outcome.MessageID, reminder.NextDueAt, "delivery_timeout"))
 			}
 		}
 	}
@@ -500,46 +482,14 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 }
 
 func (r *Router) emitSweepRecord(result store.SweepResult, expiredMessages, timedOutDeliveries, reminderSuccess, reminderFailure int) {
-	counts := map[string]any{
-		"stale_agent_count":        result.StaleAgents,
-		"expired_message_count":    expiredMessages,
-		"timed_out_delivery_count": timedOutDeliveries,
-		"reminder_success_count":   reminderSuccess,
-		"reminder_failure_count":   reminderFailure,
-		"server_job_success_count": 0,
-		"server_job_failure_count": 0,
-	}
-	if result.ConversationMessages > 0 {
-		counts["conversation_message_pruned_count"] = result.ConversationMessages
-	}
-	if result.LifecycleExpired > 0 {
-		counts["lifecycle_running_expired_count"] = result.LifecycleExpired
-	}
-	if result.LifecycleStates > 0 {
-		counts["lifecycle_tombstone_pruned_count"] = result.LifecycleStates
-	}
-	if result.LifecycleEvents > 0 {
-		counts["lifecycle_ledger_pruned_count"] = result.LifecycleEvents
-	}
-	if result.LifecycleProducers > 0 {
-		counts["lifecycle_producer_pruned_count"] = result.LifecycleProducers
-	}
-	if result.GoalControlStates > 0 {
-		counts["goal_control_pruned_count"] = result.GoalControlStates
-	}
-	work := false
-	for _, value := range counts {
-		if count, ok := value.(int); ok && count > 0 {
-			work = true
-			break
-		}
-	}
+	counts := SweepCounts{StaleAgents: result.StaleAgents, ExpiredMessages: expiredMessages, TimedOutDeliveries: timedOutDeliveries, ReminderSuccess: reminderSuccess, ReminderFailure: reminderFailure, ConversationMessages: result.ConversationMessages, LifecycleExpired: result.LifecycleExpired, LifecycleStates: result.LifecycleStates, LifecycleEvents: result.LifecycleEvents, LifecycleProducers: result.LifecycleProducers, GoalControlStates: result.GoalControlStates}
+	work := counts.StaleAgents > 0 || counts.ExpiredMessages > 0 || counts.TimedOutDeliveries > 0 || counts.ReminderSuccess > 0 || counts.ReminderFailure > 0 || counts.ConversationMessages > 0 || counts.LifecycleExpired > 0 || counts.LifecycleStates > 0 || counts.LifecycleEvents > 0 || counts.LifecycleProducers > 0 || counts.GoalControlStates > 0
 	now := r.now()
 	if r.lastSweepRecord.IsZero() {
 		r.lastSweepRecord = now
 	}
 	if work || now.Sub(r.lastSweepRecord) >= r.sweepHeartbeat {
-		r.emit("lifecycle_sweep_completed", counts)
+		r.emitEvent(LifecycleSweepCompletedEvent(counts))
 		r.lastSweepRecord = now
 	}
 }
@@ -559,7 +509,7 @@ func (r *Router) sweepAttachments() error {
 
 func (r *Router) sweepAttachmentsBestEffort() {
 	if err := r.sweepAttachments(); err != nil {
-		r.emit("router_error", map[string]any{"error_code": "attachment_sweep_failed"})
+		r.emitEvent(RouterErrorEvent("attachment_sweep_failed", ""))
 	}
 }
 
@@ -567,7 +517,7 @@ func (r *Router) publishLifecycleUpdates(ctx context.Context, updates []store.Li
 	for _, update := range updates {
 		snapshot, err := r.store.SubagentLifecycleSnapshot(ctx, update.ParentAgentID)
 		if err != nil {
-			r.emit("router_error", map[string]any{"error_code": "lifecycle_projection_failed", "agent_id": update.ParentAgentID})
+			r.emitEvent(RouterErrorEvent("lifecycle_projection_failed", update.ParentAgentID))
 			continue
 		}
 		r.mu.Lock()

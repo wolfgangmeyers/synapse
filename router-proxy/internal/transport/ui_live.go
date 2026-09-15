@@ -184,7 +184,7 @@ func (snapshot *uiLiveProjection) frame() map[string]any {
 func (h *uiLiveHub) publish(ctx context.Context) {
 	snapshot, err := h.snapshot(ctx)
 	if err != nil {
-		h.router.emit("ui_live_snapshot_failed", map[string]any{"error_code": "projection_unavailable"})
+		h.router.emitEvent(UILiveSnapshotFailedEvent("projection_unavailable"))
 		return
 	}
 	h.mu.Lock()
