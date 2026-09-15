@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -319,10 +320,10 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 		return RouterLogResponse{Status: "source_unavailable", Lines: []RouterLogLine{}, Diagnostics: diags}, nil
 	}
 	digest := snapshotDigest(files)
+	inventory := inventoryDigest(files)
 	pageEnd := -1 // The initial page is newest; a cursor moves toward older matches.
 	if q.Cursor != nil {
 		c, e := r.decode(*q.Cursor)
-		inventory := inventoryDigest(files)
 		if e != nil || time.Now().UnixNano() >= c.Expires || !hmac.Equal(c.Digest[:], digest[:]) || !hmac.Equal(c.InventoryDigest[:], inventory[:]) || c.Query != q.Query || c.From != optional(q.From) || c.To != optional(q.To) || int(c.Offset) > int(c.Length) || !cursorSourceClaimsMatch(c, files) {
 			return RouterLogResponse{}, errRouterLogInvalidCursor
 		}
@@ -391,7 +392,7 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 		out.Lines = append(out.Lines, encodedMatches[pageStart:pageEnd]...)
 		if pageStart > 0 {
 			boundary := matches[pageStart]
-			c := cursorForByteBoundary(boundary, len(matches), digest, files, q)
+			c := cursorForByteBoundaryWithInventory(boundary, len(matches), digest, inventory, files, q)
 			token, e := r.encodeCursor(c)
 			if e != nil {
 				return RouterLogResponse{}, e
@@ -545,9 +546,23 @@ func readBounded(path string, size int64) ([]byte, error) {
 	return readBoundedFile(f, size)
 }
 
+var routerLogReadBufferPool = sync.Pool{
+	New: func() any { return []byte{} },
+}
+
 func readBoundedFile(f *os.File, size int64) ([]byte, error) {
 	data := make([]byte, 0, size)
-	buf := make([]byte, maxRouterLogChunk)
+	chunkSize := size
+	if chunkSize > maxRouterLogChunk {
+		chunkSize = maxRouterLogChunk
+	}
+	buf := routerLogReadBufferPool.Get().([]byte)
+	if int64(cap(buf)) < chunkSize {
+		buf = make([]byte, chunkSize)
+	} else {
+		buf = buf[:chunkSize]
+	}
+	defer routerLogReadBufferPool.Put(buf)
 	for int64(len(data)) < size {
 		want := int64(len(buf))
 		if left := size - int64(len(data)); left < want {
@@ -678,7 +693,10 @@ func activeTail(fs []logFile) bool {
 }
 
 func cursorForSnapshot(offset, length int, digest [32]byte, files []logFile, q RouterLogQuery) logCursor {
-	c := logCursor{Version: 1, Digest: digest, InventoryDigest: inventoryDigest(files), Offset: uint32(offset), Length: uint32(length), Tail: activeTail(files), Expires: time.Now().Add(routerLogCursorTTL).UnixNano(), Query: q.Query, From: optional(q.From), To: optional(q.To)}
+	return cursorForSnapshotWithInventory(offset, length, digest, inventoryDigest(files), files, q)
+}
+func cursorForSnapshotWithInventory(offset, length int, digest, inventory [32]byte, files []logFile, q RouterLogQuery) logCursor {
+	c := logCursor{Version: 1, Digest: digest, InventoryDigest: inventory, Offset: uint32(offset), Length: uint32(length), Tail: activeTail(files), Expires: time.Now().Add(routerLogCursorTTL).UnixNano(), Query: q.Query, From: optional(q.From), To: optional(q.To)}
 	for _, f := range files {
 		if f.active {
 			c.Name, c.Kind = f.name, f.kind
@@ -690,7 +708,10 @@ func cursorForSnapshot(offset, length int, digest [32]byte, files []logFile, q R
 	return c
 }
 func cursorForByteBoundary(m routerLogMatch, length int, digest [32]byte, files []logFile, q RouterLogQuery) logCursor {
-	c := cursorForSnapshot(0, length, digest, files, q)
+	return cursorForByteBoundaryWithInventory(m, length, digest, inventoryDigest(files), files, q)
+}
+func cursorForByteBoundaryWithInventory(m routerLogMatch, length int, digest, inventory [32]byte, files []logFile, q RouterLogQuery) logCursor {
+	c := cursorForSnapshotWithInventory(0, length, digest, inventory, files, q)
 	f := files[m.file]
 	c.Direction = "older-byte"
 	c.BoundaryName, c.BoundaryKind = f.name, f.kind
