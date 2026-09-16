@@ -46,6 +46,12 @@ func newRouterProxy(upstreamHost string, upstreamPort int) (*routerProxy, error)
 }
 
 func (p *routerProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The managed bridge is loopback-only and must never be exposed through
+	// this optional forwarding surface.
+	if r.URL != nil && r.URL.Path == "/v1/managed-bridge" {
+		http.NotFound(w, r)
+		return
+	}
 	if r.ContentLength > maxRequestBytes {
 		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 		return

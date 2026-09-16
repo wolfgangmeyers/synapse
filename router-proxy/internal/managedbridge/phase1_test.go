@@ -515,6 +515,53 @@ func TestCommandPayloadIsCanonicalAndPartialWriteStaysUnknown(t *testing.T) {
 	}
 }
 
+func TestRPCModeActivatesOnlyAfterAdmissionAndClassifiesResponses(t *testing.T) {
+	partial := &partialCommandWriter{}
+	bridge, socket, command := testActiveBridge(t, partial)
+	command.Name = CommandRPC
+	if err := bridge.admitCommand(socket, command); !errors.Is(err, ErrAmbiguousCommand) {
+		t.Fatalf("partial RPC command error=%v", err)
+	}
+	bridge.mu.Lock()
+	if bridge.rpcMode {
+		t.Fatal("partial RPC command activated response mode")
+	}
+	bridge.mu.Unlock()
+	if err := bridge.acceptPiLine([]byte(`{"message":"ordinary"}`)); err != nil {
+		t.Fatal(err)
+	}
+	bridge.mu.Lock()
+	if got := bridge.events.items[len(bridge.events.items)-1].frame.Name; got != EventMessage {
+		t.Fatalf("partial RPC followed by ordinary output classified as %s", got)
+	}
+	bridge.mu.Unlock()
+	socket.cancel()
+
+	recording := &recordingCommandWriter{}
+	bridge, socket, command = testActiveBridge(t, recording)
+	command.Name = CommandRPC
+	command.Payload = json.RawMessage(`{"jsonrpc":"2.0","method":"echo","id":"rpc"}`)
+	command.Hash, _ = HashPayload(command.Payload)
+	if err := bridge.admitCommand(socket, command); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.acceptPiLine([]byte(`{"jsonrpc":"2.0","id":"rpc","result":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.acceptPiLine([]byte(`{"message":"ordinary"}`)); err != nil {
+		t.Fatal(err)
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if got := bridge.events.items[len(bridge.events.items)-2].frame.Name; got != EventRPC {
+		t.Fatalf("RPC response classified as %s", got)
+	}
+	if got := bridge.events.items[len(bridge.events.items)-1].frame.Name; got != EventMessage {
+		t.Fatalf("ordinary output after RPC classified as %s", got)
+	}
+	socket.cancel()
+}
+
 func TestSecureConfigRejectsSymlinkAndWrongModes(t *testing.T) {
 	token := bytesOf('x', 32)
 	config := phase1Config(t, "ws://127.0.0.1:8765/v1/managed-bridge", "")

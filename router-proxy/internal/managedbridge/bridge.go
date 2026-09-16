@@ -98,6 +98,7 @@ type Bridge struct {
 	generation     uint64
 	commandCursor  *CursorEngine
 	commandStarted bool
+	rpcMode        bool
 	unknown        map[uint64]cursorRecord
 	events         *eventBuffer
 	degraded       bool
@@ -369,7 +370,32 @@ func (b *Bridge) acceptPiLine(line []byte) error {
 	if _, err := HashPayload(line); err != nil {
 		return ErrInvalidFrame
 	}
-	return b.addEvent(EventMessage, id, json.RawMessage(append([]byte(nil), line...)))
+	b.mu.Lock()
+	rpcMode := b.rpcMode
+	b.mu.Unlock()
+	name := EventMessage
+	if rpcMode && isRPCResponse(line) {
+		name = EventRPC
+	}
+	return b.addEvent(name, id, json.RawMessage(append([]byte(nil), line...)))
+}
+
+func isRPCResponse(line []byte) bool {
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(line, &value); err != nil || value == nil {
+		return false
+	}
+	var version string
+	if err := json.Unmarshal(value["jsonrpc"], &version); err != nil || version != "2.0" {
+		return false
+	}
+	if _, ok := value["id"]; !ok {
+		return false
+	}
+	_, hasMethod := value["method"]
+	_, hasResult := value["result"]
+	_, hasError := value["error"]
+	return (hasMethod && !hasResult && !hasError) || (!hasMethod && hasResult != hasError)
 }
 
 func (b *Bridge) addEvent(name, id string, payload json.RawMessage) error {
@@ -937,6 +963,12 @@ func (b *Bridge) admitCommand(socket *bridgeSocket, command Command) error {
 	}
 	if !result.Accepted {
 		return ErrDurableAdmission
+	}
+	if command.Name == CommandRPC {
+		// Switch output classification only after the command was durably
+		// admitted and written to Pi. A rejected or partial RPC command must
+		// not turn later ordinary output into an RPC event.
+		b.rpcMode = true
 	}
 	return b.queue(socket, Ack{PostAuth: socket.post, Protocol: ProtocolVersion, Type: string(FrameAck), Domain: DomainCommands, Seq: command.Seq})
 }
