@@ -1226,7 +1226,7 @@ func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testin
 	}}}))
 	// Pi's emitted result is only a candidate. A wrong acknowledgment and the
 	// raw result both retain provisional settlement until durable manager receipt.
-	client.(*rpcClient).AcknowledgeDirectRootControlReceipt("123e4567-e89b-42d3-a456-426614174099")
+	client.(*rpcClient).AcknowledgeDirectRootControlReceipt("123e4567-e89b-42d3-a456-426614174099", directRootControlResultSuccess)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "final", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "RFC 9110 is HTTP Semantics."}}}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
 	select {
@@ -1234,7 +1234,7 @@ func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testin
 		t.Fatalf("wrong acknowledgment released direct settlement: %#v", event)
 	case <-time.After(50 * time.Millisecond):
 	}
-	client.(*rpcClient).AcknowledgeDirectRootControlReceipt(requestID)
+	client.(*rpcClient).AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultSuccess)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
 	select {
 	case event := <-events:
@@ -2372,10 +2372,143 @@ func TestRPCClientRejectsMultipleRootControlsOnlyAfterLastRejection(t *testing.T
 func TestRPCClientDurableRootAcknowledgmentRequiresFollowUpSettlement(t *testing.T) {
 	requestID := "123e4567-e89b-42d3-a456-426614174005"
 	client, token, _ := newDirectRootControlTestClient(t, requestID)
-	client.AcknowledgeDirectRootControlReceipt(requestID)
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultSuccess)
 	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
 	requireNoDirectRootResult(t, token)
 	require.True(t, directRootTestSettlement(t, client, token, 6).settled)
+}
+
+func TestRPCClientTerminalErrorAcknowledgmentReleasesDeferredSettlement(t *testing.T) {
+	requestID := "123e4567-e89b-42d3-a456-426614174006"
+	client, token, _ := newDirectRootControlTestClient(t, requestID)
+	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultError)
+	result := <-token.result
+	require.True(t, result.settled)
+	require.False(t, result.reply != nil, "terminal error must not synthesize a reply")
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultError)
+	requireNoDirectRootResult(t, token)
+}
+
+func TestRPCClientTerminalErrorAcknowledgmentBeforeSettlementReleasesOnSettlement(t *testing.T) {
+	requestID := "123e4567-e89b-42d3-a456-426614174007"
+	client, token, _ := newDirectRootControlTestClient(t, requestID)
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultError)
+	require.True(t, directRootTestSettlement(t, client, token, 5).settled)
+	requireNoDirectRootResult(t, token)
+}
+
+func TestRPCClientTerminalRootErrorSettlesIdleAndAllowsNextMessage(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	direct := DirectMailboxRPC(client)
+	requests := readJSONLRequests(stdinReader)
+	activity := make(chan map[string]any, 2)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	turnAttempt := directMailboxAttempt("message-a")
+	turnAttempt.Fence.RuntimeGeneration = "123e4567-e89b-42d3-a456-426614174003"
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstEvents, err := direct.PromptManagedMailbox(firstCtx, turnAttempt)
+	require.NoError(t, err)
+	firstPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstPrompt["id"], "type": "response", "command": "prompt", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": turnAttempt.Fence.RuntimeGeneration, "session_epoch": 2}}}))
+	select {
+	case event := <-firstEvents:
+		require.NotNil(t, event.Receipt)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first append receipt")
+	}
+	requestID := "123e4567-e89b-42d3-a456-426614174011"
+	definitionSHA := strings.Repeat("b", 64)
+	rootTool := ManifestTool{CapabilityID: "web_search", Name: "web_search__" + definitionSHA, DefinitionID: "def_" + definitionSHA, DefinitionSHA256: definitionSHA, OperationID: "web.search"}
+	rootFrame := rootControlFrameForEvent(turnAttempt.Fence, rootTool, requestID, map[string]any{"query": "RFC 9110"})
+	decodedRoot, candidate := classifyRootControlEvent(rootFrame, 1)
+	require.True(t, candidate)
+	require.NotNil(t, decodedRoot)
+	require.NoError(t, writeRPC(stdoutWriter, rootFrame))
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		_, pending := client.directMailbox.pendingRootRequests[requestID]
+		return pending
+	}, time.Second, time.Millisecond)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-firstEvents:
+		t.Fatalf("pending terminal root was settled before durable error acknowledgment: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultError)
+	select {
+	case event := <-firstEvents:
+		require.True(t, event.Settled)
+		require.Nil(t, event.Reply)
+	case <-time.After(time.Second):
+		t.Fatal("terminal root error did not release direct settlement")
+	}
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("terminal root error did not publish parent idle")
+	}
+	cancelFirst()
+	for range firstEvents {
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.directMailbox == nil
+	}, time.Second, time.Millisecond)
+
+	secondAttempt := directMailboxAttempt("message-b")
+	secondAttempt.Fence.RuntimeGeneration = turnAttempt.Fence.RuntimeGeneration
+	secondEvents, err := direct.PromptManagedMailbox(context.Background(), secondAttempt)
+	require.NoError(t, err)
+	secondPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondPrompt["id"], "type": "response", "command": "prompt", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "second-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-b", "runtime_generation": secondAttempt.Fence.RuntimeGeneration, "session_epoch": 2}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	var gotReceipt, gotSettled bool
+	for !gotReceipt || !gotSettled {
+		select {
+		case event := <-secondEvents:
+			gotReceipt = gotReceipt || event.Receipt != nil
+			gotSettled = gotSettled || event.Settled
+		case <-time.After(time.Second):
+			t.Fatal("next message was not deliverable after terminal root error")
+		}
+	}
+	require.True(t, gotReceipt)
+	require.True(t, gotSettled)
+}
+
+func TestRPCClientRootAcknowledgmentsKeepOtherRootsPending(t *testing.T) {
+	first := "123e4567-e89b-42d3-a456-426614174008"
+	second := "123e4567-e89b-42d3-a456-426614174009"
+	client, token, _ := newDirectRootControlTestClient(t, first, second)
+	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
+	client.AcknowledgeDirectRootControlReceipt(first, directRootControlResultError)
+	requireNoDirectRootResult(t, token)
+	client.AcknowledgeDirectRootControlReceipt(second, directRootControlResultSuccess)
+	requireNoDirectRootResult(t, token)
+	require.True(t, directRootTestSettlement(t, client, token, 6).settled)
+	client.AcknowledgeDirectRootControlReceipt(second, directRootControlResultSuccess)
+	requireNoDirectRootResult(t, token)
+}
+
+func TestRPCClientDirectRootAcknowledgmentRejectsUnknownStatus(t *testing.T) {
+	requestID := "123e4567-e89b-42d3-a456-426614174010"
+	client, token, _ := newDirectRootControlTestClient(t, requestID)
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultStatus(99))
+	client.mu.Lock()
+	_, pending := token.pendingRootRequests[requestID]
+	client.mu.Unlock()
+	require.True(t, pending)
+	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
 }
 
 func TestRPCClientDirectRootRequestFenceAndDurableAcknowledgment(t *testing.T) {
@@ -2398,7 +2531,7 @@ func TestRPCClientDirectRootRequestFenceAndDurableAcknowledgment(t *testing.T) {
 	// Only the manager's explicit durable acknowledgment releases a root hold.
 	require.Len(t, client.directMailbox.pendingRootRequests, 2)
 	client.mu.Unlock()
-	client.AcknowledgeDirectRootControlReceipt(requestID)
+	client.AcknowledgeDirectRootControlReceipt(requestID, directRootControlResultSuccess)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	require.NotContains(t, client.directMailbox.pendingRootRequests, requestID)
