@@ -50,10 +50,15 @@ func (m *Manager) publishManagedFinalDelivery(delivery store.ManagedFinalDeliver
 			m.failManagedFinalDelivery(*claimed, "reply_transport_failed")
 			return
 		}
-		if _, err := m.store.MarkManagedFinalDeliveryDelivered(context.Background(), *claimed); err != nil {
+		changed, err := m.store.MarkManagedFinalDeliveryDelivered(context.Background(), *claimed)
+		if err != nil {
 			// The outbox remains delivering and startup recovery retries the
 			// deterministic conversation write; never claim success from persistence.
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), claimed.Attempt.Fence.AgentID, claimed.Attempt.MessageID, claimed.Attempt.AttemptNumber, "reply_delivery_receipt_persistence_failed", "")
+			return
+		}
+		if changed {
+			m.emitEvent(managedMailboxEventText(EventManagedMailboxOutgoing, claimed.Attempt, claimed.Body, "outgoing", ManagedMailboxOutgoingOperation, ManagedMailboxOutgoingStatus))
 		}
 	})
 }

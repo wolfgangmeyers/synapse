@@ -126,7 +126,12 @@ func TestManagedDirectRPCComposedBehavioralGate(t *testing.T) {
 			}
 		}
 	}()
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: composedRPCFactory{process: process}, RPCFactory: composedRPCFactory{rpc: client}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource(sessionID, runtimeGeneration), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	outgoingEvents := make(chan Event, 2)
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: composedRPCFactory{process: process}, RPCFactory: composedRPCFactory{rpc: client}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource(sessionID, runtimeGeneration), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, EventSink: func(event Event) {
+		if event.Kind == EventManagedMailboxOutgoing {
+			outgoingEvents <- event
+		}
+	}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(ctx); _ = client.Close() })
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "composed-agent", Cwd: paths["work"], RequestID: "composed-launch"})
@@ -262,4 +267,26 @@ func TestManagedDirectRPCComposedBehavioralGate(t *testing.T) {
 	}
 	require.Len(t, directComplete, 1, "the unique direct-turn tool must have one successful Complete projection")
 	require.Nil(t, directComplete[0].Presentation.Error)
+	var outgoing Event
+	require.Eventually(t, func() bool {
+		select {
+		case outgoing = <-outgoingEvents:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	require.Equal(t, EventManagedMailboxOutgoing, outgoing.Kind)
+	require.Equal(t, "composed-agent", outgoing.AgentID)
+	require.Equal(t, "outgoing", outgoing.Direction)
+	require.Equal(t, "agent", outgoing.Source)
+	require.Equal(t, ManagedMailboxOutgoingOperation, outgoing.Operation)
+	require.Equal(t, ManagedMailboxOutgoingStatus, outgoing.Status)
+	require.Equal(t, "done", outgoing.Body)
+	require.False(t, outgoing.Truncated)
+	select {
+	case duplicate := <-outgoingEvents:
+		t.Fatalf("duplicate outbox delivery emitted event: %+v", duplicate)
+	default:
+	}
 }
