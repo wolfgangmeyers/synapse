@@ -157,7 +157,7 @@ export function RouterLogViewer({ routerUrl, agentId, open = true, onClose = () 
     setLoading(true);
     setError(undefined);
     try {
-      const response = await client.routerLog({ query: agentId, from: null, to: null, cursor: null });
+      const response = await client.routerLogForAgent(agentId, { query: "", from: null, to: null, cursor: null });
       if (requestGeneration.current === generation) setPage(response);
     } catch (cause) {
       if (requestGeneration.current === generation) { setError(errorMessage(cause)); setPage(undefined); }

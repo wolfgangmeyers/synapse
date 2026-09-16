@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,10 +38,11 @@ const (
 )
 
 type RouterLogQuery struct {
-	Query  string
-	From   *string
-	To     *string
-	Cursor *string
+	Query   string
+	From    *string
+	To      *string
+	Cursor  *string
+	AgentID string
 }
 type RouterLogLine struct {
 	BytesBase64 string `json:"bytes_base64"`
@@ -68,9 +71,50 @@ type routerLogErrorBody struct {
 	Error routerLogError `json:"error"`
 }
 
-var routerLogErrorMessages = map[string]string{"invalid_request": "The router-log request is invalid.", "method_not_allowed": "The router-log method is not allowed.", "source_unavailable": "The router-log source is unavailable.", "invalid_cursor": "The router-log cursor is invalid."}
+var routerLogErrorMessages = map[string]string{"invalid_request": "The router-log request is invalid.", "method_not_allowed": "The router-log method is not allowed.", "forbidden": "The router-log request is not allowed.", "source_unavailable": "The router-log source is unavailable.", "invalid_cursor": "The router-log cursor is invalid."}
 
-func (r *Router) handleRouterLog(w http.ResponseWriter, req *http.Request) {
+func managedRouterLogPath(path string) (string, bool) {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/router-log") {
+		return "", false
+	}
+	rawID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/router-log")
+	if rawID == "" || strings.Contains(rawID, "/") {
+		return "", true
+	}
+	agentID, err := url.PathUnescape(rawID)
+	if err != nil || !agentIDRE.MatchString(agentID) {
+		return "", true
+	}
+	return agentID, true
+}
+
+func loopbackRemoteAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+		if strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]") {
+			if !strings.HasPrefix(host, "[") || !strings.HasSuffix(host, "]") {
+				return false
+			}
+			host = host[1 : len(host)-1]
+		}
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
+}
+
+// Both the legacy unscoped route and the agent-scoped route expose stored log
+// fields, so both use the actual socket peer as their authority boundary.
+func (r *Router) handleRouterLog(w http.ResponseWriter, req *http.Request, agentID string) {
+	if !loopbackRemoteAddr(req.RemoteAddr) {
+		r.writeRouterLogError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if agentID == "" && req.URL.Path != "/v1/router-log" {
+		r.writeRouterLogError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
 	if req.Method != http.MethodGet {
 		r.writeRouterLogError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
@@ -80,6 +124,7 @@ func (r *Router) handleRouterLog(w http.ResponseWriter, req *http.Request) {
 		r.writeRouterLogError(w, 400, "invalid_request")
 		return
 	}
+	query.AgentID = agentID
 	if r.routerLogReader == nil {
 		r.writeRouterLogError(w, 503, "source_unavailable")
 		return
@@ -116,6 +161,9 @@ func validateRouterLogResponse(v RouterLogResponse) error {
 	}
 	if len(v.Lines) > maxRouterLogMatches {
 		return errors.New("too many lines")
+	}
+	if v.NextCursor != nil && (*v.NextCursor == "" || len([]byte(*v.NextCursor)) > maxRouterLogCursor || !utf8.ValidString(*v.NextCursor)) {
+		return errors.New("invalid cursor")
 	}
 	for _, l := range v.Lines {
 		b, e := base64.StdEncoding.DecodeString(l.BytesBase64)
@@ -235,8 +283,15 @@ func RouterLogLines(data []byte) []RouterLogLine {
 
 type RawRouterLogReader []byte
 
-func (r RawRouterLogReader) ReadRouterLog(context.Context, RouterLogQuery) (RouterLogResponse, error) {
-	return RouterLogResponse{Status: "complete", Lines: RouterLogLines([]byte(r))}, nil
+func (r RawRouterLogReader) ReadRouterLog(_ context.Context, q RouterLogQuery) (RouterLogResponse, error) {
+	lines := make([]RouterLogLine, 0)
+	for _, match := range splitRawLFWithOffsets([]byte(r)) {
+		if !routerLogLineMatches(match.line, q) {
+			continue
+		}
+		lines = append(lines, RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(match.line)})
+	}
+	return RouterLogResponse{Status: "complete", Lines: lines}, nil
 }
 
 type configuredRouterLogReader struct {
@@ -320,6 +375,9 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 		return RouterLogResponse{Status: "source_unavailable", Lines: []RouterLogLine{}, Diagnostics: diags}, nil
 	}
 	digest := snapshotDigest(files)
+	if q.AgentID != "" {
+		digest = scopedRouterLogDigest(digest, q.AgentID)
+	}
 	inventory := inventoryDigest(files)
 	pageEnd := -1 // The initial page is newest; a cursor moves toward older matches.
 	if q.Cursor != nil {
@@ -338,7 +396,7 @@ func (r *configuredRouterLogReader) ReadRouterLog(ctx context.Context, q RouterL
 		}
 		data := files[i].data
 		for _, m := range splitRawLFWithOffsets(data) {
-			if !bytesContains(m.line, q.Query) || !lineInTime(m.line, q.From, q.To, &diags) {
+			if !routerLogLineMatches(m.line, q) || !lineInTime(m.line, q.From, q.To, &diags) {
 				continue
 			}
 			m.file = i
@@ -648,6 +706,29 @@ func splitRawLFWithOffsets(data []byte) []routerLogMatch {
 	}
 	return out
 }
+func routerLogLineMatches(line []byte, q RouterLogQuery) bool {
+	if q.AgentID != "" && !lineMatchesAgent(line, q.AgentID) {
+		return false
+	}
+	return bytesContains(line, q.Query)
+}
+
+func lineMatchesAgent(line []byte, agentID string) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(line, &object) != nil || object == nil {
+		return false
+	}
+	raw, ok := object["agent_id"]
+	if !ok {
+		return false
+	}
+	var recordAgentID string
+	if json.Unmarshal(raw, &recordAgentID) != nil {
+		return false
+	}
+	return agentIDRE.MatchString(recordAgentID) && recordAgentID == agentID
+}
+
 func bytesContains(line []byte, q string) bool { return strings.Contains(string(line), q) }
 func lineInTime(line []byte, from, to *string, diags *[]RouterLogDiagnostic) bool {
 	if from == nil && to == nil {
@@ -762,6 +843,16 @@ func inventoryDigest(fs []logFile) [32]byte {
 	copy(out[:], h.Sum(nil))
 	return out
 }
+func scopedRouterLogDigest(snapshot [32]byte, agentID string) [32]byte {
+	h := sha256.New()
+	h.Write(snapshot[:])
+	h.Write([]byte("\x00"))
+	h.Write([]byte(agentID))
+	var digest [32]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
+}
+
 func snapshotDigest(fs []logFile) [32]byte {
 	h := sha256.New()
 	for _, f := range fs {
