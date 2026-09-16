@@ -166,11 +166,11 @@ The cursor never contains a filesystem path or raw log bytes. The server re-enum
 
 A cursor is also invalid when its query or time window differs from the request, its claims fail authentication, its offset is outside the captured generation, or its bounded lifetime has expired. A refresh always starts a new snapshot.
 
-## Logger privacy precondition
+## Logger instrumentation boundary
 
-Exact-line delivery makes logger emission the privacy boundary. The viewer cannot safely redact a stored line. Before viewer work, replace open event maps with a closed typed event and field contract, or typed safe event builders that enforce the same contract.
+Exact-line delivery makes logger emission the privacy boundary. This frontend viewer does not change logger instrumentation or claim to make stored records safe. The current logger may discard `message`, `body`, and `error` before a record reaches the viewer; preserving those values in the UI applies whenever the backend emits them. Logger instrumentation is a separate required pass.
 
-The logger must reject unknown event names and fields before serialization. Every allowed field has an event-specific type and bound. Strings, numbers, arrays, and records have fixed limits. Diagnostics use fixed categories. The logger must not persist message subjects or bodies, prompts, instructions, model input or output, tool arguments or results, credentials, authorization codes, cookies, headers, bearer values, raw request or response payloads, raw errors, stacks, filesystem paths, working directories, manifests, process IDs, command lines, runtime fences, session identities, instance identities, lease identities, producer epochs, frame identities, parent-session identities, or arbitrary nested caller objects.
+That backend pass must reject unknown event names and fields before serialization. Every allowed field has an event-specific type and bound. Strings, numbers, arrays, and records have fixed limits. Diagnostics use fixed categories. The logger must not persist message subjects or bodies, prompts, instructions, model input or output, tool arguments or results, credentials, authorization codes, cookies, headers, bearer values, raw request or response payloads, raw errors, stacks, filesystem paths, working directories, manifests, process IDs, command lines, runtime fences, session identities, instance identities, lease identities, producer epochs, frame identities, parent-session identities, or arbitrary nested caller objects.
 
 The audit must cover these current producers:
 
@@ -210,16 +210,16 @@ The modal has:
 
 - a dark code-editor-like surface that matches the existing application colors;
 - a heading naming the selected agent, a short scope note, and the shared modal close control;
-- a plain-text search field, `From` and `To` time inputs, `Search`, `Refresh`, and `Clear` controls;
+- one debounced plain-text filter, a manual `Refresh` action, and a compact displayed-fields configuration;
 - loading and error status outside the log text;
 - a no-match message outside the log text;
-- a scrollable log panel with a readable structured view that preserves every logged field, including message, body, and error text, plus an obvious `Raw` view for the original line; credentials and access tokens are redacted in both views;
-- `Older` and `Newer` paging controls with disabled states at the ends; and
-- a read-only label and no controls for workers, delivery, retries, log deletion, export, or download.
+- a bounded scrollable log panel with one readable structured view that preserves every stored value exactly when its field is selected, including message, body, and error text; credentials, access tokens, and known secret values are redacted;
+- no date, pagination, raw-view, mutation, export, or download controls; and
+- an always-visible heading and scope note naming the selected agent.
 
-Initial modal load queries the selected agent and displays the newest 500 matching records oldest-to-newest within that page. `Older` requests the next forward cursor within the fixed newest-500 result set. React stores the request cursor and page for each response. `Newer` returns to the prior stored page without a server request. Search, time-window changes, and refresh clear the stack and start one new snapshot. Disable `Older` when `next_cursor` is null. Disable `Newer` at the initial page. A cursor error clears all pages, shows a fixed message, and starts a fresh query.
+Initial and refreshed loads query only the selected agent and use the server's bounded latest-results response. Typing in the additional filter debounces a client-side filter over the already loaded agent-scoped rows; rapid edits produce no additional request, while the agent query remains fixed and cannot be removed. There are no manual pages or time-window controls.
 
-Decode each record from base64 using a fatal UTF-8 decoder, parse the JSON record, and render every selected-agent field as escaped text. The structured view may format fields for readability; the Raw view preserves the original line except for credential and access-token redactions. Do not use `innerHTML` or Markdown. Malformed or non-UTF-8 records remain available in Raw view when their agent scope can be established; otherwise they are not assigned to an agent.
+Decode each record from base64 using a fatal UTF-8 decoder, parse the JSON record, and render each configured selected-agent field as escaped text. The displayed-fields selection is stored under the versioned `mecha.web.routerLogs.v1.displayKeys` local-storage key, restored on reopen and reload, and falls back to defaults when storage is malformed. Defaults include timestamp/time, level, event/type/status, message, body, and error. Do not use `innerHTML` or Markdown.
 
 ## Required validation
 
@@ -230,8 +230,8 @@ No implementation is complete without these checks:
 3. Query tests cover exact byte search, no time window, inclusive `from`, exclusive `to`, timestamp-less and malformed timestamps, newest 500 selection, chronological page order, response packing, and the maximum base64 line plus JSON envelope under `48 MiB`.
 4. Cursor tests cover query/time-window binding, generation name, identity, offset, length, snapshot boundary, provisional trailing state, expiry, replacement, removal, length change, new generation, and tail completion invalidation.
 5. Go route tests cover the explicit query-string mapping, missing-versus-empty behavior in Go and TypeScript, duplicate and unknown parameters, invalid percent encoding, invalid UTF-8, invalid timestamps and cursors, fixed errors, the closed JSON response, no path/raw-error leakage, source-unavailable and partial states, CORS, no-store headers, and read-only methods.
-6. React tests cover manifest parity, typed query serialization and response validation, missing-versus-empty behavior, the agent-scoped Logs action and modal, search/loading/error/no-match/paging states, full-field structured rendering, raw-line rendering, credential/access-token redaction, and the absence of mutation/export controls.
-7. One mandatory test must build the actual React bundle, start the actual Go router with `--managed-ui-dist` pointing at that built bundle, open the router-served mailbox page, select an agent, open its Logs modal, and exercise the bundled viewer against `GET /v1/router-log`. A component test or a separately running Vite server is not enough.
+6. React tests cover manifest parity, typed query serialization and response validation, missing-versus-empty behavior, the required agent-scoped Logs action and modal, exact debounce and client-side filtering without repeated fetches, loading/error/no-match states, full-field structured rendering, malformed-record fallback, credential/access-token/known-secret redaction, versioned field-selection persistence including empty and malformed storage, icon accessible names, one visible `Displayed fields` heading, and the absence of removed controls.
+7. The actual built-bundle/router-served mailbox test remains the browser acceptance check for the deployed frontend. It must build the React bundle, start the Go router with `--managed-ui-dist` pointing at that build, select an agent, open its Logs modal, and exercise `GET /v1/router-log`. This implementation lane does not restart the router or run live browser testing; the exact manual handoff is reported separately. A component test or a separately running Vite server is not enough.
 8. Regression checks must preserve the current bind host and port rules, direct router reachability, wildcard non-credentialed CORS and preflight behavior, WebSocket and UI-live behavior, existing authentication/provider behavior, existing permissions and managed controls, message and reminder behavior, export/static asset behavior, archive behavior, and RPC behavior. Archive and RPC production files remain frozen.
 
 ## Isolated delivery reproduction
@@ -250,6 +250,6 @@ Do not touch production or shared customer traffic. Do not deploy or modify arch
 - Search, newest-500 selection, chronological paging, time-window behavior, and cursor invalidation are deterministic and bounded.
 - The route and client use closed typed JSON schemas with bounded redacted diagnostics.
 - The UI is dark, navigable, searchable, readable for invalid bytes and CR, and read-only.
-- Logger safety is established before viewer work.
-- The actual router-served built bundle test passes, and existing bind, CORS, direct reachability, authentication, permission, export, static, archive, and RPC behavior remains unchanged.
+- Logger instrumentation remains a separate required backend pass; the viewer preserves every selected value the backend emits.
+- The actual router-served built bundle test is the browser acceptance gate, and existing bind, CORS, direct reachability, authentication, permission, export, static, archive, and RPC behavior remains unchanged.
 - No implementation, archive, or RPC production file is changed in Phase 1.

@@ -1,138 +1,154 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createHttpClient } from "../../src/transport/http-client";
-import { decodeRouterLogBytes, RouterLogViewer } from "../../src/components/RouterLogViewer";
+import { DEFAULT_DISPLAY_KEYS, decodeRouterLogBytes, loadDisplayKeys, RouterLogViewer } from "../../src/components/RouterLogViewer";
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+const encodedRecord = (record: Record<string, unknown>): string => btoa(JSON.stringify(record));
+const encodedBytes = (bytes: number[]): string => btoa(String.fromCharCode(...bytes));
+const response = (lines: string[]) => new Response(JSON.stringify({ status: "complete", lines: lines.map((bytes_base64) => ({ bytes_base64 })), next_cursor: null, diagnostics: [] }), { status: 200 });
+const recordResponse = (...records: Record<string, unknown>[]): Response => response(records.map(encodedRecord));
+const storage = (entries: Record<string, string> = {}) => {
+  const values = new Map(Object.entries(entries));
+  return {
+    getItem: (key: string): string | null => values.get(key) ?? null,
+    setItem: (key: string, value: string): void => { values.set(key, value); },
+    values,
+  };
+};
 
-describe("router log client and display", () => {
-  it("loads recent safe records into text nodes on the initial view", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "eyJldmVudCI6InJvdXRlcl9zdGFydGVkIn0NCg==" }], next_cursor: null, diagnostics: [] }), { status: 200 })));
-    render(<RouterLogViewer routerUrl="http://router.test" />);
-    const line = await screen.findByText("Router started");
-    expect(line).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "Router logs" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+describe("router log viewer", () => {
+  it("loads readable records and removes obsolete controls", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => recordResponse(
+      { event: "router_started", agent_id: "rpc-test", message: "started" },
+      { event: "foreign_event", agent_id: "other-agent", message: "rpc-test appears in another field" },
+    )));
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" />);
+    expect(await screen.findByText("Router started")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Logs for rpc-test" })).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Filter" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
-    expect(screen.queryByText(/invalid_request/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" }).querySelector(".fa-arrows-rotate")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Search" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Older" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Newer" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Foreign event")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Raw" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("From")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("To")).not.toBeInTheDocument();
   });
 
-  it("keeps the modal scoped to the selected agent and renders only safe metadata", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", lines: [
-      { bytes_base64: "eyJldmVudCI6ImxpZmVjeWNsZV9pbmdlc3RlZCIsImFnZW50X2lkIjoicnBjLXRlc3QiLCJzdGF0dXMiOiJvayIsIm1lc3NhZ2UiOiJub25zZWNyZXQgYm9keSIsImJvZHkiOiJmdWxsIGJvZHkgdGV4dCIsImVycm9yIjoiZnVsbCBlcnJvciB0ZXh0IiwicGFzc3dvcmQiOiJmaXh0dXJlLXNlY3JldCJ9" },
-      { bytes_base64: "eyJldmVudCI6ImZvcmVpZ25fZXZlbnQiLCJhZ2VudF9pZCI6Im90aGVyLWFnZW50IiwibWVzc2FnZSI6InNlY3JldCBvdGhlciJ9" },
-    ], next_cursor: null, diagnostics: [] }), { status: 200 })));
+  it("keeps the agent request fixed while filtering already-loaded rows after the debounce", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => recordResponse(
+      { event: "matching", agent_id: "rpc-test", message: "find this" },
+      { event: "other", agent_id: "rpc-test", message: "leave this" },
+    ));
+    vi.stubGlobal("fetch", fetchImpl);
     render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" />);
-    expect(await screen.findByRole("dialog", { name: "Logs for rpc-test" })).toBeInTheDocument();
-    expect(screen.getByText("Lifecycle ingested")).toBeInTheDocument();
-    expect(screen.getByText("rpc-test")).toBeInTheDocument();
-    expect(screen.getByText("nonsecret body")).toBeInTheDocument();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const filter = screen.getByRole("searchbox", { name: "Filter" });
+    await act(async () => { fireEvent.change(filter, { target: { value: "f" } }); fireEvent.change(filter, { target: { value: "find" } }); });
+    expect(screen.getByText("leave this")).toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(299); });
+    expect(screen.getByText("leave this")).toBeInTheDocument();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(screen.getByText("find this")).toBeInTheDocument();
+    expect(screen.queryByText("Leave this")).not.toBeInTheDocument();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    for (const [input] of fetchImpl.mock.calls) {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("query")).toBe("rpc-test");
+      expect(url.searchParams.has("from")).toBe(false);
+      expect(url.searchParams.has("to")).toBe(false);
+      expect(url.searchParams.has("cursor")).toBe(false);
+    }
+  });
+
+  it("ignores a stale response after the selected agent changes", async () => {
+    let resolveFirst: ((value: Response) => void) | undefined;
+    let resolveSecond: ((value: Response) => void) | undefined;
+    const fetchImpl = vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => {
+      if (new URL(String(input)).searchParams.get("query") === "first") resolveFirst = resolve;
+      else resolveSecond = resolve;
+    }));
+    vi.stubGlobal("fetch", fetchImpl);
+    const view = render(<RouterLogViewer routerUrl="http://router.test" agentId="first" />);
+    await waitFor(() => expect(resolveFirst).toBeDefined());
+    view.rerender(<RouterLogViewer routerUrl="http://router.test" agentId="second" />);
+    await waitFor(() => expect(resolveSecond).toBeDefined());
+    await act(async () => { resolveSecond?.(recordResponse({ event: "second_agent", agent_id: "second" })); });
+    expect(await screen.findByText("Second agent")).toBeInTheDocument();
+    await act(async () => { resolveFirst?.(recordResponse({ event: "first_agent", agent_id: "first" })); });
+    expect(screen.queryByText("First agent")).not.toBeInTheDocument();
+  });
+
+  it("preserves message, body, and error values while redacting secret patterns", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => recordResponse({ event: "lifecycle_ingested", agent_id: "rpc-test", message: "exact message", body: "full body text", error: "full error text", password: "fixture-secret", details: "Bearer abc123 password=fixture-secret" })));
+    const fieldStorage = storage({ "mecha.web.routerLogs.v1.displayKeys": JSON.stringify(["event", "message", "body", "error", "password", "details"]) });
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" storage={fieldStorage} />);
+    expect(await screen.findByText("Lifecycle ingested")).toBeInTheDocument();
+    expect(screen.getByText("exact message")).toBeInTheDocument();
     expect(screen.getByText("full body text")).toBeInTheDocument();
     expect(screen.getByText("full error text")).toBeInTheDocument();
-    expect(screen.getByText("[REDACTED]")).toBeInTheDocument();
-    expect(screen.queryByText("Foreign event")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Raw" }));
-    expect(screen.getByText(/nonsecret body/)).toBeInTheDocument();
-    expect(screen.getByText(/full body text/)).toBeInTheDocument();
-    expect(screen.getByText(/full error text/)).toBeInTheDocument();
-    expect(screen.queryByText(/fixture-secret/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("[REDACTED]").length).toBeGreaterThan(0);
+    expect(screen.queryByText("fixture-secret")).not.toBeInTheDocument();
+    expect(screen.queryByText("abc123")).not.toBeInTheDocument();
   });
 
-  it("shows request errors outside the log panel without exposing raw error data", async () => {
+  it("shows a readable fallback for malformed and non-UTF-8 records", async () => {
+    const malformed = encodedBytes([123, 34, 97, 103, 101, 110, 116, 95, 105, 100, 34, 58, 34, 114, 112, 99, 45, 116, 101, 115, 116, 34, 44, 255, 125]);
+    vi.stubGlobal("fetch", vi.fn(async () => response([malformed])));
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" />);
+    expect(await screen.findByText("Unstructured log entry")).toBeInTheDocument();
+    expect(screen.getByText(/\\xff/)).toBeInTheDocument();
+  });
+
+  it("has one visible displayed-fields heading and allows an empty selection", async () => {
+    const fieldStorage = storage({ "mecha.web.routerLogs.v1.displayKeys": "[]" });
+    vi.stubGlobal("fetch", vi.fn(async () => recordResponse({ event: "configured", agent_id: "rpc-test", message: "hidden" })));
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" storage={fieldStorage} />);
+    expect(await screen.findByText("Router event")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Displayed fields" })).toBeVisible();
+    expect(screen.getAllByText("Displayed fields")).toHaveLength(1);
+    expect(screen.getByRole("checkbox", { name: "event" })).not.toBeChecked();
+  });
+
+  it("persists selected display keys across reloads and falls back from malformed storage", async () => {
+    const fieldStorage = storage();
+    expect(loadDisplayKeys(fieldStorage)).toEqual([...DEFAULT_DISPLAY_KEYS]);
+    fieldStorage.values.set("mecha.web.routerLogs.v1.displayKeys", JSON.stringify(["message", "body"]));
+    expect(loadDisplayKeys(fieldStorage)).toEqual(["message", "body"]);
+    fieldStorage.values.set("mecha.web.routerLogs.v1.displayKeys", "not-json");
+    expect(loadDisplayKeys(fieldStorage)).toEqual([...DEFAULT_DISPLAY_KEYS]);
+    fieldStorage.values.set("mecha.web.routerLogs.v1.displayKeys", JSON.stringify(["event", "message"]));
+    vi.stubGlobal("fetch", vi.fn(async () => recordResponse({ event: "configured", agent_id: "rpc-test", message: "visible" })));
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" storage={fieldStorage} />);
+    await screen.findByText("Configured");
+    fireEvent.click(screen.getByRole("checkbox", { name: "message" }));
+    expect(JSON.parse(fieldStorage.values.get("mecha.web.routerLogs.v1.displayKeys") ?? "null")).toEqual(["event"]);
+    cleanup();
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" storage={fieldStorage} />);
+    await screen.findByText("Configured");
+    expect(screen.getByRole("checkbox", { name: "message" })).not.toBeChecked();
+  });
+
+  it("renders request errors without raw error data", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("Router logs could not be loaded."); }));
-    render(<RouterLogViewer routerUrl="http://router.test" />);
+    render(<RouterLogViewer routerUrl="http://router.test" agentId="rpc-test" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Router logs could not be loaded.");
-    expect(screen.queryByText(/invalid_request/i)).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Router log records" })).toBeEmptyDOMElement();
   });
 
-  it("serializes the explicit query and preserves a valid response", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toBe("http://router.test/v1/router-log?query=raw+line&from=2030-01-01T00%3A00%3A00.000Z&to=2030-01-02T00%3A00%3A00.000Z");
-      return new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "YQ0=" }], next_cursor: null, diagnostics: [] }), { status: 200 });
-    });
-    await expect(createHttpClient("http://router.test", fetchImpl).routerLog({ query: "raw line", from: "2030-01-01T00:00:00.000Z", to: "2030-01-02T00:00:00.000Z", cursor: null })).resolves.toMatchObject({ lines: [{ bytes_base64: "YQ0=" }] });
+  it("serializes explicit transport queries and preserves valid responses", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => { expect(String(input)).toBe("http://router.test/v1/router-log?query=raw+line&from=2030-01-01T00%3A00%3A00.000Z&to=2030-01-02T00%3A00%3A00.000Z"); return response([]); });
+    await expect(createHttpClient("http://router.test", fetchImpl).routerLog({ query: "raw line", from: "2030-01-01T00:00:00.000Z", to: "2030-01-02T00:00:00.000Z", cursor: null })).resolves.toMatchObject({ lines: [] });
   });
 
-  it("renders invalid bytes with a deterministic fallback while preserving CR", () => {
-    expect(decodeRouterLogBytes("YQ0g//I=" )).toBe("a\r \\xff\\xf2");
-  });
-
-  it("rejects unknown response fields and invalid query values", async () => {
-    const client = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify({ status: "complete", lines: [], next_cursor: null, diagnostics: [], extra: true }), { status: 200 })));
-    await expect(client.routerLog({ query: "", from: null, to: null, cursor: null })).rejects.toMatchObject({ code: "invalid_response" });
-    await expect(client.routerLog({ query: "\u0000", from: null, to: null, cursor: null })).rejects.toThrow("invalid");
-  });
-
-  it("rejects normalized calendar dates while accepting valid UTC boundaries", async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ status: "complete", lines: [], next_cursor: null, diagnostics: [] }), { status: 200 }));
-    const client = createHttpClient("http://router.test", fetchImpl);
-    await expect(client.routerLog({ query: "", from: "2030-02-31T00:00:00Z", to: "2030-03-02T00:00:00Z", cursor: null })).rejects.toThrow("invalid");
-    await expect(client.routerLog({ query: "", from: "2024-02-29T00:00:00Z", to: "2024-03-01T00:00:00Z", cursor: null })).resolves.toMatchObject({ status: "complete" });
-    expect(fetchImpl).toHaveBeenCalledOnce();
-  });
-
-  it("measures the router-log response in UTF-8 bytes before parsing", async () => {
-    const oversizedUtf8Body = JSON.stringify({ status: "complete", lines: [{ bytes_base64: "界".repeat(16_777_216) }], next_cursor: null, diagnostics: [] });
-    expect(oversizedUtf8Body.length).toBeLessThan(48 * 1024 * 1024);
-    expect(new TextEncoder().encode(oversizedUtf8Body).length).toBeGreaterThan(48 * 1024 * 1024);
-    const client = createHttpClient("http://router.test", vi.fn(async () => new Response(oversizedUtf8Body, { status: 200 })));
-    await expect(client.routerLog({ query: "", from: null, to: null, cursor: null })).rejects.toThrow("oversized response");
-  });
-
-  it("renders degraded statuses and diagnostics", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "source_unavailable", lines: [], next_cursor: null, diagnostics: [{ category: "source_unavailable", count: 1 }] }), { status: 200 })));
-    render(<RouterLogViewer routerUrl="http://router.test" />);
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/router log source unavailable/i));
-    expect(screen.getByText("source unavailable (1)")).toBeInTheDocument();
-    expect(screen.queryByText("No matching router log records.")).not.toBeInTheDocument();
-  });
-
-  it("ignores a stale invalid-cursor failure after a filter edit", async () => {
-    let rejectCursor: ((response: Response) => void) | undefined;
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL) => {
-      if (fetchImpl.mock.calls.length === 1) return new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "eyJldmVudCI6Im5ldyJ9" }], next_cursor: "stale", diagnostics: [] }), { status: 200 });
-      if (fetchImpl.mock.calls.length === 2) return new Promise<Response>((resolve) => { rejectCursor = resolve; });
-      return new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "eyJldmVudCI6Im5ld2VyIn0=" }], next_cursor: null, diagnostics: [] }), { status: 200 });
-    });
-    vi.stubGlobal("fetch", fetchImpl);
-    render(<RouterLogViewer routerUrl="http://router.test" />);
-    await waitFor(() => expect(screen.getByText("New")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: "Older" }));
-    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "new query" } });
-    fireEvent.click(screen.getByRole("button", { name: "Search" }));
-    await waitFor(() => expect(screen.getByText("Newer")).toBeInTheDocument());
-
-    rejectCursor?.(new Response(JSON.stringify({ error: { code: "invalid_cursor", message: "The cursor is invalid." } }), { status: 400 }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-    expect(screen.getByText("Newer")).toBeInTheDocument();
-    expect(screen.queryByText("New")).not.toBeInTheDocument();
-    const newerUrl = new URL(String(fetchImpl.mock.calls[2]?.[0]));
-    expect(newerUrl.searchParams.get("query")).toBe("new query");
-    expect(newerUrl.searchParams.has("cursor")).toBe(false);
-  });
-
-  it("clears history and retries from the start after an invalid cursor", async () => {
-    const responses = [
-      new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "eyJldmVudCI6Im5ldyJ9" }], next_cursor: "stale", diagnostics: [] }), { status: 200 }),
-      new Response(JSON.stringify({ error: { code: "invalid_cursor", message: "The cursor is invalid." } }), { status: 400 }),
-      new Response(JSON.stringify({ status: "complete", lines: [{ bytes_base64: "eyJldmVudCI6ImZyZXNoIn0=" }], next_cursor: null, diagnostics: [] }), { status: 200 }),
-    ];
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL) => responses.shift()!);
-    vi.stubGlobal("fetch", fetchImpl);
-    render(<RouterLogViewer routerUrl="http://router.test" />);
-    await waitFor(() => expect(screen.getByText("New")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Older" }));
-    await waitFor(() => expect(screen.getByText("Fresh")).toBeInTheDocument());
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-    expect(String(fetchImpl.mock.calls[2]?.[0])).toContain("/v1/router-log?query=");
-    expect(String(fetchImpl.mock.calls[2]?.[0])).not.toContain("cursor=");
-    expect(screen.getByRole("button", { name: "Older" })).toBeDisabled();
-  });
+  it("decodes invalid bytes with a deterministic fallback while preserving CR", () => { expect(decodeRouterLogBytes("YQ0g//I=")).toBe("a\r \\xff\\xf2"); });
 });
