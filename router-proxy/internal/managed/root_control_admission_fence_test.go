@@ -142,8 +142,9 @@ func (r *rootAdmissionRPC) rejections() []string {
 type rootAdmissionHandler struct {
 	identity RootControlHandlerIdentity
 
-	mu    sync.Mutex
-	calls []RootControlInvocation
+	mu     sync.Mutex
+	calls  []RootControlInvocation
+	result RootControlHandlerResult
 }
 
 type panicOnceRootAdmissionHandler struct {
@@ -182,6 +183,12 @@ func (h *rootAdmissionHandler) Execute(_ context.Context, invocation RootControl
 	h.mu.Lock()
 	h.calls = append(h.calls, invocation)
 	h.mu.Unlock()
+	h.mu.Lock()
+	result := h.result
+	h.mu.Unlock()
+	if result.Status != "" {
+		return result, nil
+	}
 	return RootControlHandlerResult{Status: "ok", Content: "accepted", Details: map[string]any{"accepted": true}}, nil
 }
 
@@ -388,6 +395,7 @@ func TestRootControlAdmissionRejectsEachFenceFieldMutation(t *testing.T) {
 
 func TestRootControlHandlerPanicCompletesOnceAndKeepsRPCUsable(t *testing.T) {
 	manager, durable, binding, fence, tool, _, _ := newRootAdmissionFixtureWithReceiver(t, false)
+	manager.eventSink = func(Event) { panic("private sink marker") }
 	stdoutReader, stdoutWriter := io.Pipe()
 	stdinReader, stdinWriter := io.Pipe()
 	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)

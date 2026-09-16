@@ -78,20 +78,24 @@ func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBi
 		}
 	}()
 	if !m.rootBindingCurrent(ctx, binding, fence) || event.RuntimeGeneration != fence.RuntimeGeneration || event.SessionEpoch != fence.SessionEpoch || event.ManifestSHA256 != fence.ManifestHash {
+		m.emitEvent(managedRootControlRejectedEvent(binding.agentID))
 		return
 	}
 	tool, found := m.rootManifestTool(event)
 	if !found || ValidateManifestArguments(tool, event.Arguments) != nil {
+		m.emitEvent(managedRootControlRejectedEvent(binding.agentID))
 		return
 	}
 	arguments, err := canonicalJSON(event.Arguments)
 	if err != nil {
+		m.emitEvent(managedRootControlRejectedEvent(binding.agentID))
 		return
 	}
 	argumentHash := sha256.Sum256(arguments)
 	fingerprintValue := map[string]any{"request_id": event.RequestID, "tool_call_id": event.ToolCallID, "capability_id": event.CapabilityID, "tool_name": event.ToolName, "definition_id": event.DefinitionID, "definition_sha256": event.DefinitionSHA256, "operation_id": event.OperationID, "manifest_sha256": event.ManifestSHA256, "runtime_generation": event.RuntimeGeneration, "session_epoch": event.SessionEpoch, "arguments": event.Arguments}
 	fingerprintBytes, err := canonicalJSON(fingerprintValue)
 	if err != nil {
+		m.emitEvent(managedRootControlRejectedEvent(binding.agentID))
 		return
 	}
 	fingerprint := sha256.Sum256(fingerprintBytes)
@@ -112,9 +116,15 @@ func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBi
 	}
 	reservation, err := m.store.ReserveManagedControlRequest(ctx, store.ManagedControlRequestInput{RequestID: event.RequestID, ResultID: resultID, AgentID: binding.agentID, ToolCallID: event.ToolCallID, CapabilityID: event.CapabilityID, ToolName: event.ToolName, DefinitionID: event.DefinitionID, OperationID: event.OperationID, CanonicalArgumentsSHA256: fmt.Sprintf("%x", argumentHash), RequestFingerprint: fmt.Sprintf("%x", fingerprint), Fence: fence, ReceivedAt: formatManagedTime(m.clock.Now())})
 	if err != nil || reservation.RequestID == "" {
+		m.emitEvent(managedRootControlRejectedEvent(binding.agentID))
 		return
 	}
 	reserved = true
+	if !reservation.Replayed {
+		// Admission is durable at this point. The typed event contains only the
+		// closed scalar argument projection, never the caller's raw object.
+		m.emitEvent(managedRootControlRequestEvent(binding.agentID, event))
+	}
 	if event.OperationID == "mail.send" {
 		arguments, ok := event.Arguments.(map[string]any)
 		recipient, recipientOK := arguments["recipient"].(string)
@@ -340,7 +350,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 		result.Details = map[string]any{}
 	}
 	if result.Status != "ok" && result.Status != "error" {
-		_ = m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, "HANDLER_INVALID_RESULT", "handler returned an invalid result status")
+		m.failRootControlHandler(ctx, binding, claim, fence, "HANDLER_INVALID_RESULT", "handler returned an invalid result status")
 		return
 	}
 	if result.Status == "ok" {
@@ -350,7 +360,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	// correlated completion rather than a request re-execution instruction.
 	result.Retryable = false
 	if result.Status == "error" && (result.ErrorCode == "" || !validManifestText(result.ErrorCode, 128, false)) {
-		_ = m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, "HANDLER_INVALID_RESULT", "handler returned an invalid error code")
+		m.failRootControlHandler(ctx, binding, claim, fence, "HANDLER_INVALID_RESULT", "handler returned an invalid error code")
 		return
 	}
 	if !alreadyCommitted {
@@ -360,7 +370,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	}
 	details, err := canonicalJSON(result.Details)
 	if err != nil {
-		_ = m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, "HANDLER_INVALID_RESULT", "handler returned invalid details")
+		m.failRootControlHandler(ctx, binding, claim, fence, "HANDLER_INVALID_RESULT", "handler returned invalid details")
 		return
 	}
 	payload := rootControlPayload(claim.Request, result, result.Details)
@@ -370,6 +380,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	}
 	completed, err := m.store.CompleteManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, store.ManagedControlResult{Status: result.Status, Content: result.Content, DetailsJSON: string(details), PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(canonical)), DecodedPayloadBytes: len(canonical), ErrorCode: result.ErrorCode, ErrorMessage: result.ErrorMessage, Retryable: result.Retryable})
 	if err == nil && completed != nil {
+		m.emitEvent(managedRootControlResultEvent(*completed))
 		outcome := "success"
 		if result.Status == "error" {
 			outcome = "error"
@@ -385,6 +396,17 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 // recordRootControlHistory uses the immutable tool name and terminal result.
 // Arguments and result content can contain human-entered text, so they never
 // cross into the timeline projection.
+func (m *Manager) failRootControlHandler(ctx context.Context, binding *managedBinding, claim *store.ManagedControlHandlerClaim, fence store.ManagedRuntimeFence, code, detail string) {
+	if claim == nil || binding == nil {
+		return
+	}
+	if err := m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, code, detail); err == nil {
+		row := claim.Request
+		row.ResultStatus, row.ErrorCode, row.ErrorDetail = "error", code, detail
+		m.emitEvent(managedRootControlResultEvent(row))
+	}
+}
+
 func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolName, outcome, requestID string) {
 	if toolName == "" || requestID == "" {
 		return
