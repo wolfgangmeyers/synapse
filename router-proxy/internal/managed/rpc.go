@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -2181,12 +2182,24 @@ func rootControlEpoch(value any) (int64, bool) {
 	}
 }
 
+func validOrdinaryToolName(value string) bool {
+	if value == "" || !utf8.ValidString(value) || len([]byte(value)) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') && char != '_' && char != '-' && char != '.' && char != ':' {
+			return false
+		}
+	}
+	return true
+}
+
 // classifyRootControlEvent identifies only the documented completed hidden
 // request. It deliberately ignores partial frames and malformed candidates.
-// classifyBuiltinToolLifecycleEvent accepts only the native ordered RPC start
-// and end frames for the fixed local coding builtin allowlist. It deliberately
-// ignores args, result, and every update field so no private tool material can
-// enter the manager or SQLite path.
+// classifyBuiltinToolLifecycleEvent accepts the native ordered start frames for
+// the fixed local coding builtin allowlist and every exact, safely named terminal
+// frame. It deliberately ignores args, result, and every update field so no
+// private tool material can enter the manager or SQLite path.
 func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (*BuiltinToolLifecycleEvent, bool) {
 	kind, _ := event["type"].(string)
 	if kind != "tool_execution_start" && kind != "tool_execution_end" {
@@ -2201,7 +2214,13 @@ func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (
 	}
 	callID, callOK := event["toolCallId"].(string)
 	toolName, toolOK := event["toolName"].(string)
-	if !callOK || !validBuiltinToolCallID(callID) || !toolOK || !validBuiltinToolName(toolName) {
+	if !callOK || !validBuiltinToolCallID(callID) || !toolOK {
+		return nil, true
+	}
+	if kind == "tool_execution_start" && !validBuiltinToolName(toolName) {
+		return nil, true
+	}
+	if kind == "tool_execution_end" && !validOrdinaryToolName(toolName) {
 		return nil, true
 	}
 	result := &BuiltinToolLifecycleEvent{ToolCallID: callID, ToolName: toolName, Watermark: watermark}
