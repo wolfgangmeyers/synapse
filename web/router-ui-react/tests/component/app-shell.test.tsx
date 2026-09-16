@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 afterEach(cleanup);
 import { AppShell } from "../../src/components/AppShell";
@@ -61,6 +61,18 @@ describe("AppShell", () => {
     expect(banner.querySelector("button[aria-label='Inline tool settings']")).toBeInTheDocument();
     expect(banner.querySelector(".peer-heading > p")).toHaveClass("peer-activity");
     expect(banner.querySelector(".peer-heading > p")).not.toHaveTextContent("fixture-peer");
+  });
+
+  it("keeps the agent-scoped Logs action in the conversation header", () => {
+    const onLogs = vi.fn();
+    const agent: Agent = { agent_id: "rpc-test", activity_state: "idle", subagent_count: 0, subagents: [] };
+    render(<ConversationHeader agent={agent} onLogs={onLogs} />);
+    const button = screen.getByRole("button", { name: "Logs" });
+    expect(button).toHaveAttribute("title", "View logs for Rpc Test");
+    expect(button).toHaveClass("logs-header-button");
+    expect(button.querySelector(".fa-file-lines")).toBeInTheDocument();
+    fireEvent.click(button);
+    expect(onLogs).toHaveBeenCalledOnce();
   });
 
   it("marks the reminder button active when the selected agent has a reminder", () => {

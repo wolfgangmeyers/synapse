@@ -18,7 +18,7 @@ These statements describe the current checkout. The dirty archive and RPC files 
 - `router-proxy/cmd/mailbox-router/log_writer.go` has timestamp-only rotation names, no `.1` producer, and open `map[string]any` fields. It writes the generated timestamp alongside the event and caller fields.
 - `web/router-ui-react/src/transport/http-client.ts` has no typed router-log client.
 - `web/router-ui-react/src/protocol/manifest.ts` and `router/contract/manifest.json` omit the router-log query route.
-- `web/router-ui-react/src/App.tsx` has no router log viewer surface or navigation entry.
+- `web/router-ui-react/src/App.tsx` has no router log viewer surface or agent-scoped Logs action.
 
 The implementation must close these gaps without changing unrelated transport, archive, or RPC semantics.
 
@@ -204,22 +204,22 @@ Add a typed React transport client. It validates the closed request and response
 
 ## React viewer behavior
 
-Add a same-origin client page at `/logs`, reached from the existing dark application shell through a clear `Router logs` navigation item. The browser route is UI navigation only. API calls always use the configured router URL and the typed client.
+Add an in-context Logs action to the selected agent's existing conversation header. Clicking it opens an agent-scoped modal on the mailbox page; do not add a standalone Logs page or global navigation entry. API calls always use the configured router URL and the typed client.
 
-The page has:
+The modal has:
 
 - a dark code-editor-like surface that matches the existing application colors;
-- a heading, a short retained-window note, and a `Back to mailbox` control;
+- a heading naming the selected agent, a short scope note, and the shared modal close control;
 - a plain-text search field, `From` and `To` time inputs, `Search`, `Refresh`, and `Clear` controls;
 - loading and error status outside the log text;
 - a no-match message outside the log text;
-- a scrollable log panel with monospace text, preserved horizontal whitespace, no Markdown or HTML interpretation, no JSON field table, and horizontal scrolling for long records;
+- a scrollable log panel with a readable structured view that preserves every logged field, including message, body, and error text, plus an obvious `Raw` view for the original line; credentials and access tokens are redacted in both views;
 - `Older` and `Newer` paging controls with disabled states at the ends; and
 - a read-only label and no controls for workers, delivery, retries, log deletion, export, or download.
 
-Initial page load runs an unrestricted query for the newest 500 matches. The initial response is displayed oldest-to-newest within that page. `Older` requests the next forward cursor within the fixed newest-500 result set. React stores the request cursor and page for each response. `Newer` returns to the prior stored page without a server request. Search, time-window changes, and refresh clear the stack and start one new snapshot. Disable `Older` when `next_cursor` is null. Disable `Newer` at the initial page. A cursor error clears all pages, shows a fixed message, and starts a fresh query.
+Initial modal load queries the selected agent and displays the newest 500 matching records oldest-to-newest within that page. `Older` requests the next forward cursor within the fixed newest-500 result set. React stores the request cursor and page for each response. `Newer` returns to the prior stored page without a server request. Search, time-window changes, and refresh clear the stack and start one new snapshot. Disable `Older` when `next_cursor` is null. Disable `Newer` at the initial page. A cursor error clears all pages, shows a fixed message, and starts a fresh query.
 
-Render every line as a text node. Decode base64 into bytes. Valid UTF-8 uses a fatal UTF-8 decoder and the resulting text. Preserve CR and whitespace in the text node under `white-space: pre` styling. Invalid byte sequences use one deterministic visible byte fallback, such as lowercase `\\xNN` for each invalid byte, while valid runs remain decoded. This presentation fallback never changes the response bytes, search bytes, or cursor state. Do not use `innerHTML`, Markdown, JSON pretty-printing, replacement during transport decoding, or line trimming.
+Decode each record from base64 using a fatal UTF-8 decoder, parse the JSON record, and render every selected-agent field as escaped text. The structured view may format fields for readability; the Raw view preserves the original line except for credential and access-token redactions. Do not use `innerHTML` or Markdown. Malformed or non-UTF-8 records remain available in Raw view when their agent scope can be established; otherwise they are not assigned to an agent.
 
 ## Required validation
 
@@ -230,8 +230,8 @@ No implementation is complete without these checks:
 3. Query tests cover exact byte search, no time window, inclusive `from`, exclusive `to`, timestamp-less and malformed timestamps, newest 500 selection, chronological page order, response packing, and the maximum base64 line plus JSON envelope under `48 MiB`.
 4. Cursor tests cover query/time-window binding, generation name, identity, offset, length, snapshot boundary, provisional trailing state, expiry, replacement, removal, length change, new generation, and tail completion invalidation.
 5. Go route tests cover the explicit query-string mapping, missing-versus-empty behavior in Go and TypeScript, duplicate and unknown parameters, invalid percent encoding, invalid UTF-8, invalid timestamps and cursors, fixed errors, the closed JSON response, no path/raw-error leakage, source-unavailable and partial states, CORS, no-store headers, and read-only methods.
-6. React tests cover manifest parity, typed query serialization and response validation, missing-versus-empty behavior, search/loading/error/no-match/paging states, navigation, safe rendering of valid UTF-8, CR, and invalid bytes, and the absence of mutation/export controls.
-7. One mandatory test must build the actual React bundle, start the actual Go router with `--managed-ui-dist` pointing at that built bundle, call the router-served same-origin `/logs` route, and exercise the bundled viewer against `GET /v1/router-log`. A component test or a separately running Vite server is not enough.
+6. React tests cover manifest parity, typed query serialization and response validation, missing-versus-empty behavior, the agent-scoped Logs action and modal, search/loading/error/no-match/paging states, full-field structured rendering, raw-line rendering, credential/access-token redaction, and the absence of mutation/export controls.
+7. One mandatory test must build the actual React bundle, start the actual Go router with `--managed-ui-dist` pointing at that built bundle, open the router-served mailbox page, select an agent, open its Logs modal, and exercise the bundled viewer against `GET /v1/router-log`. A component test or a separately running Vite server is not enough.
 8. Regression checks must preserve the current bind host and port rules, direct router reachability, wildcard non-credentialed CORS and preflight behavior, WebSocket and UI-live behavior, existing authentication/provider behavior, existing permissions and managed controls, message and reminder behavior, export/static asset behavior, archive behavior, and RPC behavior. Archive and RPC production files remain frozen.
 
 ## Isolated delivery reproduction
