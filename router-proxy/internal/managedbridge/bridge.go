@@ -31,13 +31,14 @@ type EventInfo struct {
 	Hash string
 }
 type Diagnostics struct {
-	State         string
-	Connected     bool
-	Degraded      bool
-	CommandCursor uint64
-	EventCursor   uint64
-	ReplayFloor   uint64
-	PiPID         int
+	State               string
+	Connected           bool
+	Degraded            bool
+	CommandCursor       uint64
+	EventCursor         uint64
+	ReplayFloor         uint64
+	PiPID               int
+	NeedsReconstruction bool
 }
 
 type queuedEvent struct {
@@ -103,6 +104,7 @@ type Bridge struct {
 	connected      bool
 	terminal       bool
 	terminalErr    error
+	reconstruction *NeedsReconstruction
 	options        Options
 	runStarted     bool
 	stopCancel     context.CancelFunc
@@ -769,6 +771,17 @@ func (b *Bridge) readPump(socket *bridgeSocket) {
 	}
 }
 
+// NeedsReconstruction is returned when the durable peer has discarded the
+// cursor history required to resume. The bridge does not advance any cursor
+// or invent a snapshot in this state.
+type NeedsReconstruction struct {
+	Domain   string
+	Expected uint64
+	Floor    uint64
+}
+
+func (*NeedsReconstruction) Error() string { return "managed bridge needs reconstruction" }
+
 var (
 	ErrStaleSocket      = errors.New("managed bridge socket is stale")
 	ErrAmbiguousCommand = errors.New("managed bridge command admission is ambiguous")
@@ -830,6 +843,17 @@ func (b *Bridge) handleFrame(socket *bridgeSocket, frame any) error {
 			return ErrStaleFrame
 		}
 		return b.handleAck(socket, value)
+	case ReplayGap:
+		if b.state.CheckFrame(value) != nil || !samePost(value.PostAuth, socket.post) || value.Expected == 0 || value.Floor == 0 {
+			return ErrStaleFrame
+		}
+		gap := &NeedsReconstruction{Domain: value.Domain, Expected: value.Expected, Floor: value.Floor}
+		b.mu.Lock()
+		b.reconstruction = gap
+		b.degraded = true
+		b.mu.Unlock()
+		_ = b.state.Transition(StateNeedsReconstruction)
+		return gap
 	default:
 		return ErrInvalidFrame
 	}
@@ -1013,7 +1037,7 @@ func (b *Bridge) Diagnostics() Diagnostics {
 	if b.events.next > 0 {
 		event = b.events.next - 1
 	}
-	return Diagnostics{State: string(b.state.State()), Connected: b.connected, Degraded: b.degraded, CommandCursor: cursor, EventCursor: event, ReplayFloor: b.events.floor, PiPID: int(b.fence.PiPID)}
+	return Diagnostics{State: string(b.state.State()), Connected: b.connected, Degraded: b.degraded, CommandCursor: cursor, EventCursor: event, ReplayFloor: b.events.floor, PiPID: int(b.fence.PiPID), NeedsReconstruction: b.reconstruction != nil}
 }
 func (b *Bridge) Events() []EventInfo {
 	b.mu.Lock()
@@ -1025,3 +1049,12 @@ func (b *Bridge) Events() []EventInfo {
 	return result
 }
 func (b *Bridge) Fence() RuntimeFence { b.mu.Lock(); defer b.mu.Unlock(); return b.fence }
+
+func (b *Bridge) Reconstruction() (NeedsReconstruction, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reconstruction == nil {
+		return NeedsReconstruction{}, false
+	}
+	return *b.reconstruction, true
+}

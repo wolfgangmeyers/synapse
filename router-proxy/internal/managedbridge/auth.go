@@ -64,10 +64,20 @@ func AuthenticateFor(verifier Verifier, challenge Challenge, fence RuntimeFence)
 
 // VerifyAuthenticate checks the challenge binding and proof in constant time.
 func VerifyAuthenticate(verifier Verifier, challenge Challenge, auth Authenticate) error {
-	if !verifier.initialized || auth.ValidateFor(challenge) != nil {
+	if !verifier.initialized {
 		return ErrInvalidFrame
 	}
-	want := proof(verifier, bridgeTranscript(challenge, auth))
+	return VerifyAuthenticateKey(verifier.key[:], challenge, auth)
+}
+
+// VerifyAuthenticateKey is the persistence-boundary helper used by Store.
+// The key is accepted only for the duration of this call and is never
+// returned or included in a protocol value.
+func VerifyAuthenticateKey(key []byte, challenge Challenge, auth Authenticate) error {
+	if len(key) != 32 || subtle.ConstantTimeCompare(key, make([]byte, 32)) == 1 || challenge.Validate() != nil || auth.ValidateFor(challenge) != nil {
+		return ErrInvalidFrame
+	}
+	want := proofKey(key, bridgeTranscript(challenge, auth))
 	if !constantTimeHexEqual(want, auth.Proof) {
 		return ErrInvalidFrame
 	}
@@ -77,7 +87,15 @@ func VerifyAuthenticate(verifier Verifier, challenge Challenge, auth Authenticat
 // AuthenticatedFor creates the router acceptance proof. Cursors are the
 // router's already durable positions; zero means no prior sequence.
 func AuthenticatedFor(verifier Verifier, challenge Challenge, auth Authenticate, commandCursor, eventCursor uint64) (Authenticated, error) {
-	if !verifier.initialized || VerifyAuthenticate(verifier, challenge, auth) != nil {
+	if !verifier.initialized {
+		return Authenticated{}, ErrInvalidFrame
+	}
+	return AuthenticatedForKey(verifier.key[:], challenge, auth, commandCursor, eventCursor)
+}
+
+// AuthenticatedForKey creates the router proof at the persistence boundary.
+func AuthenticatedForKey(key []byte, challenge Challenge, auth Authenticate, commandCursor, eventCursor uint64) (Authenticated, error) {
+	if len(key) != 32 || subtle.ConstantTimeCompare(key, make([]byte, 32)) == 1 || VerifyAuthenticateKey(key, challenge, auth) != nil {
 		return Authenticated{}, ErrInvalidFrame
 	}
 	accepted := Authenticated{
@@ -87,7 +105,7 @@ func AuthenticatedFor(verifier Verifier, challenge Challenge, auth Authenticate,
 		ConnectionNonce:     challenge.ConnectionNonce, Fence: auth.Fence,
 		CommandCursor: commandCursor, EventCursor: eventCursor,
 	}
-	accepted.Proof = proof(verifier, acceptanceTranscript(challenge, auth, accepted))
+	accepted.Proof = proofKey(key, acceptanceTranscript(challenge, auth, accepted))
 	return accepted, nil
 }
 
@@ -167,7 +185,11 @@ func acceptanceTranscript(challenge Challenge, auth Authenticate, accepted Authe
 }
 
 func proof(verifier Verifier, transcript []byte) string {
-	mac := hmac.New(sha256.New, verifier.key[:])
+	return proofKey(verifier.key[:], transcript)
+}
+
+func proofKey(key, transcript []byte) string {
+	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(transcript)
 	return hex.EncodeToString(mac.Sum(nil))
 }
