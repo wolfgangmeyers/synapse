@@ -119,6 +119,7 @@ type Store struct {
 	managedRestartAllFault  func(string) error
 	managedGraphFault       func(string) error
 	managedTerminationFault func(string) error
+	managedBridgeFault      func(string) error
 	// These process-local bounds reset on restart; reconciliation is idempotent.
 	managedParentActivityReconcileMu        sync.Mutex
 	managedParentActivityReconcileCursor    string
