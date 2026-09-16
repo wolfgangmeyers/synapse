@@ -304,7 +304,7 @@ function routerLogQuery(value: unknown): value is RouterLogQuery {
 function validBase64(value: unknown): value is string { return typeof value === "string" && value.length % 4 === 0 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value); }
 function routerLogResponse(value: unknown): RouterLogResponse {
   const root = recordValue(value);
-  if (!root || Object.keys(root).length !== 4 || Object.keys(root).some((key) => !["status", "lines", "next_cursor", "diagnostics"].includes(key)) || !isRouterLogStatus(root.status) || !Array.isArray(root.lines) || root.lines.length > 500 || (root.next_cursor !== null && (typeof root.next_cursor !== "string" || root.next_cursor.length === 0)) || !Array.isArray(root.diagnostics) || root.diagnostics.length > 8) throw invalidResponse("Router returned an invalid router-log response", value);
+  if (!root || Object.keys(root).length !== 4 || Object.keys(root).some((key) => !["status", "lines", "next_cursor", "diagnostics"].includes(key)) || !isRouterLogStatus(root.status) || !Array.isArray(root.lines) || root.lines.length > 500 || (root.next_cursor !== null && (typeof root.next_cursor !== "string" || root.next_cursor.length === 0 || utf8Length(root.next_cursor) > 4096)) || !Array.isArray(root.diagnostics) || root.diagnostics.length > 8) throw invalidResponse("Router returned an invalid router-log response", value);
   const lines: RouterLogLine[] = [];
   for (const candidate of root.lines) { const line = recordValue(candidate); if (!line || Object.keys(line).length !== 1 || !validBase64(line.bytes_base64)) throw invalidResponse("Router returned an invalid router-log line", value); try { atob(line.bytes_base64); } catch { throw invalidResponse("Router returned an invalid router-log line", value); } lines.push({ bytes_base64: line.bytes_base64 }); }
   const diagnostics: RouterLogDiagnostic[] = [];
@@ -366,6 +366,7 @@ export interface RouterHttpClient {
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
+  routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
 }
 
 export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): RouterHttpClient {
@@ -444,6 +445,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     respondProviderAuth: async (operationId, promptId, value) => managedOperation(await managedRequest(`/v1/provider-auth/operations/${encodeURIComponent(operationId)}/response`, "POST", { prompt_id: promptId, value })),
     setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
     routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
+    routerLogForAgent: async (agentId, query) => { if (!isAgentId(agentId) || !routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
   };
 }
 

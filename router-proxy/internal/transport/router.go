@@ -97,9 +97,9 @@ type RuntimeIdentity struct {
 	SourceTree   string `json:"source_tree"`
 }
 
-// RouterLogReader is the read-only source behind GET /v1/router-log.
-// Implementations own source snapshots and cursor validation; the transport
-// validates the wire query before calling it.
+// RouterLogReader is the read-only source behind the router-log routes.
+// Implementations own source snapshots, agent filtering, and cursor validation;
+// the transport validates the wire query before calling it.
 type RouterLogReader interface {
 	ReadRouterLog(context.Context, RouterLogQuery) (RouterLogResponse, error)
 }

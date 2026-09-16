@@ -39,6 +39,7 @@ export const httpRoutes = [
   { methods: ["GET"], path: "/v1/health" },
   { methods: ["GET"], path: "/v1/capabilities" },
   { methods: ["GET"], path: "/v1/router-log" },
+  { methods: ["GET"], path: "/v1/managed-agents/{agent_id}/router-log" },
   { methods: ["GET"], path: "/v1/memory/policy" },
   { methods: ["POST"], path: "/v1/memory/rebuild" },
   { methods: ["POST"], path: "/v1/memory/lookup" },

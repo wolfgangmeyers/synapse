@@ -49,7 +49,7 @@ func TestRouterLogEndpointReturnsClosedFixedErrors(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			router.handleHTTP(recorder, httptest.NewRequest(test.method, test.target, nil))
+			router.handleHTTP(recorder, localRouterLogRequest(test.method, test.target))
 			require.Equal(t, test.status, recorder.Code)
 			var body map[string]map[string]string
 			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
@@ -62,10 +62,22 @@ func TestRouterLogEndpointReturnsClosedFixedErrors(t *testing.T) {
 
 	router.routerLogReader = nil
 	recorder := httptest.NewRecorder()
-	router.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/router-log?query=", nil))
+	router.handleHTTP(recorder, localRouterLogRequest(http.MethodGet, "/v1/router-log?query="))
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	require.Contains(t, recorder.Body.String(), `"code":"source_unavailable"`)
 	require.NotContains(t, recorder.Body.String(), "path")
+}
+
+func TestRouterLogEndpointRejectsUnboundedResponseCursor(t *testing.T) {
+	cursor := strings.Repeat("a", maxRouterLogCursor+1)
+	router := &Router{ids: randomIDs{}, routerLogReader: RouterLogReaderFunc(func(context.Context, RouterLogQuery) (RouterLogResponse, error) {
+		return RouterLogResponse{Status: "complete", Lines: []RouterLogLine{}, NextCursor: &cursor, Diagnostics: []RouterLogDiagnostic{}}, nil
+	})}
+	recorder := httptest.NewRecorder()
+	router.handleHTTP(recorder, localRouterLogRequest(http.MethodGet, "/v1/router-log?query="))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"code":"source_unavailable"`)
+	require.NotContains(t, recorder.Body.String(), cursor)
 }
 
 func TestRouterLogEndpointWritesExactlyTheValidatedResponseBytes(t *testing.T) {
@@ -126,7 +138,7 @@ func TestRouterLogEndpointWritesExactlyTheValidatedResponseBytes(t *testing.T) {
 	requestTarget := "/v1/router-log?query=" + query + "&from=" + url.QueryEscape(from) + "&to=" + url.QueryEscape(to)
 	router := &Router{ids: randomIDs{}, routerLogReader: rawReader}
 	recorder := httptest.NewRecorder()
-	router.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, requestTarget, nil))
+	router.handleHTTP(recorder, localRouterLogRequest(http.MethodGet, requestTarget))
 	require.Equal(t, http.StatusOK, recorder.Code)
 	body := recorder.Body.Bytes()
 	require.Len(t, body, maxRouterLogResponse)
@@ -161,7 +173,7 @@ func TestRouterLogEndpointWritesExactlyTheValidatedResponseBytes(t *testing.T) {
 
 	continuationTarget := requestTarget + "&cursor=" + url.QueryEscape(*response.NextCursor)
 	continuedRecorder := httptest.NewRecorder()
-	router.handleHTTP(continuedRecorder, httptest.NewRequest(http.MethodGet, continuationTarget, nil))
+	router.handleHTTP(continuedRecorder, localRouterLogRequest(http.MethodGet, continuationTarget))
 	require.Equal(t, http.StatusOK, continuedRecorder.Code)
 	var continued RouterLogResponse
 	require.NoError(t, json.Unmarshal(continuedRecorder.Body.Bytes(), &continued))
@@ -178,7 +190,7 @@ func TestRouterLogEndpointReturnsClosedResponseAndPreservesRawLines(t *testing.T
 	raw := []byte("first\r\n\xff\r\n\nlast")
 	router := &Router{ids: randomIDs{}, routerLogReader: RawRouterLogReader(raw)}
 	recorder := httptest.NewRecorder()
-	router.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/router-log?query=", nil))
+	router.handleHTTP(recorder, localRouterLogRequest(http.MethodGet, "/v1/router-log?query="))
 	require.Equal(t, http.StatusOK, recorder.Code)
 	var response RouterLogResponse
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
@@ -391,6 +403,112 @@ func TestRouterLogReassemblesLineLargerThan16MiBReadChunk(t *testing.T) {
 	data = append(data, []byte("\xff\n")...)
 	lines := splitRawLF(data)
 	require.Equal(t, [][]byte{line, []byte{0xff}}, lines)
+}
+
+func TestConfiguredRouterLogScopedPaginationAndCursorBinding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.jsonl")
+	makeLine := func(agentID string) []byte {
+		prefix := []byte(`{"agent_id":"` + agentID + `","message":"`)
+		suffix := []byte(`"}`)
+		line := append(append([]byte{}, prefix...), bytes.Repeat([]byte{'x'}, 24<<20-len(prefix)-len(suffix))...)
+		return append(line, suffix...)
+	}
+	rotatedLine := makeLine("agent-a")
+	activeLine := makeLine("agent-a")
+	require.NoError(t, os.WriteFile(path+".20260101T000000.000000000Z", append(append([]byte{}, rotatedLine...), '\n'), 0o600))
+	require.NoError(t, os.WriteFile(path, activeLine, 0o600))
+	rawReader, err := NewConfiguredRouterLogReader(path)
+	require.NoError(t, err)
+	reader := rawReader.(*configuredRouterLogReader)
+	scope := "agent-a"
+	first, err := reader.ReadRouterLog(context.Background(), RouterLogQuery{AgentID: scope})
+	require.NoError(t, err)
+	require.Len(t, first.Lines, 1)
+	require.NotNil(t, first.NextCursor)
+	require.Equal(t, activeLine, decodeLineBytes(t, first.Lines[0]))
+	continued, err := reader.ReadRouterLog(context.Background(), RouterLogQuery{AgentID: scope, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	require.Equal(t, []RouterLogLine{{BytesBase64: base64.StdEncoding.EncodeToString(rotatedLine)}}, continued.Lines)
+	_, err = reader.ReadRouterLog(context.Background(), RouterLogQuery{AgentID: "agent-b", Cursor: first.NextCursor})
+	require.ErrorIs(t, err, errRouterLogInvalidCursor)
+}
+
+func localRouterLogRequest(method, target string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	req.RemoteAddr = "127.0.0.1:43210"
+	return req
+}
+
+func TestManagedRouterLogScopesByDecodedAgentIDBeforeQuery(t *testing.T) {
+	raw := []byte("{\"agent_id\":\"agent-a\",\"message\":\"safe\"}\r\n" +
+		"{\"agent_id\":\"agent-b\",\"message\":\"agent-a\"}\n" +
+		"{\"message\":\"agent-a\"}\n" +
+		"malformed agent-a\n" +
+		"{\"agent_id\":12,\"message\":\"agent-a\"}\n")
+	router := &Router{ids: randomIDs{}, routerLogReader: RawRouterLogReader(raw)}
+	recorder := httptest.NewRecorder()
+	router.handleHTTP(recorder, localRouterLogRequest(http.MethodGet, "/v1/managed-agents/agent-a/router-log?query=agent-a"))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response RouterLogResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, []RouterLogLine{{BytesBase64: base64.StdEncoding.EncodeToString([]byte("{\"agent_id\":\"agent-a\",\"message\":\"safe\"}\r"))}}, response.Lines)
+}
+
+func TestManagedRouterLogRejectsInvalidIDsMethodsAndSpoofedRemoteAddress(t *testing.T) {
+	router := &Router{ids: randomIDs{}, routerLogReader: RawRouterLogReader([]byte(`{"agent_id":"agent-a"}`))}
+	cases := []struct {
+		name, method, target, remote string
+		status                       int
+	}{
+		{"invalid ID", http.MethodGet, "/v1/managed-agents/bad%2Fagent/router-log?query=", "127.0.0.1:1", http.StatusBadRequest},
+		{"method", http.MethodPost, "/v1/managed-agents/agent-a/router-log?query=", "127.0.0.1:1", http.StatusMethodNotAllowed},
+		{"non-loopback", http.MethodGet, "/v1/managed-agents/agent-a/router-log?query=", "192.0.2.1:1", http.StatusForbidden},
+		{"forwarded spoof", http.MethodGet, "/v1/managed-agents/agent-a/router-log?query=", "192.0.2.1:1", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			req.RemoteAddr = tc.remote
+			if tc.name == "forwarded spoof" {
+				req.Header.Set("X-Forwarded-For", "127.0.0.1")
+			}
+			recorder := httptest.NewRecorder()
+			router.handleHTTP(recorder, req)
+			require.Equal(t, tc.status, recorder.Code)
+			if tc.status == http.StatusForbidden {
+				require.Contains(t, recorder.Body.String(), `"code":"forbidden"`)
+				require.NotContains(t, recorder.Body.String(), "192.0.2.1")
+			}
+		})
+	}
+
+	req := localRouterLogRequest(http.MethodGet, "/v1/managed-agents/agent-a/router-log?query=")
+	req.Header.Set("Origin", "https://arbitrary.example")
+	recorder := httptest.NewRecorder()
+	router.handleHTTP(recorder, req)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "*", recorder.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestLegacyRouterLogUsesTheSameLoopbackBoundary(t *testing.T) {
+	router := &Router{ids: randomIDs{}, routerLogReader: RawRouterLogReader([]byte("legacy"))}
+	req := httptest.NewRequest(http.MethodGet, "/v1/router-log?query=", nil)
+	req.RemoteAddr = "198.51.100.4:9000"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	recorder := httptest.NewRecorder()
+	router.handleHTTP(recorder, req)
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"code":"forbidden"`)
+}
+
+func TestLoopbackRemoteAddrAcceptsServerAndTestForms(t *testing.T) {
+	for _, remoteAddr := range []string{"127.0.0.1", "127.0.0.1:43210", "[127.0.0.1]:43210", "::1", "[::1]", "[::1]:43210", "[::1%lo0]:43210", "[::ffff:127.0.0.1]:43210"} {
+		require.True(t, loopbackRemoteAddr(remoteAddr), remoteAddr)
+	}
+	for _, remoteAddr := range []string{"", "localhost:43210", "192.0.2.1:43210", "[2001:db8::1]:43210", "::1:43210", "[127.0.0.1", "127.0.0.1]"} {
+		require.False(t, loopbackRemoteAddr(remoteAddr), remoteAddr)
+	}
 }
 
 func decodeLine(t *testing.T, line RouterLogLine) string { return string(decodeLineBytes(t, line)) }

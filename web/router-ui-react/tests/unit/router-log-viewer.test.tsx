@@ -63,7 +63,8 @@ describe("router log viewer", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
     for (const [input] of fetchImpl.mock.calls) {
       const url = new URL(String(input));
-      expect(url.searchParams.get("query")).toBe("rpc-test");
+      expect(url.pathname).toBe("/v1/managed-agents/rpc-test/router-log");
+      expect(url.searchParams.get("query")).toBe("");
       expect(url.searchParams.has("from")).toBe(false);
       expect(url.searchParams.has("to")).toBe(false);
       expect(url.searchParams.has("cursor")).toBe(false);
@@ -74,7 +75,7 @@ describe("router log viewer", () => {
     let resolveFirst: ((value: Response) => void) | undefined;
     let resolveSecond: ((value: Response) => void) | undefined;
     const fetchImpl = vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => {
-      if (new URL(String(input)).searchParams.get("query") === "first") resolveFirst = resolve;
+      if (new URL(String(input)).pathname.endsWith("/first/router-log")) resolveFirst = resolve;
       else resolveSecond = resolve;
     }));
     vi.stubGlobal("fetch", fetchImpl);
@@ -148,6 +149,22 @@ describe("router log viewer", () => {
   it("serializes explicit transport queries and preserves valid responses", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => { expect(String(input)).toBe("http://router.test/v1/router-log?query=raw+line&from=2030-01-01T00%3A00%3A00.000Z&to=2030-01-02T00%3A00%3A00.000Z"); return response([]); });
     await expect(createHttpClient("http://router.test", fetchImpl).routerLog({ query: "raw line", from: "2030-01-01T00:00:00.000Z", to: "2030-01-02T00:00:00.000Z", cursor: null })).resolves.toMatchObject({ lines: [] });
+  });
+
+  it("uses the encoded nested route for an agent-scoped query", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => { expect(String(input)).toBe("http://router.test/v1/managed-agents/agent.one/router-log?query=raw+line"); return response([]); });
+    await expect(createHttpClient("http://router.test", fetchImpl).routerLogForAgent("agent.one", { query: "raw line", from: null, to: null, cursor: null })).resolves.toMatchObject({ lines: [] });
+  });
+
+  it("rejects an oversized response cursor", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ status: "complete", lines: [], next_cursor: "a".repeat(4097), diagnostics: [] }), { status: 200 }));
+    await expect(createHttpClient("http://router.test", fetchImpl).routerLog({ query: "", from: null, to: null, cursor: null })).rejects.toThrow("invalid router-log response");
+  });
+
+  it("rejects an invalid scoped agent before making a request", async () => {
+    const fetchImpl = vi.fn(async () => response([]));
+    await expect(createHttpClient("http://router.test", fetchImpl).routerLogForAgent("bad/id", { query: "", from: null, to: null, cursor: null })).rejects.toThrow("Router-log query is invalid");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("decodes invalid bytes with a deterministic fallback while preserving CR", () => { expect(decodeRouterLogBytes("YQ0g//I=")).toBe("a\r \\xff\\xf2"); });

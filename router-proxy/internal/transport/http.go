@@ -139,6 +139,14 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
 		return
 	}
+	if req.URL.Path == "/v1/router-log" {
+		r.handleRouterLog(w, req, "")
+		return
+	}
+	if agentID, matched := managedRouterLogPath(req.URL.EscapedPath()); matched {
+		r.handleRouterLog(w, req, agentID)
+		return
+	}
 	if r.handleManagedHTTP(w, req) {
 		return
 	}
@@ -149,9 +157,6 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	switch {
-	case path == "/v1/router-log":
-		r.handleRouterLog(w, req)
-		return
 	case req.Method == http.MethodGet && path == "/v1/health":
 		r.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "v1", "schema_migrations": r.store.MigrationIDs(), "runtime": r.runtimeIdentity})
 		return
