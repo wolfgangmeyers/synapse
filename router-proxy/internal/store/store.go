@@ -115,14 +115,16 @@ type Store struct {
 	// managed027Fault, managedRestartAllFault, managedGraphFault, and
 	// managedTerminationFault are test-only failure seams. They keep rollback
 	// tests on the real single SQLite connection.
-	managed027Fault                      func(string) error
-	managedRestartAllFault               func(string) error
-	managedGraphFault                    func(string) error
-	managedTerminationFault              func(string) error
-	managedParentActivityReconcileMu     sync.Mutex
-	managedParentActivityReconcileCursor string
-	mu                                   sync.Mutex
-	closed                               bool
+	managed027Fault         func(string) error
+	managedRestartAllFault  func(string) error
+	managedGraphFault       func(string) error
+	managedTerminationFault func(string) error
+	// These process-local bounds reset on restart; reconciliation is idempotent.
+	managedParentActivityReconcileMu        sync.Mutex
+	managedParentActivityReconcileCursor    string
+	managedParentActivityReconcileHighWater string
+	mu                                      sync.Mutex
+	closed                                  bool
 }
 
 //go:embed migrations/*.sql

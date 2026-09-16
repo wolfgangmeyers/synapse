@@ -172,6 +172,13 @@ func managedReconciliationCursor(t *testing.T, durable *Store) string {
 	return durable.managedParentActivityReconcileCursor
 }
 
+func managedReconciliationHighWater(t *testing.T, durable *Store) string {
+	t.Helper()
+	durable.managedParentActivityReconcileMu.Lock()
+	defer durable.managedParentActivityReconcileMu.Unlock()
+	return durable.managedParentActivityReconcileHighWater
+}
+
 func TestReconcileManagedParentActivityMakesBoundedKeysetProgress(t *testing.T) {
 	ctx := context.Background()
 	durable, _ := readyParentCompactionFixture(t)
@@ -194,6 +201,7 @@ func TestReconcileManagedParentActivityMakesBoundedKeysetProgress(t *testing.T) 
 	require.NoError(t, err)
 	require.Zero(t, repaired)
 	require.Equal(t, "agent-255", managedReconciliationCursor(t, durable))
+	require.Equal(t, "zz-stale", managedReconciliationHighWater(t, durable))
 	native, err := durable.ManagedAgent(ctx, nativeFence.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "active", native.ActivityState)
@@ -223,6 +231,47 @@ func TestReconcileManagedParentActivityMakesBoundedKeysetProgress(t *testing.T) 
 	require.NoError(t, err)
 	require.Zero(t, repaired)
 	require.Empty(t, managedReconciliationCursor(t, durable), "an exhausted keyset wraps on the next bounded sweep")
+	require.Empty(t, managedReconciliationHighWater(t, durable))
+}
+
+func TestReconcileManagedParentActivityWrapsFiniteCycleUnderTailChurn(t *testing.T) {
+	ctx := context.Background()
+	durable, _ := readyParentCompactionFixture(t)
+	for index := 0; index < 257; index++ {
+		insertManagedReconciliationAgent(t, durable, fmt.Sprintf("agent-%03d", index), "idle", 4000+index, fmt.Sprintf("incarnation-%03d", index))
+	}
+	first, err := durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, first)
+	require.Equal(t, "agent-255", managedReconciliationCursor(t, durable))
+	require.Equal(t, "source-agent", managedReconciliationHighWater(t, durable))
+
+	staleFence := insertManagedReconciliationAgent(t, durable, "agent-100-new", "active", 5000, "stale-incarnation")
+	insertManagedReconciliationAgent(t, durable, "zz-tail-000", "idle", 6000, "tail-incarnation-000")
+	repaired, err := durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	agent, err := durable.ManagedAgent(ctx, staleFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+
+	insertManagedReconciliationAgent(t, durable, "zz-tail-001", "idle", 6001, "tail-incarnation-001")
+	repaired, err = durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	require.Empty(t, managedReconciliationCursor(t, durable))
+	require.Empty(t, managedReconciliationHighWater(t, durable))
+	agent, err = durable.ManagedAgent(ctx, staleFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+
+	insertManagedReconciliationAgent(t, durable, "zz-tail-002", "idle", 6002, "tail-incarnation-002")
+	repaired, err = durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, repaired, "the below-cursor stale row is visited in the next finite cycle")
+	agent, err = durable.ManagedAgent(ctx, staleFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
 }
 
 func TestReconcileManagedParentActivityRejectsStaleFenceAfterReplacement(t *testing.T) {
