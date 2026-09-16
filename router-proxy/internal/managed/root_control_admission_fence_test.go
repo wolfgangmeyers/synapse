@@ -115,7 +115,7 @@ func (r *rootAdmissionRPC) submissionCount() int {
 	return len(r.submissions)
 }
 
-func (r *rootAdmissionRPC) AcknowledgeDirectRootControlReceipt(requestID string) {
+func (r *rootAdmissionRPC) AcknowledgeDirectRootControlReceipt(requestID string, _ directRootControlResultStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.acknowledged = append(r.acknowledged, requestID)

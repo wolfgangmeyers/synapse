@@ -63,6 +63,42 @@ func (o *coldRecoveryOps) WaitForProcessGroupEmpty(_ context.Context, identity P
 	return ProcessProbe{State: ProcessAbsent}
 }
 
+type identityColdRecoveryOps struct {
+	mu      sync.Mutex
+	states  map[ProcessIdentity]ProcessProbeState
+	signals []ProcessIdentity
+	closed  []ProcessIdentity
+	waited  []ProcessIdentity
+}
+
+func (o *identityColdRecoveryOps) Probe(identity ProcessIdentity) ProcessProbe {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return ProcessProbe{State: o.states[identity]}
+}
+func (o *identityColdRecoveryOps) CloseProcessInput(process Process) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.closed = append(o.closed, process.Identity())
+	return nil
+}
+func (o *identityColdRecoveryOps) SignalVerifiedProcessGroup(identity ProcessIdentity, _ syscall.Signal) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.signals = append(o.signals, identity)
+	o.states[identity] = ProcessAbsent
+	return nil
+}
+func (o *identityColdRecoveryOps) SignalVerifiedProcessGroupAfterLeaderExit(identity ProcessIdentity) error {
+	return o.SignalVerifiedProcessGroup(identity, syscall.SIGKILL)
+}
+func (o *identityColdRecoveryOps) WaitForProcessGroupEmpty(_ context.Context, identity ProcessIdentity, _ <-chan error) ProcessProbe {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.waited = append(o.waited, identity)
+	return ProcessProbe{State: o.states[identity]}
+}
+
 func setupColdRecovery(t *testing.T, factory ProcessFactory, rpcFactory RPCFactory, ops ProcessGroupOps, process *launchProcess, rpc *launchRPC) (*Manager, *store.Store, store.ManagedAgentRecord, *coldRecoveryOps, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -260,6 +296,12 @@ func TestRecoverManagedRootColdStartFailurePathsCleanUpAndTerminalize(t *testing
 			require.Equal(t, "failed", current.LifecycleState)
 			_, bound := manager.bindingFor(agent.AgentID)
 			require.False(t, bound)
+			manager.mu.Lock()
+			require.NotContains(t, manager.bindings, agent.AgentID)
+			require.NotContains(t, manager.processes, agent.AgentID)
+			require.NotContains(t, manager.rpcs, agent.AgentID)
+			require.NotContains(t, manager.operationIDs, agent.AgentID)
+			manager.mu.Unlock()
 			if !test.start {
 				ops.mu.Lock()
 				require.Equal(t, []ProcessIdentity{process.identity}, ops.closed)
@@ -281,8 +323,9 @@ func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadines
 	old := store.ManagedAgentRecord{AgentID: "cold-agent", Name: "cold-agent", SlotHeld: true, Cwd: paths["work"], SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", AcceptingPrompts: true, PiSessionID: "old-session", SessionEpoch: 1, ProcessPID: 901, ProcessStartMarker: "old-start", ProcessIncarnation: "old-inc", RuntimeGeneration: "old-runtime", ManifestRevision: manifest.Revision, ManifestHash: manifest.CanonicalSHA256}
 	op := store.ManagedOperation{OperationID: "cold-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "cold-operation", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	oldFence := seedColdRecoveryAgent(t, durable, old, op)
+	require.NoError(t, durable.MarkManagedOperationTerminal(ctx, op.OperationID))
 	rpc := &launchRPC{active: expectedManagedActiveTools(manifest)}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("target-runtime"), ProcessFactory: &launchFactory{process: &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("target-runtime", "restart-runtime"), ProcessFactory: &launchFactory{process: &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}})
 	require.NoError(t, err)
 	defer manager.Close(ctx)
 	recipe, err := manager.managedLaunchRecipe(old)
@@ -299,6 +342,21 @@ func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadines
 	require.Equal(t, 902, current.ProcessPID)
 	require.Equal(t, "new-inc", current.ProcessIncarnation)
 	require.Equal(t, "target-runtime", current.RuntimeGeneration)
+	require.Equal(t, op.OperationID, current.LaunchOperationID)
+	binding, bound := manager.bindingFor(old.AgentID)
+	require.True(t, bound)
+	binding.serial.Lock()
+	require.Equal(t, current.LaunchOperationID, binding.operationID)
+	require.Empty(t, binding.lifecycleAction)
+	binding.serial.Unlock()
+	manager.mu.Lock()
+	require.Equal(t, current.LaunchOperationID, manager.operationIDs[old.AgentID])
+	manager.mu.Unlock()
+	factory := manager.processFactory.(*launchFactory)
+	require.Equal(t, old.PiSessionID, factory.spec.SessionID)
+	require.Equal(t, ResumeExisting, factory.spec.LaunchMode)
+	require.Contains(t, factory.spec.Environment, "MECHA_RPC_RUNTIME_GENERATION=target-runtime")
+	require.Contains(t, factory.spec.Environment, "MECHA_RPC_SESSION_EPOCH=1")
 	action, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "ready", action.Stage)
@@ -314,6 +372,113 @@ func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadines
 	require.NotEqual(t, action.OldProcessStartMarker, action.TargetProcessStartMarker)
 	require.NotEqual(t, action.OldProcessIncarnation, action.TargetProcessIncarnation)
 	require.NotEqual(t, action.OldRuntimeGeneration, action.TargetRuntimeGeneration)
+	// A delayed recovery callback must not retarget a newer owner. Keep the
+	// durable fence unchanged and replace only the manager owner map, then call
+	// the same restoration helper the stale callback would use.
+	targetFence := storedAgentFence(current)
+	stale := &managedBinding{
+		agentID: old.AgentID, lane: binding.lane, process: binding.process, rpc: binding.rpc,
+		identity: binding.identity, sessionID: binding.sessionID, sessionEpoch: binding.sessionEpoch,
+		runtimeGeneration: binding.runtimeGeneration, manifestRevision: binding.manifestRevision,
+		manifestHash: binding.manifestHash, operationID: action.ActionID, lifecycleAction: "root-recovery",
+	}
+	newer := &managedBinding{
+		agentID: old.AgentID, lane: binding.lane, process: binding.process, rpc: binding.rpc,
+		identity: binding.identity, sessionID: binding.sessionID, sessionEpoch: binding.sessionEpoch,
+		runtimeGeneration: binding.runtimeGeneration, manifestRevision: binding.manifestRevision,
+		manifestHash: binding.manifestHash, operationID: "newer-owner", lifecycleAction: "restart",
+	}
+	manager.mu.Lock()
+	manager.bindings[old.AgentID] = newer
+	manager.operationIDs[old.AgentID] = newer.operationID
+	manager.mu.Unlock()
+	restored, err := manager.restoreRecoveredBindingOwner(ctx, stale, action.ActionID, targetFence)
+	require.NoError(t, err)
+	require.False(t, restored)
+	manager.mu.Lock()
+	require.Same(t, newer, manager.bindings[old.AgentID])
+	require.Equal(t, "newer-owner", manager.operationIDs[old.AgentID])
+	manager.mu.Unlock()
+	// Restore the live binding for the remainder of this test's public restart
+	// regression check.
+	manager.mu.Lock()
+	manager.bindings[old.AgentID] = binding
+	manager.operationIDs[old.AgentID] = current.LaunchOperationID
+	manager.mu.Unlock()
+	require.ErrorIs(t, func() error {
+		_, readErr := durable.ManagedOperation(ctx, action.ActionID)
+		return readErr
+	}(), sql.ErrNoRows)
+
+	result, err := manager.ReserveRestart(ctx, RestartRequest{
+		AgentID: "cold-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/cold-agent/restart",
+		RequestID: "fresh-restart", CanonicalBodyHash: "fresh-restart-body",
+	})
+	require.NoError(t, err)
+	require.False(t, result.Replayed)
+	require.Equal(t, "fresh-restart", result.Operation.OperationID)
+	fresh, err := durable.ManagedOperation(ctx, "fresh-restart")
+	require.NoError(t, err)
+	require.Equal(t, "fresh-restart", fresh.OperationID)
+}
+
+func TestRecoverManagedRootColdStartMissingLaunchOwnerReapsBeforeReady(t *testing.T) {
+	ctx := context.Background()
+	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
+	rpc := &launchRPC{active: nil}
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}
+	manager, durable, agent, tracked, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+	db := installColdRecoveryTrigger(t, databasePath, "SELECT 1")
+	defer db.Close()
+	_, err := db.Exec(`UPDATE managed_agents SET launch_operation_id=NULL WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+
+	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+	action, err := durable.ManagedRootRecoveryAction(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", action.Stage)
+	require.Equal(t, "RECOVERY_LAUNCH_OWNER_MISSING", action.FailureCode)
+	require.Equal(t, "managed launch operation owner is unavailable", action.FailureMessage)
+	require.NotContains(t, action.FailureMessage, "secret")
+	current, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, agent.Name, current.Name)
+	require.Equal(t, "running", current.DesiredState)
+	require.Equal(t, "failed", current.LifecycleState)
+	require.Equal(t, "failed", current.ActivityState)
+	require.False(t, current.AcceptingPrompts)
+	require.False(t, current.SlotHeld)
+	require.Equal(t, process.identity.PID, current.ProcessPID)
+
+	manager.mu.Lock()
+	require.NotContains(t, manager.bindings, agent.AgentID)
+	require.NotContains(t, manager.processes, agent.AgentID)
+	require.NotContains(t, manager.rpcs, agent.AgentID)
+	require.NotContains(t, manager.operationIDs, agent.AgentID)
+	manager.mu.Unlock()
+	tracked.mu.Lock()
+	require.Equal(t, []ProcessIdentity{process.identity}, tracked.closed)
+	require.Contains(t, tracked.waited, process.identity)
+	require.Empty(t, tracked.signals)
+	require.Equal(t, ProcessAbsent, tracked.states[process.identity.PID])
+	tracked.mu.Unlock()
+	operation, err := durable.ManagedOperation(ctx, "fault-operation")
+	require.NoError(t, err)
+	require.Equal(t, "pending", operation.State)
+}
+
+func TestRecoveredTargetCleanupDoesNotReapNewerProcessWithReusedPID(t *testing.T) {
+	stale := ProcessIdentity{PID: 902, StartMarker: "stale-start", Incarnation: "stale-inc"}
+	newer := ProcessIdentity{PID: 902, StartMarker: "newer-start", Incarnation: "newer-inc"}
+	ops := &identityColdRecoveryOps{states: map[ProcessIdentity]ProcessProbeState{stale: ProcessMismatch, newer: ProcessOwned}}
+	manager := &Manager{processOps: ops}
+	process := &launchProcess{identity: stale, stopped: make(chan struct{})}
+
+	require.False(t, manager.cleanupRecoveredTarget(&managedBinding{process: process}, store.ManagedRuntimeFence{ProcessPID: stale.PID, ProcessStartMarker: stale.StartMarker, ProcessIncarnation: stale.Incarnation}))
+	ops.mu.Lock()
+	require.Empty(t, ops.signals)
+	require.Equal(t, ProcessOwned, ops.states[newer])
+	ops.mu.Unlock()
 }
 
 func TestRecoverManagedRootColdStartReadinessFailureClosesExactTarget(t *testing.T) {

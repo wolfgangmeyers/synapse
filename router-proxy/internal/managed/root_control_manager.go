@@ -21,17 +21,28 @@ var errRootControlHandlerPanic = errors.New("managed root control handler failed
 // directRootControlReceiptAcknowledger lets the manager release a provisional
 // direct-delivery settlement only after this exact result is durable.
 type directRootControlReceiptAcknowledger interface {
-	AcknowledgeDirectRootControlReceipt(requestID string)
+	AcknowledgeDirectRootControlReceipt(requestID string, status directRootControlResultStatus)
 }
 
 type directRootControlRejector interface {
 	RejectRootControlRequest(requestID string, fence store.ManagedRuntimeFence)
 }
 
-func acknowledgeDirectRootControlReceipt(rpc RPC, requestID string) {
-	if acknowledger, ok := rpc.(directRootControlReceiptAcknowledger); ok {
-		acknowledger.AcknowledgeDirectRootControlReceipt(requestID)
+func acknowledgeDirectRootControlReceipt(rpc RPC, requestID, resultStatus string) {
+	acknowledger, ok := rpc.(directRootControlReceiptAcknowledger)
+	if !ok {
+		return
 	}
+	var status directRootControlResultStatus
+	switch resultStatus {
+	case "ok":
+		status = directRootControlResultSuccess
+	case "error":
+		status = directRootControlResultError
+	default:
+		return
+	}
+	acknowledger.AcknowledgeDirectRootControlReceipt(requestID, status)
 }
 
 func rejectDirectRootControl(rpc RPC, requestID string, fence store.ManagedRuntimeFence) {
@@ -528,7 +539,7 @@ func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedB
 			}
 			entryIdentity := rootControlReceiptEntryIdentity(receipt.Event, row)
 			if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: entryIdentity, Attempt: claim.Request.AppendAttempt, Fence: fence}) == nil {
-				acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID)
+				acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID, row.ResultStatus)
 			}
 			return
 		case <-deadline.Done():
@@ -558,7 +569,7 @@ func (m *Manager) reconcileRootControlAppend(ctx context.Context, binding *manag
 			_ = m.store.MarkManagedControlAppendSubmitted(ctx, row.RequestID, row.AppendOwner, row.AppendAttempt, fence)
 		}
 		if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: row.AppendOwner, EntryIdentity: row.ResultEntryID, Attempt: row.AppendAttempt, Fence: fence}) == nil {
-			acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID)
+			acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID, row.ResultStatus)
 		}
 		return
 	}
