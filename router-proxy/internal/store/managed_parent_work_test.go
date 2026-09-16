@@ -151,6 +151,101 @@ func TestReconcileManagedParentActivityRepairsHistoricalStaleRowsIdempotently(t 
 	require.Equal(t, afterVersion, repeatVersion)
 }
 
+func insertManagedReconciliationAgent(t *testing.T, durable *Store, agentID, activity string, pid int, incarnation string) ManagedRuntimeFence {
+	t.Helper()
+	fence := ManagedRuntimeFence{AgentID: agentID, PiSessionID: "session-" + agentID, SessionEpoch: 1, ProcessPID: pid, ProcessStartMarker: "marker-" + agentID, ProcessIncarnation: incarnation, RuntimeGeneration: "generation-" + agentID, ManifestRevision: 1, ManifestHash: testManifestHash}
+	_, err := durable.db.Exec(`INSERT INTO managed_agents (
+		agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,
+		desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,
+		session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,
+		manifest_revision,manifest_hash,created_at,updated_at)
+		VALUES (?,?,0,'/tmp','openai-codex','gpt-5.6-terra','running','running',?,0,?,?,?,?,?,?,1,?,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`,
+		agentID, agentID, activity, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestHash)
+	require.NoError(t, err)
+	return fence
+}
+
+func managedReconciliationCursor(t *testing.T, durable *Store) string {
+	t.Helper()
+	durable.managedParentActivityReconcileMu.Lock()
+	defer durable.managedParentActivityReconcileMu.Unlock()
+	return durable.managedParentActivityReconcileCursor
+}
+
+func TestReconcileManagedParentActivityMakesBoundedKeysetProgress(t *testing.T) {
+	ctx := context.Background()
+	durable, _ := readyParentCompactionFixture(t)
+	var nativeFence ManagedRuntimeFence
+	for index := 0; index < 257; index++ {
+		activity := "idle"
+		if index == 0 {
+			activity = "active"
+		}
+		fence := insertManagedReconciliationAgent(t, durable, fmt.Sprintf("agent-%03d", index), activity, 1000+index, fmt.Sprintf("incarnation-%03d", index))
+		if index == 0 {
+			nativeFence = fence
+			_, err := durable.db.Exec(`INSERT INTO managed_parent_compaction_state(agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,source_sequence,compacting,active,updated_at) VALUES(?,?,?,?,?,1,0,1,'2026-01-01T00:00:00.000Z')`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration)
+			require.NoError(t, err)
+		}
+	}
+	staleFence := insertManagedReconciliationAgent(t, durable, "zz-stale", "active", 2000, "stale-incarnation")
+
+	repaired, err := durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	require.Equal(t, "agent-255", managedReconciliationCursor(t, durable))
+	native, err := durable.ManagedAgent(ctx, nativeFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", native.ActivityState)
+	stale, err := durable.ManagedAgent(ctx, staleFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", stale.ActivityState)
+
+	_, err = durable.db.Exec(`DELETE FROM managed_agents WHERE agent_id=?`, "agent-255")
+	require.NoError(t, err)
+	insertManagedReconciliationAgent(t, durable, "agent-257-inserted", "idle", 2257, "inserted-incarnation")
+	_, err = durable.db.Exec(`UPDATE managed_agents SET process_pid=?, process_start_marker=?, process_incarnation=?, runtime_generation=? WHERE agent_id=?`, 3000, "replacement-marker", "replacement-incarnation", "replacement-generation", staleFence.AgentID)
+	require.NoError(t, err)
+	staleFence.ProcessPID = 3000
+	staleFence.ProcessStartMarker = "replacement-marker"
+	staleFence.ProcessIncarnation = "replacement-incarnation"
+	staleFence.RuntimeGeneration = "replacement-generation"
+
+	repaired, err = durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, repaired)
+	require.Equal(t, "zz-stale", managedReconciliationCursor(t, durable))
+	stale, err = durable.ManagedAgent(ctx, staleFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", stale.ActivityState)
+
+	repaired, err = durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	require.Empty(t, managedReconciliationCursor(t, durable), "an exhausted keyset wraps on the next bounded sweep")
+}
+
+func TestReconcileManagedParentActivityRejectsStaleFenceAfterReplacement(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active', process_pid=?, process_start_marker=?, process_incarnation=?, runtime_generation=? WHERE agent_id=?`, 3000, "replacement-marker", "replacement-incarnation", "replacement-generation", fence.AgentID)
+	require.NoError(t, err)
+	stale := fence
+	updated, err := durable.RecomputeManagedParentActivity(ctx, stale)
+	require.NoError(t, err)
+	require.False(t, updated)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+
+	repaired, err := durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, repaired)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
 func TestReconcileManagedParentActivityPreservesNativeActiveUntilNewerIdle(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)
