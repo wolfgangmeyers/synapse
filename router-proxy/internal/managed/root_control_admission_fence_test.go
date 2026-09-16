@@ -146,6 +146,36 @@ type rootAdmissionHandler struct {
 	calls []RootControlInvocation
 }
 
+type panicOnceRootAdmissionHandler struct {
+	identity RootControlHandlerIdentity
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (h *panicOnceRootAdmissionHandler) Identity() RootControlHandlerIdentity { return h.identity }
+
+func (h *panicOnceRootAdmissionHandler) Execute(_ context.Context, invocation RootControlInvocation) (RootControlHandlerResult, error) {
+	h.mu.Lock()
+	h.calls++
+	calls := h.calls
+	h.mu.Unlock()
+	if calls == 1 {
+		panic("private panic marker")
+	}
+	return RootControlHandlerResult{Status: "ok", Content: "accepted", Details: map[string]any{"accepted": true}}, nil
+}
+
+func (h *panicOnceRootAdmissionHandler) Reconcile(context.Context, RootControlInvocation) (RootControlHandlerResult, error) {
+	panic("private panic marker")
+}
+
+func (h *panicOnceRootAdmissionHandler) callCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls
+}
+
 func (h *rootAdmissionHandler) Identity() RootControlHandlerIdentity { return h.identity }
 
 func (h *rootAdmissionHandler) Execute(_ context.Context, invocation RootControlInvocation) (RootControlHandlerResult, error) {
@@ -209,6 +239,17 @@ func newRootAdmissionFixtureWithReceiver(t *testing.T, installReceiver bool) (*M
 		manager.installRootControlReceiver(binding)
 	}
 	return manager, durable, binding, fence, tool, rpc, handler
+}
+
+func rootControlFrameForEvent(fence store.ManagedRuntimeFence, tool ManifestTool, requestID string, arguments any) map[string]any {
+	frame := rootControlParserFrame(tool, nil)
+	details := frame["message"].(map[string]any)["details"].(map[string]any)
+	details["request_id"] = requestID
+	details["manifest_sha256"] = fence.ManifestHash
+	details["runtime_generation"] = fence.RuntimeGeneration
+	details["session_epoch"] = fence.SessionEpoch
+	details["arguments"] = arguments
+	return frame
 }
 
 func rootAdmissionEvent(fence store.ManagedRuntimeFence, tool ManifestTool, requestID string, arguments any) RootControlEvent {
@@ -343,6 +384,103 @@ func TestRootControlAdmissionRejectsEachFenceFieldMutation(t *testing.T) {
 			require.Equal(t, []string{expectedRejectedID}, rpc.rejections(), "each terminal pre-reservation rejection is released exactly once")
 		})
 	}
+}
+
+func TestRootControlHandlerPanicCompletesOnceAndKeepsRPCUsable(t *testing.T) {
+	manager, durable, binding, fence, tool, _, _ := newRootAdmissionFixtureWithReceiver(t, false)
+	stdoutReader, stdoutWriter := io.Pipe()
+	stdinReader, stdinWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = stdinWriter.Close()
+	})
+
+	handler := &panicOnceRootAdmissionHandler{identity: RootControlHandlerIdentity{
+		CapabilityID: tool.CapabilityID, ToolName: tool.Name, DefinitionID: tool.DefinitionID,
+		DefinitionSHA256: tool.DefinitionSHA256, OperationID: tool.OperationID,
+	}}
+	handlers := defaultRootControlHandlers(manager.manifest)
+	for index, candidate := range manager.manifest.Tools {
+		if candidate.OperationID == tool.OperationID {
+			handlers[index] = handler
+		}
+	}
+	registry, err := NewRootControlHandlerRegistry(manager.manifest, handlers)
+	require.NoError(t, err)
+	manager.rootControlHandlers = registry
+	binding.rpc = client
+	client.SetRootControlEventHandler(func(event RootControlEvent) { manager.handleRootControlEvent(binding, event) })
+
+	requests := readJSONLRequests(stdinReader)
+	firstRequestID := "123e4567-e89b-42d3-a456-426614174301"
+	require.NoError(t, writeRPC(stdoutWriter, rootControlFrameForEvent(fence, tool, firstRequestID, rootAdmissionArguments("panic"))))
+	firstAppend := requireRequest(t, requests)
+	require.Equal(t, "prompt", firstAppend["type"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstAppend["id"], "type": "response", "command": "prompt", "success": true}))
+	firstAwaitingAppend := waitForManagedControl(t, durable, firstRequestID, "awaiting_append")
+	firstPayload, err := durable.ManagedControlResultEnvelope(context.Background(), firstRequestID)
+	require.NoError(t, err)
+	firstDetails := make(map[string]any, len(firstPayload)-1)
+	for key, value := range firstPayload {
+		if key != "content" {
+			firstDetails[key] = value
+		}
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{
+		"type": "message_end", "message": map[string]any{"customType": "mecha.control.result.v1", "display": false, "content": firstPayload["content"], "details": firstDetails},
+	}))
+	firstDelivered := waitForManagedControl(t, durable, firstRequestID, "delivered")
+	require.Equal(t, "error", firstDelivered.ResultStatus)
+	require.Equal(t, "HANDLER_FAILED", firstDelivered.ErrorCode)
+	require.Equal(t, "managed root control handler failed internally", firstDelivered.ErrorDetail)
+	require.False(t, firstDelivered.Retryable)
+	require.NotContains(t, firstDelivered.ErrorDetail, "private panic marker")
+	require.NotContains(t, firstDelivered.ResultContent, "private panic marker")
+	require.Equal(t, firstAwaitingAppend.ResultID, firstDelivered.ResultID)
+	require.Equal(t, 1, handler.callCount())
+
+	getStateDone := make(chan error, 1)
+	go func() {
+		_, getStateErr := client.GetState(context.Background())
+		getStateDone <- getStateErr
+	}()
+	getState := requireRequest(t, requests)
+	require.Equal(t, "get_state", getState["type"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": getState["id"], "type": "response", "command": "get_state", "success": true, "data": map[string]any{}}))
+	require.NoError(t, <-getStateDone)
+	require.Nil(t, client.terminalError(), "handler panic must not terminalize the RPC client")
+
+	secondRequestID := "123e4567-e89b-42d3-a456-426614174302"
+	require.NoError(t, writeRPC(stdoutWriter, rootControlFrameForEvent(fence, tool, secondRequestID, rootAdmissionArguments("valid"))))
+	secondAppend := requireRequest(t, requests)
+	require.Equal(t, "prompt", secondAppend["type"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondAppend["id"], "type": "response", "command": "prompt", "success": true}))
+	secondPayload := func() map[string]any {
+		var payload map[string]any
+		require.Eventually(t, func() bool {
+			payload, err = durable.ManagedControlResultEnvelope(context.Background(), secondRequestID)
+			return err == nil
+		}, time.Second, time.Millisecond)
+		return payload
+	}()
+	secondDetails := make(map[string]any, len(secondPayload)-1)
+	for key, value := range secondPayload {
+		if key != "content" {
+			secondDetails[key] = value
+		}
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{
+		"type": "message_end", "message": map[string]any{"customType": "mecha.control.result.v1", "display": false, "content": secondPayload["content"], "details": secondDetails},
+	}))
+	secondDelivered := waitForManagedControl(t, durable, secondRequestID, "delivered")
+	require.Equal(t, "ok", secondDelivered.ResultStatus)
+	require.Equal(t, 2, handler.callCount())
+	require.Nil(t, client.terminalError())
+
+	page, err := durable.ManagedHistoryPage(context.Background(), fence.AgentID, "complete", 0, 20)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 2, "each request gets one terminal history entry")
 }
 
 func TestRootControlDurableReceiptFailureDoesNotAcknowledgeDirectSettlement(t *testing.T) {
