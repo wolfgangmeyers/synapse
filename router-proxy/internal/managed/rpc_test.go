@@ -562,7 +562,7 @@ func TestRPCClientResponseHookRunsBeforeResponseWaiter(t *testing.T) {
 	request := requireRequest(t, requests)
 	writeResult := make(chan error, 1)
 	go func() {
-		writeResult <- writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true})
+		writeResult <- writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "abort", "success": true})
 	}()
 	select {
 	case <-hookEntered:
@@ -760,43 +760,70 @@ func TestRPCClientOldEvaluatorCleanupCannotClearReplacementSuppression(t *testin
 }
 
 func TestRPCClientEvaluatorCleanupRejectsMalformedOrRejectedAbort(t *testing.T) {
-	for _, testCase := range []struct {
-		name     string
-		response map[string]any
-		want     error
-	}{{name: "malformed", response: map[string]any{"type": "response", "command": "abort"}, want: ErrAbortResponseMalformed}, {name: "rejected", response: map[string]any{"type": "response", "command": "abort", "success": false}, want: ErrAbortResponseRejected}} {
-		t.Run(testCase.name, func(t *testing.T) {
-			stdinReader, stdinWriter := io.Pipe()
-			stdoutReader, stdoutWriter := io.Pipe()
-			client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
-			t.Cleanup(func() { require.NoError(t, client.Close()) })
-			requests := readJSONLRequests(stdinReader)
-			fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
-			token := &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 1, settled: 3, fence: fence}
+	t.Run("malformed response remains pending until valid abort response", func(t *testing.T) {
+		stdinReader, stdinWriter := io.Pipe()
+		stdoutReader, stdoutWriter := io.Pipe()
+		client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+		t.Cleanup(func() { require.NoError(t, client.Close()) })
+		requests := readJSONLRequests(stdinReader)
+		fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+		token := &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 1, settled: 3, fence: fence}
+		client.mu.Lock()
+		client.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
+		client.suppressNextEvaluatorSettled = true
+		client.mu.Unlock()
+		result := make(chan error, 1)
+		go func() {
+			result <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
+		}()
+		request := requireRequest(t, requests)
+		requestID := request["id"].(string)
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": requestID, "type": "response", "command": "abort"}))
+		require.Eventually(t, func() bool {
 			client.mu.Lock()
-			client.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
-			client.suppressNextEvaluatorSettled = true
-			client.mu.Unlock()
-			result := make(chan error, 1)
-			go func() {
-				result <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
-			}()
-			request := requireRequest(t, requests)
-			response := make(map[string]any, len(testCase.response)+1)
-			for key, value := range testCase.response {
-				response[key] = value
-			}
-			response["id"] = request["id"]
-			require.NoError(t, writeRPC(stdoutWriter, response))
-			require.ErrorIs(t, <-result, testCase.want)
-			client.mu.Lock()
-			cleanupOwner := client.goalEvaluationCleanup
-			suppressed := client.suppressNextEvaluatorSettled
-			client.mu.Unlock()
-			require.NotNil(t, cleanupOwner)
-			require.True(t, suppressed)
-		})
-	}
+			defer client.mu.Unlock()
+			_, pending := client.pending[requestID]
+			return pending && len(client.backlog) == 1 && client.terminal == nil
+		}, time.Second, time.Millisecond)
+		select {
+		case err := <-result:
+			t.Fatalf("malformed abort response resolved cleanup: %v", err)
+		case <-time.After(25 * time.Millisecond):
+		}
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": requestID, "type": "response", "command": "abort", "success": true}))
+		require.NoError(t, <-result)
+		client.mu.Lock()
+		require.Nil(t, client.goalEvaluationCleanup)
+		require.False(t, client.suppressNextEvaluatorSettled)
+		client.mu.Unlock()
+	})
+
+	t.Run("rejected response returns normal RPC failure", func(t *testing.T) {
+		stdinReader, stdinWriter := io.Pipe()
+		stdoutReader, stdoutWriter := io.Pipe()
+		client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+		t.Cleanup(func() { require.NoError(t, client.Close()) })
+		requests := readJSONLRequests(stdinReader)
+		fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174000", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+		token := &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 1, settled: 3, fence: fence}
+		client.mu.Lock()
+		client.goalEvaluationCleanup = &managedGoalEvaluationCleanup{token: token}
+		client.suppressNextEvaluatorSettled = true
+		client.mu.Unlock()
+		result := make(chan error, 1)
+		go func() {
+			result <- client.ReconcileManagedGoalEvaluation(context.Background(), fence, token.evaluationID, token.goalRevision, token.settled)
+		}()
+		request := requireRequest(t, requests)
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "abort", "success": false, "error": "abort rejected"}))
+		require.EqualError(t, <-result, "Pi RPC error: abort rejected")
+		client.mu.Lock()
+		cleanupOwner := client.goalEvaluationCleanup
+		suppressed := client.suppressNextEvaluatorSettled
+		client.mu.Unlock()
+		require.NotNil(t, cleanupOwner)
+		require.True(t, suppressed)
+	})
 }
 
 func TestRPCClientManagedGoalEvaluationTimeoutLeavesNoArmedToken(t *testing.T) {
@@ -888,6 +915,74 @@ func TestRPCClientDeliversOnlyValidatedPostCompactionNotification(t *testing.T) 
 	}
 }
 
+func TestManagedDirectUnknownTrafficRemainsBoundedWhileReceiptCompletes(t *testing.T) {
+	newArmedDirect := func(t *testing.T) (*rpcClient, *io.PipeWriter, <-chan DirectMailboxEvent, store.ManagedDirectAttempt) {
+		t.Helper()
+		stdinReader, stdinWriter := io.Pipe()
+		stdoutReader, stdoutWriter := io.Pipe()
+		client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+		t.Cleanup(func() { _ = client.Close() })
+		attempt := directMailboxAttempt("direct-unknown")
+		prompted := make(chan struct {
+			events <-chan DirectMailboxEvent
+			err    error
+		}, 1)
+		go func() {
+			events, err := DirectMailboxRPC(client).PromptManagedMailbox(context.Background(), attempt)
+			prompted <- struct {
+				events <-chan DirectMailboxEvent
+				err    error
+			}{events: events, err: err}
+		}()
+		request := requireRequest(t, readJSONLRequests(stdinReader))
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
+		select {
+		case result := <-prompted:
+			require.NoError(t, result.err)
+			return client, stdoutWriter, result.events, attempt
+		case <-time.After(time.Second):
+			t.Fatal("managed direct prompt did not complete after response")
+			return nil, nil, nil, store.ManagedDirectAttempt{}
+		}
+	}
+	t.Run("128 unknown frames leave direct receipt reply and settle usable", func(t *testing.T) {
+		client, writer, events, attempt := newArmedDirect(t)
+		for index := 0; index < 128; index++ {
+			require.NoError(t, writeRPC(writer, map[string]any{"type": "future_direct_event", "index": index}))
+		}
+		require.Eventually(t, func() bool {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return len(client.backlog) == 128 && client.terminal == nil
+		}, time.Second, time.Millisecond)
+		require.NotEmpty(t, attempt.MessageID)
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": attempt.MessageID, "runtime_generation": attempt.Fence.RuntimeGeneration, "session_epoch": attempt.Fence.SessionEpoch}}}))
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "message_end", "message": map[string]any{"id": "assistant-entry", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "accepted"}}}}))
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
+		var receipt, reply, settled bool
+		for index := 0; index < 2; index++ {
+			select {
+			case event := <-events:
+				receipt = receipt || event.Receipt != nil
+				reply = reply || event.Reply != nil
+				settled = settled || event.Settled
+			case <-time.After(time.Second):
+				t.Fatal("direct delivery did not finish after bounded unknown traffic")
+			}
+		}
+		require.True(t, receipt)
+		require.True(t, reply)
+		require.True(t, settled)
+	})
+	t.Run("129th unknown frame terminalizes", func(t *testing.T) {
+		client, writer, _, _ := newArmedDirect(t)
+		for index := 0; index < 129; index++ {
+			require.NoError(t, writeRPC(writer, map[string]any{"type": "future_direct_event", "index": index}))
+		}
+		require.Eventually(t, func() bool { return errors.Is(client.terminalError(), ErrReadinessBacklogFull) }, time.Second, time.Millisecond)
+	})
+}
+
 func TestManagedDirectReceiptRequiresMatchingAppendMarker(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
@@ -901,7 +996,7 @@ func TestManagedDirectReceiptRequiresMatchingAppendMarker(t *testing.T) {
 	request := requireRequest(t, requests)
 	require.Equal(t, "prompt", request["type"])
 	require.Contains(t, request["message"], "/mecha-mailbox-deliver-v1 ")
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "persisted-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
 	select {
 	case event := <-events:
@@ -932,7 +1027,7 @@ func TestManagedDirectMailboxAllowsAnEmptyBody(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload, &envelope))
 	require.Equal(t, "", envelope["content"])
 
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "empty-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "empty-message", "runtime_generation": "generation", "session_epoch": 2}}}))
 	select {
 	case event := <-events:
@@ -962,7 +1057,7 @@ func TestManagedDirectReceiptDiagnostics(t *testing.T) {
 	events, err := direct.PromptManagedMailbox(ctx, directMailboxAttempt("message-a"))
 	require.NoError(t, err)
 	request := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "turn_started"}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "other.custom.v1", "details": map[string]any{}}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.mailbox.appended.v1"}}))
@@ -1002,7 +1097,7 @@ func TestManagedDirectMailboxLeavesPolicyReceiptForItsFencedWaiter(t *testing.T)
 	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
 	require.NoError(t, err)
 	mailboxPrompt := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": mailboxPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": mailboxPrompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "mailbox-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
 	select {
 	case event := <-events:
@@ -1018,7 +1113,7 @@ func TestManagedDirectMailboxLeavesPolicyReceiptForItsFencedWaiter(t *testing.T)
 	}()
 	policyPrompt := requireRequest(t, requests)
 	require.True(t, strings.HasPrefix(policyPrompt["message"].(string), "/mecha-policy-apply-v1 "))
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": policyPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": policyPrompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, <-applied)
 
 	waited := make(chan struct {
@@ -1052,7 +1147,7 @@ func TestManagedDirectMailboxCapturesAssistantReplyUntilSettled(t *testing.T) {
 	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
 	require.NoError(t, err)
 	request := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "interim-entry", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "working"}}}}))
@@ -1088,13 +1183,15 @@ func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testin
 	defer client.Close()
 	direct := client.(DirectMailboxRPC)
 	requests := readJSONLRequests(stdinReader)
+	activity := make(chan map[string]any, 2)
+	client.(ParentActivityRPC).SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
 	attempt := directMailboxAttempt("message-a")
 	generation := "123e4567-e89b-42d3-a456-426614174003"
 	attempt.Fence.RuntimeGeneration = generation
 	events, err := direct.PromptManagedMailbox(context.Background(), attempt)
 	require.NoError(t, err)
 	prompt := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": prompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": prompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": generation, "session_epoch": 2}}}))
 	select {
 	case event := <-events:
@@ -1105,7 +1202,7 @@ func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testin
 
 	requestID := "123e4567-e89b-42d3-a456-426614174001"
 	definitionSHA := strings.Repeat("b", 64)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"role": "custom", "customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "timestamp": float64(0), "details": map[string]any{
 		"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "call-1", "capability_id": "web_search", "tool_name": "web_search__" + definitionSHA,
 		"definition_id": "def_" + definitionSHA, "definition_sha256": definitionSHA, "operation_id": "web.search", "manifest_sha256": strings.Repeat("a", 64),
 		"runtime_generation": generation, "session_epoch": 2, "context_ref": "root", "arguments": map[string]any{"query": "RFC 9110"},
@@ -1117,12 +1214,27 @@ func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testin
 		t.Fatalf("root control let the provisional turn settle direct delivery: %#v", event)
 	case <-time.After(50 * time.Millisecond):
 	}
+	select {
+	case event := <-activity:
+		t.Fatalf("provisional root settlement emitted parent activity: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "mcr1_result", "customType": "mecha.control.result.v1", "display": false, "details": map[string]any{
 		"protocol": "mecha.control/v1", "request_id": requestID, "result_id": "123e4567-e89b-42d3-a456-426614174002", "target_session_epoch": 2,
 		"runtime_generation": generation, "manifest_sha256": strings.Repeat("a", 64), "status": "ok", "details": map[string]any{},
 	}}}))
+	// Pi's emitted result is only a candidate. A wrong acknowledgment and the
+	// raw result both retain provisional settlement until durable manager receipt.
+	client.(*rpcClient).AcknowledgeDirectRootControlReceipt("123e4567-e89b-42d3-a456-426614174099")
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "final", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "RFC 9110 is HTTP Semantics."}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-events:
+		t.Fatalf("wrong acknowledgment released direct settlement: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+	client.(*rpcClient).AcknowledgeDirectRootControlReceipt(requestID)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
 	select {
 	case event := <-events:
@@ -1130,6 +1242,17 @@ func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testin
 		require.Equal(t, &DirectMailboxReply{EntryIdentity: "final", Body: "RFC 9110 is HTTP Semantics."}, event.Reply)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for the root-control follow-up to settle")
+	}
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("final root settlement did not emit parent idle activity")
+	}
+	select {
+	case event := <-activity:
+		t.Fatalf("root settlement emitted duplicate parent activity: %#v", event)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -1185,7 +1308,7 @@ func TestManagedDirectRecoveryUsesExactPersistedEntry(t *testing.T) {
 		map[string]any{"id": "wrong-content", "type": "custom_message", "customType": "mecha.mailbox.appended.v1", "content": "other", "display": false, "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}},
 		map[string]any{"id": "right", "type": "custom_message", "customType": "mecha.mailbox.appended.v1", "content": "persisted body", "display": false, "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}},
 	}
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{"entries": entries, "leafId": "right"}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "get_entries", "success": true, "data": map[string]any{"entries": entries, "leafId": "right"}}))
 	outcome := <-result
 	require.NoError(t, outcome.err)
 	require.NotNil(t, outcome.recovery.Receipt)
@@ -1207,7 +1330,7 @@ func TestRPCClientOrdersCallsBoundsResponsesAndUsesAcceptedTools(t *testing.T) {
 			}
 			id, _ := request["id"].(string)
 			typ, _ := request["type"].(string)
-			response := map[string]any{"id": id, "type": "response", "success": true, "data": map[string]any{}}
+			response := map[string]any{"id": id, "type": "response", "command": typ, "success": true, "data": map[string]any{}}
 			switch typ {
 			case "get_state":
 				response["data"] = map[string]any{"sessionId": "session"}
@@ -1265,7 +1388,7 @@ func TestRPCReadinessSourceCommandsUseDirectJSONL(t *testing.T) {
 	require.True(t, strings.HasPrefix(policyRequest["message"].(string), "/mecha-policy-apply-v1 "))
 	policyID := policyRequest["id"].(string)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_start", "message": map[string]any{"customType": "mecha.policy.applied.v1", "details": policyDetails("generation", 1)}}))
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": policyID, "type": "response", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": policyID, "type": "response", "command": "prompt", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}))
 	policy := <-policyResult
 	require.NoError(t, policy.err)
 	require.Equal(t, map[string]any{"success": true, "command": "prompt"}, policy.value)
@@ -1300,7 +1423,7 @@ func TestRPCReadinessSourceCommandsUseDirectJSONL(t *testing.T) {
 	snapshotID := snapshotRequest["id"].(string)
 	// The persisted receipt may precede Pi's normal prompt acknowledgement.
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.child.snapshot.v1", "details": snapshotDetails()}}))
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": snapshotID, "type": "response", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": snapshotID, "type": "response", "command": "prompt", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}))
 	snapshot := <-snapshotResult
 	require.NoError(t, snapshot.err)
 	require.Equal(t, map[string]any{"success": true, "command": "prompt"}, snapshot.value)
@@ -1323,7 +1446,7 @@ func (w *blockingJSONLWriter) Write(value []byte) (int, error) {
 	if err := json.Unmarshal(bytesTrimSpace(value), &request); err != nil {
 		return 0, err
 	}
-	if err := writeRPC(w.stdout, map[string]any{"id": request["id"], "type": "response", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}); err != nil {
+	if err := writeRPC(w.stdout, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}); err != nil {
 		return 0, err
 	}
 	return len(value), nil
@@ -1364,6 +1487,109 @@ func TestPrivateCommandCapturesWatermarkInsideItsWriteSerializer(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestMalformedMatchingResponseFramesLeaveWaiterArmed(t *testing.T) {
+	malformedFrames := []struct {
+		name  string
+		build func(string) map[string]any
+	}{
+		{name: "missing command", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "success": true, "data": map[string]any{}}
+		}},
+		{name: "wrong command", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_commands", "success": true, "data": map[string]any{}}
+		}},
+		{name: "command has wrong type", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": []any{"get_state"}, "success": true, "data": map[string]any{}}
+		}},
+		{name: "extra command field", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "command_extra": "get_state", "success": true, "data": map[string]any{}}
+		}},
+		{name: "missing success", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "data": map[string]any{}}
+		}},
+		{name: "success has wrong type", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": "true", "data": map[string]any{}}
+		}},
+		{name: "extra success field", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": true, "success_extra": true, "data": map[string]any{}}
+		}},
+		{name: "success with error", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": true, "error": "unexpected", "data": map[string]any{}}
+		}},
+		{name: "failure with data", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": false, "error": "failed", "data": map[string]any{}}
+		}},
+		{name: "failure missing error", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": false}
+		}},
+		{name: "failure empty error", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": false, "error": ""}
+		}},
+		{name: "failure error has wrong type", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": false, "error": map[string]any{"message": "failed"}}
+		}},
+	}
+	validResponses := []struct {
+		name    string
+		build   func(string) map[string]any
+		wantErr string
+	}{
+		{name: "valid success", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": true, "data": map[string]any{}}
+		}},
+		{name: "valid failure", build: func(id string) map[string]any {
+			return map[string]any{"id": id, "type": "response", "command": "get_state", "success": false, "error": "failed"}
+		}, wantErr: "Pi RPC error: failed"},
+	}
+
+	for _, malformed := range malformedFrames {
+		for _, valid := range validResponses {
+			t.Run(malformed.name+" then "+valid.name, func(t *testing.T) {
+				stdinReader, stdinWriter := io.Pipe()
+				stdoutReader, stdoutWriter := io.Pipe()
+				client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+				t.Cleanup(func() { _ = client.Close() })
+				result := make(chan error, 1)
+				requests := readJSONLRequests(stdinReader)
+				go func() { _, err := client.GetState(context.Background()); result <- err }()
+				request := requireRequest(t, requests)
+				requestID := request["id"].(string)
+
+				require.NoError(t, writeRPC(stdoutWriter, malformed.build(requestID)))
+				require.Eventually(t, func() bool {
+					client.mu.Lock()
+					defer client.mu.Unlock()
+					_, waiterArmed := client.pending[requestID]
+					return waiterArmed && len(client.backlog) == 1 && client.terminal == nil
+				}, time.Second, time.Millisecond)
+				select {
+				case err := <-result:
+					t.Fatalf("malformed frame consumed response waiter: %v", err)
+				case <-time.After(25 * time.Millisecond):
+				}
+
+				require.NoError(t, writeRPC(stdoutWriter, valid.build(requestID)))
+				if valid.wantErr == "" {
+					require.NoError(t, <-result)
+				} else {
+					require.EqualError(t, <-result, valid.wantErr)
+				}
+				select {
+				case err := <-result:
+					t.Fatalf("response waiter resolved more than once: %v", err)
+				case <-time.After(25 * time.Millisecond):
+				}
+				client.mu.Lock()
+				_, waiterArmed := client.pending[requestID]
+				require.False(t, waiterArmed)
+				require.Len(t, client.backlog, 1)
+				require.Nil(t, client.terminal)
+				client.mu.Unlock()
+			})
+		}
+	}
+}
+
 func TestLateResponsesNeverOccupyReadinessBacklog(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
@@ -1380,7 +1606,7 @@ func TestLateResponsesNeverOccupyReadinessBacklog(t *testing.T) {
 		if index == 0 {
 			id = request["id"].(string)
 		}
-		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": id, "type": "response", "success": true, "data": map[string]any{}}))
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": id, "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	}
 	require.Eventually(t, func() bool {
 		client.mu.Lock()
@@ -1449,13 +1675,258 @@ func TestRPCReadinessMatcherRejectsStaleMalformedAndOverflowTraffic(t *testing.T
 		})
 	}
 
-	t.Run("129th notification terminalizes", func(t *testing.T) {
+	t.Run("129 ordinary session events leave the client usable", func(t *testing.T) {
+		stdinReader, stdinWriter := io.Pipe()
+		stdoutReader, stdoutWriter := io.Pipe()
+		client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+		t.Cleanup(func() { _ = client.Close() })
+		requests := readJSONLRequests(stdinReader)
+		client.mu.Lock()
+		client.parentActivityHandler = func(map[string]any) {}
+		client.mu.Unlock()
+		ordinary := realPiOrdinaryEventFixtures()
+		for index := 0; index < 129; index++ {
+			require.NoError(t, writeRPC(stdoutWriter, ordinary[index%len(ordinary)]))
+		}
+		require.Eventually(t, func() bool {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return client.eventSequence == 129
+		}, time.Second, time.Millisecond)
+		state := make(chan error, 1)
+		go func() { _, err := client.GetState(context.Background()); state <- err }()
+		request := requireRequest(t, requests)
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "get_state", "success": true, "data": map[string]any{}}))
+		require.NoError(t, <-state)
+		client.mu.Lock()
+		require.Nil(t, client.terminal)
+		require.Empty(t, client.backlog)
+		client.mu.Unlock()
+	})
+
+	t.Run("129 unknown future events terminalize", func(t *testing.T) {
 		client, writer := newClient(t)
 		for index := 0; index < 129; index++ {
-			require.NoError(t, writeRPC(writer, map[string]any{"type": "unrelated", "index": index}))
+			require.NoError(t, writeRPC(writer, map[string]any{"type": "future_event_v1", "index": index}))
 		}
 		require.Eventually(t, func() bool { return errors.Is(client.terminalError(), ErrReadinessBacklogFull) }, time.Second, time.Millisecond)
 	})
+}
+
+func TestRPCReadLoopPreservesSemanticCustomReceiptCandidates(t *testing.T) {
+	newClient := func(t *testing.T) (*rpcClient, *io.PipeWriter) {
+		t.Helper()
+		reader, writer := io.Pipe()
+		client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
+		t.Cleanup(func() { _ = client.Close() })
+		return client, writer
+	}
+	wrapped := func(customType string, details map[string]any) map[string]any {
+		message := map[string]any{"customType": customType}
+		if details != nil {
+			message["details"] = details
+		}
+		return map[string]any{"type": "message_end", "message": message}
+	}
+	waitForPolicy := func(client *rpcClient, watermark uint64) error {
+		_, err := client.waitForReceipt(context.Background(), watermark, "mecha.policy.applied.v1", func(receipt map[string]any) error {
+			if receiptCustomType(receipt) != "mecha.policy.applied.v1" || receiptDetails(receipt) == nil {
+				return errors.New("policy receipt is malformed")
+			}
+			return nil
+		})
+		return err
+	}
+
+	t.Run("valid known receipt before waiter remains available", func(t *testing.T) {
+		client, writer := newClient(t)
+		require.NoError(t, writeRPC(writer, wrapped("mecha.policy.applied.v1", policyDetails("generation", 1))))
+		require.Eventually(t, func() bool {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return client.eventSequence == 1 && len(client.backlog) == 1
+		}, time.Second, time.Millisecond)
+		require.NoError(t, waitForPolicy(client, 0))
+	})
+	t.Run("valid known receipt wakes active waiter", func(t *testing.T) {
+		client, writer := newClient(t)
+		result := make(chan error, 1)
+		go func() { result <- waitForPolicy(client, 0) }()
+		select {
+		case err := <-result:
+			t.Fatalf("waiter returned before its receipt: %v", err)
+		case <-time.After(25 * time.Millisecond):
+		}
+		require.NoError(t, writeRPC(writer, wrapped("mecha.policy.applied.v1", policyDetails("generation", 1))))
+		require.NoError(t, <-result)
+	})
+	for _, test := range []struct {
+		name  string
+		frame map[string]any
+	}{
+		{"malformed known receipt remains observable", wrapped("mecha.policy.applied.v1", nil)},
+		{"unknown future custom type remains observable", wrapped("mecha.policy.future.v1", map[string]any{"future": true})},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, writer := newClient(t)
+			require.NoError(t, writeRPC(writer, test.frame))
+			require.Eventually(t, func() bool {
+				client.mu.Lock()
+				defer client.mu.Unlock()
+				return client.eventSequence == 1 && len(client.backlog) == 1 && client.terminal == nil
+			}, time.Second, time.Millisecond)
+		})
+	}
+}
+
+func TestRPCReadLoopBacklogsMalformedSemanticCandidates(t *testing.T) {
+	newClient := func(t *testing.T) (*rpcClient, *io.PipeWriter) {
+		t.Helper()
+		reader, writer := io.Pipe()
+		client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
+		t.Cleanup(func() { _ = client.Close() })
+		return client, writer
+	}
+	for name, frame := range map[string]map[string]any{
+		"compaction future field":           {"type": "compaction_start", "reason": "manual", "future": true},
+		"parent activity future field":      {"type": "agent_start", "future": true},
+		"child delta malformed wrapper":     {"type": "message_end", "message": map[string]any{"customType": "mecha.child.delta.v1", "display": true}, "future": true},
+		"post compaction malformed wrapper": {"type": "message_end", "message": map[string]any{"customType": "mecha.post_compaction.v1", "display": false}, "future": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, writer := newClient(t)
+			require.NoError(t, writeRPC(writer, frame))
+			require.Eventually(t, func() bool {
+				client.mu.Lock()
+				defer client.mu.Unlock()
+				return client.eventSequence == 1 && len(client.backlog) == 1 && client.terminal == nil
+			}, time.Second, time.Millisecond)
+		})
+	}
+}
+
+func TestRPCReadLoopDropsMalformedBuiltinControlCandidate(t *testing.T) {
+	reader, writer := io.Pipe()
+	client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = client.Close() })
+	callbacks := make(chan BuiltinToolLifecycleEvent, 1)
+	client.SetBuiltinToolLifecycleEventHandler(func(event BuiltinToolLifecycleEvent) { callbacks <- event })
+
+	// These malformed control candidates cannot reach persistence or readiness
+	// storage, which is the anti-poison boundary for raw tool payloads.
+	for _, frame := range []map[string]any{
+		{"type": "tool_execution_start", "toolCallId": "call-0", "toolName": "future-tool", "args": map[string]any{"sensitive": "never retained"}},
+		{"type": "tool_execution_start", "toolCallId": "call-0", "toolName": "read"},
+		{"type": "tool_execution_end", "toolCallId": "call-0", "toolName": "read", "result": nil, "isError": false, "future": true},
+	} {
+		require.NoError(t, writeRPC(writer, frame))
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 3 && len(client.backlog) == 0 && client.terminal == nil
+	}, time.Second, time.Millisecond)
+	select {
+	case event := <-callbacks:
+		t.Fatalf("malformed builtin reached persistence callback: %#v", event)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+// realPiOrdinaryEventFixtures mirrors rpc-mode's serialized Pi 0.85 event
+// shapes. Payloads are deliberately synthetic and content-free.
+func realPiOrdinaryEventFixtures() []map[string]any {
+	usage := func() map[string]any {
+		return map[string]any{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cacheWrite1h": 0, "reasoning": 0, "cost": map[string]any{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+	}
+	message := map[string]any{"role": "user"}
+	assistant := func(event map[string]any) map[string]any {
+		return map[string]any{"type": "message_update", "usage": usage(), "assistantMessageEvent": event}
+	}
+	updates := []map[string]any{
+		assistant(map[string]any{"type": "start"}),
+		assistant(map[string]any{"type": "text_start", "contentIndex": 0}),
+		assistant(map[string]any{"type": "text_delta", "contentIndex": 0, "delta": ""}),
+		assistant(map[string]any{"type": "text_end", "contentIndex": 0, "content": ""}),
+		assistant(map[string]any{"type": "thinking_start", "contentIndex": 0}),
+		assistant(map[string]any{"type": "thinking_delta", "contentIndex": 0, "delta": ""}),
+		assistant(map[string]any{"type": "thinking_end", "contentIndex": 0, "content": ""}),
+		assistant(map[string]any{"type": "toolcall_start", "contentIndex": 0, "id": "call-0", "toolName": "read"}),
+		assistant(map[string]any{"type": "toolcall_delta", "contentIndex": 0, "delta": ""}),
+		assistant(map[string]any{"type": "toolcall_end", "contentIndex": 0, "toolCall": map[string]any{"type": "toolCall", "id": "call-0", "name": "read", "arguments": map[string]any{}}}),
+		assistant(map[string]any{"type": "done", "reason": "stop", "message": map[string]any{"role": "assistant"}}),
+		assistant(map[string]any{"type": "error", "reason": "error", "error": map[string]any{"role": "assistant"}}),
+	}
+	frames := []map[string]any{
+		{"type": "agent_start"},
+		{"type": "agent_end", "messages": []any{}, "willRetry": false},
+		{"type": "agent_settled"},
+		{"type": "turn_start"},
+		{"type": "turn_end", "message": message, "toolResults": []any{}},
+		{"type": "message_start", "message": message},
+		{"type": "message_end", "message": message},
+		{"type": "tool_execution_start", "toolCallId": "call-0", "toolName": "read", "args": map[string]any{}},
+		{"type": "tool_execution_update", "toolCallId": "call-0", "toolName": "read", "args": map[string]any{}, "partialResult": ""},
+		{"type": "tool_execution_end", "toolCallId": "call-0", "toolName": "read", "result": map[string]any{}, "isError": false},
+		{"type": "queue_update", "steering": []any{}, "followUp": []any{}},
+		{"type": "compaction_start", "reason": "manual"},
+		{"type": "compaction_end", "reason": "manual", "result": map[string]any{"summary": "", "firstKeptEntryId": "e0", "tokensBefore": 0, "estimatedTokensAfter": 0}, "aborted": false, "willRetry": false},
+		{"type": "entry_appended", "entry": map[string]any{"type": "custom", "id": "e1", "parentId": nil, "timestamp": "1970-01-01T00:00:00.000Z", "customType": "synthetic"}},
+		{"type": "session_info_changed", "name": ""},
+		{"type": "thinking_level_changed", "level": "low"},
+		{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 2, "delayMs": 0, "errorMessage": "synthetic"},
+		{"type": "auto_retry_end", "success": true, "attempt": 1},
+		{"type": "summarization_retry_scheduled", "attempt": 1, "maxAttempts": 2, "delayMs": 0, "errorMessage": "synthetic"},
+		{"type": "summarization_retry_attempt_start", "source": "branchSummary"},
+		{"type": "summarization_retry_attempt_start", "source": "compaction", "reason": "manual"},
+		{"type": "summarization_retry_finished"},
+		{"type": "bash_execution_update", "delta": "", "id": "bash-0"},
+	}
+	return append(frames, updates...)
+}
+
+func TestOrdinaryAgentSessionEventRejectsMalformedKnownShapes(t *testing.T) {
+	usage := func() map[string]any {
+		return map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "totalTokens": float64(0), "cost": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "total": float64(0)}}
+	}
+	for name, event := range map[string]map[string]any{
+		"future ordinary key":               {"type": "turn_start", "future": true},
+		"null session name":                 {"type": "session_info_changed", "name": nil},
+		"numeric session name":              {"type": "session_info_changed", "name": float64(1)},
+		"missing usage":                     {"type": "message_update", "assistantMessageEvent": map[string]any{"type": "text_delta", "contentIndex": float64(0), "delta": ""}},
+		"usage future key":                  {"type": "message_update", "usage": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "totalTokens": float64(0), "cost": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "total": float64(0)}, "future": float64(1)}, "assistantMessageEvent": map[string]any{"type": "text_delta", "contentIndex": float64(0), "delta": ""}},
+		"cost future key":                   {"type": "message_update", "usage": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "totalTokens": float64(0), "cost": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "total": float64(0), "future": float64(1)}}, "assistantMessageEvent": map[string]any{"type": "text_delta", "contentIndex": float64(0), "delta": ""}},
+		"unknown done reason":               {"type": "message_update", "usage": usage(), "assistantMessageEvent": map[string]any{"type": "done", "reason": "future", "message": map[string]any{}}},
+		"unknown error reason":              {"type": "message_update", "usage": usage(), "assistantMessageEvent": map[string]any{"type": "error", "reason": "future", "error": map[string]any{}}},
+		"toolcall arguments not object":     {"type": "message_update", "usage": usage(), "assistantMessageEvent": map[string]any{"type": "toolcall_end", "contentIndex": float64(0), "toolCall": map[string]any{"type": "toolCall", "id": "call-0", "name": "read", "arguments": "bad"}}},
+		"toolcall optional wrong type":      {"type": "message_update", "usage": usage(), "assistantMessageEvent": map[string]any{"type": "toolcall_end", "contentIndex": float64(0), "toolCall": map[string]any{"type": "toolCall", "id": "call-0", "name": "read", "arguments": map[string]any{}, "namespace": float64(1)}}},
+		"compaction result missing summary": {"type": "compaction_end", "reason": "manual", "result": map[string]any{"firstKeptEntryId": "e0", "tokensBefore": float64(0)}, "aborted": false, "willRetry": false},
+		"compaction result future key":      {"type": "compaction_end", "reason": "manual", "result": map[string]any{"summary": "", "firstKeptEntryId": "e0", "tokensBefore": float64(0), "future": true}, "aborted": false, "willRetry": false},
+	} {
+		t.Run(name, func(t *testing.T) { require.False(t, ordinaryAgentSessionEvent(event)) })
+	}
+}
+
+func TestOrdinaryValidatorOptionalAndClosedBranches(t *testing.T) {
+	usage := map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "totalTokens": float64(0), "cacheWrite1h": float64(0), "reasoning": float64(0), "cost": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "total": float64(0)}}
+	completeResult := map[string]any{"summary": "", "firstKeptEntryId": "e0", "tokensBefore": float64(0), "estimatedTokensAfter": float64(0), "usage": usage, "details": map[string]any{"opaque": true}}
+	for name, event := range map[string]map[string]any{
+		"complete compaction optional shape":     {"type": "compaction_end", "reason": "manual", "result": completeResult, "aborted": false, "willRetry": false},
+		"retry final error allowed with success": {"type": "auto_retry_end", "success": true, "attempt": float64(1), "finalError": "diagnostic"},
+		"bash optional id omitted":               {"type": "bash_execution_update", "delta": ""},
+	} {
+		t.Run(name, func(t *testing.T) { require.True(t, ordinaryAgentSessionEvent(event)) })
+	}
+	for name, event := range map[string]map[string]any{
+		"compaction nested usage wrong type":     {"type": "compaction_end", "reason": "manual", "result": map[string]any{"summary": "", "firstKeptEntryId": "e0", "tokensBefore": float64(0), "usage": "bad"}, "aborted": false, "willRetry": false},
+		"compaction estimated tokens wrong type": {"type": "compaction_end", "reason": "manual", "result": map[string]any{"summary": "", "firstKeptEntryId": "e0", "tokensBefore": float64(0), "estimatedTokensAfter": "bad"}, "aborted": false, "willRetry": false},
+		"compaction top future key":              {"type": "compaction_end", "reason": "manual", "aborted": false, "willRetry": false, "future": true},
+		"compaction success has error message":   {"type": "compaction_end", "reason": "manual", "result": completeResult, "aborted": false, "willRetry": false, "errorMessage": ""},
+		"retry final error wrong type":           {"type": "auto_retry_end", "success": false, "attempt": float64(1), "finalError": float64(1)},
+		"bash id wrong type":                     {"type": "bash_execution_update", "delta": "", "id": float64(1)},
+	} {
+		t.Run(name, func(t *testing.T) { require.False(t, ordinaryAgentSessionEvent(event)) })
+	}
 }
 
 func TestRPCClientWakesWaitersOnEOFAndClose(t *testing.T) {
@@ -1478,6 +1949,34 @@ func TestRPCClientWakesWaitersOnEOFAndClose(t *testing.T) {
 	require.NoError(t, other.Close())
 	err := other.Prompt(context.Background(), "after-close")
 	require.Contains(t, err.Error(), "closed")
+}
+
+func TestNonAdmittedSettlementTokenAndParentIdleBothObserveBoundary(t *testing.T) {
+	reader, writer := io.Pipe()
+	client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = client.Close() })
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	activity := make(chan map[string]any, 1)
+	ParentActivityRPC(client).SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	settled := make(chan error, 1)
+	go func() { settled <- client.SettlePreparedRestartTurn(context.Background(), fence) }()
+	require.Eventually(t, func() bool { client.mu.Lock(); defer client.mu.Unlock(); return client.settlementToken != nil }, time.Second, time.Millisecond)
+	require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
+	require.NoError(t, <-settled)
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("parent idle projection did not receive the restart boundary")
+	}
+	select {
+	case extra := <-activity:
+		t.Fatalf("parent idle projection received duplicate boundary: %#v", extra)
+	case <-time.After(25 * time.Millisecond):
+	}
+	client.mu.Lock()
+	require.Empty(t, client.backlog)
+	client.mu.Unlock()
 }
 
 func TestRestartTurnSettlerTreatsAgentSettledAsDrainBoundary(t *testing.T) {
@@ -1541,7 +2040,7 @@ func TestRestartTurnSettlerConsumesDecodedAdmittedSettlement(t *testing.T) {
 	go func() { prompted <- client.PromptAdmittedRestartTurn(context.Background(), "admitted prompt", fence) }()
 	request := requireRequest(t, requests)
 	require.Equal(t, "prompt", request["type"])
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true}))
 	require.NoError(t, <-prompted)
 
 	// The native semantic frame is decoded before reset arms its current
@@ -1566,7 +2065,7 @@ func TestRestartTurnSettlerConsumesDecodedAdmittedSettlement(t *testing.T) {
 		prompted <- other.PromptAdmittedRestartTurn(context.Background(), "other admitted prompt", fence)
 	}()
 	request = requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true}))
 	require.NoError(t, <-prompted)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
 	require.Eventually(t, func() bool {
@@ -1582,6 +2081,49 @@ func TestRestartTurnSettlerConsumesDecodedAdmittedSettlement(t *testing.T) {
 	other.mu.Unlock()
 }
 
+func TestAdmittedSettlementWithArmedWaiterDoesNotRetainDuplicate(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	activity := make(chan map[string]any, 4)
+	ParentActivityRPC(client).SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+
+	for cycle := 0; cycle < 4; cycle++ {
+		prompted := make(chan error, 1)
+		go func() {
+			prompted <- client.PromptAdmittedRestartTurn(context.Background(), fmt.Sprintf("admitted prompt %d", cycle), fence)
+		}()
+		request := requireRequest(t, requests)
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true}))
+		require.NoError(t, <-prompted)
+
+		settled := make(chan error, 1)
+		go func() { settled <- client.SettlePreparedRestartTurn(context.Background(), fence) }()
+		require.Eventually(t, func() bool { client.mu.Lock(); defer client.mu.Unlock(); return client.settlementToken != nil }, time.Second, time.Millisecond)
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+		require.NoError(t, <-settled)
+		select {
+		case event := <-activity:
+			require.Equal(t, "idle", event["state"])
+		case <-time.After(time.Second):
+			t.Fatal("admitted settlement did not publish parent idle activity")
+		}
+		require.Eventually(t, func() bool {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return client.admittedRestartTurn == nil && client.settlementToken == nil && len(client.backlog) == 0 && client.terminal == nil
+		}, time.Second, time.Millisecond)
+	}
+	select {
+	case extra := <-activity:
+		t.Fatalf("admitted settlement published activity twice: %#v", extra)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestRPCClientManagerAuthorizedPromptReplacesOnlySettledRestartAdmission(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
@@ -1593,7 +2135,7 @@ func TestRPCClientManagerAuthorizedPromptReplacesOnlySettledRestartAdmission(t *
 	firstResult := make(chan error, 1)
 	go func() { firstResult <- client.PromptAdmittedRestartTurn(context.Background(), "first prompt", fence) }()
 	firstRequest := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstRequest["id"], "type": "response", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstRequest["id"], "type": "response", "command": "prompt", "success": true}))
 	require.NoError(t, <-firstResult)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
 
@@ -1611,7 +2153,7 @@ func TestRPCClientManagerAuthorizedPromptReplacesOnlySettledRestartAdmission(t *
 	secondResult := make(chan error, 1)
 	go func() { secondResult <- client.PromptAdmittedRestartTurn(context.Background(), "second prompt", fence) }()
 	secondRequest := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondRequest["id"], "type": "response", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondRequest["id"], "type": "response", "command": "prompt", "success": true}))
 	require.NoError(t, <-secondResult)
 
 	client.mu.Lock()
@@ -1642,7 +2184,7 @@ func TestRPCClientRejectsOverlappingUnsettledRestartAdmission(t *testing.T) {
 	firstResult := make(chan error, 1)
 	go func() { firstResult <- client.PromptAdmittedRestartTurn(context.Background(), "first prompt", fence) }()
 	firstRequest := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstRequest["id"], "type": "response", "success": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstRequest["id"], "type": "response", "command": "prompt", "success": true}))
 	require.NoError(t, <-firstResult)
 	require.Equal(t, 1, countedStdin.Count())
 	client.mu.Lock()
@@ -1682,7 +2224,7 @@ func TestRPCClientRejectsNonCanonicalManagedCommandBeforeReadiness(t *testing.T)
 	defer client.Close()
 	go func() {
 		_ = writeRPC(stdoutWriter, map[string]any{
-			"id": "managed-1", "type": "response", "success": true,
+			"id": "managed-1", "type": "response", "command": "get_commands", "success": true,
 			"data": map[string]any{"commands": []any{"/goal:1"}},
 		})
 	}()
@@ -1710,7 +2252,7 @@ func TestRPCClientDeliversOnlyValidParentCompactionEventsOutsideReadinessBacklog
 	var live ParentCompactionRPC = client
 	received := make(chan map[string]any, 1)
 	live.SetParentCompactionEventHandler(func(event map[string]any) { received <- event })
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_start"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_start", "reason": "manual"}))
 	select {
 	case event := <-received:
 		require.Equal(t, "compacting", event["state"])
@@ -1718,7 +2260,7 @@ func TestRPCClientDeliversOnlyValidParentCompactionEventsOutsideReadinessBacklog
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for parent compaction")
 	}
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_end", "aborted": true}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_end", "reason": "manual", "aborted": true, "willRetry": false}))
 	select {
 	case event := <-received:
 		require.Equal(t, "idle", event["state"])
@@ -1733,6 +2275,159 @@ func TestRPCClientDeliversOnlyValidParentCompactionEventsOutsideReadinessBacklog
 	}, time.Second, time.Millisecond)
 }
 
+func TestRPCClientDeliversValidCompactionEndVariantsThroughPipeWithoutBacklog(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	received := make(chan map[string]any, 2)
+	ParentCompactionRPC(client).SetParentCompactionEventHandler(func(event map[string]any) { received <- event })
+	usage := map[string]any{"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4, "totalTokens": 10, "cost": map[string]any{"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4, "total": 10}}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_end", "reason": "manual", "result": map[string]any{"summary": "kept recent work", "firstKeptEntryId": "entry-1", "tokensBefore": 12, "estimatedTokensAfter": 6, "usage": usage, "details": map[string]any{"nested": []any{map[string]any{"arbitrary": true}}}}, "aborted": false, "willRetry": false}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_end", "reason": "overflow", "aborted": false, "willRetry": false, "errorMessage": "compaction failed"}))
+	for _, expected := range []string{"completed", "failed"} {
+		select {
+		case event := <-received:
+			require.Equal(t, "idle", event["state"])
+			require.Equal(t, expected, event["outcome"])
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s compaction callback", expected)
+		}
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 2 && len(client.backlog) == 0
+	}, time.Second, time.Millisecond)
+}
+
+func newDirectRootControlTestClient(t *testing.T, requestIDs ...string) (*rpcClient, *directMailboxToken, store.ManagedRuntimeFence) {
+	t.Helper()
+	reader, writer := io.Pipe()
+	client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	fence := store.ManagedRuntimeFence{RuntimeGeneration: "generation", SessionEpoch: 2, ManifestHash: strings.Repeat("a", 64)}
+	pending := make(map[string]struct{}, len(requestIDs))
+	for _, requestID := range requestIDs {
+		pending[requestID] = struct{}{}
+	}
+	token := &directMailboxToken{generation: fence.RuntimeGeneration, epoch: fence.SessionEpoch, manifestHash: fence.ManifestHash, receiptSeen: true, pendingRootRequests: pending, result: make(chan directMailboxResult, 8)}
+	client.mu.Lock()
+	client.directMailbox = token
+	client.mu.Unlock()
+	return client, token, fence
+}
+
+func directRootTestSettlement(t *testing.T, client *rpcClient, token *directMailboxToken, sequence uint64) directMailboxResult {
+	t.Helper()
+	client.mu.Lock()
+	client.eventSequence = sequence
+	result, handled := client.classifyDirectMailboxEvent(map[string]any{"type": "agent_settled"}, token)
+	client.mu.Unlock()
+	require.True(t, handled)
+	return result
+}
+
+func requireNoDirectRootResult(t *testing.T, token *directMailboxToken) {
+	t.Helper()
+	select {
+	case result := <-token.result:
+		t.Fatalf("unexpected direct root result: %#v", result)
+	default:
+	}
+}
+
+func TestRPCClientRejectRootControlBeforeSettlementReleasesOnSettlement(t *testing.T) {
+	requestID := "123e4567-e89b-42d3-a456-426614174001"
+	client, token, fence := newDirectRootControlTestClient(t, requestID)
+	client.RejectRootControlRequest(requestID, fence)
+	requireNoDirectRootResult(t, token)
+	result := directRootTestSettlement(t, client, token, 5)
+	require.True(t, result.settled)
+}
+
+func TestRPCClientRejectRootControlAfterSettlementReleasesExactlyOnce(t *testing.T) {
+	requestID := "123e4567-e89b-42d3-a456-426614174002"
+	client, token, fence := newDirectRootControlTestClient(t, requestID)
+	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
+	client.RejectRootControlRequest(requestID, fence)
+	result := <-token.result
+	require.True(t, result.settled)
+	client.RejectRootControlRequest(requestID, fence)
+	requireNoDirectRootResult(t, token)
+}
+
+func TestRPCClientRejectsMultipleRootControlsOnlyAfterLastRejection(t *testing.T) {
+	first := "123e4567-e89b-42d3-a456-426614174003"
+	second := "123e4567-e89b-42d3-a456-426614174004"
+	client, token, fence := newDirectRootControlTestClient(t, first, second)
+	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
+	client.RejectRootControlRequest(first, fence)
+	requireNoDirectRootResult(t, token)
+	client.RejectRootControlRequest(first, fence)
+	requireNoDirectRootResult(t, token)
+	client.RejectRootControlRequest(second, fence)
+	require.True(t, (<-token.result).settled)
+}
+
+func TestRPCClientDurableRootAcknowledgmentRequiresFollowUpSettlement(t *testing.T) {
+	requestID := "123e4567-e89b-42d3-a456-426614174005"
+	client, token, _ := newDirectRootControlTestClient(t, requestID)
+	client.AcknowledgeDirectRootControlReceipt(requestID)
+	require.False(t, directRootTestSettlement(t, client, token, 5).settled)
+	requireNoDirectRootResult(t, token)
+	require.True(t, directRootTestSettlement(t, client, token, 6).settled)
+}
+
+func TestRPCClientDirectRootRequestFenceAndDurableAcknowledgment(t *testing.T) {
+	client := NewRPCClient(io.Discard, strings.NewReader(""), func() error { return nil }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requestID := "123e4567-e89b-42d3-a456-426614174001"
+	otherID := "123e4567-e89b-42d3-a456-426614174002"
+	client.mu.Lock()
+	client.directMailbox = &directMailboxToken{generation: "generation", epoch: 2, manifestHash: strings.Repeat("a", 64), receiptSeen: true, pendingRootRequests: map[string]struct{}{}}
+	for _, event := range []*RootControlEvent{
+		{RequestID: requestID, RuntimeGeneration: "stale-generation", SessionEpoch: 2, ManifestSHA256: strings.Repeat("a", 64)},
+		{RequestID: requestID, RuntimeGeneration: "generation", SessionEpoch: 3, ManifestSHA256: strings.Repeat("a", 64)},
+		{RequestID: requestID, RuntimeGeneration: "generation", SessionEpoch: 2, ManifestSHA256: strings.Repeat("b", 64)},
+	} {
+		client.noteDirectRootControlRequestLocked(event)
+	}
+	require.Empty(t, client.directMailbox.pendingRootRequests, "stale root requests must not hold direct settlement")
+	client.noteDirectRootControlRequestLocked(&RootControlEvent{RequestID: requestID, RuntimeGeneration: "generation", SessionEpoch: 2, ManifestSHA256: strings.Repeat("a", 64)})
+	client.directMailbox.pendingRootRequests[otherID] = struct{}{}
+	// Only the manager's explicit durable acknowledgment releases a root hold.
+	require.Len(t, client.directMailbox.pendingRootRequests, 2)
+	client.mu.Unlock()
+	client.AcknowledgeDirectRootControlReceipt(requestID)
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	require.NotContains(t, client.directMailbox.pendingRootRequests, requestID)
+	require.Contains(t, client.directMailbox.pendingRootRequests, otherID, "durable acknowledgment clears only its exact request")
+}
+
+func TestRPCClientMalformedCompactionEndFillsReadinessBacklog(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = client.Close() })
+	// This is a Pi 0.85 compaction_end frame with an unknown future field.
+	malformed := map[string]any{"type": "compaction_end", "reason": "manual", "result": map[string]any{
+		"summary": "", "firstKeptEntryId": "e0", "tokensBefore": 0, "estimatedTokensAfter": 0,
+	}, "aborted": false, "willRetry": false, "future": true}
+	for index := 0; index < 128; index++ {
+		require.NoError(t, writeRPC(stdoutWriter, malformed))
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 128 && len(client.backlog) == 128 && client.terminal == nil
+	}, time.Second, time.Millisecond)
+	require.NoError(t, writeRPC(stdoutWriter, malformed))
+	require.Eventually(t, func() bool { return errors.Is(client.terminalError(), ErrReadinessBacklogFull) }, time.Second, time.Millisecond)
+	client.mu.Lock()
+	require.Len(t, client.backlog, 128)
+	client.mu.Unlock()
+}
+
 func TestRPCClientDeliversParentActivityWithoutBlockingDirectSettlement(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
@@ -1745,7 +2440,7 @@ func TestRPCClientDeliversParentActivityWithoutBlockingDirectSettlement(t *testi
 	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
 	require.NoError(t, err)
 	request := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
@@ -1883,15 +2578,15 @@ func TestRPCClientDeliversOnlyValidChildDeltasOutsideReadinessBacklog(t *testing
 		t.Fatal("timed out waiting for child delta")
 	}
 
-	// A malformed delta is consumed as its own event class and cannot poison a
-	// readiness receipt wait or fill the bounded readiness backlog.
+	// A malformed known delta is retained as a bounded protocol alarm instead
+	// of disappearing before a readiness owner can inspect the stream boundary.
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{
 		"customType": "mecha.child.delta.v1", "content": "Managed child lifecycle updated.", "display": false, "details": map[string]any{"protocol": "mecha.children/v1"},
 	}}))
 	require.Eventually(t, func() bool {
 		client.mu.Lock()
 		defer client.mu.Unlock()
-		return client.eventSequence == 2 && len(client.backlog) == 0
+		return client.eventSequence == 2 && len(client.backlog) == 1
 	}, time.Second, time.Millisecond)
 	select {
 	case delta := <-received:

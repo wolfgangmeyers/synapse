@@ -28,9 +28,15 @@ func (rootAdmissionAppendToken) Release()          {}
 type rootAdmissionRPC struct {
 	*goalProjectionRPC
 
-	mu          sync.Mutex
-	handler     func(RootControlEvent)
-	submissions []map[string]any
+	mu           sync.Mutex
+	handler      func(RootControlEvent)
+	submissions  []map[string]any
+	acknowledged []string
+	rejected     []string
+	submitted    chan struct{}
+	receiptGate  <-chan struct{}
+	submitErr    error
+	recoverEntry bool
 }
 
 func (r *rootAdmissionRPC) SetRootControlEventHandler(handler func(RootControlEvent)) {
@@ -55,7 +61,19 @@ func (r *rootAdmissionRPC) ArmRootControlResult(string, string) (RootControlAppe
 func (r *rootAdmissionRPC) SubmitRootControlResult(_ context.Context, _ RootControlAppendToken, payload map[string]any) (<-chan RootControlResultReceipt, error) {
 	r.mu.Lock()
 	r.submissions = append(r.submissions, cloneJSONRecord(payload))
+	gate := r.receiptGate
+	submitted := r.submitted
+	submitErr := r.submitErr
 	r.mu.Unlock()
+	if submitted != nil {
+		close(submitted)
+	}
+	if submitErr != nil {
+		return nil, submitErr
+	}
+	if gate != nil {
+		<-gate
+	}
 
 	details := make(map[string]any, len(payload)-1)
 	for key, value := range payload {
@@ -75,14 +93,50 @@ func (r *rootAdmissionRPC) SubmitRootControlResult(_ context.Context, _ RootCont
 	return receipts, nil
 }
 
-func (r *rootAdmissionRPC) GetRootControlEntry(context.Context, string) (map[string]any, error) {
-	return nil, errors.New("exact entry lookup is not used by this deterministic receipt")
+func (r *rootAdmissionRPC) GetRootControlEntry(_ context.Context, entryID string) (map[string]any, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.recoverEntry || len(r.submissions) == 0 {
+		return nil, errors.New("exact entry lookup is not configured")
+	}
+	payload := r.submissions[len(r.submissions)-1]
+	details := make(map[string]any, len(payload)-1)
+	for key, value := range payload {
+		if key != "content" {
+			details[key] = value
+		}
+	}
+	return map[string]any{"id": entryID, "customType": "mecha.control.result.v1", "display": false, "content": payload["content"], "details": details}, nil
 }
 
 func (r *rootAdmissionRPC) submissionCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.submissions)
+}
+
+func (r *rootAdmissionRPC) AcknowledgeDirectRootControlReceipt(requestID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.acknowledged = append(r.acknowledged, requestID)
+}
+
+func (r *rootAdmissionRPC) RejectRootControlRequest(requestID string, _ store.ManagedRuntimeFence) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rejected = append(r.rejected, requestID)
+}
+
+func (r *rootAdmissionRPC) acknowledgments() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.acknowledged...)
+}
+
+func (r *rootAdmissionRPC) rejections() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.rejected...)
 }
 
 type rootAdmissionHandler struct {
@@ -272,6 +326,7 @@ func TestRootControlAdmissionRejectsEachFenceFieldMutation(t *testing.T) {
 				row := waitForManagedControl(t, durable, requestID, "delivered")
 				require.Equal(t, 1, handler.callCount())
 				require.Equal(t, 1, rpc.submissionCount())
+				require.Equal(t, []string{requestID}, rpc.acknowledgments(), "manager acknowledges only after the durable receipt transitions this result to delivered")
 				require.NotEmpty(t, row.ResultID)
 				page, pageErr := durable.ManagedHistoryPage(context.Background(), fence.AgentID, "complete", 0, 20)
 				require.NoError(t, pageErr)
@@ -281,8 +336,51 @@ func TestRootControlAdmissionRejectsEachFenceFieldMutation(t *testing.T) {
 			}
 			rpc.emit(event)
 			assertRejectedRootAdmission(t, durable, rpc, handler, fence, requestID, *before)
+			require.Empty(t, rpc.acknowledgments(), "rejected/non-durable admission must not release direct settlement")
+			// Manager-only malformed IDs are harmless no-ops in the real RPC, but
+			// the fixture records the exact received event ID for admission proof.
+			expectedRejectedID := event.RequestID
+			require.Equal(t, []string{expectedRejectedID}, rpc.rejections(), "each terminal pre-reservation rejection is released exactly once")
 		})
 	}
+}
+
+func TestRootControlDurableReceiptFailureDoesNotAcknowledgeDirectSettlement(t *testing.T) {
+	manager, durable, binding, fence, tool, rpc, handler := newRootAdmissionFixtureWithReceiver(t, false)
+	rpc.submitted = make(chan struct{})
+	releaseReceipt := make(chan struct{})
+	rpc.receiptGate = releaseReceipt
+	requestID := "123e4567-e89b-42d3-a456-426614174290"
+	done := make(chan struct{})
+	go func() {
+		manager.admitAndRunRootControl(context.Background(), binding, rootAdmissionEvent(fence, tool, requestID, rootAdmissionArguments("router")))
+		close(done)
+	}()
+	select {
+	case <-rpc.submitted:
+	case <-time.After(time.Second):
+		t.Fatal("full root-control submission did not reach its durable receipt boundary")
+	}
+	require.Equal(t, 1, handler.callCount(), "validation and handler execution complete before the injected delivery failure")
+	require.NoError(t, durable.Close())
+	close(releaseReceipt)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("root-control append did not return after durable delivery failure")
+	}
+	require.Empty(t, rpc.acknowledgments(), "failed DeliverManagedControlReceipt must keep direct settlement provisional")
+}
+
+func TestRootControlRecoveryDeliveryAcknowledgesOnlyAfterDurableReceipt(t *testing.T) {
+	manager, durable, binding, fence, tool, rpc, _ := newRootAdmissionFixtureWithReceiver(t, false)
+	rpc.submitErr = errors.New("lost command response after Pi persisted the entry")
+	rpc.recoverEntry = true
+	requestID := "123e4567-e89b-42d3-a456-426614174291"
+	manager.admitAndRunRootControl(context.Background(), binding, rootAdmissionEvent(fence, tool, requestID, rootAdmissionArguments("router")))
+	row := requireManagedControlDelivered(t, durable, requestID)
+	require.Equal(t, []string{requestID}, rpc.acknowledgments(), "recovery acknowledges only after its exact persisted entry is durably delivered")
+	require.NotEmpty(t, row.ResultEntryID)
 }
 
 func TestRootControlDuplicateRequestReusesResultIDAndRejectsChangedFingerprint(t *testing.T) {
@@ -331,8 +429,8 @@ func rootControlParserFrame(tool ManifestTool, mutation func(map[string]any)) ma
 		"arguments":          rootAdmissionArguments("router"),
 	}
 	frame := map[string]any{"type": "message_end", "message": map[string]any{
-		"customType": "mecha.control.request.v1", "display": false,
-		"content": "Router control request queued.", "details": details,
+		"role": "custom", "customType": "mecha.control.request.v1", "display": false,
+		"content": "Router control request queued.", "timestamp": float64(0), "details": details,
 	}}
 	if mutation != nil {
 		mutation(frame)
