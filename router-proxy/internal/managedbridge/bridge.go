@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -22,6 +23,11 @@ type Options struct {
 	Sleep  Sleeper
 	Now    func() time.Time
 	Random Random
+
+	// These package-private seams make failure paths deterministic in tests
+	// without changing the production process or status contracts.
+	processOps processOSOps
+	statusOps  statusFileOps
 }
 
 type EventInfo struct {
@@ -87,11 +93,12 @@ func (o *eventBuffer) prune(seq uint64) {
 // Bridge is a standalone disabled-by-default managed RPC client. It owns one
 // Pi process and one current router socket; it has no router integration.
 type Bridge struct {
-	config   Config
-	verifier Verifier
-	fence    RuntimeFence
-	process  *childProcess
-	state    *StateMachine
+	config        Config
+	verifier      Verifier
+	fence         RuntimeFence
+	outerIdentity ProcessIdentity
+	process       *childProcess
+	state         *StateMachine
 
 	mu             sync.Mutex
 	current        *bridgeSocket
@@ -247,7 +254,17 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 
 	config := b.config
-	process, err := startChild(runCtx, config)
+	var publishedStatus ManagedRuntimeStatus
+	statusPublished := false
+	if config.ManagedProcessGroup {
+		pid := os.Getpid()
+		processOps := normalizeProcessOSOps(b.options.processOps)
+		if group, groupErr := processOps.getpgid(pid); groupErr != nil || group != pid {
+			b.setTerminal(ErrProcessStart)
+			return b.resultError(ctx)
+		}
+	}
+	process, err := startChildWithOps(runCtx, config, b.options.processOps)
 	if err != nil {
 		b.setTerminal(ErrProcessStart)
 		return b.resultError(ctx)
@@ -258,6 +275,37 @@ func (b *Bridge) Run(ctx context.Context) error {
 	b.fence.PiStartMarker = process.identity.StartMarker
 	b.fence.PiIncarnation = process.identity.Incarnation
 	b.mu.Unlock()
+	if config.ManagedProcessGroup {
+		outer, identityErr := captureProcessIdentity()
+		if identityErr != nil {
+			cleanupErr := process.stop(context.Background())
+			process.closeOutputs()
+			terminalErr := errors.Join(ErrProcessStart, cleanupErr)
+			b.setTerminal(terminalErr)
+			return b.resultError(ctx)
+		}
+		b.mu.Lock()
+		b.outerIdentity = outer
+		fence := b.fence
+		b.mu.Unlock()
+		status, signErr := SignManagedRuntimeStatus(b.verifier, NewManagedRuntimeStatus(fence, process.identity, outer, b.options.Now()))
+		if signErr == nil {
+			if b.options.statusOps.fsync != nil || b.options.statusOps.rename != nil || b.options.statusOps.unlink != nil || b.options.statusOps.fstatat != nil {
+				signErr = publishManagedRuntimeStatusWithOps(config.StatusPath, status, b.verifier, normalizeStatusFileOps(b.options.statusOps))
+			} else {
+				signErr = PublishManagedRuntimeStatus(config.StatusPath, status, b.verifier)
+			}
+		}
+		if signErr != nil {
+			cleanupErr := process.stop(context.Background())
+			process.closeOutputs()
+			terminalErr := errors.Join(signErr, cleanupErr)
+			b.setTerminal(terminalErr)
+			return b.resultError(ctx)
+		}
+		publishedStatus = status
+		statusPublished = true
+	}
 
 	stderrDone := make(chan struct{})
 	go drainStderr(process.stderr, stderrDone)
@@ -285,11 +333,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 			}
 			cancel()
 		case <-networkDone:
+			// The connection loop is a reconnecting auxiliary. Its return is not
+			// evidence that Pi exited and must never tear down the runtime.
 			networkDone = nil
-			if runErr == nil {
-				runErr = ErrProcessExit
-			}
-			cancel()
 		case <-runCtx.Done():
 			if runErr == nil {
 				runErr = runCtx.Err()
@@ -310,8 +356,17 @@ func (b *Bridge) Run(ctx context.Context) error {
 	joinCtx, joinCancel := context.WithTimeout(context.Background(), time.Second)
 	process.joinOutputs(joinCtx, stdoutDoneAsDone(stdoutDone), stderrDone)
 	joinCancel()
-	if cleanupErr != nil && runErr == nil {
-		runErr = cleanupErr
+	// Keep the descriptor while cleanup is uncertain. A future owner must see
+	// it whenever Pi or any dedicated-group member may still be alive.
+	if cleanupErr == nil && statusPublished {
+		if b.options.statusOps.fsync != nil || b.options.statusOps.rename != nil || b.options.statusOps.unlink != nil || b.options.statusOps.fstatat != nil {
+			cleanupErr = removeManagedRuntimeStatusWithOps(context.Background(), config.StatusPath, publishedStatus, b.verifier, normalizeStatusFileOps(b.options.statusOps))
+		} else {
+			cleanupErr = RemoveManagedRuntimeStatus(context.Background(), config.StatusPath, publishedStatus, b.verifier)
+		}
+	}
+	if cleanupErr != nil {
+		runErr = errors.Join(runErr, cleanupErr)
 	}
 	_ = b.state.Transition(StateStopped)
 	b.acceptTerminalEvent()
@@ -427,7 +482,12 @@ func (b *Bridge) connectionLoop(ctx context.Context) {
 		if b.state.BeginConnect() != nil {
 			_ = b.state.MarkStale()
 			if b.state.BeginConnect() != nil {
-				return
+				// A transient state mismatch is a reconnect diagnostic. Keep
+				// Pi alive and retry until the run context is canceled.
+				if !b.waitReconnect(ctx, &delay) {
+					return
+				}
+				continue
 			}
 		}
 		conn, err := b.options.Dial(ctx, b.config.RouterURL)
@@ -1081,6 +1141,12 @@ func (b *Bridge) Events() []EventInfo {
 	return result
 }
 func (b *Bridge) Fence() RuntimeFence { b.mu.Lock(); defer b.mu.Unlock(); return b.fence }
+
+func (b *Bridge) OuterIdentity() ProcessIdentity {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.outerIdentity
+}
 
 func (b *Bridge) Reconstruction() (NeedsReconstruction, bool) {
 	b.mu.Lock()
