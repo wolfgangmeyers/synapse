@@ -16,6 +16,28 @@ import (
 
 const rootControlAppendTimeout = 10 * time.Second
 
+// directRootControlReceiptAcknowledger lets the manager release a provisional
+// direct-delivery settlement only after this exact result is durable.
+type directRootControlReceiptAcknowledger interface {
+	AcknowledgeDirectRootControlReceipt(requestID string)
+}
+
+type directRootControlRejector interface {
+	RejectRootControlRequest(requestID string, fence store.ManagedRuntimeFence)
+}
+
+func acknowledgeDirectRootControlReceipt(rpc RPC, requestID string) {
+	if acknowledger, ok := rpc.(directRootControlReceiptAcknowledger); ok {
+		acknowledger.AcknowledgeDirectRootControlReceipt(requestID)
+	}
+}
+
+func rejectDirectRootControl(rpc RPC, requestID string, fence store.ManagedRuntimeFence) {
+	if rejector, ok := rpc.(directRootControlRejector); ok {
+		rejector.RejectRootControlRequest(requestID, fence)
+	}
+}
+
 // installRootControlReceiver binds request intake only after the runtime has
 // passed normal readiness and becomes the installed binding. This prevents an
 // unready/replaced process from admitting root controls.
@@ -45,6 +67,14 @@ func (m *Manager) handleRootControlEvent(binding *managedBinding, event RootCont
 
 func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBinding, event RootControlEvent) {
 	fence := bindingFence(binding.agentID, binding)
+	// Every terminal admission return reports an exact rejection. The RPC then
+	// applies its own fence check, so a stale manager cannot affect a new turn.
+	reserved := false
+	defer func() {
+		if !reserved {
+			rejectDirectRootControl(binding.rpc, event.RequestID, fence)
+		}
+	}()
 	if !m.rootBindingCurrent(ctx, binding, fence) || event.RuntimeGeneration != fence.RuntimeGeneration || event.SessionEpoch != fence.SessionEpoch || event.ManifestSHA256 != fence.ManifestHash {
 		return
 	}
@@ -82,6 +112,7 @@ func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBi
 	if err != nil || reservation.RequestID == "" {
 		return
 	}
+	reserved = true
 	if event.OperationID == "mail.send" {
 		arguments, ok := event.Arguments.(map[string]any)
 		recipient, recipientOK := arguments["recipient"].(string)
@@ -462,7 +493,9 @@ func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedB
 				continue
 			}
 			entryIdentity := rootControlReceiptEntryIdentity(receipt.Event, row)
-			_ = m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: entryIdentity, Attempt: claim.Request.AppendAttempt, Fence: fence})
+			if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: entryIdentity, Attempt: claim.Request.AppendAttempt, Fence: fence}) == nil {
+				acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID)
+			}
 			return
 		case <-deadline.Done():
 			m.reconcileRootControlAppend(ctx, binding, claim.Request)
@@ -490,7 +523,9 @@ func (m *Manager) reconcileRootControlAppend(ctx context.Context, binding *manag
 		if row.State == "append_pending" {
 			_ = m.store.MarkManagedControlAppendSubmitted(ctx, row.RequestID, row.AppendOwner, row.AppendAttempt, fence)
 		}
-		_ = m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: row.AppendOwner, EntryIdentity: row.ResultEntryID, Attempt: row.AppendAttempt, Fence: fence})
+		if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: row.AppendOwner, EntryIdentity: row.ResultEntryID, Attempt: row.AppendAttempt, Fence: fence}) == nil {
+			acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID)
+		}
 		return
 	}
 	m.retryRootControlAppend(ctx, binding, row.RequestID, row.AppendOwner, row.AppendAttempt, fence, "result entry was absent during recovery")

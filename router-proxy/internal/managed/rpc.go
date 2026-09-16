@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -254,12 +255,15 @@ type managedGoalEvaluationCleanup struct {
 	barrier               <-chan struct{}
 }
 type directMailboxToken struct {
-	messageID       string
-	generation      string
-	epoch           int64
-	watermark       uint64
-	receiptSeen     bool
-	settledSequence uint64
+	messageID            string
+	generation           string
+	manifestHash         string
+	epoch                int64
+	watermark            uint64
+	receiptSeen          bool
+	settledSequence      uint64
+	settledReleased      bool
+	acceptedRootFollowUp bool
 	// Root controls are completed on a later Pi follow-up turn. Retain direct
 	// ownership across the provisional settle so WebUI stays working until the
 	// result has driven that turn's final response.
@@ -318,11 +322,12 @@ type rpcClient struct {
 	stdout  io.Reader
 	closeFn func() error
 
-	mu           sync.Mutex
-	pending      map[string]chan rpcResponse
-	pendingHooks map[string]rpcResponseHook
-	nextID       int64
-	activeTools  []string
+	mu              sync.Mutex
+	pending         map[string]chan rpcResponse
+	pendingCommands map[string]string
+	pendingHooks    map[string]rpcResponseHook
+	nextID          int64
+	activeTools     []string
 
 	// The matcher is owned under mu. Responses never occupy this bounded FIFO.
 	// A terminal error lives separately so a retained notification can never
@@ -373,7 +378,7 @@ func NewRPCClient(stdin io.Writer, stdout io.Reader, closeFn func() error) RPC {
 	terminalHandlerDone := make(chan struct{})
 	close(terminalHandlerDone)
 	client := &rpcClient{
-		stdin: stdin, stdout: stdout, closeFn: closeFn, pending: map[string]chan rpcResponse{}, pendingHooks: map[string]rpcResponseHook{}, notified: make(chan struct{}, 1),
+		stdin: stdin, stdout: stdout, closeFn: closeFn, pending: map[string]chan rpcResponse{}, pendingCommands: map[string]string{}, pendingHooks: map[string]rpcResponseHook{}, notified: make(chan struct{}, 1),
 		semanticQueue: make(chan rpcSemanticTask, rpcSemanticQueueCapacity), semanticDone: make(chan struct{}),
 		readerDone: make(chan struct{}), terminalHandlerDone: terminalHandlerDone,
 	}
@@ -446,18 +451,21 @@ func (c *rpcClient) readLoop() {
 			c.readerTerminalize(errors.New("Pi emitted malformed RPC JSON"))
 			return
 		}
-		if id, ok := raw["id"].(string); ok {
-			if typ, _ := raw["type"].(string); typ == "response" || raw["error"] != nil {
-				c.mu.Lock()
-				ch := c.pending[id]
+		if id, ok := raw["id"].(string); ok && validRPCResponseEnvelope(raw) {
+			command := raw["command"].(string)
+			c.mu.Lock()
+			expectedCommand, hasExpectedCommand := c.pendingCommands[id]
+			ch, hasPending := c.pending[id]
+			if hasPending && hasExpectedCommand && expectedCommand == command {
 				delete(c.pending, id)
+				delete(c.pendingCommands, id)
 				hook := c.pendingHooks[id]
 				delete(c.pendingHooks, id)
 				var responseErr error
 				if value, hasError := raw["error"]; hasError && value != nil {
 					responseErr = fmt.Errorf("Pi RPC error: %v", value)
 				}
-				if hook != nil && ch != nil {
+				if hook != nil {
 					if hookErr := hook(raw, responseErr); hookErr != nil {
 						responseErr = hookErr
 					}
@@ -471,6 +479,16 @@ func (c *rpcClient) readLoop() {
 				// the bounded readiness receipt FIFO.
 				continue
 			}
+			if !hasPending {
+				// A valid response for an unknown request is discarded. A response
+				// for a known request with the wrong command falls through to the
+				// bounded backlog below as malformed traffic.
+				c.mu.Unlock()
+				continue
+			}
+			// The request ID remains the routing key, but a response for a
+			// different command is malformed traffic, not its completion.
+			c.mu.Unlock()
 		}
 		var rootCallback func(RootControlEvent)
 		var rootEvent *RootControlEvent
@@ -491,10 +509,8 @@ func (c *rpcClient) readLoop() {
 		if !terminal {
 			c.eventSequence++
 			if event, candidate := classifyBuiltinToolLifecycleEvent(raw, c.eventSequence); candidate {
-				// Native tool lifecycle is semantic work. Invalid and unsupported
-				// records are consumed here, never retained as readiness receipts or
-				// forwarded as raw tool data. All semantic callbacks share the stdout
-				// FIFO, so this cannot overtake a neighboring root or activity event.
+				// Tool lifecycle is an anti-poison semantic channel, never a readiness
+				// receipt. Invalid/future shapes are discarded without payload logging.
 				if event != nil && c.builtinToolLifecycleHandler != nil {
 					builtinToolLifecycleCallback, builtinToolLifecycleEvent = c.builtinToolLifecycleHandler, event
 				}
@@ -507,10 +523,10 @@ func (c *rpcClient) readLoop() {
 				continue
 			}
 			if event, candidate := classifyRootControlEvent(raw, c.eventSequence); candidate {
-				// Root requests are control-plane input, not readiness receipts. Bad
-				// candidates are dropped locally and cannot fill the receipt backlog.
+				// Root control is an anti-poison control-plane channel, not a readiness
+				// receipt. Malformed/future candidates never enter that bounded FIFO.
 				if event != nil {
-					c.noteDirectRootControlRequestLocked(event.RequestID)
+					c.noteDirectRootControlRequestLocked(event)
 					if c.rootControlHandler != nil {
 						rootCallback, rootEvent = c.rootControlHandler, event
 					}
@@ -523,11 +539,10 @@ func (c *rpcClient) readLoop() {
 				}
 				continue
 			}
-			if delta, candidate := classifyChildDeltaEvent(raw); candidate {
-				// Lifecycle deltas stay outside the readiness receipt backlog. They
-				// still use the shared semantic FIFO, while their consumer merges only
-				// a current, monotonically newer durable projection.
-				if delta != nil && c.childDeltaHandler != nil {
+			if delta, candidate := classifyChildDeltaEvent(raw); candidate && delta != nil {
+				// Valid lifecycle deltas stay outside the readiness receipt backlog.
+				// A malformed candidate remains observable in the bounded alarm FIFO.
+				if c.childDeltaHandler != nil {
 					childDeltaCallback, childDelta = c.childDeltaHandler, delta
 				}
 				c.mu.Unlock()
@@ -538,8 +553,8 @@ func (c *rpcClient) readLoop() {
 				}
 				continue
 			}
-			if event, candidate := classifyParentCompactionEvent(raw, c.eventSequence); candidate {
-				if event != nil && c.parentCompactionHandler != nil {
+			if event, candidate := classifyParentCompactionEvent(raw, c.eventSequence); candidate && event != nil {
+				if c.parentCompactionHandler != nil {
 					parentCompactionCallback, parentCompaction = c.parentCompactionHandler, event
 				}
 				c.mu.Unlock()
@@ -550,8 +565,8 @@ func (c *rpcClient) readLoop() {
 				}
 				continue
 			}
-			if event, candidate := classifyParentCompactionNotificationEvent(raw, c.eventSequence); candidate {
-				if event != nil && c.parentCompactionNotificationHandler != nil {
+			if event, candidate := classifyParentCompactionNotificationEvent(raw, c.eventSequence); candidate && event != nil {
+				if c.parentCompactionNotificationHandler != nil {
 					parentCompactionNotificationCallback, parentCompactionNotification = c.parentCompactionNotificationHandler, event
 				}
 				c.mu.Unlock()
@@ -562,14 +577,20 @@ func (c *rpcClient) readLoop() {
 				}
 				continue
 			}
+			if isUnboundPostCompactionNotification(raw) {
+				c.mu.Unlock()
+				continue
+			}
+			admittedSettlementCaptured := false
 			if agentSettledFrame(raw) && c.admittedRestartTurn != nil && c.eventSequence > c.admittedRestartTurn.watermark && c.admittedRestartTurn.settledSequence == 0 {
 				// This is recorded in stdout order before the semantic callback can
 				// be delayed behind durable activity projection. It is binding-scoped
 				// by the full fence captured atomically with the prompt write.
 				c.admittedRestartTurn.settledSequence = c.eventSequence
+				admittedSettlementCaptured = true
 				c.signalLocked()
 			}
-			if event, candidate := classifyParentActivityEvent(raw, c.eventSequence); candidate {
+			if event, candidate := classifyParentActivityEvent(raw, c.eventSequence); candidate && event != nil {
 				parentActivityCandidate = true
 				cleanupBoundary := c.goalEvaluationCleanup != nil && c.goalEvaluationCleanup.abortBoundary
 				if event != nil && event["state"] == "active" && !cleanupBoundary {
@@ -600,9 +621,6 @@ func (c *rpcClient) readLoop() {
 					parentActivityCallback, parentActivity = c.parentActivityHandler, event
 				}
 			}
-			if isRootControlResultEvent(raw) {
-				c.noteDirectRootControlResultLocked(raw)
-			}
 			if token := c.rootResult; token != nil && classifyRootControlResultEvent(raw, token, c.eventSequence) {
 				select {
 				case token.result <- RootControlResultReceipt{Event: raw, Watermark: c.eventSequence}:
@@ -622,12 +640,6 @@ func (c *rpcClient) readLoop() {
 				c.mu.Unlock()
 				continue
 			}
-			if isPostCompactionNotificationEvent(raw) {
-				// A malformed post-compaction notification is neither a readiness
-				// receipt nor a history fact. Keep it out of the bounded backlog.
-				c.mu.Unlock()
-				continue
-			}
 			// Readiness receipts are consumed by their fenced waiters, even while a
 			// semantic callback remains open for a root-control follow-up. The
 			// reader never waits on that callback, so a later policy receipt can
@@ -639,10 +651,13 @@ func (c *rpcClient) readLoop() {
 				// the paused direct matcher would consume it and hide it from restart.
 				if !(agentSettledType(raw) && c.settlementToken != nil) {
 					if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
+						// A native settled boundary is provisional while a root-control
+						// follow-up is outstanding; do not advertise parent idle early.
+						deferParentIdle := agentSettledFrame(raw) && len(token.pendingRootRequests) != 0
 						c.sendDirectMailboxResultLocked(token, result)
 						c.signalLocked()
 						c.mu.Unlock()
-						if parentActivityCallback != nil && !c.enqueueSemantic(func() {
+						if !deferParentIdle && parentActivityCallback != nil && !c.enqueueSemantic(func() {
 							parentActivityCallback(parentActivity)
 						}) {
 							return
@@ -651,13 +666,39 @@ func (c *rpcClient) readLoop() {
 					}
 				}
 			}
-			if parentActivityCandidate && c.settlementToken == nil && parentActivityCallback != nil {
+			if parentActivityCandidate && parentActivityCallback != nil && c.settlementToken == nil && !admittedSettlementCaptured {
 				c.mu.Unlock()
 				if !c.enqueueSemantic(func() {
 					parentActivityCallback(parentActivity)
 				}) {
 					return
 				}
+				continue
+			}
+			if admittedSettlementCaptured {
+				// The admitted record owns this exact boundary. Do not duplicate it
+				// in backlog, but still fan the idle projection out once below.
+				c.mu.Unlock()
+				if parentActivityCallback != nil && !c.enqueueSemantic(func() {
+					parentActivityCallback(parentActivity)
+				}) {
+					return
+				}
+				continue
+			}
+			// Ordinary Pi session events have no readiness consumer once the
+			// semantic paths above declined them. Keep this allowlist exact so an
+			// unfamiliar protocol frame still reaches the bounded alarm FIFO.
+			// An active settlement waiter owns its frame. Without a parent
+			// subscriber, an unowned settled frame stays as stale-boundary proof
+			// for a later waiter. An admitted turn records its sequence above and
+			// is deliberately not duplicated in backlog.
+			settledOwned := agentSettledFrame(raw) && !admittedSettlementCaptured && (c.settlementToken != nil || (c.parentActivityHandler == nil && c.admittedRestartTurn == nil))
+			// Wrapped custom messages are semantic receipt candidates. They need
+			// the existing waiter/backlog path before ordinary message_end disposal;
+			// this includes malformed-known and future custom types as bounded alarms.
+			if !settledOwned && !semanticCustomMessageCandidate(raw) && ordinaryAgentSessionEvent(raw) {
+				c.mu.Unlock()
 				continue
 			}
 			// A controlled restart owns its agent_settled receipt. Keep that
@@ -753,8 +794,15 @@ func (c *rpcClient) terminalizeLocked(err error) {
 	}
 	for id, ch := range c.pending {
 		delete(c.pending, id)
+		delete(c.pendingCommands, id)
 		delete(c.pendingHooks, id)
 		ch <- rpcResponse{err: err}
+	}
+	for id := range c.pendingCommands {
+		delete(c.pendingCommands, id)
+	}
+	for id := range c.pendingHooks {
+		delete(c.pendingHooks, id)
 	}
 	if !c.semanticQueueClosed {
 		c.semanticQueueClosed = true
@@ -801,15 +849,18 @@ func (c *rpcClient) callSerializedWithHookAndRestartAdmission(ctx context.Contex
 	}
 	response := make(chan rpcResponse, 1)
 	c.pending[id] = response
+	c.pendingCommands[id] = typ
 	if admissionFence != nil {
 		if admitted := c.admittedRestartTurn; admitted != nil {
 			if admitted.fence != *admissionFence {
 				delete(c.pending, id)
+				delete(c.pendingCommands, id)
 				c.mu.Unlock()
 				return nil, 0, errors.New("restart turn admission fence does not match armed turn")
 			}
 			if admitted.settledSequence <= admitted.watermark {
 				delete(c.pending, id)
+				delete(c.pendingCommands, id)
 				c.mu.Unlock()
 				return nil, 0, errors.New("restart turn admission is already armed")
 			}
@@ -826,6 +877,7 @@ func (c *rpcClient) callSerializedWithHookAndRestartAdmission(ctx context.Contex
 	watermark := c.eventSequence
 	if _, err = fmt.Fprintf(c.stdin, "%s\n", encoded); err != nil {
 		delete(c.pending, id)
+		delete(c.pendingCommands, id)
 		delete(c.pendingHooks, id)
 		if admissionFence != nil && c.admittedRestartTurn != nil && c.admittedRestartTurn.fence == *admissionFence {
 			c.admittedRestartTurn = nil
@@ -844,6 +896,7 @@ func (c *rpcClient) callSerializedWithHookAndRestartAdmission(ctx context.Contex
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
+		delete(c.pendingCommands, id)
 		delete(c.pendingHooks, id)
 		c.mu.Unlock()
 		return nil, watermark, ctx.Err()
@@ -1459,6 +1512,238 @@ func validRestartFence(fence store.ManagedRuntimeFence) bool {
 	return fence.AgentID != "" && fence.PiSessionID != "" && fence.SessionEpoch >= 1 && fence.ProcessPID > 0 && fence.ProcessStartMarker != "" && fence.ProcessIncarnation != "" && fence.RuntimeGeneration != "" && fence.ManifestRevision >= 1 && len(fence.ManifestHash) == 64
 }
 
+func semanticCustomMessageCandidate(value map[string]any) bool {
+	return receiptCustomType(value) != ""
+}
+
+// ordinaryAgentSessionEvent recognizes only the JSON frames serialized by Pi's
+// RPC mode. It validates each known discriminator's closed source-declared
+// shape so a future field is retained as a bounded compatibility alarm.
+func ordinaryAgentSessionEvent(value map[string]any) bool {
+	typeName, ok := value["type"].(string)
+	if !ok {
+		return false
+	}
+	switch typeName {
+	case "agent_start", "agent_settled", "turn_start", "summarization_retry_finished":
+		return exactJSONKeys(value, "type")
+	case "agent_end":
+		return exactJSONKeys(value, "type", "messages", "willRetry") && jsonArray(value["messages"]) && jsonBool(value["willRetry"])
+	case "turn_end":
+		return exactJSONKeys(value, "type", "message", "toolResults") && jsonObject(value["message"]) && jsonArray(value["toolResults"])
+	case "message_start", "message_end":
+		return exactJSONKeys(value, "type", "message") && jsonObject(value["message"])
+	case "message_update":
+		return exactJSONKeys(value, "type", "usage", "assistantMessageEvent") && validUsage(value["usage"]) && validAssistantMessageEvent(value["assistantMessageEvent"])
+	case "tool_execution_start":
+		return exactJSONKeys(value, "type", "toolCallId", "toolName", "args") && jsonString(value["toolCallId"]) && jsonString(value["toolName"])
+	case "tool_execution_update":
+		return exactJSONKeys(value, "type", "toolCallId", "toolName", "args", "partialResult") && jsonString(value["toolCallId"]) && jsonString(value["toolName"])
+	case "tool_execution_end":
+		return exactJSONKeys(value, "type", "toolCallId", "toolName", "result", "isError") && jsonString(value["toolCallId"]) && jsonString(value["toolName"]) && jsonBool(value["isError"])
+	case "queue_update":
+		return exactJSONKeys(value, "type", "steering", "followUp") && jsonStringArray(value["steering"]) && jsonStringArray(value["followUp"])
+	case "compaction_start":
+		return exactJSONKeys(value, "type", "reason") && compactionReason(value["reason"])
+	case "compaction_end":
+		return validCompactionEnd(value)
+	case "entry_appended":
+		return exactJSONKeys(value, "type", "entry") && jsonObject(value["entry"])
+	case "session_info_changed":
+		return allowedJSONKeys(value, []string{"type"}, []string{"name"}) && optionalJSONString(value, "name")
+	case "thinking_level_changed":
+		return exactJSONKeys(value, "type", "level") && oneOfString(value["level"], "off", "minimal", "low", "medium", "high", "xhigh", "max")
+	case "auto_retry_start", "summarization_retry_scheduled":
+		return exactJSONKeys(value, "type", "attempt", "maxAttempts", "delayMs", "errorMessage") && jsonNumber(value["attempt"]) && jsonNumber(value["maxAttempts"]) && jsonNumber(value["delayMs"]) && jsonString(value["errorMessage"])
+	case "auto_retry_end":
+		return validAutoRetryEnd(value)
+	case "summarization_retry_attempt_start":
+		return validSummarizationRetryStart(value)
+	case "bash_execution_update":
+		return validBashExecutionUpdate(value)
+	default:
+		return false
+	}
+}
+
+func exactJSONKeys(value map[string]any, keys ...string) bool {
+	return allowedJSONKeys(value, keys, nil)
+}
+
+// allowedJSONKeys permits only source-declared optional fields. A new field
+// remains an unknown protocol shape and reaches the bounded alarm backlog.
+func allowedJSONKeys(value map[string]any, required, optional []string) bool {
+	allowed := make(map[string]struct{}, len(required)+len(optional))
+	for _, key := range required {
+		allowed[key] = struct{}{}
+		if _, ok := value[key]; !ok {
+			return false
+		}
+	}
+	for _, key := range optional {
+		allowed[key] = struct{}{}
+	}
+	for key := range value {
+		if _, ok := allowed[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// validRPCResponseEnvelope is deliberately checked before removing a waiter:
+// malformed response-shaped traffic must remain observable in the bounded FIFO.
+func validRPCResponseEnvelope(value map[string]any) bool {
+	id, idOK := value["id"].(string)
+	command, commandOK := value["command"].(string)
+	success, successOK := value["success"].(bool)
+	if !idOK || id == "" || !commandOK || command == "" || !successOK || value["type"] != "response" {
+		return false
+	}
+	if success {
+		return allowedJSONKeys(value, []string{"id", "type", "command", "success"}, []string{"data"})
+	}
+	errorMessage, errorOK := value["error"].(string)
+	return errorOK && errorMessage != "" && exactJSONKeys(value, "id", "type", "command", "success", "error")
+}
+
+func jsonObject(value any) bool { _, ok := value.(map[string]any); return ok }
+func jsonArray(value any) bool  { _, ok := value.([]any); return ok }
+func jsonString(value any) bool { _, ok := value.(string); return ok }
+func jsonBool(value any) bool   { _, ok := value.(bool); return ok }
+func jsonNumber(value any) bool {
+	switch value.(type) {
+	case float64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+func jsonStringArray(value any) bool {
+	values, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range values {
+		if !jsonString(item) {
+			return false
+		}
+	}
+	return true
+}
+func oneOfString(value any, options ...string) bool {
+	candidate, ok := value.(string)
+	if !ok {
+		return false
+	}
+	for _, option := range options {
+		if candidate == option {
+			return true
+		}
+	}
+	return false
+}
+func compactionReason(value any) bool { return oneOfString(value, "manual", "threshold", "overflow") }
+
+func validUsage(value any) bool {
+	usage, ok := value.(map[string]any)
+	if !ok || !allowedJSONKeys(usage, []string{"input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"}, []string{"cacheWrite1h", "reasoning"}) {
+		return false
+	}
+	for _, key := range []string{"input", "output", "cacheRead", "cacheWrite", "totalTokens"} {
+		if !jsonNumber(usage[key]) {
+			return false
+		}
+	}
+	for _, key := range []string{"cacheWrite1h", "reasoning"} {
+		if optional, present := usage[key]; present && !jsonNumber(optional) {
+			return false
+		}
+	}
+	cost, ok := usage["cost"].(map[string]any)
+	if !ok || !exactJSONKeys(cost, "input", "output", "cacheRead", "cacheWrite", "total") {
+		return false
+	}
+	for _, key := range []string{"input", "output", "cacheRead", "cacheWrite", "total"} {
+		if !jsonNumber(cost[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validAssistantMessageEvent(value any) bool {
+	event, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	switch event["type"] {
+	case "start":
+		return exactJSONKeys(event, "type")
+	case "text_start", "thinking_start":
+		return exactJSONKeys(event, "type", "contentIndex") && jsonNumber(event["contentIndex"])
+	case "text_delta", "thinking_delta", "toolcall_delta":
+		return exactJSONKeys(event, "type", "contentIndex", "delta") && jsonNumber(event["contentIndex"]) && jsonString(event["delta"])
+	case "text_end", "thinking_end":
+		return exactJSONKeys(event, "type", "contentIndex", "content") && jsonNumber(event["contentIndex"]) && jsonString(event["content"])
+	case "toolcall_start":
+		return exactJSONKeys(event, "type", "contentIndex", "id", "toolName") && jsonNumber(event["contentIndex"]) && jsonString(event["id"]) && jsonString(event["toolName"])
+	case "toolcall_end":
+		toolCall, ok := event["toolCall"].(map[string]any)
+		return exactJSONKeys(event, "type", "contentIndex", "toolCall") && jsonNumber(event["contentIndex"]) && ok && allowedJSONKeys(toolCall, []string{"type", "id", "name", "arguments"}, []string{"thoughtSignature", "namespace"}) && oneOfString(toolCall["type"], "toolCall") && jsonString(toolCall["id"]) && jsonString(toolCall["name"]) && jsonObject(toolCall["arguments"]) && optionalJSONString(toolCall, "thoughtSignature") && optionalJSONString(toolCall, "namespace")
+	case "done":
+		return exactJSONKeys(event, "type", "reason", "message") && oneOfString(event["reason"], "stop", "length", "toolUse", "deferred") && jsonObject(event["message"])
+	case "error":
+		return exactJSONKeys(event, "type", "reason", "error") && oneOfString(event["reason"], "aborted", "error") && jsonObject(event["error"])
+	default:
+		return false
+	}
+}
+
+func optionalJSONString(value map[string]any, key string) bool {
+	optional, present := value[key]
+	return !present || jsonString(optional)
+}
+
+func validCompactionEnd(value map[string]any) bool {
+	// Ordinary disposal shares the semantic lifecycle contract: malformed and
+	// future compaction frames remain bounded readiness-backlog alarms.
+	return validParentCompactionWireEvent(value)
+}
+
+func validAutoRetryEnd(value map[string]any) bool {
+	if !allowedJSONKeys(value, []string{"type", "success", "attempt"}, []string{"finalError"}) || !jsonBool(value["success"]) || !jsonNumber(value["attempt"]) {
+		return false
+	}
+	if finalError, present := value["finalError"]; present {
+		return jsonString(finalError)
+	}
+	return true
+}
+func validSummarizationRetryStart(value map[string]any) bool {
+	if source, ok := value["source"].(string); !ok || (source != "branchSummary" && source != "compaction") {
+		return false
+	}
+	if value["source"] == "branchSummary" {
+		return exactJSONKeys(value, "type", "source")
+	}
+	return exactJSONKeys(value, "type", "source", "reason") && compactionReason(value["reason"])
+}
+func validBashExecutionUpdate(value map[string]any) bool {
+	if !jsonString(value["delta"]) || (len(value) != 2 && len(value) != 3) {
+		return false
+	}
+	for key := range value {
+		if key != "type" && key != "delta" && key != "id" {
+			return false
+		}
+	}
+	if id, ok := value["id"]; ok {
+		return jsonString(id)
+	}
+	return true
+}
+
 func agentSettledType(value map[string]any) bool {
 	typeName, ok := value["type"].(string)
 	return ok && typeName == "agent_settled"
@@ -1644,11 +1929,13 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 	}
 	response := make(chan rpcResponse, 1)
 	c.pending[id] = response
-	token := &directMailboxToken{messageID: attempt.MessageID, generation: attempt.Fence.RuntimeGeneration, epoch: attempt.Fence.SessionEpoch, watermark: c.eventSequence, pendingRootRequests: map[string]struct{}{}, result: make(chan directMailboxResult, 128)}
+	c.pendingCommands[id] = "prompt"
+	token := &directMailboxToken{messageID: attempt.MessageID, generation: attempt.Fence.RuntimeGeneration, manifestHash: attempt.Fence.ManifestHash, epoch: attempt.Fence.SessionEpoch, watermark: c.eventSequence, pendingRootRequests: map[string]struct{}{}, result: make(chan directMailboxResult, 128)}
 	c.directMailbox = token
 	c.noteStaleDirectMailboxEventsLocked(token)
 	if _, err = fmt.Fprintf(c.stdin, "%s\n", payload); err != nil {
 		delete(c.pending, id)
+		delete(c.pendingCommands, id)
 		c.directMailbox = nil
 		c.terminalizeLocked(err)
 		c.mu.Unlock()
@@ -1692,6 +1979,7 @@ func (c *rpcClient) releaseDirectMailboxToken(id string, token *directMailboxTok
 		c.directMailbox = nil
 	}
 	delete(c.pending, id)
+	delete(c.pendingCommands, id)
 }
 
 func (c *rpcClient) sendDirectMailboxResultLocked(token *directMailboxToken, result directMailboxResult) {
@@ -1709,55 +1997,84 @@ func (c *rpcClient) noteStaleDirectMailboxEventsLocked(token *directMailboxToken
 	}
 }
 
-func (c *rpcClient) noteDirectRootControlRequestLocked(requestID string) {
+func (c *rpcClient) noteDirectRootControlRequestLocked(event *RootControlEvent) {
 	token := c.directMailbox
-	if token == nil || !token.receiptSeen || !rootControlUUIDRE.MatchString(requestID) {
+	if event == nil || token == nil || !token.receiptSeen || !rootControlUUIDRE.MatchString(event.RequestID) || event.RuntimeGeneration != token.generation || event.SessionEpoch != token.epoch || event.ManifestSHA256 != token.manifestHash {
 		return
 	}
 	if token.pendingRootRequests == nil {
 		token.pendingRootRequests = map[string]struct{}{}
 	}
-	token.pendingRootRequests[requestID] = struct{}{}
+	token.pendingRootRequests[event.RequestID] = struct{}{}
 }
 
-func (c *rpcClient) noteDirectRootControlResultLocked(event map[string]any) {
+func (c *rpcClient) AcknowledgeDirectRootControlReceipt(requestID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if token := c.directMailbox; token != nil {
+		if _, pending := token.pendingRootRequests[requestID]; pending {
+			delete(token.pendingRootRequests, requestID)
+			token.acceptedRootFollowUp = true
+			c.signalLocked()
+		}
+	}
+}
+
+// RejectRootControlRequest releases only a manager-invalid request whose full
+// runtime fence matches this direct turn. If Pi already emitted its provisional
+// settled boundary, emit the deferred idle exactly once after the last root is
+// rejected.
+func (c *rpcClient) RejectRootControlRequest(requestID string, fence store.ManagedRuntimeFence) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	token := c.directMailbox
-	if token == nil || len(token.pendingRootRequests) == 0 {
+	if token == nil || !token.receiptSeen || requestID == "" || !rootControlUUIDRE.MatchString(requestID) || token.generation != fence.RuntimeGeneration || token.epoch != fence.SessionEpoch || token.manifestHash != fence.ManifestHash {
 		return
 	}
-	message := nestedMessage(event)
-	if message == nil {
-		message = event
-	}
-	details, ok := message["details"].(map[string]any)
-	if !ok || details["protocol"] != "mecha.control/v1" || details["runtime_generation"] != token.generation || !sameEpoch(details["target_session_epoch"], token.epoch) {
-		return
-	}
-	requestID, ok := details["request_id"].(string)
-	if !ok || !rootControlUUIDRE.MatchString(requestID) {
+	if _, pending := token.pendingRootRequests[requestID]; !pending {
 		return
 	}
 	delete(token.pendingRootRequests, requestID)
+	if len(token.pendingRootRequests) == 0 && token.settledSequence != 0 && !token.settledReleased {
+		token.settledReleased = true
+		c.sendDirectMailboxResultLocked(token, directMailboxResult{reply: token.reply, settled: true})
+	}
+	c.signalLocked()
 }
 
 func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *directMailboxToken) (directMailboxResult, bool) {
 	kind, _ := event["type"].(string)
 	if kind == "agent_settled" {
+		if !agentSettledFrame(event) {
+			return directMailboxResult{}, false
+		}
 		// A root tool completes on a triggerTurn follow-up. Its source result can
 		// arrive after the model's provisional response, so only the follow-up's
 		// settled event releases the direct delivery lane.
-		if len(token.pendingRootRequests) != 0 {
+		if token.receiptSeen && token.settledSequence == 0 {
+			token.settledSequence = c.eventSequence
+			if token.acceptedRootFollowUp {
+				return directMailboxResult{}, true
+			}
+		}
+		if token.acceptedRootFollowUp {
+			token.acceptedRootFollowUp = false
+			if len(token.pendingRootRequests) == 0 && !token.settledReleased {
+				token.settledReleased = true
+				return directMailboxResult{reply: token.reply, settled: true}, true
+			}
 			return directMailboxResult{}, true
 		}
-		if token.receiptSeen {
-			token.settledSequence = c.eventSequence
+		if len(token.pendingRootRequests) != 0 || token.settledReleased {
+			return directMailboxResult{}, true
 		}
+		token.settledReleased = true
 		return directMailboxResult{reply: token.reply, settled: token.receiptSeen}, true
 	}
 	if kind != "message_end" {
-		// Activity and streaming frames are expected while the model works. They
-		// are not receipt failures and must not flood direct diagnostics.
-		return directMailboxResult{}, true
+		// Unrelated stream traffic must continue to semantic/ordinary classification
+		// or the bounded unknown alarm; direct delivery owns no generic frames.
+		return directMailboxResult{}, false
 	}
 	if receiptCustomType(event) == "mecha.mailbox.appended.v1" {
 		details := receiptDetails(event)
@@ -1778,11 +2095,11 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 		return directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}, true
 	}
 	if !token.receiptSeen {
-		return directMailboxResult{}, true
+		return directMailboxResult{}, false
 	}
 	body, ok := directMailboxAssistantText(event)
 	if !ok {
-		return directMailboxResult{}, true
+		return directMailboxResult{}, false
 	}
 	// A tool-using turn can emit more than one assistant message. Keep the last
 	// visible text and publish it only with agent_settled.
@@ -1875,6 +2192,13 @@ func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (
 	if kind != "tool_execution_start" && kind != "tool_execution_end" {
 		return nil, false
 	}
+	if kind == "tool_execution_start" {
+		if !exactJSONKeys(event, "type", "toolCallId", "toolName", "args") {
+			return nil, true
+		}
+	} else if !exactJSONKeys(event, "type", "toolCallId", "toolName", "result", "isError") {
+		return nil, true
+	}
 	callID, callOK := event["toolCallId"].(string)
 	toolName, toolOK := event["toolName"].(string)
 	if !callOK || !validBuiltinToolCallID(callID) || !toolOK || !validBuiltinToolName(toolName) {
@@ -1909,12 +2233,26 @@ func classifyRootControlEvent(event map[string]any, watermark uint64) (*RootCont
 	message := nestedMessage(event)
 	switch event["type"] {
 	case "message_end":
+		if message == nil || message["customType"] != "mecha.control.request.v1" {
+			return nil, false
+		}
+		if !exactJSONKeys(event, "type", "message") || !exactJSONKeys(message, "role", "customType", "content", "display", "details", "timestamp") || message["role"] != "custom" {
+			return nil, true
+		}
+		if !validWireNumber(message["timestamp"]) {
+			return nil, true
+		}
 	case "custom_message":
+		if event["customType"] != "mecha.control.request.v1" {
+			return nil, false
+		}
+		// This direct route is a normalized transport event, not a raw persisted
+		// session entry; its producer emits exactly these five fields.
+		if !exactJSONKeys(event, "type", "customType", "content", "display", "details") {
+			return nil, true
+		}
 		message = event
 	default:
-		return nil, false
-	}
-	if message == nil || message["customType"] != "mecha.control.request.v1" {
 		return nil, false
 	}
 	if message["display"] != false || message["content"] != "Router control request queued." {
@@ -1955,6 +2293,9 @@ func classifyChildDeltaEvent(event map[string]any) (map[string]any, bool) {
 	if message == nil || message["customType"] != "mecha.child.delta.v1" {
 		return nil, false
 	}
+	if !exactJSONKeys(event, "type", "message") {
+		return nil, true
+	}
 	if message["display"] != false || message["content"] != "Managed child lifecycle updated." {
 		return nil, true
 	}
@@ -1972,8 +2313,12 @@ func classifyChildDeltaEvent(event map[string]any) (map[string]any, bool) {
 // classifyParentCompactionEvent admits only native Pi RPC lifecycle events.
 // It never infers an outcome from transcript text, a disconnect, or absence.
 func classifyParentCompactionEvent(event map[string]any, sequence uint64) (map[string]any, bool) {
-	if event["type"] != "compaction_start" && event["type"] != "compaction_end" {
+	kind, _ := event["type"].(string)
+	if kind != "compaction_start" && kind != "compaction_end" {
 		return nil, false
+	}
+	if !validParentCompactionWireEvent(event) {
+		return nil, true
 	}
 	normalized, err := normalizeParentCompactionEvent(event, sequence)
 	if err != nil {
@@ -1985,9 +2330,65 @@ func classifyParentCompactionEvent(event map[string]any, sequence uint64) (map[s
 // classifyParentActivityEvent admits only Pi's native lifecycle boundary. The
 // settled frame still reaches the direct-mail matcher below so its final reply
 // is persisted before the serialized parent lane returns to idle.
+func validParentCompactionWireEvent(event map[string]any) bool {
+	reason, reasonOK := event["reason"].(string)
+	if !reasonOK || (reason != "manual" && reason != "threshold" && reason != "overflow") {
+		return false
+	}
+	if event["type"] == "compaction_start" {
+		return exactJSONKeys(event, "type", "reason")
+	}
+	aborted, abortedOK := event["aborted"].(bool)
+	willRetry, retryOK := event["willRetry"].(bool)
+	if !abortedOK || !retryOK {
+		return false
+	}
+	if result, hasResult := event["result"]; hasResult {
+		// JSON.stringify omits undefined result; an admitted completion is the
+		// sole end variant that carries a result on Pi's RPC wire.
+		resultMap, resultOK := result.(map[string]any)
+		_, summaryOK := resultMap["summary"].(string)
+		_, firstKeptOK := resultMap["firstKeptEntryId"].(string)
+		beforeOK := validWireNumber(resultMap["tokensBefore"])
+		afterOK := validWireNumber(resultMap["estimatedTokensAfter"])
+		usage, hasUsage := resultMap["usage"]
+		usageOK := !hasUsage || validUsage(usage)
+		return resultOK && summaryOK && firstKeptOK && beforeOK && afterOK && usageOK && !aborted && !willRetry && exactJSONKeys(event, "type", "reason", "result", "aborted", "willRetry") && allowedJSONKeys(resultMap, []string{"summary", "firstKeptEntryId", "tokensBefore", "estimatedTokensAfter"}, []string{"usage", "details"})
+	}
+	if aborted {
+		return !willRetry && exactJSONKeys(event, "type", "reason", "aborted", "willRetry")
+	}
+	errorMessage, errorOK := event["errorMessage"].(string)
+	return !willRetry && errorOK && errorMessage != "" && exactJSONKeys(event, "type", "reason", "aborted", "willRetry", "errorMessage")
+}
+
+func validWireNumber(value any) bool {
+	var number float64
+	switch typed := value.(type) {
+	case float64:
+		number = typed
+	case int:
+		number = float64(typed)
+	case int64:
+		number = float64(typed)
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return false
+		}
+		number = parsed
+	default:
+		return false
+	}
+	return number >= 0 && !math.IsNaN(number) && !math.IsInf(number, 0)
+}
+
 func classifyParentActivityEvent(event map[string]any, sequence uint64) (map[string]any, bool) {
 	if event["type"] != "agent_start" && event["type"] != "agent_settled" {
 		return nil, false
+	}
+	if !exactJSONKeys(event, "type") {
+		return nil, true
 	}
 	normalized, err := normalizeParentActivityEvent(event, sequence)
 	if err != nil {
@@ -1996,12 +2397,16 @@ func classifyParentActivityEvent(event map[string]any, sequence uint64) (map[str
 	return normalized, true
 }
 
-func isPostCompactionNotificationEvent(event map[string]any) bool {
-	message := nestedMessage(event)
-	if message == nil {
-		message = event
+func isUnboundPostCompactionNotification(event map[string]any) bool {
+	if !exactJSONKeys(event, "type", "message") || event["type"] != "message_end" {
+		return false
 	}
-	return message["customType"] == "mecha.post_compaction.v1"
+	message := nestedMessage(event)
+	if message == nil || message["customType"] != "mecha.post_compaction.v1" || message["display"] != true || message["content"] != "COMPACTION-CERT-DONE" {
+		return false
+	}
+	_, hasDetails := message["details"]
+	return !hasDetails
 }
 
 // classifyParentCompactionNotificationEvent admits only Pi's durable visible
@@ -2136,8 +2541,10 @@ func (c *rpcClient) SubmitRootControlResult(ctx context.Context, rawToken RootCo
 	}
 	response := make(chan rpcResponse, 1)
 	c.pending[id] = response
+	c.pendingCommands[id] = "prompt"
 	if _, err = fmt.Fprintf(c.stdin, "%s\n", payload); err != nil {
 		delete(c.pending, id)
+		delete(c.pendingCommands, id)
 		c.terminalizeLocked(err)
 		c.mu.Unlock()
 		return nil, err
@@ -2152,6 +2559,7 @@ func (c *rpcClient) SubmitRootControlResult(ctx context.Context, rawToken RootCo
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
+		delete(c.pendingCommands, id)
 		c.mu.Unlock()
 		return nil, ctx.Err()
 	}
