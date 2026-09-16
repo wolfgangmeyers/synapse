@@ -218,3 +218,33 @@ func (h testRootHandler) Execute(context.Context, RootControlInvocation) (RootCo
 func (h testRootHandler) Reconcile(context.Context, RootControlInvocation) (RootControlHandlerResult, error) {
 	return RootControlHandlerResult{}, nil
 }
+
+type panicRootHandler struct {
+	identity RootControlHandlerIdentity
+}
+
+func (h panicRootHandler) Identity() RootControlHandlerIdentity { return h.identity }
+func (h panicRootHandler) Execute(context.Context, RootControlInvocation) (RootControlHandlerResult, error) {
+	panic("private panic marker")
+}
+func (h panicRootHandler) Reconcile(context.Context, RootControlInvocation) (RootControlHandlerResult, error) {
+	panic("private panic marker")
+}
+
+func TestInvokeRootControlHandlerConvertsExecuteAndReconcilePanics(t *testing.T) {
+	handler := panicRootHandler{identity: RootControlHandlerIdentity{OperationID: "panic"}}
+	for _, test := range []struct {
+		name      string
+		reconcile bool
+	}{
+		{name: "execute"},
+		{name: "reconcile", reconcile: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := invokeRootControlHandler(context.Background(), handler, RootControlInvocation{OperationID: "panic"}, test.reconcile)
+			require.ErrorIs(t, err, errRootControlHandlerPanic)
+			require.Empty(t, result)
+			require.NotContains(t, err.Error(), "private panic marker")
+		})
+	}
+}

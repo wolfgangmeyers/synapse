@@ -16,6 +16,8 @@ import (
 
 const rootControlAppendTimeout = 10 * time.Second
 
+var errRootControlHandlerPanic = errors.New("managed root control handler failed internally")
+
 // directRootControlReceiptAcknowledger lets the manager release a provisional
 // direct-delivery settlement only after this exact result is durable.
 type directRootControlReceiptAcknowledger interface {
@@ -227,6 +229,22 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 	}
 }
 
+// invokeRootControlHandler contains only the dynamic handler call. A handler
+// panic becomes a fixed error so finishRootControlHandler can persist the
+// terminal nonretryable result without exposing the recovered value.
+func invokeRootControlHandler(ctx context.Context, handler RootControlHandler, invocation RootControlInvocation, reconcile bool) (result RootControlHandlerResult, err error) {
+	defer func() {
+		if recover() != nil {
+			result = RootControlHandlerResult{}
+			err = errRootControlHandlerPanic
+		}
+	}()
+	if reconcile {
+		return handler.Reconcile(ctx, invocation)
+	}
+	return handler.Execute(ctx, invocation)
+}
+
 // executeRootControlHandler keeps context.compact on Pi's typed RPC boundary.
 // The Python root-control adapter can retain process-local settings, but it
 // cannot produce a Pi compaction or its native lifecycle events. A recovered
@@ -257,17 +275,11 @@ func (m *Manager) executeRootControlHandler(ctx context.Context, binding *manage
 		return m.executeManagedGoalSnooze(ctx, binding, invocation)
 	}
 	if invocation.OperationID != "context.control" {
-		if reconcile {
-			return handler.Reconcile(ctx, invocation)
-		}
-		return handler.Execute(ctx, invocation)
+		return invokeRootControlHandler(ctx, handler, invocation, reconcile)
 	}
 	arguments, ok := invocation.Arguments.(map[string]any)
 	if !ok || arguments["action"] != "compact" {
-		if reconcile {
-			return handler.Reconcile(ctx, invocation)
-		}
-		return handler.Execute(ctx, invocation)
+		return invokeRootControlHandler(ctx, handler, invocation, reconcile)
 	}
 	if reconcile {
 		return RootControlHandlerResult{}, errors.New("native Pi compaction outcome is unknown after recovery")

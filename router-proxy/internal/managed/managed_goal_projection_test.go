@@ -144,7 +144,7 @@ func readyGoalProjectionFixture(t *testing.T) (*Manager, *store.Store, *managedB
 	launch := store.ManagedAgentRecord{AgentID: "goal-agent", Name: "goal-agent", SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "goal-session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: managedGoalProjectionTestManifestHash}
 	op := store.ManagedOperation{OperationID: "goal-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "goal-launch", CanonicalBodyHash: "goal-body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, durable.ReserveManagedLaunch(ctx, launch, op))
-	require.NoError(t, durable.UpdateManagedAgentStarting(ctx, launch.AgentID, launch.PiSessionID, store.ProcessIdentityRecord{PID: 99, StartMarker: "goal-marker", Incarnation: "goal-incarnation"}, "goal-generation"))
+	require.NoError(t, durable.UpdateManagedAgentStarting(ctx, launch.AgentID, launch.PiSessionID, store.ProcessIdentityRecord{PID: 99, StartMarker: "goal-marker", Incarnation: "goal-incarnation"}, "123e4567-e89b-42d3-a456-426614174100"))
 	stored, err := durable.ManagedAgent(ctx, launch.AgentID)
 	require.NoError(t, err)
 	fence := storedAgentFence(stored)
