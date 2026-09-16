@@ -449,6 +449,34 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement RPC could not open")
 	}
 	target.rpc = targetRPC
+	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
+		_ = closeRPCAndWait(targetRPC)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
+	}
+	// Legacy rows can retain a valid recovery recipe without the private launch
+	// operation that owns the durable binding. Check that owner before installing
+	// the binding or publishing the running lifecycle state.
+	authoritativeAgent, err := m.store.ManagedAgent(ctx, agent.AgentID)
+	if err != nil {
+		_ = closeRPCAndWait(targetRPC)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement launch owner could not be read")
+	}
+	if authoritativeAgent.LaunchOperationID == "" {
+		_ = closeRPCAndWait(targetRPC)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_LAUNCH_OWNER_MISSING", "managed launch operation owner is unavailable")
+	}
 	if !m.installBinding(target) {
 		_ = closeRPCAndWait(targetRPC)
 		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
@@ -456,15 +484,6 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement binding could not be installed")
-	}
-	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
-		_ = closeRPCAndWait(targetRPC)
-		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
-		m.clearBinding(target)
-		if !cleanupOK {
-			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
-		}
-		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
 	}
 	if err := m.store.CompleteManagedRootRecoveryReady(ctx, agent.AgentID, targetFence); err != nil {
 		_ = closeRPCAndWait(targetRPC)
@@ -475,9 +494,17 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness could not be committed")
 	}
-	target.serial.Lock()
-	target.lifecycleAction = ""
-	target.serial.Unlock()
+	// Recovery temporarily uses its action ID as the binding owner so all work
+	// stays fenced until the ready transaction commits. Restore the durable
+	// launch owner before clearing that lifecycle hold; a stale callback must not
+	// overwrite a newer binding or lifecycle action.
+	restored, err := m.restoreRecoveredBindingOwner(ctx, target, action.ActionID, targetFence)
+	if err != nil {
+		return err
+	}
+	if !restored {
+		return nil
+	}
 	m.installRootControlReceiver(target)
 	m.installChildDeltaReceiver(target)
 	m.installParentCompactionReceiver(target)
@@ -487,6 +514,32 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	m.installBuiltinToolLifecycleReceiver(target)
 	m.startRecoveredRootWatcher(target, targetFence)
 	return nil
+}
+
+// restoreRecoveredBindingOwner applies the post-ready ownership handoff only
+// while the exact recovery binding still owns the durable fence and process.
+// The manager map is checked while the binding lock is held so a stale callback
+// cannot update its operation ID after a newer owner has taken over.
+func (m *Manager) restoreRecoveredBindingOwner(ctx context.Context, target *managedBinding, actionID string, targetFence store.ManagedRuntimeFence) (bool, error) {
+	authoritativeAgent, err := m.store.ManagedAgent(ctx, target.agentID)
+	if err != nil {
+		return false, err
+	}
+	target.serial.Lock()
+	defer target.serial.Unlock()
+	valid := authoritativeAgent.LaunchOperationID != "" && target.operationID == actionID && target.lifecycleAction == "root-recovery" && !target.reaped && sameBindingFence(bindingFence(target.agentID, target), targetFence) && sameBindingFence(storedAgentFence(authoritativeAgent), targetFence) && m.liveBinding(authoritativeAgent, target)
+	if !valid {
+		return false, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bindings[target.agentID] != target || m.closed {
+		return false, nil
+	}
+	target.operationID = authoritativeAgent.LaunchOperationID
+	target.lifecycleAction = ""
+	m.operationIDs[target.agentID] = authoritativeAgent.LaunchOperationID
+	return true, nil
 }
 
 func recoveryEnvironment(stable []string, routerURL, generation string, epoch int64) []string {

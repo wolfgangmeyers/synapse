@@ -255,16 +255,23 @@ type managedGoalEvaluationCleanup struct {
 	abortBoundarySequence uint64
 	barrier               <-chan struct{}
 }
+type directRootControlResultStatus uint8
+
+const (
+	directRootControlResultSuccess directRootControlResultStatus = iota + 1
+	directRootControlResultError
+)
+
 type directMailboxToken struct {
-	messageID            string
-	generation           string
-	manifestHash         string
-	epoch                int64
-	watermark            uint64
-	receiptSeen          bool
-	settledSequence      uint64
-	settledReleased      bool
-	acceptedRootFollowUp bool
+	messageID             string
+	generation            string
+	manifestHash          string
+	epoch                 int64
+	watermark             uint64
+	receiptSeen           bool
+	settledSequence       uint64
+	settledReleased       bool
+	acceptedRootFollowUps uint
 	// Root controls are completed on a later Pi follow-up turn. Retain direct
 	// ownership across the provisional settle so WebUI stays working until the
 	// result has driven that turn's final response.
@@ -2009,16 +2016,53 @@ func (c *rpcClient) noteDirectRootControlRequestLocked(event *RootControlEvent) 
 	token.pendingRootRequests[event.RequestID] = struct{}{}
 }
 
-func (c *rpcClient) AcknowledgeDirectRootControlReceipt(requestID string) {
+func (c *rpcClient) AcknowledgeDirectRootControlReceipt(requestID string, status directRootControlResultStatus) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if token := c.directMailbox; token != nil {
-		if _, pending := token.pendingRootRequests[requestID]; pending {
-			delete(token.pendingRootRequests, requestID)
-			token.acceptedRootFollowUp = true
-			c.signalLocked()
-		}
+	token := c.directMailbox
+	if token == nil {
+		c.mu.Unlock()
+		return
 	}
+	if _, pending := token.pendingRootRequests[requestID]; !pending {
+		c.mu.Unlock()
+		return
+	}
+	if status != directRootControlResultSuccess && status != directRootControlResultError {
+		// The status is an internal typed value selected from the durable row.
+		// Fail closed if a future caller supplies an unknown value.
+		c.mu.Unlock()
+		return
+	}
+	delete(token.pendingRootRequests, requestID)
+	if status == directRootControlResultSuccess {
+		// A successful persisted result causes Pi to start one native follow-up
+		// turn. Terminal errors do not, so they must not create this expectation.
+		token.acceptedRootFollowUps++
+	}
+	released := status == directRootControlResultError && c.releaseDirectRootSettlementLocked(token)
+	if released {
+		c.sendDirectMailboxResultLocked(token, directMailboxResult{reply: token.reply, settled: true})
+	}
+	idleHandler := c.parentActivityHandler
+	idleSequence := token.settledSequence
+	c.signalLocked()
+	c.mu.Unlock()
+	// The provisional native settled frame was held back while the root request
+	// was pending. A terminal error has no follow-up frame, so publish its idle
+	// activity boundary when the durable result releases the direct turn.
+	if released && idleHandler != nil {
+		_ = c.enqueueSemantic(func() {
+			idleHandler(map[string]any{"sequence": int64(idleSequence), "state": "idle"})
+		})
+	}
+}
+
+func (c *rpcClient) releaseDirectRootSettlementLocked(token *directMailboxToken) bool {
+	if token == nil || len(token.pendingRootRequests) != 0 || token.acceptedRootFollowUps != 0 || token.settledSequence == 0 || token.settledReleased {
+		return false
+	}
+	token.settledReleased = true
+	return true
 }
 
 // RejectRootControlRequest releases only a manager-invalid request whose full
@@ -2036,8 +2080,7 @@ func (c *rpcClient) RejectRootControlRequest(requestID string, fence store.Manag
 		return
 	}
 	delete(token.pendingRootRequests, requestID)
-	if len(token.pendingRootRequests) == 0 && token.settledSequence != 0 && !token.settledReleased {
-		token.settledReleased = true
+	if c.releaseDirectRootSettlementLocked(token) {
 		c.sendDirectMailboxResultLocked(token, directMailboxResult{reply: token.reply, settled: true})
 	}
 	c.signalLocked()
@@ -2054,14 +2097,13 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 		// settled event releases the direct delivery lane.
 		if token.receiptSeen && token.settledSequence == 0 {
 			token.settledSequence = c.eventSequence
-			if token.acceptedRootFollowUp {
+			if token.acceptedRootFollowUps != 0 {
 				return directMailboxResult{}, true
 			}
 		}
-		if token.acceptedRootFollowUp {
-			token.acceptedRootFollowUp = false
-			if len(token.pendingRootRequests) == 0 && !token.settledReleased {
-				token.settledReleased = true
+		if token.acceptedRootFollowUps != 0 {
+			token.acceptedRootFollowUps--
+			if c.releaseDirectRootSettlementLocked(token) {
 				return directMailboxResult{reply: token.reply, settled: true}, true
 			}
 			return directMailboxResult{}, true
