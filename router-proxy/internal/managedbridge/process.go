@@ -2,12 +2,14 @@ package managedbridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -17,20 +19,26 @@ import (
 )
 
 var (
-	ErrInvalidConfig = errors.New("managed bridge configuration is invalid")
-	ErrProcessStart  = errors.New("managed bridge process could not start")
-	ErrProcessExit   = errors.New("managed bridge Pi process exited")
-	ErrStdoutLimit   = errors.New("managed bridge Pi output exceeded its bound")
-	ErrBridgeStarted = errors.New("managed bridge run is already finished or active")
+	ErrInvalidConfig      = errors.New("managed bridge configuration is invalid")
+	ErrReservedStatusPath = errors.New("managed bridge status path uses a reserved basename")
+	ErrProcessStart       = errors.New("managed bridge process could not start")
+	ErrProcessExit        = errors.New("managed bridge Pi process exited")
+	ErrStdoutLimit        = errors.New("managed bridge Pi output exceeded its bound")
+	ErrBridgeStarted      = errors.New("managed bridge run is already finished or active")
 )
 
-type processIdentity struct {
-	PID                      int
-	StartMarker, Incarnation string
+// ProcessIdentity binds a live process across PID reuse.
+type ProcessIdentity struct {
+	PID         int    `json:"pid"`
+	StartMarker string `json:"start_marker"`
+	Incarnation string `json:"incarnation"`
 }
 
-func (processIdentity) String() string   { return "managed bridge process identity [redacted]" }
-func (processIdentity) GoString() string { return "managed bridge process identity [redacted]" }
+// processIdentity remains the internal spelling used by the Phase 1 code.
+type processIdentity = ProcessIdentity
+
+func (ProcessIdentity) String() string   { return "managed bridge process identity [redacted]" }
+func (ProcessIdentity) GoString() string { return "managed bridge process identity [redacted]" }
 func (RuntimeFence) String() string      { return "managed bridge runtime fence [redacted]" }
 func (RuntimeFence) GoString() string    { return "managed bridge runtime fence [redacted]" }
 
@@ -44,12 +52,43 @@ const (
 	processUnknown
 )
 
+type processOSOps struct {
+	kill        func(int, syscall.Signal) error
+	getpgid     func(int) (int, error)
+	startMarker func(int) (string, error)
+	listGroup   func(int) ([]int, error)
+}
+
+var nativeProcessOSOps = processOSOps{
+	kill:        syscall.Kill,
+	getpgid:     syscall.Getpgid,
+	startMarker: processStartMarker,
+	listGroup:   listProcessGroup,
+}
+
+func normalizeProcessOSOps(ops processOSOps) processOSOps {
+	if ops.kill == nil {
+		ops.kill = nativeProcessOSOps.kill
+	}
+	if ops.getpgid == nil {
+		ops.getpgid = nativeProcessOSOps.getpgid
+	}
+	if ops.startMarker == nil {
+		ops.startMarker = nativeProcessOSOps.startMarker
+	}
+	if ops.listGroup == nil {
+		ops.listGroup = nativeProcessOSOps.listGroup
+	}
+	return ops
+}
+
 type childProcess struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
 	identity processIdentity
+	ops      processOSOps
 
 	waitOnce sync.Once
 	waitErr  error
@@ -58,11 +97,13 @@ type childProcess struct {
 	closeInputOnce   sync.Once
 	closeOutputsOnce sync.Once
 
-	stopMu      sync.Mutex
-	stopStarted bool
-	stopDone    chan struct{}
-	stopErr     error
-	groupOwned  bool
+	stopMu         sync.Mutex
+	stopStarted    bool
+	stopDone       chan struct{}
+	stopErr        error
+	groupOwned     bool
+	processGroupID int
+	managedGroup   bool
 }
 
 func (p *childProcess) String() string   { return "managed bridge process [redacted]" }
@@ -85,6 +126,10 @@ func newUUID() (string, error) {
 }
 
 func startChild(ctx context.Context, config Config) (*childProcess, error) {
+	return startChildWithOps(ctx, config, nativeProcessOSOps)
+}
+
+func startChildWithOps(ctx context.Context, config Config, rawOps processOSOps) (*childProcess, error) {
 	if ctx == nil || ctx.Err() != nil || config.validate() != nil {
 		return nil, ErrProcessStart
 	}
@@ -93,7 +138,20 @@ func startChild(ctx context.Context, config Config) (*childProcess, error) {
 	if config.PiEnv != nil {
 		cmd.Env = append([]string(nil), config.PiEnv...)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	managedGroup := config.ManagedProcessGroup
+	groupID := 0
+	ops := normalizeProcessOSOps(rawOps)
+	if managedGroup {
+		// The launcher owns process-group setup. The library only verifies that
+		// the bridge is already the group leader and lets Pi inherit that group.
+		groupID = os.Getpid()
+		if group, groupErr := ops.getpgid(groupID); groupErr != nil || group != groupID {
+			return nil, ErrProcessStart
+		}
+	} else {
+		// Preserve standalone Phase 1 ownership: Pi starts its own group.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, ErrProcessStart
@@ -115,7 +173,7 @@ func startChild(ctx context.Context, config Config) (*childProcess, error) {
 		_ = stderr.Close()
 		return nil, ErrProcessStart
 	}
-	marker, err := processStartMarker(cmd.Process.Pid)
+	marker, err := ops.startMarker(cmd.Process.Pid)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -134,8 +192,12 @@ func startChild(ctx context.Context, config Config) (*childProcess, error) {
 		return nil, ErrProcessStart
 	}
 	identity := processIdentity{PID: cmd.Process.Pid, StartMarker: marker, Incarnation: incarnation}
-	group, groupErr := syscall.Getpgid(identity.PID)
-	if groupErr != nil || group != identity.PID {
+	group, groupErr := ops.getpgid(identity.PID)
+	wantGroup := identity.PID
+	if managedGroup {
+		wantGroup = groupID
+	}
+	if groupErr != nil || group != wantGroup {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = stdin.Close()
@@ -143,7 +205,20 @@ func startChild(ctx context.Context, config Config) (*childProcess, error) {
 		_ = stderr.Close()
 		return nil, ErrProcessStart
 	}
-	return &childProcess{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, identity: identity, waitDone: make(chan struct{}), groupOwned: true}, nil
+	return &childProcess{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, identity: identity, ops: ops, waitDone: make(chan struct{}), groupOwned: true, processGroupID: int(wantGroup), managedGroup: managedGroup}, nil
+}
+
+func captureProcessIdentity() (ProcessIdentity, error) {
+	pid := os.Getpid()
+	marker, err := processStartMarker(pid)
+	if err != nil {
+		return ProcessIdentity{}, ErrProcessStart
+	}
+	incarnation, err := newUUID()
+	if err != nil {
+		return ProcessIdentity{}, ErrProcessStart
+	}
+	return ProcessIdentity{PID: pid, StartMarker: marker, Incarnation: incarnation}, nil
 }
 
 func processStartMarker(pid int) (string, error) {
@@ -164,24 +239,46 @@ func processStartMarker(pid int) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// probeProcess proves a standalone owner: the recorded process is also the
+// leader of its own process group.
 func probeProcess(identity processIdentity) processProbeState {
+	return probeProcessWithOps(identity, identity.PID, true, nativeProcessOSOps)
+}
+
+// probeProcessInGroup retains the existing group-aware probe for callers that
+// need to inspect a group without changing the standalone owner semantics.
+func probeProcessInGroup(identity processIdentity, expectedGroup int) processProbeState {
+	return probeProcessWithOps(identity, expectedGroup, false, nativeProcessOSOps)
+}
+
+// probeManagedMember proves a managed Pi member. The outer bridge must supply
+// its already-verified group ID; the member itself must match its PID marker,
+// remain live, and belong to that group. A member is not required to lead it.
+func probeManagedMember(identity processIdentity, expectedOuterGroup int) processProbeState {
+	if expectedOuterGroup <= 0 {
+		return processUnknown
+	}
+	return probeProcessWithOps(identity, expectedOuterGroup, false, nativeProcessOSOps)
+}
+
+func probeProcessWithOps(identity processIdentity, expectedGroup int, requireLeader bool, ops processOSOps) processProbeState {
 	if identity.PID <= 0 || identity.StartMarker == "" {
 		return processUnknown
 	}
-	if err := syscall.Kill(-identity.PID, 0); err != nil {
+	if err := ops.kill(identity.PID, 0); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return processAbsent
 		}
 		if errors.Is(err, syscall.EPERM) {
-			if _, groupErr := syscall.Getpgid(identity.PID); errors.Is(groupErr, syscall.ESRCH) {
+			if _, groupErr := ops.getpgid(identity.PID); errors.Is(groupErr, syscall.ESRCH) {
 				return processPresent
 			}
 		}
 		return processUnknown
 	}
-	marker, err := processStartMarker(identity.PID)
+	marker, err := ops.startMarker(identity.PID)
 	if err != nil {
-		if _, groupErr := syscall.Getpgid(identity.PID); errors.Is(groupErr, syscall.ESRCH) {
+		if _, groupErr := ops.getpgid(identity.PID); errors.Is(groupErr, syscall.ESRCH) {
 			return processPresent
 		}
 		return processUnknown
@@ -189,14 +286,17 @@ func probeProcess(identity processIdentity) processProbeState {
 	if marker != identity.StartMarker {
 		return processMismatch
 	}
-	group, err := syscall.Getpgid(identity.PID)
+	group, err := ops.getpgid(identity.PID)
 	if err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return processPresent
 		}
 		return processUnknown
 	}
-	if group != identity.PID {
+	if expectedGroup > 0 && group != expectedGroup {
+		return processMismatch
+	}
+	if requireLeader && group != identity.PID {
 		return processMismatch
 	}
 	return processOwned
@@ -301,72 +401,204 @@ func (p *childProcess) stop(ctx context.Context) error {
 	return err
 }
 
+func (p *childProcess) processOps() processOSOps {
+	return normalizeProcessOSOps(p.ops)
+}
+
+func (p *childProcess) probe() processProbeState {
+	return probeProcessWithOps(p.identity, p.processGroupID, !p.managedGroup, p.processOps())
+}
+
+type processGroupProbeState uint8
+
+const (
+	processGroupOwned processGroupProbeState = iota + 1
+	processGroupAbsent
+	processGroupUnknown
+)
+
+type processGroupProbe struct {
+	state   processGroupProbeState
+	members []int
+	err     error
+}
+
+func (p *childProcess) inspectGroup() processGroupProbe {
+	ops := p.processOps()
+	if p.processGroupID <= 0 {
+		return processGroupProbe{state: processGroupUnknown, err: errors.New("invalid process group")}
+	}
+	if err := ops.kill(-p.processGroupID, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+		if errors.Is(err, syscall.ESRCH) {
+			return processGroupProbe{state: processGroupAbsent}
+		}
+		return processGroupProbe{state: processGroupUnknown, err: err}
+	}
+	members, err := ops.listGroup(p.processGroupID)
+	if err != nil {
+		return processGroupProbe{state: processGroupUnknown, err: err}
+	}
+	return processGroupProbe{state: processGroupOwned, members: members}
+}
+
 func (p *childProcess) stopInternal(ctx context.Context) error {
 	p.closeInput()
 	if err := ctx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended before probing", processUnknown, err)
 	}
-	probe := probeProcess(p.identity)
-	if probe == processAbsent {
-		return p.awaitWait(ctx, p.startWaiter(), probe)
-	}
-	if probe == processPresent && p.groupOwned {
-		// The leader may have exited naturally while descendants retained the
-		// process-group pipe. The startup proof authorizes this continuation.
-		if absent := waitForAbsent(ctx, p.identity, processPresentDrainGrace); absent {
-			return p.awaitWait(ctx, p.startWaiter(), processAbsent)
-		}
-		if err := killLeaderlessGroup(ctx, p.identity); err != nil {
-			return err
-		}
-		return p.awaitGroupAndWait(ctx, p.startWaiter())
-	}
-	if probe != processOwned {
+	waiter := p.startWaiter()
+	probe := p.probe()
+	if probe == processMismatch || probe == processUnknown {
 		return newProcessCleanupError("process identity is not owned", probe, nil)
 	}
-	if err := signalOwnedGroup(ctx, p.identity, syscall.SIGTERM); err != nil {
+	if probe == processAbsent || (!p.managedGroup && probe == processPresent) {
+		return p.cleanupGroup(ctx, waiter, syscall.SIGKILL)
+	}
+	if p.managedGroup {
+		if err := signalOwnedProcessWithOps(ctx, p.identity, p.processGroupID, syscall.SIGTERM, p.processOps()); err != nil {
+			return err
+		}
+		return p.finishManagedStop(ctx, waiter)
+	}
+	if err := signalOwnedGroupWithOps(ctx, p.identity, syscall.SIGTERM, p.processOps()); err != nil {
 		return err
 	}
-	waiter := p.startWaiter()
-	graceCtx, cancel := context.WithTimeout(ctx, processGraceDuration(ctx))
-	probe = waitForGroup(graceCtx, p.identity, waiter)
-	cancel()
-	if probe == processAbsent {
-		return p.awaitWait(ctx, waiter, probe)
-	}
-	if err := ctx.Err(); err != nil {
-		return newProcessCleanupError("stop context ended before escalation", probe, err)
-	}
-	switch probe {
-	case processOwned:
-		if err := signalOwnedGroup(ctx, p.identity, syscall.SIGKILL); err != nil {
-			return err
+	if !waitForProcessExit(ctx, p.waitDone, processGraceDuration(ctx)) {
+		if err := ctx.Err(); err != nil {
+			return newProcessCleanupError("stop context ended before escalation", processPresent, err)
 		}
-	case processPresent:
-		if err := killLeaderlessGroup(ctx, p.identity); err != nil {
-			return err
-		}
-	default:
-		return newProcessCleanupError("process identity is not owned for escalation", probe, nil)
+	} else {
+		return p.cleanupGroup(ctx, waiter, syscall.SIGKILL)
 	}
-	probe = waitForGroup(ctx, p.identity, waiter)
-	if probe != processAbsent {
-		return newProcessCleanupError("managed process group did not stop", probe, ctx.Err())
+	if err := signalOwnedGroupWithOps(ctx, p.identity, syscall.SIGKILL, p.processOps()); err != nil {
+		return err
 	}
-	return p.awaitWait(ctx, waiter, probe)
+	return p.cleanupGroup(ctx, waiter, syscall.SIGKILL)
 }
 
-func (p *childProcess) awaitGroupAndWait(ctx context.Context, waiter <-chan error) error {
-	for {
-		if probeProcess(p.identity) == processAbsent {
-			return p.awaitWait(ctx, waiter, processAbsent)
+func (p *childProcess) finishManagedStop(ctx context.Context, waiter <-chan error) error {
+	if waitForProcessExit(ctx, p.waitDone, processGraceDuration(ctx)) {
+		// Pi can disappear while a descendant retains the dedicated group's
+		// pipes. The group must still be drained and proven empty.
+		return p.cleanupGroup(ctx, waiter, syscall.SIGKILL)
+	}
+	if err := ctx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended before escalation", processPresent, err)
+	}
+	if err := signalOwnedProcessWithOps(ctx, p.identity, p.processGroupID, syscall.SIGKILL, p.processOps()); err != nil {
+		return err
+	}
+	if err := p.awaitWait(ctx, waiter, processAbsent); err != nil {
+		return err
+	}
+	return p.cleanupGroup(ctx, waiter, syscall.SIGKILL)
+}
+
+func waitForProcessExit(ctx context.Context, done <-chan struct{}, grace time.Duration) bool {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+func (p *childProcess) cleanupGroup(ctx context.Context, waiter <-chan error, signal syscall.Signal) error {
+	group := p.inspectGroup()
+	if group.state == processGroupUnknown {
+		return newProcessCleanupError("process group inspection failed", processUnknown, group.err)
+	}
+	if group.state == processGroupOwned && len(group.members) != 0 {
+		if p.managedGroup {
+			if err := signalGroupMembers(ctx, p.processGroupID, os.Getpid(), signal, p.processOps(), group.members); err != nil {
+				return err
+			}
+		} else if err := p.processOps().kill(-p.processGroupID, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return newProcessCleanupError("process group signal failed", processPresent, err)
 		}
-		select {
-		case <-ctx.Done():
-			return newProcessCleanupError("stop context ended while waiting for process group", processPresent, ctx.Err())
-		case <-time.After(10 * time.Millisecond):
+		group = p.inspectGroup()
+		if group.state == processGroupUnknown {
+			return newProcessCleanupError("process group verification failed", processUnknown, group.err)
+		}
+		if group.state == processGroupOwned && len(group.members) != 0 {
+			if p.managedGroup {
+				if err := signalGroupMembers(ctx, p.processGroupID, os.Getpid(), syscall.SIGKILL, p.processOps(), group.members); err != nil {
+					return err
+				}
+			} else if err := p.processOps().kill(-p.processGroupID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return newProcessCleanupError("process group escalation failed", processPresent, err)
+			}
+			group = p.inspectGroup()
+			if group.state == processGroupUnknown {
+				return newProcessCleanupError("process group verification failed", processUnknown, group.err)
+			}
 		}
 	}
+	if group.state == processGroupOwned && len(group.members) != 0 {
+		return newProcessCleanupError("process group is not empty", processPresent, nil)
+	}
+	return p.awaitWait(ctx, waiter, processAbsent)
+}
+
+func signalGroupMembers(ctx context.Context, groupID, keepPID int, signal syscall.Signal, ops processOSOps, members []int) error {
+	for _, pid := range members {
+		if pid <= 0 || pid == keepPID {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return newProcessCleanupError("stop context ended while signaling group", processPresent, err)
+		}
+		if err := ops.kill(pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return newProcessCleanupError("process group member signal failed", processPresent, err)
+		}
+	}
+	return nil
+}
+
+func managedGroupMembers(groupID, keepPID int) []int {
+	if groupID <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(-groupID, 0); errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	members, err := listProcessGroup(groupID)
+	if err != nil {
+		return []int{-1}
+	}
+	filtered := make([]int, 0, len(members))
+	for _, pid := range members {
+		if pid != keepPID {
+			filtered = append(filtered, pid)
+		}
+	}
+	return filtered
+}
+
+func listProcessGroup(groupID int) ([]int, error) {
+	cmd := exec.Command("ps", "-axo", "pid=,pgid=")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	members := make([]int, 0)
+	for _, line := range bytes.Split(output, []byte{'\n'}) {
+		fields := strings.Fields(string(line))
+		if len(fields) != 2 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		pgid, pgidErr := strconv.Atoi(fields[1])
+		if pidErr == nil && pgidErr == nil && pid > 0 && pgid == groupID && pid != os.Getpid() {
+			members = append(members, pid)
+		}
+	}
+	return members, nil
 }
 
 func (p *childProcess) awaitWait(ctx context.Context, waiter <-chan error, state processProbeState) error {
@@ -389,91 +621,38 @@ func processGraceDuration(ctx context.Context) time.Duration {
 	return processStopInternalGrace
 }
 
-func waitForAbsent(ctx context.Context, identity processIdentity, duration time.Duration) bool {
-	grace, cancel := context.WithTimeout(ctx, duration)
-	defer cancel()
-	for {
-		if probeProcess(identity) == processAbsent {
-			return true
-		}
-		select {
-		case <-grace.Done():
-			return false
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
-func waitForGroup(ctx context.Context, identity processIdentity, leaderDone <-chan error) processProbeState {
-	for {
-		probe := probeProcess(identity)
-		if probe == processAbsent {
-			return probe
-		}
-		if ctx.Err() != nil {
-			return probe
-		}
-		select {
-		case <-leaderDone:
-			leaderDone = nil
-		case <-ctx.Done():
-			return probe
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
-func signalOwnedGroup(ctx context.Context, identity processIdentity, signal syscall.Signal) error {
+func signalOwnedGroupWithOps(ctx context.Context, identity processIdentity, signal syscall.Signal, ops processOSOps) error {
 	if err := ctx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended before signaling", processUnknown, err)
 	}
-	probe := probeProcess(identity)
+	probe := probeProcessWithOps(identity, identity.PID, true, ops)
 	if probe == processAbsent {
 		return nil
 	}
-	if probe != processOwned && probe != processPresent {
+	if probe != processOwned {
 		return newProcessCleanupError("process identity is not owned for signal", probe, nil)
 	}
-	for {
-		err := syscall.Kill(-identity.PID, signal)
-		if err == nil || errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		if !errors.Is(err, syscall.EPERM) {
-			return newProcessCleanupError("process group signal failed", probe, nil)
-		}
-		select {
-		case <-ctx.Done():
-			return newProcessCleanupError("process group signal failed", probe, ctx.Err())
-		case <-time.After(10 * time.Millisecond):
-		}
+	if err := ops.kill(-identity.PID, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return newProcessCleanupError("process group signal failed", probe, err)
 	}
+	return nil
 }
 
-func killLeaderlessGroup(ctx context.Context, identity processIdentity) error {
+func signalOwnedProcessWithOps(ctx context.Context, identity processIdentity, expectedGroup int, signal syscall.Signal, ops processOSOps) error {
 	if err := ctx.Err(); err != nil {
-		return newProcessCleanupError("stop context ended before leaderless escalation", processPresent, err)
+		return newProcessCleanupError("stop context ended before signaling", processUnknown, err)
 	}
-	if probe := probeProcess(identity); probe != processPresent {
-		if probe == processAbsent {
-			return nil
-		}
-		return newProcessCleanupError("leaderless process group is not verified", probe, nil)
+	probe := probeProcessWithOps(identity, expectedGroup, false, ops)
+	if probe == processAbsent {
+		return nil
 	}
-	for {
-		err := syscall.Kill(-identity.PID, syscall.SIGKILL)
-		if err == nil || errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		if !errors.Is(err, syscall.EPERM) {
-			return newProcessCleanupError("leaderless process group signal failed", processPresent, nil)
-		}
-		select {
-		case <-ctx.Done():
-			return newProcessCleanupError("leaderless process group signal failed", processPresent, ctx.Err())
-		case <-time.After(10 * time.Millisecond):
-		}
+	if probe != processOwned {
+		return newProcessCleanupError("process identity is not owned for signal", probe, nil)
 	}
+	if err := ops.kill(identity.PID, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return newProcessCleanupError("process signal failed", probe, err)
+	}
+	return nil
 }
 
 type processCleanupError struct {

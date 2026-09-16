@@ -41,6 +41,12 @@ type Config struct {
 	PiEnv        []string `json:"pi_env"`
 	PiDir        string   `json:"pi_dir"`
 
+	// ManagedProcessGroup makes the bridge process the verified process-group
+	// owner and places Pi in that same group. The zero value preserves the
+	// Phase 1 standalone child-owned group.
+	ManagedProcessGroup bool   `json:"managed_process_group"`
+	StatusPath          string `json:"status_path"`
+
 	MaxStdoutLine    int           `json:"max_stdout_line"`
 	MaxStderrBytes   int           `json:"max_stderr_bytes"`
 	OutboxCapacity   int           `json:"outbox_capacity"`
@@ -83,6 +89,17 @@ func absolutePath(value string) bool {
 func (c Config) validate() error {
 	c = defaultConfig(c)
 	if validateRouterURL(c.RouterURL) != nil || !absolutePath(c.TokenPath) || c.Agent == "" || !absolutePath(c.PiExecutable) || !absolutePath(c.PiDir) {
+		return ErrInvalidConfig
+	}
+	if c.ManagedProcessGroup {
+		if !absolutePath(c.StatusPath) {
+			return ErrInvalidConfig
+		}
+		if isReservedStatusBasename(filepath.Base(c.StatusPath)) {
+			return ErrReservedStatusPath
+		}
+	}
+	if !c.ManagedProcessGroup && c.StatusPath != "" {
 		return ErrInvalidConfig
 	}
 	if len(c.Agent) > MaxAgentBytes || !validIdentity(c.Agent) {
@@ -129,17 +146,20 @@ func currentOwner(info os.FileInfo) bool {
 
 func openSecureParent(path string) (int, error) {
 	parent := filepath.Dir(path)
-	// macOS exposes /var and /tmp through system symlinks. Resolve those
-	// aliases first, then open the resolved directory without following its
-	// final component. The caller opens the file itself with openat, so a later
-	// pathname replacement cannot redirect the read.
+	// Resolve aliases such as /tmp and /var before opening the directory. The
+	// descriptor is then the authority for every lock and status operation;
+	// the basename is never resolved or followed.
 	resolved, err := filepath.EvalSymlinks(parent)
 	if err != nil {
 		return -1, err
 	}
-	parentInfo, err := os.Lstat(parent)
-	if err != nil || parentInfo.Mode()&os.ModeSymlink != 0 {
-		return -1, ErrInvalidConfig
+	// These two system aliases are stable on macOS. Other symlinked parents
+	// remain rejected so callers cannot substitute an arbitrary directory.
+	if parent != "/tmp" && parent != "/var" {
+		parentInfo, statErr := os.Lstat(parent)
+		if statErr != nil || parentInfo.Mode()&os.ModeSymlink != 0 {
+			return -1, ErrInvalidConfig
+		}
 	}
 	fd, err := unix.Open(resolved, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
 	if err != nil {

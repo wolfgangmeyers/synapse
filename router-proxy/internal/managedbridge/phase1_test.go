@@ -45,9 +45,131 @@ func TestManagedBridgeHelper(t *testing.T) {
 		os.Exit(0)
 	case "term-ignore":
 		signal.Ignore(syscall.SIGTERM)
-		select {}
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGUSR1)
+		defer signal.Stop(signals)
+		<-signals
 	case "pipe-holder":
-		select {}
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGUSR1)
+		defer signal.Stop(signals)
+		<-signals
+	case "managed-exit":
+		os.Exit(0)
+	case "managed-child":
+		config := processTestConfig(t, "term-ignore")
+		config.ManagedProcessGroup = true
+		config.StatusPath = filepath.Join(t.TempDir(), "status.json")
+		process, err := startChild(context.Background(), config)
+		if err != nil {
+			os.Exit(3)
+		}
+		group, groupErr := syscall.Getpgid(process.identity.PID)
+		if groupErr != nil || group != os.Getpid() {
+			_ = process.stop(context.Background())
+			os.Exit(4)
+		}
+		if err := process.stop(context.Background()); err != nil {
+			os.Exit(5)
+		}
+		os.Exit(0)
+	case "managed-descendant-stop":
+		config := processTestConfig(t, "spawn-holder")
+		config.ManagedProcessGroup = true
+		config.StatusPath = filepath.Join(t.TempDir(), "status.json")
+		process, err := startChild(context.Background(), config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "managed descendant start: %v\\n", err)
+			os.Exit(6)
+		}
+		if err := process.wait(); err == nil {
+			// The leader is expected to exit while its child retains the pipes.
+		}
+		if len(managedGroupMembers(os.Getpid(), os.Getpid())) == 0 {
+			os.Exit(7)
+		}
+		if err := process.stop(context.Background()); err != nil {
+			os.Exit(8)
+		}
+		if len(managedGroupMembers(os.Getpid(), os.Getpid())) != 0 {
+			os.Exit(9)
+		}
+		fmt.Fprintln(os.Stdout, "managed-descendant-clean")
+		os.Exit(0)
+	case "managed-wrong-group":
+		config := processTestConfig(t, "term-ignore")
+		config.ManagedProcessGroup = true
+		config.StatusPath = filepath.Join(t.TempDir(), "status.json")
+		process, err := startChild(context.Background(), config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "managed wrong-group start: %v\\n", err)
+			os.Exit(10)
+		}
+		correctGroup := process.processGroupID
+		process.processGroupID = correctGroup + 1
+		if err := process.stop(context.Background()); err == nil {
+			os.Exit(11)
+		}
+		if probeManagedMember(process.identity, correctGroup) != processOwned {
+			os.Exit(12)
+		}
+		process.stopMu.Lock()
+		process.stopStarted = false
+		process.stopDone = nil
+		process.stopErr = nil
+		process.stopMu.Unlock()
+		process.processGroupID = correctGroup
+		if err := process.stop(context.Background()); err != nil {
+			os.Exit(13)
+		}
+		fmt.Fprintln(os.Stdout, "managed-wrong-group-refused")
+		os.Exit(0)
+	case "managed-status-hook", "managed-runtime":
+		config := processTestConfig(t, os.Getenv("MANAGED_BRIDGE_PI_MODE"))
+		config.RouterURL = os.Getenv("MANAGED_BRIDGE_ROUTER_URL")
+		config.ManagedProcessGroup = true
+		config.StatusPath = os.Getenv("MANAGED_BRIDGE_STATUS_PATH")
+		verifier := mustVerifier(t, 'x')
+		runCtx, cancel := context.WithCancel(context.Background())
+		options := Options{}
+		if os.Getenv("MANAGED_BRIDGE_MODE") == "managed-status-hook" {
+			options.Dial = func(ctx context.Context, _ string) (*websocket.Conn, error) {
+				if _, err := ReadManagedRuntimeStatus(config.StatusPath, verifier); err != nil {
+					fmt.Fprintln(os.Stdout, "status-missing")
+					cancel()
+					return nil, err
+				}
+				fmt.Fprintln(os.Stdout, "status-observed")
+				cancel()
+				return nil, errors.New("test dial hook")
+			}
+		} else {
+			go func() {
+				_, _ = os.Stdin.Read(make([]byte, 1))
+				cancel()
+			}()
+		}
+		bridge, err := NewBridge(config, verifier, options)
+		if err != nil {
+			os.Exit(14)
+		}
+		runErr := bridge.Run(runCtx)
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "managed bridge run: %v\\n", runErr)
+		}
+		if os.Getenv("MANAGED_BRIDGE_MODE") == "managed-status-hook" {
+			if !errors.Is(runErr, context.Canceled) {
+				os.Exit(15)
+			}
+		} else if os.Getenv("MANAGED_BRIDGE_PI_MODE") == "managed-exit" {
+			if !errors.Is(runErr, ErrProcessExit) {
+				os.Exit(16)
+			}
+			fmt.Fprintln(os.Stdout, "pi-exit-observed")
+		} else {
+			fmt.Fprintln(os.Stdout, "bridge-stopped")
+		}
+		os.Exit(0)
 	}
 	buf := make([]byte, 32*1024)
 	for {
