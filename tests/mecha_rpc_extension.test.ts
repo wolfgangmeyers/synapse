@@ -150,6 +150,103 @@ test("child delta delivery retries in order and bounds overflow into a recoverab
   assert.equal(overflow.length, MAX_BUFFERED_CHILD_DELTAS, "overflow replaces queued newest input and leaves one recovery gap");
 });
 
+test("the owner completion hook waits for the exact terminal delta before publishing completion", async () => {
+  const symbol = Symbol.for("@gotgenes/pi-subagents:service-registry");
+  const previous = Object.getOwnPropertyDescriptor(globalThis, symbol);
+  let completionHook: ((record: { id: string }) => void | Promise<void>) | undefined;
+  const service = {
+    registerBeforeCompletionHookV1(hook: (record: { id: string }) => void | Promise<void>) {
+      completionHook = hook;
+      return () => { completionHook = undefined; };
+    },
+  };
+  Object.defineProperty(globalThis, symbol, { configurable: true, value: { services: new Map([["root-session", service]]) } });
+  try {
+    const current = fixture();
+    const releaseAppend = Promise.withResolvers<void>();
+    const originalSend = current.pi.sendMessage;
+    current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+      current.sent.push({ message, options });
+      if (message.customType === "mecha.child.delta.v1") return releaseAppend.promise;
+      return originalSend(message, options);
+    };
+    const terminal = {
+      protocol: "mecha.children/v1", owner_session_id: "root-session", sequence: 9,
+      task_id: "task-1", run_id: "run-1", parent_entry_id: "entry-1", context_ref: null,
+      changes: { lifecycle_state: "completed" },
+    };
+    current.events.get("subagents:lifecycle-v2")!(terminal);
+    assert.ok(completionHook);
+    const persisted: string[] = [];
+    const publishCompletion = async (): Promise<void> => {
+      await completionHook!({ id: "task-1" });
+      persisted.push("subagents:record");
+      current.sent.push({ message: { customType: "subagents:record" }, options: undefined });
+    };
+    const completion = publishCompletion();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(persisted, []);
+    assert.equal(current.sent.filter(({ message }) => message.customType === "mecha.child.delta.v1").length, 1);
+
+    releaseAppend.resolve();
+    await completion;
+    assert.deepEqual(persisted, ["subagents:record"]);
+    const terminalIndex = current.sent.findIndex(({ message }) => message.customType === "mecha.child.delta.v1");
+    const completionIndex = current.sent.findIndex(({ message }) => message.customType === "subagents:record");
+    assert.equal(completionIndex, terminalIndex + 1);
+    assert.equal(current.sent.filter(({ message }) => message.customType === "subagents:record").length, 1);
+  } finally {
+    if (previous === undefined) delete (globalThis as Record<PropertyKey, unknown>)[symbol];
+    else Object.defineProperty(globalThis, symbol, previous);
+  }
+});
+
+test("terminal completion is suppressed truthfully when the delta append fails or closes", async () => {
+  const symbol = Symbol.for("@gotgenes/pi-subagents:service-registry");
+  const previous = Object.getOwnPropertyDescriptor(globalThis, symbol);
+  let completionHook: ((record: { id: string }) => void | Promise<void>) | undefined;
+  const service = {
+    registerBeforeCompletionHookV1(hook: (record: { id: string }) => void | Promise<void>) {
+      completionHook = hook;
+      return () => { completionHook = undefined; };
+    },
+  };
+  Object.defineProperty(globalThis, symbol, { configurable: true, value: { services: new Map([["root-session", service]]) } });
+  try {
+    const current = fixture();
+    const originalSend = current.pi.sendMessage;
+    current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+      if (message.customType === "mecha.child.delta.v1") return Promise.reject(new Error("append rejected"));
+      return originalSend(message, options);
+    };
+    current.events.get("subagents:lifecycle-v2")!({
+      protocol: "mecha.children/v1", owner_session_id: "root-session", sequence: 10,
+      task_id: "task-failed", run_id: "run-failed", parent_entry_id: "entry-failed", context_ref: null,
+      changes: { lifecycle_state: "error" },
+    });
+    await assert.rejects(() => completionHook!({ id: "task-failed" }), /not durably appended/);
+    assert.equal(current.sent.some(({ message }) => message.customType === "subagents:record"), false);
+
+    const releaseAppend = Promise.withResolvers<void>();
+    current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+      if (message.customType === "mecha.child.delta.v1") return releaseAppend.promise;
+      return originalSend(message, options);
+    };
+    current.events.get("subagents:lifecycle-v2")!({
+      protocol: "mecha.children/v1", owner_session_id: "root-session", sequence: 11,
+      task_id: "task-closed", run_id: "run-closed", parent_entry_id: "entry-closed", context_ref: null,
+      changes: { lifecycle_state: "stopped" },
+    });
+    const closing = completionHook!({ id: "task-closed" });
+    current.handlers.get("session_shutdown")!({}, current.context);
+    await assert.rejects(() => closing, /not durably appended/);
+    await assert.rejects(() => completionHook!({ id: "task-closed" }), /session closed/);
+  } finally {
+    if (previous === undefined) delete (globalThis as Record<PropertyKey, unknown>)[symbol];
+    else Object.defineProperty(globalThis, symbol, previous);
+  }
+});
+
 test("clearing an old in-flight child delivery restarts draining for the replacement owner", async () => {
   const firstStarted = Promise.withResolvers<void>();
   const releaseFirst = Promise.withResolvers<void>();

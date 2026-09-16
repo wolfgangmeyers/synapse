@@ -461,6 +461,9 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   let commandRegistrationFailed = false;
   let registeredOwnerSessionId: string | undefined;
   let disposeChildFactory: (() => void) | undefined;
+  let disposeCompletionHook: (() => void) | undefined;
+  // Each entry is consumed by its matching completion hook; shutdown clears the in-flight set.
+  const terminalDeltaAcknowledgements = new Map<string, Promise<boolean>>();
   const childDeltaBuffer = new BoundedChildDeltaBuffer(
     async (wire) => sendHiddenCustomMessage(pi, "mecha.child.delta.v1", "Managed child lifecycle updated.", wire, { triggerTurn: false }),
     (ownerSessionId) => registeredOwnerSessionId === ownerSessionId,
@@ -470,7 +473,27 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   // exhausted retry leaves a sequence gap for router-side snapshot recovery.
   const enqueueChildDelta = (wire: JsonRecord): void => {
     const ownerSessionId = wire.owner_session_id;
-    if (typeof ownerSessionId === "string") childDeltaBuffer.enqueue(ownerSessionId, wire);
+    if (typeof ownerSessionId !== "string") return;
+    const acknowledgement = childDeltaBuffer.enqueue(ownerSessionId, wire);
+    const changes = wire.changes;
+    const lifecycleState = isRecord(changes) ? changes.lifecycle_state : undefined;
+    if (typeof wire.task_id === "string" && (lifecycleState === "completed" || lifecycleState === "error" || lifecycleState === "stopped" || lifecycleState === "aborted" || lifecycleState === "steered")) {
+      terminalDeltaAcknowledgements.set(wire.task_id, acknowledgement);
+    }
+  };
+  const registerCompletionHook = (ownerSessionId: string | undefined): void => {
+    disposeCompletionHook?.();
+    disposeCompletionHook = undefined;
+    if (ownerSessionId === undefined) return;
+    const service = getSubagentsService(ownerSessionId);
+    if (service === undefined || typeof service.registerBeforeCompletionHookV1 !== "function") return;
+    disposeCompletionHook = service.registerBeforeCompletionHookV1(async (record) => {
+      if (registeredOwnerSessionId !== ownerSessionId) throw new Error("Managed child session closed before terminal delta append.");
+      const acknowledgement = terminalDeltaAcknowledgements.get(record.id);
+      if (acknowledgement === undefined) return;
+      terminalDeltaAcknowledgements.delete(record.id);
+      if (!await acknowledgement) throw new Error("Managed terminal child delta was not durably appended.");
+    });
   };
   const queuedCommands: Array<{ name: string; command: Command }> = [];
   const queueCommand = (name: string, command: Command): void => {
@@ -509,6 +532,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     if (ownerSessionId === undefined) return;
     const service = childExtensionFactoryService(ownerSessionId);
     if (service === undefined) return;
+    registerCompletionHook(ownerSessionId);
     const acceptedManifest = toolRegistry.acceptedManifest();
     if (acceptedManifest === undefined) throw new TypeError("Managed child factory requires an accepted manifest.");
     // Existing children retain their spawn snapshot. Replacing this registration
@@ -881,8 +905,14 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   // is still before get_commands or any model request can observe this extension.
   pi.on("session_start", async (_event, context) => {
     const ownerSessionId = sessionIdFromContext(context);
-    if (registeredOwnerSessionId !== ownerSessionId) childDeltaBuffer.clear();
+    if (registeredOwnerSessionId !== ownerSessionId) {
+      disposeCompletionHook?.();
+      disposeCompletionHook = undefined;
+      terminalDeltaAcknowledgements.clear();
+      childDeltaBuffer.clear();
+    }
     registeredOwnerSessionId = ownerSessionId;
+    registerCompletionHook(ownerSessionId);
     registerCommands();
     if (nativeRootControlTestEnabled && registeredOwnerSessionId !== undefined && initialAcceptedManifest === undefined) {
       const ownerSessionId = registeredOwnerSessionId;
@@ -947,6 +977,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     rootPendingRequestIds.clear();
     installationReceipts.clear();
     childDeltaBuffer.clear();
+    terminalDeltaAcknowledgements.clear();
     registeredOwnerSessionId = undefined;
   });
 
