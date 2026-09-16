@@ -429,7 +429,7 @@ func (r *Router) connectedAgents(ctx context.Context, includeModels bool) map[st
 
 func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 	if r.managed != nil {
-		if err := r.managed.PruneManagedRootRecovery(ctx); err != nil {
+		if err := r.managed.RecoverManagedRootColdStarts(ctx); err != nil {
 			return store.SweepResult{}, err
 		}
 	}
