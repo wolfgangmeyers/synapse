@@ -8,18 +8,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 )
 
 const (
-	maxEventStringBytes = 256
-	maxEventCount       = 1_000_000
+	maxEventStringBytes         = 256
+	maxEventIdentifierBytes     = 256
+	maxEventAgentMessageIDBytes = 128
+	maxEventErrorBytes          = 2048
+	maxEventCount               = 1_000_000
+	redactedValue               = "[REDACTED]"
 
 	logRotationAge  = 24 * time.Hour
 	logRetentionAge = 48 * time.Hour
@@ -30,18 +37,27 @@ const (
 )
 
 type logWriter struct {
-	path     string
-	now      func() time.Time
-	file     *os.File
-	openedAt time.Time
-	mu       sync.Mutex
+	path         string
+	now          func() time.Time
+	file         *os.File
+	openedAt     time.Time
+	knownSecrets []string
+	mu           sync.Mutex
 }
 
 func newLogWriter(path string) (*logWriter, error) {
-	return newLogWriterAt(path, time.Now)
+	return newLogWriterWithKnownSecretsAt(path, time.Now, nil)
+}
+
+func newLogWriterWithKnownSecrets(path string, knownSecrets []string) (*logWriter, error) {
+	return newLogWriterWithKnownSecretsAt(path, time.Now, knownSecrets)
 }
 
 func newLogWriterAt(path string, now func() time.Time) (*logWriter, error) {
+	return newLogWriterWithKnownSecretsAt(path, now, nil)
+}
+
+func newLogWriterWithKnownSecretsAt(path string, now func() time.Time, knownSecrets []string) (*logWriter, error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -64,7 +80,7 @@ func newLogWriterAt(path string, now func() time.Time) (*logWriter, error) {
 	if openedAt.IsZero() {
 		openedAt = now().UTC()
 	}
-	return &logWriter{path: path, now: now, file: file, openedAt: openedAt}, nil
+	return &logWriter{path: path, now: now, file: file, openedAt: openedAt, knownSecrets: sortedKnownSecrets(knownSecrets)}, nil
 }
 
 // eventLogger keeps diagnostics best effort. Its error path writes directly to
@@ -81,6 +97,14 @@ func typedEventLogger(writer *logWriter, errorWriter io.Writer) transport.EventL
 	return func(event transport.Event) {
 		if err := writer.LogEvent(event); err != nil {
 			_, _ = fmt.Fprintf(errorWriter, "mailbox-router: event log write failed: %v\n", err)
+		}
+	}
+}
+
+func managedEventLogger(writer *logWriter, errorWriter io.Writer) managed.EventSink {
+	return func(event managed.Event) {
+		if err := writer.LogManagedEvent(event); err != nil {
+			_, _ = fmt.Fprintf(errorWriter, "mailbox-router: managed event log write failed: %v\n", err)
 		}
 	}
 }
@@ -105,6 +129,14 @@ var safeEventFields = map[string]map[string]struct{}{
 	"reminder_started":           {"reminder_id": {}, "scheduled_for": {}},
 	"reminder_succeeded":         {"reminder_id": {}, "scheduled_for": {}, "linked_message_id": {}, "agent_id": {}},
 	"reminder_failed":            {"reminder_id": {}, "scheduled_for": {}, "error_code": {}},
+	"managed_mailbox_incoming":   {"agent_id": {}, "message_id": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
+	"managed_mailbox_outgoing":   {"agent_id": {}, "message_id": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
+	"managed_root_control":       {"agent_id": {}, "operation_id": {}, "request_id": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
+	"managed_reminder":           {"agent_id": {}, "message_id": {}, "operation_id": {}, "reminder_id": {}, "status": {}, "error_code": {}, "error_text": {}, "message": {}, "content": {}, "phase": {}, "truncated": {}},
+	"managed_tool_lifecycle":     {"agent_id": {}, "operation_id": {}, "tool_id": {}, "call_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
+	"managed_process":            {"agent_id": {}, "operation_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
+	"managed_rpc":                {"agent_id": {}, "operation_id": {}, "call_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
+	"managed_recovery":           {"agent_id": {}, "operation_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
 }
 
 var closedEventValues = map[string]map[string]struct{}{
@@ -115,23 +147,51 @@ var closedEventValues = map[string]map[string]struct{}{
 	"lifecycle_event": {"snapshot": {}, "started": {}, "terminal": {}, "agent_start": {}, "agent_settled": {}, "agent_end": {}, "message_start": {}, "message_end": {}},
 }
 
+var (
+	// Keep common prose punctuation outside the bearer match. The value may
+	// still contain token punctuation such as dots, slashes, and equals signs.
+	bearerTextPattern = regexp.MustCompile(`(?i)\bbearer[ \t]+[^\s,;(){}\[\]]+`)
+	secretTextPattern = regexp.MustCompile(`(?i)(\b(?:access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|password|secret|credential|authorization|cookie)\b)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
+)
+
+func eventStringLimit(key string) int {
+	switch key {
+	case "body", "message", "content":
+		return protocol.AbsoluteMaxBodyBytes
+	case "error_text":
+		return maxEventErrorBytes
+	case "agent_id", "message_id", "event_id", "linked_message_id":
+		return maxEventAgentMessageIDBytes
+	case "operation_id", "request_id", "reminder_id", "tool_id", "call_id":
+		return maxEventIdentifierBytes
+	default:
+		return maxEventStringBytes
+	}
+}
+
 func validateEvent(event string, fields map[string]any) error {
 	allowed, ok := safeEventFields[event]
 	if !ok {
 		return fmt.Errorf("unknown event %q", event)
 	}
+	managedEvent := strings.HasPrefix(event, "managed_")
 	for key, value := range fields {
-		if _, ok := allowed[key]; !ok {
+		if _, ok := allowed[key]; !ok && !isSecretKey(key) {
 			return fmt.Errorf("unsafe or unknown field %q for event %q", key, event)
 		}
 		switch item := value.(type) {
 		case string:
-			if !utf8.ValidString(item) || len(item) > maxEventStringBytes || strings.IndexByte(item, 0) >= 0 || item == "" && key != "reason" {
+			if !utf8.ValidString(item) || len(item) > eventStringLimit(key) || strings.IndexByte(item, 0) >= 0 {
 				return fmt.Errorf("field %q exceeds string bound", key)
 			}
-			if values, ok := closedEventValues[key]; ok {
-				if _, allowed := values[item]; !allowed {
-					return fmt.Errorf("field %q has an unknown closed value", key)
+			if item == "" && key != "reason" && key != "subject" && key != "body" && key != "message" && key != "content" && key != "error_text" {
+				return fmt.Errorf("field %q must not be empty", key)
+			}
+			if !managedEvent {
+				if values, ok := closedEventValues[key]; ok {
+					if _, allowed := values[item]; !allowed {
+						return fmt.Errorf("field %q has an unknown closed value", key)
+					}
 				}
 			}
 			if key == "next_due_at" || key == "scheduled_for" {
@@ -139,6 +199,10 @@ func validateEvent(event string, fields map[string]any) error {
 				if err != nil || parsed.UTC().Format(time.RFC3339Nano) != item {
 					return fmt.Errorf("field %q is not a normalized timestamp", key)
 				}
+			}
+		case bool:
+			if key != "truncated" {
+				return fmt.Errorf("field %q has unsafe type", key)
 			}
 		case int:
 			if (key == "port" && (item < 1 || item > 65535)) || item < 0 || item > maxEventCount {
@@ -153,6 +217,103 @@ func validateEvent(event string, fields map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func isSecretKey(key string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
+	for _, part := range []string{"password", "secret", "credential", "authorization", "cookie", "token", "access_token", "refresh_token", "client_secret", "api_key", "apikey", "private_key"} {
+		if strings.Contains(lower, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedKnownSecrets(values []string) []string {
+	secrets := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && utf8.ValidString(value) && strings.IndexByte(value, 0) < 0 {
+			secrets = append(secrets, value)
+		}
+	}
+	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return secrets
+}
+
+func redactLogText(value string, knownSecrets []string) string {
+	// Apply syntax redaction before registered values so the replacement marker
+	// is not mistaken for the tail of a bearer value.
+	value = bearerTextPattern.ReplaceAllString(value, "Bearer "+redactedValue)
+	value = secretTextPattern.ReplaceAllString(value, "$1$2"+redactedValue)
+	// Never run known-secret replacement through the marker itself. This keeps
+	// the sanitizer idempotent even when a configured secret is a marker or a
+	// substring of one.
+	parts := strings.Split(value, redactedValue)
+	for index := range parts {
+		for _, secret := range sortedKnownSecrets(knownSecrets) {
+			if secret == redactedValue {
+				continue
+			}
+			parts[index] = strings.ReplaceAll(parts[index], secret, redactedValue)
+		}
+	}
+	return strings.Join(parts, redactedValue)
+}
+
+func redactLogFields(fields map[string]any, knownSecrets []string) map[string]any {
+	redacted := make(map[string]any, len(fields))
+	for key, value := range fields {
+		if isSecretKey(key) {
+			redacted[key] = redactedValue
+			continue
+		}
+		if text, ok := value.(string); ok {
+			redacted[key] = redactLogText(text, knownSecrets)
+		} else {
+			redacted[key] = value
+		}
+	}
+	return redacted
+}
+
+func managedEventFields(event managed.Event) (string, map[string]any, error) {
+	name := string(event.Kind)
+	if !event.Valid() {
+		return "", nil, fmt.Errorf("unknown managed event %q", name)
+	}
+	fields := make(map[string]any)
+	add := func(key, value string) {
+		if value != "" {
+			fields[key] = value
+		}
+	}
+	add("agent_id", event.AgentID)
+	add("message_id", event.MessageID)
+	add("operation_id", event.OperationID)
+	add("request_id", event.RequestID)
+	add("reminder_id", event.ReminderID)
+	add("subject", event.Subject)
+	add("body", event.Body)
+	add("message", event.Message)
+	add("content", event.Content)
+	add("status", event.Status)
+	add("error_code", event.ErrorCode)
+	add("error_text", event.ErrorText)
+	add("phase", event.Phase)
+	add("tool_id", event.ToolID)
+	add("call_id", event.CallID)
+	if event.Truncated {
+		fields["truncated"] = true
+	}
+	return name, fields, nil
+}
+
+func (w *logWriter) LogManagedEvent(event managed.Event) error {
+	name, fields, err := managedEventFields(event)
+	if err != nil {
+		return err
+	}
+	return w.logFields(name, fields)
 }
 
 func (w *logWriter) LogEvent(event transport.Event) error {
@@ -178,7 +339,7 @@ func (w *logWriter) logFields(event string, fields map[string]any) error {
 
 	now := w.now().UTC()
 	record := map[string]any{"event": event, "timestamp": now.Format("2006-01-02T15:04:05.000Z")}
-	for key, value := range fields {
+	for key, value := range redactLogFields(fields, w.knownSecrets) {
 		record[key] = value
 	}
 	encoded, err := json.Marshal(record)

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -143,4 +145,96 @@ func TestLogWriterRejectsUnsafeRecordBeforeWriting(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Empty(t, data)
+}
+
+func TestManagedLogWriterPreservesBoundedTextExactly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.jsonl")
+	writer, err := newLogWriter(path)
+	require.NoError(t, err)
+	body := "line one\r\nline two\n雪"
+	require.NoError(t, writer.LogManagedEvent(managed.Event{
+		Kind: managed.EventManagedMailboxIncoming, AgentID: "agent", MessageID: "message", OperationID: "operation",
+		Subject: "subject\r\n雪", Body: body, ErrorText: "error\r\n雪",
+	}))
+	require.NoError(t, writer.Close())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(data, &record))
+	require.Equal(t, "subject\r\n雪", record["subject"])
+	require.Equal(t, body, record["body"])
+	require.Equal(t, "error\r\n雪", record["error_text"])
+}
+
+func TestManagedLogWriterEnforcesFieldBoundsWithoutTruncating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.jsonl")
+	writer, err := newLogWriter(path)
+	require.NoError(t, err)
+	require.NoError(t, writer.LogManagedEvent(managed.Event{Kind: managed.EventManagedProcess, AgentID: strings.Repeat("a", maxEventAgentMessageIDBytes), OperationID: strings.Repeat("o", maxEventIdentifierBytes), ErrorText: strings.Repeat("e", maxEventErrorBytes), Content: strings.Repeat("c", protocol.AbsoluteMaxBodyBytes)}))
+	require.Error(t, writer.LogManagedEvent(managed.Event{Kind: managed.EventManagedProcess, AgentID: strings.Repeat("a", maxEventAgentMessageIDBytes+1)}))
+	require.Error(t, writer.LogManagedEvent(managed.Event{Kind: managed.EventManagedProcess, OperationID: strings.Repeat("o", maxEventIdentifierBytes+1)}))
+	require.Error(t, writer.LogManagedEvent(managed.Event{Kind: managed.EventManagedProcess, ErrorText: strings.Repeat("e", maxEventErrorBytes+1)}))
+	require.Error(t, writer.LogManagedEvent(managed.Event{Kind: managed.EventManagedProcess, Content: strings.Repeat("c", protocol.AbsoluteMaxBodyBytes+1)}))
+	require.NoError(t, writer.Close())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Len(t, strings.Split(strings.TrimSpace(string(data)), "\n"), 1)
+}
+
+func TestManagedLogWriterRedactsTextAndRegisteredSecretsBeforeJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.jsonl")
+	writer, err := newLogWriterWithKnownSecrets(path, []string{"synthetic-secret", "synthetic"})
+	require.NoError(t, err)
+	text := "Bearer synthetic-secret access_token=synthetic-secret"
+	require.NoError(t, writer.LogManagedEvent(managed.Event{Kind: managed.EventManagedRPC, Message: text, ErrorText: "password=synthetic-secret"}))
+	require.NoError(t, writer.Log("router_error", map[string]any{"error_code": "internal_error", "password": "synthetic-secret"}))
+	require.NoError(t, writer.Close())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "synthetic-secret")
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var record map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &record))
+	require.Equal(t, "Bearer [REDACTED] access_token=[REDACTED]", record["message"])
+	require.Equal(t, "password=[REDACTED]", record["error_text"])
+	var keyRecord map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &keyRecord))
+	require.Equal(t, redactedValue, keyRecord["password"])
+	require.Equal(t, map[string]any{"password": redactedValue}, redactLogFields(map[string]any{"password": "synthetic-secret"}, nil))
+}
+
+func TestLogWriterRedactionIsIdempotentAndPreservesMixedSecrets(t *testing.T) {
+	knownSecrets := []string{"synthetic-secret", "synthetic"}
+	input := "before Bearer bearer-token access_token=access-token known=synthetic-secret marker=[REDACTED] after"
+	redacted := redactLogText(input, knownSecrets)
+	require.Equal(t, "before Bearer [REDACTED] access_token=[REDACTED] known=[REDACTED] marker=[REDACTED] after", redacted)
+	require.Equal(t, redacted, redactLogText(redacted, knownSecrets))
+	require.Equal(t, "[REDACTED]", redactLogText("[REDACTED]", []string{"[REDACTED]", "REDACTED"}))
+}
+
+func TestLogWriterRedactionPreservesOrdinaryTextAndDelimiters(t *testing.T) {
+	ordinary := "secret sauce; cookie-cutter; access-tokenized; password reset"
+	redacted := redactLogText("Bearer synthetic-token, next", []string{"synthetic-token"})
+	require.Equal(t, "Bearer [REDACTED], next", redacted)
+	require.Equal(t, ordinary, redactLogText(ordinary, nil))
+
+	fields := redactLogFields(map[string]any{
+		"accessToken": "synthetic-access-token",
+		"api_key":     "synthetic-api-key",
+		"message":     ordinary,
+	}, nil)
+	require.Equal(t, redactedValue, fields["accessToken"])
+	require.Equal(t, redactedValue, fields["api_key"])
+	require.Equal(t, ordinary, fields["message"])
+}
+
+func TestManagedEventAdapterFailureIsIsolated(t *testing.T) {
+	writer, err := newLogWriter(filepath.Join(t.TempDir(), "router.jsonl"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	var output strings.Builder
+	require.NotPanics(t, func() {
+		managedEventLogger(writer, &output)(managed.Event{Kind: managed.EventManagedRecovery, Status: "failed"})
+	})
+	require.Contains(t, output.String(), "managed event log write failed")
 }
