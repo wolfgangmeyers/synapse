@@ -7,13 +7,6 @@ import { Sidebar } from "../../src/components/Sidebar";
 afterEach(cleanup);
 
 describe("Sidebar", () => {
-  it("keeps the Logs surface discoverable from the application navigation", () => {
-    render(<Sidebar routerLabel="local" connection="connected" agents={[]} />);
-    const navigation = screen.getByRole("navigation", { name: "Application navigation" });
-    expect(navigation).toContainElement(screen.getByRole("link", { name: "Logs" }));
-    expect(screen.getByRole("link", { name: "Logs" })).toHaveAttribute("href", "/logs");
-  });
-
   it("filters and selects agents", () => {
     const onSelect = vi.fn();
     render(<Sidebar routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);

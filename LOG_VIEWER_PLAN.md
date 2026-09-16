@@ -21,7 +21,7 @@ Confirm these gaps at the start of implementation and close only the listed view
 | `web/router-ui-react/src/transport/http-client.ts` | No typed router-log client | Add the typed client and boundary validation. |
 | `web/router-ui-react/src/protocol/manifest.ts` | No router-log route entry | Add exactly `{methods:["GET"],path:"/v1/router-log"}`. |
 | `router/contract/manifest.json` | No router-log route entry | Add the same ordinary method/path entry. Keep request and response types outside the manifest. |
-| `web/router-ui-react/src/App.tsx` | No log page or navigation | Add the `/logs` page and existing-shell navigation. |
+| `web/router-ui-react/src/App.tsx` | No log viewer or agent action | Add an agent-scoped Logs action in the conversation header and shared modal. |
 
 Do not describe the current active-only route as an implemented V2 feature. Do not treat the dirty `router_log.go` file as proof that the contract is complete.
 
@@ -104,9 +104,9 @@ Add a typed client in the existing React transport layer. Validate every request
 
 Add contract tests for query serialization, missing-versus-empty behavior in Go and TypeScript, duplicate and unknown parameters, invalid percent encoding, invalid UTF-8, invalid timestamps and cursors, response limits, invalid base64, fixed errors, CORS-origin calls, and manifest parity.
 
-### 6. Dark React page
+### 6. In-context React modal
 
-Add `/logs` navigation to the existing shell and a read-only viewer surface. Keep the route same-origin when served by the built bundle. Use the typed client with the configured router URL.
+Add a read-only, agent-scoped Logs action to the existing conversation header. Open the viewer in the shared modal shell on the mailbox page; do not add a standalone `/logs` page or global navigation. Use the typed client with the configured router URL.
 
 Implement:
 
@@ -115,8 +115,8 @@ Implement:
 - `Search`, `Refresh`, and `Clear` actions;
 - loading, no-match, partial-window, source-unavailable, invalid-cursor, and request-error states outside the log panel;
 - `Older` and `Newer` page controls within the fixed newest-500 result set, with correct disabled states;
-- a dark monospace panel with `white-space: pre`, horizontal scrolling, and no wrapping that changes line shape;
-- plain text nodes only, with no Markdown, HTML, JSON table, export, download, or worker controls; and
+- a readable structured view that preserves every logged field, including message, body, and error text, plus an obvious Raw view for the original line;
+- escaped text nodes only, with credential and access-token redaction in both views and no Markdown, HTML interpretation, export, download, or worker controls; and
 - deterministic display for valid UTF-8, CR, and invalid byte sequences.
 
 Use a fatal UTF-8 decode for valid records. Keep CR and whitespace in the text node. Render invalid bytes with one documented deterministic `\\xNN` fallback for display. The fallback must not alter the base64 response, search input, cursor, or source comparison.
@@ -131,8 +131,8 @@ Then run the mandatory built-bundle test:
 
 1. Build the actual React bundle.
 2. Start the actual Go router with `--managed-ui-dist` set to that build directory and the production reader injected.
-3. Request the same-origin `/logs` page from the router.
-4. Exercise the bundled page's search against `GET /v1/router-log` with bounded query parameters.
+3. Request the same-origin mailbox page from the router, select an agent, and open its Logs modal.
+4. Exercise the bundled modal's scoped search against `GET /v1/router-log` with bounded query parameters.
 5. Verify the page loads without a Vite overlay and renders the returned records.
 
 A component test or a separately running Vite server does not satisfy this check.
