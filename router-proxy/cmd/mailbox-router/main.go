@@ -214,7 +214,8 @@ func main() {
 			log.Print("managed provider status is unavailable")
 		}
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}, RouterLogReader: routerLogReader})
+	managedBridgeHandler := transport.NewManagedBridgeHandler(durable)
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ManagedBridge: managedBridgeHandler, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}, RouterLogReader: routerLogReader})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

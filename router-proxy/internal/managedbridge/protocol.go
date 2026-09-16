@@ -260,6 +260,7 @@ const (
 	CommandAbort    = "abort"
 	CommandShutdown = "shutdown"
 	CommandManifest = "manifest"
+	CommandRPC      = "rpc"
 
 	EventReady   = "ready"
 	EventState   = "state"
@@ -267,18 +268,19 @@ const (
 	EventTool    = "tool"
 	EventError   = "error"
 	EventStopped = "stopped"
+	EventRPC     = "rpc"
 )
 
 func validCommand(name string) bool {
 	switch name {
-	case CommandPrompt, CommandAbort, CommandShutdown, CommandManifest:
+	case CommandPrompt, CommandAbort, CommandShutdown, CommandManifest, CommandRPC:
 		return true
 	}
 	return false
 }
 func validEvent(name string) bool {
 	switch name {
-	case EventReady, EventState, EventMessage, EventTool, EventError, EventStopped:
+	case EventReady, EventState, EventMessage, EventTool, EventError, EventStopped, EventRPC:
 		return true
 	}
 	return false

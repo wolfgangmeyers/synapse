@@ -231,6 +231,9 @@ type Options struct {
 	PolicyTimeout         time.Duration
 	PolicySender          PolicySender
 	Managed               *managed.Manager
+	// ManagedBridge is the authenticated loopback bridge handler. The command
+	// binary constructs it so route ownership is explicit and closeable.
+	ManagedBridge *ManagedBridgeHandler
 	// ProviderAuth shares the managed Pi auth context and emits non-secret
 	// status/prompt frames through the existing direct UI-live channel.
 	ProviderAuth *managed.ProviderAuthCoordinator
@@ -343,6 +346,7 @@ type Router struct {
 	goalAvailable            bool
 	lifecycleAvailable       bool
 	managed                  *managed.Manager
+	managedBridge            *ManagedBridgeHandler
 	providerAuth             *managed.ProviderAuthCoordinator
 	managedPathCanonicalizer func(*http.Request) string
 	staticUI                 *staticUI
@@ -582,6 +586,10 @@ func New(options Options) (*Router, error) {
 	if logger == nil {
 		logger = func(Event) {}
 	}
+	managedBridge := options.ManagedBridge
+	if managedBridge == nil {
+		managedBridge = NewManagedBridgeHandler(options.Store)
+	}
 	lifecycle := options.LifecycleAvailable
 	if !options.LifecycleAvailable {
 		lifecycle = contains(options.Store.MigrationIDs(), "017_subagent_lifecycle")
@@ -592,7 +600,7 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader}
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
@@ -750,6 +758,13 @@ func (r *Router) Listen(ctx context.Context) error {
 
 // ServeHTTP exposes the router for net/http and httptest callers.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == "/v1/managed-bridge" {
+		r.mu.RLock()
+		handler := r.managedBridge
+		r.mu.RUnlock()
+		handler.ServeHTTP(w, req)
+		return
+	}
 	if req.URL.Path == "/v1/ui-live" {
 		r.serveUILive(w, req)
 		return
@@ -817,6 +832,11 @@ func (r *Router) Close(ctx context.Context) error {
 	var err error
 	if r.providerAuth != nil {
 		r.providerAuth.Close()
+	}
+	if r.managedBridge != nil {
+		if bridgeErr := r.managedBridge.Close(ctx); bridgeErr != nil && err == nil {
+			err = bridgeErr
+		}
 	}
 	if r.managed != nil {
 		if managedErr := r.managed.Close(ctx); managedErr != nil {

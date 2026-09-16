@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -25,13 +26,20 @@ const (
 
 // ManagedBridgeHandler is an unregistered HTTP handler for the Phase 2B
 // router-side WebSocket. The owner chooses where to mount it.
+type managedBridgeStreamKey struct {
+	agent  string
+	bridge string
+}
+
 type ManagedBridgeHandler struct {
 	store               *store.Store
 	routerNonce         string
 	registry            *managedBridgeRegistry
 	mu                  sync.Mutex
+	streamMu            sync.Mutex
 	closed              bool
 	sessions            map[*managedBridgeSession]struct{}
+	streams             map[managedBridgeStreamKey]*managedbridge.RPCStream
 	heartbeat           time.Duration
 	maxDrain            int
 	afterEventAdmission func(*managedBridgeSession)
@@ -68,7 +76,7 @@ func NewManagedBridgeHandler(durable *store.Store, options ...ManagedBridgeHandl
 		// with no valid nonce rejects every connection safely.
 		challenge.RouterInstanceNonce = strings.Repeat("0", 64)
 	}
-	handler := &ManagedBridgeHandler{store: durable, routerNonce: challenge.RouterInstanceNonce, registry: phase2BRegistry, sessions: make(map[*managedBridgeSession]struct{}), heartbeat: managedBridgeHeartbeat, maxDrain: managedBridgeMaxDrain}
+	handler := &ManagedBridgeHandler{store: durable, routerNonce: challenge.RouterInstanceNonce, registry: phase2BRegistry, sessions: make(map[*managedBridgeSession]struct{}), streams: make(map[managedBridgeStreamKey]*managedbridge.RPCStream), heartbeat: managedBridgeHeartbeat, maxDrain: managedBridgeMaxDrain}
 	if len(options) != 0 {
 		handler.afterEventAdmission = options[0].afterEventAdmission
 		handler.afterActivate = options[0].afterActivate
@@ -88,6 +96,112 @@ func NewManagedBridgeHandler(durable *store.Store, options ...ManagedBridgeHandl
 // handler behind their own HTTP path.
 func NewManagedBridgeServer(durable *store.Store, options ...ManagedBridgeHandlerOptions) *ManagedBridgeHandler {
 	return NewManagedBridgeHandler(durable, options...)
+}
+
+// Open creates the in-process newline JSON-RPC stream used by the managed
+// manager. The stream is fenced to one exact bridge runtime.
+func (h *ManagedBridgeHandler) Open(ctx context.Context, fence managedbridge.RuntimeFence) (io.ReadWriteCloser, error) {
+	return h.openRPCStream(ctx, fence)
+}
+
+// Attach replaces any older stream for the same bridge identity and replays
+// every retained admitted RPC event that has not reached the reader. The full
+// runtime fence remains on the stream and rejects stale store operations.
+func (h *ManagedBridgeHandler) Attach(ctx context.Context, fence managedbridge.RuntimeFence) (io.ReadWriteCloser, error) {
+	return h.openRPCStream(ctx, fence)
+}
+
+func (h *ManagedBridgeHandler) openRPCStream(ctx context.Context, fence managedbridge.RuntimeFence) (io.ReadWriteCloser, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if h == nil || h.store == nil || fence.Validate() != nil {
+		return nil, managedbridge.ErrRPCStreamInvalid
+	}
+	h.mu.Lock()
+	closed := h.closed
+	h.mu.Unlock()
+	if closed {
+		return nil, managedbridge.ErrRPCStreamClosed
+	}
+	cursors, err := h.store.ManagedBridgeCursors(ctx, fence.BridgeInstance)
+	if err != nil {
+		return nil, err
+	}
+	key := managedBridgeStreamKey{agent: fence.Agent, bridge: fence.BridgeInstance}
+	// Validate the full runtime fence before replacing the currently attached
+	// stream. A stale reconnect must leave the live stream untouched.
+	events, replayErr := h.store.ReplayManagedBridgeEvents(ctx, fence.BridgeInstance, cursors.EventAppliedNext, managedBridgeFence(fence))
+	if replayErr != nil {
+		return nil, replayErr
+	}
+	stream, err := managedbridge.NewRPCStream(managedbridge.RPCStreamOptions{
+		Fence:        fence,
+		NextEventSeq: cursors.EventAppliedNext,
+		Queue: func(command managedbridge.RPCCommand) error {
+			if command.Fence != fence || command.Name != managedbridge.CommandRPC {
+				return managedbridge.ErrRPCStreamStale
+			}
+			_, queueErr := h.store.QueueManagedBridgeCommand(context.Background(), store.ManagedBridgeCommandInput{
+				BridgeID: fence.BridgeInstance, RequestID: command.RequestID, Name: command.Name,
+				Payload: append([]byte(nil), command.Payload...), PayloadHash: command.PayloadHash,
+				Fence: managedBridgeFence(fence),
+			})
+			return queueErr
+		},
+		Wake: func() { h.Wake(fence.Agent, fence.BridgeInstance) },
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	h.streamMu.Lock()
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		h.streamMu.Unlock()
+		_ = stream.Close()
+		return nil, managedbridge.ErrRPCStreamClosed
+	}
+	old := h.streams[key]
+	h.streams[key] = stream
+	h.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	// Registration and replay share streamMu with live event delivery. This
+	// prevents a newly admitted event from overtaking retained history.
+	for _, event := range events {
+		if event.State != "admitted" || event.Name != managedbridge.EventRPC {
+			continue
+		}
+		payload, payloadErr := h.store.ReadManagedBridgeEventPayload(ctx, fence.BridgeInstance, event.Seq, managedBridgeFence(fence))
+		if payloadErr != nil {
+			replayErr = payloadErr
+			break
+		}
+		if pushErr := stream.PushEvent(managedbridge.RPCStreamEvent{
+			Seq: event.Seq, Name: event.Name, Fence: fence, Payload: payload,
+			Applied: func(seq uint64) func() error {
+				return func() error {
+					return h.store.ApplyManagedBridgeEvent(context.Background(), fence.BridgeInstance, seq, managedBridgeFence(fence))
+				}
+			}(event.Seq),
+		}); pushErr != nil {
+			replayErr = pushErr
+			break
+		}
+	}
+	h.streamMu.Unlock()
+	return stream, nil
+}
+
+func (h *ManagedBridgeHandler) streamFor(fence managedbridge.RuntimeFence) *managedbridge.RPCStream {
+	key := managedBridgeStreamKey{agent: fence.Agent, bridge: fence.BridgeInstance}
+	h.mu.Lock()
+	stream := h.streams[key]
+	h.mu.Unlock()
+	return stream
 }
 
 // ServeHTTP implements the unregistered Phase 2B WebSocket endpoint.
@@ -355,6 +469,16 @@ func (h *ManagedBridgeHandler) Close(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	h.mu.Lock()
+	streams := make([]*managedbridge.RPCStream, 0, len(h.streams))
+	for _, stream := range h.streams {
+		streams = append(streams, stream)
+	}
+	h.streams = make(map[managedBridgeStreamKey]*managedbridge.RPCStream)
+	h.mu.Unlock()
+	for _, stream := range streams {
+		_ = stream.Close()
+	}
 	return nil
 }
 
@@ -587,16 +711,45 @@ func (s *managedBridgeSession) handleEvent(event managedbridge.Event) error {
 	if hook := s.handler.afterEventAdmission; hook != nil {
 		hook(s)
 	}
+	// The reader only admits durable data. ACK writing and event delivery run
+	// asynchronously so a slow writer or managed reader cannot stop inbound
+	// command/ACK processing. An admitted event remains replayable until the
+	// stream callback reaches its complete line boundary.
+	stream := (*managedbridge.RPCStream)(nil)
+	if event.Name == managedbridge.EventRPC {
+		stream = s.handler.streamFor(event.Fence)
+	}
+	go s.finishEvent(event, stream)
+	return nil
+}
+
+func (s *managedBridgeSession) finishEvent(event managedbridge.Event, stream *managedbridge.RPCStream) {
+	if stream != nil {
+		s.handler.streamMu.Lock()
+		payload := append([]byte(nil), event.Payload...)
+		pushErr := stream.PushEvent(managedbridge.RPCStreamEvent{
+			Seq: event.Seq, Name: event.Name, Payload: payload, Fence: event.Fence,
+			Applied: func() error {
+				return s.handler.store.ApplyManagedBridgeEvent(context.Background(), event.BridgeInstance, event.Seq, managedBridgeFence(event.Fence))
+			},
+		})
+		s.handler.streamMu.Unlock()
+		if pushErr != nil && !errors.Is(pushErr, managedbridge.ErrRPCStreamClosed) {
+			// The durable row is deliberately left admitted. Attach will retry it.
+			return
+		}
+	}
 	ack := managedbridge.Ack{PostAuth: s.post, Protocol: managedbridge.ProtocolVersion, Type: string(managedbridge.FrameAck), Domain: managedbridge.DomainEvents, Seq: event.Seq}
 	if err := s.queueAndWait(ack); err != nil {
-		return err
+		return
 	}
-	// Applied is recorded after the ACK write. If the socket disappears between
-	// admission and ACK, the bridge resumes with its old cursor and resends the
-	// exact event; admission then returns the duplicate and the ACK is repeated.
-	return s.withCurrent(func() error {
-		return s.handler.store.ApplyManagedBridgeEvent(s.ctx, event.BridgeInstance, event.Seq, managedBridgeFence(event.Fence))
-	})
+	if event.Name != managedbridge.EventRPC {
+		// Legacy websocket-only events still apply after their ACK even when an
+		// RPC stream has been opened for the same bridge. RPC events remain
+		// admitted until a manager stream reads their complete line, including
+		// when no stream is currently attached.
+		_ = s.handler.store.ApplyManagedBridgeEvent(context.Background(), event.BridgeInstance, event.Seq, managedBridgeFence(event.Fence))
+	}
 }
 
 func (s *managedBridgeSession) handleAck(ack managedbridge.Ack) error {

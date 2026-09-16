@@ -1033,10 +1033,10 @@ func managedbridgeHashValid(payload []byte) bool {
 	return err == nil
 }
 func validBridgeCommandName(name string) bool {
-	return name == managedbridge.CommandPrompt || name == managedbridge.CommandAbort || name == managedbridge.CommandShutdown || name == managedbridge.CommandManifest
+	return name == managedbridge.CommandPrompt || name == managedbridge.CommandAbort || name == managedbridge.CommandShutdown || name == managedbridge.CommandManifest || name == managedbridge.CommandRPC
 }
 func validBridgeEventName(name string) bool {
-	return name == managedbridge.EventReady || name == managedbridge.EventState || name == managedbridge.EventMessage || name == managedbridge.EventTool || name == managedbridge.EventError || name == managedbridge.EventStopped
+	return name == managedbridge.EventReady || name == managedbridge.EventState || name == managedbridge.EventMessage || name == managedbridge.EventTool || name == managedbridge.EventError || name == managedbridge.EventStopped || name == managedbridge.EventRPC
 }
 func validBridgeID(value string) bool { return managedCanonicalUUIDRE.MatchString(value) }
 
