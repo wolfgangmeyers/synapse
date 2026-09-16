@@ -280,20 +280,103 @@ func managedParentSourceActiveTx(ctx context.Context, db *sql.DB, fence ManagedR
 	return false, nil
 }
 func (s *Store) recomputeManagedParentActivityTx(ctx context.Context, fence ManagedRuntimeFence) error {
+	_, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
+	return err
+}
+
+func (s *Store) recomputeManagedParentActivityChangedTx(ctx context.Context, fence ManagedRuntimeFence) (bool, error) {
 	var compacting, nativeActive int
 	err := s.db.QueryRowContext(ctx, `SELECT compacting,active FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&compacting, &nativeActive)
 	if errors.Is(err, sql.ErrNoRows) {
 		compacting, nativeActive = 0, 0
 	} else if err != nil {
-		return err
+		return false, err
 	}
 	active, err := managedParentSourceActiveTx(ctx, s.db, fence, nativeActive != 0)
 	if err != nil {
+		return false, err
+	}
+	projected := managedParentProjectedActivity(compacting != 0, active)
+	result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting') AND activity_state != ?`, append([]any{projected, formatTimestamp(s.clock.Now())}, append(managedFenceValues(fence), projected)...)...)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
+func (s *Store) currentManagedParentFenceTx(ctx context.Context, agentID string) (ManagedRuntimeFence, error) {
+	var fence ManagedRuntimeFence
+	err := s.db.QueryRowContext(ctx, `SELECT agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash
+		FROM managed_agents
+		WHERE agent_id=? AND desired_state='running' AND lifecycle_state='running'
+			AND pi_session_id IS NOT NULL AND process_pid IS NOT NULL AND process_start_marker IS NOT NULL
+			AND process_incarnation IS NOT NULL AND runtime_generation IS NOT NULL`, agentID).Scan(
+		&fence.AgentID, &fence.PiSessionID, &fence.SessionEpoch, &fence.ProcessPID, &fence.ProcessStartMarker,
+		&fence.ProcessIncarnation, &fence.RuntimeGeneration, &fence.ManifestRevision, &fence.ManifestHash)
+	return fence, err
+}
+
+func (s *Store) recomputeManagedParentActivityForAgentTx(ctx context.Context, agentID string) error {
+	fence, err := s.currentManagedParentFenceTx(ctx, agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')`, append([]any{managedParentProjectedActivity(compacting != 0, active), formatTimestamp(s.clock.Now())}, managedFenceValues(fence)...)...)
-	return err
+	return s.recomputeManagedParentActivityTx(ctx, fence)
 }
+
+// ReconcileManagedParentActivity repairs stale active projections left by an
+// older router. It only reads current running fences and reuses the normal
+// source precedence, so native activity and replacement runtimes remain safe.
+func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("context is required")
+	}
+	const batchSize = 256
+	changed := 0
+	err := s.runImmediate(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, `SELECT agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash
+			FROM managed_agents
+			WHERE desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')
+				AND pi_session_id IS NOT NULL AND process_pid IS NOT NULL AND process_start_marker IS NOT NULL
+				AND process_incarnation IS NOT NULL AND runtime_generation IS NOT NULL
+			ORDER BY agent_id LIMIT ?`, batchSize)
+		if err != nil {
+			return err
+		}
+		var fences []ManagedRuntimeFence
+		for rows.Next() {
+			var fence ManagedRuntimeFence
+			if err := rows.Scan(&fence.AgentID, &fence.PiSessionID, &fence.SessionEpoch, &fence.ProcessPID, &fence.ProcessStartMarker, &fence.ProcessIncarnation, &fence.RuntimeGeneration, &fence.ManifestRevision, &fence.ManifestHash); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			fences = append(fences, fence)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, fence := range fences {
+			wasChanged, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
+			if err != nil {
+				return err
+			}
+			if wasChanged {
+				changed++
+			}
+		}
+		if changed > 0 {
+			_, err := s.bumpManagedProjectionVersion(ctx)
+			return err
+		}
+		return nil
+	})
+	return changed, err
+}
+
 func (s *Store) RecomputeManagedParentActivity(ctx context.Context, fence ManagedRuntimeFence) (bool, error) {
 	if ctx == nil || !validManagedRuntimeFence(fence) {
 		return false, errors.New("managed parent activity fence is invalid")
@@ -334,12 +417,16 @@ func (s *Store) SettleManagedParentDirectTurn(ctx context.Context, attempt Manag
 		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
 }
-func interruptManagedParentWorkTx(ctx context.Context, db *sql.DB, fence ManagedRuntimeFence, now string) error {
-	if _, err := db.ExecContext(ctx, `UPDATE managed_parent_final_deliveries SET state='interrupted',terminal_at=? WHERE work_id IN (SELECT work_id FROM managed_parent_work WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=? AND state IN ('pending_turn','settled','final_delivery_pending')) AND state IN ('pending','delivering')`, append([]any{now}, managedParentFenceArgs(fence)...)...); err != nil {
+func interruptManagedParentWorkMatchingTx(ctx context.Context, db *sql.DB, workWhere string, workArgs []any, now string) error {
+	if _, err := db.ExecContext(ctx, `UPDATE managed_parent_final_deliveries SET state='interrupted',terminal_at=? WHERE work_id IN (SELECT work_id FROM managed_parent_work WHERE `+workWhere+` AND state IN ('pending_turn','settled','final_delivery_pending')) AND state IN ('pending','delivering')`, append([]any{now}, workArgs...)...); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `UPDATE managed_parent_work SET state='interrupted',terminal_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=? AND state IN ('pending_turn','settled','final_delivery_pending')`, append([]any{now}, managedParentFenceArgs(fence)...)...)
+	_, err := db.ExecContext(ctx, `UPDATE managed_parent_work SET state='interrupted',terminal_at=? WHERE `+workWhere+` AND state IN ('pending_turn','settled','final_delivery_pending')`, append([]any{now}, workArgs...)...)
 	return err
+}
+
+func interruptManagedParentWorkTx(ctx context.Context, db *sql.DB, fence ManagedRuntimeFence, now string) error {
+	return interruptManagedParentWorkMatchingTx(ctx, db, managedFenceWhere(""), managedParentFenceArgs(fence), now)
 }
 func (s *Store) InterruptManagedParentWork(ctx context.Context, fence ManagedRuntimeFence) error {
 	if ctx == nil || !validManagedRuntimeFence(fence) {

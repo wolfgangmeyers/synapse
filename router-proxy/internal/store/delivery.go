@@ -1048,6 +1048,10 @@ func (s *Store) RetireManagedRecipientSourceForTermination(ctx context.Context, 
 		if err := s.runManagedDirectTerminationTestHook(func(hook *managedDirectTerminationTestHook) func() error { return hook.afterSourceDisposition }); err != nil {
 			return err
 		}
+		now := formatTimestamp(s.clock.Now())
+		if err := interruptManagedParentWorkMatchingTx(ctx, s.db, "agent_id=?", []any{agentID}, now); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id=?`, agentID); err != nil {
 			return err
 		}
@@ -1060,7 +1064,7 @@ func (s *Store) RetireManagedRecipientSourceForTermination(ctx context.Context, 
 		if err := s.runManagedDirectTerminationTestHook(func(hook *managedDirectTerminationTestHook) func() error { return hook.afterDiagnosticsDeleted }); err != nil {
 			return err
 		}
-		return nil
+		return s.recomputeManagedParentActivityForAgentTx(ctx, agentID)
 	})
 }
 
@@ -1447,7 +1451,10 @@ func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectA
 			if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
 				return err
 			}
-			return s.rearmFailedReminder(ctx, attempt.MessageID, nowText)
+			if err := s.rearmFailedReminder(ctx, attempt.MessageID, nowText); err != nil {
+				return err
+			}
+			return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 		}
 		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
@@ -1499,7 +1506,10 @@ func (s *Store) ReleaseManagedDirectRecovery(ctx context.Context, attempt Manage
 		if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
 			return err
 		}
-		return s.rearmFailedReminder(ctx, attempt.MessageID, nowText)
+		if err := s.rearmFailedReminder(ctx, attempt.MessageID, nowText); err != nil {
+			return err
+		}
+		return s.recomputeManagedParentActivityForAgentTx(ctx, attempt.Fence.AgentID)
 	})
 	return terminal, err
 }
@@ -1668,8 +1678,37 @@ func (s *Store) NextManagedDirectRetry(ctx context.Context, agentID string) (tim
 // ExpireManagedDirectForMessage writes the terminal attempt state before the
 // ordinary row is deleted. The foreign key then removes volatile attempt rows.
 func (s *Store) expireManagedDirectForMessageTx(ctx context.Context, messageID, now string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='failed',released_at=?,next_attempt_at=NULL,failure_code='expired',failure_detail=NULL WHERE message_id=? AND state IN ('direct_pending','direct_prompted','released')`, now, messageID)
-	return err
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT agent_id FROM managed_parent_work WHERE message_id=? AND state IN ('pending_turn','final_delivery_pending')`, messageID)
+	if err != nil {
+		return err
+	}
+	var agentIDs []string
+	for rows.Next() {
+		var agentID string
+		if err := rows.Scan(&agentID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		agentIDs = append(agentIDs, agentID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='failed',released_at=?,next_attempt_at=NULL,failure_code='expired',failure_detail=NULL WHERE message_id=? AND state IN ('direct_pending','direct_prompted','released')`, now, messageID); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_final_deliveries SET state='interrupted',terminal_at=? WHERE work_id IN (SELECT work_id FROM managed_parent_work WHERE message_id=? AND state IN ('pending_turn','final_delivery_pending')) AND state IN ('pending','delivering')`, now, messageID); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='interrupted',terminal_at=? WHERE message_id=? AND state IN ('pending_turn','final_delivery_pending')`, now, messageID); err != nil {
+		return err
+	}
+	for _, agentID := range agentIDs {
+		if err := s.recomputeManagedParentActivityForAgentTx(ctx, agentID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func utf16Length(v string) int {

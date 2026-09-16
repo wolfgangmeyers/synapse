@@ -433,6 +433,11 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 			return store.SweepResult{}, err
 		}
 	}
+	// Repair active projections left by older router versions before publishing
+	// the sweep snapshot. The store keeps this bounded and fence-scoped.
+	if _, err := r.store.ReconcileManagedParentActivity(ctx); err != nil {
+		return store.SweepResult{}, err
+	}
 	// Recovery owns these deletions and transitions so the router can publish
 	// the same records as Node. In particular, do not let store retention remove
 	// an expired queued message before message_expired is emitted.
