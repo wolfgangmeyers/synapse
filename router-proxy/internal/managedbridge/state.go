@@ -9,25 +9,27 @@ import (
 type State string
 
 const (
-	StateDisconnected  State = "disconnected"
-	StateConnect       State = "connect"
-	StateChallenged    State = "challenged"
-	StateAuthenticated State = "authenticated"
-	StateResuming      State = "resuming"
-	StateActive        State = "active"
-	StateStale         State = "stale"
-	StateStopped       State = "stopped"
+	StateDisconnected        State = "disconnected"
+	StateConnect             State = "connect"
+	StateChallenged          State = "challenged"
+	StateAuthenticated       State = "authenticated"
+	StateResuming            State = "resuming"
+	StateActive              State = "active"
+	StateNeedsReconstruction State = "needs_reconstruction"
+	StateStale               State = "stale"
+	StateStopped             State = "stopped"
 )
 
 var transitions = map[State]map[State]bool{
-	StateDisconnected:  {StateConnect: true, StateStopped: true},
-	StateConnect:       {StateChallenged: true, StateStale: true, StateStopped: true},
-	StateChallenged:    {StateAuthenticated: true, StateStale: true, StateStopped: true},
-	StateAuthenticated: {StateResuming: true, StateStale: true, StateStopped: true},
-	StateResuming:      {StateActive: true, StateStale: true, StateStopped: true},
-	StateActive:        {StateStale: true, StateStopped: true},
-	StateStale:         {StateConnect: true, StateStopped: true},
-	StateStopped:       {},
+	StateDisconnected:        {StateConnect: true, StateStopped: true},
+	StateConnect:             {StateChallenged: true, StateStale: true, StateStopped: true},
+	StateChallenged:          {StateAuthenticated: true, StateStale: true, StateStopped: true},
+	StateAuthenticated:       {StateResuming: true, StateStale: true, StateStopped: true},
+	StateResuming:            {StateActive: true, StateStale: true, StateStopped: true},
+	StateActive:              {StateNeedsReconstruction: true, StateStale: true, StateStopped: true},
+	StateNeedsReconstruction: {StateStopped: true, StateStale: true},
+	StateStale:               {StateConnect: true, StateStopped: true},
+	StateStopped:             {},
 }
 
 func ValidTransition(from, to State) bool { return transitions[from][to] }

@@ -60,6 +60,13 @@ type ManagedBridgeHandshake struct {
 	Fence    ManagedRuntimeFence
 }
 
+// ManagedBridgeAuthResult is the only session-authentication projection. It
+// contains the router proof and durable cursors, never verifier material.
+type ManagedBridgeAuthResult struct {
+	Accepted managedbridge.Authenticated
+	Cursors  ManagedBridgeCursors
+}
+
 // ManagedBridgeIdentity is safe to return to callers. It deliberately omits
 // the verifier and all command/event payloads.
 type ManagedBridgeIdentity struct {
@@ -280,6 +287,118 @@ func (s *Store) AuthenticateManagedBridgeWithVerifier(ctx context.Context, agent
 		return ManagedBridgeIdentity{}, ErrManagedBridgeAuthRejected
 	}
 	return s.AuthenticateManagedBridge(ctx, ManagedBridgeHandshake{AgentID: agentID, BridgeID: bridgeID, Verifier: bytes, Fence: fence})
+}
+
+// AuthenticateAndProve performs bridge proof verification, current-fence
+// checking, cursor projection, and router proof generation in one SQLite
+// transaction. Verifier bytes stay inside this method and never cross the
+// store API boundary.
+func (s *Store) AuthenticateAndProve(ctx context.Context, challenge managedbridge.Challenge, auth managedbridge.Authenticate) (ManagedBridgeAuthResult, error) {
+	if challenge.Validate() != nil || auth.ValidateFor(challenge) != nil || auth.BridgeInstance == "" || auth.Agent == "" {
+		return ManagedBridgeAuthResult{}, ErrManagedBridgeAuthRejected
+	}
+	var result ManagedBridgeAuthResult
+	err := s.runImmediate(ctx, func() error {
+		row, err := managedBridgeForTx(ctx, s.db, auth.BridgeInstance)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrManagedBridgeAuthRejected
+		}
+		if err != nil {
+			return err
+		}
+		wireFence := managedBridgeFence(auth.Fence)
+		if row.AgentID != auth.Agent || row.Revoked || !row.Enabled || !sameManagedRestartFence(row.Fence, wireFence) {
+			return ErrManagedBridgeAuthRejected
+		}
+		if err := s.requireCurrentManagedFenceTx(ctx, row.AgentID, wireFence); err != nil {
+			if errors.Is(err, ErrManagedBridgeStale) {
+				return ErrManagedBridgeAuthRejected
+			}
+			return err
+		}
+		if managedbridge.VerifyAuthenticateKey(row.Verifier, challenge, auth) != nil {
+			return ErrManagedBridgeAuthRejected
+		}
+		cursors, err := row.cursors()
+		if err != nil {
+			return ErrManagedBridgeAuthRejected
+		}
+		commandCursor := cursors.CommandAcked
+		eventCursor := cursorBefore(cursors.EventAppliedNext)
+		accepted, err := managedbridge.AuthenticatedForKey(row.Verifier, challenge, auth, commandCursor, eventCursor)
+		if err != nil {
+			return ErrManagedBridgeAuthRejected
+		}
+		result = ManagedBridgeAuthResult{Accepted: accepted, Cursors: cursors}
+		return nil
+	})
+	if err != nil {
+		return ManagedBridgeAuthResult{}, err
+	}
+	return result, nil
+}
+
+func cursorBefore(next uint64) uint64 {
+	if next == 0 || next == 1 {
+		return 0
+	}
+	return next - 1
+}
+
+// BindManagedBridgeRuntime atomically binds a newly started process fence to
+// both the managed agent and its bridge reservation. The caller supplies only
+// the non-secret runtime identity; verifier material remains in the bridge row.
+func (s *Store) BindManagedBridgeRuntime(ctx context.Context, bridgeID string, fence ManagedRuntimeFence) error {
+	if !validBridgeID(bridgeID) || !validManagedRuntimeFence(fence) {
+		return ErrManagedBridgeInvalid
+	}
+	return s.runImmediate(ctx, func() error {
+		row, err := managedBridgeForTx(ctx, s.db, bridgeID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrManagedBridgeAuthRejected
+		}
+		if err != nil {
+			return err
+		}
+		agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id=?`, row.AgentID), nil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrManagedBridgeAuthRejected
+		}
+		if err != nil {
+			return err
+		}
+		if !sameManagedRestartFence(row.Fence, restartFenceFromAgent(agent)) || fence.AgentID != row.AgentID {
+			return ErrManagedBridgeStale
+		}
+		fenceHash, err := managedBridgeFenceHash(fence)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		args := []any{fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash, now, fence.AgentID}
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?,session_epoch=?,process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,manifest_revision=?,manifest_hash=?,updated_at=? WHERE agent_id=? AND `+managedFenceWhere(""), append(args, managedFenceValues(restartFenceFromAgent(agent))...)...)
+		if err != nil {
+			return err
+		}
+		count, err := updated.RowsAffected()
+		if err != nil || count != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrManagedBridgeStale
+		}
+		updated, err = s.db.ExecContext(ctx, `UPDATE managed_bridges SET fence_pi_session_id=?,fence_session_epoch=?,fence_process_pid=?,fence_process_start_marker=?,fence_process_incarnation=?,fence_runtime_generation=?,fence_manifest_revision=?,fence_manifest_hash=?,fence_hash=?,updated_at=? WHERE bridge_id=? AND `+managedBridgeFenceWhere(""), []any{fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash, fenceHash, now, bridgeID, row.Fence.AgentID, row.Fence.PiSessionID, row.Fence.SessionEpoch, row.Fence.ProcessPID, row.Fence.ProcessStartMarker, row.Fence.ProcessIncarnation, row.Fence.RuntimeGeneration, row.Fence.ManifestRevision, row.Fence.ManifestHash}...)
+		if err != nil {
+			return err
+		}
+		if count, err := updated.RowsAffected(); err != nil || count != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrManagedBridgeStale
+		}
+		return nil
+	})
 }
 
 // RevokeManagedBridge is a private manager-store mutation. The full fence is
@@ -920,6 +1039,10 @@ func validBridgeEventName(name string) bool {
 	return name == managedbridge.EventReady || name == managedbridge.EventState || name == managedbridge.EventMessage || name == managedbridge.EventTool || name == managedbridge.EventError || name == managedbridge.EventStopped
 }
 func validBridgeID(value string) bool { return managedCanonicalUUIDRE.MatchString(value) }
+
+func managedBridgeFenceWhere(prefix string) string {
+	return prefix + "fence_agent_id = ? AND " + prefix + "fence_pi_session_id = ? AND " + prefix + "fence_session_epoch = ? AND " + prefix + "fence_process_pid = ? AND " + prefix + "fence_process_start_marker = ? AND " + prefix + "fence_process_incarnation = ? AND " + prefix + "fence_runtime_generation = ? AND " + prefix + "fence_manifest_revision = ? AND " + prefix + "fence_manifest_hash = ?"
+}
 
 func (s *Store) requireBridgeFenceTx(ctx context.Context, bridgeID string, fence ManagedRuntimeFence) (managedBridgeRow, error) {
 	row, err := managedBridgeForTx(ctx, s.db, bridgeID)
