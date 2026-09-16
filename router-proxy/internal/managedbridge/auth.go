@@ -37,6 +37,16 @@ func (Verifier) MarshalJSON() ([]byte, error) { return nil, ErrSecretSerializati
 func (Verifier) String() string               { return "[redacted]" }
 func (Verifier) GoString() string             { return "[redacted]" }
 
+// Bytes returns a copy of the derived verifier for a persistence boundary.
+// It never returns the original token and callers must treat the returned
+// bytes as secret material.
+func (v Verifier) Bytes() ([]byte, error) {
+	if !v.initialized {
+		return nil, ErrInvalidFrame
+	}
+	return append([]byte(nil), v.key[:]...), nil
+}
+
 // AuthenticateFor creates a bridge proof for a router challenge.
 func AuthenticateFor(verifier Verifier, challenge Challenge, fence RuntimeFence) (Authenticate, error) {
 	if !verifier.initialized || challenge.Validate() != nil || fence.Validate() != nil {
