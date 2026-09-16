@@ -33,6 +33,13 @@ func (m *Manager) installBuiltinToolLifecycleReceiver(binding *managedBinding) {
 		return
 	}
 	rpc.SetBuiltinToolLifecycleEventHandler(func(event BuiltinToolLifecycleEvent) {
+		// Ordinary terminal frames are persisted in this semantic callback. The
+		// RPC dispatcher processes the next parent-activity frame only after this
+		// callback returns, so idle projection cannot overtake the durable row.
+		if event.Phase == "end" && !validBuiltinToolName(event.ToolName) {
+			m.handleOrdinaryToolLifecycleEvent(binding, event)
+			return
+		}
 		m.enqueueBuiltinToolLifecycle(binding, event)
 	})
 	if terminalRPC, ok := binding.rpc.(RPCReaderTerminalRPC); ok {
@@ -141,6 +148,23 @@ func (m *Manager) stopBuiltinToolLifecycleQueue(binding *managedBinding) {
 	binding.builtinToolQueue = nil
 	binding.builtinToolOverflowed = false
 	binding.builtinToolQueueSerial.Unlock()
+}
+
+func (m *Manager) handleOrdinaryToolLifecycleEvent(binding *managedBinding, event BuiltinToolLifecycleEvent) {
+	if binding == nil || event.Phase != "end" || !validOrdinaryToolName(event.ToolName) || !validBuiltinToolCallID(event.ToolCallID) {
+		return
+	}
+	binding.serial.Lock()
+	fence := bindingFence(binding.agentID, binding)
+	binding.serial.Unlock()
+	if !m.rootBindingCurrent(context.Background(), binding, fence) {
+		return
+	}
+	entry, created, err := m.store.RecordManagedOrdinaryToolCompletion(context.Background(), fence, event.ToolCallID, event.ToolName, event.IsError)
+	if err != nil || !created {
+		return
+	}
+	m.publishCompleteHistory(entry)
 }
 
 func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event BuiltinToolLifecycleEvent) {

@@ -43,6 +43,31 @@ func managedBuiltinInvocationKey(fence ManagedRuntimeFence, callID string) strin
 	return fmt.Sprintf("mbt1_%x", sum[:])
 }
 
+func managedOrdinaryToolCompletionKey(fence ManagedRuntimeFence, callID string) string {
+	// The version and every durable incarnation component are length-delimited
+	// before hashing. A reused call ID in a replacement process therefore gets a
+	// different bounded event key.
+	parts := []string{"mot1", fence.AgentID, fence.PiSessionID, fmt.Sprintf("%d", fence.SessionEpoch), fmt.Sprintf("%d", fence.ProcessPID), fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fmt.Sprintf("%d", fence.ManifestRevision), fence.ManifestHash, callID}
+	var canonical strings.Builder
+	for _, part := range parts {
+		fmt.Fprintf(&canonical, "%d:%s", len(part), part)
+	}
+	sum := sha256.Sum256([]byte(canonical.String()))
+	return fmt.Sprintf("mot1_%x", sum[:])
+}
+
+func validManagedOrdinaryToolName(name string) bool {
+	if name == "" || validManagedBuiltinToolName(name) || !utf8.ValidString(name) || len([]byte(name)) > 128 {
+		return false
+	}
+	for _, char := range name {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') && char != '_' && char != '-' && char != '.' && char != ':' {
+			return false
+		}
+	}
+	return true
+}
+
 func managedBuiltinPresentation(tool string, outcome ManagedBuiltinToolOutcome) (string, string, *ManagedHistoryPresentation, error) {
 	if !validManagedBuiltinToolName(tool) {
 		return "", "", nil, errors.New("managed builtin tool name is invalid")
@@ -222,6 +247,58 @@ func (s *Store) FinishManagedBuiltinInvocation(ctx context.Context, fence Manage
 		return nil
 	})
 	return entry, changed, err
+}
+
+// RecordManagedOrdinaryToolCompletion records one terminal row for a validated
+// non-builtin Pi tool. The current-fence check and builtin lookup share the same
+// immediate transaction as the strict history insert, so stale events and
+// already-owned builtin call IDs cannot create an ordinary duplicate.
+func (s *Store) RecordManagedOrdinaryToolCompletion(ctx context.Context, fence ManagedRuntimeFence, toolCallID, toolName string, isError bool) (ManagedHistoryEntry, bool, error) {
+	if ctx == nil || !validManagedRuntimeFence(fence) || !validManagedBuiltinToolCallID(toolCallID) || !validManagedOrdinaryToolName(toolName) {
+		return ManagedHistoryEntry{}, false, errors.New("managed ordinary tool completion is invalid")
+	}
+	key := managedOrdinaryToolCompletionKey(fence, toolCallID)
+	var entry ManagedHistoryEntry
+	created := false
+	err := s.runImmediate(ctx, func() error {
+		current, err := managedBuiltinFenceIsCurrentTx(ctx, s.db, fence)
+		if err != nil {
+			return err
+		}
+		if !current {
+			return ErrManagedBuiltinInvocationFenceInactive
+		}
+		var owned int
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_builtin_tool_invocations WHERE invocation_key=? AND tool_name=?`, managedBuiltinInvocationKey(fence, toolCallID), toolName).Scan(&owned)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		level, message := "info", "Ran "+toolName
+		presentation := &ManagedHistoryPresentation{Kind: "tool", ToolName: toolName, Outcome: "success", Summary: "Completed successfully"}
+		if isError {
+			level, message = "error", strings.ToUpper(toolName[:1])+toolName[1:]+" failed"
+			presentation = &ManagedHistoryPresentation{Kind: "tool", ToolName: toolName, Outcome: "failed", Summary: "The operation could not be completed.", Error: &ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false}}
+		}
+		encoded, err := managedHistoryPresentationJSON(presentation)
+		if err != nil {
+			return err
+		}
+		var prior string
+		err = s.db.QueryRowContext(ctx, `SELECT event_key FROM managed_complete_history WHERE event_key=?`, key).Scan(&prior)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		entry, err = s.recordManagedCompleteHistoryStrictTx(ctx, fence.AgentID, "managed_tool", level, message, key, encoded, presentation)
+		if err != nil {
+			return err
+		}
+		created = prior == ""
+		return nil
+	})
+	return entry, created, err
 }
 
 // InterruptActiveManagedBuiltinInvocations closes only an exact lost runtime
