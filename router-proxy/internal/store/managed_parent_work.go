@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	managedFinalDeliveryMaxAttempts    = 5
-	managedParentWorkTerminalPerAgent  = 200
-	managedParentWorkTerminalRetention = 30 * 24 * time.Hour
+	managedFinalDeliveryMaxAttempts         = 5
+	managedParentWorkTerminalPerAgent       = 200
+	managedParentWorkTerminalRetention      = 30 * 24 * time.Hour
+	managedParentActivityReconcileBatchSize = 256
 )
 
 // ManagedFinalDelivery is the durable source-backed reply passed to the
@@ -335,15 +336,18 @@ func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error)
 	if ctx == nil {
 		return 0, errors.New("context is required")
 	}
-	const batchSize = 256
+	s.managedParentActivityReconcileMu.Lock()
+	defer s.managedParentActivityReconcileMu.Unlock()
 	changed := 0
+	nextCursor := s.managedParentActivityReconcileCursor
 	err := s.runImmediate(ctx, func() error {
 		rows, err := s.db.QueryContext(ctx, `SELECT agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash
 			FROM managed_agents
 			WHERE desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')
 				AND pi_session_id IS NOT NULL AND process_pid IS NOT NULL AND process_start_marker IS NOT NULL
 				AND process_incarnation IS NOT NULL AND runtime_generation IS NOT NULL
-			ORDER BY agent_id LIMIT ?`, batchSize)
+				AND agent_id > ?
+			ORDER BY agent_id LIMIT ?`, s.managedParentActivityReconcileCursor, managedParentActivityReconcileBatchSize)
 		if err != nil {
 			return err
 		}
@@ -359,6 +363,12 @@ func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error)
 		if err := rows.Close(); err != nil {
 			return err
 		}
+		if len(fences) == 0 {
+			// An exhausted keyset starts a new pass on the next sweep. Rows inserted
+			// before the cursor are picked up after this wrap.
+			nextCursor = ""
+			return nil
+		}
 		for _, fence := range fences {
 			wasChanged, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
 			if err != nil {
@@ -368,12 +378,16 @@ func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error)
 				changed++
 			}
 		}
+		nextCursor = fences[len(fences)-1].AgentID
 		if changed > 0 {
 			_, err := s.bumpManagedProjectionVersion(ctx)
 			return err
 		}
 		return nil
 	})
+	if err == nil {
+		s.managedParentActivityReconcileCursor = nextCursor
+	}
 	return changed, err
 }
 
