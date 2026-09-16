@@ -110,14 +110,17 @@ func TestManagedDeliveryAppendAckRecoveryNative(t *testing.T) {
 	releasePrompt := func() { promptReleaseOnce.Do(func() { close(promptRelease) }) }
 	t.Cleanup(releasePrompt)
 	var once sync.Once
-	rpc := &appendAckNativeRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, appendID: "pi-entry-fixed", body: "append ack body", interrupt: func() { once.Do(func() { close(interrupted) }) }, promptCalls: promptCalls, promptRelease: promptRelease}
+	subject := "append subject\r\n雪"
+	body := "append ack\r\n雪\n"
+	rpc := &appendAckNativeRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, appendID: "pi-entry-fixed", body: body, interrupt: func() { once.Do(func() { close(interrupted) }) }, promptCalls: promptCalls, promptRelease: promptRelease}
 	factory := appendAckNativeFactory{process: process, rpc: rpc}
 	ackInterrupted := make(chan struct{})
 	startupRecoveryEntered := make(chan struct{})
 	startupRecoveryRelease := make(chan struct{})
+	incomingEvents := make(chan Event, 4)
 	var startupRecoveryOnce sync.Once
 	newManager := func(gateStartup bool) *Manager {
-		manager, managerErr := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: factory, RPCFactory: appendAckNativeRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "mock", ID: "mock", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: &coldRecoveryOps{states: map[int]ProcessProbeState{4101: ProcessOwned}}, BeforeManagedDirectRecovery: func(context.Context, string) {
+		manager, managerErr := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: factory, RPCFactory: appendAckNativeRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "mock", ID: "mock", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: &coldRecoveryOps{states: map[int]ProcessProbeState{4101: ProcessOwned}}, EventSink: func(event Event) { incomingEvents <- event }, BeforeManagedDirectRecovery: func(context.Context, string) {
 			if gateStartup {
 				startupRecoveryOnce.Do(func() { close(startupRecoveryEntered); <-startupRecoveryRelease })
 			}
@@ -142,7 +145,8 @@ func TestManagedDeliveryAppendAckRecoveryNative(t *testing.T) {
 	}
 	close(startupRecoveryRelease)
 	require.NoError(t, manager.RecoverManagedDirectAttempts(ctx))
-	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "123e4567-e89b-42d3-a456-426614174099", From: "sender", To: "append-agent", Body: rpc.body, CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	source := protocol.MessageSource{Kind: "agent"}
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "123e4567-e89b-42d3-a456-426614174099", From: "sender", To: "append-agent", Subject: &subject, Body: rpc.body, CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), Source: &source})
 	require.NoError(t, err)
 	_, err = durable.ResolveMessageTarget(ctx, "123e4567-e89b-42d3-a456-426614174099")
 	require.NoError(t, err)
@@ -225,6 +229,26 @@ func TestManagedDeliveryAppendAckRecoveryNative(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "acknowledged", stored.State)
 	require.Contains(t, stored.ReceiptEntryIdentity, "pi-entry-fixed-recovery-")
+	select {
+	case event := <-incomingEvents:
+		require.Equal(t, EventManagedMailboxIncoming, event.Kind)
+		require.Equal(t, "append-agent", event.AgentID)
+		require.Equal(t, "123e4567-e89b-42d3-a456-426614174099", event.MessageID)
+		require.Equal(t, "incoming", event.Direction)
+		require.Equal(t, "agent", event.Source)
+		require.Equal(t, ManagedMailboxIncomingOperation, event.Operation)
+		require.Equal(t, ManagedMailboxIncomingStatus, event.Status)
+		require.Equal(t, subject, event.Subject)
+		require.Equal(t, body, event.Body)
+		require.False(t, event.Truncated)
+	case <-time.After(time.Second):
+		t.Fatal("durable incoming acknowledgement event was not emitted")
+	}
+	select {
+	case duplicateEvent := <-incomingEvents:
+		t.Fatalf("duplicate acknowledgement emitted event: %+v", duplicateEvent)
+	default:
+	}
 	message, err := durable.MessageFor(ctx, "123e4567-e89b-42d3-a456-426614174099")
 	require.NoError(t, err)
 	require.NotNil(t, message)

@@ -129,8 +129,8 @@ var safeEventFields = map[string]map[string]struct{}{
 	"reminder_started":           {"reminder_id": {}, "scheduled_for": {}},
 	"reminder_succeeded":         {"reminder_id": {}, "scheduled_for": {}, "linked_message_id": {}, "agent_id": {}},
 	"reminder_failed":            {"reminder_id": {}, "scheduled_for": {}, "error_code": {}},
-	"managed_mailbox_incoming":   {"agent_id": {}, "message_id": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
-	"managed_mailbox_outgoing":   {"agent_id": {}, "message_id": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
+	"managed_mailbox_incoming":   {"agent_id": {}, "message_id": {}, "direction": {}, "source": {}, "operation": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
+	"managed_mailbox_outgoing":   {"agent_id": {}, "message_id": {}, "direction": {}, "source": {}, "operation": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
 	"managed_root_control":       {"agent_id": {}, "operation_id": {}, "request_id": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
 	"managed_reminder":           {"agent_id": {}, "message_id": {}, "operation_id": {}, "reminder_id": {}, "status": {}, "error_code": {}, "error_text": {}, "message": {}, "content": {}, "phase": {}, "truncated": {}},
 	"managed_tool_lifecycle":     {"agent_id": {}, "operation_id": {}, "tool_id": {}, "call_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
@@ -289,6 +289,9 @@ func managedEventFields(event managed.Event) (string, map[string]any, error) {
 	}
 	add("agent_id", event.AgentID)
 	add("message_id", event.MessageID)
+	add("direction", event.Direction)
+	add("source", event.Source)
+	add("operation", event.Operation)
 	add("operation_id", event.OperationID)
 	add("request_id", event.RequestID)
 	add("reminder_id", event.ReminderID)

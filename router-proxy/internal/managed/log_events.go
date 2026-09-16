@@ -1,5 +1,28 @@
 package managed
 
+import (
+	"unicode/utf8"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+)
+
+const (
+	managedEventSubjectMaxBytes = 256
+	managedEventBodyMaxBytes    = protocol.AbsoluteMaxBodyBytes
+	managedEventTruncationMark  = "[TRUNCATED]"
+
+	ManagedMailboxIncomingOperation = "append"
+	ManagedMailboxIncomingStatus    = "acknowledged"
+	ManagedMailboxOutgoingOperation = "publish"
+	ManagedMailboxOutgoingStatus    = "delivered"
+
+	// A recovered outbox row retains its body but not the original message
+	// envelope. Keep the fixed event shape and use the known reply source.
+	managedMailboxOutgoingSource = "agent"
+	managedMailboxIncomingSource = "unknown"
+)
+
 // EventKind is the closed vocabulary of managed events that may eventually be
 // sent to the router's bounded diagnostic log. Producers are added separately;
 // this phase only defines the typed sink contract.
@@ -22,6 +45,9 @@ const (
 type Event struct {
 	Kind        EventKind
 	AgentID     string
+	Direction   string
+	Source      string
+	Operation   string
 	MessageID   string
 	OperationID string
 	RequestID   string
@@ -54,11 +80,49 @@ func (e Event) Valid() bool {
 	}
 }
 
-// emitEvent is the only manager-owned sink seam. No managed producer is wired
-// to it yet; later producers can call it without importing transport.
+// emitEvent is the only manager-owned sink seam. Sink failures are isolated
+// here because logging is diagnostic and must not alter a durable transition.
 func (m *Manager) emitEvent(event Event) {
 	if m == nil || m.eventSink == nil || !event.Valid() {
 		return
 	}
+	defer func() { _ = recover() }()
 	m.eventSink(event)
+}
+
+func boundedManagedEventText(value string, limit int) (string, bool) {
+	if len(value) <= limit {
+		return value, false
+	}
+	prefixLimit := limit - len(managedEventTruncationMark)
+	if prefixLimit < 0 {
+		return managedEventTruncationMark[:limit], true
+	}
+	prefix := value[:prefixLimit]
+	for !utf8.ValidString(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix + managedEventTruncationMark, true
+}
+
+func managedMailboxEventText(kind EventKind, attempt store.ManagedDirectAttempt, body string, direction, operation, status string) Event {
+	subject := ""
+	if attempt.Message.Subject != nil {
+		subject = *attempt.Message.Subject
+	}
+	subject, subjectTruncated := boundedManagedEventText(subject, managedEventSubjectMaxBytes)
+	body, bodyTruncated := boundedManagedEventText(body, managedEventBodyMaxBytes)
+	source := attempt.Message.Source.Kind
+	if direction == "outgoing" {
+		// Replies are produced by the managed agent. The incoming envelope's
+		// source may be reminder/web UI, and recovered outbox rows omit it.
+		source = managedMailboxOutgoingSource
+	} else if source == "" {
+		source = managedMailboxIncomingSource
+	}
+	return Event{
+		Kind: kind, AgentID: attempt.Fence.AgentID, Direction: direction,
+		Source: source, Operation: operation, MessageID: attempt.MessageID,
+		Subject: subject, Body: body, Status: status, Truncated: subjectTruncated || bodyTruncated,
+	}
 }

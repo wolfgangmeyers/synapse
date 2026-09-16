@@ -1277,7 +1277,16 @@ func (s *Store) MarkManagedDirectPrompted(ctx context.Context, attempt ManagedDi
 }
 
 func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string, requireCurrentFence bool) error {
-	return s.runImmediate(ctx, func() error {
+	_, err := s.AcknowledgeManagedDirectResult(ctx, attempt, receiptEntry, requireCurrentFence)
+	return err
+}
+
+// AcknowledgeManagedDirectResult reports whether this call performed the
+// durable direct-message acknowledgement. A false result is an idempotent
+// duplicate or an already-disposed source and must not trigger a second event.
+func (s *Store) AcknowledgeManagedDirectResult(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string, requireCurrentFence bool) (bool, error) {
+	changed := false
+	err := s.runImmediate(ctx, func() error {
 		status, err := managedDirectRouteStatusTx(ctx, s.db, attempt.SnapshotID, attempt.Fence.AgentID)
 		if err != nil {
 			return err
@@ -1293,11 +1302,11 @@ func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDir
 		if err != nil {
 			return err
 		}
-		changed, err := directAttemptMatches(result)
+		updated, err := directAttemptMatches(result)
 		if err != nil {
 			return err
 		}
-		if !changed {
+		if !updated {
 			// A second receipt after settlement is harmless; it cannot recreate an ordinary row.
 			var count int
 			err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, attempt.MessageID).Scan(&count)
@@ -1309,6 +1318,7 @@ func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDir
 			}
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
+		changed = true
 		if err := s.completeLinkedReminder(ctx, attempt.MessageID); err != nil {
 			return err
 		}
@@ -1318,6 +1328,7 @@ func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDir
 		}
 		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
+	return changed, err
 }
 
 // AcknowledgeManagedDirectRecovered settles an old prompted attempt after the
@@ -1325,20 +1336,26 @@ func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDir
 // fence is intentionally not compared to the replacement binding: the marker
 // itself is fenced by the recorded session, generation, epoch, and content.
 func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string) error {
+	_, err := s.AcknowledgeManagedDirectRecoveredResult(ctx, attempt, receiptEntry)
+	return err
+}
+
+func (s *Store) AcknowledgeManagedDirectRecoveredResult(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string) (bool, error) {
 	if receiptEntry == "" {
-		return errors.New("managed direct recovered receipt identity is required")
+		return false, errors.New("managed direct recovered receipt identity is required")
 	}
-	return s.runImmediate(ctx, func() error {
+	changed := false
+	err := s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=?`, now, receiptEntry, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID)
 		if err != nil {
 			return err
 		}
-		changed, err := directAttemptMatches(result)
+		updated, err := directAttemptMatches(result)
 		if err != nil {
 			return err
 		}
-		if !changed {
+		if !updated {
 			status, err := managedDirectRouteStatusTx(ctx, s.db, attempt.SnapshotID, attempt.Fence.AgentID)
 			if err != nil {
 				return err
@@ -1355,6 +1372,7 @@ func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt M
 			}
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
+		changed = true
 		ownsLinkedReminder, err := s.recoveredAttemptOwnsLinkedReminderTx(ctx, attempt)
 		if err != nil {
 			return err
@@ -1368,6 +1386,7 @@ func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt M
 		_, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, attempt.MessageID)
 		return err
 	})
+	return changed, err
 }
 
 // recoveredAttemptOwnsLinkedReminderTx keeps an old recovered attempt from

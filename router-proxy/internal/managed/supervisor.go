@@ -2290,10 +2290,16 @@ func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, 
 // acknowledgeManagedDirect retries the durable settlement after an exact
 // append receipt. Releasing at this point would risk another write, so retries
 // preserve the receipt identity until the original ordinary row is settled.
+// The event is emitted only after the store reports the first guarded change;
+// duplicate and stale receipts stay silent. The durable transition comes first,
+// so a crash before this best-effort write can leave a missing diagnostic line.
 func (m *Manager) acknowledgeManagedDirect(attempt store.ManagedDirectAttempt, receiptEntry string) bool {
-	err := m.store.AcknowledgeManagedDirect(context.Background(), attempt, receiptEntry, true)
+	changed, err := m.store.AcknowledgeManagedDirectResult(context.Background(), attempt, receiptEntry, true)
 	if err == nil {
-		return true
+		if changed {
+			m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
+		}
+		return changed
 	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
@@ -2310,9 +2316,12 @@ func (m *Manager) acknowledgeManagedDirect(attempt store.ManagedDirectAttempt, r
 }
 
 func (m *Manager) acknowledgeManagedDirectRecovered(attempt store.ManagedDirectAttempt, receiptEntry string) bool {
-	err := m.store.AcknowledgeManagedDirectRecovered(context.Background(), attempt, receiptEntry)
+	changed, err := m.store.AcknowledgeManagedDirectRecoveredResult(context.Background(), attempt, receiptEntry)
 	if err == nil {
-		return true
+		if changed {
+			m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
+		}
+		return changed
 	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
@@ -2345,13 +2354,19 @@ func (m *Manager) retryManagedDirectAcknowledgment(attempt store.ManagedDirectAt
 				}
 			}
 
-			var err error
+			var (
+				changed bool
+				err     error
+			)
 			if recovered {
-				err = m.store.AcknowledgeManagedDirectRecovered(context.Background(), attempt, receiptEntry)
+				changed, err = m.store.AcknowledgeManagedDirectRecoveredResult(context.Background(), attempt, receiptEntry)
 			} else {
-				err = m.store.AcknowledgeManagedDirect(context.Background(), attempt, receiptEntry, true)
+				changed, err = m.store.AcknowledgeManagedDirectResult(context.Background(), attempt, receiptEntry, true)
 			}
 			if err == nil {
+				if changed {
+					m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
+				}
 				m.OfferDirect(attempt.Fence.AgentID)
 				return
 			}
