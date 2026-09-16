@@ -237,37 +237,67 @@ func (s *Store) RecordManagedCompleteHistoryWithPresentation(ctx context.Context
 	}
 	var entry ManagedHistoryEntry
 	err = s.runImmediate(ctx, func() error {
-		if eventKey != "" {
-			var sequence int64
-			var storedCategory string
-			var storedPresentation sql.NullString
-			err := s.db.QueryRowContext(ctx, `SELECT sequence,category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &storedCategory, &entry.At, &entry.Level, &entry.Message, &storedPresentation)
-			if err == nil {
-				entry.ID = fmt.Sprintf("complete:%d", sequence)
-				entry.AgentID = agentID
-				entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
-				return nil
-			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-		}
-		occurredAt := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,NULLIF(?,''),NULLIF(?,''))`, nullableString(agentID), category, level, message, occurredAt, eventKey, presentationJSON)
-		if err != nil {
-			return err
-		}
-		sequence, err := result.LastInsertId()
-		if err != nil {
-			return err
-		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
-			return err
-		}
-		entry = ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: agentID, At: occurredAt, Level: level, Message: message, Presentation: presentation}
-		return nil
+		entry, err = s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation)
+		return err
 	})
 	return entry, err
+}
+
+// recordManagedCompleteHistoryStrictTx is the fail-closed variant used by
+// acknowledgement transactions. A reused event key is valid only when every
+// canonical display field matches the fact being acknowledged.
+func (s *Store) recordManagedCompleteHistoryStrictTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation) (ManagedHistoryEntry, error) {
+	if eventKey != "" {
+		var sequence int64
+		var storedAgent, storedCategory, storedAt, storedLevel, storedMessage, storedPresentation string
+		err := s.db.QueryRowContext(ctx, `SELECT sequence,COALESCE(agent_id,''),category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key=?`, eventKey).Scan(&sequence, &storedAgent, &storedCategory, &storedAt, &storedLevel, &storedMessage, &storedPresentation)
+		if err == nil {
+			if storedAgent != agentID || storedCategory != category || storedLevel != level || storedMessage != message || storedPresentation != presentationJSON {
+				return ManagedHistoryEntry{}, errors.New("managed complete history event key conflicts with canonical metadata")
+			}
+			return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: storedAgent, At: storedAt, Level: storedLevel, Message: storedMessage, Presentation: effectiveManagedHistoryPresentation(storedCategory, storedLevel, storedMessage, storedPresentation)}, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return ManagedHistoryEntry{}, err
+		}
+	}
+	return s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation)
+}
+
+// recordManagedCompleteHistoryTx inserts and prunes one Complete row while the
+// caller's immediate transaction is open. Generic callers retain the existing
+// idempotent event-key behavior; acknowledgement callers use the strict helper
+// above so an unrelated row can never be silently reused.
+func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation) (ManagedHistoryEntry, error) {
+	var entry ManagedHistoryEntry
+	if eventKey != "" {
+		var sequence int64
+		var storedCategory string
+		var storedPresentation sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT sequence,category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &storedCategory, &entry.At, &entry.Level, &entry.Message, &storedPresentation)
+		if err == nil {
+			entry.ID = fmt.Sprintf("complete:%d", sequence)
+			entry.AgentID = agentID
+			entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
+			return entry, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return ManagedHistoryEntry{}, err
+		}
+	}
+	occurredAt := formatTimestamp(s.clock.Now())
+	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,NULLIF(?,''),NULLIF(?,''))`, nullableString(agentID), category, level, message, occurredAt, eventKey, presentationJSON)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	sequence, err := result.LastInsertId()
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: agentID, At: occurredAt, Level: level, Message: message, Presentation: presentation}, nil
 }
 
 // ManagedHistoryPage is an independent cursor read for the two browser views.

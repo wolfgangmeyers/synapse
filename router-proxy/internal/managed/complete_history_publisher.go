@@ -23,6 +23,11 @@ func (m *Manager) publishCompleteHistory(entry store.ManagedHistoryEntry) {
 	publish := m.completeHistoryPublisher
 	m.mu.Unlock()
 	if publish != nil {
-		publish(entry)
+		// This is a post-commit wakeup. A transport subscriber must never turn
+		// a durable acknowledgement into a failed or retried transaction.
+		func() {
+			defer func() { _ = recover() }()
+			publish(entry)
+		}()
 	}
 }
