@@ -2294,9 +2294,10 @@ func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, 
 // duplicate and stale receipts stay silent. The durable transition comes first,
 // so a crash before this best-effort write can leave a missing diagnostic line.
 func (m *Manager) acknowledgeManagedDirect(attempt store.ManagedDirectAttempt, receiptEntry string) bool {
-	changed, err := m.store.AcknowledgeManagedDirectResult(context.Background(), attempt, receiptEntry, true)
+	changed, historyEntry, err := m.store.AcknowledgeManagedDirectResultWithHistory(context.Background(), attempt, receiptEntry, true)
 	if err == nil {
 		if changed {
+			m.publishCompleteHistory(historyEntry)
 			m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
 		}
 		return changed
@@ -2316,9 +2317,10 @@ func (m *Manager) acknowledgeManagedDirect(attempt store.ManagedDirectAttempt, r
 }
 
 func (m *Manager) acknowledgeManagedDirectRecovered(attempt store.ManagedDirectAttempt, receiptEntry string) bool {
-	changed, err := m.store.AcknowledgeManagedDirectRecoveredResult(context.Background(), attempt, receiptEntry)
+	changed, historyEntry, err := m.store.AcknowledgeManagedDirectRecoveredResultWithHistory(context.Background(), attempt, receiptEntry)
 	if err == nil {
 		if changed {
+			m.publishCompleteHistory(historyEntry)
 			m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
 		}
 		return changed
@@ -2355,16 +2357,18 @@ func (m *Manager) retryManagedDirectAcknowledgment(attempt store.ManagedDirectAt
 			}
 
 			var (
-				changed bool
-				err     error
+				changed      bool
+				historyEntry store.ManagedHistoryEntry
+				err          error
 			)
 			if recovered {
-				changed, err = m.store.AcknowledgeManagedDirectRecoveredResult(context.Background(), attempt, receiptEntry)
+				changed, historyEntry, err = m.store.AcknowledgeManagedDirectRecoveredResultWithHistory(context.Background(), attempt, receiptEntry)
 			} else {
-				changed, err = m.store.AcknowledgeManagedDirectResult(context.Background(), attempt, receiptEntry, true)
+				changed, historyEntry, err = m.store.AcknowledgeManagedDirectResultWithHistory(context.Background(), attempt, receiptEntry, true)
 			}
 			if err == nil {
 				if changed {
+					m.publishCompleteHistory(historyEntry)
 					m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
 				}
 				m.OfferDirect(attempt.Fence.AgentID)

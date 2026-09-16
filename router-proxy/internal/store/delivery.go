@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1285,7 +1286,16 @@ func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDir
 // durable direct-message acknowledgement. A false result is an idempotent
 // duplicate or an already-disposed source and must not trigger a second event.
 func (s *Store) AcknowledgeManagedDirectResult(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string, requireCurrentFence bool) (bool, error) {
+	changed, _, err := s.AcknowledgeManagedDirectResultWithHistory(ctx, attempt, receiptEntry, requireCurrentFence)
+	return changed, err
+}
+
+// AcknowledgeManagedDirectResultWithHistory is the manager-owned acknowledgement
+// seam. It returns the committed Complete fact so publication can happen only
+// after the settlement transaction succeeds.
+func (s *Store) AcknowledgeManagedDirectResultWithHistory(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string, requireCurrentFence bool) (bool, ManagedHistoryEntry, error) {
 	changed := false
+	var historyEntry ManagedHistoryEntry
 	err := s.runImmediate(ctx, func() error {
 		status, err := managedDirectRouteStatusTx(ctx, s.db, attempt.SnapshotID, attempt.Fence.AgentID)
 		if err != nil {
@@ -1319,6 +1329,17 @@ func (s *Store) AcknowledgeManagedDirectResult(ctx context.Context, attempt Mana
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
 		changed = true
+		metadata, err := s.managedDirectAcknowledgementMetadataTx(ctx, attempt.MessageID)
+		if err != nil || metadata == nil {
+			if err == nil {
+				err = errors.New("acknowledged message disappeared before history recording")
+			}
+			return err
+		}
+		historyEntry, err = s.recordManagedDirectAcknowledgementHistoryTx(ctx, *metadata, attempt)
+		if err != nil {
+			return err
+		}
 		if err := s.completeLinkedReminder(ctx, attempt.MessageID); err != nil {
 			return err
 		}
@@ -1328,7 +1349,10 @@ func (s *Store) AcknowledgeManagedDirectResult(ctx context.Context, attempt Mana
 		}
 		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
-	return changed, err
+	if err != nil {
+		return false, ManagedHistoryEntry{}, err
+	}
+	return changed, historyEntry, nil
 }
 
 // AcknowledgeManagedDirectRecovered settles an old prompted attempt after the
@@ -1341,10 +1365,18 @@ func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt M
 }
 
 func (s *Store) AcknowledgeManagedDirectRecoveredResult(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string) (bool, error) {
+	changed, _, err := s.AcknowledgeManagedDirectRecoveredResultWithHistory(ctx, attempt, receiptEntry)
+	return changed, err
+}
+
+// AcknowledgeManagedDirectRecoveredResultWithHistory is the recovered-attempt
+// counterpart used by the manager to publish the committed Complete fact.
+func (s *Store) AcknowledgeManagedDirectRecoveredResultWithHistory(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string) (bool, ManagedHistoryEntry, error) {
 	if receiptEntry == "" {
-		return false, errors.New("managed direct recovered receipt identity is required")
+		return false, ManagedHistoryEntry{}, errors.New("managed direct recovered receipt identity is required")
 	}
 	changed := false
+	var historyEntry ManagedHistoryEntry
 	err := s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=?`, now, receiptEntry, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID)
@@ -1373,6 +1405,17 @@ func (s *Store) AcknowledgeManagedDirectRecoveredResult(ctx context.Context, att
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
 		changed = true
+		metadata, err := s.managedDirectAcknowledgementMetadataTx(ctx, attempt.MessageID)
+		if err != nil || metadata == nil {
+			if err == nil {
+				err = errors.New("recovered message disappeared before history recording")
+			}
+			return err
+		}
+		historyEntry, err = s.recordManagedDirectAcknowledgementHistoryTx(ctx, *metadata, attempt)
+		if err != nil {
+			return err
+		}
 		ownsLinkedReminder, err := s.recoveredAttemptOwnsLinkedReminderTx(ctx, attempt)
 		if err != nil {
 			return err
@@ -1386,7 +1429,66 @@ func (s *Store) AcknowledgeManagedDirectRecoveredResult(ctx context.Context, att
 		_, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, attempt.MessageID)
 		return err
 	})
-	return changed, err
+	if err != nil {
+		return false, ManagedHistoryEntry{}, err
+	}
+	return changed, historyEntry, nil
+}
+
+const managedDirectAcknowledgementEventVersion = "managed-complete-activity/v1"
+
+// managedDirectAcknowledgementEventKey hashes length-delimited fields so
+// retry receipt spelling cannot change the identity of a successful ack.
+func managedDirectAcknowledgementEventKey(recipientAgent, messageID, incarnationID string, attemptNumber int) string {
+	fields := []string{managedDirectAcknowledgementEventVersion, recipientAgent, messageID, incarnationID, fmt.Sprintf("%d", attemptNumber)}
+	canonical := make([]byte, 0, len(fields)*16)
+	for _, field := range fields {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len([]byte(field))))
+		canonical = append(canonical, length[:]...)
+		canonical = append(canonical, []byte(field)...)
+	}
+	digest := sha256.Sum256(canonical)
+	return fmt.Sprintf("%x", digest[:])
+}
+
+// managedDirectAcknowledgementMetadata is the persisted identity needed for a
+// Complete acknowledgement. Keeping this query body-free prevents operational
+// message content from entering the history path.
+type managedDirectAcknowledgementMetadata struct {
+	ID, Recipient, IncarnationID, SourceKind string
+}
+
+func (s *Store) managedDirectAcknowledgementMetadataTx(ctx context.Context, messageID string) (*managedDirectAcknowledgementMetadata, error) {
+	var metadata managedDirectAcknowledgementMetadata
+	err := s.db.QueryRowContext(ctx, `SELECT id,recipient,message_incarnation_id,COALESCE(source_kind,'unknown') FROM messages WHERE id=?`, messageID).Scan(&metadata.ID, &metadata.Recipient, &metadata.IncarnationID, &metadata.SourceKind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &metadata, nil
+}
+
+// recordManagedDirectAcknowledgementHistoryTx records a bounded Complete fact
+// while the acknowledgement transaction is still open. All fields are fixed
+// display facts; the body and receipt never cross this boundary.
+func (s *Store) recordManagedDirectAcknowledgementHistoryTx(ctx context.Context, metadata managedDirectAcknowledgementMetadata, attempt ManagedDirectAttempt) (ManagedHistoryEntry, error) {
+	category := "managed_message"
+	messageText := "Message acknowledged"
+	presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", Summary: "Inbound message acknowledged"}
+	if metadata.SourceKind == "reminder" {
+		category = "reminder"
+		messageText = "Reminder acknowledged"
+		presentation = &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success", Summary: "Reminder completed"}
+	}
+	presentationJSON, err := managedHistoryPresentationJSON(presentation)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	eventKey := managedDirectAcknowledgementEventKey(metadata.Recipient, metadata.ID, metadata.IncarnationID, attempt.AttemptNumber)
+	return s.recordManagedCompleteHistoryStrictTx(ctx, metadata.Recipient, category, "info", messageText, eventKey, presentationJSON, presentation)
 }
 
 // recoveredAttemptOwnsLinkedReminderTx keeps an old recovered attempt from
