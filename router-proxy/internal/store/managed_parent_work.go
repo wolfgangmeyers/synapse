@@ -340,14 +340,30 @@ func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error)
 	defer s.managedParentActivityReconcileMu.Unlock()
 	changed := 0
 	nextCursor := s.managedParentActivityReconcileCursor
+	nextHighWater := s.managedParentActivityReconcileHighWater
 	err := s.runImmediate(ctx, func() error {
+		if nextHighWater == "" {
+			var highWater sql.NullString
+			if err := s.db.QueryRowContext(ctx, `SELECT MAX(agent_id) FROM managed_agents
+				WHERE desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')
+					AND pi_session_id IS NOT NULL AND process_pid IS NOT NULL AND process_start_marker IS NOT NULL
+					AND process_incarnation IS NOT NULL AND runtime_generation IS NOT NULL`).Scan(&highWater); err != nil {
+				return err
+			}
+			if !highWater.Valid {
+				nextCursor = ""
+				return nil
+			}
+			nextCursor = ""
+			nextHighWater = highWater.String
+		}
 		rows, err := s.db.QueryContext(ctx, `SELECT agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash
 			FROM managed_agents
 			WHERE desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')
 				AND pi_session_id IS NOT NULL AND process_pid IS NOT NULL AND process_start_marker IS NOT NULL
 				AND process_incarnation IS NOT NULL AND runtime_generation IS NOT NULL
-				AND agent_id > ?
-			ORDER BY agent_id LIMIT ?`, s.managedParentActivityReconcileCursor, managedParentActivityReconcileBatchSize)
+				AND agent_id > ? AND agent_id <= ?
+			ORDER BY agent_id LIMIT ?`, nextCursor, nextHighWater, managedParentActivityReconcileBatchSize)
 		if err != nil {
 			return err
 		}
@@ -364,9 +380,10 @@ func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error)
 			return err
 		}
 		if len(fences) == 0 {
-			// An exhausted keyset starts a new pass on the next sweep. Rows inserted
-			// before the cursor are picked up after this wrap.
+			// An exhausted high-water range starts a new pass on the next sweep.
+			// Rows outside this range, including churn below the cursor, are included then.
 			nextCursor = ""
+			nextHighWater = ""
 			return nil
 		}
 		for _, fence := range fences {
@@ -387,6 +404,7 @@ func (s *Store) ReconcileManagedParentActivity(ctx context.Context) (int, error)
 	})
 	if err == nil {
 		s.managedParentActivityReconcileCursor = nextCursor
+		s.managedParentActivityReconcileHighWater = nextHighWater
 	}
 	return changed, err
 }
