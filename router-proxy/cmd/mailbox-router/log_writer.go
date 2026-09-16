@@ -131,7 +131,7 @@ var safeEventFields = map[string]map[string]struct{}{
 	"reminder_failed":            {"reminder_id": {}, "scheduled_for": {}, "error_code": {}},
 	"managed_mailbox_incoming":   {"agent_id": {}, "message_id": {}, "direction": {}, "source": {}, "operation": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
 	"managed_mailbox_outgoing":   {"agent_id": {}, "message_id": {}, "direction": {}, "source": {}, "operation": {}, "operation_id": {}, "subject": {}, "body": {}, "message": {}, "content": {}, "status": {}, "error_code": {}, "error_text": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
-	"managed_root_control":       {"agent_id": {}, "operation_id": {}, "request_id": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
+	"managed_root_control":       {"agent_id": {}, "operation": {}, "operation_id": {}, "request_id": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "arguments": {}, "phase": {}, "tool_id": {}, "call_id": {}, "truncated": {}},
 	"managed_reminder":           {"agent_id": {}, "message_id": {}, "operation_id": {}, "reminder_id": {}, "status": {}, "error_code": {}, "error_text": {}, "message": {}, "content": {}, "phase": {}, "truncated": {}},
 	"managed_tool_lifecycle":     {"agent_id": {}, "operation_id": {}, "tool_id": {}, "call_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
 	"managed_process":            {"agent_id": {}, "operation_id": {}, "phase": {}, "status": {}, "error_code": {}, "error_text": {}, "content": {}, "message": {}, "truncated": {}},
@@ -164,6 +164,8 @@ func eventStringLimit(key string) int {
 		return maxEventAgentMessageIDBytes
 	case "operation_id", "request_id", "reminder_id", "tool_id", "call_id":
 		return maxEventIdentifierBytes
+	case "arguments":
+		return 4 * 1024
 	default:
 		return maxEventStringBytes
 	}
@@ -299,6 +301,7 @@ func managedEventFields(event managed.Event) (string, map[string]any, error) {
 	add("body", event.Body)
 	add("message", event.Message)
 	add("content", event.Content)
+	add("arguments", event.Arguments)
 	add("status", event.Status)
 	add("error_code", event.ErrorCode)
 	add("error_text", event.ErrorText)

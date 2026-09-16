@@ -1,6 +1,7 @@
 package managed
 
 import (
+	"encoding/json"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -8,9 +9,18 @@ import (
 )
 
 const (
-	managedEventSubjectMaxBytes = 256
-	managedEventBodyMaxBytes    = protocol.AbsoluteMaxBodyBytes
-	managedEventTruncationMark  = "[TRUNCATED]"
+	managedEventSubjectMaxBytes   = 256
+	managedEventBodyMaxBytes      = protocol.AbsoluteMaxBodyBytes
+	managedEventErrorMaxBytes     = 2_000
+	managedEventArgumentsMaxBytes = 4_096
+	managedEventTruncationMark    = "[TRUNCATED]"
+
+	managedRootControlRequestOperation = "request"
+	managedRootControlResultOperation  = "result"
+	managedRootControlAdmissionPhase   = "admission"
+	managedRootControlCompletionPhase  = "completion"
+	managedRootControlAcceptedStatus   = "accepted"
+	managedRootControlRejectedStatus   = "rejected"
 
 	ManagedMailboxIncomingOperation = "append"
 	ManagedMailboxIncomingStatus    = "acknowledged"
@@ -56,13 +66,17 @@ type Event struct {
 	Body        string
 	Message     string
 	Content     string
-	Status      string
-	ErrorCode   string
-	ErrorText   string
-	Phase       string
-	ToolID      string
-	CallID      string
-	Truncated   bool
+	// Arguments is canonical JSON containing only the operation-specific scalar
+	// arguments explicitly approved by rootControlSafeArguments. User text,
+	// nested payloads, and all unapproved fields are excluded.
+	Arguments string
+	Status    string
+	ErrorCode string
+	ErrorText string
+	Phase     string
+	ToolID    string
+	CallID    string
+	Truncated bool
 }
 
 // EventSink receives typed managed diagnostics. A nil sink disables this
@@ -103,6 +117,89 @@ func boundedManagedEventText(value string, limit int) (string, bool) {
 		prefix = prefix[:len(prefix)-1]
 	}
 	return prefix + managedEventTruncationMark, true
+}
+
+// rootControlSafeArguments projects only closed, scalar fields whose values
+// are useful for lifecycle diagnostics and are not user-entered content. The
+// full validated request remains private to the handler and durable ledger.
+func rootControlSafeArguments(operationID string, arguments any) (string, bool) {
+	object, ok := arguments.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	allowed := map[string]map[string]struct{}{
+		"goal.control":             {"action": {}},
+		"goal.snooze":              {},
+		"context.control":          {"action": {}},
+		"ops.git_status":           {"action": {}},
+		"mail.send":                {},
+		"mail.parent":              {},
+		"ops.pr_status":            {"action": {}, "pullRequest": {}},
+		"ops.priority":             {"action": {}, "status": {}},
+		"recall.control":           {"action": {}},
+		"reminder.control":         {"action": {}, "delayMinutes": {}, "intervalMinutes": {}},
+		"policy.inline_allowance":  {"usageCount": {}},
+		"router.control":           {"action": {}},
+		"notifications.settled":    {"action": {}},
+		"ops.state":                {"action": {}, "state": {}, "field": {}},
+		"ops.verification_handoff": {"action": {}, "remoteVerified": {}},
+		"ops.worker":               {"action": {}},
+		"web.search":               {"freshness": {}, "maxResults": {}},
+	}
+	keys, ok := allowed[operationID]
+	if !ok {
+		return "", false
+	}
+	projected := make(map[string]any, len(keys))
+	for key := range keys {
+		value, present := object[key]
+		if !present {
+			continue
+		}
+		switch value.(type) {
+		case bool, string, json.Number, int, int32, int64, uint, uint64, float32, float64:
+			projected[key] = value
+		}
+	}
+	if len(projected) == 0 {
+		return "", false
+	}
+	canonical, err := canonicalJSON(projected)
+	if err != nil {
+		return "", false
+	}
+	bounded, truncated := boundedManagedEventText(string(canonical), managedEventArgumentsMaxBytes)
+	return bounded, truncated
+}
+
+func managedRootControlRequestEvent(agentID string, event RootControlEvent) Event {
+	arguments, truncated := rootControlSafeArguments(event.OperationID, event.Arguments)
+	return Event{
+		Kind: EventManagedRootControl, AgentID: agentID, Operation: managedRootControlRequestOperation,
+		OperationID: event.OperationID, RequestID: event.RequestID, ToolID: event.ToolName,
+		CallID: event.ToolCallID, Arguments: arguments, Phase: managedRootControlAdmissionPhase,
+		Status: managedRootControlAcceptedStatus, Truncated: truncated,
+	}
+}
+
+func managedRootControlRejectedEvent(agentID string) Event {
+	return Event{
+		Kind: EventManagedRootControl, AgentID: agentID, Operation: managedRootControlRequestOperation,
+		Phase: managedRootControlAdmissionPhase, Status: managedRootControlRejectedStatus,
+		ErrorCode: "INVALID_REQUEST",
+	}
+}
+
+func managedRootControlResultEvent(row store.ManagedControlRequest) Event {
+	content, contentTruncated := boundedManagedEventText(row.ResultContent, managedEventBodyMaxBytes)
+	errorText, errorTruncated := boundedManagedEventText(row.ErrorDetail, managedEventErrorMaxBytes)
+	return Event{
+		Kind: EventManagedRootControl, AgentID: row.AgentID, Operation: managedRootControlResultOperation,
+		OperationID: row.OperationID, RequestID: row.RequestID, ToolID: row.ToolName,
+		CallID: row.ToolCallID, Phase: managedRootControlCompletionPhase, Status: row.ResultStatus,
+		Content: content, ErrorCode: row.ErrorCode, ErrorText: errorText,
+		Truncated: contentTruncated || errorTruncated,
+	}
 }
 
 func managedMailboxEventText(kind EventKind, attempt store.ManagedDirectAttempt, body string, direction, operation, status string) Event {
