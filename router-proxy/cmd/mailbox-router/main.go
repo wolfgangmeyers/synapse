@@ -162,6 +162,7 @@ func main() {
 	}
 	defer logWriter.Close()
 	logger := eventLogger(logWriter, os.Stderr)
+	managedLogger := managedEventLogger(logWriter, os.Stderr)
 	var managedManager *managed.Manager
 	var providerAuth *managed.ProviderAuthCoordinator
 	if options.managed.Enabled {
@@ -188,7 +189,7 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(rootErr)
 		}
-		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.StoreCatalogSource{Store: durable}, RootControlHandlers: rootHandlers})
+		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, EventSink: managedLogger, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.StoreCatalogSource{Store: durable}, RootControlHandlers: rootHandlers})
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()
