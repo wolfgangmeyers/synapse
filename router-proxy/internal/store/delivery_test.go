@@ -82,6 +82,117 @@ func TestManagedDirectFifthAttemptTerminal(t *testing.T) {
 	require.Equal(t, "dead_letter", message.State)
 }
 
+func TestManagedDirectTerminalCleanupPreservesCompletedChildAndClearsParentActivity(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyManagedDirectFixture(t)
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, ManagedChildSnapshot{SnapshotID: "direct-completed-child", OwnerSessionID: fence.PiSessionID, Sequence: 0, Canonical: []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"direct-completed-child"}`), SHA256: testManifestHash}))
+	updated, err := durable.ApplyManagedChildDelta(ctx, fence, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 1, ParentEntryID: "parent", TaskID: "child", RunID: "run", Changes: map[string]any{"description": "Child", "model": nil, "lifecycle_state": "running", "started_at": "2026-09-15T12:00:00Z", "finished_at": nil, "duration_ms": nil, "compaction": map[string]any{"state": "idle", "count": 0, "started_at": nil, "last_outcome": nil}}})
+	require.NoError(t, err)
+	require.True(t, updated)
+	updated, err = durable.ApplyManagedChildDelta(ctx, fence, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 2, ParentEntryID: "parent", TaskID: "child", RunID: "run", Changes: map[string]any{"lifecycle_state": "completed", "finished_at": "2026-09-15T12:00:01Z", "duration_ms": int64(1000)}})
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-fifth-completed-child")
+	for number := 1; number <= 5; number++ {
+		require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, fmt.Sprintf("cursor-%d", number)))
+		terminal, err := durable.ReleaseManagedDirect(ctx, *attempt, "prompt_failed", "")
+		require.NoError(t, err)
+		require.Equal(t, number == 5, terminal)
+		if terminal {
+			break
+		}
+		require.NoError(t, func() error {
+			_, err := durable.db.Exec(`UPDATE managed_direct_delivery_attempts SET next_attempt_at = ? WHERE message_id = ? AND attempt_number = ?`, formatTimestamp(time.Now().Add(-time.Second)), attempt.MessageID, number)
+			return err
+		}())
+		attempt, err = durable.AllocateManagedDirectAttempt(ctx, fence)
+		require.NoError(t, err)
+		require.NotNil(t, attempt)
+	}
+	source, err := durable.ManagedReadinessSource(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Contains(t, string(source.Snapshot.Canonical), `"lifecycle_state":"completed"`)
+	require.NotContains(t, string(source.Snapshot.Canonical), `"lifecycle_state":"interrupted_unknown"`)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
+func TestReleaseManagedDirectRecoveryTerminalClearsParentActivity(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyManagedDirectFixture(t)
+	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-recovery-terminal")
+	for number := 1; number <= 4; number++ {
+		require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, fmt.Sprintf("recovery-cursor-%d", number)))
+		terminal, err := durable.ReleaseManagedDirect(ctx, *attempt, "prompt_failed", "")
+		require.NoError(t, err)
+		require.False(t, terminal)
+		require.NoError(t, func() error {
+			_, err := durable.db.Exec(`UPDATE managed_direct_delivery_attempts SET next_attempt_at = ? WHERE message_id = ? AND attempt_number = ?`, formatTimestamp(time.Now().Add(-time.Second)), attempt.MessageID, number)
+			return err
+		}())
+		attempt, err = durable.AllocateManagedDirectAttempt(ctx, fence)
+		require.NoError(t, err)
+		require.NotNil(t, attempt)
+	}
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "recovery-cursor-5"))
+	terminal, err := durable.ReleaseManagedDirectRecovery(ctx, *attempt, "recovery_dead_letter")
+	require.NoError(t, err)
+	require.True(t, terminal)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
+func TestRecoveryTerminalUsesCurrentFenceWithoutClearingReplacementActivity(t *testing.T) {
+	ctx := context.Background()
+	durable, oldFence := readyManagedDirectFixture(t)
+	attempt := allocateTestDirectAttempt(t, durable, oldFence, "direct-recovery-replacement")
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "old-cursor"))
+	newFence := oldFence
+	newFence.ProcessPID++
+	newFence.ProcessStartMarker = "replacement-marker"
+	newFence.ProcessIncarnation = "replacement-incarnation"
+	newFence.RuntimeGeneration = "replacement-generation"
+	require.NoError(t, func() error {
+		_, err := durable.db.Exec(`UPDATE managed_agents SET process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,activity_state='active' WHERE agent_id=?`, newFence.ProcessPID, newFence.ProcessStartMarker, newFence.ProcessIncarnation, newFence.RuntimeGeneration, newFence.AgentID)
+		return err
+	}())
+	replacement := parentWorkAttempt(newFence, "replacement-parent-work")
+	openParentWorkForTest(t, durable, replacement)
+	require.NoError(t, func() error {
+		_, err := durable.db.Exec(`UPDATE managed_direct_delivery_attempts SET attempt_number=5 WHERE message_id=? AND attempt_number=1`, attempt.MessageID)
+		return err
+	}())
+	attempt.AttemptNumber = 5
+	terminal, err := durable.ReleaseManagedDirectRecovery(ctx, *attempt, "recovery_dead_letter")
+	require.NoError(t, err)
+	require.True(t, terminal)
+	agent, err := durable.ManagedAgent(ctx, newFence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+	var oldWorkState string
+	require.NoError(t, durable.db.QueryRow(`SELECT state FROM managed_parent_work WHERE message_id=? AND attempt_number=1`, attempt.MessageID).Scan(&oldWorkState))
+	require.Equal(t, "interrupted", oldWorkState)
+}
+
+func TestExpiredPromptedMessageClearsParentActivity(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyManagedDirectFixture(t)
+	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-expired-prompt")
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "expiry-cursor"))
+	require.NoError(t, func() error {
+		_, err := durable.db.Exec(`UPDATE messages SET expires_at=? WHERE id=?`, formatTimestamp(time.Now().Add(-time.Second)), attempt.MessageID)
+		return err
+	}())
+	_, err := durable.RecoverExpiredUnclaimedMessages(ctx)
+	require.NoError(t, err)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
 func TestManagedDirectExpiryAndTmuxIsolation(t *testing.T) {
 	durable, fence := readyManagedDirectFixture(t)
 	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-expiry")
@@ -494,6 +605,7 @@ func TestRetireManagedRecipientSourceForTerminationCleansDirectStateAndPreserves
 			stale := *fixture.attempts["prompted"]
 			otherFence := readyManagedDirectAgent(t, fixture.store, "other-agent")
 			otherAttempt := allocateTestDirectAttempt(t, fixture.store, otherFence, "other-direct")
+			require.NoError(t, fixture.store.MarkManagedDirectPrompted(context.Background(), *otherAttempt, "other-cursor"))
 			require.NoError(t, fixture.store.RecordManagedDirectDiagnostic(context.Background(), otherFence.AgentID, otherAttempt.MessageID, otherAttempt.AttemptNumber, "other", ""))
 			if initialState == "active" {
 				preTerminationAttempt, err := fixture.store.AllocateManagedDirectAttempt(context.Background(), fixture.fence)
@@ -518,6 +630,12 @@ func TestRetireManagedRecipientSourceForTerminationCleansDirectStateAndPreserves
 			require.Equal(t, before["snapshots"], after["snapshots"])
 			require.Equal(t, otherBefore["attempts"], directTerminationLedger(t, fixture.store, otherFence.AgentID, otherFence.AgentID)["attempts"])
 			require.Equal(t, otherBefore["diagnostics"], directTerminationLedger(t, fixture.store, otherFence.AgentID, otherFence.AgentID)["diagnostics"])
+			other, err := fixture.store.ManagedAgent(context.Background(), otherFence.AgentID)
+			require.NoError(t, err)
+			require.Equal(t, "active", other.ActivityState)
+			owner, err := fixture.store.ManagedAgent(context.Background(), fixture.fence.AgentID)
+			require.NoError(t, err)
+			require.Equal(t, "idle", owner.ActivityState)
 
 			require.NoError(t, fixture.store.AcknowledgeManagedDirect(context.Background(), stale, "late-receipt", true))
 			require.NoError(t, fixture.store.AcknowledgeManagedDirectRecovered(context.Background(), stale, "late-recovered-receipt"))

@@ -125,6 +125,75 @@ func TestManagedFinalDeliveryFailureIsBoundedAndInterruptClosesExactFence(t *tes
 	require.Equal(t, "final_delivery_pending", parentWorkState(t, durable, fresh))
 }
 
+func TestReconcileManagedParentActivityRepairsHistoricalStaleRowsIdempotently(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id=?`, fence.AgentID)
+	require.NoError(t, err)
+	beforeVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	repaired, err := durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, repaired)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+	afterVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, beforeVersion+1, afterVersion)
+
+	repaired, err = durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	repeatVersion, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, afterVersion, repeatVersion)
+}
+
+func TestReconcileManagedParentActivityPreservesNativeActiveUntilNewerIdle(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	updated, err := durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 1, State: "active"})
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	repaired, err := durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+
+	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 2, State: "idle"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	repaired, err = durable.ReconcileManagedParentActivity(ctx)
+	require.NoError(t, err)
+	require.Zero(t, repaired)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
+func TestManagedParentActivityKeepsOtherActiveWorkVisibleUntilAllSourcesSettle(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	first := parentWorkAttempt(fence, "parent-source-one")
+	second := parentWorkAttempt(fence, "parent-source-two")
+	openParentWorkForTest(t, durable, first)
+	openParentWorkForTest(t, durable, second)
+
+	require.NoError(t, durable.SettleManagedParentDirectTurn(ctx, first))
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+	require.NoError(t, durable.SettleManagedParentDirectTurn(ctx, second))
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
 func TestManagedParentWorkRetentionKeepsABoundedTerminalArchivePerAgent(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)
