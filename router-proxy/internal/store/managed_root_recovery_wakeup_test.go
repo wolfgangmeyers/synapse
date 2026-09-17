@@ -25,8 +25,9 @@ func prepareManagedRootRecoveryWakeup(t *testing.T) (*Store, ManagedRuntimeFence
 	target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation, target.RuntimeGeneration = 72, "start-2", "inc-2", "target-runtime"
 	require.NoError(t, durable.InstallManagedRootRecoveryFence(ctx, old, target))
 	require.NoError(t, durable.CompleteManagedRootRecovery(ctx, old.AgentID, target))
-	_, err = durable.db.Exec(`UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,slot_held=1 WHERE agent_id=?`, old.AgentID)
-	require.NoError(t, err)
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, target, DefaultManagedReadinessPolicy()))
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, target, ManagedChildSnapshot{SnapshotID: "wakeup-snapshot", OwnerSessionID: target.PiSessionID, Sequence: 0, Canonical: []byte(`{"owner_session_id":"session-1","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"wakeup-snapshot"}`), SHA256: testManifestHash}))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, target))
 	now := formatTimestamp(durable.clock.Now())
 	_, err = durable.db.Exec(`INSERT INTO recipient_sources(recipient_name,source_kind,owner_identity,state,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(recipient_name) DO UPDATE SET source_kind='managed',owner_identity=excluded.owner_identity,state='active',updated_at=excluded.updated_at`, old.AgentID, "managed", old.AgentID, "active", now, now)
 	require.NoError(t, err)
@@ -35,17 +36,17 @@ func prepareManagedRootRecoveryWakeup(t *testing.T) (*Store, ManagedRuntimeFence
 
 func insertInterruptedWakeupChild(t *testing.T, durable *Store, fence ManagedRuntimeFence, taskID, runID string) {
 	t.Helper()
-	_, err := durable.db.Exec(`INSERT INTO managed_child_recoveries(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown','parent_process_lost',?,?)`,
-		fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, "entry-"+runID, taskID, runID, 3, `{"run_id":"`+runID+`","task_id":"`+taskID+`"}`, formatTimestamp(durable.clock.Now()), formatTimestamp(durable.clock.Now()))
+	_, err := durable.db.Exec(`INSERT INTO managed_child_recoveries(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_pid,prior_process_start_marker,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'interrupted_unknown','parent_process_lost',?,?)`,
+		fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, "entry-"+runID, taskID, runID, 3, `{"run_id":"`+runID+`","task_id":"`+taskID+`"}`, formatTimestamp(durable.clock.Now()), formatTimestamp(durable.clock.Now()))
 	require.NoError(t, err)
 }
 
 func TestManagedRootRecoveryWakeupUsesExactFenceAndNormalDelivery(t *testing.T) {
-	durable, old, _, action := prepareManagedRootRecoveryWakeup(t)
+	durable, old, targetFence, action := prepareManagedRootRecoveryWakeup(t)
 	ctx := context.Background()
 	insertInterruptedWakeupChild(t, durable, old, "task-b", "run-b")
 	insertInterruptedWakeupChild(t, durable, old, "task-a", "run-a")
-	insertInterruptedWakeupChild(t, durable, ManagedRuntimeFence{AgentID: old.AgentID, PiSessionID: old.PiSessionID, SessionEpoch: old.SessionEpoch, ProcessPID: old.ProcessPID, ProcessStartMarker: old.ProcessStartMarker, ProcessIncarnation: "other-inc", RuntimeGeneration: old.RuntimeGeneration}, "task-x", "run-x")
+	insertInterruptedWakeupChild(t, durable, ManagedRuntimeFence{AgentID: old.AgentID, PiSessionID: old.PiSessionID, SessionEpoch: old.SessionEpoch, ProcessPID: 999, ProcessStartMarker: "other-start", ProcessIncarnation: "other-inc", RuntimeGeneration: old.RuntimeGeneration}, "task-x", "run-x")
 
 	wakeup, err := durable.QueueManagedRootRecoveryWakeup(ctx, action.ActionID)
 	require.NoError(t, err)
@@ -57,16 +58,25 @@ func TestManagedRootRecoveryWakeupUsesExactFenceAndNormalDelivery(t *testing.T) 
 	require.NoError(t, durable.db.QueryRow(`SELECT recovery_state FROM managed_child_recoveries WHERE run_id=?`, "run-a").Scan(&recoveryState))
 	require.Equal(t, "interrupted_unknown", recoveryState)
 
-	target, err := durable.ResolveMessageTarget(ctx, wakeup.MessageID)
+	snapshot, err := durable.MessageTargetSnapshot(ctx, wakeup.MessageID)
 	require.NoError(t, err)
-	require.NotNil(t, target)
-	require.Equal(t, "managed", target.SourceKind)
-	require.Equal(t, old.AgentID, target.OwnerIdentity)
+	require.Equal(t, wakeup.MessageID, snapshot.MessageID)
+	require.Equal(t, "managed", snapshot.SourceKind)
+	require.Equal(t, old.AgentID, snapshot.OwnerIdentity)
 	var state, source, recipient string
 	require.NoError(t, durable.db.QueryRow(`SELECT state,source_kind,recipient FROM messages WHERE id=?`, wakeup.MessageID).Scan(&state, &source, &recipient))
 	require.Equal(t, "queued", state)
 	require.Equal(t, "system", source)
 	require.Equal(t, old.AgentID, recipient)
+	attempt, err := durable.AllocateManagedDirectAttempt(ctx, targetFence)
+	require.NoError(t, err)
+	require.NotNil(t, attempt)
+	require.Equal(t, wakeup.MessageID, attempt.MessageID)
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "wakeup-cursor"))
+	require.NoError(t, durable.AcknowledgeManagedDirect(ctx, *attempt, "wakeup-receipt", true))
+	var remaining int
+	require.NoError(t, durable.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, wakeup.MessageID).Scan(&remaining))
+	require.Zero(t, remaining)
 }
 
 func TestManagedRootRecoveryWakeupNotifiesWithoutChildrenAndIsIdempotent(t *testing.T) {

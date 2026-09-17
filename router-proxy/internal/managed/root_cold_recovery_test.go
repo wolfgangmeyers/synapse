@@ -312,6 +312,47 @@ func TestRecoverManagedRootColdStartFailurePathsCleanUpAndTerminalize(t *testing
 	}
 }
 
+func TestRecoverManagedRootColdStartRetriesWakeupWithoutReapingReadyBinding(t *testing.T) {
+	ctx := context.Background()
+	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	rpc := &launchRPC{active: expectedManagedActiveTools(manifest)}
+	manager, durable, agent, _, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}, process, rpc)
+	triggerDB := installColdRecoveryTrigger(t, databasePath, "CREATE TRIGGER reject_recovery_wakeup BEFORE INSERT ON messages WHEN NEW.id LIKE 'mrrw_%' BEGIN SELECT RAISE(FAIL, 'wakeup insert failed'); END")
+	defer triggerDB.Close()
+
+	err = manager.RecoverManagedRootColdStarts(ctx)
+	require.ErrorContains(t, err, "wakeup insert failed")
+	current, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", current.LifecycleState)
+	require.True(t, current.AcceptingPrompts)
+	_, bound := manager.bindingFor(agent.AgentID)
+	require.True(t, bound, "a retryable wakeup failure must retain the ready replacement binding")
+	ready, err := durable.ManagedRootRecoveryAction(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "ready", ready.Stage)
+	var messages, markers int
+	require.NoError(t, triggerDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE id LIKE 'mrrw_%'`).Scan(&messages))
+	require.NoError(t, triggerDB.QueryRow(`SELECT COUNT(*) FROM managed_root_recovery_wakeups`).Scan(&markers))
+	require.Zero(t, messages)
+	require.Zero(t, markers)
+
+	_, err = triggerDB.Exec(`DROP TRIGGER reject_recovery_wakeup`)
+	require.NoError(t, err)
+	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+	require.NoError(t, triggerDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE id LIKE 'mrrw_%'`).Scan(&messages))
+	require.NoError(t, triggerDB.QueryRow(`SELECT COUNT(*) FROM managed_root_recovery_wakeups`).Scan(&markers))
+	require.Equal(t, 1, messages)
+	require.Equal(t, 1, markers)
+	current, err = durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, 902, current.ProcessPID)
+	_, bound = manager.bindingFor(agent.AgentID)
+	require.True(t, bound)
+}
+
 func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadiness(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
