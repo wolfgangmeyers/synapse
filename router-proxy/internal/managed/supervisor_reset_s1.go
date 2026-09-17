@@ -44,6 +44,16 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 	if err != nil {
 		return ResetResult{}, err
 	}
+	// Repair the deployed pre-reconciler failure only after an exact live
+	// binding proof. This makes the old terminal action eligible for one normal
+	// retry without changing its historical idempotency response.
+	if err := m.reconcileStrandedManagedReset(ctx, request.AgentID); err != nil {
+		return ResetResult{}, err
+	}
+	agent, err = m.store.ManagedAgent(ctx, request.AgentID)
+	if err != nil {
+		return ResetResult{}, err
+	}
 	liveFence := storedAgentFence(agent)
 	predecessor, retryErr := m.store.LatestRetryableManagedReset(ctx, request.AgentID)
 	if retryErr != nil && !errors.Is(retryErr, sql.ErrNoRows) {
@@ -63,6 +73,34 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 		}
 		source, retryOf = *predecessor.SourceFence, predecessor.ActionID
 		switch predecessor.TerminalCode {
+		case "RESET_PROCESS_IDENTITY_UNSAFE":
+			if predecessor.Stage != "admission" {
+				return ResetResult{}, &store.ManagedResetConflictError{AgentID: request.AgentID}
+			}
+			candidate, live := m.bindingFor(request.AgentID)
+			if !live {
+				return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+			}
+			candidate.serial.Lock()
+			candidateLive := m.liveBinding(agent, candidate)
+			candidateSource := bindingFence(request.AgentID, candidate)
+			candidate.serial.Unlock()
+			if !candidateLive || !sameBindingFence(candidateSource, source) {
+				return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+			}
+			binding, liveFence, live = candidate, source, true
+			if !live {
+				return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+			}
+			targetEpoch = source.SessionEpoch + 1
+			targetSession, err = m.ids.Next()
+			if err != nil {
+				return ResetResult{}, err
+			}
+			targetGeneration = predecessor.PlannedTargetRuntimeGeneration
+			if err := m.ensureFreshManagedSession(ctx, request.AgentID, targetSession); err != nil {
+				return ResetResult{}, err
+			}
 		case "RESET_TARGET_START_FAILED", "RESET_TARGET_IDENTITY_UNSAFE":
 			if predecessor.Stage != "target_ready" {
 				return ResetResult{}, &store.ManagedResetConflictError{AgentID: request.AgentID}
@@ -181,10 +219,19 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 	}
 	if binding != nil {
 		binding.serial.Lock()
-		if !m.liveBindingForFence(context.Background(), binding, liveFence) {
+		live, subreason := m.liveBindingForFenceReason(context.Background(), binding, liveFence)
+		if !live {
 			binding.serial.Unlock()
+			// Reservation is durable and remains the sole lifecycle owner. A
+			// transient proof failure must not terminalize the reset or signal a
+			// process; the lane reconciler will repeat the complete proof.
+			_ = m.store.RecordManagedResetBindingDiagnostic(context.Background(), admission.Action.ActionID, liveFence, subreason)
 			lane.admission.Unlock()
-			_ = m.store.FailManagedReset(context.Background(), admission.Action.ActionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, liveFence)
+			m.startManagedTask(func() {
+				lane.serial.Lock()
+				defer lane.serial.Unlock()
+				m.reconcileManagedResetAdmission(admission.Action.ActionID, liveFence, targetSession, targetGeneration, targetEpoch, launchMode)
+			})
 			return ResetResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 		}
 		binding.operationID, binding.lifecycleAction = request.RequestID, "reset"
@@ -202,6 +249,93 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 		m.executeResetInLane(binding, admission.Action.ActionID, source, targetSession, targetGeneration, targetEpoch, launchMode)
 	})
 	return ResetResult{Agent: &responseAgent, Operation: admission.Operation}, nil
+}
+
+// reconcileManagedResetAdmission repeats the complete source proof after a
+// post-reservation binding failure. A successful proof reattaches the existing
+// binding and runs the already-reserved action; a failed proof terminalizes
+// without touching the process.
+func (m *Manager) reconcileManagedResetAdmission(actionID string, fence store.ManagedRuntimeFence, targetSession, targetGeneration string, targetEpoch int64, mode SessionLaunchMode) {
+	action, err := m.store.ManagedLifecycleAction(context.Background(), actionID)
+	if err != nil || action.Kind != "reset" || action.State != "admitted" || action.Stage != "admission" || action.SourceFence == nil || !sameBindingFence(*action.SourceFence, fence) {
+		return
+	}
+	binding, found := m.bindingFor(fence.AgentID)
+	if found {
+		binding.serial.Lock()
+		live, subreason := m.liveBindingForFenceReason(context.Background(), binding, fence)
+		if live {
+			binding.operationID, binding.lifecycleAction = action.OperationID, "reset"
+			binding.serial.Unlock()
+			m.mu.Lock()
+			if m.bindings[fence.AgentID] == binding {
+				m.operationIDs[fence.AgentID] = action.OperationID
+			}
+			m.mu.Unlock()
+			m.executeResetInLane(binding, actionID, fence, targetSession, targetGeneration, targetEpoch, mode)
+			return
+		}
+		binding.serial.Unlock()
+		_ = m.store.RecordManagedResetBindingDiagnostic(context.Background(), actionID, fence, subreason)
+	} else {
+		_ = m.store.RecordManagedResetBindingDiagnostic(context.Background(), actionID, fence, "binding_missing")
+	}
+	_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, fence)
+}
+
+// reconcileStrandedManagedReset repairs the old failure mode only when the
+// manager can prove the exact durable fence is still bound. It never probes a
+// PID and then assumes ownership from that probe alone.
+func (m *Manager) ReconcileManagedResetFailures(ctx context.Context) error {
+	actions, err := m.store.ManagedResetIdentityUnsafeActions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, action := range actions {
+		if action == nil || action.SourceFence == nil {
+			continue
+		}
+		lane := m.laneFor(action.AgentID)
+		lane.serial.Lock()
+		binding, found := m.bindingFor(action.AgentID)
+		if found {
+			binding.serial.Lock()
+			live, _ := m.liveBindingForFenceReason(ctx, binding, *action.SourceFence)
+			binding.serial.Unlock()
+			if live {
+				if reconcileErr := m.store.ReconcileManagedResetIdentityUnsafe(ctx, action.ActionID, *action.SourceFence); reconcileErr != nil && !errors.Is(reconcileErr, sql.ErrNoRows) {
+					lane.serial.Unlock()
+					return reconcileErr
+				}
+			}
+		}
+		lane.serial.Unlock()
+	}
+	return nil
+}
+
+func (m *Manager) reconcileStrandedManagedReset(ctx context.Context, agentID string) error {
+	action, err := m.store.ManagedResetIdentityUnsafeAction(ctx, agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if action.SourceFence == nil {
+		return nil
+	}
+	binding, found := m.bindingFor(agentID)
+	if !found {
+		return nil
+	}
+	binding.serial.Lock()
+	live, _ := m.liveBindingForFenceReason(ctx, binding, *action.SourceFence)
+	binding.serial.Unlock()
+	if !live {
+		return nil
+	}
+	return m.store.ReconcileManagedResetIdentityUnsafe(ctx, action.ActionID, *action.SourceFence)
 }
 
 // ensureFreshManagedSession checks both the durable artifact ledger and the
@@ -618,12 +752,27 @@ func (m *Manager) RecoverManagedLifecycleControls(ctx context.Context) error {
 		m.recoverResetActionInLane(claim, action)
 		lane.serial.Unlock()
 	}
+	if err := m.ReconcileManagedResetFailures(ctx); err != nil {
+		return err
+	}
 	return m.RecoverManagedLifecycleRestarts(ctx)
 }
 
 func (m *Manager) recoverResetActionInLane(claim *store.ManagedLifecycleRecoveryClaim, action *store.ManagedLifecycleAction) {
 	if claim == nil || action == nil {
 		return
+	}
+	if action.State == "admitted" && action.Stage == "admission" && action.SourceFence != nil {
+		agent, agentErr := m.store.ManagedAgent(context.Background(), action.AgentID)
+		if agentErr == nil && agent.LastErrorCode == "RESET_BINDING_PROOF_FAILED" {
+			targetSession, idErr := m.ids.Next()
+			if idErr != nil || m.ensureFreshManagedSession(context.Background(), action.AgentID, targetSession) != nil {
+				_ = m.store.FailManagedReset(context.Background(), action.ActionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, *action.SourceFence)
+				return
+			}
+			m.reconcileManagedResetAdmission(action.ActionID, *action.SourceFence, targetSession, action.PlannedTargetRuntimeGeneration, action.SourceFence.SessionEpoch+1, CreateNew)
+			return
+		}
 	}
 	probe := m.processOps.Probe(oldFenceIdentity(claim.Fence))
 	switch action.Stage {
