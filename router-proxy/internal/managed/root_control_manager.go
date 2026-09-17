@@ -243,7 +243,10 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 		}
 		result, err := m.executeRootControlHandler(ctx, binding, handler, invocation, true)
 		m.finishRootControlHandler(ctx, binding, handler, claim, result, err, claim.Request.State == "side_effect_committed")
-	case "completed":
+	case "completed", "failed":
+		// A handler-invalid result is stored as failed before its durable result
+		// append is claimed. It is still a recoverable result-delivery row; do not
+		// require the handler to execute again.
 		m.appendRootControlResult(ctx, binding, *row)
 	case "append_pending", "awaiting_append":
 		m.reconcileRootControlAppend(ctx, binding, *row)

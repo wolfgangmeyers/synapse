@@ -574,24 +574,41 @@ func (s *Store) ListRestorableManagedControlRequests(ctx context.Context, fence 
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT request_id FROM managed_control_requests WHERE agent_id=? AND state NOT IN ('delivered','failed','cancelled') AND `+managedControlFenceWhere()+` ORDER BY received_at,request_id`, append([]any{fence.AgentID}, managedControlFenceArgs(fence)...)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT request_id FROM managed_control_requests WHERE agent_id=? AND (`+
+		`state NOT IN ('delivered','failed','cancelled') OR `+
+		`(state='failed' AND result_status='error' AND append_attempt=0 AND result_entry_id IS NOT NULL AND result_entry_id <> '')`+
+		`) AND `+managedControlFenceWhere()+` ORDER BY received_at,request_id`, append([]any{fence.AgentID}, managedControlFenceArgs(fence)...)...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var result []ManagedControlRequest
+	var requestIDs []string
 	for rows.Next() {
 		var requestID string
 		if err := rows.Scan(&requestID); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
+		requestIDs = append(requestIDs, requestID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	// The query above can hold the SQLite connection while rows are open. Close
+	// it before re-reading each full row, or the single-connection Store can
+	// deadlock while recovering a failed append result.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	result := make([]ManagedControlRequest, 0, len(requestIDs))
+	for _, requestID := range requestIDs {
 		row, err := managedControlForTx(ctx, s.db, requestID)
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, *row)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) PruneManagedControlTerminal(ctx context.Context) (int, error) {
