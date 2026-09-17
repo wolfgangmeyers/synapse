@@ -660,6 +660,11 @@ func (s *Store) PruneManagedRootRecovery(ctx context.Context) (int, error) {
 		}
 		count, err := result.RowsAffected()
 		removed = int(count)
+		if err != nil {
+			return err
+		}
+		wakeups, err := s.pruneManagedRootRecoveryWakeupsTx(ctx)
+		removed += wakeups
 		return err
 	})
 	return removed, err
