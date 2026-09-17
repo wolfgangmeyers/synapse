@@ -185,10 +185,14 @@ type managedBinding struct {
 	token                   string
 	waitDone                <-chan error
 	waitSignal              <-chan struct{}
-	waitErr                 error
-	restartExecutionDone    bool
-	restartShutdownDone     bool
-	restartShutdownError    error
+	// waitSerial is the publication/commit gate for process exit. The waiter
+	// acquires it before closing waitSignal, and reconciliation holds it through
+	// its durable transition. Binding serial alone cannot order Process.Wait.
+	waitSerial           sync.Mutex
+	waitErr              error
+	restartExecutionDone bool
+	restartShutdownDone  bool
+	restartShutdownError error
 	// retainBinding keeps a failed EOF cleanup owner available for retry.
 	retainBinding bool
 }
@@ -510,12 +514,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	waitSignal := make(chan struct{})
 	go func() {
 		waitErr := process.Wait()
-		// waitSignal publishes waitErr before readiness may classify an EOF.
-		// It must not wait on binding.serial because readiness owns that lock
-		// while an RPC call can return the EOF that triggered this path.
-		binding.waitErr = waitErr
-		close(waitSignal)
-		waitDone <- waitErr
+		publishBindingWait(binding, waitSignal, waitDone, waitErr)
 	}()
 	binding.serial.Lock()
 	binding.waitDone = waitDone
@@ -721,6 +720,17 @@ func (m *Manager) runningBindingCurrent(ctx context.Context, binding *managedBin
 	}
 	agent, err := m.store.ManagedAgent(ctx, fence.AgentID)
 	return err == nil && agent.DesiredState == "running" && agent.LifecycleState == "running" && sameBindingFence(storedAgentFence(agent), fence)
+}
+
+// publishBindingWait is the single publication point for Process.Wait. The
+// same gate is held by reconciliation through its durable transition, so an
+// exit cannot publish between the final proof and the store write.
+func publishBindingWait(binding *managedBinding, waitSignal chan struct{}, waitDone chan error, waitErr error) {
+	binding.waitSerial.Lock()
+	binding.waitErr = waitErr
+	close(waitSignal)
+	waitDone <- waitErr
+	binding.waitSerial.Unlock()
 }
 
 // completedBindingWait reads the wait result only after the one waiter has
@@ -1566,9 +1576,7 @@ func (m *Manager) watchRestartProcess(binding *managedBinding) {
 	binding.waitDone, binding.waitSignal = waitDone, waitSignal
 	go func() {
 		waitErr := binding.process.Wait()
-		binding.waitErr = waitErr
-		close(waitSignal)
-		waitDone <- waitErr
+		publishBindingWait(binding, waitSignal, waitDone, waitErr)
 	}()
 }
 
