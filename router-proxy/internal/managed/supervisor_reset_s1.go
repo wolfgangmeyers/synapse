@@ -291,30 +291,27 @@ func (m *Manager) ReconcileManagedResetFailures(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, action := range actions {
-		if action == nil || action.SourceFence == nil {
+	for _, listed := range actions {
+		if listed == nil || listed.SourceFence == nil {
 			continue
 		}
-		lane := m.laneFor(action.AgentID)
+		lane := m.laneFor(listed.AgentID)
 		lane.serial.Lock()
-		binding, found := m.bindingFor(action.AgentID)
-		if found {
-			binding.serial.Lock()
-			live, _ := m.liveBindingForFenceReason(ctx, binding, *action.SourceFence)
-			binding.serial.Unlock()
-			if live {
-				if reconcileErr := m.store.ReconcileManagedResetIdentityUnsafe(ctx, action.ActionID, *action.SourceFence); reconcileErr != nil && !errors.Is(reconcileErr, sql.ErrNoRows) {
-					lane.serial.Unlock()
-					return reconcileErr
-				}
-			}
-		}
+		err := m.reconcileStrandedManagedResetInLane(ctx, listed.AgentID)
 		lane.serial.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (m *Manager) reconcileStrandedManagedReset(ctx context.Context, agentID string) error {
+// reconcileStrandedManagedResetInLane holds the agent lane and the immutable
+// binding lease from the live proof through the durable transition. The process
+// exit watcher uses the same lane, so it cannot clear this binding between the
+// proof and the update. A closed wait signal is checked while the lease is held
+// and fails closed; the watcher then owns any later exit reconciliation.
+func (m *Manager) reconcileStrandedManagedResetInLane(ctx context.Context, agentID string) error {
 	action, err := m.store.ManagedResetIdentityUnsafeAction(ctx, agentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -330,12 +327,51 @@ func (m *Manager) reconcileStrandedManagedReset(ctx context.Context, agentID str
 		return nil
 	}
 	binding.serial.Lock()
+	defer binding.serial.Unlock()
+	if binding.waitSignal != nil {
+		select {
+		case <-binding.waitSignal:
+			return nil
+		default:
+		}
+	}
 	live, _ := m.liveBindingForFenceReason(ctx, binding, *action.SourceFence)
-	binding.serial.Unlock()
 	if !live {
 		return nil
 	}
-	return m.store.ReconcileManagedResetIdentityUnsafe(ctx, action.ActionID, *action.SourceFence)
+	if m.beforeManagedResetReconcile != nil {
+		m.beforeManagedResetReconcile(agentID)
+	}
+	if binding.waitSignal != nil {
+		select {
+		case <-binding.waitSignal:
+			return nil
+		default:
+		}
+	}
+	if err := m.store.ReconcileManagedResetIdentityUnsafe(ctx, action.ActionID, *action.SourceFence); err != nil {
+		var stale *store.ManagedRestartStaleError
+		if !errors.As(err, &stale) || !isManagedResetReconciliationStale(ctx, m.store, action.ActionID) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) reconcileStrandedManagedReset(ctx context.Context, agentID string) error {
+	lane := m.laneFor(agentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	return m.reconcileStrandedManagedResetInLane(ctx, agentID)
+}
+
+// isManagedResetReconciliationStale treats a lost one-shot race as success only
+// after reloading the action. A retryable predecessor is the durable marker
+// that another owner already performed this reconciliation; every other stale
+// result remains fail closed.
+func isManagedResetReconciliationStale(ctx context.Context, durable *store.Store, actionID string) bool {
+	current, err := durable.ManagedLifecycleAction(ctx, actionID)
+	return err == nil && current.Kind == "reset" && current.State == "failed" && current.Stage == "admission" && current.Retryable
 }
 
 // ensureFreshManagedSession checks both the durable artifact ledger and the
