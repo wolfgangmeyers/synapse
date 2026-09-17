@@ -84,6 +84,16 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		if cleanupOnly || agent.DesiredState != "running" {
 			continue
 		}
+		// A router can stop after the ready transaction and before the separate
+		// durable restart notice transaction. Re-run that notice boundary on every
+		// startup scan; its action marker makes the retry idempotent.
+		wakeup, wakeupErr := m.store.QueueManagedRootRecoveryWakeupForAgent(ctx, agent.AgentID)
+		if wakeupErr != nil {
+			return wakeupErr
+		}
+		if wakeup != nil {
+			m.OfferDirect(agent.AgentID)
+		}
 		cleanupOnly, cleanupErr = m.cleanupFailedColdRecoveryTarget(ctx, agent.AgentID)
 		if cleanupErr != nil {
 			return cleanupErr
@@ -494,6 +504,16 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness could not be committed")
 	}
+	if _, err := m.store.QueueManagedRootRecoveryWakeup(ctx, action.ActionID); err != nil {
+		_ = closeRPCAndWait(targetRPC)
+		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
+		m.clearBinding(target)
+		if !cleanupOK {
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		}
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "restart notice could not be committed")
+	}
+	m.OfferDirect(agent.AgentID)
 	// Recovery temporarily uses its action ID as the binding owner so all work
 	// stays fenced until the ready transaction commits. Restore the durable
 	// launch owner before clearing that lifecycle hold; a stale callback must not
