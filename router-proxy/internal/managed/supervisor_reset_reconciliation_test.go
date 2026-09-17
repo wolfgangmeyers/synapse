@@ -42,6 +42,9 @@ func TestResetReconciliationFailsClosedWhenProcessExitsAfterProof(t *testing.T) 
 
 	entered := make(chan struct{})
 	manager.beforeManagedResetReconcile = func(string) {
+		// This hook runs after the last live-binding proof and immediately before
+		// the wait-publication commit gate. Close the wait signal in that exact
+		// handoff window; reconciliation must leave the durable failure untouched.
 		close(entered)
 		close(exitSignal)
 	}
@@ -54,8 +57,8 @@ func TestResetReconciliationFailsClosedWhenProcessExitsAfterProof(t *testing.T) 
 	}
 	require.NoError(t, <-result)
 
-	// The process exit happened after the exact binding proof. The second check
-	// prevents the old durable fence from being restored to running.
+	// The process exit happened after the exact pre-write proof. The transaction
+	// check prevents the old durable fence from being restored to running.
 	action, err := durable.ManagedLifecycleAction(ctx, actionID)
 	require.NoError(t, err)
 	require.False(t, action.Retryable)

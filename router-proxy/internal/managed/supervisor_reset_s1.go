@@ -307,10 +307,10 @@ func (m *Manager) ReconcileManagedResetFailures(ctx context.Context) error {
 }
 
 // reconcileStrandedManagedResetInLane holds the agent lane and the immutable
-// binding lease from the live proof through the durable transition. The process
-// exit watcher uses the same lane, so it cannot clear this binding between the
-// proof and the update. A closed wait signal is checked while the lease is held
-// and fails closed; the watcher then owns any later exit reconciliation.
+// binding lease from the live proof through the durable transition. The wait
+// publication gate is acquired after the final proof and held through the
+// durable write. Process.Wait must publish through that gate, so an exit either
+// wins before reconciliation commits or is ordered after the commit.
 func (m *Manager) reconcileStrandedManagedResetInLane(ctx context.Context, agentID string) error {
 	action, err := m.store.ManagedResetIdentityUnsafeAction(ctx, agentID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -339,9 +339,21 @@ func (m *Manager) reconcileStrandedManagedResetInLane(ctx context.Context, agent
 	if !live {
 		return nil
 	}
+	// This is the last proof before entering the wait/publication transaction.
+	// The transaction check below closes the handoff if Process.Wait publishes
+	// after this proof but before the durable write begins.
+	if binding.waitSignal != nil {
+		select {
+		case <-binding.waitSignal:
+			return nil
+		default:
+		}
+	}
 	if m.beforeManagedResetReconcile != nil {
 		m.beforeManagedResetReconcile(agentID)
 	}
+	binding.waitSerial.Lock()
+	defer binding.waitSerial.Unlock()
 	if binding.waitSignal != nil {
 		select {
 		case <-binding.waitSignal:
