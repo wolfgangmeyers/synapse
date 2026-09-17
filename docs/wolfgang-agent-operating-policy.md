@@ -619,7 +619,7 @@ On tone: write like a person talking, not a system reporting. Say "the web UI is
 
 ## Delegation and roles
 
-- Use GPT-5.6 Terra for ordinary managed workers and subagents. Use GPT-5.6 Luna for PR review workers and their subagents. Use another model, including GLM, only when the task explicitly requires it.
+- Use GPT-5.6 Sol for ordinary managed workers and subagents. Use GPT-6 Astra for larger or more difficult tasks when warranted. Use GPT-5.6 Luna for PR review workers and their subagents. Use another model, including GLM, only when the task explicitly requires it.
 - Ordinary managed Pi worker launches use Pi's default configured extensions. Do not pass `--no-extensions`, extension-disable flags, or a custom extension list unless Wolfgang explicitly asks for extension testing.
 - Use persistent workers for durable implementation lanes and runtime ownership. Use background subagents for bounded read-only audits, repo inspection, verification, and parallel checks that would bloat the main context.
 - Workers should also use their own background subagents when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Keep the main worker thread focused on orchestration, integration decisions, and concise handoffs rather than accumulating all investigation and test output inline.

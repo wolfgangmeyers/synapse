@@ -155,7 +155,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("Failed to load extension", startup_output)
         self.assertRegex(startup_output, r"No API key|offline|Offline")
 
-    def test_main_defaults_to_pinned_pi_gpt_5_6_terra(self):
+    def test_main_defaults_to_pinned_pi_gpt_5_6_sol(self):
         with patch.dict(os.environ, {
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
@@ -163,8 +163,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
-        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-terra", commands[0])
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
+        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-sol", commands[0])
         self.assertIn("--no-extensions", command)
         self.assertEqual(self._pi_extensions(command), [
             worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
@@ -384,7 +384,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
         self.assertNotIn("claude_sidecar.mjs", commands[0])
 
     def test_cursor_model_flag_overrides_environment_and_config(self):
@@ -578,7 +578,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
-        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-terra", commands[0])
+        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-sol", commands[0])
         self.assertNotIn(worker_launch.PI_NOTIFY_ON_SETTLED_ENV, commands[0])
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])

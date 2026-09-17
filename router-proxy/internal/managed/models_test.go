@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSelectModelUsesExplicitSavedThenTerraAvailability(t *testing.T) {
-	catalog := CatalogFromModels(Model{Provider: "saved", ID: "model", Available: true}, Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})
+func TestSelectModelUsesExplicitSavedThenSolFallback(t *testing.T) {
+	catalog := CatalogFromModels(Model{Provider: "saved", ID: "model", Available: true}, Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Available: true})
 	current, err := catalog.Catalog(context.Background())
 	require.NoError(t, err)
 	selected, err := SelectModel(&Model{Provider: "saved", ID: "model"}, nil, current)
@@ -21,7 +21,7 @@ func TestSelectModelUsesExplicitSavedThenTerraAvailability(t *testing.T) {
 	require.Equal(t, "saved", selected.Provider)
 	selected, err = SelectModel(nil, &store.ManagedModel{Provider: "missing", ID: "model"}, current)
 	require.NoError(t, err)
-	require.Equal(t, "gpt-5.6-terra", selected.ID)
+	require.Equal(t, "gpt-5.6-sol", selected.ID)
 }
 
 func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
@@ -32,7 +32,7 @@ func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
 	require.NoError(t, durable.SetDefaultModel(ctx, &store.ManagedModel{Provider: "saved", ID: "persisted"}))
 	source := StoreCatalogSource{Store: durable, Helper: CatalogFromModels(
 		Model{Provider: "saved", ID: "persisted", Available: true},
-		Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true},
+		Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Available: true},
 	)}
 	selected, err := source.Select(ctx, nil)
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
 	selected, err = source.Select(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, "openai-codex", selected.Provider)
-	require.Equal(t, "gpt-5.6-terra", selected.ID)
+	require.Equal(t, "gpt-5.6-sol", selected.ID)
 }
 
 func TestSelectModelRejectsUnavailableExplicitButUsesServerFallbackWhenOmitted(t *testing.T) {
@@ -51,7 +51,7 @@ func TestSelectModelRejectsUnavailableExplicitButUsesServerFallbackWhenOmitted(t
 
 	selected, err := SelectModel(nil, nil, Catalog{Models: []Model{}})
 	require.NoError(t, err)
-	require.Equal(t, Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}, selected)
+	require.Equal(t, Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", Available: true}, selected)
 }
 
 func TestPublicAgentOmitsPrivateProcessAndSessionIdentity(t *testing.T) {

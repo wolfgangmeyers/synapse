@@ -177,8 +177,8 @@ class SupervisorToolCallRecoveryTests(unittest.TestCase):
             "call_id": "call_broken",
         })
         self.assertIn("--provider openai-codex", command)
-        self.assertIn("--model gpt-5.6-terra", command)
-        self.assertIn("MECHA_PI_MODEL_KEY=openai-codex/gpt-5.6-terra", command)
+        self.assertIn("--model gpt-5.6-sol", command)
+        self.assertIn("MECHA_PI_MODEL_KEY=openai-codex/gpt-5.6-sol", command)
         argv = shlex.split(command)
         self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(argv))
 
