@@ -8,25 +8,49 @@ ALTER TABLE managed_child_recoveries ADD COLUMN prior_process_start_marker TEXT;
 -- recovery action carries the exact old process identity. Rows without that
 -- evidence remain in the ledger but are intentionally excluded from notices.
 UPDATE managed_child_recoveries
-SET prior_process_pid = (
-      SELECT old_process_pid
-      FROM managed_root_recovery_actions
-      WHERE agent_id=managed_child_recoveries.agent_id
-        AND old_pi_session_id=managed_child_recoveries.prior_pi_session_id
-        AND old_session_epoch=managed_child_recoveries.prior_session_epoch
-        AND old_process_incarnation=managed_child_recoveries.prior_process_incarnation
-        AND old_runtime_generation=managed_child_recoveries.prior_runtime_generation
-      ORDER BY updated_at DESC, action_id DESC LIMIT 1
+SET prior_process_pid = COALESCE(
+      (
+        SELECT old_process_pid
+        FROM managed_root_recovery_actions
+        WHERE agent_id=managed_child_recoveries.agent_id
+          AND old_pi_session_id=managed_child_recoveries.prior_pi_session_id
+          AND old_session_epoch=managed_child_recoveries.prior_session_epoch
+          AND old_process_incarnation=managed_child_recoveries.prior_process_incarnation
+          AND old_runtime_generation=managed_child_recoveries.prior_runtime_generation
+        ORDER BY updated_at DESC, action_id DESC LIMIT 1
+      ),
+      (
+        SELECT process_pid
+        FROM managed_agents
+        WHERE agent_id=managed_child_recoveries.agent_id
+          AND pi_session_id=managed_child_recoveries.prior_pi_session_id
+          AND session_epoch=managed_child_recoveries.prior_session_epoch
+          AND process_incarnation=managed_child_recoveries.prior_process_incarnation
+          AND runtime_generation=managed_child_recoveries.prior_runtime_generation
+        LIMIT 1
+      )
     ),
-    prior_process_start_marker = (
-      SELECT old_process_start_marker
-      FROM managed_root_recovery_actions
-      WHERE agent_id=managed_child_recoveries.agent_id
-        AND old_pi_session_id=managed_child_recoveries.prior_pi_session_id
-        AND old_session_epoch=managed_child_recoveries.prior_session_epoch
-        AND old_process_incarnation=managed_child_recoveries.prior_process_incarnation
-        AND old_runtime_generation=managed_child_recoveries.prior_runtime_generation
-      ORDER BY updated_at DESC, action_id DESC LIMIT 1
+    prior_process_start_marker = COALESCE(
+      (
+        SELECT old_process_start_marker
+        FROM managed_root_recovery_actions
+        WHERE agent_id=managed_child_recoveries.agent_id
+          AND old_pi_session_id=managed_child_recoveries.prior_pi_session_id
+          AND old_session_epoch=managed_child_recoveries.prior_session_epoch
+          AND old_process_incarnation=managed_child_recoveries.prior_process_incarnation
+          AND old_runtime_generation=managed_child_recoveries.prior_runtime_generation
+        ORDER BY updated_at DESC, action_id DESC LIMIT 1
+      ),
+      (
+        SELECT process_start_marker
+        FROM managed_agents
+        WHERE agent_id=managed_child_recoveries.agent_id
+          AND pi_session_id=managed_child_recoveries.prior_pi_session_id
+          AND session_epoch=managed_child_recoveries.prior_session_epoch
+          AND process_incarnation=managed_child_recoveries.prior_process_incarnation
+          AND runtime_generation=managed_child_recoveries.prior_runtime_generation
+        LIMIT 1
+      )
     )
 WHERE prior_process_pid IS NULL;
 
