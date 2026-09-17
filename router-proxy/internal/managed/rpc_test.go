@@ -1685,6 +1685,22 @@ func TestLateResponsesNeverOccupyReadinessBacklog(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+func TestRPCClientTerminalizedReadinessStillSendsTypedAbort(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = client.Close() })
+	requests := readJSONLRequests(stdinReader)
+	for index := 0; index <= rpcSemanticQueueCapacity; index++ {
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "future_event_v1", "index": index}))
+	}
+	require.Eventually(t, func() bool { return errors.Is(client.terminalError(), ErrReadinessBacklogFull) }, time.Second, time.Millisecond)
+	err := client.Abort(context.Background())
+	require.ErrorIs(t, err, ErrAbortResponseUnavailable)
+	request := requireRequest(t, requests)
+	require.Equal(t, "abort", request["type"])
+}
+
 func TestRPCReadinessMatcherRejectsStaleMalformedAndOverflowTraffic(t *testing.T) {
 	newClient := func(t *testing.T) (*rpcClient, *io.PipeWriter) {
 		t.Helper()

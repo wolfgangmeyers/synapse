@@ -22,6 +22,7 @@ var ErrReadinessBacklogFull = errors.New("managed readiness receipt backlog is f
 var ErrSemanticQueueFull = errors.New("managed RPC semantic dispatcher queue is full")
 var ErrAbortResponseMalformed = errors.New("Pi Abort response is malformed")
 var ErrAbortResponseRejected = errors.New("Pi Abort response was not successful")
+var ErrAbortResponseUnavailable = errors.New("Pi Abort response was unavailable after reader termination")
 var ErrManagedGoalEvaluationCleanupStale = errors.New("managed goal evaluation cleanup token is stale")
 var ErrManagedGoalEvaluationSettledNotObserved = errors.New("managed goal evaluation settled event was not observed")
 var rootControlUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -460,6 +461,9 @@ func (c *rpcClient) readLoop() {
 			c.readerTerminalize(errors.New("Pi emitted malformed RPC JSON"))
 			return
 		}
+		if c.routeMalformedAbortResponse(raw) {
+			continue
+		}
 		if id, ok := raw["id"].(string); ok && validRPCResponseEnvelope(raw) {
 			command := raw["command"].(string)
 			c.mu.Lock()
@@ -744,6 +748,37 @@ func (c *rpcClient) readLoop() {
 	}
 }
 
+// routeMalformedAbortResponse preserves the typed Abort validator's ability
+// to distinguish a malformed or rejected Abort response. Other malformed
+// response-shaped traffic must remain in the bounded readiness backlog.
+func (c *rpcClient) routeMalformedAbortResponse(raw map[string]any) bool {
+	id, ok := raw["id"].(string)
+	if !ok || id == "" {
+		return false
+	}
+	c.mu.Lock()
+	expectedCommand, hasExpectedCommand := c.pendingCommands[id]
+	_, hasHook := c.pendingHooks[id]
+	ch, hasPending := c.pending[id]
+	if !hasPending || !hasExpectedCommand || expectedCommand != "abort" || hasHook {
+		c.mu.Unlock()
+		return false
+	}
+	command, commandOK := raw["command"].(string)
+	if validRPCResponseEnvelope(raw) && commandOK && command == "abort" {
+		c.mu.Unlock()
+		return false
+	}
+	delete(c.pending, id)
+	delete(c.pendingCommands, id)
+	delete(c.pendingHooks, id)
+	c.mu.Unlock()
+	if ch != nil {
+		ch <- rpcResponse{value: raw}
+	}
+	return true
+}
+
 func (c *rpcClient) signalLocked() {
 	select {
 	case c.notified <- struct{}{}:
@@ -931,11 +966,45 @@ func (c *rpcClient) GetState(ctx context.Context) (map[string]any, error) {
 // wrapper. The response is part of the ownership proof: only Pi's typed,
 // successful Abort acknowledgement counts before the caller reaps its group.
 func (c *rpcClient) Abort(ctx context.Context) error {
+	c.mu.Lock()
+	terminal := c.terminal
+	c.mu.Unlock()
+	if terminal != nil {
+		// A readiness backlog overflow stops the stdout reader, but the exact
+		// owned Pi process may still be alive and accepting commands. Send the
+		// typed Abort before the lifecycle reaper takes over. Its response cannot
+		// be observed on this terminated reader, so the caller must still prove
+		// the exact process fence and reap the group before replacement.
+		if !errors.Is(terminal, ErrReadinessBacklogFull) && !errors.Is(terminal, ErrSemanticQueueFull) {
+			return terminal
+		}
+		return c.sendTerminalAbort(ctx)
+	}
 	value, err := c.call(ctx, "abort", nil)
 	if err != nil {
 		return err
 	}
 	return validateAbortResponse(value)
+}
+
+func (c *rpcClient) sendTerminalAbort(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextID++
+	payload := map[string]any{"id": fmt.Sprintf("managed-%d", c.nextID), "type": "abort"}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(c.stdin, "%s\n", encoded); err != nil {
+		return err
+	}
+	return ErrAbortResponseUnavailable
 }
 
 // Compact calls Pi's native RPC command instead of synthesizing a context

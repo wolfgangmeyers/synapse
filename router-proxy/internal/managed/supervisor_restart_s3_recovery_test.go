@@ -3,6 +3,8 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -73,6 +75,54 @@ func recoveredLifecycleRestartManager(t *testing.T, fixture *restartExecutionFix
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return manager
+}
+
+func TestLifecycleRestartRecoveryOwnedSourceUsesAbortReapAndExactlyOnceReplacement(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, time.Millisecond)
+	action, source, attempt, _ := prepareLifecycleRestartRecoverySource(t, fixture, "restart-recovery-stuck-source")
+	db, err := sql.Open("sqlite", fixture.database)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id='restart-agent'`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	require.NoError(t, fixture.durable.AdvanceManagedLifecycleRestartToSettle(context.Background(), action.ActionID, source))
+	binding, found := fixture.manager.bindingFor(source.AgentID)
+	require.True(t, found)
+	binding.serial.Lock()
+	binding.operationID, binding.lifecycleAction = action.ActionID, "restart"
+	binding.serial.Unlock()
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	native := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = native.Close() })
+	requests := readJSONLRequests(stdinReader)
+	for index := 0; index <= rpcSemanticQueueCapacity; index++ {
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "future_event_v1", "index": index}))
+	}
+	require.Eventually(t, func() bool { return errors.Is(native.terminalError(), ErrReadinessBacklogFull) }, time.Second, time.Millisecond)
+	fixture.oldRPC.abortRPC = native
+
+	require.NoError(t, fixture.manager.RecoverManagedLifecycleControls(context.Background()))
+	require.Equal(t, "abort", requireRequest(t, requests)["type"])
+	require.Eventually(t, func() bool {
+		stored, readErr := fixture.durable.ManagedLifecycleAction(context.Background(), action.ActionID)
+		return readErr == nil && stored.State == "succeeded"
+	}, time.Second, time.Millisecond)
+	requireManagedParentTerminalForTest(t, fixture.database, attempt, "interrupted", "interrupted")
+	fixture.oldRPC.mu.Lock()
+	abortCalls := fixture.oldRPC.abortCalls
+	fixture.oldRPC.mu.Unlock()
+	require.Equal(t, 1, abortCalls)
+	fixture.factory.mu.Lock()
+	starts := fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 2, starts)
+
+	require.NoError(t, fixture.manager.RecoverManagedLifecycleControls(context.Background()))
+	fixture.factory.mu.Lock()
+	starts = fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 2, starts, "recovery replay must not create a second replacement")
 }
 
 func TestLifecycleRestartRecoveryInterruptsParentWorkAtEverySourceStopEntry(t *testing.T) {

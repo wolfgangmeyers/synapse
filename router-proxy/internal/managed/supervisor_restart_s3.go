@@ -186,7 +186,13 @@ func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionI
 		}
 		settler, ok := sourceRPC.(RestartTurnSettler)
 		if !ok {
-			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_RECOVERY_NEEDS_SETTLE", source)
+			if !m.recoverUnsettledLifecycleRestartSource(binding, actionID, source, sourceRPC, sourceProcess, sourceWait, false) {
+				return
+			}
+			if m.isClosed() {
+				return
+			}
+			m.startLifecycleRestartTargetInLane(actionID, source)
 			return
 		}
 		// Close cancels runCtx before it waits for lifecycle work. Settlement is
@@ -198,7 +204,13 @@ func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionI
 		current := m.restartBindingMatches(binding, source, actionID, true) && binding.lifecycleAction == "restart"
 		binding.serial.Unlock()
 		if err != nil {
-			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_RECOVERY_NEEDS_SETTLE", source)
+			if !m.recoverUnsettledLifecycleRestartSource(binding, actionID, source, sourceRPC, sourceProcess, sourceWait, terminalizedRestartRPCError(err)) {
+				return
+			}
+			if m.isClosed() {
+				return
+			}
+			m.startLifecycleRestartTargetInLane(actionID, source)
 			return
 		}
 		if !current {
@@ -225,6 +237,48 @@ func (m *Manager) executeLifecycleRestartInLane(binding *managedBinding, actionI
 		return
 	}
 	m.startLifecycleRestartTargetInLane(actionID, source)
+}
+
+// recoverUnsettledLifecycleRestartSource is the bounded fallback for an active
+// source whose reader can no longer prove settlement. It sends the typed Abort,
+// rechecks the exact live fence, records the source artifact while the process
+// is still owned, then uses the normal source-stop reaper. An uncertain probe
+// leaves the source untouched and fails closed.
+func (m *Manager) recoverUnsettledLifecycleRestartSource(binding *managedBinding, actionID string, source store.ManagedRuntimeFence, rpc RPC, process Process, waitDone <-chan error, terminalized bool) bool {
+	if binding == nil || process == nil || process.Identity() != oldFenceIdentity(source) || !m.restartBindingMatches(binding, source, actionID, true) {
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
+		return false
+	}
+	abortCtx, cancel := context.WithTimeout(context.Background(), m.config.Limits.GracefulStop)
+	abortErr := rpc.Abort(abortCtx)
+	cancel()
+	if abortErr != nil && !errors.Is(abortErr, ErrAbortResponseUnavailable) {
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_RECOVERY_NEEDS_SETTLE", source)
+		return false
+	}
+	terminalized = terminalized || errors.Is(abortErr, ErrAbortResponseUnavailable)
+	if !m.restartBindingMatches(binding, source, actionID, true) || m.processOps.Probe(oldFenceIdentity(source)).State != ProcessOwned {
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
+		return false
+	}
+	var artifactErr error
+	if terminalized {
+		artifactErr = m.attachExistingLifecycleRestartArtifact(actionID, source)
+	} else {
+		_, artifactErr = m.attachLifecycleRestartArtifact(binding, actionID, source)
+	}
+	if artifactErr != nil {
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_PREPARATION_FAILED", source)
+		return false
+	}
+	if err := m.store.AdvanceManagedLifecycleRestartToSourceStop(context.Background(), actionID, source); err != nil {
+		return false
+	}
+	return m.stopLifecycleRestartSourceInLane(binding, actionID, source, rpc, process, waitDone)
+}
+
+func terminalizedRestartRPCError(err error) bool {
+	return errors.Is(err, ErrReadinessBacklogFull) || errors.Is(err, ErrSemanticQueueFull)
 }
 
 // stopLifecycleRestartSourceInLane closes source input only after source_stop
@@ -748,7 +802,8 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 		return
 	}
 	if action.Stage == "source_settle" {
-		if m.processOps.Probe(oldFenceIdentity(source)).State == ProcessAbsent {
+		probe := m.processOps.Probe(oldFenceIdentity(source)).State
+		if probe == ProcessAbsent {
 			if err := m.prepareAbsentLifecycleRestart(action.ActionID, source); err != nil {
 				_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_PREPARATION_FAILED", source)
 				return
@@ -759,9 +814,21 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 					m.startLifecycleRestartTargetInLane(action.ActionID, source)
 				}
 			}
-		} else {
-			_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_RECOVERY_NEEDS_SETTLE", source)
+			return
 		}
+		if probe == ProcessOwned {
+			binding, found := m.bindingFor(source.AgentID)
+			if found {
+				binding.serial.Lock()
+				rpc, process, waitDone := binding.rpc, binding.process, binding.waitDone
+				binding.serial.Unlock()
+				if rpc != nil && process != nil && m.recoverUnsettledLifecycleRestartSource(binding, action.ActionID, source, rpc, process, waitDone, true) {
+					m.startLifecycleRestartTargetInLane(action.ActionID, source)
+					return
+				}
+			}
+		}
+		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), action.ActionID, "RESTART_RECOVERY_NEEDS_SETTLE", source)
 		return
 	}
 	if action.Stage == "source_stop" {
