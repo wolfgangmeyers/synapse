@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
@@ -41,12 +42,29 @@ func TestResetReconciliationFailsClosedWhenProcessExitsAfterProof(t *testing.T) 
 	defer func() { _ = manager.Close(ctx); _ = durable.Close() }()
 
 	entered := make(chan struct{})
+	publisherStarted := make(chan struct{})
+	publisherPublished := make(chan struct{})
+	allowPublisher := make(chan struct{})
+	waitDone := make(chan error, 1)
 	manager.beforeManagedResetReconcile = func(string) {
-		// This hook runs after the last live-binding proof and immediately before
-		// the wait-publication commit gate. Close the wait signal in that exact
-		// handoff window; reconciliation must leave the durable failure untouched.
+		// This hook runs while reconciliation owns waitSerial. Release an actual
+		// Process.Wait publisher at that boundary; it must announce the exit and
+		// remain blocked until reconciliation abandons the durable write.
 		close(entered)
-		close(exitSignal)
+		go func() {
+			close(publisherStarted)
+			<-allowPublisher
+			publishBindingWait(binding, exitSignal, waitDone, nil)
+			close(publisherPublished)
+		}()
+		<-publisherStarted
+		close(allowPublisher)
+		require.Eventually(t, binding.waitPending.Load, time.Second, time.Millisecond)
+		select {
+		case <-publisherPublished:
+			t.Fatal("wait publisher bypassed reconciliation waitSerial")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	result := make(chan error, 1)
 	go func() { result <- manager.ReconcileManagedResetFailures(ctx) }()
@@ -56,6 +74,11 @@ func TestResetReconciliationFailsClosedWhenProcessExitsAfterProof(t *testing.T) 
 		t.Fatal("context unexpectedly cancelled")
 	}
 	require.NoError(t, <-result)
+	select {
+	case <-publisherPublished:
+	case <-time.After(time.Second):
+		t.Fatal("wait publisher did not publish after reconciliation released waitSerial")
+	}
 
 	// The process exit happened after the exact pre-write proof. The transaction
 	// check prevents the old durable fence from being restored to running.
