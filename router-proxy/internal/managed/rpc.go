@@ -269,6 +269,7 @@ type directMailboxToken struct {
 	epoch                 int64
 	watermark             uint64
 	receiptSeen           bool
+	receipt               *DirectMailboxReceipt
 	settledSequence       uint64
 	settledReleased       bool
 	acceptedRootFollowUps uint
@@ -1960,6 +1961,7 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 		defer close(out)
 		defer c.releaseDirectMailboxToken(id, token)
 		responseCh := response
+		receiptDelivered := false
 		for {
 			select {
 			case value := <-token.result:
@@ -1967,6 +1969,9 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 					return
 				}
 				event := DirectMailboxEvent{Receipt: value.receipt, Reply: value.reply, Settled: value.settled, DiagnosticCode: value.diagnosticCode}
+				if event.Receipt != nil {
+					receiptDelivered = true
+				}
 				if event.Receipt != nil || event.Reply != nil || event.Settled || event.DiagnosticCode != "" {
 					out <- event
 				}
@@ -1978,6 +1983,43 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 				// persisted append marker or a terminal stream condition.
 				responseCh = nil
 			case <-ctx.Done():
+				// Cancellation after Pi has durably appended the mailbox entry is a
+				// terminal direct-turn boundary. Release it exactly once so the
+				// manager can clear durable activity and admit the next message. A
+				// missing receipt or pending root-control work remains provisional;
+				// the manager will retain/recover or interrupt it on stream close.
+				var canceled DirectMailboxEvent
+				var idleHandler func(map[string]any)
+				var idleEvent map[string]any
+				c.mu.Lock()
+				canCancelSettle := token.settledSequence == 0 && !token.settledReleased
+				canDrainCommittedSettle := token.settledSequence != 0 && token.settledReleased && !receiptDelivered
+				if c.directMailbox == token && token.receiptSeen && len(token.pendingRootRequests) == 0 && token.acceptedRootFollowUps == 0 && (canCancelSettle || canDrainCommittedSettle) {
+					// A native settled frame may have been observed before the
+					// receipt. Receipt classification then queues the combined
+					// receipt/settlement result and marks it released. Cancellation
+					// must forward that committed result rather than treating the
+					// nonzero boundary as a reason to drop it.
+					if token.settledSequence == 0 {
+						token.settledSequence = c.eventSequence
+						token.settledReleased = true
+						idleHandler = c.parentActivityHandler
+						idleEvent = map[string]any{"sequence": int64(token.settledSequence), "state": "idle"}
+					}
+					if !receiptDelivered {
+						canceled.Receipt = token.receipt
+						receiptDelivered = canceled.Receipt != nil
+					}
+					canceled.Reply = token.reply
+					canceled.Settled = true
+				}
+				c.mu.Unlock()
+				if canceled.Settled {
+					out <- canceled
+					if idleHandler != nil {
+						_ = c.enqueueSemantic(func() { idleHandler(idleEvent) })
+					}
+				}
 				return
 			}
 		}
@@ -2140,7 +2182,8 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 		}
 		token.receiptSeen = true
 		identity := directMailboxEntryIdentity(event, c.eventSequence)
-		result := directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}
+		token.receipt = &DirectMailboxReceipt{EntryIdentity: identity}
+		result := directMailboxResult{receipt: token.receipt}
 		if token.settledSequence != 0 && len(token.pendingRootRequests) == 0 && token.acceptedRootFollowUps == 0 && !token.settledReleased {
 			token.settledReleased = true
 			result.settled = true
