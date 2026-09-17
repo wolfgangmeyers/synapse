@@ -328,13 +328,14 @@ func (s *Store) ClaimManagedControlAppend(ctx context.Context, requestID, owner,
 			return err
 		}
 		now := formatTimestamp(s.clock.Now())
-		if row.State != managedControlCompleted || !sameManagedControlFence(row.Fence, fence) || row.ResultEntryID == "" || (row.NextAppendAt != "" && row.NextAppendAt > now) || row.AppendAttempt >= 5 {
+		appendableFailure := row.State == managedControlFailed && row.ResultStatus == "error" && row.AppendAttempt == 0
+		if (row.State != managedControlCompleted && !appendableFailure) || !sameManagedControlFence(row.Fence, fence) || row.ResultEntryID == "" || (row.NextAppendAt != "" && row.NextAppendAt > now) || row.AppendAttempt >= 5 {
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
 		attempt := row.AppendAttempt + 1
-		args := []any{attempt, owner, now, watermark, requestID, managedControlCompleted}
+		args := []any{attempt, owner, now, watermark, requestID}
 		args = append(args, managedControlFenceArgs(fence)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='append_pending',append_attempt=?,append_owner=?,append_started_at=?,append_watermark=?,append_submitted_at=NULL,next_append_at=NULL WHERE request_id=? AND state=? AND `+managedControlFenceWhere(), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='append_pending',append_attempt=?,append_owner=?,append_started_at=?,append_watermark=?,append_submitted_at=NULL,next_append_at=NULL,terminal_at=NULL,retryable=NULL WHERE request_id=? AND (state='completed' OR (state='failed' AND result_status='error' AND append_attempt=0)) AND `+managedControlFenceWhere(), args...)
 		if err != nil {
 			return err
 		}
@@ -345,7 +346,7 @@ func (s *Store) ClaimManagedControlAppend(ctx context.Context, requestID, owner,
 			}
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
-		row.State, row.AppendAttempt, row.AppendOwner, row.AppendStartedAt, row.AppendWatermark, row.NextAppendAt = managedControlAppendPending, attempt, owner, now, watermark, ""
+		row.State, row.AppendAttempt, row.AppendOwner, row.AppendStartedAt, row.AppendWatermark, row.NextAppendAt, row.TerminalAt, row.Retryable = managedControlAppendPending, attempt, owner, now, watermark, "", "", false
 		claim = &ManagedControlAppendClaim{Request: *row, Owner: owner}
 		return nil
 	})
@@ -482,6 +483,53 @@ func (s *Store) RetryManagedControlAppend(ctx context.Context, requestID, owner 
 		}
 		return nil
 	})
+}
+
+// FailManagedControlWithResult records a terminal handler error together with
+// the valid result envelope that must be appended to Pi before direct delivery
+// can be released.
+func (s *Store) FailManagedControlWithResult(ctx context.Context, requestID, owner string, fence ManagedRuntimeFence, value ManagedControlResult) (*ManagedControlRequest, error) {
+	if !managedCanonicalUUIDRE.MatchString(requestID) || !managedCanonicalUUIDRE.MatchString(owner) || !validManagedRuntimeFence(fence) {
+		return nil, errors.New("managed control failure is invalid")
+	}
+	if value.Status != "error" {
+		return nil, errors.New("managed control failure result must be an error")
+	}
+	if err := validManagedControlResult(value); err != nil {
+		return nil, err
+	}
+	var failed *ManagedControlRequest
+	err := s.runImmediate(ctx, func() error {
+		row, err := managedControlForTx(ctx, s.db, requestID)
+		if err != nil {
+			return err
+		}
+		if (row.State != managedControlExecuting && row.State != managedControlEffectCommitted) || row.HandlerOwner != owner || !sameManagedControlFence(row.Fence, fence) {
+			return &ManagedControlStaleError{AgentID: row.AgentID}
+		}
+		entryID := "mcr1_" + strings.ReplaceAll(row.ResultID, "-", "")
+		now := formatTimestamp(s.clock.Now())
+		args := []any{value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, now, value.ErrorCode, value.ErrorMessage, now, requestID, owner}
+		args = append(args, managedControlFenceArgs(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='failed',result_status=?,result_content=?,result_details_json=?,result_payload_sha256=?,decoded_payload_bytes=?,result_entry_id=?,terminal_at=?,error_code=?,error_detail=?,handler_completed_at=?,retryable=0,next_append_at=NULL WHERE request_id=? AND handler_owner=? AND state IN ('executing','side_effect_committed') AND `+managedControlFenceWhere(), args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return &ManagedControlStaleError{AgentID: row.AgentID}
+		}
+		row.State, row.ResultStatus, row.ResultContent, row.ResultDetailsJSON, row.ResultPayloadSHA256, row.DecodedPayloadBytes, row.ResultEntryID, row.ErrorCode, row.ErrorDetail, row.HandlerCompletedAt, row.TerminalAt, row.Retryable = managedControlFailed, value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, value.ErrorCode, value.ErrorMessage, now, now, false
+		failed = row
+		if _, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, s.clock.Now()); err != nil {
+			return err
+		}
+		return s.recomputeManagedControlActivityTx(ctx, fence)
+	})
+	return failed, err
 }
 
 func (s *Store) FailManagedControl(ctx context.Context, requestID, owner string, fence ManagedRuntimeFence, code, detail string) error {

@@ -659,9 +659,14 @@ func (c *rpcClient) readLoop() {
 				// the paused direct matcher would consume it and hide it from restart.
 				if !(agentSettledType(raw) && c.settlementToken != nil) {
 					if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
-						// A native settled boundary is provisional while a root-control
-						// follow-up is outstanding; do not advertise parent idle early.
-						deferParentIdle := agentSettledFrame(raw) && len(token.pendingRootRequests) != 0
+						// A native settled boundary is provisional until the matching
+						// append receipt is observed and any root-control follow-up is
+						// durable. Do not advertise parent idle early.
+						deferParentIdle := agentSettledFrame(raw) && (!token.receiptSeen || len(token.pendingRootRequests) != 0)
+						if result.settled && parentActivityCallback == nil && c.parentActivityHandler != nil {
+							parentActivityCallback = c.parentActivityHandler
+							parentActivity = map[string]any{"sequence": int64(token.settledSequence), "state": "idle"}
+						}
 						c.sendDirectMailboxResultLocked(token, result)
 						c.signalLocked()
 						c.mu.Unlock()
@@ -2095,7 +2100,7 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 		// A root tool completes on a triggerTurn follow-up. Its source result can
 		// arrive after the model's provisional response, so only the follow-up's
 		// settled event releases the direct delivery lane.
-		if token.receiptSeen && token.settledSequence == 0 {
+		if token.settledSequence == 0 {
 			token.settledSequence = c.eventSequence
 			if token.acceptedRootFollowUps != 0 {
 				return directMailboxResult{}, true
@@ -2108,11 +2113,11 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 			}
 			return directMailboxResult{}, true
 		}
-		if len(token.pendingRootRequests) != 0 || token.settledReleased {
+		if len(token.pendingRootRequests) != 0 || !token.receiptSeen || token.settledReleased {
 			return directMailboxResult{}, true
 		}
 		token.settledReleased = true
-		return directMailboxResult{reply: token.reply, settled: token.receiptSeen}, true
+		return directMailboxResult{reply: token.reply, settled: true}, true
 	}
 	if kind != "message_end" {
 		// Unrelated stream traffic must continue to semantic/ordinary classification
@@ -2135,7 +2140,12 @@ func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *dire
 		}
 		token.receiptSeen = true
 		identity := directMailboxEntryIdentity(event, c.eventSequence)
-		return directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}, true
+		result := directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}
+		if token.settledSequence != 0 && len(token.pendingRootRequests) == 0 && token.acceptedRootFollowUps == 0 && !token.settledReleased {
+			token.settledReleased = true
+			result.settled = true
+		}
+		return result, true
 	}
 	if !token.receiptSeen {
 		return directMailboxResult{}, false

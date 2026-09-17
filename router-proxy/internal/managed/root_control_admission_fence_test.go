@@ -491,6 +491,121 @@ func TestRootControlHandlerPanicCompletesOnceAndKeepsRPCUsable(t *testing.T) {
 	require.Len(t, page.Entries, 2, "each request gets one terminal history entry")
 }
 
+func TestInvalidRootControlResultSettlesDirectTurnAndAllowsNextMessage(t *testing.T) {
+	manager, durable, binding, fence, tool, _, handler := newRootAdmissionFixtureWithReceiver(t, false)
+	handler.result = RootControlHandlerResult{Status: "error", Content: "ignored", Details: map[string]any{}, ErrorMessage: "ignored"}
+	stdoutReader, stdoutWriter := io.Pipe()
+	stdinReader, stdinWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = stdinWriter.Close()
+	})
+	binding.rpc = client
+	manager.installRootControlReceiver(binding)
+	requests := readJSONLRequests(stdinReader)
+	activity := make(chan map[string]any, 2)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+
+	firstAttempt := directMailboxAttempt("invalid-root-message")
+	firstAttempt.Fence = fence
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstEvents, err := DirectMailboxRPC(client).PromptManagedMailbox(firstCtx, firstAttempt)
+	require.NoError(t, err)
+	firstPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstPrompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-invalid", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": firstAttempt.MessageID, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch}}}))
+	select {
+	case event := <-firstEvents:
+		require.NotNil(t, event.Receipt)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for direct append receipt")
+	}
+
+	requestID := "123e4567-e89b-42d3-a456-426614174390"
+	require.NoError(t, writeRPC(stdoutWriter, rootControlFrameForEvent(fence, tool, requestID, rootAdmissionArguments("invalid-result"))))
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		_, pending := client.directMailbox.pendingRootRequests[requestID]
+		return pending
+	}, time.Second, time.Millisecond)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-firstEvents:
+		t.Fatalf("invalid root result settled before durable error receipt: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case event := <-activity:
+		t.Fatalf("invalid root result published idle before durable error receipt: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	rootAppend := requireRequest(t, requests)
+	require.Equal(t, "prompt", rootAppend["type"])
+	var payload map[string]any
+	require.Eventually(t, func() bool {
+		payload, err = durable.ManagedControlResultEnvelope(context.Background(), requestID)
+		return err == nil
+	}, time.Second, time.Millisecond)
+	require.Equal(t, "error", payload["status"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": rootAppend["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
+	resultDetails := make(map[string]any, len(payload)-1)
+	for key, value := range payload {
+		if key != "content" {
+			resultDetails[key] = value
+		}
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "opaque-invalid-result", "customType": "mecha.control.result.v1", "display": false, "content": payload["content"], "details": resultDetails}}))
+	row := waitForManagedControl(t, durable, requestID, "delivered")
+	require.Equal(t, "error", row.ResultStatus)
+	require.Equal(t, "HANDLER_INVALID_RESULT", row.ErrorCode)
+	select {
+	case event := <-firstEvents:
+		require.True(t, event.Settled)
+		require.Nil(t, event.Reply)
+	case <-time.After(time.Second):
+		t.Fatal("invalid root result did not release direct settlement")
+	}
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("invalid root result did not publish parent idle")
+	}
+
+	cancelFirst()
+	for range firstEvents {
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.directMailbox == nil
+	}, time.Second, time.Millisecond)
+
+	secondAttempt := directMailboxAttempt("after-invalid-root")
+	secondAttempt.Fence = fence
+	secondEvents, err := DirectMailboxRPC(client).PromptManagedMailbox(context.Background(), secondAttempt)
+	require.NoError(t, err)
+	secondPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondPrompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-next", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": secondAttempt.MessageID, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	var gotReceipt, gotSettled bool
+	for !gotReceipt || !gotSettled {
+		select {
+		case event := <-secondEvents:
+			gotReceipt = gotReceipt || event.Receipt != nil
+			gotSettled = gotSettled || event.Settled
+		case <-time.After(time.Second):
+			t.Fatal("next direct message was not accepted after invalid root result")
+		}
+	}
+	require.True(t, gotReceipt)
+	require.True(t, gotSettled)
+}
+
 func TestRootControlDurableReceiptFailureDoesNotAcknowledgeDirectSettlement(t *testing.T) {
 	manager, durable, binding, fence, tool, rpc, handler := newRootAdmissionFixtureWithReceiver(t, false)
 	rpc.submitted = make(chan struct{})
