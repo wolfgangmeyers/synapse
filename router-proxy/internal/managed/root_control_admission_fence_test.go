@@ -35,6 +35,7 @@ type rootAdmissionRPC struct {
 	rejected     []string
 	submitted    chan struct{}
 	receiptGate  <-chan struct{}
+	armErr       error
 	submitErr    error
 	recoverEntry bool
 }
@@ -55,6 +56,11 @@ func (r *rootAdmissionRPC) emit(event RootControlEvent) {
 }
 
 func (r *rootAdmissionRPC) ArmRootControlResult(string, string) (RootControlAppendToken, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.armErr != nil {
+		return nil, r.armErr
+	}
 	return rootAdmissionAppendToken{}, nil
 }
 
@@ -604,6 +610,35 @@ func TestInvalidRootControlResultSettlesDirectTurnAndAllowsNextMessage(t *testin
 	}
 	require.True(t, gotReceipt)
 	require.True(t, gotSettled)
+}
+
+func TestFailedRootControlResultRecoversWhenAppendArmFailsBeforeClaim(t *testing.T) {
+	manager, durable, binding, fence, tool, rpc, handler := newRootAdmissionFixtureWithReceiver(t, false)
+	// An invalid handler result is durably retained as a failed result before
+	// append admission. A transient arm failure must not make that result
+	// disappear from the next recovery scan.
+	handler.result = RootControlHandlerResult{Status: "error", Content: "ignored", Details: map[string]any{}, ErrorMessage: "missing code"}
+	rpc.armErr = errors.New("append arm temporarily unavailable")
+	requestID := "123e4567-e89b-42d3-a456-426614174356"
+	manager.admitAndRunRootControl(context.Background(), binding, rootAdmissionEvent(fence, tool, requestID, rootAdmissionArguments("append-recovery")))
+	failed := waitForManagedControl(t, durable, requestID, "failed")
+	require.Equal(t, "HANDLER_INVALID_RESULT", failed.ErrorCode)
+	require.Equal(t, "error", failed.ResultStatus)
+	require.Zero(t, failed.AppendAttempt)
+	require.Empty(t, rpc.acknowledgments())
+
+	restorable, err := durable.ListRestorableManagedControlRequests(context.Background(), fence)
+	require.NoError(t, err)
+	require.Len(t, restorable, 1)
+	require.Equal(t, requestID, restorable[0].RequestID)
+
+	rpc.mu.Lock()
+	rpc.armErr = nil
+	rpc.mu.Unlock()
+	manager.resumeRootControl(context.Background(), binding, requestID, nil)
+	delivered := waitForManagedControl(t, durable, requestID, "delivered")
+	require.Equal(t, "error", delivered.ResultStatus)
+	require.Equal(t, 1, rpc.submissionCount())
 }
 
 func TestRootControlDurableReceiptFailureDoesNotAcknowledgeDirectSettlement(t *testing.T) {

@@ -94,7 +94,7 @@ func TestRootControlInvalidHandlerResultEmitsTerminalFailureEvent(t *testing.T) 
 	handler.result = RootControlHandlerResult{Status: "error", Content: "ignored", Details: map[string]any{}, ErrorCode: "", ErrorMessage: "ignored"}
 	requestID := "123e4567-e89b-42d3-a456-426614174355"
 	manager.admitAndRunRootControl(context.Background(), binding, rootAdmissionEvent(fence, tool, requestID, rootAdmissionArguments("invalid-result")))
-	row := waitForManagedControl(t, durable, requestID, "failed")
+	row := waitForManagedControl(t, durable, requestID, "delivered")
 	require.Equal(t, "HANDLER_INVALID_RESULT", row.ErrorCode)
 	_ = nextRootLogEvent(t, events)
 	result := nextRootLogEvent(t, events)
