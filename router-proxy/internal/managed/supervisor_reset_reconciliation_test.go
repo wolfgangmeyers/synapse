@@ -59,10 +59,17 @@ func TestResetReconciliationFailsClosedWhenProcessExitsAfterProof(t *testing.T) 
 		}()
 		<-publisherStarted
 		close(allowPublisher)
-		require.Eventually(t, binding.waitPending.Load, time.Second, time.Millisecond)
+		deadline := time.Now().Add(time.Second)
+		for !binding.waitPending.Load() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if !binding.waitPending.Load() {
+			t.Errorf("wait publisher never reached the waitSerial gate")
+			return
+		}
 		select {
 		case <-publisherPublished:
-			t.Fatal("wait publisher bypassed reconciliation waitSerial")
+			t.Errorf("wait publisher bypassed reconciliation waitSerial")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
