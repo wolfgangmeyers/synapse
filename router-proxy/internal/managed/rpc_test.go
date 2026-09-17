@@ -1176,6 +1176,76 @@ func TestManagedDirectMailboxCapturesAssistantReplyUntilSettled(t *testing.T) {
 	require.Equal(t, &DirectMailboxReply{EntryIdentity: "reply-entry", Body: "reply works"}, reply)
 }
 
+func TestManagedDirectMailboxSettlesWhenAppendReceiptFollowsSettlement(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	direct := DirectMailboxRPC(client)
+	requests := readJSONLRequests(stdinReader)
+	activity := make(chan map[string]any, 2)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstEvents, err := direct.PromptManagedMailbox(firstCtx, directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	firstPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": firstPrompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-firstEvents:
+		t.Fatalf("settlement before the append receipt released direct delivery: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case event := <-activity:
+		t.Fatalf("settlement before the append receipt published parent idle: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-a", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	select {
+	case event := <-firstEvents:
+		require.Equal(t, "append-a", event.Receipt.EntryIdentity)
+		require.True(t, event.Settled)
+	case <-time.After(time.Second):
+		t.Fatal("append receipt did not release the already observed settlement")
+	}
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("settled direct turn did not publish parent idle")
+	}
+	cancelFirst()
+	for range firstEvents {
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.directMailbox == nil
+	}, time.Second, time.Millisecond)
+
+	secondAttempt := directMailboxAttempt("message-b")
+	secondEvents, err := direct.PromptManagedMailbox(context.Background(), secondAttempt)
+	require.NoError(t, err)
+	secondPrompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": secondPrompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-b", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-b", "runtime_generation": "generation", "session_epoch": 2}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	var gotReceipt, gotSettled bool
+	for !gotReceipt || !gotSettled {
+		select {
+		case event := <-secondEvents:
+			gotReceipt = gotReceipt || event.Receipt != nil
+			gotSettled = gotSettled || event.Settled
+		case <-time.After(time.Second):
+			t.Fatal("next direct message was not accepted after out-of-order settlement")
+		}
+	}
+	require.True(t, gotReceipt)
+	require.True(t, gotSettled)
+}
+
 func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()

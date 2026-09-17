@@ -411,11 +411,36 @@ func (m *Manager) failRootControlHandler(ctx context.Context, binding *managedBi
 	if claim == nil || binding == nil {
 		return
 	}
-	if err := m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, code, detail); err == nil {
-		row := claim.Request
-		row.ResultStatus, row.ErrorCode, row.ErrorDetail = "error", code, detail
-		m.emitEvent(managedRootControlResultEvent(row))
+	details := map[string]any{}
+	result := RootControlHandlerResult{
+		Status:       "error",
+		Content:      "The managed control operation could not be completed.",
+		Details:      details,
+		ErrorCode:    code,
+		ErrorMessage: detail,
 	}
+	canonicalDetails, err := canonicalJSON(details)
+	if err != nil {
+		return
+	}
+	canonicalPayload, err := canonicalJSON(rootControlPayload(claim.Request, result, details))
+	if err != nil {
+		return
+	}
+	failed, err := m.store.FailManagedControlWithResult(ctx, claim.Request.RequestID, claim.Owner, fence, store.ManagedControlResult{
+		Status:              result.Status,
+		Content:             result.Content,
+		DetailsJSON:         string(canonicalDetails),
+		PayloadSHA256:       fmt.Sprintf("%x", sha256.Sum256(canonicalPayload)),
+		DecodedPayloadBytes: len(canonicalPayload),
+		ErrorCode:           result.ErrorCode,
+		ErrorMessage:        result.ErrorMessage,
+	})
+	if err != nil || failed == nil {
+		return
+	}
+	m.emitEvent(managedRootControlResultEvent(*failed))
+	m.appendRootControlResult(ctx, binding, *failed)
 }
 
 func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolName, outcome, requestID string) {
@@ -478,7 +503,8 @@ func boundedRootError(err error) string {
 
 func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedBinding, row store.ManagedControlRequest) {
 	rpc, ok := binding.rpc.(RootControlRPC)
-	if !ok || row.State != "completed" {
+	appendableFailure := row.State == "failed" && row.ResultStatus == "error" && row.AppendAttempt == 0
+	if !ok || (row.State != "completed" && !appendableFailure) {
 		return
 	}
 	fence := bindingFence(binding.agentID, binding)
