@@ -121,6 +121,13 @@ func (s *Store) queueManagedRootRecoveryWakeupTx(ctx context.Context, actionID s
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO messages(id,sender,recipient,subject,body,created_at,expires_at,message_incarnation_id,sentinel_json,source_kind,state) VALUES(?,?,?,?,?,?,?,?,NULL,?,'queued')`, messageID, "system", action.AgentID, nil, body, now, expires, incarnation, "system"); err != nil {
 		return err
 	}
+	target, err := s.resolveMessageTargetTx(ctx, messageID)
+	if err != nil {
+		return err
+	}
+	if target == nil {
+		return errors.New("managed root recovery wakeup target is not active")
+	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_root_recovery_wakeups(action_id,agent_id,old_pi_session_id,old_session_epoch,old_process_pid,old_process_start_marker,old_process_incarnation,old_runtime_generation,message_id,body,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		action.ActionID, action.AgentID, action.OldPiSessionID, action.OldSessionEpoch, action.OldProcessPID, action.OldProcessStartMarker, action.OldProcessIncarnation, action.OldRuntimeGeneration, messageID, body, now, expires)
 	if err != nil {
@@ -162,8 +169,8 @@ type managedRootRecoveryChildName struct {
 func (s *Store) managedRootRecoveryWakeupBodyTx(ctx context.Context, action *ManagedRootRecoveryAction) (string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT parent_entry_id,task_id,run_id
 		FROM managed_child_recoveries
-		WHERE agent_id=? AND prior_pi_session_id=? AND prior_session_epoch=? AND prior_process_incarnation=? AND prior_runtime_generation=? AND recovery_state='interrupted_unknown'
-		ORDER BY task_id ASC,run_id ASC,parent_entry_id ASC`, action.AgentID, action.OldPiSessionID, action.OldSessionEpoch, action.OldProcessIncarnation, action.OldRuntimeGeneration)
+		WHERE agent_id=? AND prior_pi_session_id=? AND prior_session_epoch=? AND prior_process_pid=? AND prior_process_start_marker=? AND prior_process_incarnation=? AND prior_runtime_generation=? AND recovery_state='interrupted_unknown'
+		ORDER BY task_id ASC,run_id ASC,parent_entry_id ASC`, action.AgentID, action.OldPiSessionID, action.OldSessionEpoch, action.OldProcessPID, action.OldProcessStartMarker, action.OldProcessIncarnation, action.OldRuntimeGeneration)
 	if err != nil {
 		return "", err
 	}

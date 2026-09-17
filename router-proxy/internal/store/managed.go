@@ -2704,11 +2704,11 @@ func (s *Store) archiveActiveManagedChildrenForFenceTx(ctx context.Context, next
 		}
 		parentEntryID, taskID, runID := run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string)
 		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_recoveries(
-			agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown',?,?,?)
+			agent_id,prior_pi_session_id,prior_session_epoch,prior_process_pid,prior_process_start_marker,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'interrupted_unknown',?,?,?)
 			ON CONFLICT(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,parent_entry_id,task_id,run_id)
-			DO UPDATE SET recovery_cause=excluded.recovery_cause, run_json=excluded.run_json, source_sequence=excluded.source_sequence, updated_at=excluded.updated_at`,
-			next.AgentID, prior.PiSessionID, prior.SessionEpoch, prior.ProcessIncarnation, prior.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, cause, now, now)
+			DO UPDATE SET prior_process_pid=excluded.prior_process_pid, prior_process_start_marker=excluded.prior_process_start_marker, recovery_cause=excluded.recovery_cause, run_json=excluded.run_json, source_sequence=excluded.source_sequence, updated_at=excluded.updated_at`,
+			next.AgentID, prior.PiSessionID, prior.SessionEpoch, prior.ProcessPID, prior.ProcessStartMarker, prior.ProcessIncarnation, prior.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, cause, now, now)
 		if err != nil {
 			return err
 		}
@@ -2762,11 +2762,11 @@ func (s *Store) RecordManagedParentProcessLost(ctx context.Context, fence Manage
 			}
 			parentEntryID, taskID, runID := run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string)
 			_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_recoveries(
-				agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown','parent_process_lost',?,?)
+				agent_id,prior_pi_session_id,prior_session_epoch,prior_process_pid,prior_process_start_marker,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'interrupted_unknown','parent_process_lost',?,?)
 				ON CONFLICT(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,parent_entry_id,task_id,run_id)
-				DO UPDATE SET recovery_cause=excluded.recovery_cause,run_json=excluded.run_json,source_sequence=excluded.source_sequence,updated_at=excluded.updated_at`,
-				fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, now, now)
+				DO UPDATE SET prior_process_pid=excluded.prior_process_pid,prior_process_start_marker=excluded.prior_process_start_marker,recovery_cause=excluded.recovery_cause,run_json=excluded.run_json,source_sequence=excluded.source_sequence,updated_at=excluded.updated_at`,
+				fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, now, now)
 			if err != nil {
 				return err
 			}
@@ -3406,11 +3406,11 @@ func (s *Store) archiveOmittedActiveManagedChildrenTx(ctx context.Context, fence
 			return errors.New("stored managed child run cannot be archived")
 		}
 		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_recoveries(
-			agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown','snapshot_omitted',?,?)
+			agent_id,prior_pi_session_id,prior_session_epoch,prior_process_pid,prior_process_start_marker,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'interrupted_unknown','snapshot_omitted',?,?)
 			ON CONFLICT(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,parent_entry_id,task_id,run_id)
-			DO UPDATE SET recovery_cause=excluded.recovery_cause,run_json=excluded.run_json,source_sequence=excluded.source_sequence,updated_at=excluded.updated_at`,
-			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, now, now)
+			DO UPDATE SET prior_process_pid=excluded.prior_process_pid,prior_process_start_marker=excluded.prior_process_start_marker,recovery_cause=excluded.recovery_cause,run_json=excluded.run_json,source_sequence=excluded.source_sequence,updated_at=excluded.updated_at`,
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, now, now)
 		if err != nil {
 			return err
 		}

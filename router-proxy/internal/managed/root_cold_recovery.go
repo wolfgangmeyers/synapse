@@ -84,15 +84,17 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		if cleanupOnly || agent.DesiredState != "running" {
 			continue
 		}
-		// A router can stop after the ready transaction and before the separate
-		// durable restart notice transaction. Re-run that notice boundary on every
-		// startup scan; its action marker makes the retry idempotent.
-		wakeup, wakeupErr := m.store.QueueManagedRootRecoveryWakeupForAgent(ctx, agent.AgentID)
-		if wakeupErr != nil {
-			return wakeupErr
-		}
-		if wakeup != nil {
-			m.OfferDirect(agent.AgentID)
+		// A live binding identifies the replacement owned by this router. Only
+		// that binding may retry the notice here; an unbound ready action belongs
+		// to an older runtime and must be superseded before a new notice is made.
+		if _, bound := m.bindingFor(agent.AgentID); bound {
+			wakeup, wakeupErr := m.store.QueueManagedRootRecoveryWakeupForAgent(ctx, agent.AgentID)
+			if wakeupErr != nil {
+				return wakeupErr
+			}
+			if wakeup != nil {
+				m.OfferDirect(agent.AgentID)
+			}
 		}
 		cleanupOnly, cleanupErr = m.cleanupFailedColdRecoveryTarget(ctx, agent.AgentID)
 		if cleanupErr != nil {
@@ -504,16 +506,10 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "replacement readiness could not be committed")
 	}
-	if _, err := m.store.QueueManagedRootRecoveryWakeup(ctx, action.ActionID); err != nil {
-		_ = closeRPCAndWait(targetRPC)
-		cleanupOK := m.cleanupRecoveredTarget(target, targetFence)
-		m.clearBinding(target)
-		if !cleanupOK {
-			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
-		}
-		return m.failColdRecoveryAction(ctx, action, "RECOVERY_READINESS_FAILED", "restart notice could not be committed")
-	}
-	m.OfferDirect(agent.AgentID)
+	// The replacement is already the authoritative running binding. If the
+	// notice transaction fails, keep that binding and let the next sweep retry;
+	// reaping it would leave desired-running with no recoverable owner.
+	_, wakeupErr := m.store.QueueManagedRootRecoveryWakeup(ctx, action.ActionID)
 	// Recovery temporarily uses its action ID as the binding owner so all work
 	// stays fenced until the ready transaction commits. Restore the durable
 	// launch owner before clearing that lifecycle hold; a stale callback must not
@@ -523,7 +519,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		return err
 	}
 	if !restored {
-		return nil
+		return wakeupErr
 	}
 	m.installRootControlReceiver(target)
 	m.installChildDeltaReceiver(target)
@@ -533,7 +529,8 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	m.installQualifiedGoalActivityReceiver(target)
 	m.installBuiltinToolLifecycleReceiver(target)
 	m.startRecoveredRootWatcher(target, targetFence)
-	return nil
+	m.OfferDirect(agent.AgentID)
+	return wakeupErr
 }
 
 // restoreRecoveredBindingOwner applies the post-ready ownership handoff only
