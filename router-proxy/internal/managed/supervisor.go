@@ -294,7 +294,10 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	}
 	catalog := options.CatalogSource
 	if catalog == nil {
-		catalog = CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})
+		catalog = CatalogFromModels(
+			Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", Available: true},
+			Model{Provider: "openai-codex", ID: "gpt-6-astra", Name: "GPT-6 Astra", Available: true},
+		)
 	}
 	groupLeader := options.ProcessGroupLeaderVerifier
 	if groupLeader == nil {

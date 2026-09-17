@@ -149,7 +149,7 @@ func TestManagedLaunchValidationBehavioral(t *testing.T) {
 
 	t.Run("AC-003 exact five model outcomes", func(t *testing.T) {
 		var mu sync.Mutex
-		catalog := managed.Catalog{Models: []managed.Model{{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}, {Provider: "google", ID: "gemini-2.5-pro", Available: true}}}
+		catalog := managed.Catalog{Models: []managed.Model{{Provider: "openai-codex", ID: "gpt-5.6-sol", Available: true}, {Provider: "google", ID: "gemini-2.5-pro", Available: true}}}
 		source := managed.ModelSourceFunc(func(context.Context) (managed.Catalog, error) { mu.Lock(); defer mu.Unlock(); return catalog, nil })
 		rpc := &launchValidationRPCFactory{}
 		durable, processes, manager, server := newLaunchValidationServer(t, source, rpc)
@@ -160,16 +160,16 @@ func TestManagedLaunchValidationBehavioral(t *testing.T) {
 		}{
 			{"explicit", `{"name":"explicit","cwd":` + string(launchValidationJSON(root)) + `,"model":{"provider":"google","id":"gemini-2.5-pro"}}`, "google", "gemini-2.5-pro", 202},
 			{"saved default", `{"name":"saved","cwd":` + string(launchValidationJSON(root)) + `}`, "google", "gemini-2.5-pro", 202},
-			{"unavailable saved default", `{"name":"fallback","cwd":` + string(launchValidationJSON(root)) + `}`, "openai-codex", "gpt-5.6-terra", 202},
+			{"unavailable saved default", `{"name":"fallback","cwd":` + string(launchValidationJSON(root)) + `}`, "openai-codex", "gpt-5.6-sol", 202},
 			{"unavailable explicit", `{"name":"bad-explicit","cwd":` + string(launchValidationJSON(root)) + `,"model":{"provider":"google","id":"missing"}}`, "", "", 422},
-			{"unavailable Terra", `{"name":"bad-terra","cwd":` + string(launchValidationJSON(root)) + `}`, "openai-codex", "gpt-5.6-terra", 202},
+			{"unavailable Sol", `{"name":"bad-sol","cwd":` + string(launchValidationJSON(root)) + `}`, "openai-codex", "gpt-5.6-sol", 202},
 		}
 		require.NoError(t, durable.SetDefaultModel(context.Background(), &store.ManagedModel{Provider: "google", ID: "gemini-2.5-pro"}))
 		for i, tc := range cases {
 			if tc.name == "unavailable saved default" {
 				require.NoError(t, durable.SetDefaultModel(context.Background(), &store.ManagedModel{Provider: "missing", ID: "model"}))
 			}
-			if tc.name == "unavailable Terra" {
+			if tc.name == "unavailable Sol" {
 				mu.Lock()
 				catalog = managed.Catalog{}
 				mu.Unlock()

@@ -27,7 +27,7 @@ The separate browser UI keeps its existing boundary. It accepts loopback or its 
 {"default_agent":"pi"}
 ```
 
-Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers and subagents use provider `openai-codex` and model `gpt-5.6-terra`; PR-review workers and their subagents use `gpt-5.6-luna`. Another model requires an explicit task requirement. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
+Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers and subagents use provider `openai-codex` and model `gpt-5.6-sol` by default. Use `gpt-6-astra` for larger or more difficult tasks when warranted. PR-review workers and their subagents use `gpt-5.6-luna`. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
 
 ## Shell fallbacks and service scripts
 

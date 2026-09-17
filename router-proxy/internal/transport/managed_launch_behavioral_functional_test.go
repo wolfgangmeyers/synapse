@@ -229,7 +229,7 @@ func newManagedFunctionalFixture(t *testing.T) *managedFunctionalFixture {
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable, Config: config, Manifest: manifest,
-		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}),
+		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", Available: true}),
 	})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
@@ -306,7 +306,7 @@ func TestManagedLaunchBehavioralFunctional(t *testing.T) {
 	started := fixture.waitEvent("started")
 	require.Equal(t, fixture.root, started.Cwd)
 	require.Equal(t, "openai-codex", argumentAfter(started.Args, "--provider"))
-	require.Equal(t, "gpt-5.6-terra", argumentAfter(started.Args, "--model"))
+	require.Equal(t, "gpt-5.6-sol", argumentAfter(started.Args, "--model"))
 	require.Equal(t, "--mode", started.Args[1])
 	require.NotContains(t, strings.Join(started.Args, " "), "tmux")
 	require.NotEqual(t, os.Getpid(), started.PID)

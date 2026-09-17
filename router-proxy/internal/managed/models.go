@@ -76,7 +76,7 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 	// An omitted model delegates to the router's built-in Pi default. Provider
 	// catalogs gate explicit choices, but must not turn the optional launch field
 	// into a validation error while a catalog refresh or sign-in is unavailable.
-	return Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}, nil
+	return Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", Available: true}, nil
 }
 
 type StoreCatalogSource struct {

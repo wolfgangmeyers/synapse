@@ -25,7 +25,7 @@ RECOVERY_DEBOUNCE_SECONDS = 10 * 60
 SUPERVISOR_WINDOW = "supervisor"
 TOOLS = Path(__file__).resolve().parent
 PI_PROVIDER = "openai-codex"
-PI_MODEL = "gpt-5.6-terra"
+PI_MODEL = "gpt-5.6-sol"
 
 
 def actionable(level: str, owner: str, issue: str, action: str, resolved_when: str) -> str:
