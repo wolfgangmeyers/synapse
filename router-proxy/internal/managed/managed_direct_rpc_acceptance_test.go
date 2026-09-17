@@ -70,7 +70,10 @@ func collectAcceptanceSettlement(t *testing.T, events <-chan DirectMailboxEvent)
 	// A duplicate native boundary must not produce another settlement event.
 	require.Never(t, func() bool {
 		select {
-		case event := <-events:
+		case event, open := <-events:
+			if !open {
+				return false
+			}
 			if event.Receipt != nil {
 				receipts++
 			}
@@ -169,29 +172,61 @@ func TestManagedDirectCancellationAllowsNextPrompt(t *testing.T) {
 
 	firstEvents, cancelFirst := directAcceptancePrompt(t, direct, requests, writer, "cancel-first")
 	require.NoError(t, writeRPC(writer, acceptanceReceipt("cancel-first")))
-	select {
-	case event := <-firstEvents:
-		require.NotNil(t, event.Receipt)
-		require.False(t, event.Settled)
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for cancellation-turn receipt")
-	}
+	// Wait until the RPC has observed the receipt, but leave its result queued so
+	// cancellation also proves that receipt-before-settlement ordering survives
+	// the wrapper goroutine winning the cancellation race.
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.directMailbox != nil && client.directMailbox.receiptSeen
+	}, time.Second, time.Millisecond)
 	cancelFirst()
+	receipts, settlements := collectAcceptanceSettlement(t, firstEvents)
+	require.Equal(t, 1, receipts)
+	require.Equal(t, 1, settlements)
+	requireOneIdle(t, activity)
 	for range firstEvents {
 	}
-	require.Never(t, func() bool {
-		select {
-		case event := <-activity:
-			return event["state"] == "idle"
-		default:
-			return false
-		}
-	}, 50*time.Millisecond, time.Millisecond)
 
 	secondEvents, cancelSecond := directAcceptancePrompt(t, direct, requests, writer, "cancel-second")
 	require.NoError(t, writeRPC(writer, acceptanceReceipt("cancel-second")))
 	require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
-	receipts, settlements := collectAcceptanceSettlement(t, secondEvents)
+	receipts, settlements = collectAcceptanceSettlement(t, secondEvents)
+	require.Equal(t, 1, receipts)
+	require.Equal(t, 1, settlements)
+	requireOneIdle(t, activity)
+	cancelSecond()
+	for range secondEvents {
+	}
+}
+
+func TestManagedDirectCancellationDrainsQueuedSettlementAfterNativeBoundary(t *testing.T) {
+	client, requests, writer, activity := directAcceptanceClient(t)
+	direct := DirectMailboxRPC(client)
+
+	firstEvents, cancelFirst := directAcceptancePrompt(t, direct, requests, writer, "cancel-queued-first")
+	// The native boundary is provisional until the append receipt arrives.
+	require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
+	require.NoError(t, writeRPC(writer, acceptanceReceipt("cancel-queued-first")))
+	// Receipt classification has now committed the combined result, but the
+	// consumer has intentionally not drained it yet.
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.directMailbox != nil && client.directMailbox.settledSequence != 0 && client.directMailbox.settledReleased
+	}, time.Second, time.Millisecond)
+	cancelFirst()
+	receipts, settlements := collectAcceptanceSettlement(t, firstEvents)
+	require.Equal(t, 1, receipts)
+	require.Equal(t, 1, settlements)
+	requireOneIdle(t, activity)
+	for range firstEvents {
+	}
+
+	secondEvents, cancelSecond := directAcceptancePrompt(t, direct, requests, writer, "cancel-queued-second")
+	require.NoError(t, writeRPC(writer, acceptanceReceipt("cancel-queued-second")))
+	require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
+	receipts, settlements = collectAcceptanceSettlement(t, secondEvents)
 	require.Equal(t, 1, receipts)
 	require.Equal(t, 1, settlements)
 	requireOneIdle(t, activity)

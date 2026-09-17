@@ -580,6 +580,27 @@ func TestInvalidRootControlResultSettlesDirectTurnAndAllowsNextMessage(t *testin
 	case <-time.After(time.Second):
 		t.Fatal("invalid root result did not publish parent idle")
 	}
+	require.Never(t, func() bool {
+		select {
+		case event, open := <-firstEvents:
+			if !open {
+				return false
+			}
+			t.Fatalf("invalid root result emitted duplicate direct event: %#v", event)
+			return true
+		default:
+			return false
+		}
+	}, 50*time.Millisecond, time.Millisecond)
+	require.Never(t, func() bool {
+		select {
+		case event := <-activity:
+			t.Fatalf("invalid root result emitted duplicate parent activity: %#v", event)
+			return true
+		default:
+			return false
+		}
+	}, 50*time.Millisecond, time.Millisecond)
 
 	cancelFirst()
 	for range firstEvents {
@@ -610,6 +631,21 @@ func TestInvalidRootControlResultSettlesDirectTurnAndAllowsNextMessage(t *testin
 	}
 	require.True(t, gotReceipt)
 	require.True(t, gotSettled)
+	select {
+	case event := <-activity:
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("next direct message did not publish parent idle")
+	}
+	require.Never(t, func() bool {
+		select {
+		case event := <-activity:
+			t.Fatalf("next direct message emitted duplicate parent activity: %#v", event)
+			return true
+		default:
+			return false
+		}
+	}, 50*time.Millisecond, time.Millisecond)
 }
 
 func TestFailedRootControlResultRecoversWhenAppendArmFailsBeforeClaim(t *testing.T) {
