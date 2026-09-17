@@ -72,15 +72,20 @@ type nilReader struct{}
 func (nilReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 type restartExecutionOps struct {
-	mu      sync.Mutex
-	states  map[int]ProcessProbeState
-	signals []syscall.Signal
-	process map[int]*restartExecutionProcess
+	mu               sync.Mutex
+	states           map[int]ProcessProbeState
+	signals          []syscall.Signal
+	signalIdentities []ProcessIdentity
+	process          map[int]*restartExecutionProcess
 }
 
 func (ops *restartExecutionOps) Probe(identity ProcessIdentity) ProcessProbe {
 	ops.mu.Lock()
 	defer ops.mu.Unlock()
+	process, exists := ops.process[identity.PID]
+	if !exists || process == nil || process.Identity() != identity {
+		return ProcessProbe{State: ProcessMismatch}
+	}
 	return ProcessProbe{State: ops.states[identity.PID]}
 }
 func (ops *restartExecutionOps) CloseProcessInput(process Process) error {
@@ -89,10 +94,12 @@ func (ops *restartExecutionOps) CloseProcessInput(process Process) error {
 func (ops *restartExecutionOps) SignalVerifiedProcessGroup(identity ProcessIdentity, signal syscall.Signal) error {
 	ops.mu.Lock()
 	defer ops.mu.Unlock()
-	if ops.states[identity.PID] != ProcessOwned {
+	process, exists := ops.process[identity.PID]
+	if !exists || process == nil || process.Identity() != identity || ops.states[identity.PID] != ProcessOwned {
 		return syscall.ESRCH
 	}
 	ops.signals = append(ops.signals, signal)
+	ops.signalIdentities = append(ops.signalIdentities, identity)
 	ops.states[identity.PID] = ProcessAbsent
 	ops.process[identity.PID].once.Do(func() { close(ops.process[identity.PID].done) })
 	return nil
@@ -102,8 +109,12 @@ func (ops *restartExecutionOps) SignalVerifiedProcessGroupAfterLeaderExit(identi
 }
 func (ops *restartExecutionOps) WaitForProcessGroupEmpty(ctx context.Context, identity ProcessIdentity, _ <-chan error) ProcessProbe {
 	ops.mu.Lock()
+	process, exists := ops.process[identity.PID]
 	state := ops.states[identity.PID]
 	ops.mu.Unlock()
+	if !exists || process == nil || process.Identity() != identity {
+		return ProcessProbe{State: ProcessMismatch}
+	}
 	if state == ProcessAbsent {
 		return ProcessProbe{State: ProcessAbsent}
 	}
@@ -118,14 +129,22 @@ type restartExecutionRPC struct {
 	settled       chan struct{}
 	settleRelease chan struct{}
 	settleCalls   int
+	settleErr     error
+	onAbort       func()
+	abortCalls    int
 	policyRelease chan struct{}
 	policyErr     error
+	abortRPC      RPC
+	stateCalls    int
 	sessionFile   string
 	promptCalls   int
 	prompts       []string
 }
 
 func (rpc *restartExecutionRPC) GetState(context.Context) (map[string]any, error) {
+	rpc.mu.Lock()
+	rpc.stateCalls++
+	rpc.mu.Unlock()
 	return map[string]any{"sessionId": rpc.session, "sessionFile": rpc.sessionFile}, nil
 }
 func (rpc *restartExecutionRPC) GetCommands(context.Context) ([]string, error) {
@@ -170,12 +189,26 @@ func (rpc *restartExecutionRPC) Prompt(_ context.Context, message string) error 
 	rpc.mu.Unlock()
 	return nil
 }
-func (rpc *restartExecutionRPC) Abort(context.Context) error { return nil }
-func (rpc *restartExecutionRPC) Close() error                { return nil }
+func (rpc *restartExecutionRPC) Abort(ctx context.Context) error {
+	rpc.mu.Lock()
+	rpc.abortCalls++
+	onAbort := rpc.onAbort
+	abortRPC := rpc.abortRPC
+	rpc.mu.Unlock()
+	if onAbort != nil {
+		onAbort()
+	}
+	if abortRPC != nil {
+		return abortRPC.Abort(ctx)
+	}
+	return nil
+}
+func (rpc *restartExecutionRPC) Close() error { return nil }
 func (rpc *restartExecutionRPC) SettlePreparedRestartTurn(ctx context.Context, _ store.ManagedRuntimeFence) error {
 	rpc.mu.Lock()
 	rpc.settleCalls++
 	release := rpc.settleRelease
+	err := rpc.settleErr
 	rpc.mu.Unlock()
 	if rpc.settled != nil {
 		select {
@@ -190,6 +223,9 @@ func (rpc *restartExecutionRPC) SettlePreparedRestartTurn(ctx context.Context, _
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -270,6 +306,21 @@ func newRestartExecutionFixture(t *testing.T, gracefulStop time.Duration) *resta
 		return agentErr == nil && operationErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts && operation.State == "terminal"
 	}, time.Second, time.Millisecond)
 	return &restartExecutionFixture{manager: manager, durable: durable, old: old, target: target, oldRPC: oldRPC, targetRPC: targetRPC, ops: ops, factory: factory, manifest: manifest, root: root, database: databasePath}
+}
+
+func retainRestartSourceArtifact(t *testing.T, fixture *restartExecutionFixture, artifactID string) {
+	t.Helper()
+	agent, err := fixture.durable.ManagedAgent(context.Background(), "restart-agent")
+	require.NoError(t, err)
+	info, err := os.Stat(filepath.Join(fixture.root, "session.json"))
+	require.NoError(t, err)
+	device, inode, err := deviceInode(info)
+	require.NoError(t, err)
+	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(context.Background(), store.ManagedSessionArtifact{
+		ArtifactID: artifactID, AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch,
+		RootRelativePath: "session.json", PathSHA256: artifactPathHash("session.json"), DiscoveryState: "materialized",
+		FileDevice: device, FileInode: inode, CleanupState: "retained", DiscoveredAt: formatManagedTime(time.Now()), CleanupUpdatedAt: formatManagedTime(time.Now()),
+	}))
 }
 
 func (fixture *restartExecutionFixture) reserve(t *testing.T) {
@@ -570,6 +621,83 @@ func TestRestartStaleBindingCleanup(t *testing.T) {
 	mapped := fixture.manager.processes["restart-agent"]
 	fixture.manager.mu.Unlock()
 	require.Equal(t, fixture.target, mapped)
+}
+
+func TestRestartTerminalizedSourceAbortsThenReapsExactOwnedGroup(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, time.Millisecond)
+	retainRestartSourceArtifact(t, fixture, "123e4567-e89b-42d3-a456-000000000095")
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	native := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { _ = native.Close() })
+	requests := readJSONLRequests(stdinReader)
+	for index := 0; index <= rpcSemanticQueueCapacity; index++ {
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "future_event_v1", "index": index}))
+	}
+	require.Eventually(t, func() bool { return errors.Is(native.terminalError(), ErrReadinessBacklogFull) }, time.Second, time.Millisecond)
+	fixture.oldRPC.settleErr = ErrReadinessBacklogFull
+	fixture.oldRPC.abortRPC = native
+	fixture.oldRPC.mu.Lock()
+	stateCallsBeforeRestart := fixture.oldRPC.stateCalls
+	fixture.oldRPC.mu.Unlock()
+	fixture.reserve(t)
+	fixture.waitReady(t)
+
+	request := requireRequest(t, requests)
+	require.Equal(t, "abort", request["type"])
+	fixture.oldRPC.mu.Lock()
+	abortCalls := fixture.oldRPC.abortCalls
+	settleCalls := fixture.oldRPC.settleCalls
+	stateCallsAfterRestart := fixture.oldRPC.stateCalls
+	fixture.oldRPC.mu.Unlock()
+	require.Equal(t, 1, settleCalls)
+	require.Equal(t, 1, abortCalls, "a terminalized source must receive the typed Abort before reaping")
+	require.Equal(t, stateCallsBeforeRestart, stateCallsAfterRestart, "terminalized recovery must use the retained artifact without GetState")
+	fixture.ops.mu.Lock()
+	signals := append([]syscall.Signal(nil), fixture.ops.signals...)
+	signalIdentities := append([]ProcessIdentity(nil), fixture.ops.signalIdentities...)
+	fixture.ops.mu.Unlock()
+	require.Contains(t, signals, syscall.SIGTERM)
+	require.Contains(t, signalIdentities, fixture.old.identity, "reaping must use the complete persisted process fence")
+}
+
+func TestRestartTerminalizedSourceRejectsUncertainFenceBeforeReap(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, time.Millisecond)
+	fixture.oldRPC.settleErr = ErrReadinessBacklogFull
+	fixture.oldRPC.onAbort = func() {
+		fixture.ops.mu.Lock()
+		fixture.ops.states[fixture.old.identity.PID] = ProcessUnknown
+		fixture.ops.mu.Unlock()
+	}
+	fixture.reserve(t)
+	require.Eventually(t, func() bool {
+		action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
+		return err == nil && action.State == "failed"
+	}, time.Second, time.Millisecond)
+	action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
+	require.NoError(t, err)
+	require.Equal(t, "RESTART_IDENTITY_UNSAFE", action.TerminalCode)
+	fixture.factory.mu.Lock()
+	starts := fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 1, starts, "uncertain source identity must not start a replacement")
+	fixture.ops.mu.Lock()
+	signals := append([]syscall.Signal(nil), fixture.ops.signals...)
+	fixture.ops.mu.Unlock()
+	require.Empty(t, signals, "uncertain source identity must not be reaped")
+}
+
+func TestRestartReplayDoesNotStartSecondReplacement(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, time.Millisecond)
+	fixture.reserve(t)
+	fixture.waitReady(t)
+	result, err := fixture.manager.ReserveRestart(context.Background(), RestartRequest{AgentID: "restart-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/restart-agent/restart", RequestID: "restart", CanonicalBodyHash: "body"})
+	require.NoError(t, err)
+	require.True(t, result.Replayed)
+	fixture.factory.mu.Lock()
+	starts := fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 2, starts)
 }
 
 func TestRestartFailureRedaction(t *testing.T) {
