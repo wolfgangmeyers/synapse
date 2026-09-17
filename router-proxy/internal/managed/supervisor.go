@@ -216,6 +216,7 @@ type Manager struct {
 	beforeDirectAcknowledge                    func(context.Context, store.ManagedDirectAttempt) error
 	beforeManagedDirectRecovery                func(context.Context, string)
 	beforeResetOldArtifactCleanup              func(context.Context, string) error
+	beforeManagedResetReconcile                func(string)
 	afterResetTargetStartBeforeBind            func(context.Context, string, Process) error
 	afterLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
 	beforeManagedLaunchStart                   func(context.Context, string)
