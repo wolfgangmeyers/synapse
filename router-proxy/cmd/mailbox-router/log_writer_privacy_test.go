@@ -34,6 +34,31 @@ func TestValidateEventRejectsUnknownAndUnsafeFields(t *testing.T) {
 	}
 }
 
+func TestLogWriterNormalizesEquivalentHistoricalTimestampsAndKeepsUnknownState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.jsonl")
+	writer, err := newLogWriter(path)
+	require.NoError(t, err)
+	require.NoError(t, writer.Log("reminder_started", map[string]any{
+		"reminder_id":   "reminder",
+		"scheduled_for": "2026-09-17T05:00:00-07:00",
+	}))
+	require.NoError(t, writer.Log("delivery_timed_out", map[string]any{
+		"message_id": "message", "agent_id": "agent", "attempt": 1,
+		"state": "unknown", "reason": "delivery_timeout",
+	}))
+	require.NoError(t, writer.Close())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 2)
+	var reminder map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &reminder))
+	require.Equal(t, "2026-09-17T12:00:00Z", reminder["scheduled_for"])
+	var delivery map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &delivery))
+	require.Equal(t, "unknown", delivery["state"])
+}
+
 func TestValidateEventAcceptsEveryProductionClosedCallSiteValue(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -81,6 +106,22 @@ func TestValidateEventAcceptsEveryLifecycleEmitterValue(t *testing.T) {
 		require.Error(t, validateEvent(event, map[string]any{"lifecycle_event": "arbitrary"}))
 	}
 	require.Error(t, validateEvent("lifecycle_persisted", map[string]any{"disposition": "arbitrary"}))
+}
+
+func TestEventLoggerKeepsProjectionRunningAfterMalformedHistoricalEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.jsonl")
+	writer, err := newLogWriter(path)
+	require.NoError(t, err)
+	var output strings.Builder
+	logger := typedEventLogger(writer, &output)
+	logger(transport.ReminderStartedEvent("reminder", "not-a-timestamp"))
+	logger(transport.RouterStoppedEvent())
+	require.NoError(t, writer.Close())
+	require.Contains(t, output.String(), "event log write failed")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"event":"router_stopped"`)
+	require.NotContains(t, string(data), `"event":"reminder_started"`)
 }
 
 func TestTypedEventLoggerWritesClosedBuilderEvents(t *testing.T) {

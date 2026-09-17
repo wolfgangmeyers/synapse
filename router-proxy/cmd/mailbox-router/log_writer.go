@@ -191,15 +191,14 @@ func validateEvent(event string, fields map[string]any) error {
 			}
 			if !managedEvent {
 				if values, ok := closedEventValues[key]; ok {
-					if _, allowed := values[item]; !allowed {
+					if _, allowed := values[item]; !allowed && !(key == "state" && item == "unknown") {
 						return fmt.Errorf("field %q has an unknown closed value", key)
 					}
 				}
 			}
 			if key == "next_due_at" || key == "scheduled_for" {
-				parsed, err := time.Parse(time.RFC3339Nano, item)
-				if err != nil || parsed.UTC().Format(time.RFC3339Nano) != item {
-					return fmt.Errorf("field %q is not a normalized timestamp", key)
+				if _, err := time.Parse(time.RFC3339Nano, item); err != nil {
+					return fmt.Errorf("field %q is not a parseable timestamp", key)
 				}
 			}
 		case bool:
@@ -219,6 +218,22 @@ func validateEvent(event string, fields map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func normalizeEventFields(fields map[string]any) map[string]any {
+	normalized := make(map[string]any, len(fields))
+	for key, value := range fields {
+		if key == "next_due_at" || key == "scheduled_for" {
+			if timestamp, ok := value.(string); ok {
+				if parsed, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
+					normalized[key] = parsed.UTC().Format(time.RFC3339Nano)
+					continue
+				}
+			}
+		}
+		normalized[key] = value
+	}
+	return normalized
 }
 
 func isSecretKey(key string) bool {
@@ -331,6 +346,7 @@ func (w *logWriter) Log(event string, fields map[string]any) error {
 }
 
 func (w *logWriter) logFields(event string, fields map[string]any) error {
+	fields = normalizeEventFields(fields)
 	if err := validateEvent(event, fields); err != nil {
 		return err
 	}
