@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -189,6 +190,7 @@ type managedBinding struct {
 	// acquires it before closing waitSignal, and reconciliation holds it through
 	// its durable transition. Binding serial alone cannot order Process.Wait.
 	waitSerial           sync.Mutex
+	waitPending          atomic.Bool
 	waitErr              error
 	restartExecutionDone bool
 	restartShutdownDone  bool
@@ -726,7 +728,12 @@ func (m *Manager) runningBindingCurrent(ctx context.Context, binding *managedBin
 // same gate is held by reconciliation through its durable transition, so an
 // exit cannot publish between the final proof and the store write.
 func publishBindingWait(binding *managedBinding, waitSignal chan struct{}, waitDone chan error, waitErr error) {
+	// Announce the exit before contending on the publication gate. A reset
+	// reconciliation that already owns the gate must observe this pending wait
+	// and leave the durable failure untouched.
+	binding.waitPending.Store(true)
 	binding.waitSerial.Lock()
+	binding.waitPending.Store(false)
 	binding.waitErr = waitErr
 	close(waitSignal)
 	waitDone <- waitErr

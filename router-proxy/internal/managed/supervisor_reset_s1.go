@@ -349,11 +349,16 @@ func (m *Manager) reconcileStrandedManagedResetInLane(ctx context.Context, agent
 		default:
 		}
 	}
-	if m.beforeManagedResetReconcile != nil {
-		m.beforeManagedResetReconcile(agentID)
-	}
 	binding.waitSerial.Lock()
 	defer binding.waitSerial.Unlock()
+	if m.beforeManagedResetReconcile != nil {
+		// The hook is inside the wait/publication transaction. Tests use it to
+		// release a real Process.Wait publisher while this gate is held.
+		m.beforeManagedResetReconcile(agentID)
+	}
+	if binding.waitPending.Load() {
+		return nil
+	}
 	if binding.waitSignal != nil {
 		select {
 		case <-binding.waitSignal:
