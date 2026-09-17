@@ -772,6 +772,10 @@ He asked for this on 2026-08-07 after two PRs sat green for hours with nobody lo
 
 Check both before reporting a PR as waiting on review. "No reviews yet" usually means nobody was asked.
 
+### Restore open PR mergeability
+
+For a non-Dependabot open PR that is behind or conflicting, promptly route or perform ordinary rebase or conflict resolution to restore mergeability. Retain its existing draft/ready lifecycle, validate and report the new head. Do not infer a rebase ban from restrictions on requesting review, marking ready, or merging. Hold rebase only when Wolfgang explicitly places that PR on hold.
+
 ## Safety and local autonomy
 
 - Do not print or commit secrets, credentials, browser auth state, private screenshots, or credential-bearing documents.
