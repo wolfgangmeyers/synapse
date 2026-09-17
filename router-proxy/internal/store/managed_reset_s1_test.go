@@ -16,6 +16,68 @@ func resetReservationForTest(agent ManagedAgentRecord, id string) ManagedResetRe
 	}
 }
 
+func TestManagedResetBindingDiagnosticReconcilesOnlyExactFence(t *testing.T) {
+	durable, ctx, agent, _ := restartFixture(t)
+	source := restartFenceFromAgent(&agent)
+	actionID := lifecycleUUID(930)
+	action := lifecycleActionInput(actionID, agent.AgentID, "reset", "direct", source)
+	action.State, action.Stage = "admitted", "admission"
+	action.PlannedTargetRuntimeGeneration = lifecycleUUID(931)
+	require.NoError(t, durable.CreateManagedLifecycleAction(ctx, action))
+	_, err := durable.db.Exec(`UPDATE managed_agents SET lifecycle_state='resetting',accepting_prompts=0 WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, durable.RecordManagedResetBindingDiagnostic(ctx, actionID, source, "process_group_leader_unverified"))
+	stored, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "RESET_BINDING_PROOF_FAILED", stored.LastErrorCode)
+	require.Equal(t, "process_group_leader_unverified", stored.LastErrorMessage)
+	require.NoError(t, durable.FailManagedReset(ctx, actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source))
+	failed, err := durable.ManagedLifecycleAction(ctx, actionID)
+	require.NoError(t, err)
+	require.False(t, failed.Retryable)
+
+	mismatch := source
+	mismatch.RuntimeGeneration = lifecycleUUID(932)
+	require.Error(t, durable.ReconcileManagedResetIdentityUnsafe(ctx, actionID, mismatch))
+	stillFailed, err := durable.ManagedLifecycleAction(ctx, actionID)
+	require.NoError(t, err)
+	require.False(t, stillFailed.Retryable)
+
+	require.NoError(t, durable.ReconcileManagedResetIdentityUnsafe(ctx, actionID, source))
+	reconciled, err := durable.ManagedLifecycleAction(ctx, actionID)
+	require.NoError(t, err)
+	require.True(t, reconciled.Retryable)
+	restored, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", restored.LifecycleState)
+	require.True(t, restored.AcceptingPrompts)
+	require.Error(t, durable.ReconcileManagedResetIdentityUnsafe(ctx, actionID, source), "reconciliation is one-shot")
+}
+
+func TestManagedResetAdmissionRetryPreservesIdempotency(t *testing.T) {
+	durable, ctx, agent, _ := restartFixture(t)
+	source := restartFenceFromAgent(&agent)
+	predecessorID := lifecycleUUID(933)
+	predecessor := lifecycleActionInput(predecessorID, agent.AgentID, "reset", "direct", source)
+	predecessor.State, predecessor.Stage = "failed", "admission"
+	predecessor.TerminalCode, predecessor.TerminalMessage, predecessor.Retryable = "RESET_PROCESS_IDENTITY_UNSAFE", "binding proof failed", true
+	predecessor.Operation.State = "terminal"
+	predecessor.PlannedTargetRuntimeGeneration = lifecycleUUID(934)
+	require.NoError(t, durable.CreateManagedLifecycleAction(ctx, predecessor))
+	reservation := resetReservationForTest(agent, lifecycleUUID(935))
+	reservation.RetryOf = predecessorID
+	reservation.InitialState, reservation.InitialStage = "admitted", "admission"
+	reservation.PlannedTargetRuntimeGeneration = predecessor.PlannedTargetRuntimeGeneration
+	admission, err := durable.ReserveManagedReset(ctx, reservation)
+	require.NoError(t, err)
+	require.False(t, admission.Replayed)
+	require.Equal(t, predecessorID, admission.Action.RetryOf)
+	replayed, err := durable.ReserveManagedReset(ctx, reservation)
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+	require.Equal(t, admission.Operation.ResponseBody, replayed.Operation.ResponseBody)
+}
+
 func TestManagedResetAdmissionClearFailureRollsBackForReplay(t *testing.T) {
 	durable, ctx, agent, _ := restartFixture(t)
 	reservation := resetReservationForTest(agent, lifecycleUUID(907))

@@ -1031,22 +1031,65 @@ func sameBindingFence(left, right store.ManagedRuntimeFence) bool {
 }
 
 func (m *Manager) liveBinding(agent *store.ManagedAgentRecord, binding *managedBinding) bool {
-	if agent == nil || binding.reaped || binding.process == nil || binding.rpc == nil || ValidateIdentity(binding.identity) != nil || !m.groupLeader(binding.identity) {
-		return false
+	live, _ := m.liveBindingReason(agent, binding, store.ManagedRuntimeFence{})
+	return live
+}
+
+// liveBindingReason is the fail-closed ownership proof used by lifecycle
+// admission. The reason is fixed diagnostic vocabulary; no process or provider
+// error text is persisted.
+func (m *Manager) liveBindingReason(agent *store.ManagedAgentRecord, binding *managedBinding, expected store.ManagedRuntimeFence) (bool, string) {
+	if agent == nil || binding == nil {
+		return false, "binding_missing"
+	}
+	if binding.reaped {
+		return false, "binding_reaped"
+	}
+	if binding.process == nil {
+		return false, "process_missing"
+	}
+	if binding.rpc == nil {
+		return false, "rpc_missing"
+	}
+	if ValidateIdentity(binding.identity) != nil {
+		return false, "process_identity_invalid"
+	}
+	if !m.groupLeader(binding.identity) {
+		return false, "process_group_leader_unverified"
 	}
 	if binding.process.Identity() != binding.identity {
-		return false
+		return false, "process_identity_changed"
 	}
-	fence := bindingFence(agent.AgentID, binding)
-	return agent.PiSessionID == fence.PiSessionID && agent.SessionEpoch == fence.SessionEpoch && agent.ProcessPID == fence.ProcessPID && agent.ProcessStartMarker == fence.ProcessStartMarker && agent.ProcessIncarnation == fence.ProcessIncarnation && agent.RuntimeGeneration == fence.RuntimeGeneration && agent.ManifestRevision == fence.ManifestRevision && agent.ManifestHash == fence.ManifestHash
+	actual := bindingFence(agent.AgentID, binding)
+	if expected.AgentID != "" && !sameBindingFence(actual, expected) {
+		return false, "binding_fence_mismatch"
+	}
+	if !sameBindingFence(storedAgentFence(agent), actual) {
+		return false, "persisted_fence_mismatch"
+	}
+	if expected.AgentID != "" && !sameBindingFence(storedAgentFence(agent), expected) {
+		return false, "persisted_fence_mismatch"
+	}
+	return true, ""
 }
 
 func (m *Manager) liveBindingForFence(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) bool {
+	live, _ := m.liveBindingForFenceReason(ctx, binding, fence)
+	return live
+}
+
+func (m *Manager) liveBindingForFenceReason(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) (bool, string) {
+	if binding == nil {
+		return false, "binding_missing"
+	}
 	if !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
-		return false
+		return false, "binding_fence_mismatch"
 	}
 	agent, err := m.store.ManagedAgent(ctx, fence.AgentID)
-	return err == nil && m.liveBinding(agent, binding) && sameBindingFence(store.ManagedRuntimeFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}, fence)
+	if err != nil {
+		return false, "managed_agent_read_failed"
+	}
+	return m.liveBindingReason(agent, binding, fence)
 }
 
 func replayRestartOperation(request RestartRequest, operation *store.ManagedOperation) (RestartResult, error) {

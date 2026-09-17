@@ -284,6 +284,13 @@ func (s *Store) ReserveManagedReset(ctx context.Context, reservation ManagedRese
 				return &ManagedResetConflictError{AgentID: reservation.AgentID}
 			}
 			switch {
+			case state == "admitted" && stage == "admission":
+				// A reconciled admission failure can retry from the exact live
+				// source. The predecessor remains terminal for replay, and this
+				// successor owns the one new reset execution.
+				if predecessor.Stage != "admission" || predecessor.TargetFence != nil || reservation.TargetFence != nil || reservation.TargetArtifactID != "" || reservation.PlannedTargetRuntimeGeneration != predecessor.PlannedTargetRuntimeGeneration {
+					return &ManagedResetConflictError{AgentID: reservation.AgentID}
+				}
 			case state == "starting_target" && stage == "target_start":
 				// Target-start retries resume the same verified session after the
 				// manager has reaped/probed it and cleared the predecessor fence.
@@ -377,6 +384,124 @@ func (s *Store) LatestRetryableManagedReset(ctx context.Context, agentID string)
 		return nil, errors.New("store is closed")
 	}
 	return scanManagedLifecycleAction(s.db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE kind='reset' AND execution_owner='lifecycle' AND agent_id=? AND state='failed' AND retryable=1 AND NOT EXISTS (SELECT 1 FROM managed_lifecycle_actions successor WHERE successor.retry_of=managed_lifecycle_actions.action_id) ORDER BY completed_at DESC,action_id DESC LIMIT 1`, agentID))
+}
+
+const (
+	managedResetBindingDiagnosticCode = "RESET_BINDING_PROOF_FAILED"
+	managedResetBindingRetryCode      = "RESET_PROCESS_IDENTITY_UNSAFE"
+)
+
+// RecordManagedResetBindingDiagnostic keeps an admitted reset alive while the
+// manager re-proves its source binding. It records only a fixed subreason; it
+// never changes the durable lifecycle state or the process fence.
+func (s *Store) RecordManagedResetBindingDiagnostic(ctx context.Context, actionID string, fence ManagedRuntimeFence, subreason string) error {
+	if !validManagedRuntimeFence(fence) || actionID == "" || !isLifecycleText(subreason) {
+		return errors.New("managed reset binding diagnostic is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		action, err := managedLifecycleActionForTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		if action.Kind != "reset" || action.State != "admitted" || action.Stage != "admission" || action.SourceFence == nil || !sameManagedRestartFence(*action.SourceFence, fence) {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		args := append([]any{managedResetBindingDiagnosticCode, subreason, now, now}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='resetting' AND accepting_prompts=0 AND slot_held=1`, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+// ReconcileManagedResetIdentityUnsafe makes an old non-retryable reset
+// retryable only after the caller has proved the exact source fence is still
+// live. The operation remains a terminal historical response; a new request
+// must create the one allowed retry successor.
+func (s *Store) ReconcileManagedResetIdentityUnsafe(ctx context.Context, actionID string, fence ManagedRuntimeFence) error {
+	if !validManagedRuntimeFence(fence) || actionID == "" {
+		return errors.New("managed reset identity reconciliation is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		action, err := managedLifecycleActionForTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		if action.Kind != "reset" || action.State != "failed" || action.Stage != "admission" || action.TerminalCode != managedResetBindingRetryCode || action.Retryable || action.SourceFence == nil || !sameManagedRestartFence(*action.SourceFence, fence) {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET retryable=1,updated_at=? WHERE action_id=? AND state='failed' AND stage='admission' AND terminal_code=? AND retryable=0 AND `+managedLifecycleFenceWhere("source_"), append([]any{now, actionID, managedResetBindingRetryCode}, managedFenceValues(fence)[1:]...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='failed' AND accepting_prompts=0 AND slot_held=1`, append([]any{now}, managedFenceValues(fence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+// ManagedResetIdentityUnsafeAction returns the old deployment's stranded
+// admission failure. It is advisory; ReconcileManagedResetIdentityUnsafe
+// repeats the exact fence checks in its write transaction.
+func (s *Store) ManagedResetIdentityUnsafeAction(ctx context.Context, agentID string) (*ManagedLifecycleAction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return scanManagedLifecycleAction(s.db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE agent_id=? AND kind='reset' AND state='failed' AND stage='admission' AND terminal_code=? AND retryable=0 AND NOT EXISTS (SELECT 1 FROM managed_lifecycle_actions successor WHERE successor.retry_of=managed_lifecycle_actions.action_id) ORDER BY completed_at DESC,action_id DESC LIMIT 1`, agentID, managedResetBindingRetryCode))
+}
+
+// ManagedResetIdentityUnsafeActions lists only the old admission failures that
+// can be repaired by an exact live-binding proof. It never authorizes a retry.
+func (s *Store) ManagedResetIdentityUnsafeActions(ctx context.Context) ([]*ManagedLifecycleAction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, managedLifecycleActionSelect+` WHERE kind='reset' AND state='failed' AND stage='admission' AND terminal_code=? AND retryable=0 AND NOT EXISTS (SELECT 1 FROM managed_lifecycle_actions successor WHERE successor.retry_of=managed_lifecycle_actions.action_id) ORDER BY completed_at,action_id`, managedResetBindingRetryCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var actions []*ManagedLifecycleAction
+	for rows.Next() {
+		action, scanErr := scanManagedLifecycleAction(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		actions = append(actions, action)
+	}
+	return actions, rows.Err()
 }
 
 func (s *Store) ManagedResetActions(ctx context.Context) ([]*ManagedLifecycleAction, error) {
