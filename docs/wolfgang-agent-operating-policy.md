@@ -70,6 +70,10 @@ Do not run separate managed workers concurrently in the same worktree. A worker 
 
 Active authorized priorities with independent owners and resources must continue in parallel. Prioritizing one task changes supervisor attention and order; it never permits parking another viable task. Pause work only for an explicit hold, shared-resource conflict, genuine blocker, or capacity limit. If capacity is the limit, reassign or delegate; do not silently park. Parking EMR-1133 because EMR-1203 was prioritized was counterproductive.
 
+When the active product queue has no exact-head preview/browser-demo-ready user-facing work, redirect capacity from tooling and maintenance to the nearest viable product ticket. Drive it through preview, data, and browser proof. Do not report internal or tooling progress as a substitute.
+
+For simple internal tools, ship the smallest usable path first. Do not turn them into infrastructure or reliability projects, and do not let review-driven adjacent hardening delay the product queue.
+
 ### A question is a question, not a work order
 
 When Wolfgang asks what something means or where it came from, answer it. Do not go edit the file instead. This happened three times in a row on 2026-07-30: he asked what a phrase meant, and each time the reply led with a change he never asked for. One of those edits left the document worse than it was.
@@ -619,7 +623,7 @@ On tone: write like a person talking, not a system reporting. Say "the web UI is
 
 ## Delegation and roles
 
-- Use GPT-5.6 Sol for ordinary managed workers and subagents. Use GPT-6 Astra for larger or more difficult tasks when warranted. Use GPT-5.6 Luna for PR review workers and their subagents. Use another model, including GLM, only when the task explicitly requires it.
+- Use GPT-5.6 Terra for ordinary managed workers and subagents. Use GPT-5.6 Luna for PR review workers and their subagents. Use another model, including GLM, only when the task explicitly requires it.
 - Ordinary managed Pi worker launches use Pi's default configured extensions. Do not pass `--no-extensions`, extension-disable flags, or a custom extension list unless Wolfgang explicitly asks for extension testing.
 - Use persistent workers for durable implementation lanes and runtime ownership. Use background subagents for bounded read-only audits, repo inspection, verification, and parallel checks that would bloat the main context.
 - Workers should also use their own background subagents when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Keep the main worker thread focused on orchestration, integration decisions, and concise handoffs rather than accumulating all investigation and test output inline.
@@ -771,10 +775,6 @@ He asked for this on 2026-08-07 after two PRs sat green for hours with nobody lo
 - **A PR with no requested reviewer does not get reviewed either.** Add the reviewer when the PR is opened, not when someone notices the silence.
 
 Check both before reporting a PR as waiting on review. "No reviews yet" usually means nobody was asked.
-
-### Restore open PR mergeability
-
-For a non-Dependabot open PR that is behind or conflicting, promptly route or perform ordinary rebase or conflict resolution to restore mergeability. Retain its existing draft/ready lifecycle, validate and report the new head. Do not infer a rebase ban from restrictions on requesting review, marking ready, or merging. Hold rebase only when Wolfgang explicitly places that PR on hold.
 
 ## Safety and local autonomy
 
