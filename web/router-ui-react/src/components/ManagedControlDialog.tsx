@@ -27,17 +27,16 @@ export function ManagedControlDialog({ open, agent, pending = false, error, onCl
       </section>
       <section className="managed-control-settings" aria-label={`Settings for ${agent.agent_id}`}>
         <p className="managed-control-summary-label">Work controls</p>
-        <div className="dialog-actions managed-control-actions">
-          <button type="button" disabled={pending} onClick={onGoal}>Set goal</button>
-          <button type="button" className="secondary" disabled={pending} onClick={onReminders}>Manage reminders</button>
-          <button type="button" className="secondary" disabled={pending} onClick={onInlineTools}>Inline tool settings</button>
+        <div className="managed-control-actions" aria-label={`Work controls for ${agent.agent_id}`}>
+          <button type="button" className="managed-control-button primary" disabled={pending} onClick={onGoal}><i className="fa-solid fa-bullseye" aria-hidden="true" /><span>Set goal</span></button>
+          <button type="button" className="managed-control-button secondary" aria-label="Manage reminders" disabled={pending} onClick={onReminders}><i className="fa-regular fa-bell" aria-hidden="true" /><span>Reminders</span></button>
+          <button type="button" className="managed-control-button secondary" aria-label="Inline tool settings" disabled={pending} onClick={onInlineTools}><i className="fa-solid fa-gear" aria-hidden="true" /><span>Tool settings</span></button>
+          <span className="managed-control-divider" aria-hidden="true" />
+          <button type="button" className="managed-control-button secondary" disabled={pending} onClick={() => runAction("restart")}><i className="fa-solid fa-arrow-rotate-left" aria-hidden="true" /><span>Restart</span></button>
+          <button type="button" className="managed-control-button secondary" disabled={pending} onClick={() => runAction("reset")}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" /><span>Reset</span></button>
+          <button type="button" className="managed-control-button danger-button" disabled={pending} onClick={() => onConfirmTerminationChange(true)}><i className="fa-regular fa-trash-can" aria-hidden="true" /><span>Terminate</span></button>
         </div>
       </section>
-      <div className="dialog-actions managed-control-actions" aria-label={`Actions for ${agent.agent_id}`}>
-        <button type="button" disabled={pending} onClick={() => runAction("restart")}>Restart</button>
-        <button type="button" className="secondary" disabled={pending} onClick={() => runAction("reset")}>Reset</button>
-        <button type="button" className="danger-button" disabled={pending} onClick={() => onConfirmTerminationChange(true)}>Terminate</button>
-      </div>
       {confirmTermination ? <section className="managed-confirmation" role="alert" aria-labelledby="managed-termination-title">
         <h3 id="managed-termination-title">Terminate {agent.agent_id}?</h3>
         <p>This stops the agent and its work.</p>

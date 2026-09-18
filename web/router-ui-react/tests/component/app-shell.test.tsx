@@ -35,6 +35,12 @@ describe("AppShell", () => {
     expect(banner.querySelector(".model-current")).toHaveTextContent("fixture-provider/fixture-model");
   });
 
+  it("uses the selected agent ID as the deterministic RoboHash seed", () => {
+    const agent: Agent = { agent_id: "fixture peer", activity_state: "idle" };
+    const { container } = render(<ConversationHeader agent={agent} />);
+    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "https://robohash.org/fixture%20peer?set=set1");
+  });
+
   it("keeps selected-peer actions inside the heading after the status", () => {
     const agent: Agent = { agent_id: "fixture-peer", activity_state: "active", subagent_count: 0, subagents: [] };
     render(<ConversationHeader agent={agent} onGoal={() => undefined} onReminders={() => undefined} />);
@@ -73,6 +79,19 @@ describe("AppShell", () => {
     expect(button.querySelector(".fa-file-lines")).toBeInTheDocument();
     fireEvent.click(button);
     expect(onLogs).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the managed-worker control in the header action row", () => {
+    const onManageManaged = vi.fn();
+    const agent: Agent = { agent_id: "managed-peer", source: "router-managed", activity_state: "idle", subagent_count: 0, subagents: [] };
+    render(<ConversationHeader agent={agent} onManageManaged={onManageManaged} />);
+    const button = screen.getByRole("button", { name: "Manage worker" });
+    expect(button).toHaveClass("managed-agent-header-button");
+    expect(button.querySelector(".fa-gear")).toBeInTheDocument();
+    expect(button.closest("h2")).toBeInTheDocument();
+    expect(screen.getByRole("banner").querySelector(".managed-agent-controls")).toBeNull();
+    fireEvent.click(button);
+    expect(onManageManaged).toHaveBeenCalledOnce();
   });
 
   it("marks the reminder button active when the selected agent has a reminder", () => {

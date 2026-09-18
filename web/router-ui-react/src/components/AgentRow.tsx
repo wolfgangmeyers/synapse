@@ -3,6 +3,7 @@ import type { Agent, SubagentSummary } from "../state/agent-projection";
 import { humanName } from "../state/selectors";
 import { SubagentBadge } from "./SubagentBadge";
 import { ArrivalIndicator } from "./ArrivalIndicator";
+import { AgentAvatar } from "./AgentAvatar";
 import type { Arrival } from "../domain/arrivals";
 
 export interface AgentRowProps {
@@ -18,8 +19,6 @@ export interface AgentRowProps {
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
 }
-function initial(id: string): string { return id.trim().charAt(0).toUpperCase() || "?"; }
-
 function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   return (agent.managed_children ?? []).flatMap((child) => {
     if (child.recovery.state !== "confirmed" || (child.status !== "queued" && child.status !== "running")) return [];
@@ -48,7 +47,7 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
 
   return <div role="listitem" className={className} aria-selected={selected} data-agent-id={agent.agent_id}>
     <div className="agent-row-select" role="button" tabIndex={0} onClick={() => onSelect?.(agent.agent_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect?.(agent.agent_id); } }} aria-pressed={selected} aria-label={`${humanName(agent.agent_id)} (${agent.agent_id})`}>
-      <span className={`avatar ${working ? "working" : compacting ? "compacting" : ""}`} aria-hidden="true">{initial(agent.agent_id)}</span>
+      <span className={`avatar ${working ? "working" : compacting ? "compacting" : ""}`} aria-hidden="true"><AgentAvatar agentId={agent.agent_id} /></span>
       <span className="agent-row-text">
         <span className="agent-name-line">
           {hasGoal ? onGoal ? <button type="button" className="goal-indicator" title="Set goal" aria-label="Set goal" onClick={(event) => { stopActionPropagation(event); onGoal(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-flag" aria-hidden="true" /></button> : <span className="goal-indicator" title="Goal active" aria-label="Goal active"><i className="fa-solid fa-flag" aria-hidden="true" /></span> : null}

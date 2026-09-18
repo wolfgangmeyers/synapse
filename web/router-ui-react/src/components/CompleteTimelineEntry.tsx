@@ -39,24 +39,38 @@ function toolVisual(presentation: ManagedHistoryPresentation): CompleteTimelineV
   return { icon, tone, label, detail: presentation.summary ?? "Completed successfully", isHighValue: false };
 }
 
+type ChildTerminalOutcome = { detail: string; success: boolean };
+
+function childTerminalOutcome(presentation: ManagedHistoryPresentation): ChildTerminalOutcome | undefined {
+  switch (presentation.child_state) {
+    case "completed":
+    case "steered": return { detail: "Completed", success: true };
+    case "aborted":
+    case "stopped": return { detail: "Stopped", success: false };
+    case "error": return { detail: "Failed", success: false };
+    case "interrupted_unknown": return { detail: "Interrupted — outcome unknown", success: false };
+  }
+  // A terminal outcome is authoritative even if a delayed child-state frame
+  // still says running, so completed cards never retain a live indicator.
+  switch (presentation.outcome) {
+    case "success":
+    case "completed": return { detail: "Completed", success: true };
+    case "error":
+    case "failed": return { detail: "Failed", success: false };
+    case "aborted": return { detail: "Stopped", success: false };
+    case "interrupted":
+    case "reconciled_unknown": return { detail: "Interrupted — outcome unknown", success: false };
+    default: return undefined;
+  }
+}
+
 function childVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
-  const state = presentation.child_state;
   const recovery = presentation.kind === "recovery";
-  const labels: Record<string, string> = {
-    completed: "Subagent finished",
-    steered: "Subagent wrapped up",
-    aborted: "Subagent stopped",
-    stopped: "Subagent stopped",
-    error: "Subagent failed",
-    interrupted_unknown: "Subagent interrupted — outcome unknown",
-  };
-  const label = labels[state ?? ""] ?? (recovery ? "Subagent recovery" : "Subagent updated");
-  const detail = [presentation.child_label, presentation.summary].filter((value): value is string => value !== undefined && value !== "").join(" · ");
-  const succeeded = state === "completed" || state === "steered";
-  const terminalFailure = state === "aborted" || state === "stopped" || state === "error" || state === "interrupted_unknown";
-  const tone: CompleteTimelineTone = terminalFailure ? "danger" : succeeded ? "green" : recovery ? "teal" : "blue";
-  const icon = succeeded ? "fa-solid fa-check" : recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project";
-  return { icon, tone, label, ...(detail ? { detail } : {}), isHighValue: recovery || ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
+  const terminal = childTerminalOutcome(presentation);
+  const detail = [terminal?.detail, presentation.child_label, presentation.summary].filter((value): value is string => value !== undefined && value !== "").join(" · ");
+  const tone: CompleteTimelineTone = terminal === undefined ? recovery ? "teal" : "blue" : terminal.success ? "green" : "danger";
+  const icon = terminal?.success ? "fa-solid fa-check" : recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project";
+  return { icon, tone, label: "Subagent", ...(detail ? { detail } : {}), isHighValue: recovery || terminal !== undefined };
 }
 
 function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
@@ -109,14 +123,19 @@ function isChildOrRecoveryPresentation(presentation: ManagedHistoryPresentation 
 function isActivePresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
   if (presentation === undefined) return false;
   if (presentation.kind === "compaction") return presentation.outcome === "compacting";
-  if (isChildOrRecoveryPresentation(presentation)) return presentation.child_state === "queued" || presentation.child_state === "running";
+  if (isChildOrRecoveryPresentation(presentation)) return childTerminalOutcome(presentation) === undefined && (presentation.child_state === "queued" || presentation.child_state === "running" || presentation.outcome === "active");
   return presentation.outcome === "active";
+}
+
+export function isActiveManagedSubagentLifecycle(entry: Pick<ManagedHistoryEntry, "presentation">): boolean {
+  return isChildOrRecoveryPresentation(entry.presentation) && isActivePresentation(entry.presentation);
 }
 
 function isTerminalSuccessPresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
   if (presentation?.kind === "compaction") return presentation.outcome === "completed";
   if (presentation?.kind === "tool") return presentation.outcome === "success";
-  return isChildOrRecoveryPresentation(presentation) && (presentation.child_state === "completed" || presentation.child_state === "steered");
+  const terminal = isChildOrRecoveryPresentation(presentation) ? childTerminalOutcome(presentation) : undefined;
+  return terminal?.success === true;
 }
 
 function isTerminalDangerPresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
@@ -124,9 +143,7 @@ function isTerminalDangerPresentation(presentation: ManagedHistoryPresentation |
     return presentation.outcome === "failed" || presentation.outcome === "interrupted" || presentation.outcome === "aborted" || presentation.outcome === "reconciled_unknown";
   }
   if (presentation?.kind === "tool") return presentation.outcome === "error" || presentation.outcome === "failed" || presentation.outcome === "interrupted";
-  if (isChildOrRecoveryPresentation(presentation)) {
-    return presentation.child_state === "aborted" || presentation.child_state === "stopped" || presentation.child_state === "error" || presentation.child_state === "interrupted_unknown";
-  }
+  if (isChildOrRecoveryPresentation(presentation)) return childTerminalOutcome(presentation)?.success === false;
   return false;
 }
 

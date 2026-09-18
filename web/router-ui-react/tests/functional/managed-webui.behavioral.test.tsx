@@ -236,7 +236,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     const runningChildCard = await waitFor(() => {
       const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
       expect(card).toBeInTheDocument();
-      expect(card).toHaveTextContent("Subagent updated");
+      expect(card).toHaveTextContent("Subagent");
       expect(card).toHaveTextContent("Functional child");
       return card;
     });
@@ -282,7 +282,8 @@ describe("real managed router to React WebUI behavioral seam", () => {
     await waitFor(() => {
       const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
       expect(card).toBe(runningChildCard);
-      expect(card).toHaveTextContent("Subagent finished");
+      expect(card).toHaveTextContent("Subagent");
+      expect(card).toHaveTextContent("Completed");
       if (card === null) throw new Error("child card missing at terminal state");
       expect([...document.querySelectorAll<HTMLElement>("[data-activity-id]")].indexOf(card)).toBe(childPosition);
       expect(card).not.toHaveClass("activity-entry--active");

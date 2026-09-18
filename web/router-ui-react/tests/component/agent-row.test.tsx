@@ -8,6 +8,11 @@ import "../../src/app.css";
 afterEach(cleanup);
 
 describe("AgentRow", () => {
+  it("uses a deterministic RoboHash image seeded by the agent ID", () => {
+    const { container } = render(<AgentRow agent={{ agent_id: "build agent", activity_state: "idle" }} />);
+    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "https://robohash.org/build%20agent?set=set1");
+  });
+
   it("renders legacy Font Awesome goal and reminder badges without changing row structure", () => {
     render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", goal: { enabled: true, goal: "goal" }, subagent_count: 0 }} reminderCount={1} />);
     expect(document.querySelector(".goal-indicator > i")).toHaveClass("fa-solid", "fa-flag");
