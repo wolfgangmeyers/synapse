@@ -116,7 +116,10 @@ export function createPolicyBridge() {
       return policy;
     },
     consumeInlineCredit(toolName: string): boolean {
-      if (!policy.inlineEnabled || !["bash", "edit", "write"].includes(toolName)) return false;
+      if (!["bash", "edit", "write"].includes(toolName)) return false;
+      // Match mecha-messaging: the durable UI setting is a broad runtime
+      // permission. Credits are only relevant while that setting is off.
+      if (policy.inlineEnabled) return true;
       const count = policy.inlineCredits[toolName] ?? 0;
       if (count <= 0) return false;
       const credits = { ...policy.inlineCredits, [toolName]: count - 1 };
