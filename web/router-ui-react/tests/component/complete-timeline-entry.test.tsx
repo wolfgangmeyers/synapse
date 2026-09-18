@@ -91,13 +91,13 @@ describe("Complete timeline entry", () => {
   });
 
   it.each([
-    { initial: "queued" as const, terminal: "completed" as const, outcome: "completed" as const, label: "Subagent finished", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
-    { initial: "running" as const, terminal: "completed" as const, outcome: "completed" as const, label: "Subagent finished", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
-    { initial: "running" as const, terminal: "aborted" as const, outcome: "aborted" as const, label: "Subagent stopped", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
-    { initial: "running" as const, terminal: "stopped" as const, outcome: "unknown" as const, label: "Subagent stopped", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
-    { initial: "running" as const, terminal: "error" as const, outcome: "error" as const, label: "Subagent failed", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
-    { initial: "running" as const, terminal: "interrupted_unknown" as const, outcome: "unknown" as const, label: "Subagent interrupted — outcome unknown", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
-  ])("updates one native subagent card from $initial to $terminal", ({ initial, terminal, outcome, label, tone, terminalClass }) => {
+    { initial: "queued" as const, terminal: "completed" as const, outcome: "completed" as const, state: "Completed", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
+    { initial: "running" as const, terminal: "completed" as const, outcome: "completed" as const, state: "Completed", tone: "green" as const, terminalClass: "activity-entry--terminal-success" },
+    { initial: "running" as const, terminal: "aborted" as const, outcome: "aborted" as const, state: "Stopped", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { initial: "running" as const, terminal: "stopped" as const, outcome: "unknown" as const, state: "Stopped", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { initial: "running" as const, terminal: "error" as const, outcome: "error" as const, state: "Failed", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+    { initial: "running" as const, terminal: "interrupted_unknown" as const, outcome: "unknown" as const, state: "Interrupted — outcome unknown", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger" },
+  ])("updates one native subagent card from $initial to $terminal", ({ initial, terminal, outcome, state, tone, terminalClass }) => {
     const id = "complete:subagent";
     const detail = "Native child · Native child finished";
     const { container, rerender } = render(<CompleteTimelineEntry entry={activityEntry(id, { kind: "child", child_state: initial, outcome: "active" })} />);
@@ -115,8 +115,19 @@ describe("Complete timeline entry", () => {
     expect(terminalArticle).toHaveClass(`activity-entry--${tone}`, terminalClass);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
     if (terminalClass === "activity-entry--terminal-success") expect(terminalArticle.querySelector(".fa-check")).toBeInTheDocument();
-    expect(screen.getByText(label)).toBeInTheDocument();
-    expect(screen.getByText(detail)).toBeInTheDocument();
+    expect(terminalArticle.querySelector(".activity-entry-label strong")).toHaveTextContent("Subagent");
+    expect(terminalArticle).toHaveTextContent(state);
+    expect(screen.getByText(`${state} · ${detail}`)).toBeInTheDocument();
+  });
+
+  it("settles a completed subagent when a delayed lifecycle state still says running", () => {
+    const { container } = render(<CompleteTimelineEntry entry={activityEntry("complete:subagent-outcome", { kind: "child", child_state: "running", outcome: "completed", child_label: "Worker", summary: "Returned successfully" })} />);
+    const article = activityArticle(container);
+
+    expect(article.querySelector(".activity-entry-label strong")).toHaveTextContent("Subagent");
+    expect(article).toHaveClass("activity-entry--terminal-success");
+    expect(article).not.toHaveClass("activity-entry--active");
+    expect(article).toHaveTextContent("Completed · Worker · Returned successfully");
   });
 
   it.each([
@@ -166,9 +177,9 @@ describe("Complete timeline entry", () => {
       <CompleteTimelineEntry entry={{ id: "complete:child-compaction", agent_id: "managed-worker", at, message: "Child compaction failed", presentation: { kind: "compaction", child_label: "Child", outcome: "failed" } }} />
     </>);
     expect(screen.getByText("Context compacted")).toBeInTheDocument();
-    expect(screen.getByText("Subagent interrupted — outcome unknown")).toBeInTheDocument();
-    expect(screen.getByText("Subagent wrapped up")).toBeInTheDocument();
-    expect(screen.getByText("Delay fifteen seconds · Wrapped up in 15 seconds")).toBeInTheDocument();
+    expect(screen.getAllByText("Subagent")).toHaveLength(2);
+    expect(screen.getByText("Interrupted — outcome unknown")).toBeInTheDocument();
+    expect(screen.getByText("Completed · Delay fifteen seconds · Wrapped up in 15 seconds")).toBeInTheDocument();
     expect(screen.getByText("Child compaction failed")).toBeInTheDocument();
     expect(container.querySelector(".fa-arrow-right")).not.toBeInTheDocument();
     expect(container.querySelector(".fa-compress")).toBeInTheDocument();

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type R
 import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
 import type { ManagedHistoryEntry } from "../protocol/types";
 import { shouldFollowToBottom } from "../state/conversation-projection";
-import { CompleteTimelineEntry, completeTimelineVisual } from "./CompleteTimelineEntry";
+import { CompleteTimelineEntry, completeTimelineVisual, isActiveManagedSubagentLifecycle } from "./CompleteTimelineEntry";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
 
@@ -34,15 +34,14 @@ function activitySequence(entry: ManagedHistoryEntry): number {
 }
 
 function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry): boolean {
-  // Complete is an outcome timeline, not a live progress log. Old routers may
-  // retain child queued/started/redirected rows, so hide those alongside normal
-  // lifecycle state while retaining a terminal child result or failure.
+  // A managed child stays in the persistent active-subagents area until its
+  // terminal update. Its actual subagent tool invocation remains a normal
+  // Complete history entry because it has presentation.kind === "tool".
+  if (isActiveManagedSubagentLifecycle(entry)) return false;
+  // Complete is an outcome timeline, not a lifecycle progress log.
   if (entry.presentation?.kind === "lifecycle" || entry.presentation?.kind === "state") return false;
   if (entry.presentation?.kind !== "child") return true;
-  // A running child owns the same Complete row that later receives compaction
-  // and terminal updates. Keep that row mounted so React preserves its stable
-  // key and DOM position throughout the child run.
-  return ["running", "completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
+  return ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
 }
 
 function dateLabel(timestamp: number): string | undefined {

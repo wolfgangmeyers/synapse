@@ -41,6 +41,10 @@ describe("ManagedControlDialog", () => {
     expect(screen.getByRole("button", { name: "Set goal" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Manage reminders" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Inline tool settings" })).toBeInTheDocument();
+    const controls = screen.getByLabelText("Work controls for managed-alpha");
+    expect(controls).toHaveClass("managed-control-actions");
+    expect(controls.querySelectorAll(".managed-control-button")).toHaveLength(6);
+    expect(controls.querySelectorAll(".managed-control-button i")).toHaveLength(6);
 
     await user.click(screen.getByRole("button", { name: "Set goal" }));
     await user.click(screen.getByRole("button", { name: "Manage reminders" }));

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -64,10 +64,10 @@ describe("Selected-agent conversation modes", () => {
     expect(container.querySelector(".timeline-live-region")).toHaveTextContent("");
 
     rerender(<MessageList messages={[]} peerId="managed-worker" activityEntries={[retained, { ...retained, id: "complete:2", message: "Child failed", presentation: { kind: "child", child_state: "error" } }]} activityHistoryReady />);
-    expect(container.querySelector(".timeline-live-region")).toHaveTextContent("Subagent failed");
+    expect(container.querySelector(".timeline-live-region")).toHaveTextContent("Subagent");
   });
 
-  it("keeps running and terminal subagent outcomes while hiding queued chatter", () => {
+  it("keeps only terminal subagent outcomes in Complete history", () => {
     render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[
       { id: "complete:1", agent_id: "managed-worker", message: "Child queued", presentation: { kind: "child", child_state: "queued" } },
       { id: "complete:2", agent_id: "managed-worker", message: "Child started", presentation: { kind: "child", child_state: "running" } },
@@ -76,13 +76,24 @@ describe("Selected-agent conversation modes", () => {
     ]} />);
 
     expect(screen.queryByText("Child queued")).not.toBeInTheDocument();
-    expect(screen.getByText("Subagent updated")).toBeInTheDocument();
+    expect(screen.getAllByText("Subagent")).toHaveLength(2);
+    expect(screen.queryByText("Child started")).not.toBeInTheDocument();
     expect(screen.queryByText("Child wrapped up")).not.toBeInTheDocument();
     expect(screen.queryByText("Child completed")).not.toBeInTheDocument();
-    expect(screen.getByText("Subagent wrapped up")).toBeInTheDocument();
-    expect(screen.getByText("Delay fifteen seconds · Wrapped up in 15 seconds")).toBeInTheDocument();
-    expect(screen.getByText("Subagent finished")).toBeInTheDocument();
-    expect(screen.getByText("Wait twenty seconds · Completed in 20 seconds")).toBeInTheDocument();
+    expect(screen.getByText("Completed · Delay fifteen seconds · Wrapped up in 15 seconds")).toBeInTheDocument();
+    expect(screen.getByText("Completed · Wait twenty seconds · Completed in 20 seconds")).toBeInTheDocument();
+  });
+
+  it("keeps the Run subagent tool invocation in history", () => {
+    const { container } = render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[
+      { id: "complete:tool", agent_id: "managed-worker", message: "Run subagent", presentation: { kind: "tool", tool_name: "subagent", outcome: "success" } },
+      { id: "complete:child", agent_id: "managed-worker", message: "Subagent updated", presentation: { kind: "child", child_state: "completed", child_label: "Review", summary: "Completed successfully" } },
+    ]} />);
+
+    expect(container.querySelectorAll("[data-activity-id]")).toHaveLength(2);
+    expect(screen.getByText("Ran subagent")).toBeInTheDocument();
+    expect(screen.getByText("Subagent")).toBeInTheDocument();
+    expect(screen.getByText("Completed · Review · Completed successfully")).toBeInTheDocument();
   });
 
   it.each([
@@ -134,8 +145,40 @@ describe("Selected-agent conversation modes", () => {
     expect(container.querySelector('[data-activity-id="complete:child"]')).toBeInTheDocument();
     const terminalArticle = container.querySelector<HTMLElement>('[data-activity-id="complete:child"]');
     if (!terminalArticle) throw new Error("Terminal child activity was not rendered");
-    expect(terminalArticle).toHaveTextContent("Subagent finished");
-    expect(terminalArticle).toHaveTextContent("Native child · Completed successfully");
+    expect(terminalArticle).toHaveTextContent("Subagent");
+    expect(terminalArticle).toHaveTextContent("Completed · Native child · Completed successfully");
+  });
+
+  it("renders active managed subagents persistently below the conversation instead of in history", () => {
+    const active = { id: "complete:child", agent_id: "managed-worker", at: "2030-01-01T10:00:00.000Z", message: "Child started", presentation: { kind: "child" as const, child_state: "running" as const, outcome: "active" as const, child_label: "Review" } };
+    const { container } = render(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} conversationView="complete" messages={[]} activityEntries={[
+      { id: "complete:tool", agent_id: "managed-worker", at: "2030-01-01T10:01:00.000Z", message: "Run subagent", presentation: { kind: "tool", tool_name: "subagent", outcome: "success" } },
+      active,
+    ]} />);
+
+    const activeArea = screen.getByLabelText("Active subagents");
+    expect(within(activeArea).getByText("Subagent")).toBeInTheDocument();
+    expect(within(activeArea).getByText("Review")).toBeInTheDocument();
+    expect(within(activeArea).getByRole("article")).toHaveClass("activity-entry--active");
+    expect(container.querySelector("#conversation-view-panel [data-activity-id='complete:child']")).not.toBeInTheDocument();
+    expect(container.querySelector("#conversation-view-panel [data-activity-id='complete:tool']")).toBeInTheDocument();
+  });
+
+  it("moves a terminal managed subagent from the active area to the newest history position", () => {
+    const active = { id: "complete:child", agent_id: "managed-worker", at: "2030-01-01T10:00:00.000Z", message: "Child started", presentation: { kind: "child" as const, child_state: "running" as const, outcome: "active" as const, child_label: "Review" } };
+    const laterHistory = { id: "complete:tool", agent_id: "managed-worker", at: "2030-01-01T10:01:00.000Z", message: "Ran bash", presentation: { kind: "tool" as const, tool_name: "bash", outcome: "success" as const } };
+    const { container, rerender } = render(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} conversationView="complete" messages={[]} activityEntries={[active, laterHistory]} />);
+
+    expect(screen.getByLabelText("Active subagents")).toContainElement(container.querySelector("[data-activity-id='complete:child']"));
+    rerender(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} conversationView="complete" messages={[]} activityEntries={[{ ...active, at: "2030-01-01T10:02:00.000Z", message: "Subagent finished", presentation: { kind: "child", child_state: "completed", outcome: "completed", child_label: "Review", summary: "Completed successfully" } }, laterHistory]} />);
+
+    expect(screen.queryByLabelText("Active subagents")).not.toBeInTheDocument();
+    const historyIDs = [...container.querySelectorAll<HTMLElement>("#conversation-view-panel [data-activity-id]")].map((element) => element.dataset.activityId);
+    expect(historyIDs).toEqual(["complete:tool", "complete:child"]);
+    const terminal = container.querySelector<HTMLElement>("#conversation-view-panel [data-activity-id='complete:child']");
+    expect(terminal).toHaveClass("activity-entry--terminal-success");
+    expect(terminal?.querySelector(".activity-entry-label strong")).toHaveTextContent("Subagent");
+    expect(terminal).toHaveTextContent("Completed · Review · Completed successfully");
   });
 
   it("orders equal-timestamp messages and Complete activities by numeric sequence with a deterministic tie", () => {
