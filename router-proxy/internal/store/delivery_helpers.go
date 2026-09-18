@@ -114,6 +114,13 @@ func sameDeliveryItems(actual []protocol.DeliveryItem, expected []storedDelivery
 }
 
 func (s *Store) failDelivery(ctx context.Context, d storedDelivery, attemptState, reason, now string, maxAttempts int) (FailureResult, error) {
+	frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, d.AgentID)
+	if err != nil {
+		return FailureResult{}, err
+	}
+	if frozen {
+		return FailureResult{MessageID: d.MessageID, State: d.MessageState}, nil
+	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE delivery_attempts SET state = ?, updated_at = ?, failure_reason = ? WHERE message_id = ? AND attempt_number = ? AND state IN ('leased','injection_requested')`, attemptState, now, reason, d.MessageID, d.AttemptNumber); err != nil {
 		return FailureResult{}, err
 	}

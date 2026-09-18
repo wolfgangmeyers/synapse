@@ -21,6 +21,109 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func insertManagedArchiveHTTPTest(t *testing.T, database, key, agentID string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", database)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO managed_agent_archives (
+		archive_key,agent_id,name,terminal_outcome,completed_at,disposition,total,
+		queued_never_attempted,in_flight_or_unknown,completed,released_or_failed)
+		VALUES (?, ?, ?, 'terminated', '2026-09-01T12:00:00.000Z', 'completed', 1, 0, 0, 1, 0)`, key, agentID, agentID)
+	require.NoError(t, err)
+}
+
+func TestManagedArchiveHTTPContractSeparatesClosedReadFromLiveDetail(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, database, store.Options{})
+	require.NoError(t, err)
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, Managed: manager})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer func() { server.Close(); _ = router.Close(ctx); _ = durable.Close() }()
+
+	key := "123e4567-e89b-42d3-a456-426614174081"
+	insertManagedArchiveHTTPTest(t, database, key, "alpha")
+
+	request := func(method, path string) (*http.Response, map[string]any) {
+		req, requestErr := http.NewRequest(method, server.URL+path, nil)
+		require.NoError(t, requestErr)
+		response, requestErr := http.DefaultClient.Do(req)
+		require.NoError(t, requestErr)
+		body, readErr := io.ReadAll(response.Body)
+		require.NoError(t, readErr)
+		require.NoError(t, response.Body.Close())
+		payload := map[string]any{}
+		if len(body) > 0 {
+			require.NoError(t, json.Unmarshal(body, &payload))
+		}
+		return response, payload
+	}
+
+	live, liveBody := request(http.MethodGet, "/v1/managed-agents/alpha")
+	require.Equal(t, http.StatusNotFound, live.StatusCode)
+	require.Equal(t, "AGENT_NOT_FOUND", liveBody["error"].(map[string]any)["code"])
+
+	archive, archiveBody := request(http.MethodGet, "/v1/managed-agents/archive/"+key)
+	require.Equal(t, http.StatusOK, archive.StatusCode)
+	require.Equal(t, "no-store", archive.Header.Get("Cache-Control"))
+	require.Equal(t, "archived", archiveBody["agent"].(map[string]any)["record_kind"])
+	require.Equal(t, key, archiveBody["agent"].(map[string]any)["archive_key"])
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		response, body := request(method, "/v1/managed-agents/archive/"+key)
+		require.Equal(t, http.StatusConflict, response.StatusCode, method)
+		require.Equal(t, "ARCHIVED_READ_ONLY", body["error"].(map[string]any)["code"], method)
+		require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
+	}
+	methodNotAllowed, _ := request(http.MethodHead, "/v1/managed-agents/archive/"+key)
+	require.Equal(t, http.StatusMethodNotAllowed, methodNotAllowed.StatusCode)
+	require.Equal(t, "no-store", methodNotAllowed.Header.Get("Cache-Control"))
+
+	for _, path := range []string{
+		"/v1/managed-agents/archive",
+		"/v1/managed-agents/archive/not-a-uuid",
+		"/v1/managed-agents/archive/123E4567-e89b-42d3-a456-426614174081",
+		"/v1/managed-agents/archive/" + key + "/extra",
+	} {
+		response, body := request(http.MethodGet, path)
+		require.Equal(t, http.StatusBadRequest, response.StatusCode, path)
+		require.Equal(t, "INVALID_ARCHIVE_KEY", body["error"].(map[string]any)["code"], path)
+	}
+	for _, invalid := range []struct{ path, rawPath string }{
+		{path: "/v1/managed-agents/archive/%ZZ", rawPath: "/v1/managed-agents/archive/%ZZ"},
+		{path: "/v1/managed-agents/archive//", rawPath: "/v1/managed-agents/archive/%2F"},
+		{path: "/v1/managed-agents/archive/\\", rawPath: "/v1/managed-agents/archive/%5C"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.URL.Path, req.URL.RawPath = invalid.path, invalid.rawPath
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		require.Equal(t, http.StatusBadRequest, response.Code, invalid.rawPath)
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+		require.Equal(t, "INVALID_ARCHIVE_KEY", body["error"].(map[string]any)["code"], invalid.rawPath)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		missing, body := request(method, "/v1/managed-agents/archive/123e4567-e89b-42d3-a456-426614174082")
+		require.Equal(t, http.StatusNotFound, missing.StatusCode, method)
+		require.Equal(t, "ARCHIVE_NOT_FOUND", body["error"].(map[string]any)["code"], method)
+	}
+
+	options := httptest.NewRequest(http.MethodOptions, "/v1/managed-agents/archive/"+key, nil)
+	options.Header.Set("Origin", "https://unrelated.example")
+	optionsResponse := httptest.NewRecorder()
+	router.ServeHTTP(optionsResponse, options)
+	require.Equal(t, http.StatusNoContent, optionsResponse.Code)
+	require.Equal(t, "*", optionsResponse.Header().Get("Access-Control-Allow-Origin"))
+	require.Equal(t, "no-store", optionsResponse.Header().Get("Cache-Control"))
+}
+
 func TestManagedGoalSettingsAcceptsOnlyTheSharedEditorShape(t *testing.T) {
 	valid := map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":120000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)}
 	settings, err := managedGoalSettings(valid)

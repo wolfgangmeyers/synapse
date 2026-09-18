@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,6 +77,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return true
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/managed-directories":
 		r.handleManagedDirectoriesGET(w, req)
+		return true
+	case managedArchiveRoute(req.URL.Path):
+		r.handleManagedArchive(w, req)
 		return true
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedAgentsGET(w, req)
@@ -1066,6 +1070,70 @@ func managedDirectoryBreadcrumbs(path string, roots []string) []map[string]strin
 		breadcrumbs = append(breadcrumbs, map[string]string{"name": element, "path": current})
 	}
 	return breadcrumbs
+}
+
+const managedArchiveRoutePrefix = "/v1/managed-agents/archive"
+
+func managedArchiveRoute(path string) bool {
+	return path == managedArchiveRoutePrefix || strings.HasPrefix(path, managedArchiveRoutePrefix+"/")
+}
+
+func managedArchiveKey(req *http.Request) (string, bool) {
+	if req == nil || req.URL == nil {
+		return "", false
+	}
+	// URL.Path is decoded by net/http. Validate RawPath too so malformed
+	// escapes and encoded separators cannot be normalized into another key.
+	if req.URL.RawPath != "" {
+		decoded, err := url.PathUnescape(req.URL.RawPath)
+		if err != nil || decoded != req.URL.Path {
+			return "", false
+		}
+	}
+	escaped := req.URL.EscapedPath()
+	prefix := managedArchiveRoutePrefix + "/"
+	if !strings.HasPrefix(escaped, prefix) {
+		return "", false
+	}
+	rawKey := strings.TrimPrefix(escaped, prefix)
+	if rawKey == "" || strings.Contains(rawKey, "/") {
+		return "", false
+	}
+	key, err := url.PathUnescape(rawKey)
+	if err != nil || strings.ContainsAny(key, "/\\") || !canonicalUUID(key) {
+		return "", false
+	}
+	return key, true
+}
+
+func (r *Router) handleManagedArchive(w http.ResponseWriter, req *http.Request) {
+	key, valid := managedArchiveKey(req)
+	if !valid {
+		r.writeManagedError(w, req, &managedHTTPError{http.StatusBadRequest, "INVALID_ARCHIVE_KEY", "Archive key is invalid"})
+		return
+	}
+	archive, err := r.store.ManagedAgentArchiveByKey(req.Context(), key)
+	if errors.Is(err, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{http.StatusNotFound, "ARCHIVE_NOT_FOUND", "Archived worker was not found"})
+		return
+	}
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{http.StatusInternalServerError, "INTERNAL", "Router could not read the managed archive"})
+		return
+	}
+	switch req.Method {
+	case http.MethodGet:
+		version, versionErr := r.store.GetProjectionVersion(req.Context())
+		if versionErr != nil {
+			r.writeManagedError(w, req, &managedHTTPError{http.StatusInternalServerError, "INTERNAL", "Router could not read the managed projection"})
+			return
+		}
+		r.writeManagedJSON(w, req, http.StatusOK, managed.ProjectionArchiveEnvelope(archive, r.now(), version), nil)
+	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		r.writeManagedError(w, req, &managedHTTPError{http.StatusConflict, "ARCHIVED_READ_ONLY", "Archived worker history is read-only"})
+	default:
+		r.writeManagedError(w, req, &managedHTTPError{http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method is not allowed"})
+	}
 }
 
 func (r *Router) handleManagedAgentsGET(w http.ResponseWriter, req *http.Request) {

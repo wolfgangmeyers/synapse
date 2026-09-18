@@ -150,6 +150,38 @@ func TestUILiveReportsProcessLossAsFailedDelta(t *testing.T) {
 	require.Equal(t, "PROCESS_EXITED", errorView["code"])
 }
 
+func TestUILiveProjectionKeepsLiveAndArchiveRecordKeysSeparate(t *testing.T) {
+	key := "123e4567-e89b-42d3-a456-426614174081"
+	stored := store.ManagedAgentsSnapshot{
+		GeneratedAt: time.Unix(1, 0), ProjectionVersion: 4,
+		Agents:   []*store.ManagedAgentRecord{{AgentID: "alpha", Name: "alpha", Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}},
+		Archives: []*store.ManagedAgentArchive{{RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha", ArchiveKey: key, TerminalOutcome: "terminated", CompletedAt: "2026-09-01T12:00:00.000Z"}},
+	}
+	projection := uiLiveProjectionFromStored(stored, 4, "", nil)
+	require.Contains(t, projection.agents, "live:alpha")
+	require.Contains(t, projection.agents, "archive:"+key)
+	frame := projection.frame()
+	records := frame["agents"].([]map[string]any)
+	require.Len(t, records, 2)
+	require.Equal(t, "alpha", records[0]["agent_id"])
+	require.Equal(t, key, records[1]["archive_key"])
+}
+
+func TestUILiveTransitionCarriesArchiveRecordKey(t *testing.T) {
+	key := "123e4567-e89b-42d3-a456-426614174081"
+	archive := managed.PublicArchive(&store.ManagedAgentArchive{RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha", ArchiveKey: key, TerminalOutcome: "terminated", CompletedAt: "2026-09-01T12:00:00.000Z"})
+	prior := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{}}
+	delta := uiLiveTransition(prior, &uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{"archive:" + key: archive}})
+	require.Equal(t, "managed_agent_delta", delta["type"])
+	require.Equal(t, "archive:"+key, delta["record_key"])
+	require.Equal(t, "alpha", delta["agent_id"])
+
+	removed := uiLiveTransition(&uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"archive:" + key: archive}}, &uiLiveProjection{version: 5, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{}})
+	require.Equal(t, "managed_agent_removed", removed["type"])
+	require.Equal(t, "archive:"+key, removed["record_key"])
+	require.Equal(t, "alpha", removed["agent_id"])
+}
+
 func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *testing.T) {
 	prior := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha"}}}
 	removed := uiLiveTransition(prior, &uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{}})
@@ -274,5 +306,7 @@ func TestRouterServesContainedStaticUIWithoutAuthorityState(t *testing.T) {
 	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
 	require.Empty(t, response.Header().Get("Set-Cookie"))
 	require.Empty(t, response.Header().Get("Access-Control-Allow-Credentials"))
-	require.Contains(t, response.Header().Get("Content-Security-Policy"), "connect-src 'self'")
+	csp := response.Header().Get("Content-Security-Policy")
+	require.Contains(t, csp, "connect-src 'self'")
+	require.Contains(t, csp, "img-src 'self' data: https://robohash.org")
 }

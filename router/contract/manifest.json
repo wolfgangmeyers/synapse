@@ -45,6 +45,7 @@
     {"methods": ["GET"], "path": "/v1/managed-directories", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["GET"], "path": "/v1/history", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["POST"], "path": "/v1/managed-agents/restart-all", "source": "handleManagedHTTP", "managed": true},
+    {"methods": ["GET", "POST", "PUT", "DELETE"], "path": "/v1/managed-agents/archive/{archive_key}", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["GET"], "path": "/v1/managed-agents/{id}", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["GET"], "path": "/v1/managed-agents/{id}/children", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["DELETE"], "path": "/v1/managed-agents/{id}", "source": "handleManagedHTTP", "managed": true},
@@ -59,7 +60,7 @@
   ],
   "managed": {
     "enabled_by_default": false,
-    "routes": ["/v1/managed-agents", "/v1/managed-agents/{agent_id}/router-log", "/v1/managed-directories", "/v1/history", "/v1/managed-agents/restart-all", "/v1/managed-agents/{id}", "/v1/managed-agents/{id}/children", "/v1/managed-agents/{agent_id}/restart", "/v1/managed-agents/{id}/reset", "/v1/models", "/v1/settings/default-model", "/v1/provider-auth", "/v1/provider-auth/{provider}/login", "/v1/provider-auth/{provider}/logout", "/v1/provider-auth/operations/{id}/response"],
+    "routes": ["/v1/managed-agents", "/v1/managed-agents/{agent_id}/router-log", "/v1/managed-directories", "/v1/history", "/v1/managed-agents/restart-all", "/v1/managed-agents/archive/{archive_key}", "/v1/managed-agents/{id}", "/v1/managed-agents/{id}/children", "/v1/managed-agents/{agent_id}/restart", "/v1/managed-agents/{id}/reset", "/v1/models", "/v1/settings/default-model", "/v1/provider-auth", "/v1/provider-auth/{provider}/login", "/v1/provider-auth/{provider}/logout", "/v1/provider-auth/operations/{id}/response"],
     "authority": "locally unauthenticated direct worker control",
     "idempotency": "worker-wide method and request ID with canonical path/body comparison",
     "legacy_agents_additive_when_authenticated": false

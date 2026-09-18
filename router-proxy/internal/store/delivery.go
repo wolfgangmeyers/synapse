@@ -335,6 +335,13 @@ func (s *Store) ClaimNextMessage(ctx context.Context, request ClaimRequest) (*do
 	}
 	var result *domain.Delivery
 	err = s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, request.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		if !request.AllowMemoryLease {
 			if err := s.requireActiveLease(ctx, request.AgentID, request.InstanceID, request.LeaseID, now); err != nil {
 				return err
@@ -404,6 +411,13 @@ func (s *Store) RecordInjectionRequested(ctx context.Context, request ReceiptReq
 	var result domain.Delivery
 	timedOut := false
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, request.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		deliveries, err := s.requireDeliveryBatch(ctx, request, now)
 		if err != nil {
 			return err
@@ -469,6 +483,13 @@ func (s *Store) AcknowledgeDelivery(ctx context.Context, request ReceiptRequest)
 	var item protocol.DeliveryItem
 	timedOut := false
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, request.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		deliveries, err := s.requireDeliveryBatch(ctx, request, now)
 		if err != nil {
 			return err
@@ -523,6 +544,13 @@ func (s *Store) NackDelivery(ctx context.Context, request ReceiptRequest, reason
 	var result BatchFailureResult
 	timedOut := false
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, request.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		deliveries, err := s.requireDeliveryBatch(ctx, request, now)
 		if err != nil {
 			return err
@@ -629,6 +657,13 @@ func (s *Store) RecoverExpiredUnclaimedMessages(ctx context.Context) ([]string, 
 			return err
 		}
 		for _, id := range expired {
+			frozen, err := managedTerminationSettlementFrozenForMessageTx(ctx, s.db, id)
+			if err != nil {
+				return err
+			}
+			if frozen {
+				continue
+			}
 			if err := s.expireManagedDirectForMessageTx(ctx, id, now); err != nil {
 				return err
 			}
@@ -654,6 +689,14 @@ func (s *Store) RetryDeadLetter(ctx context.Context, messageID string) (*domain.
 		current, err := s.messageForTx(ctx, messageID)
 		if err != nil || current == nil || current.State != domain.MessageDeadLetter {
 			return err
+		}
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, current.To)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			message = current
+			return nil
 		}
 		count, bytes, err := s.queueUsage(ctx, current.To)
 		if err != nil {
@@ -688,6 +731,13 @@ func (s *Store) DismissDeadLetter(ctx context.Context, messageID string) (bool, 
 		current, err := s.messageForTx(ctx, messageID)
 		if err != nil || current == nil || current.State != domain.MessageDeadLetter {
 			return err
+		}
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, current.To)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
 		}
 		if _, err := s.db.ExecContext(ctx, "DELETE FROM reminders WHERE linked_message_id = ? AND state = 'failed'", messageID); err != nil {
 			return err
@@ -1018,6 +1068,13 @@ func (s *Store) RetireManagedRecipientSourceForTermination(ctx context.Context, 
 	}
 	sentinel := retiredManagedRecipientOwner(agentID)
 	return s.runImmediate(ctx, func() error {
+		archiveActive, err := managedTerminationArchiveActiveTx(ctx, s.db, agentID)
+		if err != nil {
+			return err
+		}
+		if archiveActive {
+			return retireManagedRecipientSourceTx(ctx, s.db, agentID, recipientName, formatTimestamp(s.clock.Now()))
+		}
 		source, err := recipientSourceForTx(ctx, s.db, recipientName)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -1255,6 +1312,13 @@ func (s *Store) MarkManagedDirectPrompted(ctx context.Context, attempt ManagedDi
 		return errors.New("managed direct recovery cursor is required")
 	}
 	return s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, attempt.Fence.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		if !validDirectFenceTx(ctx, s.db, attempt.Fence) {
 			return &ManagedDirectNotReadyError{AgentID: attempt.Fence.AgentID}
 		}
@@ -1297,6 +1361,13 @@ func (s *Store) AcknowledgeManagedDirectResultWithHistory(ctx context.Context, a
 	changed := false
 	var historyEntry ManagedHistoryEntry
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, attempt.Fence.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		status, err := managedDirectRouteStatusTx(ctx, s.db, attempt.SnapshotID, attempt.Fence.AgentID)
 		if err != nil {
 			return err
@@ -1378,6 +1449,13 @@ func (s *Store) AcknowledgeManagedDirectRecoveredResultWithHistory(ctx context.C
 	changed := false
 	var historyEntry ManagedHistoryEntry
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, attempt.Fence.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=?`, now, receiptEntry, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID)
 		if err != nil {
@@ -1533,6 +1611,13 @@ func directRetryDelay(attempt int) time.Duration {
 func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectAttempt, code, detail string) (bool, error) {
 	terminal := false
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, attempt.Fence.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		if code == "" {
 			code = "direct_failure"
 		}
@@ -1588,6 +1673,13 @@ func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectA
 func (s *Store) ReleaseManagedDirectRecovery(ctx context.Context, attempt ManagedDirectAttempt, code string) (bool, error) {
 	terminal := false
 	err := s.runImmediate(ctx, func() error {
+		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, attempt.Fence.AgentID)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
 		now := s.clock.Now()
 		nowText := formatTimestamp(now)
 		validTarget, err := managedDirectTargetActiveTx(ctx, s.db, attempt, nowText)
@@ -1814,6 +1906,13 @@ func (s *Store) expireManagedDirectForMessageTx(ctx context.Context, messageID, 
 	}
 	if err := rows.Close(); err != nil {
 		return err
+	}
+	frozen, err := managedTerminationSettlementFrozenForMessageTx(ctx, s.db, messageID)
+	if err != nil {
+		return err
+	}
+	if frozen {
+		return nil
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='failed',released_at=?,next_attempt_at=NULL,failure_code='expired',failure_detail=NULL WHERE message_id=? AND state IN ('direct_pending','direct_prompted','released')`, now, messageID); err != nil {
 		return err

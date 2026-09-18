@@ -28,7 +28,20 @@ func (s *Store) ManagedTerminationActions(ctx context.Context) ([]*ManagedLifecy
 		}
 		actions = append(actions, action)
 	}
-	return actions, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The store owns one SQLite connection. Close the action rows before the
+	// archive-field lookups so the nested queries cannot wait on that same connection.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, action := range actions {
+		if err := loadManagedLifecycleArchiveFieldsTx(ctx, s.db, action); err != nil {
+			return nil, err
+		}
+	}
+	return actions, nil
 }
 
 // ManagedSessionArtifacts returns every artifact still owned by the managed
@@ -190,6 +203,9 @@ func (s *Store) LatestRetryableManagedTermination(ctx context.Context, agentID s
 	}
 	action, err := scanManagedLifecycleAction(s.db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE agent_id=? AND kind='terminate' AND state='failed' AND retryable=1 ORDER BY completed_at DESC,action_id DESC LIMIT 1`, agentID))
 	if err != nil {
+		return nil, err
+	}
+	if err := loadManagedLifecycleArchiveFieldsTx(ctx, s.db, action); err != nil {
 		return nil, err
 	}
 	return action, nil
