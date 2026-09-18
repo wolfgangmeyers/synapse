@@ -77,6 +77,8 @@ Maintain exactly one scheduled recurring general sweep reminder at that machine 
 
 When a reminder asks the supervisor to take action and the work is viable to delegate, run that action in a background subagent by default. This is the preferred path for reminder-driven checks, audits, CI/status sweeps, and other bounded work because it preserves supervisor responsiveness and allows independent checks to run in parallel. Keep the action inline only when it is truly trivial, must use supervisor-only local state, or delegation would create more overhead than the work itself.
 
+**Actionable PR feedback cannot rest as a known issue.** During every supervisor sweep, any unresolved, actionable feedback on the current PR head must immediately be assigned to an owner with concrete completion criteria; recorded as an evidence-backed external blocker with its owner and exact verification point; or explicitly rejected as out of scope with the acceptance criterion that excludes it. “Known issue” is not a resting state.
+
 ## mecha-developer checkout state
 
 In the primary mecha-developer checkout, dirty tracked changes are not acceptable as resting state. If the work is done, commit it and push it. If it is not done, tie the dirty files to an active task with an owner and next action. Use a worktree for larger or riskier mecha-developer changes; dirty state is expected there only while that task is active.
