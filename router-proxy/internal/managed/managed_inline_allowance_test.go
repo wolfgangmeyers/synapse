@@ -255,7 +255,7 @@ func TestNativeInlineAllowanceControlAdmitsOnlyCurrentFencedRequestAndDeliversRe
 	require.True(t, projected)
 	require.EqualValues(t, 1, credit)
 
-	require.NoError(t, writeRPC(stdout, map[string]any{"id": prompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": prompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	resultDetails := make(map[string]any, len(payload)-1)
 	for key, value := range payload {
 		if key != "content" {
@@ -289,7 +289,8 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 	events, err := binding.rpc.(DirectMailboxRPC).PromptManagedMailbox(ctx, attempt)
 	require.NoError(t, err)
 	mailboxPrompt := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdout, map[string]any{"id": mailboxPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.Equal(t, "prompt", mailboxPrompt["type"])
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": mailboxPrompt["id"], "type": "response", "command": mailboxPrompt["type"], "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdout, map[string]any{"type": "message_end", "message": map[string]any{"id": "mailbox-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch}}}))
 	select {
 	case event := <-events:
@@ -327,7 +328,8 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 	// The root callback owns this earlier policy receipt. Deliver it before waiting
 	// for the later builtin lifecycle callback, because the shared semantic FIFO
 	// cannot run that callback until the root callback has finished.
-	require.NoError(t, writeRPC(stdout, map[string]any{"id": policyPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.Equal(t, "prompt", policyPrompt["type"])
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": policyPrompt["id"], "type": "response", "command": policyPrompt["type"], "success": true, "data": map[string]any{}}))
 	policyReceipt := map[string]any{
 		"type": "message_end",
 		"message": map[string]any{
@@ -343,7 +345,8 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 	}
 	require.NoError(t, writeRPC(stdout, policyReceipt))
 	appendPrompt := requireRequest(t, requests)
-	require.NoError(t, writeRPC(stdout, map[string]any{"id": appendPrompt["id"], "type": "response", "data": map[string]any{}}))
+	require.Equal(t, "prompt", appendPrompt["type"])
+	require.NoError(t, writeRPC(stdout, map[string]any{"id": appendPrompt["id"], "type": "response", "command": appendPrompt["type"], "success": true, "data": map[string]any{}}))
 	command, commandOK := appendPrompt["message"].(string)
 	encoded := strings.TrimPrefix(command, "/mecha-control-result-v1 ")
 	payloadBytes, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
@@ -363,7 +366,7 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 
 	toolStartWritten := make(chan error, 1)
 	go func() {
-		toolStartWritten <- writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "bash-call", "toolName": "bash"})
+		toolStartWritten <- writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "bash-call", "toolName": "bash", "args": map[string]any{}})
 	}()
 	select {
 	case <-blocked:
@@ -373,15 +376,15 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 
 	framesDelivered := make(chan error, 1)
 	go func() {
-		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "read-call", "toolName": "read"}); err != nil {
+		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_start", "toolCallId": "read-call", "toolName": "read", "args": map[string]any{}}); err != nil {
 			framesDelivered <- err
 			return
 		}
-		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_end", "toolCallId": "read-call", "toolName": "read", "isError": false}); err != nil {
+		if err := writeRPC(stdout, map[string]any{"type": "tool_execution_end", "toolCallId": "read-call", "toolName": "read", "result": map[string]any{}, "isError": false}); err != nil {
 			framesDelivered <- err
 			return
 		}
-		framesDelivered <- writeRPC(stdout, map[string]any{"type": "tool_execution_end", "toolCallId": "bash-call", "toolName": "bash", "isError": false})
+		framesDelivered <- writeRPC(stdout, map[string]any{"type": "tool_execution_end", "toolCallId": "bash-call", "toolName": "bash", "result": map[string]any{}, "isError": false})
 	}()
 
 	select {

@@ -308,7 +308,7 @@ func TestManagedParentActivityDropsDecodedPriorTurnAfterAdmission(t *testing.T) 
 		<-callbackRelease
 	})
 	manager.installParentActivityReceiver(binding)
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_start"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_start", "reason": "manual"}))
 	select {
 	case <-callbackEntered:
 	case <-time.After(time.Second):
