@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -143,12 +144,17 @@ func (h *uiLiveHub) snapshot(ctx context.Context) (*uiLiveProjection, error) {
 }
 
 func uiLiveProjectionFromStored(stored store.ManagedAgentsSnapshot, childrenVersion int64, childrenGeneratedAt string, children []map[string]any) *uiLiveProjection {
-	agents := make(map[string]map[string]any, len(stored.Agents))
+	agents := make(map[string]map[string]any, len(stored.Agents)+len(stored.Archives))
 	for _, record := range stored.Agents {
 		public := managed.PublicAgent(record)
-		id, _ := public["agent_id"].(string)
-		if id != "" {
-			agents[id] = public
+		if key := managed.ManagedRecordKey(public); key != "" {
+			agents[key] = public
+		}
+	}
+	for _, archive := range stored.Archives {
+		public := managed.PublicArchive(archive)
+		if key := managed.ManagedRecordKey(public); key != "" {
+			agents[key] = public
 		}
 	}
 	generatedAt := stored.GeneratedAt.UTC().Format(time.RFC3339Nano)
@@ -169,12 +175,35 @@ func (snapshot *uiLiveProjection) frame() map[string]any {
 	for id := range snapshot.agents {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	sort.Slice(ids, func(left, right int) bool {
+		return uiLiveRecordLess(ids[left], ids[right], snapshot.agents[ids[left]], snapshot.agents[ids[right]])
+	})
 	agents := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
 		agents = append(agents, snapshot.agents[id])
 	}
 	return map[string]any{"type": "managed_agents_snapshot", "protocol": uiLiveProtocol, "projection_version": snapshot.version, "generated_at": snapshot.generatedAt, "agents": agents}
+}
+
+func uiLiveRecordLess(leftKey, rightKey string, left, right map[string]any) bool {
+	leftArchive := left["record_kind"] == "archived"
+	rightArchive := right["record_kind"] == "archived"
+	if leftArchive != rightArchive {
+		return !leftArchive
+	}
+	if leftArchive {
+		leftCompleted, _ := left["completed_at"].(string)
+		rightCompleted, _ := right["completed_at"].(string)
+		if leftCompleted != rightCompleted {
+			return leftCompleted > rightCompleted
+		}
+		leftArchiveKey, _ := left["archive_key"].(string)
+		rightArchiveKey, _ := right["archive_key"].(string)
+		if leftArchiveKey != rightArchiveKey {
+			return leftArchiveKey > rightArchiveKey
+		}
+	}
+	return leftKey < rightKey
 }
 
 // publish advances all observers from one committed store projection. If a
@@ -272,8 +301,11 @@ func managedLifecycleHistoryFacts(prior, current *uiLiveProjection) []managedLif
 		return nil
 	}
 	facts := make([]managedLifecycleHistoryFact, 0)
-	for id, next := range current.agents {
-		previous, existed := prior.agents[id]
+	for recordKey, next := range current.agents {
+		if next["record_kind"] == "archived" {
+			continue
+		}
+		previous, existed := prior.agents[recordKey]
 		// Lifecycle and ordinary activity changes are progress indicators, not
 		// Complete-history facts. The timeline is reserved for work a person can
 		// act on: tool results, mail, child events, compaction, model changes,
@@ -281,15 +313,22 @@ func managedLifecycleHistoryFacts(prior, current *uiLiveProjection) []managedLif
 		if !existed {
 			continue
 		}
+		agentID, _ := next["agent_id"].(string)
+		if agentID == "" {
+			agentID = strings.TrimPrefix(recordKey, "live:")
+		}
+		if agentID == "" {
+			continue
+		}
 		previousModel, previousModelOK := previous["model"].(map[string]any)
 		nextModel, nextModelOK := next["model"].(map[string]any)
 		if previousModelOK && nextModelOK && !reflect.DeepEqual(previousModel, nextModel) {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Model changed", eventKey: fmt.Sprintf("model:%s:%d", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "model", Outcome: "success", Summary: managedModelSummary(nextModel)}})
+			facts = append(facts, managedLifecycleHistoryFact{agentID: agentID, message: "Model changed", eventKey: fmt.Sprintf("model:%s:%d", agentID, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "model", Outcome: "success", Summary: managedModelSummary(nextModel)}})
 		}
 		previousError, _ := previous["last_error"].(map[string]any)
 		nextError, nextErrorOK := next["last_error"].(map[string]any)
 		if nextErrorOK && !reflect.DeepEqual(previousError, nextError) {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Agent failed", eventKey: fmt.Sprintf("agent-error:%s:%d", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "error", Summary: "The agent reported an operational failure", Error: &store.ManagedHistoryError{Code: "AGENT_FAILURE", Retryable: false, DetailAvailable: false}}})
+			facts = append(facts, managedLifecycleHistoryFact{agentID: agentID, message: "Agent failed", eventKey: fmt.Sprintf("agent-error:%s:%d", agentID, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "error", Summary: "The agent reported an operational failure", Error: &store.ManagedHistoryError{Code: "AGENT_FAILURE", Retryable: false, DetailAvailable: false}}})
 		}
 	}
 	// Termination deletes an agent's private Complete history in the same
@@ -319,12 +358,23 @@ func uiLiveTransition(prior, current *uiLiveProjection) map[string]any {
 	// removal. Private-only changes and batched observations use a snapshot so
 	// clients still advance exactly and never guess which record changed.
 	if len(changed) == 1 && len(removed) == 0 {
-		return map[string]any{"type": "managed_agent_delta", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "agent_id": changed[0], "changes": current.agents[changed[0]]}
+		recordKey := uiLiveRecordKey(changed[0], current.agents[changed[0]])
+		agentID, _ := current.agents[changed[0]]["agent_id"].(string)
+		return map[string]any{"type": "managed_agent_delta", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "record_key": recordKey, "agent_id": agentID, "changes": current.agents[changed[0]]}
 	}
 	if len(changed) == 0 && len(removed) == 1 {
-		return map[string]any{"type": "managed_agent_removed", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "agent_id": removed[0]}
+		recordKey := uiLiveRecordKey(removed[0], prior.agents[removed[0]])
+		agentID, _ := prior.agents[removed[0]]["agent_id"].(string)
+		return map[string]any{"type": "managed_agent_removed", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "record_key": recordKey, "agent_id": agentID}
 	}
 	return current.frame()
+}
+
+func uiLiveRecordKey(key string, record map[string]any) string {
+	if strings.HasPrefix(key, "live:") || strings.HasPrefix(key, "archive:") {
+		return key
+	}
+	return managed.ManagedRecordKey(record)
 }
 
 func (client *uiLiveClient) send(frame map[string]any) bool {

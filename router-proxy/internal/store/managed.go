@@ -259,6 +259,36 @@ type ManagedAgentSnapshot struct {
 	Agent             *ManagedAgentRecord
 }
 
+// ManagedDeliveryAggregate is the closed, bounded delivery summary retained
+// for a terminated managed agent. Overflow means the corresponding count is a
+// saturated lower bound at the archive cap.
+type ManagedDeliveryAggregate struct {
+	Disposition                  string
+	Total                        int
+	QueuedNeverAttempted         int
+	InFlightOrUnknown            int
+	Completed                    int
+	ReleasedOrFailed             int
+	TotalOverflow                bool
+	QueuedNeverAttemptedOverflow bool
+	InFlightOrUnknownOverflow    bool
+	CompletedOverflow            bool
+	ReleasedOrFailedOverflow     bool
+}
+
+// ManagedAgentArchive is the closed archive projection. It intentionally has
+// no operational fields or references back to live managed-agent state.
+type ManagedAgentArchive struct {
+	RecordKind      string
+	LifecycleState  string
+	AgentID         string
+	Name            string
+	ArchiveKey      string
+	TerminalOutcome string
+	CompletedAt     string
+	Delivery        ManagedDeliveryAggregate
+}
+
 // ManagedAgentsSnapshot is an atomic whole-projection read for UI-live and
 // direct list clients. It intentionally exposes only durable records; callers
 // turn them into the redacted public projection at the transport boundary.
@@ -266,6 +296,9 @@ type ManagedAgentsSnapshot struct {
 	GeneratedAt       time.Time
 	ProjectionVersion int64
 	Agents            []*ManagedAgentRecord
+	// Archives are retained closed records, ordered newest first. Reads apply
+	// the archive age predicate and never fall back to live rows.
+	Archives []*ManagedAgentArchive
 	// ReadinessSources are read in the same transaction as Agents so child
 	// telemetry can never mix a newer runtime snapshot with an older agent row.
 	ReadinessSources map[string]*ManagedReadinessSource
@@ -369,6 +402,16 @@ type ManagedLifecycleAction struct {
 	RecoveryClaimedAt              string
 	CreatedAt                      string
 	UpdatedAt                      string
+	// Archive fields are populated only for termination actions after migration
+	// 048. They remain private store state until the closed archive is published.
+	ArchiveKey                        string
+	DeliveryCutoffEnqueueSequence     int64
+	DeliveryAggregate                 ManagedDeliveryAggregate
+	DeliveryCheckpointEnqueueSequence int64
+	DeliveryCheckpointMessageID       string
+	DeliveryAggregateComplete         bool
+	DeliveryFrozenAt                  string
+	ArchiveOutcome                    string
 }
 
 type ManagedLifecycleReservation struct {
@@ -671,6 +714,19 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		archiveFields, archiveErr := managedLifecycleArchiveFieldsAvailableTx(ctx, s.db)
+		if archiveErr != nil {
+			return archiveErr
+		}
+		if archiveFields {
+			blocked, blockErr := managedTerminationLaunchBlockedTx(ctx, s.db, agent.AgentID, agent.Name)
+			if blockErr != nil {
+				return blockErr
+			}
+			if blocked {
+				return &ManagedLifecycleConflictError{AgentID: agent.AgentID}
+			}
+		}
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE slot_held = 1`).Scan(&count); err != nil {
 			return err
@@ -910,7 +966,14 @@ func scanManagedLifecycleAction(scanner interface{ Scan(...any) error }) (*Manag
 }
 
 func managedLifecycleActionForTx(ctx context.Context, db *sql.DB, actionID string) (*ManagedLifecycleAction, error) {
-	return scanManagedLifecycleAction(db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE action_id=?`, actionID))
+	action, err := scanManagedLifecycleAction(db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE action_id=?`, actionID))
+	if err != nil {
+		return nil, err
+	}
+	if err := loadManagedLifecycleArchiveFieldsTx(ctx, db, action); err != nil {
+		return nil, err
+	}
+	return action, nil
 }
 
 // ReserveManagedLifecycle resolves exact replay before inspecting an agent or
@@ -959,12 +1022,37 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 			return err
 		}
 		state, stage := "admitted", "admission"
+		archiveFields, err := managedLifecycleArchiveFieldsAvailableTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		var archiveKey string
+		var predecessor *ManagedLifecycleAction
 		if reservation.Kind == "terminate" {
 			state, stage = "terminating", "abort"
+			if archiveFields {
+				if reservation.RetryOf != "" {
+					archiveKey = ""
+				} else {
+					archiveKey, err = s.ids.Next()
+					if err != nil {
+						return err
+					}
+					if !managedCanonicalUUIDRE.MatchString(archiveKey) {
+						return errors.New("managed archive key is invalid")
+					}
+				}
+			}
 			if reservation.RetryOf != "" {
-				predecessor, predecessorErr := managedLifecycleActionForTx(ctx, s.db, reservation.RetryOf)
-				if predecessorErr != nil {
-					return predecessorErr
+				predecessor, err = managedLifecycleActionForTx(ctx, s.db, reservation.RetryOf)
+				if err != nil {
+					return err
+				}
+				if archiveFields {
+					archiveKey = predecessor.ArchiveKey
+					if !managedCanonicalUUIDRE.MatchString(archiveKey) {
+						return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
+					}
 				}
 				// A retry resumes the exact safe cleanup boundary. It must not send a
 				// second Abort after a file/direct-mail/durable-write failure.
@@ -1067,6 +1155,15 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 		if err != nil {
 			return err
 		}
+		if reservation.Kind == "terminate" && archiveFields {
+			if predecessor == nil {
+				if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET archive_key=? WHERE action_id=? AND kind='terminate'`, archiveKey, input.ActionID); err != nil {
+					return err
+				}
+			} else if err := copyManagedTerminationProgressTx(ctx, s.db, predecessor.ActionID, input.ActionID); err != nil {
+				return err
+			}
+		}
 		if reservation.Kind == "terminate" {
 			// This transaction is the cancellation fence. Root-control workers
 			// inspect their durable rows before doing any external append, so they
@@ -1091,6 +1188,11 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 							return linkErr
 						}
 					}
+				}
+			}
+			if archiveFields && predecessor == nil {
+				if err := captureManagedTerminationAdmissionTx(ctx, s.db, input.ActionID, reservation.AgentID, agent.Name, now); err != nil {
+					return err
 				}
 			}
 		} else {
@@ -1140,6 +1242,35 @@ func (s *Store) ManagedLifecycleAction(ctx context.Context, actionID string) (*M
 // unlinked every owned session artifact; ordinary mailbox history is purposely
 // not touched by this managed-runtime cleanup.
 func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string) error {
+	archiveFields, err := s.managedArchiveFieldsEnabled(ctx)
+	if err != nil {
+		return err
+	}
+	if archiveFields {
+		// A replay after the final transaction sees the terminal action and the
+		// detached archive, not the deleted live agent. Verify the opaque key and
+		// return success without trying to rebuild operational state.
+		existing, actionErr := s.ManagedLifecycleAction(ctx, actionID)
+		if actionErr != nil {
+			return actionErr
+		}
+		if existing.State == "succeeded" && existing.Stage == "complete" {
+			if existing.ArchiveKey == "" {
+				return &ManagedRestartStaleError{AgentID: existing.AgentID}
+			}
+			_, archiveErr := s.ManagedAgentArchive(ctx, existing.ArchiveKey)
+			return archiveErr
+		}
+		for {
+			complete, aggregateErr := s.AdvanceManagedTerminationDeliveryAggregate(ctx, actionID, managedArchiveAggregateBatchSize)
+			if aggregateErr != nil {
+				return aggregateErr
+			}
+			if complete {
+				break
+			}
+		}
+	}
 	return s.runImmediate(ctx, func() error {
 		action, err := managedLifecycleActionForTx(ctx, s.db, actionID)
 		if err != nil {
@@ -1158,8 +1289,35 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		if pending != 0 {
 			return errors.New("managed termination has session artifacts that were not safely unlinked")
 		}
+		var archiveName, archiveOutcome string
+		if archiveFields {
+			if action.ArchiveKey == "" || !action.DeliveryAggregateComplete {
+				return errors.New("managed termination delivery aggregate is incomplete")
+			}
+			if err := s.db.QueryRowContext(ctx, `SELECT name FROM managed_agents WHERE agent_id=? AND desired_state='terminated'`, action.AgentID).Scan(&archiveName); err != nil {
+				return err
+			}
+			archiveOutcome, err = managedTerminationCleanupOutcomeTx(ctx, s.db, actionID)
+			if err != nil {
+				return err
+			}
+		}
 		if err := s.completeManagedTerminationFault("before_lifecycle_cleanup"); err != nil {
 			return err
+		}
+		terminatedAt := formatTimestamp(s.clock.Now())
+		if archiveFields {
+			archive := &ManagedAgentArchive{
+				RecordKind: "archived", LifecycleState: "archived", AgentID: action.AgentID, Name: archiveName,
+				ArchiveKey: action.ArchiveKey, TerminalOutcome: archiveOutcome, CompletedAt: terminatedAt,
+				Delivery: action.DeliveryAggregate,
+			}
+			if err := insertManagedArchiveTx(ctx, s.db, archive); err != nil {
+				return err
+			}
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET archive_outcome=? WHERE action_id=? AND state='cleanup'`, archiveOutcome, actionID); err != nil {
+				return err
+			}
 		}
 		// Batch references point across agent actions, so clear them before
 		// deleting their child operations. The batch parent response survives.
@@ -1184,8 +1342,19 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_parent_compaction_state WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
-		terminatedAt := formatTimestamp(s.clock.Now())
-		if err := s.closeManagedHistoryBoundaryTx(ctx, action.AgentID, terminatedAt); err != nil {
+		// A terminated managed identity must not leave conversation or activity
+		// history for a same-name relaunch to discover. Delete only rows owned by
+		// this exact agent ID; other participants' independent history remains.
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM conversation_messages WHERE sender=? OR recipient=?`, action.AgentID, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_history_boundaries WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_history_incarnations WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM goal_control_revision_history WHERE agent_id=?`, action.AgentID); err != nil {
@@ -1205,6 +1374,11 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_producers WHERE parent_agent_id=?`, action.AgentID); err != nil {
 			return err
+		}
+		if archiveFields {
+			if err := deleteManagedTerminationRawTx(ctx, s.db, s.reminderIncarnations, action, archiveName); err != nil {
+				return err
+			}
 		}
 		if err := s.completeManagedTerminationFault("before_operation_cleanup"); err != nil {
 			return err
@@ -1243,6 +1417,11 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='TERMINATED',terminal_message='managed agent terminated' WHERE operation_id=? AND state='pending'`, terminatedAt, formatTimestamp(s.clock.Now().Add(24*time.Hour)), actionID); err != nil {
 			return err
+		}
+		if archiveFields {
+			if _, err := pruneManagedArchivesTx(ctx, s.db, s.clock.Now().UTC()); err != nil {
+				return err
+			}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -2891,6 +3070,18 @@ func managedChildHistoryDuration(value any) (time.Duration, bool) {
 	return time.Duration(milliseconds) * time.Millisecond, true
 }
 
+func managedChildHistoryTerminal(kind, lifecycleState, recoveryState string) bool {
+	if kind == "recovery" {
+		return recoveryState == "interrupted_unknown"
+	}
+	switch lifecycleState {
+	case "completed", "steered", "aborted", "stopped", "error":
+		return true
+	default:
+		return false
+	}
+}
+
 func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string, changedFields []string, display managedChildHistoryDisplay) (*ManagedHistoryPresentation, string) {
 	for _, field := range changedFields {
 		if field == "compaction:compacting" {
@@ -2935,6 +3126,7 @@ func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fenc
 	}
 	transitionKey := managedChildHistoryKey(fence, parentEntryID, taskID, runID, sequence, kind, recoveryState, recoveryCause, changedFields)
 	presentation, message := managedChildHistoryPresentation(kind, lifecycleState, recoveryState, changedFields, display)
+	occurredAt := formatTimestamp(s.clock.Now())
 	var existingSequence int64
 	var existingAt, existingLevel, existingMessage string
 	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message FROM managed_child_transitions t JOIN managed_complete_history h ON h.sequence=t.complete_sequence WHERE t.event_key=?`, transitionKey).Scan(&existingSequence, &existingAt, &existingLevel, &existingMessage)
@@ -2968,7 +3160,6 @@ func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fenc
 	if presentationErr != nil {
 		return ManagedHistoryEntry{}, presentationErr
 	}
-	occurredAt := formatTimestamp(s.clock.Now())
 	historyKey := transitionKey
 	if !hasManagedChildStaleField(changedFields) {
 		historyKey = managedChildInvocationHistoryKey(fence, parentEntryID, taskID, runID)
@@ -2986,6 +3177,13 @@ func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fenc
 		}
 	} else if historyErr != nil {
 		return ManagedHistoryEntry{}, historyErr
+	} else if managedChildHistoryTerminal(kind, lifecycleState, recoveryState) {
+		// A child row is live until this terminal transition. Give the durable
+		// history fact its completion time, rather than retaining the time at
+		// which the child started, so it appends as the newest history item.
+		if _, historyErr = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,occurred_at=?,presentation_json=? WHERE sequence=?`, "info", message, occurredAt, presentationJSON, completeSequence); historyErr != nil {
+			return ManagedHistoryEntry{}, historyErr
+		}
 	} else if _, historyErr = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,presentation_json=? WHERE sequence=?`, "info", message, presentationJSON, completeSequence); historyErr != nil {
 		return ManagedHistoryEntry{}, historyErr
 	}
@@ -4269,10 +4467,14 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		FROM managed_child_recoveries ORDER BY updated_at ASC, rowid ASC`)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table: managed_child_recoveries") {
+			archives, archiveErr := managedAgentArchivesForTx(ctx, s.db, s.clock.Now().UTC())
+			if archiveErr != nil {
+				return rollback(archiveErr)
+			}
 			if _, commitErr := s.db.ExecContext(ctx, "COMMIT"); commitErr != nil {
 				return ManagedAgentsSnapshot{}, commitErr
 			}
-			return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, ReadinessSources: sources}, nil
+			return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, Archives: archives, ReadinessSources: sources}, nil
 		}
 		return rollback(err)
 	}
@@ -4292,10 +4494,14 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if err := recoveryRows.Close(); err != nil {
 		return rollback(err)
 	}
+	archives, err := managedAgentArchivesForTx(ctx, s.db, s.clock.Now().UTC())
+	if err != nil {
+		return rollback(err)
+	}
 	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {
 		return ManagedAgentsSnapshot{}, err
 	}
-	return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, ReadinessSources: sources}, nil
+	return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, Archives: archives, ReadinessSources: sources}, nil
 }
 
 func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (ManagedAgentSnapshot, error) {

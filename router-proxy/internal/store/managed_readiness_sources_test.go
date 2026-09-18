@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,6 +121,13 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	require.Equal(t, "Child compacting", complete.Entries[0].Message)
 	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "compacting"}, complete.Entries[0].Presentation)
 
+	// A terminal child leaves the active area and becomes a new history fact, so
+	// its durable timestamp is the completion time rather than its start time.
+	stableTime, err := time.Parse("2006-01-02T15:04:05.000Z", stableChildAt)
+	require.NoError(t, err)
+	completionTime := stableTime.Add(time.Second)
+	durable.clock = deterministic.NewFixedClock(completionTime)
+
 	// The RPC reader intentionally keeps live JSON integers as json.Number.
 	// Terminal history must retain that duration instead of only working after a
 	// stored snapshot has been decoded back into float64.
@@ -132,7 +141,7 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	complete, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
 	require.Equal(t, stableChildID, complete.Entries[0].ID)
-	require.Equal(t, stableChildAt, complete.Entries[0].At)
+	require.Equal(t, formatTimestamp(completionTime), complete.Entries[0].At)
 	require.Equal(t, "Subagent wrapped up", complete.Entries[0].Message)
 	require.Equal(t, &ManagedHistoryPresentation{Kind: "child", ChildState: "steered", Outcome: "success", ChildLabel: "Child", Summary: "Wrapped up in 20 seconds"}, complete.Entries[0].Presentation)
 	published, err := durable.ManagedChildHistoryEntryForDelta(ctx, fence, terminal)

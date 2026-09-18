@@ -118,10 +118,16 @@ func TestContractManifestManagedLifecycleRoutes(t *testing.T) {
 			require.Equal(t, []string{"POST"}, route.Methods)
 			require.True(t, route.Managed)
 		}
+		if route.Path == "/v1/managed-agents/archive/{archive_key}" {
+			found[route.Path] = true
+			require.Equal(t, []string{"GET", "POST", "PUT", "DELETE"}, route.Methods)
+			require.True(t, route.Managed)
+		}
 	}
 	require.True(t, found["/v1/managed-agents/restart-all"])
 	require.True(t, found["/v1/managed-agents/{agent_id}/restart"])
 	require.True(t, found["/v1/managed-agents/{id}/reset"])
+	require.True(t, found["/v1/managed-agents/archive/{archive_key}"])
 }
 
 func TestManifestFixtureReferenceFailureIsReported(t *testing.T) {

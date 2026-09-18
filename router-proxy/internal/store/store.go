@@ -241,6 +241,9 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := store.backfillClosedManagedHistoryIncarnations(ctx); err != nil {
 		return closeOnError(err)
 	}
+	if err := store.pruneManagedArchives(ctx); err != nil {
+		return closeOnError(err)
+	}
 	if err := chmodStateFiles(databasePath); err != nil {
 		return closeOnError(err)
 	}
@@ -1014,6 +1017,15 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 		if err = s.pruneManagedParentWorkTx(ctx, nowText); err != nil {
 			return err
 		}
+		archiveRemoved, archiveErr := pruneManagedArchivesTx(ctx, s.db, now)
+		if archiveErr != nil {
+			return archiveErr
+		}
+		if archiveRemoved > 0 {
+			if _, archiveErr = s.bumpManagedProjectionVersion(ctx); archiveErr != nil {
+				return archiveErr
+			}
+		}
 		// Failed managed rows are durable audit/name reservations. They are
 		// intentionally not part of generic retention; a later terminate or
 		// restart must not make a failed name silently reusable.
@@ -1067,6 +1079,13 @@ func (s *Store) pruneExpiredQueuedMessages(ctx context.Context, now string) (int
 		return 0, err
 	}
 	for _, id := range ids {
+		frozen, err := managedTerminationSettlementFrozenForMessageTx(ctx, s.db, id)
+		if err != nil {
+			return 0, err
+		}
+		if frozen {
+			continue
+		}
 		if err := s.expireManagedDirectForMessageTx(ctx, id, now); err != nil {
 			return 0, err
 		}

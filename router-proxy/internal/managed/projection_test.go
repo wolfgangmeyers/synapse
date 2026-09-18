@@ -28,6 +28,38 @@ func TestPublicProjectionOmitsPrivateProcessAndSessionFields(t *testing.T) {
 	require.Equal(t, "router-managed", projection["agent"].(map[string]any)["source"])
 }
 
+func TestPublicArchiveProjectionUsesOnlyTheClosedShape(t *testing.T) {
+	archive := &store.ManagedAgentArchive{
+		RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha",
+		ArchiveKey: "123e4567-e89b-42d3-a456-426614174081", TerminalOutcome: "cleanup_failed",
+		CompletedAt: "2026-09-01T12:00:00.000Z", Delivery: store.ManagedDeliveryAggregate{
+			Disposition: "unknown", Total: 2, InFlightOrUnknown: 1, ReleasedOrFailed: 1,
+			TotalOverflow: true, InFlightOrUnknownOverflow: true,
+		},
+	}
+	projection := PublicArchive(archive)
+	require.Equal(t, map[string]any{
+		"record_kind": "archived", "lifecycle_state": "archived", "agent_id": "alpha", "name": "alpha",
+		"archive_key": archive.ArchiveKey, "terminal_outcome": "cleanup_failed", "completed_at": archive.CompletedAt,
+		"delivery": map[string]any{
+			"disposition": "unknown", "total": 2, "queued_never_attempted": 0, "in_flight_or_unknown": 1,
+			"completed": 0, "released_or_failed": 1,
+			"overflow": map[string]any{"total": true, "queued_never_attempted": false, "in_flight_or_unknown": true, "completed": false, "released_or_failed": false},
+		},
+	}, projection)
+}
+
+func TestProjectionListAppendsArchivesAfterLiveRecords(t *testing.T) {
+	live := &store.ManagedAgentRecord{AgentID: "alpha", Name: "alpha", Cwd: "/work", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	archive := &store.ManagedAgentArchive{RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha", ArchiveKey: "123e4567-e89b-42d3-a456-426614174081", TerminalOutcome: "terminated", CompletedAt: "2026-09-01T12:00:00.000Z"}
+	result := ProjectionListEnvelope(store.ManagedAgentsSnapshot{GeneratedAt: time.Unix(1, 0), ProjectionVersion: 8, Agents: []*store.ManagedAgentRecord{live}, Archives: []*store.ManagedAgentArchive{archive}})
+	agents := result["agents"].([]map[string]any)
+	require.Len(t, agents, 2)
+	require.Equal(t, "alpha", agents[0]["agent_id"])
+	require.Equal(t, "archive:123e4567-e89b-42d3-a456-426614174081", ManagedRecordKey(agents[1]))
+	require.Equal(t, "archived", agents[1]["record_kind"])
+}
+
 func TestPublicProjectionKeepsAUsefulRedactedDurableCause(t *testing.T) {
 	agent := &store.ManagedAgentRecord{AgentID: "alpha", Cwd: "/work", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "failed", ActivityState: "failed", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64), LastErrorCode: "PROCESS_FAILED", LastErrorMessage: `/private/router/raw.log request failed token super-secret-value Bearer another-secret https://account:fourth-secret@host.invalid/path?access_token=third-secret /private/router/session.json cwd="/Users/wolfgang/project/output.log" cwd=&quot;/Users/wolfgang/project/output.log&quot; cwd="/Users/wolfgang/project/output log" file:///Users/wolfgang/project/output.log cwd="C:\Users\wolfgang\project\output log" permission denied`, LastErrorAt: "2026-01-01T00:00:00Z", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}
 	projection := PublicAgent(agent)
