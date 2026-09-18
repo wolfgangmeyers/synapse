@@ -7,6 +7,16 @@ import { Sidebar } from "../../src/components/Sidebar";
 afterEach(cleanup);
 
 describe("Sidebar", () => {
+  it("shows only the accessible brand logo in the branding area", () => {
+    const { container } = render(<Sidebar routerLabel="local" connection="connected" agents={[]} />);
+    const brand = container.querySelector(".brand");
+    expect(brand).toContainElement(screen.getByRole("img", { name: "Mecha Developer" }));
+    expect(screen.getByRole("img", { name: "Mecha Developer" })).toHaveAttribute("src", "/logo.png");
+    expect(brand?.children).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Refresh agents" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Your agent network")).not.toBeInTheDocument();
+  });
+
   it("filters and selects agents", () => {
     const onSelect = vi.fn();
     render(<Sidebar routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);

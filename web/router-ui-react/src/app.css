@@ -71,13 +71,13 @@ input:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3p
   display: flex;
   align-items: center;
 }
-.brand { justify-content: space-between; gap: 16px; }
+.brand { display: block; width: 100%; }
+.brand-logo { display: block; width: 100%; height: auto; }
 h1, h2, h3, p { margin: 0; }
 h1 { font-size: 30px; line-height: 1.1; }
 h2 { font-size: 20px; }
 p, small, label { color: var(--muted); }
 p:empty { display: none; }
-.brand button, #refresh { width: 48px; min-width: 48px; padding: 0; font-size: 22px; }
 .status-card {
   gap: 12px;
   margin: 22px 0;
