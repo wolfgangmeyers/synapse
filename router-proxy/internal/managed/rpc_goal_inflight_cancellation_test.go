@@ -114,7 +114,7 @@ func TestRPCClientInFlightGoalEvaluationCancellationRejectsLateResult(t *testing
 			<-started
 			request := requireRequest(t, requests)
 			require.Equal(t, "prompt", request["type"])
-			require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "success": true}))
+			require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 			require.NoError(t, <-startResult)
 
 			waitCtx, cancel := test.waitCtx()

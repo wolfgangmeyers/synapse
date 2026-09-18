@@ -274,7 +274,7 @@ func TestResetWaitsForSecondAdmittedPromptSettlementBeforeSourceDiscoveryOrStop(
 		require.NoError(t, err, "turn A admission must reach the native RPC")
 	case turnA := <-requests:
 		require.NotNil(t, turnA)
-		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": turnA["id"], "type": "response", "success": true}))
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": turnA["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 		require.NoError(t, <-turnAResult)
 	}
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
@@ -288,7 +288,7 @@ func TestResetWaitsForSecondAdmittedPromptSettlementBeforeSourceDiscoveryOrStop(
 		require.NoError(t, err, "a settled prior prompt must not reject a fresh admission")
 	case turnB := <-requests:
 		require.NotNil(t, turnB)
-		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": turnB["id"], "type": "response", "success": true}))
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": turnB["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 		require.NoError(t, <-turnBResult)
 	}
 

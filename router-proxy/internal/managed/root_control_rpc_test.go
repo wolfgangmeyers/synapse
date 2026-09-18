@@ -24,7 +24,7 @@ func TestRootControlRegistryIsClosedAndRootEventRejectsLegacyControlEnvelopes(t 
 	require.Len(t, registry.byOperation, len(managedManifestOperations))
 	tool := manifest.Tools[0]
 	requestID := "123e4567-e89b-42d3-a456-426614174001"
-	valid := map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "call-1", "capability_id": tool.CapabilityID, "tool_name": tool.Name, "definition_id": tool.DefinitionID, "definition_sha256": tool.DefinitionSHA256, "operation_id": tool.OperationID, "manifest_sha256": manifest.CanonicalSHA256, "runtime_generation": "123e4567-e89b-42d3-a456-426614174002", "session_epoch": json.Number("1"), "context_ref": "root", "arguments": map[string]any{}}}}
+	valid := map[string]any{"type": "message_end", "message": map[string]any{"role": "custom", "customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "timestamp": float64(0), "details": map[string]any{"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "call-1", "capability_id": tool.CapabilityID, "tool_name": tool.Name, "definition_id": tool.DefinitionID, "definition_sha256": tool.DefinitionSHA256, "operation_id": tool.OperationID, "manifest_sha256": manifest.CanonicalSHA256, "runtime_generation": "123e4567-e89b-42d3-a456-426614174002", "session_epoch": json.Number("1"), "context_ref": "root", "arguments": map[string]any{}}}}
 	// A valid identity still needs its exact tool schema; the empty argument set
 	// is rejected here for tools that declare required properties.
 	event, candidate := classifyRootControlEvent(valid, 4)
@@ -35,13 +35,15 @@ func TestRootControlRegistryIsClosedAndRootEventRejectsLegacyControlEnvelopes(t 
 	// frame, not a synthetic message_end wrapper. It must admit the same
 	// immutable request for later correlated result delivery.
 	native := valid["message"].(map[string]any)
+	delete(native, "role")
+	delete(native, "timestamp")
 	native["type"] = "custom_message"
 	event, candidate = classifyRootControlEvent(native, 5)
 	require.True(t, candidate)
 	require.NotNil(t, event)
 	require.Equal(t, requestID, event.RequestID)
 	require.Equal(t, tool.OperationID, event.OperationID)
-	legacy := map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{"protocol": "mecha.control/v1", "request_id": requestID, "operation_id": "legacy.goal", "legacy_command": "goal", "raw_arguments": "status", "runtime_generation": "123e4567-e89b-42d3-a456-426614174002", "session_epoch": json.Number("1"), "availability": map[string]any{}}}}
+	legacy := map[string]any{"type": "message_end", "message": map[string]any{"role": "custom", "customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "timestamp": float64(0), "details": map[string]any{"protocol": "mecha.control/v1", "request_id": requestID, "operation_id": "legacy.goal", "legacy_command": "goal", "raw_arguments": "status", "runtime_generation": "123e4567-e89b-42d3-a456-426614174002", "session_epoch": json.Number("1"), "availability": map[string]any{}}}}
 	event, candidate = classifyRootControlEvent(legacy, 5)
 	require.True(t, candidate)
 	require.Nil(t, event)
@@ -99,7 +101,7 @@ func TestRootControlResultArmCapturesReceiptAndUsesOnlyExactEntryLookup(t *testi
 	var envelope map[string]any
 	require.NoError(t, json.Unmarshal(decoded, &envelope))
 	require.Equal(t, "mecha.control/v1", envelope["protocol"])
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": prompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": prompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	<-done
 	require.NoError(t, submitErr)
 	// The persisted explicit-ID result is the receipt; it is independently
@@ -117,7 +119,7 @@ func TestRootControlResultArmCapturesReceiptAndUsesOnlyExactEntryLookup(t *testi
 		lookup := requireRequest(t, requests)
 		require.Equal(t, "get_entry", lookup["type"])
 		require.Equal(t, entryID, lookup["entryId"])
-		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": lookup["id"], "type": "response", "data": map[string]any{"entry": map[string]any{"id": entryID}}}))
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": lookup["id"], "type": "response", "command": "get_entry", "success": true, "data": map[string]any{"entry": map[string]any{"id": entryID}}}))
 		<-lookupDone
 		require.NoError(t, lookupErr)
 		require.Equal(t, entryID, entry["id"])
