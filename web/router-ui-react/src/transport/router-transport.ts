@@ -136,6 +136,9 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const listeners = new Set<TransportListener>(); const controls = createControlRegistry(); const lifecycle = createLifecycleTracker();
   const diagnosticSink = options.onDiagnostic ?? defaultDiagnosticSink;
   let refreshGeneration = 0; let remindersRefreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let refreshInFlight: Promise<void> | undefined;
+  let refreshQueued = false;
+  let queuedRefreshReason: RefreshRepairReason | undefined;
   let goalControlAvailable = false;
   let inlineToolControlAvailable = false;
   let controlTimeoutMs = 30_000;
@@ -144,26 +147,45 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const reportDiagnostic = (diagnostic: RouterDiagnostic): void => {
     try { diagnosticSink(diagnostic); } catch { /* Diagnostics cannot change transport behavior. */ }
   };
-  const refreshAgents = async (repairReason?: RefreshRepairReason): Promise<void> => {
+  const refreshAgents = (repairReason?: RefreshRepairReason): Promise<void> => {
+    if (refreshInFlight !== undefined) {
+      // Activity frames can arrive faster than /v1/agents responds. Keep one
+      // follow-up request for the newest snapshot, but never start concurrent
+      // requests whose generation guards would discard every response.
+      refreshQueued = true;
+      if (repairReason !== undefined) queuedRefreshReason = repairReason;
+      return refreshInFlight;
+    }
     const generation = ++refreshGeneration;
-    try {
-      const result = await http.agents();
-      if (generation !== refreshGeneration) {
-        if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "stale_response" });
-        return;
+    const request = (async (): Promise<void> => {
+      try {
+        const result = await http.agents();
+        if (generation !== refreshGeneration) {
+          if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "stale_response" });
+          return;
+        }
+        const invalidated = controls.invalidateMissingAgents(new Set(result.agents.map((agent) => agent.agent_id)));
+        for (const control of invalidated) {
+          const timer = controlTimers.get(control.controlId);
+          if (timer !== undefined) { clearTimeout(timer); controlTimers.delete(control.controlId); }
+        }
+        if (invalidated.length > 0) emit({ type: "controls-invalidated", reason: "target_not_connected" });
+        emit({ type: "agents", agents: result.agents, ...(result.generated_at === undefined ? {} : { generatedAt: result.generated_at }), ...(result.activity_snapshot_version === undefined ? {} : { activitySnapshotVersion: result.activity_snapshot_version }) });
+        if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: boundedCount(result.agents.length), reason: repairReason });
+      } catch (error: unknown) {
+        if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "request_failed" });
+        throw error;
+      } finally {
+        refreshInFlight = undefined;
+        const shouldRefresh = refreshQueued;
+        const nextReason = queuedRefreshReason;
+        refreshQueued = false;
+        queuedRefreshReason = undefined;
+        if (shouldRefresh && socket.registered) void refreshAgents(nextReason).catch(() => undefined);
       }
-    const invalidated = controls.invalidateMissingAgents(new Set(result.agents.map((agent) => agent.agent_id)));
-    for (const control of invalidated) {
-      const timer = controlTimers.get(control.controlId);
-      if (timer !== undefined) { clearTimeout(timer); controlTimers.delete(control.controlId); }
-    }
-    if (invalidated.length > 0) emit({ type: "controls-invalidated", reason: "target_not_connected" });
-      emit({ type: "agents", agents: result.agents, ...(result.generated_at === undefined ? {} : { generatedAt: result.generated_at }), ...(result.activity_snapshot_version === undefined ? {} : { activitySnapshotVersion: result.activity_snapshot_version }) });
-      if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: boundedCount(result.agents.length), reason: repairReason });
-    } catch (error: unknown) {
-      if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "request_failed" });
-      throw error;
-    }
+    })();
+    refreshInFlight = request;
+    return request;
   };
   const scheduleAgentRefresh = (reason: RefreshRepairReason): void => { void refreshAgents(reason).catch(() => undefined); };
   const removeControl = (controlId: string): PendingControl | undefined => {
@@ -276,7 +298,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     get inlineToolControlAvailable() { return inlineToolControlAvailable; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     connect: socket.connect,
-    close() { clearInterval(refreshTimer); refreshGeneration += 1; goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
+    close() { clearInterval(refreshTimer); refreshGeneration += 1; refreshQueued = false; queuedRefreshReason = undefined; goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
     refreshReminders,
     conversation: (owner, peer) => http.conversations(owner, peer),
