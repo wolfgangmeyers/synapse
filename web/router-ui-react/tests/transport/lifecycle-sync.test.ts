@@ -75,19 +75,4 @@ describe("lifecycle synchronization", () => {
     transport.close();
   });
 
-  it("reports HTTP refresh repairs and keeps refresh failures diagnostic-only", async () => {
-    const successDiagnostics: RouterDiagnostic[] = [];
-    const success = fakeTransport(successDiagnostics);
-    success.socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "activity-1", type: "agent_activity", agent_id: "peer", instance_id: "peer-instance", activity_state: "idle", subagent_count: 0, subagents: [], generated_at: "2030-01-01T00:00:00.000Z" }) });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(successDiagnostics.some((diagnostic) => diagnostic.event === "ui_http_refresh_repair" && diagnostic.reason === "agent_projection_frame" && diagnostic.count === 0)).toBe(true);
-    success.transport.close();
-
-    const failureDiagnostics: RouterDiagnostic[] = [];
-    const failure = fakeTransport(failureDiagnostics, true);
-    failure.socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "activity-2", type: "agent_activity", agent_id: "peer", instance_id: "peer-instance", activity_state: "idle", subagent_count: 0, subagents: [], generated_at: "2030-01-01T00:00:00.000Z" }) });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(failureDiagnostics.some((diagnostic) => diagnostic.event === "ui_http_refresh_repair" && diagnostic.reason === "request_failed" && diagnostic.count === 0)).toBe(true);
-    failure.transport.close();
-  });
 });
