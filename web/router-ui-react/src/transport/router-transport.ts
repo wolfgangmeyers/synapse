@@ -123,6 +123,7 @@ function controlFor(kind: ControlKind, id: string, targetAgentId: string, target
 
 type RefreshRepairReason = "registered" | "message_arrival" | "agent_projection_frame" | "conversation_message";
 const MAX_DIAGNOSTIC_COUNT = 10_000;
+const AGENT_REFRESH_THROTTLE_MS = 1_000;
 function boundedCount(value: number): number { return Number.isSafeInteger(value) && value >= 0 ? Math.min(value, MAX_DIAGNOSTIC_COUNT) : 0; }
 function defaultDiagnosticSink(diagnostic: RouterDiagnostic): void {
   if (typeof console !== "undefined" && typeof console.debug === "function") console.debug("Mecha router UI diagnostic", diagnostic);
@@ -139,6 +140,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   let refreshInFlight: Promise<void> | undefined;
   let refreshQueued = false;
   let queuedRefreshReason: RefreshRepairReason | undefined;
+  let agentRefreshThrottleTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastAgentRefreshStartedAt = 0;
   let goalControlAvailable = false;
   let inlineToolControlAvailable = false;
   let controlTimeoutMs = 30_000;
@@ -156,6 +159,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       if (repairReason !== undefined) queuedRefreshReason = repairReason;
       return refreshInFlight;
     }
+    if (agentRefreshThrottleTimer !== undefined) { clearTimeout(agentRefreshThrottleTimer); agentRefreshThrottleTimer = undefined; refreshQueued = false; queuedRefreshReason = undefined; }
+    lastAgentRefreshStartedAt = Date.now();
     const generation = ++refreshGeneration;
     const request = (async (): Promise<void> => {
       try {
@@ -181,13 +186,33 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
         const nextReason = queuedRefreshReason;
         refreshQueued = false;
         queuedRefreshReason = undefined;
-        if (shouldRefresh && socket.registered) void refreshAgents(nextReason).catch(() => undefined);
+        if (shouldRefresh) {
+          refreshQueued = true;
+          queuedRefreshReason = nextReason;
+          scheduleQueuedRefresh();
+        }
       }
     })();
     refreshInFlight = request;
     return request;
   };
-  const scheduleAgentRefresh = (reason: RefreshRepairReason): void => { void refreshAgents(reason).catch(() => undefined); };
+  const scheduleQueuedRefresh = (): void => {
+    if (!refreshQueued || refreshInFlight !== undefined || !socket.registered || agentRefreshThrottleTimer !== undefined) return;
+    const delay = Math.max(0, AGENT_REFRESH_THROTTLE_MS - (Date.now() - lastAgentRefreshStartedAt));
+    agentRefreshThrottleTimer = setTimeout(() => {
+      agentRefreshThrottleTimer = undefined;
+      if (!refreshQueued || refreshInFlight !== undefined || !socket.registered) return;
+      const nextReason = queuedRefreshReason;
+      refreshQueued = false;
+      queuedRefreshReason = undefined;
+      void refreshAgents(nextReason).catch(() => undefined);
+    }, delay);
+  };
+  const scheduleAgentRefresh = (reason: RefreshRepairReason): void => {
+    refreshQueued = true;
+    queuedRefreshReason = reason;
+    scheduleQueuedRefresh();
+  };
   const removeControl = (controlId: string): PendingControl | undefined => {
     const timer = controlTimers.get(controlId);
     if (timer !== undefined) { clearTimeout(timer); controlTimers.delete(controlId); }
