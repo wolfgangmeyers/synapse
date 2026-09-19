@@ -29,9 +29,10 @@ type Limits struct {
 }
 
 type Config struct {
-	Enabled      bool
-	PiExecutable string
-	ManagedHome  string
+	Enabled                          bool
+	AllowManagedLaunchRecipeMismatch bool
+	PiExecutable                     string
+	ManagedHome                      string
 	// PiAgentDir is the existing ordinary Pi agent directory. Managed RPC runs
 	// with its own HOME and session root, but reads provider credentials directly
 	// from this local Pi directory.
