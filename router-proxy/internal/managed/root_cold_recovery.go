@@ -281,9 +281,13 @@ func (m *Manager) validateColdRecoveryPreflight(ctx context.Context, agent *stor
 		code, message = "RECOVERY_RECIPE_MISSING", "managed launch recipe is unavailable"
 	} else if err := store.ValidateManagedLaunchRecipe(*agent.LaunchRecipe); err != nil {
 		code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe is invalid"
-	} else if expected, err := m.managedLaunchRecipe(*agent); err != nil || store.ValidateManagedLaunchRecipe(expected) != nil || expected.SHA256 != agent.LaunchRecipe.SHA256 {
-		code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe does not match current manager configuration"
-	} else if !validRestartFence(old) || m.manifest.CanonicalSHA256 != old.ManifestHash || manifestRevision(m.manifest) != old.ManifestRevision {
+	} else if !m.config.AllowManagedLaunchRecipeMismatch {
+		expected, err := m.managedLaunchRecipe(*agent)
+		if err != nil || store.ValidateManagedLaunchRecipe(expected) != nil || expected.SHA256 != agent.LaunchRecipe.SHA256 {
+			code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe does not match current manager configuration"
+		}
+	}
+	if code == "" && (!validRestartFence(old) || m.manifest.CanonicalSHA256 != old.ManifestHash || manifestRevision(m.manifest) != old.ManifestRevision) {
 		code, message = "ORPHAN_IDENTITY_UNSAFE", "managed process identity or manifest could not be verified"
 	}
 	if code == "" {
