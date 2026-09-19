@@ -138,6 +138,45 @@ func setupColdRecovery(t *testing.T, factory ProcessFactory, rpcFactory RPCFacto
 	return manager, durable, agent, tracked, databasePath
 }
 
+func TestColdRecoveryManagedLaunchRecipeMismatchOptIn(t *testing.T) {
+	ctx := context.Background()
+	for _, testCase := range []struct {
+		name            string
+		allowMismatch   bool
+		manifestHash    string
+		wantFailureCode string
+	}{
+		{name: "default rejects mismatch", wantFailureCode: "RECOVERY_RECIPE_MISMATCH"},
+		{name: "opt in proceeds", allowMismatch: true},
+		{name: "opt in still checks manifest", allowMismatch: true, manifestHash: "wrong-manifest", wantFailureCode: "ORPHAN_IDENTITY_UNSAFE"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			manager, durable, agent, _, _ := setupColdRecovery(t, nil, nil, nil, nil, nil)
+			stored, err := durable.ManagedAgent(ctx, agent.AgentID)
+			require.NoError(t, err)
+			require.NotNil(t, stored.LaunchRecipe)
+
+			manager.config.AllowManagedLaunchRecipeMismatch = testCase.allowMismatch
+			stored.SelectedModel.ID = "mismatched-model"
+			if testCase.manifestHash != "" {
+				manager.manifest.CanonicalSHA256 = testCase.manifestHash
+			}
+
+			err = manager.validateColdRecoveryPreflight(ctx, stored, storedAgentFence(stored), ProcessAbsent)
+			require.NoError(t, err, "cold-recovery preflight persists a safe failure instead of returning it")
+			projected, readErr := durable.ManagedAgent(ctx, agent.AgentID)
+			require.NoError(t, readErr)
+			if testCase.wantFailureCode == "" {
+				require.Equal(t, "running", projected.LifecycleState)
+				require.Empty(t, projected.LastErrorCode)
+				return
+			}
+			require.Equal(t, "failed", projected.LifecycleState)
+			require.Equal(t, testCase.wantFailureCode, projected.LastErrorCode)
+		})
+	}
+}
+
 func TestRecoverFailedStopUsesOnlyExactOwnedFence(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string

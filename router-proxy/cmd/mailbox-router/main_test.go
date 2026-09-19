@@ -35,6 +35,16 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, []string{home}, parsed.managed.AllowedWorkingDirectoryRoots)
 }
 
+func TestParseConfigLaunchRecipeMismatchDefaultsOffAndAcceptsExplicitOptIn(t *testing.T) {
+	defaultConfig, err := parseConfig([]string{"--database", "/tmp/router.db"})
+	require.NoError(t, err)
+	require.False(t, defaultConfig.managed.AllowManagedLaunchRecipeMismatch)
+
+	explicitConfig, err := parseConfig([]string{"--database", "/tmp/router.db", "--managed-allow-launch-recipe-mismatch=true"})
+	require.NoError(t, err)
+	require.True(t, explicitConfig.managed.AllowManagedLaunchRecipeMismatch)
+}
+
 func TestParseConfigRejectsHalfConfiguredTmuxAudit(t *testing.T) {
 	for _, args := range [][]string{
 		{"--database", "/tmp/router.db", "--audit-supervisor-target", "supervisor"},
@@ -71,7 +81,7 @@ func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T)
 	require.NoError(t, os.MkdirAll(fakeBin, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(fakeBin, "make"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MECHA_TEST_CAPTURE\"\n"), 0o700))
 
-	environment := func(managed string) []string {
+	environment := func(managed, allowLaunchRecipeMismatch string) []string {
 		filtered := make([]string, 0, len(os.Environ())+5)
 		for _, value := range os.Environ() {
 			if !strings.HasPrefix(value, "MECHA_ROUTER_MANAGED") && !strings.HasPrefix(value, "PATH=") {
@@ -82,31 +92,69 @@ func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T)
 		if managed != "" {
 			filtered = append(filtered, "MECHA_ROUTER_MANAGED="+managed)
 		}
+		if allowLaunchRecipeMismatch != "" {
+			filtered = append(filtered, "MECHA_ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH="+allowLaunchRecipeMismatch)
+		}
 		return filtered
 	}
-	run := func(managed string) *exec.Cmd {
+	run := func(managed, allowLaunchRecipeMismatch string) *exec.Cmd {
 		command := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
-		command.Env = environment(managed)
+		command.Env = environment(managed, allowLaunchRecipeMismatch)
 		return command
 	}
 
-	require.NoError(t, run("").Run())
+	require.NoError(t, run("", "").Run())
 	arguments, err := os.ReadFile(capture)
 	require.NoError(t, err)
 	require.Contains(t, string(arguments), "ROUTER_MANAGED=true")
+	require.Contains(t, string(arguments), "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=false")
 	home, homeErr := os.UserHomeDir()
 	require.NoError(t, homeErr)
 	require.Contains(t, string(arguments), "ROUTER_MANAGED_CWD_ROOTS="+home)
 
-	require.NoError(t, run("false").Run())
+	require.NoError(t, run("false", "").Run())
 	arguments, err = os.ReadFile(capture)
 	require.NoError(t, err)
 	require.Contains(t, string(arguments), "ROUTER_MANAGED=false")
 
-	invalid := run("invalid")
+	require.NoError(t, run("", "true").Run())
+	arguments, err = os.ReadFile(capture)
+	require.NoError(t, err)
+	require.Contains(t, string(arguments), "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=true")
+
+	invalid := run("invalid", "")
 	output, err := invalid.CombinedOutput()
 	require.Error(t, err)
 	require.Contains(t, string(output), "MECHA_ROUTER_MANAGED must be true or false")
+}
+
+func TestMakefileForwardsLaunchRecipeMismatchToRouterCommand(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+
+	runMake := func(allowLaunchRecipeMismatch string) string {
+		args := []string{"-C", filepath.Join(repositoryRoot, "router-proxy"), "-n", "run-router", "ROUTER_SOURCE_TREE=clean"}
+		if allowLaunchRecipeMismatch != "" {
+			args = append(args, "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH="+allowLaunchRecipeMismatch)
+		}
+		command := exec.Command("make", args...)
+		filtered := make([]string, 0, len(os.Environ()))
+		for _, value := range os.Environ() {
+			if !strings.HasPrefix(value, "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=") {
+				filtered = append(filtered, value)
+			}
+		}
+		command.Env = filtered
+		output, err := command.CombinedOutput()
+		require.NoError(t, err, string(output))
+		return string(output)
+	}
+
+	defaultOutput := runMake("")
+	require.Contains(t, defaultOutput, `--managed-allow-launch-recipe-mismatch="false"`)
+
+	explicitOutput := runMake("true")
+	require.Contains(t, explicitOutput, `--managed-allow-launch-recipe-mismatch="true"`)
 }
 
 func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string) {
