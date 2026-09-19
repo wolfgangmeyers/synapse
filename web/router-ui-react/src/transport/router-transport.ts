@@ -123,7 +123,8 @@ function controlFor(kind: ControlKind, id: string, targetAgentId: string, target
 
 type RefreshRepairReason = "registered" | "message_arrival" | "agent_projection_frame" | "conversation_message";
 const MAX_DIAGNOSTIC_COUNT = 10_000;
-const AGENT_REFRESH_THROTTLE_MS = 1_000;
+export const LEGACY_AGENT_REFRESH_INTERVAL_MS = 60_000;
+export const LEGACY_AGENT_REFRESH_RETRY_DELAY_MS = 1_000;
 function boundedCount(value: number): number { return Number.isSafeInteger(value) && value >= 0 ? Math.min(value, MAX_DIAGNOSTIC_COUNT) : 0; }
 function defaultDiagnosticSink(diagnostic: RouterDiagnostic): void {
   if (typeof console !== "undefined" && typeof console.debug === "function") console.debug("Mecha router UI diagnostic", diagnostic);
@@ -138,10 +139,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const diagnosticSink = options.onDiagnostic ?? defaultDiagnosticSink;
   let refreshGeneration = 0; let remindersRefreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let refreshInFlight: Promise<void> | undefined;
-  let refreshQueued = false;
-  let queuedRefreshReason: RefreshRepairReason | undefined;
-  let agentRefreshThrottleTimer: ReturnType<typeof setTimeout> | undefined;
-  let lastAgentRefreshStartedAt = 0;
+  let refreshRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let goalControlAvailable = false;
   let inlineToolControlAvailable = false;
   let controlTimeoutMs = 30_000;
@@ -150,17 +148,12 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const reportDiagnostic = (diagnostic: RouterDiagnostic): void => {
     try { diagnosticSink(diagnostic); } catch { /* Diagnostics cannot change transport behavior. */ }
   };
-  const refreshAgents = (repairReason?: RefreshRepairReason): Promise<void> => {
-    if (refreshInFlight !== undefined) {
-      // Activity frames can arrive faster than /v1/agents responds. Keep one
-      // follow-up request for the newest snapshot, but never start concurrent
-      // requests whose generation guards would discard every response.
-      refreshQueued = true;
-      if (repairReason !== undefined) queuedRefreshReason = repairReason;
-      return refreshInFlight;
-    }
-    if (agentRefreshThrottleTimer !== undefined) { clearTimeout(agentRefreshThrottleTimer); agentRefreshThrottleTimer = undefined; refreshQueued = false; queuedRefreshReason = undefined; }
-    lastAgentRefreshStartedAt = Date.now();
+  const clearRefreshRetry = (): void => {
+    if (refreshRetryTimer !== undefined) { clearTimeout(refreshRetryTimer); refreshRetryTimer = undefined; }
+  };
+  const refreshAgents = (repairReason?: RefreshRepairReason, allowRetry = true): Promise<void> => {
+    if (refreshInFlight !== undefined) return refreshInFlight;
+    clearRefreshRetry();
     const generation = ++refreshGeneration;
     const request = (async (): Promise<void> => {
       try {
@@ -179,39 +172,19 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
         if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: boundedCount(result.agents.length), reason: repairReason });
       } catch (error: unknown) {
         if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "request_failed" });
+        if (allowRetry && socket.registered && refreshRetryTimer === undefined) {
+          refreshRetryTimer = setTimeout(() => {
+            refreshRetryTimer = undefined;
+            void refreshAgents(undefined, false).catch(() => undefined);
+          }, LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
+        }
         throw error;
       } finally {
         refreshInFlight = undefined;
-        const shouldRefresh = refreshQueued;
-        const nextReason = queuedRefreshReason;
-        refreshQueued = false;
-        queuedRefreshReason = undefined;
-        if (shouldRefresh) {
-          refreshQueued = true;
-          queuedRefreshReason = nextReason;
-          scheduleQueuedRefresh();
-        }
       }
     })();
     refreshInFlight = request;
     return request;
-  };
-  const scheduleQueuedRefresh = (): void => {
-    if (!refreshQueued || refreshInFlight !== undefined || !socket.registered || agentRefreshThrottleTimer !== undefined) return;
-    const delay = Math.max(0, AGENT_REFRESH_THROTTLE_MS - (Date.now() - lastAgentRefreshStartedAt));
-    agentRefreshThrottleTimer = setTimeout(() => {
-      agentRefreshThrottleTimer = undefined;
-      if (!refreshQueued || refreshInFlight !== undefined || !socket.registered) return;
-      const nextReason = queuedRefreshReason;
-      refreshQueued = false;
-      queuedRefreshReason = undefined;
-      void refreshAgents(nextReason).catch(() => undefined);
-    }, delay);
-  };
-  const scheduleAgentRefresh = (reason: RefreshRepairReason): void => {
-    refreshQueued = true;
-    queuedRefreshReason = reason;
-    scheduleQueuedRefresh();
   };
   const removeControl = (controlId: string): PendingControl | undefined => {
     const timer = controlTimers.get(controlId);
@@ -230,8 +203,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       inlineToolControlAvailable = false;
       controlTimeoutMs = 30_000;
       emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false });
-      scheduleAgentRefresh("registered");
-      clearInterval(refreshTimer); refreshTimer = setInterval(() => { scheduleAgentRefresh("registered"); }, 60_000);
+      void refreshAgents("registered").catch(() => undefined);
+      clearInterval(refreshTimer); refreshTimer = setInterval(() => { void refreshAgents("registered").catch(() => undefined); }, LEGACY_AGENT_REFRESH_INTERVAL_MS);
       const capabilityGeneration = identity.generation;
       void http.capabilities().then((capabilities) => {
         if (socket.identity.generation !== capabilityGeneration || !socket.registered) return;
@@ -253,9 +226,9 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       if (pending !== undefined) { removeControl(pending.controlId); emit({ type: "control-error", frame, pending }); }
       return;
     }
-    if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); scheduleAgentRefresh("message_arrival"); return; }
-    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
-    if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); scheduleAgentRefresh("conversation_message"); return; }
+    if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); return; }
+    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") return;
+    if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); return; }
     if (frame.type === "reminders_changed") {
       void refreshReminders();
       return;
@@ -323,7 +296,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     get inlineToolControlAvailable() { return inlineToolControlAvailable; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     connect: socket.connect,
-    close() { clearInterval(refreshTimer); refreshGeneration += 1; refreshQueued = false; queuedRefreshReason = undefined; goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
+    close() { clearInterval(refreshTimer); clearRefreshRetry(); refreshGeneration += 1; goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
     refreshReminders,
     conversation: (owner, peer) => http.conversations(owner, peer),
