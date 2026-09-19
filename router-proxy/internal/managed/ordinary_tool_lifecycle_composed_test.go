@@ -55,15 +55,23 @@ func newComposedOrdinaryLifecycleFixture(t *testing.T) (*Manager, *store.Store, 
 	return manager, durable, binding, fence, rpc, stdoutWriter
 }
 
-func writeComposedOrdinaryEnd(t *testing.T, writer io.Writer, callID string, isError bool) {
+func writeComposedOrdinaryInvocation(t *testing.T, writer io.Writer, callID string, isError bool) {
 	t.Helper()
+	require.NoError(t, writeRPC(writer, map[string]any{
+		"type":       "tool_execution_start",
+		"toolCallId": callID,
+		"toolName":   composedOrdinaryToolName,
+		"args": map[string]any{
+			"path":      composedOrdinaryPath,
+			"api_token": composedOrdinarySecret,
+		},
+	}))
 	require.NoError(t, writeRPC(writer, map[string]any{
 		"type":       "tool_execution_end",
 		"toolCallId": callID,
 		"toolName":   composedOrdinaryToolName,
 		"result": map[string]any{
 			"secret": composedOrdinarySecret,
-			"path":   composedOrdinaryPath,
 			"output": composedOrdinaryOutput,
 		},
 		"isError": isError,
@@ -90,27 +98,32 @@ func waitForRPCSequence(t *testing.T, rpc *composedOrdinaryRPC, sequence uint64)
 	}, time.Second, time.Millisecond)
 }
 
-func assertComposedOrdinaryMetadataOnly(t *testing.T, durable *store.Store, fence store.ManagedRuntimeFence) []store.ManagedHistoryEntry {
+func assertComposedOrdinaryInputOnly(t *testing.T, durable *store.Store, fence store.ManagedRuntimeFence) []store.ManagedHistoryEntry {
 	t.Helper()
 	page, err := durable.ManagedHistoryPage(context.Background(), fence.AgentID, "complete", 0, 20)
 	require.NoError(t, err)
 	serialized := fmt.Sprintf("%#v", page.Entries)
-	for _, marker := range []string{composedOrdinarySecret, composedOrdinaryPath, composedOrdinaryOutput} {
-		require.NotContains(t, serialized, marker)
+	require.NotContains(t, serialized, composedOrdinarySecret)
+	require.NotContains(t, serialized, composedOrdinaryOutput)
+	for _, entry := range page.Entries {
+		require.JSONEq(t, `{"api_token":"[REDACTED]","path":"`+composedOrdinaryPath+`"}`, string(entry.ToolInput))
 	}
 	return page.Entries
 }
 
-func TestComposedOrdinaryToolCompletionPublishesSuccessAndFailureMetadataOnly(t *testing.T) {
+func TestComposedOrdinaryToolCompletionPersistsRedactedInputAndExcludesResults(t *testing.T) {
 	manager, durable, binding, fence, _, stdoutWriter := newComposedOrdinaryLifecycleFixture(t)
 	published := make(chan composedPublication, 2)
 	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		if entry.Presentation.Outcome == "active" {
+			return
+		}
 		page, err := durable.ManagedHistoryPage(context.Background(), fence.AgentID, "complete", 0, 20)
 		published <- composedPublication{entry: entry, historySize: len(page.Entries), err: err}
 	})
 
-	writeComposedOrdinaryEnd(t, stdoutWriter, "ordinary-success", false)
-	writeComposedOrdinaryEnd(t, stdoutWriter, "ordinary-failure", true)
+	writeComposedOrdinaryInvocation(t, stdoutWriter, "ordinary-success", false)
+	writeComposedOrdinaryInvocation(t, stdoutWriter, "ordinary-failure", true)
 	first := nextComposedPublication(t, published)
 	second := nextComposedPublication(t, published)
 	require.NoError(t, first.err)
@@ -123,7 +136,7 @@ func TestComposedOrdinaryToolCompletionPublishesSuccessAndFailureMetadataOnly(t 
 	require.Equal(t, composedOrdinaryToolName, second.entry.Presentation.ToolName)
 	require.Equal(t, fence.AgentID, binding.agentID)
 
-	rows := assertComposedOrdinaryMetadataOnly(t, durable, fence)
+	rows := assertComposedOrdinaryInputOnly(t, durable, fence)
 	require.Len(t, rows, 2)
 	// Complete history is returned newest first.
 	require.Equal(t, second.entry, rows[0])
@@ -133,10 +146,14 @@ func TestComposedOrdinaryToolCompletionPublishesSuccessAndFailureMetadataOnly(t 
 func TestComposedOrdinaryToolCompletionDuplicateReplayPublishesOnce(t *testing.T) {
 	manager, durable, _, fence, rpc, stdoutWriter := newComposedOrdinaryLifecycleFixture(t)
 	published := make(chan store.ManagedHistoryEntry, 2)
-	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) { published <- entry })
+	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		if entry.Presentation.Outcome != "active" {
+			published <- entry
+		}
+	})
 
-	writeComposedOrdinaryEnd(t, stdoutWriter, "ordinary-replay", false)
-	writeComposedOrdinaryEnd(t, stdoutWriter, "ordinary-replay", false)
+	writeComposedOrdinaryInvocation(t, stdoutWriter, "ordinary-replay", false)
+	writeComposedOrdinaryInvocation(t, stdoutWriter, "ordinary-replay", false)
 	entry := func() store.ManagedHistoryEntry {
 		select {
 		case value := <-published:
@@ -147,7 +164,7 @@ func TestComposedOrdinaryToolCompletionDuplicateReplayPublishesOnce(t *testing.T
 		}
 	}()
 	require.Equal(t, "success", entry.Presentation.Outcome)
-	waitForRPCSequence(t, rpc, 2)
+	waitForRPCSequence(t, rpc, 4)
 	require.Never(t, func() bool {
 		select {
 		case <-published:
@@ -156,7 +173,7 @@ func TestComposedOrdinaryToolCompletionDuplicateReplayPublishesOnce(t *testing.T
 			return false
 		}
 	}, 100*time.Millisecond, time.Millisecond)
-	require.Len(t, assertComposedOrdinaryMetadataOnly(t, durable, fence), 1)
+	require.Len(t, assertComposedOrdinaryInputOnly(t, durable, fence), 1)
 }
 
 func TestComposedOrdinaryToolCompletionRejectsMalformedFrames(t *testing.T) {
@@ -187,13 +204,17 @@ func TestComposedOrdinaryToolCompletionRejectsMalformedFrames(t *testing.T) {
 			return false
 		}
 	}, 100*time.Millisecond, time.Millisecond)
-	require.Empty(t, assertComposedOrdinaryMetadataOnly(t, durable, fence))
+	require.Empty(t, assertComposedOrdinaryInputOnly(t, durable, fence))
 }
 
 func TestComposedOrdinaryToolCompletionRejectsStaleBinding(t *testing.T) {
 	manager, durable, oldBinding, fence, oldRPC, oldWriter := newComposedOrdinaryLifecycleFixture(t)
 	published := make(chan store.ManagedHistoryEntry, 1)
-	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) { published <- entry })
+	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		if entry.Presentation.Outcome != "active" {
+			published <- entry
+		}
+	})
 
 	replacementReader, replacementWriter := io.Pipe()
 	replacementClient := NewRPCClient(io.Discard, replacementReader, func() error { return replacementWriter.Close() }).(*rpcClient)
@@ -210,8 +231,8 @@ func TestComposedOrdinaryToolCompletionRejectsStaleBinding(t *testing.T) {
 	manager.installBuiltinToolLifecycleReceiver(replacementBinding)
 	t.Cleanup(func() { require.NoError(t, replacementClient.Close()) })
 
-	writeComposedOrdinaryEnd(t, oldWriter, "stale-binding", false)
-	waitForRPCSequence(t, oldRPC, 1)
+	writeComposedOrdinaryInvocation(t, oldWriter, "stale-binding", false)
+	waitForRPCSequence(t, oldRPC, 2)
 	require.Never(t, func() bool {
 		select {
 		case <-published:
@@ -220,9 +241,9 @@ func TestComposedOrdinaryToolCompletionRejectsStaleBinding(t *testing.T) {
 			return false
 		}
 	}, 100*time.Millisecond, time.Millisecond)
-	require.Empty(t, assertComposedOrdinaryMetadataOnly(t, durable, fence))
+	require.Empty(t, assertComposedOrdinaryInputOnly(t, durable, fence))
 
-	writeComposedOrdinaryEnd(t, replacementWriter, "stale-binding", true)
+	writeComposedOrdinaryInvocation(t, replacementWriter, "stale-binding", true)
 	var entry store.ManagedHistoryEntry
 	select {
 	case entry = <-published:
@@ -230,7 +251,7 @@ func TestComposedOrdinaryToolCompletionRejectsStaleBinding(t *testing.T) {
 		t.Fatal("timed out waiting for replacement publication")
 	}
 	require.Equal(t, "failed", entry.Presentation.Outcome)
-	rows := assertComposedOrdinaryMetadataOnly(t, durable, fence)
+	rows := assertComposedOrdinaryInputOnly(t, durable, fence)
 	require.Len(t, rows, 1)
 	require.Equal(t, entry, rows[0])
 }
@@ -240,14 +261,17 @@ func TestComposedOrdinaryToolCompletionIsPublishedBeforeParentSettlement(t *test
 	publishedStarted := make(chan struct{})
 	durableAtPublication := make(chan bool, 1)
 	releasePublication := make(chan struct{})
-	manager.SetCompleteHistoryPublisher(func(store.ManagedHistoryEntry) {
+	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		if entry.Presentation.Outcome == "active" {
+			return
+		}
 		page, err := durable.ManagedHistoryPage(context.Background(), fence.AgentID, "complete", 0, 20)
 		durableAtPublication <- err == nil && len(page.Entries) == 1
 		close(publishedStarted)
 		<-releasePublication
 	})
 
-	writeComposedOrdinaryEnd(t, stdoutWriter, "settlement-order", false)
+	writeComposedOrdinaryInvocation(t, stdoutWriter, "settlement-order", false)
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
 	select {
 	case <-publishedStarted:
@@ -266,17 +290,20 @@ func TestComposedOrdinaryToolCompletionIsPublishedBeforeParentSettlement(t *test
 	case <-time.After(time.Second):
 		t.Fatal("parent settlement was not observed after terminal publication")
 	}
-	require.Len(t, assertComposedOrdinaryMetadataOnly(t, durable, fence), 1)
+	require.Len(t, assertComposedOrdinaryInputOnly(t, durable, fence), 1)
 }
 
 func TestComposedOrdinaryToolCompletionSurvivesPublisherPanic(t *testing.T) {
 	manager, durable, _, fence, _, stdoutWriter := newComposedOrdinaryLifecycleFixture(t)
 	published := make(chan struct{}, 1)
-	manager.SetCompleteHistoryPublisher(func(store.ManagedHistoryEntry) {
+	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		if entry.Presentation.Outcome == "active" {
+			return
+		}
 		published <- struct{}{}
 		panic("private publisher panic")
 	})
-	writeComposedOrdinaryEnd(t, stdoutWriter, "publisher-panic", false)
+	writeComposedOrdinaryInvocation(t, stdoutWriter, "publisher-panic", false)
 	select {
 	case <-published:
 	case <-time.After(time.Second):
@@ -286,5 +313,5 @@ func TestComposedOrdinaryToolCompletionSurvivesPublisherPanic(t *testing.T) {
 		page, err := durable.ManagedHistoryPage(context.Background(), fence.AgentID, "complete", 0, 20)
 		return err == nil && len(page.Entries) == 1
 	}, time.Second, time.Millisecond)
-	require.Len(t, assertComposedOrdinaryMetadataOnly(t, durable, fence), 1)
+	require.Len(t, assertComposedOrdinaryInputOnly(t, durable, fence), 1)
 }

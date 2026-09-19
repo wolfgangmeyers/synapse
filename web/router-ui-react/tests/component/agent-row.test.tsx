@@ -3,14 +3,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AgentRow } from "../../src/components/AgentRow";
+import { avatarForAgent } from "../../src/components/AgentAvatar";
 import "../../src/app.css";
 
 afterEach(cleanup);
 
 describe("AgentRow", () => {
-  it("uses a deterministic RoboHash image seeded by the agent ID", () => {
-    const { container } = render(<AgentRow agent={{ agent_id: "build agent", activity_state: "idle" }} />);
-    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "https://robohash.org/build%20agent?set=set1");
+  it("uses the agent ID to select its bundled avatar", () => {
+    const agentId = "build agent";
+    const { container } = render(<AgentRow agent={{ agent_id: agentId, activity_state: "idle" }} />);
+    expect(container.querySelector(".avatar img")).toHaveAttribute("src", avatarForAgent(agentId).src);
   });
 
   it("renders legacy Font Awesome goal and reminder badges without changing row structure", () => {

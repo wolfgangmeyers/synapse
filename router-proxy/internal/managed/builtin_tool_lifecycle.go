@@ -33,11 +33,11 @@ func (m *Manager) installBuiltinToolLifecycleReceiver(binding *managedBinding) {
 		return
 	}
 	rpc.SetBuiltinToolLifecycleEventHandler(func(event BuiltinToolLifecycleEvent) {
-		// Ordinary terminal frames are persisted in this semantic callback. The
-		// RPC dispatcher processes the next parent-activity frame only after this
-		// callback returns, so idle projection cannot overtake the durable row.
-		if event.Phase == "end" && !validBuiltinToolName(event.ToolName) {
-			m.handleOrdinaryToolLifecycleEvent(binding, event)
+		// Ordinary tools persist on Pi's semantic callback lane so a following
+		// parent-settled frame cannot overtake their start or terminal row. Coding
+		// builtins retain the bounded manager queue used by control-sensitive paths.
+		if !validBuiltinToolName(event.ToolName) {
+			m.handleBuiltinToolLifecycleEvent(binding, event)
 			return
 		}
 		m.enqueueBuiltinToolLifecycle(binding, event)
@@ -150,25 +150,8 @@ func (m *Manager) stopBuiltinToolLifecycleQueue(binding *managedBinding) {
 	binding.builtinToolQueueSerial.Unlock()
 }
 
-func (m *Manager) handleOrdinaryToolLifecycleEvent(binding *managedBinding, event BuiltinToolLifecycleEvent) {
-	if binding == nil || event.Phase != "end" || !validOrdinaryToolName(event.ToolName) || !validBuiltinToolCallID(event.ToolCallID) {
-		return
-	}
-	binding.serial.Lock()
-	fence := bindingFence(binding.agentID, binding)
-	binding.serial.Unlock()
-	if !m.rootBindingCurrent(context.Background(), binding, fence) {
-		return
-	}
-	entry, created, err := m.store.RecordManagedOrdinaryToolCompletion(context.Background(), fence, event.ToolCallID, event.ToolName, event.IsError)
-	if err != nil || !created {
-		return
-	}
-	m.publishCompleteHistory(entry)
-}
-
 func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event BuiltinToolLifecycleEvent) {
-	if binding == nil || (event.Phase != "start" && event.Phase != "end") || !validBuiltinToolName(event.ToolName) || !validBuiltinToolCallID(event.ToolCallID) {
+	if binding == nil || (event.Phase != "start" && event.Phase != "end") || !validOrdinaryToolName(event.ToolName) || !validBuiltinToolCallID(event.ToolCallID) {
 		return
 	}
 	binding.serial.Lock()
@@ -185,21 +168,23 @@ func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event
 	}
 	m.expireBuiltinToolOrphanEnds(binding)
 	if event.Phase == "end" {
-		entry, changed, err := m.store.FinishManagedBuiltinInvocation(context.Background(), fence, event.ToolCallID, builtinToolTerminalOutcome(event.IsError))
+		entry, changed, err := m.store.FinishManagedToolInvocation(context.Background(), fence, event.ToolCallID, event.ToolName, builtinToolTerminalOutcome(event.IsError))
 		if errors.Is(err, store.ErrManagedBuiltinInvocationNotFound) {
+			// A terminal frame never manufactures an invocation. Buffer it briefly
+			// so a matching delayed start can establish the immutable name and input.
 			m.bufferBuiltinToolOrphanEnd(binding, event)
 			return
 		}
 		if err == nil && changed {
 			m.publishCompleteHistory(entry)
-			if !event.IsError {
+			if !event.IsError && validBuiltinToolName(event.ToolName) {
 				m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "builtin", ID: entry.ID})
 			}
 		}
 		return
 	}
 
-	entry, created, err := m.store.BeginManagedBuiltinInvocation(context.Background(), fence, event.ToolCallID, event.ToolName)
+	entry, created, err := m.store.BeginManagedToolInvocation(context.Background(), fence, event.ToolCallID, event.ToolName, event.ToolInput)
 	if err != nil {
 		return
 	}
@@ -207,11 +192,14 @@ func (m *Manager) handleBuiltinToolLifecycleEvent(binding *managedBinding, event
 		m.publishCompleteHistory(entry)
 	}
 	orphan, found := binding.builtinToolOrphanEnds[event.ToolCallID]
-	if !found || orphan.event.ToolName != event.ToolName {
+	if !found {
 		return
 	}
 	delete(binding.builtinToolOrphanEnds, event.ToolCallID)
-	terminal, changed, err := m.store.FinishManagedBuiltinInvocation(context.Background(), fence, event.ToolCallID, builtinToolTerminalOutcome(orphan.event.IsError))
+	if orphan.event.ToolName != event.ToolName {
+		return
+	}
+	terminal, changed, err := m.store.FinishManagedToolInvocation(context.Background(), fence, event.ToolCallID, event.ToolName, builtinToolTerminalOutcome(orphan.event.IsError))
 	if err == nil && changed {
 		m.publishCompleteHistory(terminal)
 		if !orphan.event.IsError {

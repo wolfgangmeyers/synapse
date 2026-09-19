@@ -1530,16 +1530,16 @@ func managedDirectAcknowledgementEventKey(recipientAgent, messageID, incarnation
 	return fmt.Sprintf("%x", digest[:])
 }
 
-// managedDirectAcknowledgementMetadata is the persisted identity needed for a
-// Complete acknowledgement. Keeping this query body-free prevents operational
-// message content from entering the history path.
+// managedDirectAcknowledgementMetadata is copied from the durable queue row
+// before acknowledgement deletes it, so Complete history retains the exact
+// incoming body and sender for click-through details.
 type managedDirectAcknowledgementMetadata struct {
-	ID, Recipient, IncarnationID, SourceKind string
+	ID, Recipient, IncarnationID, SourceKind, Sender, Body string
 }
 
 func (s *Store) managedDirectAcknowledgementMetadataTx(ctx context.Context, messageID string) (*managedDirectAcknowledgementMetadata, error) {
 	var metadata managedDirectAcknowledgementMetadata
-	err := s.db.QueryRowContext(ctx, `SELECT id,recipient,message_incarnation_id,COALESCE(source_kind,'unknown') FROM messages WHERE id=?`, messageID).Scan(&metadata.ID, &metadata.Recipient, &metadata.IncarnationID, &metadata.SourceKind)
+	err := s.db.QueryRowContext(ctx, `SELECT id,recipient,message_incarnation_id,COALESCE(source_kind,'unknown'),sender,body FROM messages WHERE id=?`, messageID).Scan(&metadata.ID, &metadata.Recipient, &metadata.IncarnationID, &metadata.SourceKind, &metadata.Sender, &metadata.Body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1549,24 +1549,24 @@ func (s *Store) managedDirectAcknowledgementMetadataTx(ctx context.Context, mess
 	return &metadata, nil
 }
 
-// recordManagedDirectAcknowledgementHistoryTx records a bounded Complete fact
-// while the acknowledgement transaction is still open. All fields are fixed
-// display facts; the body and receipt never cross this boundary.
+// recordManagedDirectAcknowledgementHistoryTx records the concise Complete fact
+// and its exact incoming click-through details in the acknowledgement transaction.
 func (s *Store) recordManagedDirectAcknowledgementHistoryTx(ctx context.Context, metadata managedDirectAcknowledgementMetadata, attempt ManagedDirectAttempt) (ManagedHistoryEntry, error) {
 	category := "managed_message"
-	messageText := "Message acknowledged"
-	presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", Summary: "Inbound message acknowledged"}
+	messageText := "Message received"
+	presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success"}
 	if metadata.SourceKind == "reminder" {
 		category = "reminder"
-		messageText = "Reminder acknowledged"
-		presentation = &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success", Summary: "Reminder completed"}
+		messageText = "Reminder received"
+		presentation = &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
 	}
 	presentationJSON, err := managedHistoryPresentationJSON(presentation)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
 	eventKey := managedDirectAcknowledgementEventKey(metadata.Recipient, metadata.ID, metadata.IncarnationID, attempt.AttemptNumber)
-	return s.recordManagedCompleteHistoryStrictTx(ctx, metadata.Recipient, category, "info", messageText, eventKey, presentationJSON, presentation)
+	details := managedHistoryDetails{MessageContent: &metadata.Body, SenderIdentity: &metadata.Sender}
+	return s.recordManagedCompleteHistoryStrictTx(ctx, metadata.Recipient, category, "info", messageText, eventKey, presentationJSON, presentation, details)
 }
 
 // recoveredAttemptOwnsLinkedReminderTx keeps an old recovered attempt from

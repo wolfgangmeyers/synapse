@@ -1,5 +1,6 @@
-import type { ReactElement } from "react";
+import { Fragment, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement } from "react";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
+import { ActivityDetailDialog } from "./ActivityDetailDialog";
 
 export type CompleteTimelineTone = "blue" | "green" | "purple" | "teal" | "yellow" | "amber" | "danger";
 
@@ -101,6 +102,11 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   // synthesis keeps an older router payload readable without reviving the
   // former generic “Agent activity” legacy card.
   const presentation = entry.presentation ?? { kind: entry.level === "error" ? "error" as const : "message" as const, outcome: entry.level === "error" ? "error" as const : "success" as const };
+  const hasInboundDetails = entry.message_content !== undefined || entry.sender_identity !== undefined;
+  if (hasInboundDetails && (presentation.kind === "message" || presentation.kind === "reminder")) {
+    const reminder = presentation.kind === "reminder";
+    return { icon: reminder ? "fa-solid fa-clock" : "fa-solid fa-envelope", tone: reminder ? "yellow" : "blue", label: reminder ? "Reminder received" : "Message received", ...(entry.sender_identity ? { detail: `From ${entry.sender_identity}` } : {}), isHighValue: false };
+  }
   if (presentation.kind === "message") return { icon: "fa-solid fa-circle-check", tone: presentation.outcome === "error" ? "danger" : "blue", label: entry.message || "Recorded activity", ...(presentation.summary ? { detail: presentation.summary } : {}), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "tool") return toolVisual(presentation);
   if (presentation.kind === "child" || presentation.kind === "recovery") return childVisual(presentation);
@@ -154,18 +160,36 @@ function formattedTime(entry: ManagedHistoryEntry): { dateTime?: string; label?:
 }
 
 export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry }): ReactElement {
+  const [detailMounted, setDetailMounted] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const detailTrigger = useRef<HTMLElement | undefined>(undefined);
   const visual = completeTimelineVisual(entry);
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
-  const accessibleName = [visual.label, visual.detail, time.title].filter((value): value is string => value !== undefined && value !== "").join(". ");
+  const hasDetails = entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined;
+  const accessibleName = [visual.label, visual.detail, time.title, hasDetails ? "View details" : undefined].filter((value): value is string => value !== undefined && value !== "").join(". ");
   const presentation = entry.presentation;
   const active = isActivePresentation(presentation);
   const terminalSuccess = isTerminalSuccessPresentation(presentation);
   const terminalDanger = isTerminalDangerPresentation(presentation);
+  const openDetails = (target: HTMLElement): void => {
+    detailTrigger.current = target;
+    setDetailMounted(true);
+    setDetailOpen(true);
+  };
+  const onClick = (event: MouseEvent<HTMLElement>): void => openDetails(event.currentTarget);
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openDetails(event.currentTarget);
+  };
   // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
   const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
-  return <article className={`activity-entry activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
-    <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
-    <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
-  </article>;
+  return <Fragment>
+    <article className={`activity-entry activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
+      <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
+      <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
+    </article>
+    {detailMounted ? <ActivityDetailDialog entry={entry} open={detailOpen} returnFocus={detailTrigger.current} onClose={() => setDetailOpen(false)} onClosed={() => setDetailMounted(false)} /> : null}
+  </Fragment>;
 }

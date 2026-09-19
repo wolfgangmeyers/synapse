@@ -19,8 +19,8 @@ type ManagedHistoryError struct {
 }
 
 // ManagedHistoryPresentation is a bounded, display-only contract. It is not a
-// diagnostic channel: tool arguments, output, process data, and raw errors
-// stay out of complete history even when an operator expands a timeline row.
+// diagnostic channel: tool output, process data, and raw errors stay out of
+// Complete history. Redacted invocation input is stored separately for details.
 type ManagedHistoryPresentation struct {
 	Kind       string               `json:"kind"`
 	ToolName   string               `json:"tool_name,omitempty"`
@@ -34,18 +34,42 @@ type ManagedHistoryPresentation struct {
 }
 
 type ManagedHistoryEntry struct {
-	ID           string                      `json:"id"`
-	AgentID      string                      `json:"agent_id"`
-	At           string                      `json:"at"`
-	Level        string                      `json:"level"`
-	Message      string                      `json:"message"`
-	Presentation *ManagedHistoryPresentation `json:"presentation,omitempty"`
+	ID             string                      `json:"id"`
+	AgentID        string                      `json:"agent_id"`
+	At             string                      `json:"at"`
+	Level          string                      `json:"level"`
+	Message        string                      `json:"message"`
+	Presentation   *ManagedHistoryPresentation `json:"presentation,omitempty"`
+	MessageContent *string                     `json:"message_content,omitempty"`
+	SenderIdentity *string                     `json:"sender_identity,omitempty"`
+	ToolInput      json.RawMessage             `json:"tool_input,omitempty"`
+}
+
+type managedHistoryDetails struct {
+	MessageContent *string
+	SenderIdentity *string
+	ToolInputJSON  string
 }
 
 type ManagedHistoryPage struct {
 	View       string                `json:"view"`
 	Entries    []ManagedHistoryEntry `json:"entries"`
 	NextBefore *int64                `json:"next_before"`
+}
+
+func managedHistoryDetail(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	result := value.String
+	return &result
+}
+
+func managedHistoryDetailEqual(stored sql.NullString, expected *string) bool {
+	if stored.Valid != (expected != nil) {
+		return false
+	}
+	return !stored.Valid || stored.String == *expected
 }
 
 func managedHistoryText(value string, maximum int, allowEmpty bool) bool {
@@ -246,39 +270,52 @@ func (s *Store) RecordManagedCompleteHistoryWithPresentation(ctx context.Context
 // recordManagedCompleteHistoryStrictTx is the fail-closed variant used by
 // acknowledgement transactions. A reused event key is valid only when every
 // canonical display field matches the fact being acknowledged.
-func (s *Store) recordManagedCompleteHistoryStrictTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation) (ManagedHistoryEntry, error) {
+func (s *Store) recordManagedCompleteHistoryStrictTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation, details ...managedHistoryDetails) (ManagedHistoryEntry, error) {
+	detail := managedHistoryDetails{}
+	if len(details) > 0 {
+		detail = details[0]
+	}
 	if eventKey != "" {
 		var sequence int64
 		var storedAgent, storedCategory, storedAt, storedLevel, storedMessage, storedPresentation string
-		err := s.db.QueryRowContext(ctx, `SELECT sequence,COALESCE(agent_id,''),category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key=?`, eventKey).Scan(&sequence, &storedAgent, &storedCategory, &storedAt, &storedLevel, &storedMessage, &storedPresentation)
+		var storedContent, storedSender, storedToolInput sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT sequence,COALESCE(agent_id,''),category,occurred_at,level,message,COALESCE(presentation_json,''),message_content,sender_identity,tool_input_json FROM managed_complete_history WHERE event_key=?`, eventKey).Scan(&sequence, &storedAgent, &storedCategory, &storedAt, &storedLevel, &storedMessage, &storedPresentation, &storedContent, &storedSender, &storedToolInput)
 		if err == nil {
-			if storedAgent != agentID || storedCategory != category || storedLevel != level || storedMessage != message || storedPresentation != presentationJSON {
+			if storedAgent != agentID || storedCategory != category || storedLevel != level || storedMessage != message || storedPresentation != presentationJSON || !managedHistoryDetailEqual(storedContent, detail.MessageContent) || !managedHistoryDetailEqual(storedSender, detail.SenderIdentity) || storedToolInput.String != detail.ToolInputJSON {
 				return ManagedHistoryEntry{}, errors.New("managed complete history event key conflicts with canonical metadata")
 			}
-			return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: storedAgent, At: storedAt, Level: storedLevel, Message: storedMessage, Presentation: effectiveManagedHistoryPresentation(storedCategory, storedLevel, storedMessage, storedPresentation)}, nil
+			storedDetails := managedHistoryDetails{MessageContent: managedHistoryDetail(storedContent), SenderIdentity: managedHistoryDetail(storedSender), ToolInputJSON: storedToolInput.String}
+			return managedHistoryEntry(sequence, storedAgent, storedAt, storedLevel, storedMessage, effectiveManagedHistoryPresentation(storedCategory, storedLevel, storedMessage, storedPresentation), storedDetails), nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return ManagedHistoryEntry{}, err
 		}
 	}
-	return s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation)
+	return s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation, detail)
 }
 
 // recordManagedCompleteHistoryTx inserts and prunes one Complete row while the
 // caller's immediate transaction is open. Generic callers retain the existing
 // idempotent event-key behavior; acknowledgement callers use the strict helper
 // above so an unrelated row can never be silently reused.
-func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation) (ManagedHistoryEntry, error) {
+func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, category, level, message, eventKey, presentationJSON string, presentation *ManagedHistoryPresentation, details ...managedHistoryDetails) (ManagedHistoryEntry, error) {
+	detail := managedHistoryDetails{}
+	if len(details) > 0 {
+		detail = details[0]
+	}
 	var entry ManagedHistoryEntry
 	if eventKey != "" {
 		var sequence int64
 		var storedCategory string
-		var storedPresentation sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT sequence,category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &storedCategory, &entry.At, &entry.Level, &entry.Message, &storedPresentation)
+		var storedPresentation, storedContent, storedSender, storedToolInput sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT sequence,category,occurred_at,level,message,COALESCE(presentation_json,''),message_content,sender_identity,tool_input_json FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &storedCategory, &entry.At, &entry.Level, &entry.Message, &storedPresentation, &storedContent, &storedSender, &storedToolInput)
 		if err == nil {
 			entry.ID = fmt.Sprintf("complete:%d", sequence)
 			entry.AgentID = agentID
 			entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
+			entry.MessageContent = managedHistoryDetail(storedContent)
+			entry.SenderIdentity = managedHistoryDetail(storedSender)
+			entry.ToolInput = rawManagedHistoryJSON(storedToolInput.String)
 			return entry, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -286,7 +323,7 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 		}
 	}
 	occurredAt := formatTimestamp(s.clock.Now())
-	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,NULLIF(?,''),NULLIF(?,''))`, nullableString(agentID), category, level, message, occurredAt, eventKey, presentationJSON)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json,message_content,sender_identity,tool_input_json) VALUES (?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),?,?,NULLIF(?,''))`, nullableString(agentID), category, level, message, occurredAt, eventKey, presentationJSON, detail.MessageContent, detail.SenderIdentity, detail.ToolInputJSON)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
@@ -297,7 +334,7 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
 		return ManagedHistoryEntry{}, err
 	}
-	return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: agentID, At: occurredAt, Level: level, Message: message, Presentation: presentation}, nil
+	return managedHistoryEntry(sequence, agentID, occurredAt, level, message, presentation, detail), nil
 }
 
 // ManagedHistoryPage is an independent cursor read for the two browser views.
@@ -331,7 +368,7 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	} else {
 		// Message rows are rendered from the selected conversation. Hide legacy
 		// transport bookkeeping so Complete stays a meaningful operational feed.
-		rows, err = s.db.QueryContext(ctx, `SELECT agent_id,sequence,category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE agent_id=? AND sequence>? AND category NOT IN ('managed_http','message') AND (? = 0 OR sequence < ?) ORDER BY sequence DESC LIMIT ?`, agentID, startSequence, before, before, limit+1)
+		rows, err = s.db.QueryContext(ctx, `SELECT agent_id,sequence,category,occurred_at,level,message,COALESCE(presentation_json,''),message_content,sender_identity,tool_input_json FROM managed_complete_history WHERE agent_id=? AND sequence>? AND category NOT IN ('managed_http','message') AND (? = 0 OR sequence < ?) ORDER BY sequence DESC LIMIT ?`, agentID, startSequence, before, before, limit+1)
 	}
 	if err != nil {
 		return ManagedHistoryPage{}, err
@@ -341,12 +378,12 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	for rows.Next() {
 		var sequence int64
 		var entryAgentID, first, second, message, category string
-		var presentation sql.NullString
+		var presentation, content, sender, toolInput sql.NullString
 		var scanErr error
 		if view == "quiet" {
 			scanErr = rows.Scan(&entryAgentID, &sequence, &first, &second, &message, &presentation)
 		} else {
-			scanErr = rows.Scan(&entryAgentID, &sequence, &category, &first, &second, &message, &presentation)
+			scanErr = rows.Scan(&entryAgentID, &sequence, &category, &first, &second, &message, &presentation, &content, &sender, &toolInput)
 		}
 		if scanErr != nil {
 			return ManagedHistoryPage{}, scanErr
@@ -359,7 +396,7 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 		if view == "quiet" {
 			page.Entries = append(page.Entries, ManagedHistoryEntry{ID: first, AgentID: entryAgentID, At: second, Level: "message", Message: message})
 		} else {
-			page.Entries = append(page.Entries, ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: entryAgentID, At: first, Level: second, Message: message, Presentation: effectiveManagedHistoryPresentation(category, second, message, presentation.String)})
+			page.Entries = append(page.Entries, managedHistoryEntry(sequence, entryAgentID, first, second, message, effectiveManagedHistoryPresentation(category, second, message, presentation.String), managedHistoryDetails{MessageContent: managedHistoryDetail(content), SenderIdentity: managedHistoryDetail(sender), ToolInputJSON: toolInput.String}))
 		}
 		lastReturnedSequence = sequence
 	}

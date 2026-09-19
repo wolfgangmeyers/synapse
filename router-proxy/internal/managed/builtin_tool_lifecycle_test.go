@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRPCClientBuiltinToolLifecycleIsOrderedAndRedacted(t *testing.T) {
+func TestRPCClientToolLifecycleIsOrderedCarriesInputAndExcludesResult(t *testing.T) {
 	reader, writer := io.Pipe()
 	client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
@@ -25,8 +25,9 @@ func TestRPCClientBuiltinToolLifecycleIsOrderedAndRedacted(t *testing.T) {
 
 	first := <-events
 	second := <-events
-	require.Equal(t, BuiltinToolLifecycleEvent{Phase: "start", ToolCallID: "call-1", ToolName: "bash", Watermark: first.Watermark}, first)
+	require.Equal(t, BuiltinToolLifecycleEvent{Phase: "start", ToolCallID: "call-1", ToolName: "bash", ToolInput: map[string]any{"command": "private command"}, Watermark: first.Watermark}, first)
 	require.Equal(t, BuiltinToolLifecycleEvent{Phase: "end", ToolCallID: "call-1", ToolName: "bash", Watermark: second.Watermark}, second)
+	require.NotContains(t, fmt.Sprintf("%#v", second), "private output")
 	require.Less(t, first.Watermark, second.Watermark)
 	select {
 	case event := <-events:
@@ -104,6 +105,41 @@ func TestBuiltinToolLifecycleCreatesOneEntryAndBuffersEndBeforeStart(t *testing.
 	page, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
 	require.Len(t, page.Entries, 1, "duplicate terminal frames must not create a second Complete entry")
+}
+
+func TestOrdinaryToolLifecycleBuffersEndBeforeStartAndValidatesTerminalName(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	bridge := &builtinLifecycleReceiverRPC{goalProjectionRPC: rpc}
+	binding.rpc = bridge
+	manager.installBuiltinToolLifecycleReceiver(binding)
+
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "end", ToolCallID: "ordinary-orphan", ToolName: "external_tool", IsError: true, Watermark: 1})
+	waitForBuiltinToolLifecycleQueue(t, binding)
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Empty(t, page.Entries, "an end frame cannot manufacture an invocation")
+
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "start", ToolCallID: "ordinary-orphan", ToolName: "external_tool", ToolInput: map[string]any{"path": "/workspace/file"}, Watermark: 2})
+	require.Eventually(t, func() bool {
+		page, lookupErr := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+		return lookupErr == nil && len(page.Entries) == 1 && page.Entries[0].Presentation.Outcome == "failed"
+	}, time.Second, time.Millisecond)
+
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "start", ToolCallID: "terminal-name", ToolName: "external_tool", ToolInput: map[string]any{"query": "safe"}, Watermark: 3})
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "end", ToolCallID: "terminal-name", ToolName: "different_tool", Watermark: 4})
+	waitForBuiltinToolLifecycleQueue(t, binding)
+	page, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 2)
+	require.Equal(t, "external_tool", page.Entries[0].Presentation.ToolName)
+	require.Equal(t, "active", page.Entries[0].Presentation.Outcome)
+
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "end", ToolCallID: "terminal-name", ToolName: "external_tool", Watermark: 5})
+	require.Eventually(t, func() bool {
+		page, lookupErr := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+		return lookupErr == nil && len(page.Entries) == 2 && page.Entries[0].Presentation.Outcome == "success"
+	}, time.Second, time.Millisecond)
 }
 
 func TestBuiltinToolLifecycleReaderEOFInterruptsExactFenceAndRejectsLateEnd(t *testing.T) {

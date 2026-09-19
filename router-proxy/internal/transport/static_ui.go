@@ -56,7 +56,7 @@ func newStaticUI(root string) (*staticUI, error) {
 
 func staticUIHeaders(header http.Header) {
 	header.Set("Cache-Control", "no-store")
-	header.Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: https://robohash.org; style-src 'self' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+	header.Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
 	header.Set("Referrer-Policy", "no-referrer")
 	header.Set("X-Content-Type-Options", "nosniff")
 }

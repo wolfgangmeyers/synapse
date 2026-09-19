@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { CompleteTimelineEntry } from "../../src/components/CompleteTimelineEntry";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation } from "../../src/protocol/types";
@@ -61,6 +61,44 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(".activity-entry--terminal-danger")).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--active")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /details/i })).not.toBeInTheDocument();
+  });
+
+  it("opens retained inbound message details by click without acknowledgment copy", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:message", agent_id: "managed-worker", at, message: "Message acknowledged",
+      message_content: "Please inspect **the original report**.", sender_identity: "ops-sender",
+      presentation: { kind: "message", outcome: "success", summary: "Inbound message acknowledged" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Message received.*From ops-sender.*View details/i });
+    expect(card).toHaveAttribute("aria-haspopup", "dialog");
+    expect(card).toHaveTextContent("Message received");
+    expect(screen.queryByText(/acknowledged/i)).not.toBeInTheDocument();
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "Message received" });
+    expect(within(dialog).getByText("ops-sender")).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Original message" })).toBeInTheDocument();
+    expect(within(dialog).getByText("the original report")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/acknowledged/i)).not.toBeInTheDocument();
+  });
+
+  it("opens readable retained tool parameters from the keyboard", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:tool-input", agent_id: "managed-worker", at, message: "Ran read", tool_input: { path: "/workspace/report.md", offset: 12, options: { hidden: false }, secret: "[REDACTED]" },
+      presentation: { kind: "tool", tool_name: "read", outcome: "success" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Ran read.*View details/i });
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter" });
+
+    const dialog = screen.getByRole("dialog", { name: "Ran read" });
+    const parameters = within(dialog).getByText(/"path": "\/workspace\/report\.md"/);
+    expect(within(dialog).getByRole("heading", { name: "Tool parameters" })).toBeInTheDocument();
+    expect(parameters).toHaveTextContent('"offset": 12');
+    expect(parameters).toHaveTextContent('"hidden": false');
+    expect(parameters).toHaveTextContent('"secret": "[REDACTED]"');
   });
 
   it.each([

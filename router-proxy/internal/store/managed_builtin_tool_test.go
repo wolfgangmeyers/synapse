@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,6 +54,45 @@ func TestManagedBuiltinToolLifecycleMutatesOneCompleteEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page.Entries, 1)
 	require.Equal(t, terminal, page.Entries[0])
+}
+
+func TestManagedToolInvocationPersistsInputAndCorrelatesReplays(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := builtinToolFixture(t)
+	input := map[string]any{"query": "status", "api_token": "private-token"}
+
+	active, created, err := durable.BeginManagedToolInvocation(ctx, fence, "ordinary-lifecycle", "web_search", input)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, "active", active.Presentation.Outcome)
+	require.JSONEq(t, `{"api_token":"[REDACTED]","query":"status"}`, string(active.ToolInput))
+
+	replayed, created, err := durable.BeginManagedToolInvocation(ctx, fence, "ordinary-lifecycle", "web_search", input)
+	require.NoError(t, err)
+	require.False(t, created)
+	require.Equal(t, active, replayed)
+
+	_, created, err = durable.BeginManagedToolInvocation(ctx, fence, "ordinary-lifecycle", "other_tool", input)
+	require.ErrorIs(t, err, ErrManagedBuiltinInvocationConflict)
+	require.False(t, created)
+	_, created, err = durable.BeginManagedToolInvocation(ctx, fence, "ordinary-lifecycle", "web_search", map[string]any{"query": "different"})
+	require.ErrorIs(t, err, ErrManagedBuiltinInvocationConflict)
+	require.False(t, created)
+
+	_, changed, err := durable.FinishManagedToolInvocation(ctx, fence, "ordinary-lifecycle", "other_tool", ManagedBuiltinToolSucceeded)
+	require.ErrorIs(t, err, ErrManagedBuiltinInvocationConflict)
+	require.False(t, changed)
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "active", page.Entries[0].Presentation.Outcome)
+
+	terminal, changed, err := durable.FinishManagedToolInvocation(ctx, fence, "ordinary-lifecycle", "web_search", ManagedBuiltinToolSucceeded)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, active.ID, terminal.ID)
+	require.Equal(t, "success", terminal.Presentation.Outcome)
+	require.JSONEq(t, string(active.ToolInput), string(terminal.ToolInput))
 }
 
 func TestManagedOrdinaryToolCompletionIsMetadataOnlyAndIdempotent(t *testing.T) {
@@ -139,22 +179,17 @@ func TestManagedOrdinaryToolCompletionFencesAndSeparatesIncarnations(t *testing.
 	require.Len(t, builtinHistoryRowsFor(t, durable, fence.AgentID), 2)
 }
 
-func TestManagedOrdinaryToolCompletionPreservesBuiltinOwnershipAndMismatchedCallIDs(t *testing.T) {
+func TestManagedOrdinaryToolCompletionRejectsOwnedCallIDMismatch(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := builtinToolFixture(t)
-	builtin, created, err := durable.BeginManagedBuiltinInvocation(ctx, fence, "builtin-call", "bash")
+	_, created, err := durable.BeginManagedBuiltinInvocation(ctx, fence, "builtin-call", "bash")
 	require.NoError(t, err)
 	require.True(t, created)
 
-	ordinary, created, err := durable.RecordManagedOrdinaryToolCompletion(ctx, fence, "builtin-call", "web_search", false)
-	require.NoError(t, err)
-	require.True(t, created)
-	require.NotEqual(t, builtin.ID, ordinary.ID)
-
-	_, created, err = durable.RecordManagedOrdinaryToolCompletion(ctx, fence, "builtin-call", "bash", false)
-	require.Error(t, err)
+	_, created, err = durable.RecordManagedOrdinaryToolCompletion(ctx, fence, "builtin-call", "web_search", false)
+	require.ErrorIs(t, err, ErrManagedBuiltinInvocationConflict)
 	require.False(t, created)
-	require.Len(t, builtinHistoryRowsFor(t, durable, fence.AgentID), 2)
+	require.Len(t, builtinHistoryRowsFor(t, durable, fence.AgentID), 1)
 }
 
 func builtinHistoryRowsFor(t *testing.T, durable *Store, agentID string) []ManagedHistoryEntry {
@@ -200,6 +235,69 @@ func TestManagedBuiltinToolLifecycleRejectsStaleFenceAndEvictsLinkedInvocation(t
 	var count int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_builtin_tool_invocations WHERE complete_sequence=?`, first.ID[len("complete:"):]).Scan(&count))
 	require.Zero(t, count, "retention must remove the invocation with its Complete row")
+}
+
+func TestManagedToolInvocationMigrationPreservesBuiltinRowsAndAllowsOrdinaryNames(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "router.db")
+	migrations := DefaultMigrations()
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "053_managed_tool_invocation_names")]})
+	require.NoError(t, err)
+
+	agent := ManagedAgentRecord{AgentID: "migration-tool", Name: "migration-tool", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "migration-session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
+	op := ManagedOperation{OperationID: "migration-tool-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "migration-tool-launch", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, before.ReserveManagedLaunch(ctx, agent, op))
+	require.NoError(t, before.UpdateManagedAgentStarting(ctx, agent.AgentID, agent.PiSessionID, ProcessIdentityRecord{PID: 101, StartMarker: "migration-marker", Incarnation: "migration-incarnation"}, "migration-generation"))
+	stored, err := before.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	fence := restartFenceFromAgent(stored)
+	require.NoError(t, before.ConfirmManagedPolicyApplied(ctx, fence, DefaultManagedReadinessPolicy()))
+	snapshot := ManagedChildSnapshot{SnapshotID: "migration-snapshot", OwnerSessionID: fence.PiSessionID, Sequence: 0, Canonical: []byte(`{"owner_session_id":"migration-session","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"migration-snapshot"}`), SHA256: testManifestHash}
+	require.NoError(t, before.ConfirmManagedChildSnapshot(ctx, fence, snapshot))
+	require.NoError(t, before.MarkManagedReadyFromSources(ctx, fence))
+
+	builtin, created, err := before.BeginManagedBuiltinInvocation(ctx, fence, "legacy-builtin", "read")
+	require.NoError(t, err)
+	require.True(t, created)
+	_, _, err = before.BeginManagedToolInvocation(ctx, fence, "pre-upgrade-ordinary", "web_search", map[string]any{"query": "before"})
+	require.Error(t, err, "the historical builtin-only constraint must require the upgrade")
+	require.NoError(t, before.Close())
+
+	after, err := Open(ctx, path, Options{})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, after.Close()) }()
+	var toolName, state string
+	var sequence int64
+	require.NoError(t, after.db.QueryRowContext(ctx, `SELECT tool_name,state,complete_sequence FROM managed_builtin_tool_invocations WHERE invocation_key=?`, managedBuiltinInvocationKey(fence, "legacy-builtin")).Scan(&toolName, &state, &sequence))
+	require.Equal(t, "read", toolName)
+	require.Equal(t, "active", state)
+	require.Equal(t, builtin.ID[len("complete:"):], fmt.Sprint(sequence))
+
+	ordinary, created, err := after.BeginManagedToolInvocation(ctx, fence, "post-upgrade-ordinary", "web_search", map[string]any{"query": "after"})
+	require.NoError(t, err)
+	require.True(t, created)
+	require.JSONEq(t, `{"query":"after"}`, string(ordinary.ToolInput))
+	var foreignKeyFailures int
+	require.NoError(t, after.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignKeyFailures))
+	require.Zero(t, foreignKeyFailures)
+}
+
+func TestInterruptAllManagedToolInvocationsUsesGenericPresentation(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := builtinToolFixture(t)
+	active, created, err := durable.BeginManagedToolInvocation(ctx, fence, "ordinary-active", "web_search", map[string]any{"query": "retained"})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	require.NoError(t, durable.InterruptAllManagedBuiltinInvocations(ctx))
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, active.ID, page.Entries[0].ID)
+	require.Equal(t, "Web_search interrupted", page.Entries[0].Message)
+	require.Equal(t, "web_search", page.Entries[0].Presentation.ToolName)
+	require.Equal(t, "interrupted", page.Entries[0].Presentation.Outcome)
+	require.JSONEq(t, `{"query":"retained"}`, string(page.Entries[0].ToolInput))
 }
 
 func TestManagedBuiltinToolLifecycleInterruptsOnlyExactFence(t *testing.T) {

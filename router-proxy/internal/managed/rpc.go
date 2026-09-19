@@ -164,12 +164,14 @@ type ParentActivitySequenceRPC interface {
 	ParentActivitySequence() uint64
 }
 
-// BuiltinToolLifecycleEvent is the narrow, redacted native Pi lifecycle fact.
-// Its payload intentionally has no arguments, result, output, or diagnostics.
+// BuiltinToolLifecycleEvent is the narrow native Pi lifecycle fact. Start
+// events retain decoded input for Complete-history details; results, output,
+// and diagnostics remain excluded.
 type BuiltinToolLifecycleEvent struct {
 	Phase      string
 	ToolCallID string
 	ToolName   string
+	ToolInput  any
 	IsError    bool
 	Watermark  uint64
 }
@@ -2360,10 +2362,10 @@ func validOrdinaryToolName(value string) bool {
 
 // classifyRootControlEvent identifies only the documented completed hidden
 // request. It deliberately ignores partial frames and malformed candidates.
-// classifyBuiltinToolLifecycleEvent accepts the native ordered start frames for
-// the fixed local coding builtin allowlist and every exact, safely named terminal
-// frame. It deliberately ignores args, result, and every update field so no
-// private tool material can enter the manager or SQLite path.
+// classifyBuiltinToolLifecycleEvent accepts exact native ordered start and
+// terminal frames for every safely named Pi tool. It carries start input to the
+// store's pre-persistence redaction boundary while deliberately ignoring result
+// and every update field.
 func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (*BuiltinToolLifecycleEvent, bool) {
 	kind, _ := event["type"].(string)
 	if kind != "tool_execution_start" && kind != "tool_execution_end" {
@@ -2381,7 +2383,7 @@ func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (
 	if !callOK || !validBuiltinToolCallID(callID) || !toolOK {
 		return nil, true
 	}
-	if kind == "tool_execution_start" && !validBuiltinToolName(toolName) {
+	if kind == "tool_execution_start" && !validOrdinaryToolName(toolName) {
 		return nil, true
 	}
 	if kind == "tool_execution_end" && !validOrdinaryToolName(toolName) {
@@ -2390,6 +2392,7 @@ func classifyBuiltinToolLifecycleEvent(event map[string]any, watermark uint64) (
 	result := &BuiltinToolLifecycleEvent{ToolCallID: callID, ToolName: toolName, Watermark: watermark}
 	if kind == "tool_execution_start" {
 		result.Phase = "start"
+		result.ToolInput = cloneJSONValue(event["args"])
 		return result, true
 	}
 	isError, errorOK := event["isError"].(bool)

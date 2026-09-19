@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -800,6 +801,54 @@ func TestManagedHistoryUsesTheDirectPagedContract(t *testing.T) {
 	require.NoError(t, err)
 	defer invalid.Body.Close()
 	require.Equal(t, http.StatusUnprocessableEntity, invalid.StatusCode)
+}
+
+func TestManagedHistoryHTTPPreservesPresentEmptyMessageDetailsAndOmitsLegacyNulls(t *testing.T) {
+	server, durable := newManagedHTTPTestServer(t)
+	ctx := context.Background()
+	const agentID = "history-agent"
+	reserveUILiveAgent(t, durable, agentID)
+	require.NoError(t, durable.UpdateManagedAgentStarting(ctx, agentID, agentID+"-session", store.ProcessIdentityRecord{PID: 701, StartMarker: "history-marker", Incarnation: "history-incarnation"}, "history-generation"))
+	fence := store.ManagedRuntimeFence{AgentID: agentID, PiSessionID: agentID + "-session", SessionEpoch: 1, ProcessPID: 701, ProcessStartMarker: "history-marker", ProcessIncarnation: "history-incarnation", RuntimeGeneration: "history-generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, store.DefaultManagedReadinessPolicy()))
+	snapshot := store.ManagedChildSnapshot{SnapshotID: "history-snapshot", OwnerSessionID: fence.PiSessionID, Sequence: 0, Canonical: []byte(`{"owner_session_id":"history-agent-session","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"history-snapshot"}`), SHA256: strings.Repeat("b", 64)}
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, snapshot))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, fence))
+
+	legacy, err := durable.AppendManagedCompleteHistory(ctx, agentID, "managed_lifecycle", "info", "Legacy detail-free event")
+	require.NoError(t, err)
+	source := protocol.MessageSource{Kind: "agent"}
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "empty-http-body", From: "original-sender", To: agentID, Body: "", CreatedAt: "2030-01-01T00:00:00.000Z", Source: &source})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, "empty-http-body")
+	require.NoError(t, err)
+	attempt, err := durable.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.NotNil(t, attempt)
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "http-cursor"))
+	changed, history, err := durable.AcknowledgeManagedDirectResultWithHistory(ctx, *attempt, "http-receipt", true)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	response, err := http.Get(server.URL + "/v1/history?agent_id=" + agentID + "&view=complete&limit=10")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var page struct {
+		Entries []map[string]json.RawMessage `json:"entries"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&page))
+	require.Len(t, page.Entries, 2)
+	byID := make(map[string]map[string]json.RawMessage, len(page.Entries))
+	for _, entry := range page.Entries {
+		var id string
+		require.NoError(t, json.Unmarshal(entry["id"], &id))
+		byID[id] = entry
+	}
+	require.JSONEq(t, `""`, string(byID[history.ID]["message_content"]))
+	require.JSONEq(t, `"original-sender"`, string(byID[history.ID]["sender_identity"]))
+	require.NotContains(t, byID[legacy.ID], "message_content")
+	require.NotContains(t, byID[legacy.ID], "sender_identity")
 }
 
 func TestManagedRestartAllMissingManagerReturnsSafeInternalError(t *testing.T) {
