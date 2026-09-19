@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mergeAgentSources, type Agent } from "../../src/state/agent-projection";
 import type { ManagedAgent } from "../../src/protocol/types";
-import { createRouterTransport, type RouterTransport, type TransportEvent } from "../../src/transport/router-transport";
+import { createRouterTransport, LEGACY_AGENT_REFRESH_INTERVAL_MS, LEGACY_AGENT_REFRESH_RETRY_DELAY_MS, type RouterTransport, type TransportEvent } from "../../src/transport/router-transport";
 import type { FetchLike } from "../../src/transport/http-client";
 import type { SocketEvent, WebSocketFactory, WebSocketLike } from "../../src/transport/websocket-client";
 
@@ -47,22 +47,19 @@ function activityFrame(frameId: string): string {
   return JSON.stringify({ version: "v1", frame_id: frameId, type: "agent_activity", agent_id: "peer", instance_id: "peer-instance", activity_state: "active", subagent_count: 0, subagents: [], generated_at: "2030-01-01T00:00:00.000Z" });
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 3_000; attempt += 1) {
-    if (predicate()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  }
-  throw new Error("timed out waiting for refresh state");
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
-function setup(fetchImpl: FetchLike, diagnostics: Array<unknown> = []): { transport: RouterTransport; socket: RefreshSocket; events: TransportEvent[] } {
+function setup(fetchImpl: FetchLike): { transport: RouterTransport; socket: RefreshSocket; events: TransportEvent[] } {
   let socket: RefreshSocket | undefined;
   const webSocketFactory: WebSocketFactory = () => {
     socket = new RefreshSocket();
     queueMicrotask(() => { if (!socket) return; socket.readyState = 1; socket.emit("open", {}); });
     return socket;
   };
-  const transport = createRouterTransport({ routerUrl: "http://router.test", agentId: "web-ui", fetchImpl, webSocketFactory, autoReconnect: false, onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+  const transport = createRouterTransport({ routerUrl: "http://router.test", agentId: "web-ui", fetchImpl, webSocketFactory, autoReconnect: false });
   const events: TransportEvent[] = [];
   transport.subscribe((event) => events.push(event));
   transport.connect();
@@ -71,58 +68,82 @@ function setup(fetchImpl: FetchLike, diagnostics: Array<unknown> = []): { transp
   return { transport, socket, events };
 }
 
-afterEach(() => { while (transports.length > 0) transports.pop()?.close(); vi.restoreAllMocks(); });
+afterEach(() => { while (transports.length > 0) transports.pop()?.close(); vi.useRealTimers(); });
 
 describe("legacy agent refresh orchestration", () => {
-  it("coalesces repeated activity frames and commits the latest response", async () => {
-    const first = deferred<Response>();
-    const second = deferred<Response>();
-    const responses = [first, second];
+  it("loads immediately, ignores repeated activity until the next interval, then refreshes once", async () => {
+    vi.useFakeTimers();
     let agentRequests = 0;
     const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
       const path = new URL(String(input)).pathname;
       if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
       if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
-      const response = responses[agentRequests];
       agentRequests += 1;
-      if (response === undefined) return jsonResponse({ agents: [legacyAgent("legacy-latest")] });
-      return response.promise;
+      return jsonResponse({ agents: [legacyAgent(`legacy-${agentRequests}`)] });
     });
-    const { transport, socket, events } = setup(fetchImpl);
-    await waitFor(() => agentRequests === 1);
+    const { socket, events } = setup(fetchImpl);
+    await flush();
+    expect(agentRequests).toBe(1);
     for (let index = 0; index < 20; index += 1) socket.emit("message", { data: activityFrame(`activity-${index}`) });
+    await flush();
     expect(agentRequests).toBe(1);
 
-    first.resolve(jsonResponse({ agents: [legacyAgent("legacy-old")] }));
-    await waitFor(() => events.some((event) => event.type === "agents" && event.agents[0]?.agent_id === "legacy-old"));
-    await waitFor(() => agentRequests === 2);
-    second.resolve(jsonResponse({ agents: [legacyAgent("legacy-latest")] }));
-    await waitFor(() => events.filter((event) => event.type === "agents").at(-1)?.agents[0]?.agent_id === "legacy-latest");
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS - 1);
+    expect(agentRequests).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(agentRequests).toBe(2);
-    expect(events.filter((event) => event.type === "agents").at(-1)).toMatchObject({ agents: [{ agent_id: "legacy-latest" }] });
+    expect(events.filter((event) => event.type === "agents").at(-1)).toMatchObject({ agents: [{ agent_id: "legacy-2" }] });
+  });
+
+  it("keeps a slow refresh from overlapping the next interval request", async () => {
+    vi.useFakeTimers();
+    const first = deferred<Response>();
+    let agentRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
+      if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
+      agentRequests += 1;
+      return agentRequests === 1 ? first.promise : jsonResponse({ agents: [legacyAgent("legacy-latest")] });
+    });
+    const { transport } = setup(fetchImpl);
+    await flush();
+    expect(agentRequests).toBe(1);
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS);
+    expect(agentRequests).toBe(1);
+
+    first.resolve(jsonResponse({ agents: [legacyAgent("legacy-first")] }));
+    await transport.refreshAgents();
+    expect(agentRequests).toBe(1);
     transport.close();
   });
 
-  it("allows a failed refresh to retry on the next activity frame", async () => {
-    const failed = deferred<Response>();
+  it("allows one retry after an error and does not retry that retry until the next interval", async () => {
+    vi.useFakeTimers();
     let agentRequests = 0;
-    const diagnostics: Array<unknown> = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
       const path = new URL(String(input)).pathname;
       if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
       if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
       agentRequests += 1;
-      if (agentRequests === 1) return failed.promise;
-      return jsonResponse({ agents: [legacyAgent("legacy-retry")] });
+      throw new Error("agents unavailable");
     });
-    const { transport, socket, events } = setup(fetchImpl, diagnostics);
-    await waitFor(() => agentRequests === 1);
-    failed.reject(new Error("agents unavailable"));
-    await waitFor(() => diagnostics.some((diagnostic) => typeof diagnostic === "object" && diagnostic !== null && "reason" in diagnostic && diagnostic.reason === "request_failed"));
-    socket.emit("message", { data: activityFrame("retry-activity") });
-    await waitFor(() => events.some((event) => event.type === "agents" && event.agents[0]?.agent_id === "legacy-retry"));
+    const { transport } = setup(fetchImpl);
+    await flush();
+    expect(agentRequests).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
     expect(agentRequests).toBe(2);
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_RETRY_DELAY_MS * 2);
+    expect(agentRequests).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS - LEGACY_AGENT_REFRESH_RETRY_DELAY_MS * 3 - 1);
+    expect(agentRequests).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(agentRequests).toBe(3);
     transport.close();
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
+    expect(agentRequests).toBe(3);
   });
 
   it("keeps managed rows in the separate source projection during a legacy refresh", () => {
