@@ -879,8 +879,10 @@ export interface ManagedHistoryError {
   retryable: boolean;
   detail_available: boolean;
 }
-// The router supplies only a closed presentation projection. It deliberately
-// excludes raw tool arguments, output, diagnostics, and runtime identifiers.
+// The router supplies only a closed presentation projection. Exact message and
+// redacted tool-call details live on ManagedHistoryEntry, separate from this
+// concise card metadata; output, diagnostics, and runtime identifiers remain
+// excluded.
 export interface ManagedHistoryPresentation {
   kind: ManagedHistoryKind;
   tool_name?: string;
@@ -892,6 +894,7 @@ export interface ManagedHistoryPresentation {
   summary?: string;
   error?: ManagedHistoryError;
 }
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export interface ManagedHistoryEntry {
   id: string;
   agent_id: AgentId;
@@ -899,6 +902,12 @@ export interface ManagedHistoryEntry {
   level?: string;
   message?: string;
   presentation?: ManagedHistoryPresentation;
+  /** Exact inbound message body retained for Complete-history details. */
+  message_content?: string;
+  /** Exact sender value associated with message_content. */
+  sender_identity?: string;
+  /** Router-redacted decoded input for a tool invocation. */
+  tool_input?: JsonValue;
 }
 export interface ManagedAgentsSnapshotFrame {
   type: "managed_agents_snapshot";

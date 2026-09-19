@@ -93,7 +93,7 @@ describe("protocol guards", () => {
     expect(isManagedAgent({ ...managedAgent, updated_at: "2026-09-09T09:48:28.4142040030Z" })).toBe(false);
   });
 
-  it("accepts only closed, redacted Complete history metadata", () => {
+  it("accepts bounded Complete history details while keeping presentation metadata closed", () => {
     const entry = { id: "complete:1", agent_id: "managed-alpha", at: "2026-09-09T09:48:28Z", level: "info", message: "Ran bash", presentation: { kind: "tool", tool_name: "functions.bash", outcome: "success", summary: "Completed successfully" } };
     expect(isManagedHistoryEntry(entry)).toBe(true);
     for (const outcome of ["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown"]) {
@@ -104,6 +104,18 @@ describe("protocol guards", () => {
     expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, tool_name: "bash --private-argument" } })).toBe(false);
     expect(isManagedCompleteHistoryEntry({ ...entry, message: "token=private" })).toBe(false);
     expect(isManagedHistoryEntry({ ...entry, message: "token=ordinary-message-content" })).toBe(true);
+
+    expect(isManagedCompleteHistoryEntry({
+      ...entry,
+      message: "Message received",
+      message_content: "token=the exact inbound body is allowed here",
+      sender_identity: "discord:operations-user",
+      tool_input: { path: "/workspace/report.md", offset: 2, nested: [true, null, "[REDACTED]"] },
+    })).toBe(true);
+    expect(isManagedHistoryEntry({ ...entry, sender_identity: "x".repeat(129) })).toBe(false);
+    expect(isManagedHistoryEntry({ ...entry, tool_input: { invalid: Number.POSITIVE_INFINITY } })).toBe(false);
+    expect(isManagedHistoryEntry({ ...entry, tool_input: { invalid: () => undefined } })).toBe(false);
+    expect(isManagedHistoryEntry({ ...entry, message_content: "body", unexpected_detail: true })).toBe(false);
   });
 
   it("accepts only bounded provider-auth live frames", () => {

@@ -191,6 +191,19 @@ func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *tes
 	require.Equal(t, "managed_agents_snapshot", gap["type"])
 }
 
+func TestManagedHistoryFramePreservesPresentEmptyMessageDetails(t *testing.T) {
+	emptyBody := ""
+	sender := "original-sender"
+	frame := managedHistoryFrame(store.ManagedHistoryEntry{ID: "complete:1", AgentID: "agent", At: "2030-01-01T00:00:00.000Z", Level: "info", Message: "Message received", MessageContent: &emptyBody, SenderIdentity: &sender})
+	require.Contains(t, frame, "message_content")
+	require.Equal(t, "", frame["message_content"])
+	require.Equal(t, sender, frame["sender_identity"])
+
+	legacy := managedHistoryFrame(store.ManagedHistoryEntry{ID: "complete:2", AgentID: "agent", At: "2030-01-01T00:00:00.000Z", Level: "info", Message: "Legacy event"})
+	require.NotContains(t, legacy, "message_content")
+	require.NotContains(t, legacy, "sender_identity")
+}
+
 func TestManagedLifecycleHistoryFactsSuppressGenericLifecycleProgress(t *testing.T) {
 	prior := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "starting", "activity_state": "starting", "pi_session_id": "private"}, "gone": {"lifecycle_state": "stopped"}}}
 	current := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "activity_state": "idle", "pi_session_id": "still-private"}, "beta": {"lifecycle_state": "starting"}}}
@@ -308,5 +321,6 @@ func TestRouterServesContainedStaticUIWithoutAuthorityState(t *testing.T) {
 	require.Empty(t, response.Header().Get("Access-Control-Allow-Credentials"))
 	csp := response.Header().Get("Content-Security-Policy")
 	require.Contains(t, csp, "connect-src 'self'")
-	require.Contains(t, csp, "img-src 'self' data: https://robohash.org")
+	require.Contains(t, csp, "img-src 'self' data:")
+	require.NotContains(t, csp, "robohash.org")
 }

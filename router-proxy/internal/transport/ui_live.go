@@ -289,6 +289,15 @@ func managedHistoryFrame(entry store.ManagedHistoryEntry) map[string]any {
 	if entry.Presentation != nil {
 		frame["presentation"] = entry.Presentation
 	}
+	if entry.MessageContent != nil {
+		frame["message_content"] = *entry.MessageContent
+	}
+	if entry.SenderIdentity != nil {
+		frame["sender_identity"] = *entry.SenderIdentity
+	}
+	if len(entry.ToolInput) > 0 {
+		frame["tool_input"] = entry.ToolInput
+	}
 	return frame
 }
 
@@ -480,7 +489,7 @@ func (h *uiLiveHub) publishHistory(view string, raw map[string]any) {
 		return
 	}
 	entry := map[string]any{}
-	for _, key := range []string{"id", "agent_id", "at", "level", "message", "presentation"} {
+	for _, key := range []string{"id", "agent_id", "at", "level", "message", "presentation", "message_content", "sender_identity", "tool_input"} {
 		if value, ok := raw[key]; ok {
 			entry[key] = value
 		}

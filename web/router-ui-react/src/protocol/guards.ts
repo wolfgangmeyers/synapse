@@ -64,6 +64,7 @@ import type {
   ManagedChild,
   ManagedChildrenProjection,
   ManagedHistoryEntry,
+  JsonValue,
 } from "./types";
 
 type RecordValue = Record<string, unknown>;
@@ -223,14 +224,40 @@ function isManagedHistoryPresentation(value: unknown): boolean {
   if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown"].includes(value.child_state))) return false;
   return (value.summary === undefined || isSafeManagedHistoryString(value.summary, 1, 512)) && (value.error === undefined || isManagedHistoryError(value.error));
 }
+function isJsonValue(value: unknown, ancestors = new Set<object>(), depth = 0): value is JsonValue {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (depth >= 64 || typeof value !== "object") return false;
+  if (ancestors.has(value)) return false;
+  ancestors.add(value);
+  const valid = Array.isArray(value)
+    ? value.every((item) => isJsonValue(item, ancestors, depth + 1))
+    : isRecord(value)
+      && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+      && Object.values(value).every((item) => isJsonValue(item, ancestors, depth + 1));
+  ancestors.delete(value);
+  return valid;
+}
+function isManagedHistoryToolInput(value: unknown): value is JsonValue {
+  if (!isJsonValue(value)) return false;
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded !== undefined && new TextEncoder().encode(encoded).byteLength <= 4 * 1024 * 1024;
+  } catch {
+    return false;
+  }
+}
 export function isManagedHistoryEntry(value: unknown): value is ManagedHistoryEntry {
-  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message", "presentation"])
+  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message", "presentation", "message_content", "sender_identity", "tool_input"])
     && isSafeString(value.id, 1, 128)
     && isAgentId(value.agent_id)
     && (value.at === undefined || isRouterUtcTimestamp(value.at))
     && (value.level === undefined || isSafeString(value.level, 1, 64))
     && (value.message === undefined || isSafeString(value.message, 0, 65536))
-    && (value.presentation === undefined || isManagedHistoryPresentation(value.presentation));
+    && (value.presentation === undefined || isManagedHistoryPresentation(value.presentation))
+    && (value.message_content === undefined || isSafeString(value.message_content, 0, 65536))
+    && (value.sender_identity === undefined || isSafeString(value.sender_identity, 1, 128))
+    && (value.tool_input === undefined || isManagedHistoryToolInput(value.tool_input));
 }
 export function isManagedCompleteHistoryEntry(value: unknown): value is ManagedHistoryEntry {
   return isManagedHistoryEntry(value) && (value.message === undefined || isSafeManagedHistoryString(value.message, 0, 512));

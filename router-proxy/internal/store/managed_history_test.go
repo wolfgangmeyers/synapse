@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -117,6 +119,31 @@ func TestManagedHistorySynthesizesStructuredPresentationForLegacyRows(t *testing
 	require.NoError(t, err)
 	require.Len(t, page.Entries, 1)
 	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", Outcome: "completed"}, page.Entries[0].Presentation)
+	require.Nil(t, page.Entries[0].MessageContent)
+	require.Nil(t, page.Entries[0].SenderIdentity)
+	encoded, err := json.Marshal(page.Entries[0])
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "message_content")
+	require.NotContains(t, string(encoded), "sender_identity")
+}
+
+func TestMigration052PreservesLegacyHistoryDetailsAsAbsent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "router.db")
+	migrations := DefaultMigrations()
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "052_managed_history_message_content")]})
+	require.NoError(t, err)
+	_, err = before.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,NULL)`, "legacy-worker", "managed_lifecycle", "info", "Legacy event", "2030-01-01T00:00:00.000Z", "legacy-before-052")
+	require.NoError(t, err)
+	require.NoError(t, before.Close())
+
+	after, err := Open(ctx, path, Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, after.Close()) })
+	var contentNull, senderNull int
+	require.NoError(t, after.db.QueryRowContext(ctx, `SELECT message_content IS NULL,sender_identity IS NULL FROM managed_complete_history WHERE event_key='legacy-before-052'`).Scan(&contentNull, &senderNull))
+	require.Equal(t, 1, contentNull)
+	require.Equal(t, 1, senderNull)
 }
 
 func TestManagedHistoryRejectsInvalidInputs(t *testing.T) {

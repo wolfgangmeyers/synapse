@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 afterEach(cleanup);
 import { AppShell } from "../../src/components/AppShell";
+import { avatarForAgent } from "../../src/components/AgentAvatar";
 import { ConversationHeader } from "../../src/components/ConversationHeader";
 import { ModelPicker } from "../../src/components/ModelPicker";
 import type { ModelSummary } from "../../src/domain/models";
@@ -35,10 +36,10 @@ describe("AppShell", () => {
     expect(banner.querySelector(".model-current")).toHaveTextContent("fixture-provider/fixture-model");
   });
 
-  it("uses the selected agent ID as the deterministic RoboHash seed", () => {
+  it("uses the selected agent ID to select its bundled avatar", () => {
     const agent: Agent = { agent_id: "fixture peer", activity_state: "idle" };
     const { container } = render(<ConversationHeader agent={agent} />);
-    expect(container.querySelector(".avatar img")).toHaveAttribute("src", "https://robohash.org/fixture%20peer?set=set1");
+    expect(container.querySelector(".avatar img")).toHaveAttribute("src", avatarForAgent(agent.agent_id).src);
   });
 
   it("keeps selected-peer actions inside the heading after the status", () => {
@@ -67,6 +68,21 @@ describe("AppShell", () => {
     expect(banner.querySelector("button[aria-label='Inline tool settings']")).toBeInTheDocument();
     expect(banner.querySelector(".peer-heading > p")).toHaveClass("peer-activity");
     expect(banner.querySelector(".peer-heading > p")).not.toHaveTextContent("fixture-peer");
+  });
+
+  it("uses compact semantic icons while retaining action labels", () => {
+    const agent: Agent = { agent_id: "fixture-peer", activity_state: "idle", subagent_count: 0, subagents: [] };
+    render(<ConversationHeader agent={agent} onGoal={() => undefined} onReminders={() => undefined} onInlineToolSettings={() => undefined} />);
+
+    const goal = screen.getByRole("button", { name: "Set goal" });
+    const reminder = screen.getByRole("button", { name: "Add reminder" });
+    const settings = screen.getByRole("button", { name: "Inline tool settings" });
+    expect(goal).toHaveAttribute("title", "Set goal");
+    expect(goal.querySelector(".fa-flag")).toBeInTheDocument();
+    expect(reminder).toHaveAttribute("title", "Add reminder");
+    expect(reminder.querySelector(".fa-clock")).toBeInTheDocument();
+    expect(settings).toHaveAttribute("title", "Inline tool settings");
+    expect(settings.querySelector(".fa-sliders")).toBeInTheDocument();
   });
 
   it("keeps the agent-scoped Logs action in the conversation header", () => {
