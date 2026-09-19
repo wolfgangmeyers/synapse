@@ -59,6 +59,7 @@ func parseConfig(args []string) (config, error) {
 	var managedEnabled bool
 	flags.BoolVar(&managedEnabled, "managed", true, "enable router-managed Pi launches (set false to preserve legacy-only routing)")
 	var managedPi, managedHome, managedPiAgentDir, managedSession, managedManifest, managedExtension, managedSubagents, managedCursorExtension, managedAuthHelper, managedRuntimeRoot, managedRoots, managedRecipient string
+	var allowManagedLaunchRecipeMismatch bool
 	flags.StringVar(&managedPi, "managed-pi", "", "installed Pi executable")
 	flags.StringVar(&managedHome, "managed-home", "", "managed Pi HOME root")
 	flags.StringVar(&managedPiAgentDir, "managed-pi-agent-dir", "", "existing ordinary Pi agent directory")
@@ -71,6 +72,7 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&managedRuntimeRoot, "managed-runtime-root", "", "checked project runtime root")
 	flags.StringVar(&managedRoots, "managed-cwd-roots", "", "comma-separated allowed working-directory roots (defaults to the current user home)")
 	flags.StringVar(&managedRecipient, "managed-quiet-recipient", "", "canonical quiet recipient")
+	flags.BoolVar(&allowManagedLaunchRecipeMismatch, "managed-allow-launch-recipe-mismatch", false, "allow recovery when the current launch recipe SHA differs from the stored recipe")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -112,7 +114,7 @@ func parseConfig(args []string) (config, error) {
 		}
 		roots = []string{home}
 	}
-	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, RouterURL: managedRouterURL, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
+	result.managed = managed.Config{Enabled: managedEnabled, AllowManagedLaunchRecipeMismatch: allowManagedLaunchRecipeMismatch, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, RouterURL: managedRouterURL, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
