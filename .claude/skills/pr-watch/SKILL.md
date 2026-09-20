@@ -5,9 +5,15 @@ description: "Watch assigned GitHub pull requests and run the required review wo
 
 # PR Watch Skill
 
-This skill runs in the dedicated agent that watches PRs and reviews them.
+This skill runs the end-to-end requested-review loop: scan, dispatch, review, and
+GitHub disposition. `pr-watch` owns the work. The supervisor receives final
+results and genuine exceptions only.
 
-`watch_prs.py` owns selection and report generation. It cannot execute an agent review or post a review. The receiving agent must run `review-pr` for every backend PR selected in the report. It does not route the configured organization's `web-app` or `web-app-lseg` repositories for review.
+`watch_prs.py` owns selection, current-head state, and report generation. For
+every selected PR, this agent must autonomously launch or hand off the required
+`review-pr` workflow using `gpt-5.6-luna`, then record the resulting GitHub
+disposition. It does not route the configured organization's `web-app` or
+`web-app-lseg` repositories for review.
 
 ## Scan
 
@@ -32,18 +38,27 @@ python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --dry-run
 
 ## Review
 
-For each selected PR, run the complete `review-pr` skill workflow. Do not post
-to GitHub outside that workflow.
+For each selected PR, autonomously launch or hand off the complete `review-pr`
+skill workflow with `gpt-5.6-luna`. Do not post to GitHub outside that workflow.
+The handoff must include the repository, PR number, and selected head SHA.
+
+Track the selected head through the review. Before posting, verify that the PR
+still has that exact head. If it changed, do not post a stale disposition:
+record the new head and dispatch a fresh review instead.
 
 Use only mecha-review personas for `robot-review`. Select relevant focus areas
 and give each persona two or three related areas. Record a concrete PR-specific
 reason for every skipped candidate area in the focus split ledger. Include an
 area when there is no reason to skip it. A different persona must validate each
-finding before it is included in the review.
+finding before it is included in the review. Never review a PR Wolfgang
+authored.
 
-All findings are `COMMENT`-only. Never use `REQUEST_CHANGES`. Approve only
-when the review evidence supports it. Do not push, merge, undraft, or change PR
-metadata.
+Deliver an actual GitHub disposition for every completed review: `COMMENT` for
+validated non-blocking findings, or `APPROVE` when the evidence supports it.
+Never use `REQUEST_CHANGES`. Do not push, merge, undraft, or change PR metadata.
+Release PRs are special: never submit `REQUEST_CHANGES`; report true product
+safety blockers as a non-blocking `COMMENT`, and handle mechanical release
+artifact fixes through the authorized release workflow.
 
 ## What It Watches
 
@@ -85,6 +100,10 @@ PR_WATCH_STATE_DIR=~/.mecha-developer/pr-watch
 PR_WATCH_VIEWER=wolfgangmeyers
 PR_WATCH_MAIL_TO=supervisor
 ```
+
+Mailbox is for final dispositions, changed-head re-dispatches, and genuine
+exceptions. Do not send routine requested-review work to the supervisor for
+dispatch.
 
 ## Maintenance
 
