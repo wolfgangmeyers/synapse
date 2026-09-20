@@ -100,6 +100,10 @@ func (s *Store) applyManagedRestartRetryMigration057(ctx context.Context, migrat
 	if foreignKeys != 1 {
 		return errors.New("migration 057 requires foreign_keys=1")
 	}
+	baselineForeignKeys, err := captureManagedForeignKeyViolations(ctx, s.db)
+	if err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
 		return err
 	}
@@ -175,12 +179,12 @@ func (s *Store) applyManagedRestartRetryMigration057(ctx context.Context, migrat
 			return fail(fmt.Errorf("restore migration 057 index: %w", err), true)
 		}
 	}
-	var foreignProblems int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems); err != nil {
+	afterForeignKeys, err := captureManagedForeignKeyViolations(ctx, s.db)
+	if err != nil {
 		return fail(err, true)
 	}
-	if foreignProblems != 0 {
-		return fail(errors.New("migration 057 foreign key check failed"), true)
+	if err := validateManagedForeignKeyDelta057(baselineForeignKeys, afterForeignKeys); err != nil {
+		return fail(err, true)
 	}
 	var integrity string
 	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
@@ -203,15 +207,96 @@ func (s *Store) applyManagedRestartRetryMigration057(ctx context.Context, migrat
 		_ = s.db.Close()
 		return err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems); err != nil || foreignProblems != 0 {
+	afterCommitForeignKeys, err := captureManagedForeignKeyViolations(ctx, s.db)
+	if err != nil {
 		s.closed = true
 		_ = s.db.Close()
-		if err != nil {
-			return err
-		}
-		return errors.New("migration 057 post-commit foreign key check failed")
+		return err
+	}
+	if err := validateManagedForeignKeyDelta057(baselineForeignKeys, afterCommitForeignKeys); err != nil {
+		s.closed = true
+		_ = s.db.Close()
+		return fmt.Errorf("migration 057 post-commit foreign key check failed: %w", err)
 	}
 	return chmodStateFiles(s.path)
+}
+
+type managedForeignKeyViolation struct {
+	table, parent string
+	rowID         int64
+	hasRowID      bool
+	foreignKeyID  int64
+}
+
+func captureManagedForeignKeyViolations(ctx context.Context, db *sql.DB) ([]managedForeignKeyViolation, error) {
+	rows, err := db.QueryContext(ctx, `SELECT "table",rowid,parent,fkid FROM pragma_foreign_key_check ORDER BY "table",rowid,parent,fkid`)
+	if err != nil {
+		return nil, err
+	}
+	var violations []managedForeignKeyViolation
+	for rows.Next() {
+		var violation managedForeignKeyViolation
+		var rowID sql.NullInt64
+		var parent sql.NullString
+		if err := rows.Scan(&violation.table, &rowID, &parent, &violation.foreignKeyID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if rowID.Valid {
+			violation.rowID, violation.hasRowID = rowID.Int64, true
+		}
+		if parent.Valid {
+			violation.parent = parent.String
+		}
+		violations = append(violations, violation)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return violations, nil
+}
+
+func managedForeignKeyViolationKey(violation managedForeignKeyViolation) string {
+	return fmt.Sprintf("%s|%t|%d|%s|%d", violation.table, violation.hasRowID, violation.rowID, violation.parent, violation.foreignKeyID)
+}
+
+func managedLifecycleForeignKeyViolation057(violation managedForeignKeyViolation) bool {
+	switch violation.table {
+	case "managed_lifecycle_actions", "managed_lifecycle_batch_items", "managed_session_artifacts", "managed_termination_diagnostics":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateManagedForeignKeyDelta057(baseline, after []managedForeignKeyViolation) error {
+	baselineUnrelated := make(map[string]struct{}, len(baseline))
+	for _, violation := range baseline {
+		if !managedLifecycleForeignKeyViolation057(violation) {
+			baselineUnrelated[managedForeignKeyViolationKey(violation)] = struct{}{}
+		}
+	}
+	afterUnrelated := make(map[string]struct{}, len(after))
+	for _, violation := range after {
+		if managedLifecycleForeignKeyViolation057(violation) {
+			return fmt.Errorf("migration 057 left lifecycle foreign-key violation in %s", violation.table)
+		}
+		key := managedForeignKeyViolationKey(violation)
+		if _, exists := baselineUnrelated[key]; !exists {
+			return fmt.Errorf("migration 057 introduced foreign-key violation in %s", violation.table)
+		}
+		afterUnrelated[key] = struct{}{}
+	}
+	for key := range baselineUnrelated {
+		if _, exists := afterUnrelated[key]; !exists {
+			return errors.New("migration 057 removed a pre-existing unrelated foreign-key violation")
+		}
+	}
+	return nil
 }
 
 const managedLifecycleOrphanRepairMigration059ID = "059_managed_lifecycle_orphan_repair"
@@ -242,6 +327,10 @@ func (s *Store) applyManagedLifecycleOrphanRepairMigration059(ctx context.Contex
 	}
 	if foreignKeys != 1 {
 		return errors.New("migration 059 requires foreign_keys=1")
+	}
+	baselineForeignKeys, err := captureManagedForeignKeyViolations(ctx, s.db)
+	if err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
 		return err
@@ -279,12 +368,12 @@ func (s *Store) applyManagedLifecycleOrphanRepairMigration059(ctx context.Contex
 	if err := s.repairManagedLifecycleForeignKeys059(ctx); err != nil {
 		return fail(fmt.Errorf("migration 059 orphan repair: %w", err), true)
 	}
-	var foreignProblems int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems); err != nil {
+	afterForeignKeys, err := captureManagedForeignKeyViolations(ctx, s.db)
+	if err != nil {
 		return fail(err, true)
 	}
-	if foreignProblems != 0 {
-		return fail(errors.New("migration 059 foreign key check failed"), true)
+	if err := validateManagedForeignKeyDelta057(baselineForeignKeys, afterForeignKeys); err != nil {
+		return fail(fmt.Errorf("migration 059 foreign key check failed: %w", err), true)
 	}
 	var integrity string
 	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
@@ -304,13 +393,16 @@ func (s *Store) applyManagedLifecycleOrphanRepairMigration059(ctx context.Contex
 		_ = s.db.Close()
 		return err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems); err != nil || foreignProblems != 0 {
+	afterCommitForeignKeys, err := captureManagedForeignKeyViolations(ctx, s.db)
+	if err != nil {
 		s.closed = true
 		_ = s.db.Close()
-		if err != nil {
-			return err
-		}
-		return errors.New("migration 059 post-commit foreign key check failed")
+		return err
+	}
+	if err := validateManagedForeignKeyDelta057(baselineForeignKeys, afterCommitForeignKeys); err != nil {
+		s.closed = true
+		_ = s.db.Close()
+		return fmt.Errorf("migration 059 post-commit foreign key check failed: %w", err)
 	}
 	return chmodStateFiles(s.path)
 }
