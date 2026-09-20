@@ -82,7 +82,7 @@ describe("AppShell", () => {
     expect(reminder).toHaveAttribute("title", "Add reminder");
     expect(reminder.querySelector(".fa-clock")).toBeInTheDocument();
     expect(settings).toHaveAttribute("title", "Inline tool settings");
-    expect(settings.querySelector(".fa-sliders")).toBeInTheDocument();
+    expect(settings.querySelector(".fa-gear")).toBeInTheDocument();
   });
 
   it("keeps the agent-scoped Logs action in the conversation header", () => {
