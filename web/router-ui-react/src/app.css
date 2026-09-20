@@ -230,11 +230,11 @@ p:empty { display: none; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
-  min-width: 18px;
-  min-height: 18px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
   margin: 0;
   padding: 0;
   border: 1px solid rgba(181,188,208,0.34);
@@ -244,7 +244,7 @@ p:empty { display: none; }
   font-size: 0;
   line-height: 1;
 }
-.goal-header-button i { font-size: 9px; }
+.goal-header-button i { font-size: 11px; }
 .goal-header-button.has-goal {
   border-color: rgba(244,114,182,0.66);
   background: rgba(190,24,93,0.34);
@@ -389,17 +389,17 @@ p:empty { display: none; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
-  min-width: 18px;
-  min-height: 18px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
   padding: 0;
   border: 1px solid rgba(120,224,205,0.58);
   border-radius: 999px;
   background: rgba(36,132,120,0.34);
   color: #b9f5e7;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 800;
   line-height: 1;
 }
@@ -690,7 +690,7 @@ p:empty { display: none; }
 .peer-heading h2 .working-indicator.inline { position: static; transform: none; width: 22px; height: 22px; right: auto; top: auto; flex: 0 0 22px; }
 .peer-heading h2 .goal-header-button,
 .peer-heading h2 .reminder-indicator,
-.peer-heading h2 .inline-tool-settings-button { flex: 0 0 18px; }
+.peer-heading h2 .inline-tool-settings-button,
 .peer-heading h2 .logs-header-button,
 .peer-heading h2 .managed-agent-header-button { flex: 0 0 24px; }
 .logs-header-button {
@@ -717,17 +717,17 @@ p:empty { display: none; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  min-width: 18px;
-  min-height: 18px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
   margin: 0;
   padding: 0;
   border: 1px solid rgba(181,188,208,0.34);
   border-radius: 999px;
   background: rgba(181,188,208,0.12);
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1;
 }
 .managed-agent-header-button {
