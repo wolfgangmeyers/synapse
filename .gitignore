@@ -35,3 +35,4 @@ VERIFY.md
 .claude/cache/
 .worktrees/
 harness/router.db
+web/router-ui-react/coverage/
