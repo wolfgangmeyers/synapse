@@ -24,6 +24,12 @@ The launcher also enables the read-only tmux/router audit. It checks the existin
 
 Router-managed Pi launch is enabled by default. Set `MECHA_ROUTER_MANAGED=false` to run the legacy router without managed-worker routes; other values are rejected before startup. Enabled mode needs a usable Pi executable, managed home and contained session root, generated manifest, mecha-rpc and pi-subagents entry files, allowed working-directory roots, and a quiet recipient. The normal launcher allows the current user's home directory, so local project folders are selectable without opening the rest of the filesystem. Set `MECHA_ROUTER_MANAGED_CWD_ROOTS` only when a different explicit scope is required. Its built-in fallback catalog uses `openai-codex/gpt-5.6-sol` and makes `openai-codex/gpt-6-astra` available for larger or more difficult tasks. The launcher creates the managed home and session directories with mode `0700`; it does not create tmux windows. Worker routes are locally unauthenticated direct controls for callers that can reach the router. They do not use a UI session, CSRF token, helper, Cursor extension, built UI, version pin, or content hash.
 
+## Shutdown ownership
+
+`tools/run_router.sh` only execs the `make ... run-router` chain. It does not install or stop a service. `cmd/mailbox-router/main.go` handles `SIGINT` and `SIGTERM` and calls `Router.Close`; `internal/transport/router.go` calls `Manager.Close`, which closes managed child RPC/processes. The external signal source is outside this repository, so issue #31's `SIGTERM` attribution remains unknown.
+
+`router-proxy/main.go` can shut down the optional proxy HTTP server, but it does not stop the upstream router. There is no checked-in service definition or stop command. Checked-in `launchctl kickstart` usages are for start/recovery only.
+
 ## Build and run the proxy
 
 ```bash

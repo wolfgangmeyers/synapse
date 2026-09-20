@@ -4192,6 +4192,38 @@ func (s *Store) markManagedFailedForFence(ctx context.Context, fence ManagedRunt
 	}
 	return s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
+		if operationID != "" {
+			// The launch link is the ownership fence for the replay row. Check it
+			// before changing the agent so a stale callback cannot fail a newer
+			// launch that happens to reuse the same agent id.
+			hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+			if err != nil {
+				return err
+			}
+			if !hasLink {
+				return &ManagedRestartStaleError{AgentID: fence.AgentID}
+			}
+			var owner sql.NullString
+			if err := s.db.QueryRowContext(ctx, `SELECT launch_operation_id FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running'`, managedFenceValues(fence)...).Scan(&owner); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return &ManagedRestartStaleError{AgentID: fence.AgentID}
+				}
+				return err
+			}
+			if !owner.Valid || owner.String != operationID {
+				return &ManagedRestartStaleError{AgentID: fence.AgentID}
+			}
+			var operationState string
+			if err := s.db.QueryRowContext(ctx, `SELECT state FROM managed_http_operations WHERE operation_id=?`, operationID).Scan(&operationState); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return &ManagedRestartStaleError{AgentID: fence.AgentID}
+				}
+				return err
+			}
+			if operationState != "pending" && operationState != "terminal" {
+				return &ManagedRestartStaleError{AgentID: fence.AgentID}
+			}
+		}
 		args := append([]any{code, message, now, now}, managedFenceValues(fence)...)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='failed',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state!='failed'`, args...)
 		if err != nil {
@@ -4201,7 +4233,21 @@ func (s *Store) markManagedFailedForFence(ctx context.Context, fence ManagedRunt
 		if err != nil {
 			return err
 		}
-		if changed != 1 {
+		agentChanged := changed == 1
+		if changed == 0 && operationID != "" {
+			// A repeated callback after the first fenced write is idempotent only
+			// when the exact row already carries the same failure.
+			var existingCode string
+			if err := s.db.QueryRowContext(ctx, `SELECT last_error_code FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='failed'`, managedFenceValues(fence)...).Scan(&existingCode); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return &ManagedRestartStaleError{AgentID: fence.AgentID}
+				}
+				return err
+			}
+			if existingCode != code {
+				return &ManagedRestartStaleError{AgentID: fence.AgentID}
+			}
+		} else if changed != 1 {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
 		if operationID != "" {
@@ -4214,11 +4260,20 @@ func (s *Store) markManagedFailedForFence(ctx context.Context, fence ManagedRunt
 				return err
 			}
 			if changed != 1 {
-				return errors.New("managed launch operation is not pending")
+				var terminal string
+				if err := s.db.QueryRowContext(ctx, `SELECT state FROM managed_http_operations WHERE operation_id=?`, operationID).Scan(&terminal); err != nil || terminal != "terminal" {
+					if err != nil {
+						return err
+					}
+					return &ManagedRestartStaleError{AgentID: fence.AgentID}
+				}
 			}
 		}
-		_, err = s.bumpManagedProjectionVersion(ctx)
-		return err
+		if agentChanged || changed == 1 {
+			_, err = s.bumpManagedProjectionVersion(ctx)
+			return err
+		}
+		return nil
 	})
 }
 

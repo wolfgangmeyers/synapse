@@ -256,6 +256,67 @@ func TestMarkManagedFailedForFenceAndOperationIsAtomic(t *testing.T) {
 	require.True(t, stored.SlotHeld)
 }
 
+func TestMarkManagedFailedForFenceAndOperationAcceptsPendingAndTerminalOwners(t *testing.T) {
+	ctx := context.Background()
+	for _, terminal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending", true: "terminal"}[terminal], func(t *testing.T) {
+			durable, fence := readinessSourceFixture(t)
+			if terminal {
+				require.NoError(t, durable.MarkManagedOperationTerminal(ctx, "source-launch"))
+			}
+			before, err := durable.GetProjectionVersion(ctx)
+			require.NoError(t, err)
+			require.NoError(t, durable.MarkManagedFailedForFenceAndOperation(ctx, fence, "source-launch", "PROCESS_STOP_FAILED", "stop failed"))
+			after, err := durable.GetProjectionVersion(ctx)
+			require.NoError(t, err)
+			require.Equal(t, before+1, after)
+			agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+			require.NoError(t, err)
+			require.Equal(t, "failed", agent.LifecycleState)
+			op, err := durable.ManagedOperation(ctx, "source-launch")
+			require.NoError(t, err)
+			require.Equal(t, "terminal", op.State)
+		})
+	}
+}
+
+func TestMarkManagedFailedForFenceAndOperationRejectsWrongOwnerAtomically(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	other := ManagedAgentRecord{AgentID: "other-owner", Name: "other-owner", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "other-session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
+	otherOperation := ManagedOperation{OperationID: "wrong-owner", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "wrong-owner", CanonicalBodyHash: "other-body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, durable.ReserveManagedLaunch(ctx, other, otherOperation))
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	_, err = durable.db.ExecContext(ctx, `UPDATE managed_agents SET launch_operation_id=? WHERE agent_id=?`, "wrong-owner", fence.AgentID)
+	require.NoError(t, err)
+	err = durable.MarkManagedFailedForFenceAndOperation(ctx, fence, "source-launch", "PROCESS_STOP_FAILED", "stop failed")
+	require.ErrorAs(t, err, new(*ManagedRestartStaleError))
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "starting", agent.LifecycleState)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
+func TestMarkManagedFailedForFenceAndOperationRejectsStaleFenceAtomically(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	stale := fence
+	stale.ProcessIncarnation = "replacement-incarnation"
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	err = durable.MarkManagedFailedForFenceAndOperation(ctx, stale, "source-launch", "PROCESS_STOP_FAILED", "stop failed")
+	require.ErrorAs(t, err, new(*ManagedRestartStaleError))
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "starting", agent.LifecycleState)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 func TestMarkManagedStoppedClearsLiveProjectionAndSlot(t *testing.T) {
 	ctx := context.Background()
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})

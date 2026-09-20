@@ -400,6 +400,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 			}
 			continue
 		}
+		if migration.ID == managedRestartRetryMigration057ID {
+			if err := s.applyManagedRestartRetryMigration057(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
+		}
 		if err := s.runImmediate(ctx, func() error {
 			if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 				id TEXT PRIMARY KEY,

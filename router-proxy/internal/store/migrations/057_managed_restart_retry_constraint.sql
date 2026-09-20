@@ -1,0 +1,4 @@
+-- Migration 027 is historical and must remain byte-for-byte stable for fresh
+-- installs. SQLite cannot alter a CHECK constraint, so the store's dedicated
+-- migration runner rebuilds this table while preserving its current columns,
+-- indexes, rows, and foreign-key graph before widening retry_of for restarts.
