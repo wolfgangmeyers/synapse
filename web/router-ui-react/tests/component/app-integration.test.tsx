@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "../../src/App";
 import { createInitialState } from "../../src/state/app-state";
-import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
+import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTER_ALIASES_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
 import { MANAGED_RECENT_FOLDERS_KEY } from "../../src/persistence/managed-folder-history";
 import { HistoryRepository } from "../../src/persistence/history-repository";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
@@ -335,6 +335,20 @@ describe("App integration", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Router persisted-router.test:43123/ })).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "Connect Mecha" })).not.toBeInTheDocument();
     expect(document.querySelector(".router-row.active")).toHaveTextContent("persisted-router.test:43123");
+  });
+
+  it("renders the configured router alias in the sidebar selector", async () => {
+    const storage = new MemoryStorage();
+    const routerUrl = "http://persisted-router.test:43123";
+    storage.setItem(ACTIVE_ROUTER_KEY, routerUrl);
+    storage.setItem(ROUTERS_KEY, JSON.stringify([routerUrl]));
+    storage.setItem(ROUTER_ALIASES_KEY, JSON.stringify({ [routerUrl]: "Production router" }));
+
+    render(<App storage={storage} connect={false} />);
+
+    const selector = await screen.findByRole("button", { name: "Router Production router and provider sign-in settings" });
+    expect(selector).toHaveTextContent("Production router");
+    expect(selector).not.toHaveTextContent("persisted-router.test:43123");
   });
 
   it("moves a saved same-host router connection onto the Web UI proxy", async () => {

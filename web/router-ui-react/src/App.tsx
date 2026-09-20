@@ -34,7 +34,7 @@ import { PromptTemplateDialog } from "./components/PromptTemplateDialog";
 import { ArrivalDialog } from "./components/ArrivalDialog";
 import { ModelPicker } from "./components/ModelPicker";
 import type { ImageInput } from "./domain/images";
-import type { SavedRouter } from "./domain/router-manager";
+import { routerDisplayName, type SavedRouter } from "./domain/router-manager";
 import { promptTemplateUpdatePayload, type PromptTemplate } from "./domain/prompt-templates";
 import { runPromptTemplateImport, type PromptTemplateImportProgress, type PromptTemplateImportResult } from "./domain/prompt-template-import";
 import { DEFAULT_GOAL_STATE, goalErrorMessage, type GoalControlSettings, type GoalState } from "./domain/goals";
@@ -552,7 +552,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const saveRouter = (router: SavedRouter, previousUrl?: string): void => { setSettings((current) => { let next = previousUrl === undefined || previousUrl !== router.url ? setActiveRouter(current, router.url) : current; next = setRouterAlias(next, router.url, router.alias ?? ""); next = setAgentId(next, router.url, router.agentId); settingsRepository.save(next); return next; }); };
   const selectRouter = (router: SavedRouter): void => { setSettings((current) => setActiveRouter(current, router.url)); setDialog(undefined); };
   const removeRouter = (url: string): void => { setSettings((current) => removeSavedRouter(current, url)); };
-  const routerLabel = new URL(activeUrl).host;
+  const routerLabel = routerDisplayName(activeUrl, settings.aliases[activeUrl]);
   const modelOptions = selectedAgent?.source === "router-managed" ? managedHeaderModels : selectModels(selectedAgent);
   const selectedModel = normalizeModelSummary(selectedAgent?.current_model);
   const pendingModelControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "model" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);
