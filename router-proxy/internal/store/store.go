@@ -382,6 +382,18 @@ func (s *Store) configureAndVerify(ctx context.Context, busyTimeout time.Duratio
 	return nil
 }
 
+func (s *Store) migrationPending(ctx context.Context, id string) (bool, error) {
+	var present int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE id=?`, id).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) error {
 	for _, migration := range migrations {
 		migration := migration
@@ -401,7 +413,24 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 			continue
 		}
 		if migration.ID == managedRestartRetryMigration057ID {
+			pending, err := s.migrationPending(ctx, migration.ID)
+			if err != nil {
+				return fmt.Errorf("migration %s preflight check failed: %w", migration.ID, err)
+			}
+			if pending {
+				if err := s.runImmediate(ctx, func() error {
+					return s.repairManagedLifecycleForeignKeys059(ctx)
+				}); err != nil {
+					return fmt.Errorf("migration %s orphan preflight failed: %w", migration.ID, err)
+				}
+			}
 			if err := s.applyManagedRestartRetryMigration057(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
+		}
+		if migration.ID == managedLifecycleOrphanRepairMigration059ID {
+			if err := s.applyManagedLifecycleOrphanRepairMigration059(ctx, migration); err != nil {
 				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
 			}
 			continue

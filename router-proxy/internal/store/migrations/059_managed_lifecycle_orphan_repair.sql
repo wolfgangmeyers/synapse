@@ -1,0 +1,3 @@
+-- Repair pre-existing managed lifecycle foreign-key debt after migration 058.
+-- The store runner keeps this forward migration separate from historical 057
+-- so databases that already recorded the CHECK-constraint rebuild are fixed.
