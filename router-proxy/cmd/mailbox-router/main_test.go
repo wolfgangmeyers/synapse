@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -155,6 +156,70 @@ func TestMakefileForwardsLaunchRecipeMismatchToRouterCommand(t *testing.T) {
 
 	explicitOutput := runMake("true")
 	require.Contains(t, explicitOutput, `--managed-allow-launch-recipe-mismatch="true"`)
+}
+
+func TestMakefileKeepsDirtyDeployBuildBlockedButLocalBuildEmbedsDirtyIdentity(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	makeDirectory := filepath.Join(repositoryRoot, "router-proxy")
+	binary := filepath.Join(t.TempDir(), "mailbox-router")
+	commit := "dirty-test-commit"
+
+	deploy := exec.Command("make", "-C", makeDirectory, "build-router", "ROUTER_BINARY="+binary, "ROUTER_SOURCE_COMMIT="+commit, "ROUTER_SOURCE_TREE=dirty")
+	deployOutput, deployErr := deploy.CombinedOutput()
+	require.Error(t, deployErr, string(deployOutput))
+	require.Contains(t, string(deployOutput), "Refusing to deploy a router binary from a dirty source tree.")
+
+	local := exec.Command("make", "-C", makeDirectory, "build-router-local", "ROUTER_BINARY="+binary, "ROUTER_SOURCE_COMMIT="+commit, "ROUTER_SOURCE_TREE=dirty")
+	localOutput, localErr := local.CombinedOutput()
+	require.NoError(t, localErr, string(localOutput))
+	require.FileExists(t, binary)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	directory := t.TempDir()
+	command := exec.Command(binary, "--database", filepath.Join(directory, "router.db"), "--log", filepath.Join(directory, "router.jsonl"), "--host", "127.0.0.1", "--port", formatPort(port), "--managed=false")
+	stdout, err := command.StdoutPipe()
+	require.NoError(t, err)
+	stderr, err := command.StderrPipe()
+	require.NoError(t, err)
+	require.NoError(t, command.Start())
+	defer func() {
+		if command.ProcessState == nil || !command.ProcessState.Exited() {
+			_ = command.Process.Kill()
+		}
+		_ = command.Wait()
+	}()
+
+	lines := make(chan string, 32)
+	go collectLines(stdout, lines)
+	go collectLines(stderr, lines)
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case line := <-lines:
+			if !strings.HasPrefix(line, "MECHA_V2_ROUTER_READY ") {
+				continue
+			}
+			health, healthErr := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/health")
+			require.NoError(t, healthErr)
+			defer health.Body.Close()
+			var body struct {
+				Runtime struct {
+					SourceCommit string `json:"source_commit"`
+					SourceTree   string `json:"source_tree"`
+				} `json:"runtime"`
+			}
+			require.NoError(t, json.NewDecoder(health.Body).Decode(&body))
+			require.Equal(t, commit, body.Runtime.SourceCommit)
+			require.Equal(t, "dirty", body.Runtime.SourceTree)
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for locally built router readiness")
+		}
+	}
 }
 
 func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string) {
