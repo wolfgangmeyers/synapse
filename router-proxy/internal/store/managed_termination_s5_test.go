@@ -79,6 +79,24 @@ func TestManagedTerminationRetryResumesItsExactCleanupStage(t *testing.T) {
 	require.Equal(t, "agent_cleanup", retry.Action.Stage)
 }
 
+func TestLatestRetryableManagedTerminationExcludesSupersededSuccessorPredecessors(t *testing.T) {
+	durable, ctx, agent, _ := restartFixture(t)
+	source := restartFenceFromAgent(&agent)
+	firstID, retryID := lifecycleUUID(962), lifecycleUUID(963)
+	firstOperation := ManagedOperation{OperationID: firstID, Method: "DELETE", CanonicalPath: "/v1/managed-agents/restartable", RequestID: firstID, CanonicalBodyHash: testManifestHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	first, err := durable.ReserveManagedLifecycle(ctx, ManagedLifecycleReservation{AgentID: agent.AgentID, Kind: "terminate", Source: "direct", Method: firstOperation.Method, CanonicalPath: firstOperation.CanonicalPath, RequestID: firstID, CanonicalBodyHash: firstOperation.CanonicalBodyHash, Fence: source, Operation: firstOperation})
+	require.NoError(t, err)
+	require.NoError(t, durable.AdvanceManagedTermination(ctx, firstID, "terminating", "abort", "terminating", "terminate_reap", &source))
+	require.NoError(t, durable.FailManagedTermination(ctx, firstID, "TERMINATION_CLEANUP_FAILED", true, &source))
+	retryOperation := ManagedOperation{OperationID: retryID, Method: "DELETE", CanonicalPath: firstOperation.CanonicalPath, RequestID: retryID, CanonicalBodyHash: testManifestHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	retry, err := durable.ReserveManagedLifecycle(ctx, ManagedLifecycleReservation{AgentID: agent.AgentID, Kind: "terminate", Source: "direct", Method: retryOperation.Method, CanonicalPath: retryOperation.CanonicalPath, RequestID: retryID, CanonicalBodyHash: retryOperation.CanonicalBodyHash, Fence: source, RetryOf: first.Action.ActionID, Operation: retryOperation})
+	require.NoError(t, err)
+	require.NoError(t, durable.CompleteManagedLifecycleAction(ctx, ManagedLifecycleTerminalization{ActionID: retry.Action.ActionID, ExpectedState: retry.Action.State, ExpectedStage: retry.Action.Stage, TerminalState: "superseded", Code: "SUPERSEDED_BY_HIGHER_ACTION", Message: "lifecycle action superseded by a higher priority action", Fence: &source}))
+
+	_, err = durable.LatestRetryableManagedTermination(ctx, agent.AgentID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}
+
 func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T) {
 	durable, ctx, agent, action := terminationActionAtDurableWrite(t)
 	_, err := durable.RecordManagedCompleteHistory(ctx, agent.AgentID, "managed_control", "info", "Updated goal", "termination-history")
