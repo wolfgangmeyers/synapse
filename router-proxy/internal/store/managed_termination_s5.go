@@ -201,7 +201,7 @@ func (s *Store) LatestRetryableManagedTermination(ctx context.Context, agentID s
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	action, err := scanManagedLifecycleAction(s.db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE agent_id=? AND kind='terminate' AND state='failed' AND retryable=1 ORDER BY completed_at DESC,action_id DESC LIMIT 1`, agentID))
+	action, err := scanManagedLifecycleAction(s.db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE agent_id=? AND kind='terminate' AND state='failed' AND retryable=1 AND NOT EXISTS (SELECT 1 FROM managed_lifecycle_actions successor WHERE successor.retry_of=managed_lifecycle_actions.action_id) ORDER BY completed_at DESC,action_id DESC LIMIT 1`, agentID))
 	if err != nil {
 		return nil, err
 	}
