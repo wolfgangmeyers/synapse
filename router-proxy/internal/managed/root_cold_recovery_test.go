@@ -19,6 +19,7 @@ import (
 type coldRecoveryOps struct {
 	mu          sync.Mutex
 	states      map[int]ProcessProbeState
+	probes      []ProcessIdentity
 	signals     []ProcessIdentity
 	closed      []ProcessIdentity
 	waited      []ProcessIdentity
@@ -28,6 +29,7 @@ type coldRecoveryOps struct {
 func (o *coldRecoveryOps) Probe(identity ProcessIdentity) ProcessProbe {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.probes = append(o.probes, identity)
 	state, ok := o.states[identity.PID]
 	if !ok {
 		return ProcessProbe{State: ProcessUnknown}
@@ -311,7 +313,7 @@ func TestRecoverManagedRootColdStartFailurePathsCleanUpAndTerminalize(t *testing
 			var factory ProcessFactory
 			if test.start {
 				factory = ProcessFactoryFunc(func(context.Context, CommandSpec) (Process, error) {
-					return nil, errors.New("scripted process start failure")
+					return nil, noChildStartError{errors.New("scripted process start failure")}
 				})
 			} else {
 				factory = &launchFactory{process: process, rpc: rpc}
@@ -709,6 +711,14 @@ func TestManagedRootRecoveryPruneRetainsExpiredFailedTargetUntilCleared(t *testi
 	require.NoError(t, durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "reaping", "stopped"))
 	require.NoError(t, durable.BeginManagedRootRecoveryTarget(ctx, action.ActionID, action.TargetRuntimeGeneration))
 	require.NoError(t, durable.InstallManagedRootRecoveryTarget(ctx, action.ActionID, store.ManagedProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, action.TargetRuntimeGeneration))
+	clearErr := durable.ClearManagedRootRecoveryTargetAfterVerifiedAbsence(ctx, action.ActionID, store.ManagedProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"})
+	require.Error(t, clearErr, "the old agent fence must retain the target action")
+	targetFence := storedAgentFence(&agent)
+	targetFence.ProcessPID = 902
+	targetFence.ProcessStartMarker = "new-start"
+	targetFence.ProcessIncarnation = "new-inc"
+	targetFence.RuntimeGeneration = action.TargetRuntimeGeneration
+	require.NoError(t, durable.InstallManagedRootRecoveryFence(ctx, storedAgentFence(&agent), targetFence))
 	require.NoError(t, durable.FailManagedRootRecovery(ctx, action.ActionID, "ORPHAN_IDENTITY_UNSAFE", "target retained"))
 	db := installColdRecoveryTrigger(t, databasePath, "SELECT 1")
 	defer db.Close()
@@ -718,6 +728,9 @@ func TestManagedRootRecoveryPruneRetainsExpiredFailedTargetUntilCleared(t *testi
 	require.NoError(t, err)
 	require.Zero(t, removed)
 	stored, err := durable.ManagedRootRecoveryActionByID(ctx, action.ActionID)
+	require.NoError(t, err)
+	require.Equal(t, 902, stored.TargetProcessPID)
+	stored, err = durable.ManagedRootRecoveryActionByID(ctx, action.ActionID)
 	require.NoError(t, err)
 	require.Equal(t, 902, stored.TargetProcessPID)
 	require.NoError(t, durable.ClearManagedRootRecoveryTargetAfterVerifiedAbsence(ctx, action.ActionID, store.ManagedProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}))
@@ -778,7 +791,7 @@ func TestRecoverManagedRootColdStartDoesNotStartAfterReadyTargetOnSecondRouter(t
 	require.NoError(t, second.Close(ctx))
 }
 
-func TestRecoverManagedRootColdStartClosesIncompleteInstalledTargetWithoutStartingAgain(t *testing.T) {
+func TestRecoverManagedRootColdStartRetainsActivelyOwnedIncompleteTarget(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
@@ -809,12 +822,60 @@ func TestRecoverManagedRootColdStartClosesIncompleteInstalledTargetWithoutStarti
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	current, err := durable.ManagedAgent(ctx, agent.AgentID)
 	require.NoError(t, err)
-	require.Equal(t, "failed", current.LifecycleState)
-	require.Equal(t, "RECOVERY_TARGET_UNKNOWN", current.LastErrorCode)
+	require.Equal(t, "starting", current.LifecycleState)
+	require.Empty(t, current.LastErrorCode)
 	stored, err := durable.ManagedRootRecoveryAction(ctx, agent.AgentID)
 	require.NoError(t, err)
-	require.Equal(t, "failed", stored.Stage)
+	require.Equal(t, "starting", stored.Stage)
+	require.Equal(t, 902, stored.TargetProcessPID)
+	ops.mu.Lock()
+	require.Empty(t, ops.signals)
+	require.Empty(t, ops.waited)
+	ops.mu.Unlock()
 	require.NoError(t, manager.Close(ctx))
+}
+
+func TestRecoverManagedRootStartingRecoveryMatrixNeverStartsWithoutSafeTarget(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		install    bool
+		probe      ProcessProbeState
+		wantStage  string
+		wantAgent  string
+		wantTarget int
+	}{
+		{name: "starting without target", wantStage: "failed", wantAgent: "failed"},
+		{name: "target absent", install: true, probe: ProcessAbsent, wantStage: "failed", wantAgent: "failed"},
+		{name: "target unknown retained", install: true, probe: ProcessUnknown, wantStage: "starting", wantAgent: "starting", wantTarget: 902},
+		{name: "target owned by another router retained", install: true, probe: ProcessOwned, wantStage: "starting", wantAgent: "starting", wantTarget: 902},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			manager, durable, agent, _, _ := setupColdRecovery(t, nil, nil, &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: test.probe}}, nil, nil)
+			recipe, err := manager.managedLaunchRecipe(agent)
+			require.NoError(t, err)
+			action, _, err := durable.ClaimManagedRootRecovery(ctx, agent.AgentID, storedAgentFence(&agent), recipe.SHA256, "target-runtime")
+			require.NoError(t, err)
+			require.NoError(t, durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "claimed", "reaping"))
+			require.NoError(t, durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "reaping", "stopped"))
+			require.NoError(t, durable.BeginManagedRootRecoveryTarget(ctx, action.ActionID, action.TargetRuntimeGeneration))
+			if test.install {
+				require.NoError(t, durable.InstallManagedRootRecoveryTarget(ctx, action.ActionID, store.ManagedProcessIdentity{PID: 902, StartMarker: "target-start", Incarnation: "target-inc"}, action.TargetRuntimeGeneration))
+				targetFence := storedAgentFence(&agent)
+				targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation = 902, "target-start", "target-inc"
+				targetFence.RuntimeGeneration = action.TargetRuntimeGeneration
+				require.NoError(t, durable.InstallManagedRootRecoveryFence(ctx, storedAgentFence(&agent), targetFence))
+			}
+			require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+			stored, err := durable.ManagedRootRecoveryAction(ctx, agent.AgentID)
+			require.NoError(t, err)
+			require.Equal(t, test.wantStage, stored.Stage)
+			require.Equal(t, test.wantTarget, stored.TargetProcessPID)
+			current, err := durable.ManagedAgent(ctx, agent.AgentID)
+			require.NoError(t, err)
+			require.Equal(t, test.wantAgent, current.LifecycleState)
+		})
+	}
 }
 
 func TestRecoverManagedRootColdStartNeverSignalsMismatchedOrUnknownProcess(t *testing.T) {

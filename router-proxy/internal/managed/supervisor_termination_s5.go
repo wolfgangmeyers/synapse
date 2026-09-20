@@ -56,19 +56,43 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	if err != nil {
 		return TerminateResult{}, err
 	}
+	lane := m.laneFor(request.AgentID)
+	lane.admission.Lock()
+	defer lane.admission.Unlock()
 	var source store.ManagedRuntimeFence
 	var sourcePtr *store.ManagedRuntimeFence
 	var retryOf string
+	sourceUnavailable := false
+	if failedRestart, restartErr := m.store.LatestRetryableManagedRestart(ctx, request.AgentID); restartErr == nil {
+		escaped, escapeErr := m.prepareFailedRestartTerminationEscape(ctx, agent, failedRestart)
+		if escapeErr != nil {
+			return TerminateResult{}, escapeErr
+		}
+		if escaped {
+			// The failed replacement target was cleared without a trustworthy
+			// source process. The termination action must carry an all-null source
+			// so its executor cannot signal the old or replacement identity.
+			sourceUnavailable = true
+			agent, err = m.store.ManagedAgent(ctx, request.AgentID)
+			if err != nil {
+				return TerminateResult{}, err
+			}
+		}
+	} else if !errors.Is(restartErr, sql.ErrNoRows) {
+		return TerminateResult{}, restartErr
+	}
 	predecessor, retryErr := m.store.LatestRetryableManagedTermination(ctx, request.AgentID)
 	if retryErr == nil {
 		retryOf = predecessor.ActionID
-		if predecessor.SourceFence != nil {
+		if !sourceUnavailable && predecessor.SourceFence != nil {
 			source, sourcePtr = *predecessor.SourceFence, predecessor.SourceFence
 		}
 	} else if !errors.Is(retryErr, sql.ErrNoRows) {
 		return TerminateResult{}, retryErr
-	} else if current := storedAgentFence(agent); validRestartFence(current) {
-		source, sourcePtr = current, &source
+	} else if !sourceUnavailable {
+		if current := storedAgentFence(agent); validRestartFence(current) {
+			source, sourcePtr = current, &source
+		}
 	}
 
 	if sourcePtr != nil {
@@ -83,15 +107,11 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 		return TerminateResult{}, err
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
-	lane := m.laneFor(request.AgentID)
-	lane.admission.Lock()
 	admission, err := m.store.ReserveManagedLifecycle(ctx, store.ManagedLifecycleReservation{AgentID: request.AgentID, Kind: "terminate", Source: "direct", Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Fence: source, RetryOf: retryOf, Operation: operation})
 	if err != nil {
-		lane.admission.Unlock()
 		return TerminateResult{}, err
 	}
 	if admission.Replayed {
-		lane.admission.Unlock()
 		return TerminateResult{Operation: admission.Operation, Replayed: true}, nil
 	}
 	// Admission is the durable point at which the selected worker becomes
@@ -119,13 +139,53 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 			}
 		}
 	}
-	lane.admission.Unlock()
 	m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
 		m.executeTerminationInLane(admission.Action.ActionID, binding)
 	})
 	return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, nil
+}
+
+func (m *Manager) prepareFailedRestartTerminationEscape(ctx context.Context, agent *store.ManagedAgentRecord, restart *store.ManagedLifecycleAction) (bool, error) {
+	if agent == nil || restart == nil || restart.TerminalCode != "RESTART_TARGET_REAP_FAILED" || restart.TargetFence == nil {
+		return false, nil
+	}
+	current := storedAgentFence(agent)
+	target := *restart.TargetFence
+	if !sameBindingFence(current, target) {
+		return false, nil
+	}
+	if binding, ok := m.bindingFor(agent.AgentID); ok {
+		binding.serial.Lock()
+		live := !binding.reaped && binding.process != nil && binding.identity.PID == target.ProcessPID && binding.identity.StartMarker == target.ProcessStartMarker && binding.identity.Incarnation == target.ProcessIncarnation
+		binding.serial.Unlock()
+		if live {
+			return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
+		}
+		return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
+	}
+	identity := oldFenceIdentity(target)
+	switch m.processOps.Probe(identity).State {
+	case ProcessOwned:
+		if !m.reapRestartGroup(ctx, identity, nil) {
+			return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
+		}
+	case ProcessAbsent:
+		// The target is already gone; this is the only other state that can
+		// safely remove the retry fence before termination admission.
+	default:
+		// Present, mismatch, and unknown do not prove the target absent. Keep
+		// the retryable action and refuse a termination with an unsafe source.
+		return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
+	}
+	if restart.SourceFence == nil {
+		return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
+	}
+	if err := m.store.ClearManagedLifecycleRestartTargetAfterVerifiedAbsence(ctx, restart.ActionID, *restart.SourceFence, target); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBinding) {

@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -31,6 +32,73 @@ func (m *Manager) startLifecycleRestart(binding *managedBinding, actionID string
 		defer binding.lane.serial.Unlock()
 		m.executeLifecycleRestartInLane(binding, actionID, source)
 	}()
+}
+
+func (m *Manager) reserveFailedLifecycleRestart(ctx context.Context, request RestartRequest, agent *store.ManagedAgentRecord, predecessor *store.ManagedLifecycleAction) (RestartResult, error) {
+	if predecessor == nil {
+		return RestartResult{}, nil
+	}
+	if predecessor.SourceFence == nil || predecessor.TargetArtifactID == "" {
+		return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+	}
+	source := *predecessor.SourceFence
+	lane := m.laneFor(request.AgentID)
+	lane.admission.Lock()
+	defer lane.admission.Unlock()
+
+	if predecessor.TargetFence != nil {
+		target := *predecessor.TargetFence
+		if _, err := m.verifyLifecycleRestartArtifact(predecessor, source); err != nil {
+			return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+		}
+		switch m.processOps.Probe(oldFenceIdentity(target)).State {
+		case ProcessAbsent:
+		case ProcessOwned:
+			if !m.reapRestartGroup(context.Background(), oldFenceIdentity(target), nil) {
+				return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+			}
+		default:
+			return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+		}
+		if err := m.store.ClearManagedLifecycleRestartTargetAfterVerifiedAbsence(context.Background(), predecessor.ActionID, source, target); err != nil {
+			return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+		}
+		predecessor.TargetFence = nil
+		predecessor.Stage = "target_start"
+	} else if predecessor.Stage != "target_start" {
+		return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+	}
+	if _, err := m.verifyLifecycleRestartArtifact(predecessor, source); err != nil {
+		return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+	}
+	agent, err := m.store.ManagedAgent(ctx, request.AgentID)
+	if err != nil || !sameBindingFence(storedAgentFence(agent), source) {
+		return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+	}
+	targetGeneration, err := m.ids.Next()
+	if err != nil {
+		return RestartResult{}, err
+	}
+	responseAgent := *agent
+	responseAgent.LifecycleState, responseAgent.AcceptingPrompts = "restarting", false
+	body, err := json.Marshal(map[string]any{"operation_id": request.RequestID, "agent": PublicAgent(&responseAgent)})
+	if err != nil {
+		return RestartResult{}, err
+	}
+	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
+	admission, err := m.store.ReserveManagedLifecycleRestart(ctx, store.ManagedLifecycleRestartReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Source: "direct", RetryOf: predecessor.ActionID, CurrentOperationID: predecessor.OperationID, SourceFence: source, PlannedTargetRuntimeGeneration: targetGeneration, TargetArtifactID: predecessor.TargetArtifactID, InitialState: "starting_target", InitialStage: "target_start", SelectedModel: agent.SelectedModel, Operation: operation})
+	if err != nil {
+		return RestartResult{}, err
+	}
+	if admission.Replayed {
+		return RestartResult{Operation: admission.Operation, Replayed: true}, nil
+	}
+	m.startManagedTask(func() {
+		lane.serial.Lock()
+		defer lane.serial.Unlock()
+		m.startLifecycleRestartTargetInLane(admission.Action.ActionID, source)
+	})
+	return RestartResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 }
 
 func (m *Manager) lifecycleRestartAction(actionID string, source store.ManagedRuntimeFence) (*store.ManagedLifecycleAction, error) {

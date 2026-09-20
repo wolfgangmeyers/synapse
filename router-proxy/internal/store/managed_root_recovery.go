@@ -335,6 +335,15 @@ func (e *ManagedRootRecoveryTargetStaleError) Error() string {
 }
 func (e *ManagedRootRecoveryTargetStaleError) Code() string { return "stale" }
 
+// ManagedRootRecoveryActionStaleError reports a lost recovery-action CAS.
+// Callers may abandon that action because another owner already advanced it.
+type ManagedRootRecoveryActionStaleError struct{ ActionID string }
+
+func (e *ManagedRootRecoveryActionStaleError) Error() string {
+	return "managed root recovery action is stale"
+}
+func (e *ManagedRootRecoveryActionStaleError) Code() string { return "stale" }
+
 // BeginManagedRootRecoveryTarget reserves the one external start boundary.
 // The starting stage with no target identity means a process may be created by
 // the current owner; a later router must fail closed instead of starting twice.
@@ -401,7 +410,7 @@ func (s *Store) InstallManagedRootRecoveryFence(ctx context.Context, old, target
 	return s.runImmediate(ctx, func() error {
 		args := []any{target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation, target.RuntimeGeneration, formatTimestamp(s.clock.Now()), target.AgentID}
 		args = append(args, managedFenceValues(old)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,lifecycle_state='starting',activity_state='starting',accepting_prompts=0,slot_held=1,updated_at=? WHERE agent_id=? AND desired_state='running' AND lifecycle_state='running' AND `+managedFenceWhere(""), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,lifecycle_state='starting',activity_state='starting',accepting_prompts=0,slot_held=1,updated_at=? WHERE agent_id=? AND desired_state='running' AND lifecycle_state IN ('starting','running') AND `+managedFenceWhere(""), args...)
 		if err != nil {
 			return err
 		}
@@ -493,19 +502,20 @@ func (s *Store) CompleteManagedRootRecoveryReady(ctx context.Context, agentID st
 		return errors.New("managed root recovery completion is invalid")
 	}
 	return s.runImmediate(ctx, func() error {
-		action, err := managedRootRecoveryActionForIDTx(ctx, s.db, managedRootRecoveryActionID(agentID, ManagedRuntimeFence{
-			AgentID: agentID, PiSessionID: target.PiSessionID, SessionEpoch: target.SessionEpoch,
-			ProcessPID: target.ProcessPID, ProcessStartMarker: target.ProcessStartMarker,
-			ProcessIncarnation: target.ProcessIncarnation, RuntimeGeneration: target.RuntimeGeneration,
-			ManifestRevision: target.ManifestRevision, ManifestHash: target.ManifestHash,
-		}))
+		// The action ID is based on the old fence, so locate the target by its
+		// immutable identity. The old fence is needed to consume an orderly-stop
+		// marker in this same transaction as the ready transition.
+		action, err := managedRootRecoveryActionQuery(ctx, s.db, `WHERE agent_id=? AND target_runtime_generation=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=? AND stage IN ('starting','ready') LIMIT 1`, agentID, target.RuntimeGeneration, target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation)
 		if err != nil {
-			// The action ID is based on the old fence, so locate the one active
-			// target claim by its immutable target identity.
-			action, err = managedRootRecoveryActionQuery(ctx, s.db, `WHERE agent_id=? AND target_runtime_generation=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=? AND stage='starting' LIMIT 1`, agentID, target.RuntimeGeneration, target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation)
-		}
-		if err != nil || action.Stage != "starting" {
 			return errors.New("managed root recovery target is stale")
+		}
+		old := ManagedRuntimeFence{AgentID: action.AgentID, PiSessionID: action.OldPiSessionID, SessionEpoch: int64(action.OldSessionEpoch), ProcessPID: action.OldProcessPID, ProcessStartMarker: action.OldProcessStartMarker, ProcessIncarnation: action.OldProcessIncarnation, RuntimeGeneration: action.OldRuntimeGeneration, ManifestRevision: action.OldManifestRevision, ManifestHash: action.OldManifestHash}
+		if action.Stage == "ready" {
+			// A repeated completion is harmless. This also closes the recovery
+			// window left by older callers that completed readiness before consuming
+			// an orderly marker.
+			_, err := s.db.ExecContext(ctx, `DELETE FROM managed_orderly_stop_markers WHERE `+managedFenceWhere("")+` AND agent_id=?`, append(managedFenceValues(old), old.AgentID)...)
+			return err
 		}
 		if err := s.managedReadinessSourcesConfirmedForFenceTx(ctx, target); err != nil {
 			return err
@@ -540,6 +550,99 @@ func (s *Store) CompleteManagedRootRecoveryReady(ctx context.Context, agentID st
 			}
 			return errors.New("managed root recovery target is stale")
 		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_orderly_stop_markers WHERE `+managedFenceWhere("")+` AND agent_id=?`, append(managedFenceValues(old), old.AgentID)...); err != nil {
+			return err
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+// RestoreManagedOrderlyStopAfterVerifiedAbsence clears a retained target only
+// after its exact process group is absent. The current agent fence decides the
+// branch: target-fenced rows roll back to the marker fence; rows that never
+// installed the target fence are failed in place and keep the marker.
+func (s *Store) RestoreManagedOrderlyStopAfterVerifiedAbsence(ctx context.Context, actionID string, old, target ManagedRuntimeFence, code, message string) error {
+	if actionID == "" || !validManagedRuntimeFence(old) || !validManagedRuntimeFence(target) || old.AgentID != target.AgentID || old.PiSessionID != target.PiSessionID || old.SessionEpoch != target.SessionEpoch || old.ManifestRevision != target.ManifestRevision || old.ManifestHash != target.ManifestHash || old.RuntimeGeneration == target.RuntimeGeneration || old.ProcessIncarnation == target.ProcessIncarnation || code == "" || message == "" {
+		return errors.New("managed orderly replacement rollback is invalid")
+	}
+	message = RedactedManagedDiagnostic(message)
+	if len(code) > 128 {
+		code = code[:128]
+	}
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	return s.runImmediate(ctx, func() error {
+		action, err := managedRootRecoveryActionForIDTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		if !sameManagedRootRecoveryFence(action, old) || action.TargetProcessPID != target.ProcessPID || action.TargetProcessStartMarker != target.ProcessStartMarker || action.TargetProcessIncarnation != target.ProcessIncarnation || action.TargetRuntimeGeneration != target.RuntimeGeneration || (action.Stage != "starting" && action.Stage != "failed") {
+			return errors.New("managed orderly replacement rollback is stale")
+		}
+		var markerCount int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_orderly_stop_markers WHERE `+managedFenceWhere(""), managedFenceValues(old)...).Scan(&markerCount); err != nil {
+			return err
+		}
+		if markerCount != 1 {
+			return errors.New("managed orderly stop marker is stale")
+		}
+		now := formatTimestamp(s.clock.Now())
+		var current ManagedRuntimeFence
+		var epoch, pid, revision sql.NullInt64
+		var session, marker, incarnation, generation, hash sql.NullString
+		if err := s.db.QueryRowContext(ctx, `SELECT pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash FROM managed_agents WHERE agent_id=? AND desired_state='running'`, old.AgentID).Scan(&session, &epoch, &pid, &marker, &incarnation, &generation, &revision, &hash); err != nil {
+			return err
+		}
+		current = ManagedRuntimeFence{AgentID: old.AgentID, PiSessionID: session.String, SessionEpoch: epoch.Int64, ProcessPID: int(pid.Int64), ProcessStartMarker: marker.String, ProcessIncarnation: incarnation.String, RuntimeGeneration: generation.String, ManifestRevision: int(revision.Int64), ManifestHash: hash.String}
+		switch {
+		case sameManagedRestartFence(current, target):
+			result, updateErr := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?,session_epoch=?,process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,manifest_revision=?,manifest_hash=?,lifecycle_state='failed',activity_state='stopped',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND desired_state='running' AND lifecycle_state IN ('starting','failed') AND `+managedFenceWhere(""), append([]any{old.PiSessionID, old.SessionEpoch, old.ProcessPID, old.ProcessStartMarker, old.ProcessIncarnation, old.RuntimeGeneration, old.ManifestRevision, old.ManifestHash, code, message, now, now, old.AgentID}, managedFenceValues(target)...)...)
+			if updateErr != nil {
+				return updateErr
+			}
+			changed, updateErr := result.RowsAffected()
+			if updateErr != nil || changed != 1 {
+				if updateErr != nil {
+					return updateErr
+				}
+				return errors.New("managed orderly replacement agent is stale")
+			}
+			if err := s.rollManagedReadinessSourceFenceTx(ctx, old); err != nil {
+				return err
+			}
+		case sameManagedRestartFence(current, old):
+			// InstallManagedRootRecoveryFence failed, so the old marker fence is
+			// still authoritative. Mark the action failed without requiring a
+			// rollback write against the already-old agent row.
+			result, updateErr := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='stopped',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND desired_state='running' AND lifecycle_state IN ('starting','running','failed') AND `+managedFenceWhere(""), append([]any{code, message, now, now, old.AgentID}, managedFenceValues(old)...)...)
+			if updateErr != nil {
+				return updateErr
+			}
+			changed, updateErr := result.RowsAffected()
+			if updateErr != nil {
+				return updateErr
+			}
+			if changed != 1 {
+				return errors.New("managed orderly replacement agent is stale")
+			}
+		default:
+			return errors.New("managed orderly replacement agent is stale")
+		}
+		args := []any{code, message, now, formatTimestamp(s.clock.Now().Add(managedRootRecoveryRetention)), actionID}
+		args = append(args, managedRootRecoveryFenceArgs(action)...)
+		args = append(args, target.RuntimeGeneration, target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET target_process_pid=NULL,target_process_start_marker=NULL,target_process_incarnation=NULL,stage='failed',failure_code=?,failure_message=?,updated_at=?,expires_at=? WHERE action_id=? AND `+managedRootRecoveryFenceWhere(action)+` AND stage IN ('starting','failed') AND target_runtime_generation=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=?`, args...)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return errors.New("managed orderly replacement action is stale")
+		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
@@ -563,15 +666,39 @@ func (s *Store) ManagedRootRecoveryActionByID(ctx context.Context, actionID stri
 	return managedRootRecoveryActionForIDTx(ctx, s.db, actionID)
 }
 
-// ClearManagedRootRecoveryTargetAfterVerifiedAbsence removes a failed action's
-// exact target identity only after its process group has been proved absent.
-// The failure fields remain as the retry record for the next recovery pass.
+// ClearManagedRootRecoveryTargetAfterVerifiedAbsence removes a retained
+// exact target only after its process group has been proved absent. A crash
+// between reservation and target-fence installation is terminalized here so
+// later recovery cannot start an unprovable second child.
 func (s *Store) ClearManagedRootRecoveryTargetAfterVerifiedAbsence(ctx context.Context, actionID string, identity ManagedProcessIdentity) error {
 	if actionID == "" || identity.PID <= 0 || identity.StartMarker == "" || identity.Incarnation == "" {
 		return errors.New("managed root recovery target identity is invalid")
 	}
 	return s.runImmediate(ctx, func() error {
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET target_process_pid=NULL,target_process_start_marker=NULL,target_process_incarnation=NULL,updated_at=? WHERE action_id=? AND stage='failed' AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=?`, formatTimestamp(s.clock.Now()), actionID, identity.PID, identity.StartMarker, identity.Incarnation)
+		now := formatTimestamp(s.clock.Now())
+		action, err := managedRootRecoveryActionForIDTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		code, message := action.FailureCode, action.FailureMessage
+		if code == "" {
+			code, message = "RECOVERY_TARGET_UNKNOWN", "replacement target was cleaned up before readiness"
+		}
+		// With no orderly marker there is no safe source fence to restore. If
+		// the agent still carries this exact target, publish a failed row rather
+		// than leaving desired-running stuck in starting forever.
+		agentResult, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='stopped',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND desired_state='running' AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=?`, code, message, now, now, action.AgentID, identity.PID, identity.StartMarker, identity.Incarnation, action.TargetRuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		agentChanged, err := agentResult.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if agentChanged != 1 {
+			return &ManagedRootRecoveryActionStaleError{ActionID: actionID}
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET target_process_pid=NULL,target_process_start_marker=NULL,target_process_incarnation=NULL,stage='failed',failure_code=?,failure_message=?,updated_at=?,expires_at=CASE WHEN stage='starting' THEN ? ELSE expires_at END WHERE action_id=? AND stage IN ('starting','failed') AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=?`, code, message, now, formatTimestamp(s.clock.Now().Add(managedRootRecoveryRetention)), actionID, identity.PID, identity.StartMarker, identity.Incarnation)
 		if err != nil {
 			return err
 		}
@@ -582,7 +709,8 @@ func (s *Store) ClearManagedRootRecoveryTargetAfterVerifiedAbsence(ctx context.C
 		if changed != 1 {
 			return errors.New("managed root recovery target is stale")
 		}
-		return nil
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
 	})
 }
 

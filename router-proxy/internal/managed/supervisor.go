@@ -191,6 +191,7 @@ type managedBinding struct {
 	// its durable transition. Binding serial alone cannot order Process.Wait.
 	waitSerial           sync.Mutex
 	waitPending          atomic.Bool
+	expectedStop         atomic.Bool
 	waitErr              error
 	restartExecutionDone bool
 	restartShutdownDone  bool
@@ -690,13 +691,43 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		}
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
-		_ = closeRPCAndWait(rpc)
-		if stopErr := process.Stop(context.Background()); stopErr != nil {
-			m.fail(agent.AgentID, "PROCESS_STOP_FAILED", sanitizeError(stopErr))
+		// Persist the orderly-stop intent before either closing the RPC stream or
+		// signaling the child. Process.Wait may publish immediately after either
+		// action, and the exit owner must see this state instead of recording a
+		// crash.
+		binding.expectedStop.Store(true)
+		if err := m.store.MarkManagedOrderlyStopped(context.Background(), fence); err != nil {
+			var stale *store.ManagedRestartStaleError
+			if errors.As(err, &stale) {
+				// A lifecycle owner may already have advanced this row after the
+				// launch binding lost its map entry. Do not overwrite that owner.
+				return
+			}
+			binding.serial.Lock()
+			binding.retainBinding = true
+			binding.serial.Unlock()
+			m.recordCloseError(err)
 			return
 		}
-		if err := m.store.MarkManagedStopped(context.Background(), agent.AgentID); err != nil {
-			m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(err))
+		_ = closeRPCAndWait(rpc)
+		if stopErr := process.Stop(context.Background()); stopErr != nil {
+			if err := m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "PROCESS_STOP_FAILED", sanitizeError(stopErr)); err != nil {
+				var stale *store.ManagedRestartStaleError
+				if !errors.As(err, &stale) {
+					binding.serial.Lock()
+					binding.retainBinding = true
+					binding.serial.Unlock()
+					m.recordCloseError(err)
+				}
+			}
+		} else if err := m.store.ConfirmManagedOrderlyStopped(context.Background(), fence); err != nil {
+			var stale *store.ManagedRestartStaleError
+			if !errors.As(err, &stale) {
+				binding.serial.Lock()
+				binding.retainBinding = true
+				binding.serial.Unlock()
+				m.recordCloseError(err)
+			}
 		}
 	}
 }
@@ -835,8 +866,11 @@ func (m *Manager) recordReadyBindingProcessExitInLane(binding *managedBinding, f
 	if !m.runningBindingCurrent(context.Background(), binding, fence) {
 		return
 	}
-	if m.isClosed() {
-		_ = m.store.MarkManagedStopped(context.Background(), binding.agentID)
+	if binding.expectedStop.Load() || m.isClosed() {
+		// A waiter can outlive the binding map entry during manager shutdown.
+		// Treat that exit as orderly even when Close could not mark this stale
+		// fence after a replacement router took ownership.
+		_ = m.store.MarkManagedOrderlyStopped(context.Background(), fence)
 		return
 	}
 	// A hard parent exit cannot carry a trustworthy child terminal event.
@@ -1142,6 +1176,13 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	}
 	if err != nil {
 		return RestartResult{}, err
+	}
+	predecessor, retryErr := m.store.LatestRetryableManagedRestart(ctx, request.AgentID)
+	if retryErr == nil {
+		return m.reserveFailedLifecycleRestart(ctx, request, agent, predecessor)
+	}
+	if !errors.Is(retryErr, sql.ErrNoRows) {
+		return RestartResult{}, retryErr
 	}
 	binding, ok := m.bindingFor(request.AgentID)
 	if !ok {
@@ -2874,18 +2915,21 @@ func (m *Manager) AbortStartup(ctx context.Context) error {
 
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return nil
+	firstClose := !m.closed
+	if firstClose {
+		m.closed = true
+		m.cancel()
 	}
-	m.closed = true
-	m.cancel()
+	// A marker-write fault leaves its binding in the map. A later Close call
+	// must retry that exact binding even though the manager remains closed to
+	// new work.
 	bindings := make([]*managedBinding, 0, len(m.bindings))
 	for _, binding := range m.bindings {
+		binding.expectedStop.Store(true)
 		bindings = append(bindings, binding)
 	}
+	m.closeErr = nil
 	m.mu.Unlock()
-	genericAgentIDs := make([]string, 0, len(bindings))
 	for _, binding := range bindings {
 		handled, err := m.shutdownLifecycleRestartBinding(ctx, binding)
 		if handled {
@@ -2913,30 +2957,79 @@ func (m *Manager) Close(ctx context.Context) error {
 		}
 		binding.serial.Lock()
 		rpc, process := binding.rpc, binding.process
+		operationID := binding.operationID
 		fence := bindingFence(binding.agentID, binding)
 		binding.serial.Unlock()
 		m.stopBuiltinToolLifecycleQueue(binding)
 		m.interruptBuiltinToolInvocations(binding, fence)
 		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
+		// The durable expected-stop state must win the race with Process.Wait.
+		// Closing the RPC stream or signaling the process first can make the
+		// waiter persist an orderly router shutdown as an unexpected exit.
+		markerErr := m.store.MarkManagedOrderlyStopped(context.Background(), fence)
+		if markerErr != nil {
+			var stale *store.ManagedRestartStaleError
+			if !errors.As(markerErr, &stale) {
+				binding.serial.Lock()
+				binding.retainBinding = true
+				binding.serial.Unlock()
+				m.recordCloseError(markerErr)
+			}
+			if lane != nil {
+				lane.serial.Unlock()
+			}
+			if errors.As(markerErr, &stale) {
+				m.clearBinding(binding)
+			}
+			continue
+		}
 		if rpc != nil {
 			_ = closeRPCAndWait(rpc)
 		}
 		if process != nil {
-			m.recordCloseError(process.Stop(ctx))
+			if stopErr := process.Stop(ctx); stopErr != nil {
+				persistErr := m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, operationID, "PROCESS_STOP_FAILED", sanitizeError(stopErr))
+				var stale *store.ManagedRestartStaleError
+				if persistErr != nil && !errors.As(persistErr, &stale) {
+					binding.serial.Lock()
+					binding.retainBinding = true
+					binding.serial.Unlock()
+					m.recordCloseError(persistErr)
+				}
+				if errors.As(persistErr, &stale) {
+					// A newer owner won the fence. clearBinding is pointer-safe.
+					m.clearBinding(binding)
+					if lane != nil {
+						lane.serial.Unlock()
+					}
+					continue
+				}
+				m.recordCloseError(stopErr)
+				if persistErr != nil {
+					if lane != nil {
+						lane.serial.Unlock()
+					}
+					continue
+				}
+			} else if confirmErr := m.store.ConfirmManagedOrderlyStopped(context.Background(), fence); confirmErr != nil {
+				var stale *store.ManagedRestartStaleError
+				if !errors.As(confirmErr, &stale) {
+					binding.serial.Lock()
+					binding.retainBinding = true
+					binding.serial.Unlock()
+					m.recordCloseError(confirmErr)
+				}
+			}
 		}
 		if lane != nil {
 			lane.serial.Unlock()
 		}
 		m.clearBinding(binding)
-		genericAgentIDs = append(genericAgentIDs, binding.agentID)
 	}
 	waitDone := make(chan struct{})
 	go func() { m.startWG.Wait(); close(waitDone) }()
 	select {
 	case <-waitDone:
-		for _, agentID := range genericAgentIDs {
-			m.recordCloseError(m.store.MarkManagedStopped(context.Background(), agentID))
-		}
 		m.mu.Lock()
 		err := m.closeErr
 		m.mu.Unlock()
