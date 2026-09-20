@@ -67,7 +67,7 @@ function renderLegacy(overrides: { agent?: Record<string, unknown>; fetchImpl?: 
 
 const managedAgent = (overrides: Partial<ManagedAgent> = {}): ManagedAgent => ({ agent_id: "managed-alpha", source: "router-managed", cwd: "/allowed/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null, ...overrides });
 
-function renderManaged(actionResponse: Response | undefined = undefined) {
+function renderManaged(actionResponse: Response | undefined = undefined, options: { childrenFail?: boolean } = {}) {
   let snapshot = managedAgent();
   let resolveAction: (() => void) | undefined;
   const actionGate = new Promise<void>((resolve) => { resolveAction = resolve; });
@@ -76,7 +76,10 @@ function renderManaged(actionResponse: Response | undefined = undefined) {
     if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, goal_control_v1: false, ui_live_v1: false });
     if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
     if (url.endsWith("/v1/managed-agents") && (init?.method ?? "GET") === "GET") return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: 1, agents: [snapshot] });
-    if (url.endsWith("/v1/managed-agents/managed-alpha/children")) return jsonResponse({ agent_id: "managed-alpha", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+    if (url.endsWith("/v1/managed-agents/managed-alpha/children")) {
+      if (options.childrenFail) throw new Error("Child projection unavailable");
+      return jsonResponse({ agent_id: "managed-alpha", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+    }
     if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: "managed-alpha", high_water_sequence: 0, messages: [] });
     if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
     if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
@@ -192,6 +195,12 @@ describe("App control fencing and managed lifecycle projections", () => {
     await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/restart") && init?.method === "POST")).toBe(true));
     const dialog = screen.getByRole("dialog", { name: "Manage managed-alpha" });
     await waitFor(() => expect(within(dialog).getByText("starting", { selector: "strong" })).toBeInTheDocument());
+  });
+
+  it("keeps managed agents and launch controls available when child details fail", async () => {
+    renderManaged(undefined, { childrenFail: true });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Managed actions" })).toBeInTheDocument();
   });
 
   it("keeps the managed controls open and shows an error when an action fails", async () => {

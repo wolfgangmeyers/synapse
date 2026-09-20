@@ -104,10 +104,20 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         if (!active) return;
         dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
         refreshManagedGoalProjection(transport, dispatch, scope, snapshot.agents);
-        const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
-        if (!active) return;
-        dispatch({ type: "managed/children", scope, children });
-        if (capabilities.ui_live_v1 !== false && canConnectUILive(options)) uiLive.connect();
+        // The managed-agent list is enough to launch and talk to agents. Child
+        // details and live updates must not make that working surface disappear.
+        try {
+          const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
+          if (!active) return;
+          dispatch({ type: "managed/children", scope, children });
+        } catch {
+          // A child projection can be repaired by the next refresh or live frame.
+        }
+        if (capabilities.ui_live_v1 !== false && canConnectUILive(options)) {
+          try { uiLive.connect(); } catch {
+            // The HTTP snapshot remains usable while the live connection recovers.
+          }
+        }
       } catch {
         if (active) dispatch({ type: "managed/enabled", scope, enabled: false });
       }
