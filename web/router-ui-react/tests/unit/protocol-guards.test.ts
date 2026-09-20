@@ -118,6 +118,28 @@ describe("protocol guards", () => {
     expect(isManagedHistoryEntry({ ...entry, message_content: "body", unexpected_detail: true })).toBe(false);
   });
 
+  it("accepts the new lifecycle frames and the bounded legacy record key", () => {
+    const managedAgent = {
+      agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+      desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+      created_at: "2026-09-09T09:48:28Z", started_at: null, updated_at: "2026-09-09T09:48:30Z", last_error: null,
+    };
+    const delta = { type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: "managed-alpha", changes: managedAgent };
+    const removed = { type: "managed_agent_removed", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: "managed-alpha" };
+    expect(isUILiveFrame(delta)).toBe(true);
+    expect(isUILiveFrame(removed)).toBe(true);
+    expect(isUILiveFrame({ ...delta, record_key: "live:managed-alpha" })).toBe(true);
+    expect(isUILiveFrame({ ...removed, record_key: "live:managed-alpha" })).toBe(true);
+    expect(isUILiveFrame({ ...delta, record_key: "" })).toBe(false);
+    expect(isUILiveFrame({ ...removed, record_key: 42 })).toBe(false);
+    expect(isUILiveFrame({ ...delta, undocumented: true })).toBe(false);
+    expect(isUILiveFrame({ ...removed, undocumented: true })).toBe(false);
+    expect(isUILiveFrame({ ...delta, changes: { ...managedAgent, record_kind: "archived" } })).toBe(false);
+    expect(isUILiveFrame({ ...delta, projection_version: -1 })).toBe(false);
+    expect(isUILiveFrame({ ...delta, agent_id: "bad id" })).toBe(false);
+  });
+
   it("accepts only bounded provider-auth live frames", () => {
     const prompt = { type: "provider_auth_prompt", protocol: "mecha.web/v1", projection_version: 1, operation_id: "auth-1", provider: "google", prompt: { id: "prompt-1", kind: "secret", message: "Enter the requested sign-in value.", url: "https://accounts.google.com/device" } };
     expect(isUILiveFrame(prompt)).toBe(true);

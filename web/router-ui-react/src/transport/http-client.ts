@@ -216,8 +216,14 @@ function templates(value: unknown): PromptTemplateResponse {
 }
 function managedAgents(value: unknown): ManagedAgentsResponse {
   const root = recordValue(value);
-  if (!root || !isRouterUtcTimestamp(root.generated_at) || !safeInteger(root.projection_version) || !Array.isArray(root.agents) || !root.agents.every(isManagedAgent)) throw invalidResponse("Router returned an invalid managed-agent list", value);
-  return { generated_at: root.generated_at, projection_version: root.projection_version, agents: root.agents };
+  const rawAgents = root?.agents;
+  // Archived records are not agents the current UI can operate. Ignore them at
+  // the boundary so a legacy archive entry cannot invalidate the live snapshot.
+  const agents = Array.isArray(rawAgents)
+    ? rawAgents.filter((candidate) => recordValue(candidate)?.record_kind !== "archived")
+    : undefined;
+  if (!root || !isRouterUtcTimestamp(root.generated_at) || !safeInteger(root.projection_version) || !agents || !agents.every(isManagedAgent)) throw invalidResponse("Router returned an invalid managed-agent list", value);
+  return { generated_at: root.generated_at, projection_version: root.projection_version, agents };
 }
 function managedAgent(value: unknown): ManagedAgentResponse {
   const root = recordValue(value);

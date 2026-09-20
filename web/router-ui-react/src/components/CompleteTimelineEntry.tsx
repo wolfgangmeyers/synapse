@@ -21,8 +21,17 @@ function titleCase(value: string): string {
   return value.split(/[._-]/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
+const managedContextTooSmallErrorCode = "CONTEXT_TOO_SMALL";
+
+function hasSafeClassifiedReason(presentation: ManagedHistoryPresentation | undefined): boolean {
+  return presentation?.kind === "tool" && presentation.tool_name === "mecha_context" && presentation.outcome === "warning" && presentation.error?.code === managedContextTooSmallErrorCode;
+}
+
 function toolVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
   const toolName = normalizedToolName(presentation.tool_name);
+  if (hasSafeClassifiedReason(presentation)) {
+    return { icon: "fa-solid fa-compress", tone: "amber", label: "Compaction skipped", detail: "Session is too small to compact.", isHighValue: true };
+  }
   const succeeded = presentation.outcome === "success";
   const failed = presentation.outcome === "error" || presentation.outcome === "failed";
   const interrupted = presentation.outcome === "interrupted";
@@ -166,6 +175,7 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const visual = completeTimelineVisual(entry);
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
+  const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
   const hasDetails = entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined;
   const accessibleName = [visual.label, visual.detail, time.title, hasDetails ? "View details" : undefined].filter((value): value is string => value !== undefined && value !== "").join(". ");
   const presentation = entry.presentation;
@@ -188,7 +198,7 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   return <Fragment>
     <article className={`activity-entry activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
-      <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
+      <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false && !safeClassifiedReason && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
     </article>
     {detailMounted ? <ActivityDetailDialog entry={entry} open={detailOpen} returnFocus={detailTrigger.current} onClose={() => setDetailOpen(false)} onClosed={() => setDetailMounted(false)} /> : null}
   </Fragment>;

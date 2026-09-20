@@ -144,17 +144,11 @@ func (h *uiLiveHub) snapshot(ctx context.Context) (*uiLiveProjection, error) {
 }
 
 func uiLiveProjectionFromStored(stored store.ManagedAgentsSnapshot, childrenVersion int64, childrenGeneratedAt string, children []map[string]any) *uiLiveProjection {
-	agents := make(map[string]map[string]any, len(stored.Agents)+len(stored.Archives))
+	agents := make(map[string]map[string]any, len(stored.Agents))
 	for _, record := range stored.Agents {
 		public := managed.PublicAgent(record)
-		if key := managed.ManagedRecordKey(public); key != "" {
-			agents[key] = public
-		}
-	}
-	for _, archive := range stored.Archives {
-		public := managed.PublicArchive(archive)
-		if key := managed.ManagedRecordKey(public); key != "" {
-			agents[key] = public
+		if record != nil && record.AgentID != "" {
+			agents[record.AgentID] = public
 		}
 	}
 	generatedAt := stored.GeneratedAt.UTC().Format(time.RFC3339Nano)
@@ -367,23 +361,14 @@ func uiLiveTransition(prior, current *uiLiveProjection) map[string]any {
 	// removal. Private-only changes and batched observations use a snapshot so
 	// clients still advance exactly and never guess which record changed.
 	if len(changed) == 1 && len(removed) == 0 {
-		recordKey := uiLiveRecordKey(changed[0], current.agents[changed[0]])
 		agentID, _ := current.agents[changed[0]]["agent_id"].(string)
-		return map[string]any{"type": "managed_agent_delta", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "record_key": recordKey, "agent_id": agentID, "changes": current.agents[changed[0]]}
+		return map[string]any{"type": "managed_agent_delta", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "agent_id": agentID, "changes": current.agents[changed[0]]}
 	}
 	if len(changed) == 0 && len(removed) == 1 {
-		recordKey := uiLiveRecordKey(removed[0], prior.agents[removed[0]])
 		agentID, _ := prior.agents[removed[0]]["agent_id"].(string)
-		return map[string]any{"type": "managed_agent_removed", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "record_key": recordKey, "agent_id": agentID}
+		return map[string]any{"type": "managed_agent_removed", "protocol": uiLiveProtocol, "projection_version": current.version, "base_version": prior.version, "agent_id": agentID}
 	}
 	return current.frame()
-}
-
-func uiLiveRecordKey(key string, record map[string]any) string {
-	if strings.HasPrefix(key, "live:") || strings.HasPrefix(key, "archive:") {
-		return key
-	}
-	return managed.ManagedRecordKey(record)
 }
 
 func (client *uiLiveClient) send(frame map[string]any) bool {

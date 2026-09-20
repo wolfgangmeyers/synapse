@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,15 @@ func readUILiveFrame(t *testing.T, conn *websocket.Conn) map[string]any {
 	var frame map[string]any
 	require.NoError(t, json.Unmarshal(body, &frame))
 	return frame
+}
+
+func mapKeys(value map[string]any) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func reserveUILiveAgent(t *testing.T, durable *store.Store, id string) {
@@ -150,36 +160,43 @@ func TestUILiveReportsProcessLossAsFailedDelta(t *testing.T) {
 	require.Equal(t, "PROCESS_EXITED", errorView["code"])
 }
 
-func TestUILiveProjectionKeepsLiveAndArchiveRecordKeysSeparate(t *testing.T) {
+func TestUILiveProjectionContainsEveryLiveRecordAndNoArchives(t *testing.T) {
 	key := "123e4567-e89b-42d3-a456-426614174081"
 	stored := store.ManagedAgentsSnapshot{
 		GeneratedAt: time.Unix(1, 0), ProjectionVersion: 4,
-		Agents:   []*store.ManagedAgentRecord{{AgentID: "alpha", Name: "alpha", Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}},
+		Agents: []*store.ManagedAgentRecord{
+			{AgentID: "alpha", Name: "alpha", Cwd: "/tmp/alpha", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)},
+			{AgentID: "beta", Name: "beta", Cwd: "/tmp/beta", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: strings.Repeat("b", 64)},
+		},
 		Archives: []*store.ManagedAgentArchive{{RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha", ArchiveKey: key, TerminalOutcome: "terminated", CompletedAt: "2026-09-01T12:00:00.000Z"}},
 	}
 	projection := uiLiveProjectionFromStored(stored, 4, "", nil)
-	require.Contains(t, projection.agents, "live:alpha")
-	require.Contains(t, projection.agents, "archive:"+key)
 	frame := projection.frame()
 	records := frame["agents"].([]map[string]any)
 	require.Len(t, records, 2)
-	require.Equal(t, "alpha", records[0]["agent_id"])
-	require.Equal(t, key, records[1]["archive_key"])
+	require.Equal(t, []string{"alpha", "beta"}, []string{records[0]["agent_id"].(string), records[1]["agent_id"].(string)})
+	for _, record := range records {
+		require.NotContains(t, record, "record_kind")
+		require.NotContains(t, record, "archive_key")
+	}
 }
 
-func TestUILiveTransitionCarriesArchiveRecordKey(t *testing.T) {
-	key := "123e4567-e89b-42d3-a456-426614174081"
-	archive := managed.PublicArchive(&store.ManagedAgentArchive{RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha", ArchiveKey: key, TerminalOutcome: "terminated", CompletedAt: "2026-09-01T12:00:00.000Z"})
-	prior := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{}}
-	delta := uiLiveTransition(prior, &uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{"archive:" + key: archive}})
-	require.Equal(t, "managed_agent_delta", delta["type"])
-	require.Equal(t, "archive:"+key, delta["record_key"])
-	require.Equal(t, "alpha", delta["agent_id"])
+func TestUILiveTransitionUsesLiveAgentIdentityAndDocumentedKeys(t *testing.T) {
+	prior := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha", "activity_state": "idle"}, "beta": {"agent_id": "beta", "activity_state": "idle"}}}
+	updated := uiLiveTransition(prior, &uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha", "activity_state": "active"}, "beta": {"agent_id": "beta", "activity_state": "idle"}}})
+	require.Equal(t, "managed_agent_delta", updated["type"])
+	require.Equal(t, "alpha", updated["agent_id"])
+	require.Equal(t, int64(3), updated["base_version"])
+	require.Equal(t, int64(4), updated["projection_version"])
+	require.NotContains(t, updated, "record_key")
+	require.Equal(t, []string{"agent_id", "base_version", "changes", "projection_version", "protocol", "type"}, mapKeys(updated))
+	require.Equal(t, "alpha", updated["changes"].(map[string]any)["agent_id"])
 
-	removed := uiLiveTransition(&uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"archive:" + key: archive}}, &uiLiveProjection{version: 5, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{}})
+	removed := uiLiveTransition(&uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha"}, "beta": {"agent_id": "beta"}}}, &uiLiveProjection{version: 5, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{"beta": {"agent_id": "beta"}}})
 	require.Equal(t, "managed_agent_removed", removed["type"])
-	require.Equal(t, "archive:"+key, removed["record_key"])
 	require.Equal(t, "alpha", removed["agent_id"])
+	require.NotContains(t, removed, "record_key")
+	require.Equal(t, []string{"agent_id", "base_version", "projection_version", "protocol", "type"}, mapKeys(removed))
 }
 
 func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *testing.T) {
