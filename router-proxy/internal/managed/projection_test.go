@@ -49,15 +49,24 @@ func TestPublicArchiveProjectionUsesOnlyTheClosedShape(t *testing.T) {
 	}, projection)
 }
 
-func TestProjectionListAppendsArchivesAfterLiveRecords(t *testing.T) {
-	live := &store.ManagedAgentRecord{AgentID: "alpha", Name: "alpha", Cwd: "/work", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+func TestProjectionListContainsEveryLiveRecordAndNoArchives(t *testing.T) {
+	liveAlpha := &store.ManagedAgentRecord{AgentID: "alpha", Name: "alpha", Cwd: "/work/alpha", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	liveBeta := &store.ManagedAgentRecord{AgentID: "beta", Name: "beta", Cwd: "/work/beta", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", ManifestRevision: 1, ManifestHash: strings.Repeat("b", 64)}
 	archive := &store.ManagedAgentArchive{RecordKind: "archived", LifecycleState: "archived", AgentID: "alpha", Name: "alpha", ArchiveKey: "123e4567-e89b-42d3-a456-426614174081", TerminalOutcome: "terminated", CompletedAt: "2026-09-01T12:00:00.000Z"}
-	result := ProjectionListEnvelope(store.ManagedAgentsSnapshot{GeneratedAt: time.Unix(1, 0), ProjectionVersion: 8, Agents: []*store.ManagedAgentRecord{live}, Archives: []*store.ManagedAgentArchive{archive}})
+	result := ProjectionListEnvelope(store.ManagedAgentsSnapshot{GeneratedAt: time.Unix(1, 0), ProjectionVersion: 8, Agents: []*store.ManagedAgentRecord{liveAlpha, liveBeta}, Archives: []*store.ManagedAgentArchive{archive}})
 	agents := result["agents"].([]map[string]any)
 	require.Len(t, agents, 2)
-	require.Equal(t, "alpha", agents[0]["agent_id"])
-	require.Equal(t, "archive:123e4567-e89b-42d3-a456-426614174081", ManagedRecordKey(agents[1]))
-	require.Equal(t, "archived", agents[1]["record_kind"])
+	require.Equal(t, []string{"alpha", "beta"}, []string{agents[0]["agent_id"].(string), agents[1]["agent_id"].(string)})
+	for _, agent := range agents {
+		require.NotContains(t, agent, "record_kind")
+		require.NotContains(t, agent, "archive_key")
+	}
+}
+
+func TestProjectionListKeepsEmptyLiveProjectionEmpty(t *testing.T) {
+	result := ProjectionListEnvelope(store.ManagedAgentsSnapshot{GeneratedAt: time.Unix(1, 0), ProjectionVersion: 9, Archives: []*store.ManagedAgentArchive{{RecordKind: "archived", AgentID: "alpha", ArchiveKey: "123e4567-e89b-42d3-a456-426614174081"}}})
+	require.Equal(t, int64(9), result["projection_version"])
+	require.Empty(t, result["agents"])
 }
 
 func TestPublicProjectionKeepsAUsefulRedactedDurableCause(t *testing.T) {

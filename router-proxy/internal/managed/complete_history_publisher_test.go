@@ -176,8 +176,41 @@ func TestRootControlHistoryPublishesTheStructuredDurableFact(t *testing.T) {
 	published := make(chan store.ManagedHistoryEntry, 1)
 	manager.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) { published <- entry })
 
-	manager.recordRootControlHistory(context.Background(), "managed-agent", "bash", "success", "request-1")
+	manager.recordRootControlHistory(context.Background(), "managed-agent", "bash", "ops.bash", "request-1", RootControlHandlerResult{Status: "ok"})
 	entry := <-published
 	require.Equal(t, "Ran bash", entry.Message)
 	require.Equal(t, &store.ManagedHistoryPresentation{Kind: "tool", ToolName: "bash", Outcome: "success", Summary: "Completed successfully"}, entry.Presentation)
+}
+
+func TestRootControlHistoryAllowsOnlyTheKnownSafeCompactionReason(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manager := &Manager{store: durable}
+
+	manager.recordRootControlHistory(context.Background(), "managed-agent", "mecha_context", "context.control", "safe-request", RootControlHandlerResult{Status: "error", ErrorCode: "HANDLER_FAILED", ErrorMessage: piContextTooSmallError})
+	manager.recordRootControlHistory(context.Background(), "managed-agent", "mecha_context", "context.control", "unsafe-request", RootControlHandlerResult{Status: "error", ErrorCode: "HANDLER_FAILED", ErrorMessage: "Pi RPC error: password=private"})
+	manager.recordRootControlHistory(context.Background(), "managed-agent", "mecha_context", "ops.state", "wrong-operation", RootControlHandlerResult{Status: "error", ErrorCode: "HANDLER_FAILED", ErrorMessage: piContextTooSmallError})
+
+	page, err := durable.ManagedHistoryPage(context.Background(), "managed-agent", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 3)
+
+	byMessage := map[string][]store.ManagedHistoryEntry{}
+	for _, entry := range page.Entries {
+		byMessage[entry.Message] = append(byMessage[entry.Message], entry)
+	}
+	require.Len(t, byMessage["Compaction skipped"], 1)
+	safe := byMessage["Compaction skipped"][0]
+	require.Equal(t, "warning", safe.Level)
+	require.Equal(t, "warning", safe.Presentation.Outcome)
+	require.Equal(t, managedContextTooSmallSafeSummary, safe.Presentation.Summary)
+	require.Equal(t, &store.ManagedHistoryError{Code: managedContextTooSmallErrorCode, Retryable: false, DetailAvailable: false}, safe.Presentation.Error)
+
+	require.Len(t, byMessage["Tool failed"], 2)
+	for _, generic := range byMessage["Tool failed"] {
+		require.Equal(t, "The operation could not be completed.", generic.Presentation.Summary)
+		require.Equal(t, &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false}, generic.Presentation.Error)
+		require.NotContains(t, generic.Presentation.Summary, "private")
+	}
 }

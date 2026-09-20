@@ -50,6 +50,7 @@ func TestManagedArchiveHTTPContractSeparatesClosedReadFromLiveDetail(t *testing.
 
 	key := "123e4567-e89b-42d3-a456-426614174081"
 	insertManagedArchiveHTTPTest(t, database, key, "alpha")
+	require.NoError(t, durable.ReserveManagedLaunch(ctx, store.ManagedAgentRecord{AgentID: "beta", Name: "beta", SlotHeld: true, Cwd: "/tmp/beta", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}, store.ManagedOperation{OperationID: "beta-operation", Method: http.MethodPost, CanonicalPath: "/v1/managed-agents", RequestID: "beta-request", CanonicalBodyHash: strings.Repeat("b", 64), ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}))
 
 	request := func(method, path string) (*http.Response, map[string]any) {
 		req, requestErr := http.NewRequest(method, server.URL+path, nil)
@@ -69,6 +70,14 @@ func TestManagedArchiveHTTPContractSeparatesClosedReadFromLiveDetail(t *testing.
 	live, liveBody := request(http.MethodGet, "/v1/managed-agents/alpha")
 	require.Equal(t, http.StatusNotFound, live.StatusCode)
 	require.Equal(t, "AGENT_NOT_FOUND", liveBody["error"].(map[string]any)["code"])
+
+	list, listBody := request(http.MethodGet, "/v1/managed-agents")
+	require.Equal(t, http.StatusOK, list.StatusCode)
+	listAgents, ok := listBody["agents"].([]any)
+	require.True(t, ok)
+	require.Len(t, listAgents, 1)
+	require.Equal(t, "beta", listAgents[0].(map[string]any)["agent_id"])
+	require.NotContains(t, listAgents[0], "record_kind")
 
 	archive, archiveBody := request(http.MethodGet, "/v1/managed-agents/archive/"+key)
 	require.Equal(t, http.StatusOK, archive.StatusCode)

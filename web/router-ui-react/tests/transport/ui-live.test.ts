@@ -54,6 +54,50 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
+  it("keeps every live row from a mixed legacy snapshot", () => {
+    vi.useFakeTimers();
+    const sockets: UILiveSocket[] = [];
+    const frames: unknown[] = [];
+    const client = createUILiveClient({ routerUrl: "http://router.test", retryDelayMs: 1, webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; }, onFrame: (frame) => frames.push(frame) });
+    client.connect();
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 4, generated_at: "2030-01-01T00:00:00.000Z", agents: [{ record_kind: "archived", agent_id: "managed-alpha" }, agent, { ...agent, agent_id: "managed-beta" }] }) });
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ agents: [{ agent_id: "managed-alpha" }, { agent_id: "managed-beta" }] });
+    expect(client.projectionVersion).toBe(4);
+    client.close();
+    vi.useRealTimers();
+  });
+
+  it("accepts new and bounded legacy lifecycle frames", () => {
+    vi.useFakeTimers();
+    const sockets: UILiveSocket[] = [];
+    const frames: unknown[] = [];
+    const client = createUILiveClient({ routerUrl: "http://router.test", retryDelayMs: 1, webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; }, onFrame: (frame) => frames.push(frame) });
+    client.connect();
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });
+    const delta = { type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: agent.agent_id, changes: { ...agent, activity_state: "active" } };
+    sockets[0]?.emit("message", { data: JSON.stringify(delta) });
+    const removed = { type: "managed_agent_removed", protocol: "mecha.web/v1", projection_version: 3, base_version: 2, agent_id: agent.agent_id, record_key: "live:managed-alpha" };
+    sockets[0]?.emit("message", { data: JSON.stringify(removed) });
+    expect(frames.map((frame) => typeof frame === "object" && frame !== null && "type" in frame ? frame.type : undefined)).toEqual(["managed_agents_snapshot", "managed_agent_delta", "managed_agent_removed"]);
+    expect(frames[2]).not.toHaveProperty("record_key");
+    client.close();
+    vi.useRealTimers();
+  });
+
+  it("rejects an invalid legacy record key and reconnects", () => {
+    vi.useFakeTimers();
+    const sockets: UILiveSocket[] = [];
+    const recoveries = vi.fn();
+    const client = createUILiveClient({ routerUrl: "http://router.test", retryDelayMs: 1, webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; }, onFrame: () => undefined, onRecovery: recoveries });
+    client.connect();
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agent_removed", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: agent.agent_id, record_key: 42 }) });
+    expect(recoveries).toHaveBeenCalledTimes(1);
+    client.close();
+    vi.useRealTimers();
+  });
+
   it("rejects every frame before its initial agent snapshot", () => {
     vi.useFakeTimers();
     const sockets: UILiveSocket[] = [];

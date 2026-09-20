@@ -3,7 +3,8 @@ import { applyLifecycleReplay, applyLifecycleSnapshot, projectConnectedAgents, u
 import type { Agent } from "../../src/state/agent-projection";
 import { createInitialState } from "../../src/state/app-state";
 import { reducer } from "../../src/state/reducer";
-import type { ManagedChildrenProjection } from "../../src/protocol/types";
+import type { ManagedAgent, ManagedChildrenProjection } from "../../src/protocol/types";
+const managed = (agent_id: string): ManagedAgent => ({ agent_id, source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null });
 const agent = (id: string, version = 1) => ({ agent_id: id, instance_id: "i", subagent_version: version, subagent_count: 1, subagents: [{ id: "child", description: "work" }] });
 describe("agent projections", () => { it("uses connected agents as authority and excludes UI", () => { expect(projectConnectedAgents([agent("web"), agent("peer")], "web").map((item) => item.agent_id)).toEqual(["peer"]); });
   it("preserves a catalog through an empty reconnect snapshot for the same instance", () => {
@@ -51,4 +52,20 @@ describe("agent projections", () => { it("uses connected agents as authority and
     state = reducer(state, { type: "managed/children", scope, version: 3, children: children(3) });
     expect(state.managedChildrenProjectionVersion).toBe(4);
     expect(state.managedChildren["managed-peer"]?.lifecycle_version).toBe(4);
-  }); });
+  });
+  it("fences an absent-agent removal without touching other live rows or children", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const alpha = managed("alpha");
+    const beta = managed("beta");
+    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 7, agents: [alpha, beta] });
+    const betaChild = { id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed" as const, cause: null, observed_at: "2030-01-01T00:00:00Z" }, status: "running" as const, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 } };
+    state = reducer(state, { type: "managed/children", scope, version: 7, children: [{ agent_id: "alpha", source: "router-managed", lifecycle_version: 7, recovery_state: "current", children: [] }, { agent_id: "beta", source: "router-managed", lifecycle_version: 7, recovery_state: "current", children: [betaChild] }] });
+    const absent = reducer(state, { type: "managed/removed", scope, version: 8, baseVersion: 7, agentId: "missing" });
+    expect(absent.managedProjectionVersion).toBe(8);
+    expect(absent.managedAgents).toEqual([alpha, beta]);
+    expect(absent.managedChildren).toEqual(state.managedChildren);
+    expect(reducer(state, { type: "managed/removed", scope, version: 9, baseVersion: 7, agentId: "missing" })).toBe(state);
+    expect(reducer(state, { type: "managed/removed", scope, version: 9, baseVersion: 8, agentId: "missing" })).toBe(state);
+    expect(reducer(state, { type: "managed/removed", scope, version: 6, baseVersion: 5, agentId: "alpha" })).toBe(state);
+  });
+});

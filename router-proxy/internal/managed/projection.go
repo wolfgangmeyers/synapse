@@ -93,12 +93,9 @@ func ProjectionArchiveEnvelope(archive *store.ManagedAgentArchive, generatedAt t
 // ProjectionEnvelope. It includes failed and stopped durable rows so the UI
 // can show lifecycle recovery state without learning private runtime fields.
 func ProjectionListEnvelope(snapshot store.ManagedAgentsSnapshot) map[string]any {
-	agents := make([]map[string]any, 0, len(snapshot.Agents)+len(snapshot.Archives))
+	agents := make([]map[string]any, 0, len(snapshot.Agents))
 	for _, agent := range snapshot.Agents {
 		agents = append(agents, PublicAgent(agent))
-	}
-	for _, archive := range snapshot.Archives {
-		agents = append(agents, PublicArchive(archive))
 	}
 	return map[string]any{"generated_at": snapshot.GeneratedAt.UTC().Format(time.RFC3339Nano), "projection_version": snapshot.ProjectionVersion, "agents": agents}
 }

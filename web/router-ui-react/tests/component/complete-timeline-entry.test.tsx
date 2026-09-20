@@ -51,6 +51,24 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector("[data-event-kind='message']")).toBeInTheDocument();
   });
 
+  it("renders the allowlisted too-small compaction result without a generic redaction notice", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{ id: "complete:compaction-skipped", agent_id: "managed-worker", at, message: "Compaction skipped", presentation: { kind: "tool", tool_name: "mecha_context", outcome: "warning", summary: "Compaction skipped: session is too small.", error: { code: "CONTEXT_TOO_SMALL", retryable: false, detail_available: false } } }} />);
+
+    expect(screen.getByText("Compaction skipped", { selector: "strong" })).toBeInTheDocument();
+    expect(screen.getByText("Session is too small to compact.")).toBeInTheDocument();
+    expect(screen.queryByText("No additional safe details available.")).not.toBeInTheDocument();
+    expect(container.querySelector(".fa-compress")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--amber")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--terminal-danger")).not.toBeInTheDocument();
+  });
+
+  it("does not apply the safe compaction presentation to another tool", () => {
+    render(<CompleteTimelineEntry entry={{ id: "complete:not-compaction", agent_id: "managed-worker", at, message: "Tool failed", presentation: { kind: "tool", tool_name: "bash", outcome: "warning", error: { code: "CONTEXT_TOO_SMALL", retryable: false, detail_available: false } } }} />);
+
+    expect(screen.queryByText("Compaction skipped")).not.toBeInTheDocument();
+    expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
+  });
+
   it("keeps error failures recognizable and exposes no unsafe detail affordance", () => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: "complete:failed", agent_id: "managed-worker", at, message: "Bash failed", presentation: { kind: "tool", tool_name: "bash", outcome: "error", error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } } }} />);
     expect(screen.getByText("Bash failed")).toBeInTheDocument();

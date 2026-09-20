@@ -126,6 +126,24 @@ describe("direct HTTP transport", () => {
     await expect(createHttpClient("http://router.test", fetchImpl).managedAgents()).resolves.toMatchObject({ projection_version: 1, agents: [{ agent_id: "managed-alpha" }] });
   });
 
+  it("keeps every valid live row when a legacy response includes archives", async () => {
+    const liveAgent = { agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.123456Z", started_at: null, updated_at: "2030-01-01T00:00:00.123456789Z", last_error: null };
+    const archive = { record_kind: "archived", lifecycle_state: "archived", agent_id: "managed-alpha", name: "Old worker", archive_key: "123e4567-e89b-42d3-a456-426614174000", terminal_outcome: "terminated", completed_at: "2030-01-01T00:00:00.000Z", delivery: {} };
+    const fetchImpl = vi.fn(async () => response({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: 4, agents: [archive, liveAgent, { ...liveAgent, agent_id: "managed-beta" }] }));
+    await expect(createHttpClient("http://router.test", fetchImpl).managedAgents()).resolves.toMatchObject({ agents: [{ agent_id: "managed-alpha" }, { agent_id: "managed-beta" }] });
+  });
+
+  it("keeps empty managed lists and their projection metadata", async () => {
+    const fetchImpl = vi.fn(async () => response({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: 0, agents: [] }));
+    await expect(createHttpClient("http://router.test", fetchImpl).managedAgents()).resolves.toEqual({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: 0, agents: [] });
+  });
+
+  it("still rejects unknown fields on a live row beside an archive", async () => {
+    const liveAgent = { agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.123456Z", started_at: null, updated_at: "2030-01-01T00:00:00.123456789Z", last_error: null, unexpected: true };
+    const fetchImpl = vi.fn(async () => response({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: 4, agents: [{ record_kind: "archived" }, liveAgent] }));
+    await expect(createHttpClient("http://router.test", fetchImpl).managedAgents()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("normalizes a null conversation message collection to an empty list", async () => {
     const fetchImpl = vi.fn(async () => response({ owner: "web-ui", peer: "worker", high_water_sequence: 4, messages: null }));
     await expect(createHttpClient("http://router.test", fetchImpl).conversations("web-ui", "worker")).resolves.toMatchObject({ messages: [] });

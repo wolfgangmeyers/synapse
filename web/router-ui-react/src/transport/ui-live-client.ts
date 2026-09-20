@@ -1,4 +1,4 @@
-import { isUILiveFrame } from "../protocol/guards";
+import { isRecord, isUILiveFrame } from "../protocol/guards";
 import type { UILiveFrame } from "../protocol/types";
 import { normalizeRouterUrl } from "../persistence/settings-repository";
 import type { WebSocketFactory, WebSocketLike } from "./websocket-client";
@@ -55,6 +55,19 @@ function defaultFactory(url: string): WebSocketLike {
   };
 }
 
+function withoutArchivedSnapshotAgents(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !("type" in value) || value.type !== "managed_agents_snapshot" || !("agents" in value) || !Array.isArray(value.agents)) return value;
+  return { ...value, agents: value.agents.filter((agent: unknown) => !isRecord(agent) || agent.record_kind !== "archived") };
+}
+
+function withoutLegacyRecordKey(frame: UILiveFrame): UILiveFrame {
+  if (frame.type !== "managed_agent_delta" && frame.type !== "managed_agent_removed") return frame;
+  if (!("record_key" in frame)) return frame;
+  const documented = { ...frame };
+  delete documented.record_key;
+  return documented;
+}
+
 export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
   const url = directUILiveURL(options.routerUrl);
   const factory = options.webSocketFactory ?? defaultFactory;
@@ -89,44 +102,46 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     if (typeof data !== "string") { recover(protocolError("frame_not_text")); return; }
     let raw: unknown;
     try { raw = JSON.parse(data); } catch { recover(protocolError("frame_not_json")); return; }
+    raw = withoutArchivedSnapshotAgents(raw);
     if (!isUILiveFrame(raw)) { recover(protocolError("frame_invalid")); return; }
-    if (!agentSnapshotAccepted && raw.type !== "managed_agents_snapshot") { recover(protocolError("snapshot_missing")); return; }
-    if (raw.type === "managed_agents_snapshot") {
+    const frame = withoutLegacyRecordKey(raw);
+    if (!agentSnapshotAccepted && frame.type !== "managed_agents_snapshot") { recover(protocolError("snapshot_missing")); return; }
+    if (frame.type === "managed_agents_snapshot") {
       // The router deliberately uses an authoritative snapshot to repair a
       // missed projection delta. It is safe to replace an equal or newer local
       // version; only a regressed snapshot could resurrect stale agent state.
-      if (version !== undefined && raw.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
-      version = raw.projection_version;
+      if (version !== undefined && frame.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
+      version = frame.projection_version;
       agentSnapshotAccepted = true;
-      options.onFrame(raw);
+      options.onFrame(frame);
       return;
     }
-    if (raw.type === "managed_agent_delta" || raw.type === "managed_agent_removed") {
-      if (!agentSnapshotAccepted || version === undefined || raw.base_version !== version || raw.projection_version !== version + 1) { recover(protocolError("projection_version_gap")); return; }
-      version = raw.projection_version;
-      options.onFrame(raw);
+    if (frame.type === "managed_agent_delta" || frame.type === "managed_agent_removed") {
+      if (!agentSnapshotAccepted || version === undefined || frame.base_version !== version || frame.projection_version !== version + 1) { recover(protocolError("projection_version_gap")); return; }
+      version = frame.projection_version;
+      options.onFrame(frame);
       return;
     }
-    if (raw.type === "managed_children_snapshot") {
+    if (frame.type === "managed_children_snapshot") {
       if (!agentSnapshotAccepted) { recover(protocolError("child_snapshot_before_agent_snapshot")); return; }
       if (!childSnapshotAccepted) {
-        childrenVersion = raw.lifecycle_version;
+        childrenVersion = frame.lifecycle_version;
         childSnapshotAccepted = true;
-        options.onFrame(raw);
+        options.onFrame(frame);
         return;
       }
       // Child frames are authoritative full projections, not deltas. A polling
       // publish can safely skip an intermediate global version, so accept an
       // equal or newer snapshot and reconnect only if it regresses.
-      if (childrenVersion === undefined || raw.lifecycle_version < childrenVersion) { recover(protocolError("child_projection_version_regressed")); return; }
-      childrenVersion = raw.lifecycle_version;
-      options.onFrame(raw);
+      if (childrenVersion === undefined || frame.lifecycle_version < childrenVersion) { recover(protocolError("child_projection_version_regressed")); return; }
+      childrenVersion = frame.lifecycle_version;
+      options.onFrame(frame);
       return;
     }
     // History and future P4 provider frames carry a projection version but do
     // not mutate the managed-agent projection. Never let them advance it.
-    if (version !== undefined && raw.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
-    options.onFrame(raw);
+    if (version !== undefined && frame.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
+    options.onFrame(frame);
   };
   const connect = (): void => {
     if (stopped || socket !== undefined) return;

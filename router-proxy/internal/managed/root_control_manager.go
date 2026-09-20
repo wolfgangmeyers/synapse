@@ -14,7 +14,12 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
-const rootControlAppendTimeout = 10 * time.Second
+const (
+	rootControlAppendTimeout          = 10 * time.Second
+	piContextTooSmallError            = "Pi RPC error: Nothing to compact (session too small)"
+	managedContextTooSmallErrorCode   = "CONTEXT_TOO_SMALL"
+	managedContextTooSmallSafeSummary = "Compaction skipped: session is too small."
+)
 
 var errRootControlHandlerPanic = errors.New("managed root control handler failed internally")
 
@@ -395,11 +400,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	completed, err := m.store.CompleteManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, store.ManagedControlResult{Status: result.Status, Content: result.Content, DetailsJSON: string(details), PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(canonical)), DecodedPayloadBytes: len(canonical), ErrorCode: result.ErrorCode, ErrorMessage: result.ErrorMessage, Retryable: result.Retryable})
 	if err == nil && completed != nil {
 		m.emitEvent(managedRootControlResultEvent(*completed))
-		outcome := "success"
-		if result.Status == "error" {
-			outcome = "error"
-		}
-		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, outcome, claim.Request.RequestID)
+		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, claim.Request.OperationID, claim.Request.RequestID, result)
 		if result.Status == "ok" && claim.Request.OperationID == "web.search" {
 			m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "tool", ID: claim.Request.RequestID})
 		}
@@ -407,9 +408,6 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	}
 }
 
-// recordRootControlHistory uses the immutable tool name and terminal result.
-// Arguments and result content can contain human-entered text, so they never
-// cross into the timeline projection.
 func (m *Manager) failRootControlHandler(ctx context.Context, binding *managedBinding, claim *store.ManagedControlHandlerClaim, fence store.ManagedRuntimeFence, code, detail string) {
 	if claim == nil || binding == nil {
 		return
@@ -446,10 +444,14 @@ func (m *Manager) failRootControlHandler(ctx context.Context, binding *managedBi
 	m.appendRootControlResult(ctx, binding, *failed)
 }
 
-func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolName, outcome, requestID string) {
+// recordRootControlHistory uses immutable control identity plus a closed
+// classification of the terminal result. Raw result content and error text can
+// contain untrusted data and must never cross into the timeline projection.
+func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolName, operationID, requestID string, result RootControlHandlerResult) {
 	if toolName == "" || requestID == "" {
 		return
 	}
+	outcome := "success"
 	level, message := "info", "Ran "+toolName
 	presentation := &store.ManagedHistoryPresentation{Kind: "tool", ToolName: toolName, Outcome: outcome, Summary: "Completed successfully"}
 	if toolName == "goal" {
@@ -459,7 +461,8 @@ func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolNam
 		message = "Reminder set"
 		presentation = &store.ManagedHistoryPresentation{Kind: "reminder", Outcome: outcome, Summary: "Completed successfully"}
 	}
-	if outcome == "error" {
+	if result.Status == "error" {
+		outcome = "error"
 		level = "error"
 		presentation.Outcome = "error"
 		presentation.Summary = "The operation could not be completed."
@@ -473,6 +476,17 @@ func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolNam
 			message = "Bash failed"
 		default:
 			message = "Tool failed"
+		}
+		// Pi exposes this expected no-op only as stable RPC error text.
+		// Require the exact operation, router error class, and full text before
+		// replacing redacted failure copy with a fixed safe classification.
+		if operationID == "context.control" && result.ErrorCode == "HANDLER_FAILED" && result.ErrorMessage == piContextTooSmallError {
+			outcome = "warning"
+			level = "warning"
+			message = "Compaction skipped"
+			presentation.Outcome = "warning"
+			presentation.Summary = managedContextTooSmallSafeSummary
+			presentation.Error = &store.ManagedHistoryError{Code: managedContextTooSmallErrorCode, Retryable: false, DetailAvailable: false}
 		}
 	}
 	entry, err := m.store.RecordManagedCompleteHistoryWithPresentation(ctx, agentID, "managed_control", level, message, "managed-control:"+requestID+":"+outcome, presentation)
