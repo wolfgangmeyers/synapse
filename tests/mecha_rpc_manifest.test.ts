@@ -43,12 +43,12 @@ test("the source-mapped manifest generator has no byte drift", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("revision two manifest retains the 16 baseline definitions and adds source-backed web search", () => {
+test("revision three manifest retains prior definitions and adds the root-only workflow transition contract", () => {
   const desired = manifest();
   const validated = validateDesiredManifest(desired, { requireBaselineCapabilities: true });
 
-  assert.equal(validated.revision, 2);
-  assert.equal(validated.tools.length, 17);
+  assert.equal(validated.revision, 3);
+  assert.equal(validated.tools.length, 18);
   assert.deepEqual(validated.tools.map((tool) => tool.name).sort(), [
     "goal",
     "goal_snooze",
@@ -66,10 +66,96 @@ test("revision two manifest retains the 16 baseline definitions and adds source-
     "mecha_state",
     "mecha_verification_handoff",
     "mecha_worker",
+    "mecha_workflow_transition",
     "web_search__4f4ca2a3ae8ea237531b8c5264d53d15474c0848fc8d7eeada0fef5b85b139ac",
   ]);
   assert.equal(hashCanonicalJson(validated), hashCanonicalJson(JSON.parse(canonicalizeJson(validated))));
   assert.equal(canonicalizeJson({ z: 1, a: [true, "x"] }), '{"a":[true,"x"],"z":1}');
+});
+
+test("workflow transition identity, schema, prompt guidance, and raw arguments are exact", () => {
+  const desired = validateDesiredManifest(manifest(), { requireBaselineCapabilities: true });
+  const matches = desired.tools.filter((tool) => tool.operation_id === "workflow.transition");
+  assert.equal(matches.length, 1);
+  const tool = matches[0]!;
+  assert.equal(tool.capability_id, "mecha_workflow_transition");
+  assert.equal(tool.name, "mecha_workflow_transition");
+  assert.equal(tool.definition_sha256, "3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69");
+  assert.equal(tool.definition_id, `def_${tool.definition_sha256}`);
+  assert.deepEqual(tool.parameters, {
+    type: "object",
+    additionalProperties: false,
+    required: ["entryId", "exit"],
+    properties: {
+      entryId: { type: "string", minLength: 36, maxLength: 36 },
+      exit: { type: "string", minLength: 1, maxLength: 256 },
+      note: { type: "string", maxLength: 4096 },
+    },
+  });
+  assert.deepEqual(tool.prompt_guidelines, [
+    "Use only the exact entry ID and a listed destination name or complete from the latest workflow entry message; a concise note is optional; never invent a target.",
+    "Call pi__mecha_workflow_transition through the Cursor pi bridge.",
+  ]);
+  assert.equal(validateArguments({ entryId: "123e4567-e89b-42d3-a456-426614174000", exit: "complete" }, tool.parameters), true);
+  for (const invalid of [
+    { entryId: "123e4567-e89b-42d3-a456-426614174000" },
+    { entryId: "123e4567-e89b-42d3-a456-426614174000", exit: "complete", runId: "other" },
+    { entryId: "short", exit: "complete" },
+    { entryId: "123e4567-e89b-42d3-a456-426614174000", exit: "" },
+    { entryId: "123e4567-e89b-42d3-a456-426614174000", exit: "complete", note: "x".repeat(4_097) },
+  ]) assert.equal(validateArguments(invalid, tool.parameters), false, JSON.stringify(invalid));
+});
+
+test("workflow transition dispatch is root-only and preserves immutable request identity", async () => {
+  const desired = manifest();
+  const manifestSha256 = hashCanonicalJson(desired);
+  for (const contextRef of ["root", "ctx1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] as const) {
+    const pi = fakePi();
+    const emitted: RecordValue[] = [];
+    const registry = createToolRegistry(pi, {
+      emitControl: (request) => { emitted.push(request); },
+      getRuntime: () => ({ runtimeGeneration: "123e4567-e89b-42d3-a456-426614174000", manifestSha256, sessionEpoch: 1 }),
+      getContextRef: () => contextRef,
+      onRequestQueued: () => {},
+    });
+    registry.installFull({
+      protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174001",
+      runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+      desired_manifest: desired, manifest_sha256: manifestSha256, restored_request_ids: [],
+      inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+    });
+    const installed = pi.tools.find((tool) => tool.name === "mecha_workflow_transition");
+    assert.ok(installed);
+    registry.captureRaw("workflow-call", "mecha_workflow_transition", {
+      entryId: "123e4567-e89b-42d3-a456-426614174000", exit: "complete", note: "done",
+    });
+    const result = await (installed.execute as (id: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>)(
+      "workflow-call", { entryId: "123e4567-e89b-42d3-a456-426614174000", exit: "complete", note: "done" }, undefined, undefined, {},
+    );
+    if (contextRef === "root") {
+      assert.equal(result.isError, undefined);
+      assert.equal(emitted.length, 1);
+      assert.deepEqual({
+        capability_id: emitted[0]!.capability_id,
+        tool_name: emitted[0]!.tool_name,
+        definition_id: emitted[0]!.definition_id,
+        definition_sha256: emitted[0]!.definition_sha256,
+        operation_id: emitted[0]!.operation_id,
+        context_ref: emitted[0]!.context_ref,
+      }, {
+        capability_id: "mecha_workflow_transition",
+        tool_name: "mecha_workflow_transition",
+        definition_id: "def_3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69",
+        definition_sha256: "3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69",
+        operation_id: "workflow.transition",
+        context_ref: "root",
+      });
+    } else {
+      assert.equal(result.isError, true);
+      assert.match(String((result.content as RecordValue[])[0]!.text), /requires the root context/);
+      assert.equal(emitted.length, 0);
+    }
+  }
 });
 
 test("protocol inventories stay closed and exact", () => {
@@ -192,8 +278,8 @@ test("full installs preflight atomically and supplemental installation is one un
     inline_policy: { enabled: true, credits: {} },
     recall_projection: { enabled: false, stores: [], content: "" },
   });
-  assert.equal(installed.tools.length, 17);
-  assert.equal(pi.tools.length, 17);
+  assert.equal(installed.tools.length, 18);
+  assert.equal(pi.tools.length, 18);
 
   const target = structuredClone(desired) as RecordValue;
   const tools = target.tools as RecordValue[];
@@ -209,7 +295,7 @@ test("full installs preflight atomically and supplemental installation is one un
   const extraName = `future_capability__${definitionHash}`;
   tools.push({ ...extra, name: extraName, definition_sha256: definitionHash, definition_id: `def_${definitionHash}` });
   tools.sort((left, right) => Buffer.compare(Buffer.from(String(left.capability_id), "utf8"), Buffer.from(String(right.capability_id), "utf8")));
-  target.revision = 3;
+  target.revision = 4;
   const added = registry.installSupplemental({
     protocol: "mecha.tools-install/v1",
     delivery_id: "123e4567-e89b-42d3-a456-426614174002",
@@ -220,8 +306,8 @@ test("full installs preflight atomically and supplemental installation is one un
     manifest_sha256: hashCanonicalJson(target),
     added_name: extraName,
   });
-  assert.equal(added.tools.length, 18);
-  assert.equal(pi.tools.length, 18);
+  assert.equal(added.tools.length, 19);
+  assert.equal(pi.tools.length, 19);
 
   await assert.rejects(async () => registry.installSupplemental({
     protocol: "mecha.tools-install/v1",
@@ -233,13 +319,13 @@ test("full installs preflight atomically and supplemental installation is one un
     manifest_sha256: hashCanonicalJson(target),
     added_name: extra.name,
   }));
-  assert.equal(pi.tools.length, 18);
+  assert.equal(pi.tools.length, 19);
   assert.deepEqual(emitted, []);
 });
 
-test("registry exceptions at positions 1, 8, and 17 make every partial manifest terminal", async () => {
+test("registry exceptions at positions 1, 9, and 18 make every partial manifest terminal", async () => {
   const desired = manifest();
-  for (const position of [1, 8, 17]) {
+  for (const position of [1, 9, 18]) {
     const pi = fakePi([], position);
     let fatal: unknown;
     const registry = createToolRegistry(pi, {
@@ -469,16 +555,16 @@ function sortedManifest(tools: RecordValue[], revision: number): RecordValue {
   };
 }
 
-test("fresh current manifests accept valid 18 through 32 tool states and changed definitions use hash names", () => {
+test("fresh current manifests accept valid 19 through 32 tool states and changed definitions use hash names", () => {
   const baseline = manifest();
   const baseTools = structuredClone(baseline.tools) as RecordValue[];
-  const current18 = sortedManifest([...baseTools, manifestTool("future_capability")], 3);
-  assert.equal(validateDesiredManifest(current18, { requireBaselineCapabilities: true }).tools.length, 18);
+  const current19 = sortedManifest([...baseTools, manifestTool("future_capability")], 4);
+  assert.equal(validateDesiredManifest(current19, { requireBaselineCapabilities: true }).tools.length, 19);
 
   const current32 = sortedManifest([
     ...baseTools,
-    ...Array.from({ length: 15 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
-  ], 3);
+    ...Array.from({ length: 14 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
+  ], 4);
   assert.equal(validateDesiredManifest(current32, { requireBaselineCapabilities: true }).tools.length, 32);
 
   const changedTools = structuredClone(baseline.tools) as RecordValue[];
@@ -499,11 +585,11 @@ test("fresh current manifests accept valid 18 through 32 tool states and changed
     definition_id: `def_${changedSha}`,
     definition_sha256: changedSha,
   });
-  const restarted = sortedManifest(changedTools, 3);
+  const restarted = sortedManifest(changedTools, 4);
   assert.doesNotThrow(() => validateDesiredManifest(restarted, { requireBaselineCapabilities: true }));
   assert.equal((restarted.tools as RecordValue[]).find((tool) => tool.capability_id === "goal")!.name, `goal__${changedSha}`);
 
-  const incorrectlyNamedAdditional = structuredClone(current18) as RecordValue;
+  const incorrectlyNamedAdditional = structuredClone(current19) as RecordValue;
   const additional = (incorrectlyNamedAdditional.tools as RecordValue[]).find((tool) => tool.capability_id === "future_capability")!;
   additional.name = "future_capability";
   assert.throws(() => validateDesiredManifest(incorrectlyNamedAdditional, { requireBaselineCapabilities: true }));
@@ -515,7 +601,7 @@ test("fresh current manifests accept valid 18 through 32 tool states and changed
 
   const overLimit = sortedManifest([
     ...(current32.tools as RecordValue[]),
-    manifestTool("future_16"),
+    manifestTool("future_14"),
   ], 3);
   assert.throws(() => validateDesiredManifest(overLimit, { requireBaselineCapabilities: true }));
 });
@@ -605,8 +691,8 @@ test("manifest ordering, reserved-name collisions, and supplemental capacity fai
   });
   const full32 = sortedManifest([
     ...(structuredClone(base.tools) as RecordValue[]),
-    ...Array.from({ length: 16 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
-  ], 2);
+    ...Array.from({ length: 14 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
+  ], 3);
   const rejectedCount = pi.tools.length;
   assert.throws(() => registry.installSupplemental({
     protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174051",

@@ -78,6 +78,56 @@ func TestTerminationAdmissionCapturesArchiveKeyCutoffRetiresSourceAndFreezesSett
 	require.Equal(t, "direct_pending", afterAttempt.State)
 }
 
+func TestCompleteManagedTerminationDeletesStaleDirectAttemptsAndPreservesArchive(t *testing.T) {
+	store, fence := readyManagedDirectFixture(t)
+	ctx := context.Background()
+	agent, err := store.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	before, err := store.Enqueue(ctx, protocol.Envelope{ID: "archive-stale-before", From: "sender", To: agent.Name, Body: "before", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = store.ResolveMessageTarget(ctx, before.Message.ID)
+	require.NoError(t, err)
+	beforeAttempt, err := store.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.NotNil(t, beforeAttempt)
+	admission := terminateArchiveTestAction(t, store, *agent, lifecycleUUID(985), fence)
+	stale, err := store.Enqueue(ctx, protocol.Envelope{ID: "archive-stale-after", From: "sender", To: agent.Name, Body: "stale", CreatedAt: time.Now().UTC().Format("2006-01-01T00:00:00.000Z")})
+	require.NoError(t, err)
+	require.Greater(t, stale.Message.EnqueueSequence, admission.Action.DeliveryCutoffEnqueueSequence)
+	require.NoError(t, func() error {
+		_, err := store.db.ExecContext(ctx, `INSERT INTO message_target_snapshots (snapshot_id,message_id,message_incarnation_id,recipient_name,source_kind,owner_identity,created_at) VALUES (?,?,?,?,?,?,?)`,
+			"stale-target", stale.Message.ID, stale.Message.MessageIncarnationID, agent.Name, "managed", agent.AgentID, "2026-09-08T00:00:00.000Z")
+		return err
+	}())
+	require.NoError(t, func() error {
+		_, err := store.db.ExecContext(ctx, `INSERT INTO managed_direct_delivery_attempts (message_id,message_incarnation_id,attempt_number,snapshot_id,agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,state,created_at,expires_at)
+			SELECT ?,message_incarnation_id,1,'stale-target',agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,'direct_pending',created_at,expires_at
+			FROM managed_direct_delivery_attempts WHERE message_id=? AND attempt_number=1`, stale.Message.ID, before.Message.ID)
+		return err
+	}())
+	var staleAttempts int
+	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE agent_id=?`, agent.AgentID).Scan(&staleAttempts))
+	require.Equal(t, 2, staleAttempts)
+
+	advanceArchiveActionToDurableWrite(t, store, admission.Action.ActionID, fence)
+	require.NoError(t, store.CompleteManagedTermination(ctx, admission.Action.ActionID))
+
+	archive, err := store.ManagedAgentArchive(ctx, admission.Action.ArchiveKey)
+	require.NoError(t, err)
+	require.Equal(t, 1, archive.Delivery.Total)
+	require.Equal(t, 1, archive.Delivery.InFlightOrUnknown)
+	_, err = store.ManagedAgent(ctx, agent.AgentID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE agent_id=?`, agent.AgentID).Scan(&staleAttempts))
+	require.Equal(t, 0, staleAttempts)
+	message, err := store.MessageFor(ctx, before.Message.ID)
+	require.NoError(t, err)
+	require.Nil(t, message)
+	message, err = store.MessageFor(ctx, stale.Message.ID)
+	require.NoError(t, err)
+	require.NotNil(t, message, "post-cutoff stale message is retained outside archive cleanup")
+}
+
 func TestCompleteManagedTerminationPublishesArchiveAndDeletesOnlyCutoffMessages(t *testing.T) {
 	store, ctx, agent, _ := restartFixture(t)
 	fence := restartFenceFromAgent(&agent)

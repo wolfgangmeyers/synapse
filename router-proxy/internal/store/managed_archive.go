@@ -392,7 +392,7 @@ func deleteManagedTerminationRawTx(ctx context.Context, db *sql.DB, reminderInca
 	if err := finalizeManagedTerminationRemindersTx(ctx, db, reminderIncarnations, name, action.AgentID, action.DeliveryCutoffEnqueueSequence); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id=? AND message_id IN (SELECT messages.id FROM messages WHERE `+predicate+`)`, append([]any{action.AgentID}, predicateArgs...)...); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id=?`, action.AgentID); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_diagnostics WHERE agent_id=?`, action.AgentID); err != nil {
