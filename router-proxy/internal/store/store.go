@@ -394,6 +394,30 @@ func (s *Store) migrationPending(ctx context.Context, id string) (bool, error) {
 	return false, nil
 }
 
+// preflightManagedLifecycleOrphansBefore057 runs immediately before migration
+// 057 in Store.Open's migration pass. At that point all 057 prerequisites,
+// including termination diagnostics, exist, and repair still precedes 057's
+// foreign-key check.
+func (s *Store) preflightManagedLifecycleOrphansBefore057(ctx context.Context) error {
+	var lifecycleTable int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='managed_lifecycle_actions'`).Scan(&lifecycleTable); err != nil {
+		return err
+	}
+	if lifecycleTable == 0 {
+		return nil
+	}
+	pending, err := s.migrationPending(ctx, managedRestartRetryMigration057ID)
+	if err != nil {
+		return err
+	}
+	if !pending {
+		return nil
+	}
+	return s.runImmediate(ctx, func() error {
+		return s.repairManagedLifecycleForeignKeys059(ctx)
+	})
+}
+
 func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) error {
 	for _, migration := range migrations {
 		migration := migration
@@ -413,14 +437,14 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 			continue
 		}
 		if migration.ID == managedRestartRetryMigration057ID {
+			// This is the only point where every 057 prerequisite table exists
+			// and the repair still precedes 057's foreign-key check.
 			pending, err := s.migrationPending(ctx, migration.ID)
 			if err != nil {
 				return fmt.Errorf("migration %s preflight check failed: %w", migration.ID, err)
 			}
 			if pending {
-				if err := s.runImmediate(ctx, func() error {
-					return s.repairManagedLifecycleForeignKeys059(ctx)
-				}); err != nil {
+				if err := s.preflightManagedLifecycleOrphansBefore057(ctx); err != nil {
 					return fmt.Errorf("migration %s orphan preflight failed: %w", migration.ID, err)
 				}
 			}
