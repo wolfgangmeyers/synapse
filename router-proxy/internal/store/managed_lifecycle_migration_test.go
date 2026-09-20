@@ -9,6 +9,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestValidateManagedForeignKeyDelta057RejectsNewUnrelatedViolation(t *testing.T) {
+	baseline := []managedForeignKeyViolation{{table: "managed_orderly_stop_markers", parent: "managed_agents", rowID: 11, hasRowID: true, foreignKeyID: 0}}
+	after := append(append([]managedForeignKeyViolation(nil), baseline...), managedForeignKeyViolation{table: "messages", parent: "agents", rowID: 12, hasRowID: true, foreignKeyID: 0})
+	require.ErrorContains(t, validateManagedForeignKeyDelta057(baseline, after), "introduced foreign-key violation")
+	removed := after[:1]
+	require.NoError(t, validateManagedForeignKeyDelta057(baseline, removed))
+	require.ErrorContains(t, validateManagedForeignKeyDelta057(baseline, nil), "removed a pre-existing unrelated")
+}
+
+func TestValidateManagedForeignKeyDelta057RejectsUnresolvedLifecycleViolations(t *testing.T) {
+	for _, table := range []string{"managed_lifecycle_actions", "managed_lifecycle_batch_items", "managed_session_artifacts", "managed_termination_diagnostics"} {
+		t.Run(table, func(t *testing.T) {
+			violation := managedForeignKeyViolation{table: table, parent: "managed_lifecycle_parent", rowID: 21, hasRowID: true, foreignKeyID: 0}
+			require.ErrorContains(t, validateManagedForeignKeyDelta057(nil, []managedForeignKeyViolation{violation}), "left lifecycle foreign-key violation")
+		})
+	}
+}
+
 func TestMigration057PreflightRepairsDebtBeforeLifecycleRebuild(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
@@ -67,11 +85,13 @@ func TestMigration057PreflightRepairsDebtBeforeLifecycleRebuild(t *testing.T) {
 	require.NoError(t, err)
 	_, err = before.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE operation_id=?`, missingDiagnosticParent.Operation.OperationID)
 	require.NoError(t, err)
+	_, err = before.db.ExecContext(ctx, `INSERT INTO managed_orderly_stop_markers(agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,marked_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "unrelated-missing-agent", "unrelated-session", 1, 814, "unrelated-start", "unrelated-incarnation", "unrelated-generation", 1, testManifestHash, "2026-09-08T00:00:00.000Z")
+	require.NoError(t, err)
 	_, err = before.db.ExecContext(ctx, `PRAGMA foreign_keys=ON`)
 	require.NoError(t, err)
 	var beforeForeignProblems int
 	require.NoError(t, before.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&beforeForeignProblems))
-	require.Equal(t, 3, beforeForeignProblems)
+	require.Equal(t, 4, beforeForeignProblems)
 	require.NoError(t, before.Close())
 
 	after, err := Open(ctx, path, Options{})
@@ -79,7 +99,10 @@ func TestMigration057PreflightRepairsDebtBeforeLifecycleRebuild(t *testing.T) {
 	defer after.Close()
 	var foreignProblems int
 	require.NoError(t, after.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems))
-	require.Zero(t, foreignProblems)
+	require.Equal(t, 1, foreignProblems)
+	var unrelatedMarker int
+	require.NoError(t, after.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_orderly_stop_markers WHERE agent_id=?`, "unrelated-missing-agent").Scan(&unrelatedMarker))
+	require.Equal(t, 1, unrelatedMarker)
 	var integrity string
 	require.NoError(t, after.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity))
 	require.Equal(t, "ok", integrity)
