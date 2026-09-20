@@ -312,6 +312,10 @@ type Router struct {
 	server                *http.Server
 	listener              net.Listener
 	serveDone             chan struct{}
+	startupCancel         context.CancelFunc
+	startupDone           chan struct{}
+	startupWork           func(context.Context) error
+	readinessStatus       string
 	sweepCancel           context.CancelFunc
 	sweepDone             chan struct{}
 	closed                bool
@@ -600,7 +604,8 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, readinessStatus: "ok"}
+	r.startupWork = r.runStartup
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
@@ -662,8 +667,9 @@ func (r *Router) URLs() (string, string) {
 	return fmt.Sprintf("http://%s:%d", host, port), fmt.Sprintf("ws://%s:%d%s", host, port, r.path)
 }
 
-// Listen performs the startup lifecycle sweep before opening the listener.
-// A router only becomes reachable after its durable state is clean.
+// Listen publishes a temporary managed HTTP server while startup recovery runs.
+// Health is the only usable route during that window. Recovery remains
+// synchronous so a failed startup never leaves a half-initialized router live.
 func (r *Router) Listen(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
@@ -680,8 +686,7 @@ func (r *Router) Listen(ctx context.Context) error {
 		return errors.New("router is already listening")
 	}
 	r.mu.Unlock()
-	// Bind before managed recovery so a recovered process inherits this exact
-	// listener URL, while delaying Serve until durable recovery is complete.
+
 	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
 	if err != nil {
 		return err
@@ -691,21 +696,105 @@ func (r *Router) Listen(ctx context.Context) error {
 		if listenerPublished {
 			return
 		}
-		// Recovery may have published managed bindings before a later durable
-		// startup step failed. Tear those resources down here; callers may never
-		// reach Router.Close after Listen returns an error.
 		if r.managed != nil {
 			_ = r.managed.AbortStartup(context.Background())
 		}
 		_ = listener.Close()
 	}()
+
 	if r.managed != nil {
-		routerURL, urlErr := managed.ManagedRouterURLForListener(r.host, listener.Addr().(*net.TCPAddr).Port)
-		if urlErr != nil {
-			return urlErr
+		server := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
+		serveDone := make(chan struct{})
+		go func() { _ = server.Serve(listener); close(serveDone) }()
+		startupCtx, startupCancel := context.WithCancel(ctx)
+		startupDone := make(chan struct{})
+		r.mu.Lock()
+		r.listener = listener
+		r.serveDone = serveDone
+		r.server = server
+		r.startupCancel = startupCancel
+		r.startupDone = startupDone
+		r.readinessStatus = "starting"
+		r.mu.Unlock()
+
+		startupErr := r.startupWork(startupCtx)
+		close(startupDone)
+		startupCancel()
+		if startupErr != nil {
+			_ = r.managed.AbortStartup(context.Background())
+			_ = server.Close()
+			<-serveDone
+			r.mu.Lock()
+			if r.listener == listener {
+				r.listener = nil
+				r.serveDone = nil
+				r.server = nil
+				r.startupCancel = nil
+				r.startupDone = nil
+				r.readinessStatus = ""
+			}
+			r.mu.Unlock()
+			return startupErr
 		}
-		if urlErr := r.managed.SetRouterURL(routerURL); urlErr != nil {
-			return urlErr
+
+		r.mu.Lock()
+		if r.closed {
+			r.mu.Unlock()
+			_ = server.Close()
+			<-serveDone
+			return errors.New("router is closed")
+		}
+		r.readinessStatus = "ok"
+		sweepCtx, sweepCancel := context.WithCancel(context.Background())
+		r.sweepCancel = sweepCancel
+		r.sweepDone = make(chan struct{})
+		sweepDone := r.sweepDone
+		listenerPublished = true
+		r.mu.Unlock()
+		r.emitEvent(RouterStartedEvent(listener.Addr().(*net.TCPAddr).Port))
+		go r.sweepLoop(sweepCtx, sweepDone)
+		return nil
+	}
+
+	if err := r.runStartup(ctx); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return errors.New("router is closed")
+	}
+	r.listener = listener
+	r.serveDone = make(chan struct{})
+	r.server = &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	r.sweepCancel = sweepCancel
+	r.sweepDone = make(chan struct{})
+	done := r.serveDone
+	sweepDone := r.sweepDone
+	server := r.server
+	listenerPublished = true
+	r.mu.Unlock()
+	r.emitEvent(RouterStartedEvent(listener.Addr().(*net.TCPAddr).Port))
+	go func() { _ = server.Serve(listener); close(done) }()
+	go r.sweepLoop(sweepCtx, sweepDone)
+	return nil
+}
+
+func (r *Router) runStartup(ctx context.Context) error {
+	if r.managed != nil {
+		r.mu.RLock()
+		listener := r.listener
+		r.mu.RUnlock()
+		if listener == nil {
+			return errors.New("managed startup listener is unavailable")
+		}
+		routerURL, err := managed.ManagedRouterURLForListener(r.host, listener.Addr().(*net.TCPAddr).Port)
+		if err != nil {
+			return err
+		}
+		if err := r.managed.SetRouterURL(routerURL); err != nil {
+			return err
 		}
 		if err := r.managed.RecoverManagedRootColdStarts(ctx); err != nil {
 			return err
@@ -731,33 +820,16 @@ func (r *Router) Listen(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.runSweep(ctx); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return errors.New("router is closed")
-	}
-	r.listener = listener
-	r.serveDone = make(chan struct{})
-	r.server = &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
-	sweepCtx, sweepCancel := context.WithCancel(context.Background())
-	r.sweepCancel = sweepCancel
-	r.sweepDone = make(chan struct{})
-	done := r.serveDone
-	sweepDone := r.sweepDone
-	server := r.server
-	listenerPublished = true
-	r.mu.Unlock()
-	r.emitEvent(RouterStartedEvent(listener.Addr().(*net.TCPAddr).Port))
-	go func() { _ = server.Serve(listener); close(done) }()
-	go r.sweepLoop(sweepCtx, sweepDone)
-	return nil
+	return r.runSweep(ctx)
 }
 
 // ServeHTTP exposes the router for net/http and httptest callers.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.readiness() == "starting" && req.URL.Path != "/v1/health" {
+		applyPermissiveCORS(w, req)
+		r.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"code": "router_starting", "message": "Router startup is still in progress"}})
+		return
+	}
 	if req.URL.Path == "/v1/managed-bridge" {
 		r.mu.RLock()
 		handler := r.managedBridge
@@ -809,6 +881,8 @@ func (r *Router) Close(ctx context.Context) error {
 	r.lifecycleMu.Unlock()
 	done := r.closeDone
 	server := r.server
+	startupCancel := r.startupCancel
+	startupDone := r.startupDone
 	sweepCancel := r.sweepCancel
 	sweepDone := r.sweepDone
 	sessions := make([]*session, 0, len(r.sessions))
@@ -823,13 +897,25 @@ func (r *Router) Close(ctx context.Context) error {
 		}
 	}
 	r.mu.Unlock()
+	var err error
+	if startupCancel != nil {
+		startupCancel()
+		if startupDone != nil {
+			select {
+			case <-startupDone:
+			case <-ctx.Done():
+				if err == nil {
+					err = ctx.Err()
+				}
+			}
+		}
+	}
 	if r.deliveryOffersCancel != nil {
 		r.deliveryOffersCancel()
 	}
 	if r.uiLive != nil {
 		r.uiLive.close()
 	}
-	var err error
 	if r.providerAuth != nil {
 		r.providerAuth.Close()
 	}
@@ -915,6 +1001,15 @@ func (s *session) lifecycleEnabledNow() bool {
 func (r *Router) nextID() (string, error) { return r.ids.Next() }
 func (r *Router) now() time.Time          { return r.clock.Now().UTC() }
 func timestamp(value time.Time) string    { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
+
+func (r *Router) readiness() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.readinessStatus == "" {
+		return "ok"
+	}
+	return r.readinessStatus
+}
 
 // emitEvent is the closed diagnostic path used by typed producers.
 func (r *Router) emitEvent(event Event) { r.log(event) }

@@ -7,7 +7,7 @@ import { normalizeRouterUrl } from "../persistence/settings-repository";
 import { isAgentId } from "../protocol/guards";
 import type { AppAction } from "../state/reducer";
 import type { Agent } from "../state/agent-projection";
-import { createRouterTransport, type RouterTransport, type RouterTransportOptions, type TransportEvent } from "../transport/router-transport";
+import { createRouterTransport, LEGACY_AGENT_REFRESH_RETRY_DELAY_MS, type RouterTransport, type RouterTransportOptions, type TransportEvent } from "../transport/router-transport";
 import { createUILiveClient, type UILiveClient } from "../transport/ui-live-client";
 import { loadManagedGoalProjection } from "../transport/managed-goal-projection";
 import type { WebSocketFactory } from "../transport/websocket-client";
@@ -91,15 +91,16 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   }), [scope.routerUrl, options.uiLiveWebSocketFactory, transport]);
   useEffect(() => {
     let active = true;
-    const startManagedSurface = async (): Promise<void> => {
+    let managedSnapshotRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleManagedSnapshotRetry = (capabilities: Awaited<ReturnType<RouterTransport["http"]["capabilities"]>>): void => {
+      if (!active || managedSnapshotRetryTimer !== undefined) return;
+      managedSnapshotRetryTimer = setTimeout(() => {
+        managedSnapshotRetryTimer = undefined;
+        void loadManagedSnapshot(capabilities);
+      }, LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
+    };
+    const loadManagedSnapshot = async (capabilities: Awaited<ReturnType<RouterTransport["http"]["capabilities"]>>): Promise<void> => {
       try {
-        const capabilities = await transport.http.capabilities();
-        // Older routers did not advertise this capability. They remain
-        // compatible; only an explicit false is a disabled-mode boundary.
-        const enabled = capabilities.managed_v1 !== false;
-        if (!active) return;
-        dispatch({ type: "managed/enabled", scope, enabled });
-        if (!enabled) return;
         const snapshot = await transport.http.managedAgents();
         if (!active) return;
         dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
@@ -119,6 +120,23 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           }
         }
       } catch {
+        // Router startup can leave the managed endpoint briefly unavailable
+        // while the transport and launch routes are already usable. Reconcile
+        // the authoritative snapshot without requiring a page reload.
+        scheduleManagedSnapshotRetry(capabilities);
+      }
+    };
+    const startManagedSurface = async (): Promise<void> => {
+      try {
+        const capabilities = await transport.http.capabilities();
+        // Older routers did not advertise this capability. They remain
+        // compatible; only an explicit false is a disabled-mode boundary.
+        const enabled = capabilities.managed_v1 !== false;
+        if (!active) return;
+        dispatch({ type: "managed/enabled", scope, enabled });
+        if (!enabled) return;
+        await loadManagedSnapshot(capabilities);
+      } catch {
         if (active) dispatch({ type: "managed/enabled", scope, enabled: false });
       }
     };
@@ -128,7 +146,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       transport.connect();
       void startManagedSurface();
     }
-    return () => { active = false; unsubscribe(); transport.close(); uiLive.close(); };
+    return () => { active = false; if (managedSnapshotRetryTimer !== undefined) clearTimeout(managedSnapshotRetryTimer); unsubscribe(); transport.close(); uiLive.close(); };
   }, [transport, uiLive, scope, options.connect, options.uiLiveWebSocketFactory]);
   // useReducer keeps its previous value while props change. Keep a confirmed peer
   // during an identity-only reset so the conversation hook does not briefly switch

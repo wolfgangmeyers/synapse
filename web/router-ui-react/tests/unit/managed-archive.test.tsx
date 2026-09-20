@@ -1,10 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { isManagedAgentRecord, isUILiveFrame } from "../../src/protocol/guards";
 import type { ManagedAgentArchive, ManagedAgent } from "../../src/protocol/types";
 import { createInitialState } from "../../src/state/app-state";
-import { managedRecordKey, mergeAgentSources } from "../../src/state/agent-projection";
+import { mergeAgentSources } from "../../src/state/agent-projection";
 import { reducer } from "../../src/state/reducer";
 import { AgentList } from "../../src/components/AgentList";
 import { ArchivedAgentView } from "../../src/components/ArchivedAgentView";
@@ -53,43 +53,31 @@ describe("managed archive UI projection", () => {
     expect(isManagedAgentRecord({ ...archive, cwd: "/private" })).toBe(false);
   });
 
-  it("accepts live and archived records with the same reusable agent ID", () => {
+  it("keeps archive-shaped records outside the live frame contract", () => {
     expect(isUILiveFrame(snapshot([live, archive]))).toBe(true);
-    expect(isUILiveFrame({ type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, record_key: "archive:123e4567-e89b-42d3-a456-426614174000", agent_id: archive.agent_id, changes: archive })).toBe(true);
-    expect(managedRecordKey(live)).toBe("live:same-worker");
-    expect(managedRecordKey(archive)).toBe("archive:123e4567-e89b-42d3-a456-426614174000");
+    expect(isUILiveFrame({ type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: live.agent_id, changes: live })).toBe(true);
+    expect(isUILiveFrame({ type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, record_key: "archive:123e4567-e89b-42d3-a456-426614174000", agent_id: archive.agent_id, changes: archive })).toBe(false);
   });
 
-  it("appends archives after live rows in completion order", () => {
-    const older = { ...archive, archive_key: "123e4567-e89b-42d3-a456-426614174001", completed_at: "2029-01-01T00:00:00.000Z" };
-    const rows = mergeAgentSources([], [older, live, archive]);
-    expect(rows.map((row) => row.record_key)).toEqual(["live:same-worker", "archive:123e4567-e89b-42d3-a456-426614174000", "archive:123e4567-e89b-42d3-a456-426614174001"]);
+  it("projects live rows without exposing archives as selectable history", () => {
+    const rows = mergeAgentSources([], [live]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ agent_id: "same-worker", source: "router-managed" });
+    render(<AgentList agents={rows} onGoal={() => undefined} onReminders={() => undefined} onToggleSubagents={() => undefined} />);
+    expect(screen.getByRole("button", { name: "Same Worker (same-worker)" })).toBeInTheDocument();
+    expect(screen.queryByText("Archived")).not.toBeInTheDocument();
   });
 
-  it("applies deltas and removals by stable record key", () => {
+  it("applies live deltas and removes only the targeted row and children", () => {
     const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
-    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 1, agents: [live, archive] });
-    state = { ...state, selectedPeer: "archive:123e4567-e89b-42d3-a456-426614174000" };
-    state = reducer(state, { type: "managed/delta", scope, version: 2, baseVersion: 1, recordKey: "live:same-worker", record: { ...live, activity_state: "active" } });
-    expect(state.managedAgents).toHaveLength(2);
-    expect(state.managedAgents?.find((item) => managedRecordKey(item) === "live:same-worker")).toMatchObject({ activity_state: "active" });
-    state = reducer(state, { type: "managed/removed", scope, version: 3, baseVersion: 2, recordKey: "archive:123e4567-e89b-42d3-a456-426614174000" });
-    expect(state.managedAgents).toEqual([expect.objectContaining({ agent_id: "same-worker" })]);
-    expect(state.selectedPeer).toBeUndefined();
-
-    state = { ...state, selectedPeer: "archive:123e4567-e89b-42d3-a456-426614174000", managedAgents: [archive, live], managedProjectionVersion: 3 };
-    state = reducer(state, { type: "managed/snapshot", scope, version: 4, agents: [live] });
-    expect(state.selectedPeer).toBeUndefined();
-    expect(state.managedAgents).toEqual([live]);
-  });
-
-  it("renders an archive as selectable history without controls", () => {
-    const onSelect = vi.fn();
-    render(<AgentList agents={[{ agent_id: archive.agent_id, source: "router-archived", record_key: managedRecordKey(archive), managed_archive: archive }]} onSelectAgent={onSelect} onGoal={() => undefined} onReminders={() => undefined} onToggleSubagents={() => undefined} />);
-    expect(screen.getByRole("button", { name: "Same worker (same-worker)" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Set goal" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add reminder" })).not.toBeInTheDocument();
-    expect(screen.getByText("Archived")).toBeInTheDocument();
+    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 1, agents: [live] });
+    const child = { id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed" as const, cause: null, observed_at: "2030-01-01T00:00:00Z" }, status: "running" as const, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 } };
+    state = reducer(state, { type: "managed/children", scope, version: 1, children: [{ agent_id: live.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [child] }] });
+    state = reducer(state, { type: "managed/delta", scope, version: 2, baseVersion: 1, agent: { ...live, activity_state: "active" } });
+    expect(state.managedAgents).toEqual([expect.objectContaining({ activity_state: "active" })]);
+    state = reducer(state, { type: "managed/removed", scope, version: 3, baseVersion: 2, agentId: live.agent_id, recordKey: "live:same-worker" });
+    expect(state.managedAgents).toEqual([]);
+    expect(state.managedChildren).toEqual({});
   });
 
   it("shows only the closed explanation surface for an archive", () => {

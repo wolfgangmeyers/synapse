@@ -5180,7 +5180,11 @@ func (s *Store) ReconcileManagedRecipientSources(ctx context.Context) error {
 			if lookupErr != nil {
 				return lookupErr
 			}
-			if existing.SourceKind != "managed" || existing.OwnerIdentity != value.id {
+			// Reconciliation only records a conflict when the source kinds differ.
+			// A retired managed row is historical source identity and must remain
+			// untouched; setting conflict_source_kind to managed would violate the
+			// recipient_sources CHECK constraint because it matches source_kind.
+			if existing.SourceKind != "managed" {
 				if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state = 'conflicted', conflict_source_kind = ?, conflict_owner_identity = ?, updated_at = ? WHERE recipient_name = ?`, "managed", value.id, formatTimestamp(s.clock.Now()), value.name); err != nil {
 					return err
 				}

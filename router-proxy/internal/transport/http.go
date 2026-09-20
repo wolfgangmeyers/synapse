@@ -158,7 +158,12 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	switch {
 	case req.Method == http.MethodGet && path == "/v1/health":
-		r.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "v1", "schema_migrations": r.store.MigrationIDs(), "runtime": r.runtimeIdentity})
+		readiness := r.readiness()
+		body := map[string]any{"status": readiness, "readiness": readiness, "version": "v1", "runtime": r.runtimeIdentity}
+		if readiness != "starting" {
+			body["schema_migrations"] = r.store.MigrationIDs()
+		}
+		r.writeJSON(w, http.StatusOK, body)
 		return
 	case req.Method == http.MethodGet && path == "/v1/capabilities":
 		r.writeJSON(w, http.StatusOK, r.capabilities())

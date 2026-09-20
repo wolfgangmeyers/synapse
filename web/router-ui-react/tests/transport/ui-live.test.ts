@@ -68,19 +68,23 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
-  it("accepts new and bounded legacy lifecycle frames", () => {
+  it("applies new and bounded legacy lifecycle frames without recovery", () => {
     vi.useFakeTimers();
     const sockets: UILiveSocket[] = [];
     const frames: unknown[] = [];
-    const client = createUILiveClient({ routerUrl: "http://router.test", retryDelayMs: 1, webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; }, onFrame: (frame) => frames.push(frame) });
+    const recoveries = vi.fn();
+    const client = createUILiveClient({ routerUrl: "http://router.test", retryDelayMs: 1, webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; }, onFrame: (frame) => frames.push(frame), onRecovery: recoveries });
     client.connect();
     sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 1, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });
-    const delta = { type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: agent.agent_id, changes: { ...agent, activity_state: "active" } };
-    sockets[0]?.emit("message", { data: JSON.stringify(delta) });
-    const removed = { type: "managed_agent_removed", protocol: "mecha.web/v1", projection_version: 3, base_version: 2, agent_id: agent.agent_id, record_key: "live:managed-alpha" };
-    sockets[0]?.emit("message", { data: JSON.stringify(removed) });
-    expect(frames.map((frame) => typeof frame === "object" && frame !== null && "type" in frame ? frame.type : undefined)).toEqual(["managed_agents_snapshot", "managed_agent_delta", "managed_agent_removed"]);
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 2, base_version: 1, agent_id: agent.agent_id, changes: { ...agent, activity_state: "active" } }) });
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agent_delta", protocol: "mecha.web/v1", projection_version: 3, base_version: 2, agent_id: agent.agent_id, record_key: "live:managed-alpha", changes: { ...agent, activity_state: "idle" } }) });
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agent_removed", protocol: "mecha.web/v1", projection_version: 4, base_version: 3, agent_id: agent.agent_id }) });
+    sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agent_removed", protocol: "mecha.web/v1", projection_version: 5, base_version: 4, agent_id: agent.agent_id, record_key: "live:managed-alpha" }) });
+    expect(frames.map((frame) => typeof frame === "object" && frame !== null && "type" in frame ? frame.type : undefined)).toEqual(["managed_agents_snapshot", "managed_agent_delta", "managed_agent_delta", "managed_agent_removed", "managed_agent_removed"]);
     expect(frames[2]).not.toHaveProperty("record_key");
+    expect(frames[4]).not.toHaveProperty("record_key");
+    expect(client.projectionVersion).toBe(5);
+    expect(recoveries).not.toHaveBeenCalled();
     client.close();
     vi.useRealTimers();
   });

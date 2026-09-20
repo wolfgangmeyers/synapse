@@ -861,6 +861,34 @@ export interface ManagedAgent {
   last_error: ManagedError | null;
   goal_state?: GoalState;
 }
+
+export interface ManagedArchiveDelivery {
+  disposition: string;
+  total: number;
+  queued_never_attempted: number;
+  in_flight_or_unknown: number;
+  completed: number;
+  released_or_failed: number;
+  overflow: {
+    total: boolean;
+    queued_never_attempted: boolean;
+    in_flight_or_unknown: boolean;
+    completed: boolean;
+    released_or_failed: boolean;
+  };
+}
+
+export interface ManagedAgentArchive {
+  record_kind: "archived";
+  lifecycle_state: "archived";
+  agent_id: AgentId;
+  name: string;
+  archive_key: string;
+  terminal_outcome: string;
+  completed_at: RouterTimestamp;
+  delivery: ManagedArchiveDelivery;
+}
+
 // Child telemetry is intentionally separate from PublicAgent. It has its own
 // managed lifecycle path, so a future PublicAgent field cannot accidentally
 // turn runtime child data into the common agent projection.

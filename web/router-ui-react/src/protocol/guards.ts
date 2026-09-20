@@ -61,6 +61,7 @@ import type {
   SubagentSyncEnableFrame,
   UILiveFrame,
   ManagedAgent,
+  ManagedAgentArchive,
   ManagedChild,
   ManagedChildrenProjection,
   ManagedHistoryEntry,
@@ -162,6 +163,29 @@ export function isManagedAgent(value: unknown): value is ManagedAgent {
   if (!isExactRecord(model, ["provider", "id"]) || !isSafeString(model.provider, 1, 128) || !isSafeString(model.id, 1, 256)) return false;
   if (!isExactRecord(manifest, ["revision", "sha256", "installed_tool_count"]) || !isSafeInteger(manifest.revision, 1) || !isPatternString(manifest.sha256, /^[0-9a-f]{64}$/, 64, 64) || !isSafeInteger(manifest.installed_tool_count, 0, 1024)) return false;
   return (value.goal_state === undefined || isGoalState(value.goal_state)) && (lastError === null || isExactRecord(lastError, ["code", "message", "at"]) && isSafeString(lastError.code, 1, 128) && isSafeString(lastError.message, 1, 1024) && isRouterUtcTimestamp(lastError.at));
+}
+
+function isManagedArchiveDelivery(value: unknown): boolean {
+  if (!isRecord(value) || !isExactRecord(value, ["disposition", "total", "queued_never_attempted", "in_flight_or_unknown", "completed", "released_or_failed", "overflow"])) return false;
+  if (!isSafeString(value.disposition, 1, 64)) return false;
+  for (const key of ["total", "queued_never_attempted", "in_flight_or_unknown", "completed", "released_or_failed"]) {
+    if (!isSafeInteger(value[key], 0)) return false;
+  }
+  const overflow = value.overflow;
+  return isExactRecord(overflow, ["total", "queued_never_attempted", "in_flight_or_unknown", "completed", "released_or_failed"])
+    && ["total", "queued_never_attempted", "in_flight_or_unknown", "completed", "released_or_failed"].every((key) => typeof overflow[key] === "boolean");
+}
+
+export function isManagedAgentArchive(value: unknown): value is ManagedAgentArchive {
+  return isRecord(value) && isExactRecord(value, ["record_kind", "lifecycle_state", "agent_id", "name", "archive_key", "terminal_outcome", "completed_at", "delivery"])
+    && value.record_kind === "archived" && value.lifecycle_state === "archived" && isAgentId(value.agent_id)
+    && isSafeString(value.name, 1, 512) && isSafeString(value.archive_key, 1, 128)
+    && isSafeString(value.terminal_outcome, 1, 64) && isRouterUtcTimestamp(value.completed_at)
+    && isManagedArchiveDelivery(value.delivery);
+}
+
+export function isManagedAgentRecord(value: unknown): value is ManagedAgent | ManagedAgentArchive {
+  return isManagedAgent(value) || isManagedAgentArchive(value);
 }
 
 function isManagedChildModel(value: unknown): boolean {
@@ -267,7 +291,7 @@ export function isUILiveFrame(value: unknown): value is UILiveFrame {
   if (!isRecord(value) || value.protocol !== "mecha.web/v1") return false;
   if (value.type === "managed_children_snapshot") return isExactRecord(value, ["type", "protocol", "lifecycle_version", "generated_at", "children"]) && isSafeInteger(value.lifecycle_version, 0) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.children) && value.children.every(isManagedChildrenProjection);
   if (!isSafeInteger(value.projection_version, 0)) return false;
-  if (value.type === "managed_agents_snapshot") return isExactRecord(value, ["type", "protocol", "projection_version", "generated_at", "agents"]) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.agents) && value.agents.every(isManagedAgent);
+  if (value.type === "managed_agents_snapshot") return isExactRecord(value, ["type", "protocol", "projection_version", "generated_at", "agents"]) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.agents) && value.agents.every(isManagedAgentRecord);
   // Older routers add an internal record key to lifecycle frames. It is not
   // presentation data, but accepting this one known field keeps a termination
   // from invalidating the complete managed-agent projection.

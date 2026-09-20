@@ -81,6 +81,42 @@ describe("App integration", () => {
     expect(screen.queryByText("Other worker restarted")).not.toBeInTheDocument();
   });
 
+  it("retries the managed snapshot after router startup and repopulates rows", async () => {
+    const managedAgent: ManagedAgent = { agent_id: "managed-recovery", source: "router-managed", cwd: "/tmp/managed-recovery", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
+    const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
+    state.selectedPeer = "router-managed:managed-recovery";
+    let snapshotRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, ui_live_v1: false });
+      if (url.endsWith("/v1/managed-agents")) {
+        snapshotRequests += 1;
+        if (snapshotRequests === 1) return jsonResponse({ error: { code: "router_starting", message: "Router startup is still in progress" } }, 503);
+        return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: 1, agents: [managedAgent] });
+      }
+      if (url.endsWith(`/v1/managed-agents/${managedAgent.agent_id}/children`)) return jsonResponse({ agent_id: managedAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+      if (url.includes("/v1/history?")) return jsonResponse({ view: "complete", entries: [], next_before: null });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: managedAgent.agent_id, high_water_sequence: 0, messages: [] });
+      if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [{ provider: "openai-codex", id: "gpt-5.6-luna", name: "GPT-5.6 Luna", available: true }], default_model: null });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl={state.routerUrl} agentId={state.agentId} state={state} transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await waitFor(() => expect(snapshotRequests).toBe(1));
+    expect(screen.getByRole("button", { name: "Managed actions" })).toBeInTheDocument();
+    expect(document.querySelector('[data-agent-id="managed-recovery"]')).not.toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-agent-id="managed-recovery"]')).toBeInTheDocument(), { timeout: 4_000 });
+    expect(snapshotRequests).toBe(2);
+  });
+
   it("sends directly to the selected managed worker and settles the receipt", async () => {
     const managedAgent: ManagedAgent = { agent_id: "managed-direct", source: "router-managed", cwd: "/tmp/managed-direct", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
     const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });

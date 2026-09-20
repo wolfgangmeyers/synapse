@@ -11,6 +11,28 @@ import (
 
 const testManifestHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestReconcileManagedRecipientSourcesLeavesRetiredManagedRowsUntouched(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	require.NoError(t, func() error {
+		_, err := durable.db.Exec(`UPDATE managed_agents SET name='system-1-research' WHERE agent_id=?`, fence.AgentID)
+		return err
+	}())
+	require.NoError(t, func() error {
+		_, err := durable.db.Exec(`UPDATE recipient_sources SET recipient_name='system-1-research',owner_identity='retired:system-1-research',state='retired',conflict_source_kind=NULL,conflict_owner_identity=NULL WHERE recipient_name=?`, fence.AgentID)
+		return err
+	}())
+
+	require.NoError(t, durable.ReconcileManagedRecipientSources(ctx))
+	source, err := durable.RecipientSource(ctx, "system-1-research")
+	require.NoError(t, err)
+	require.Equal(t, "managed", source.SourceKind)
+	require.Equal(t, "retired:system-1-research", source.OwnerIdentity)
+	require.Equal(t, "retired", source.State)
+	require.Empty(t, source.ConflictKind)
+	require.Empty(t, source.ConflictOwner)
+}
+
 func TestManagedRecipientConflictResolution(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyManagedDirectFixture(t)
