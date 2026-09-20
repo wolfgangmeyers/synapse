@@ -1,6 +1,6 @@
 {
   "protocol": "mecha.tools/v1",
-  "revision": 3,
+  "revision": 2,
   "tools": [
     {
       "capability_id": "goal",
@@ -708,44 +708,6 @@
       "name": "mecha_worker",
       "definition_id": "def_95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
       "definition_sha256": "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da"
-    },
-    {
-      "capability_id": "mecha_workflow_transition",
-      "label": "Managed workflow transition",
-      "description": "Transition the current managed workflow using its exact state-entry identity and a listed exit.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "entryId",
-          "exit"
-        ],
-        "properties": {
-          "entryId": {
-            "type": "string",
-            "minLength": 36,
-            "maxLength": 36
-          },
-          "exit": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          },
-          "note": {
-            "type": "string",
-            "maxLength": 4096
-          }
-        }
-      },
-      "operation_id": "workflow.transition",
-      "prompt_snippet": "Transition the current managed workflow from its latest state entry",
-      "prompt_guidelines": [
-        "Use only the exact entry ID and a listed destination name or complete from the latest workflow entry message; a concise note is optional; never invent a target.",
-        "Call pi__mecha_workflow_transition through the Cursor pi bridge."
-      ],
-      "name": "mecha_workflow_transition",
-      "definition_id": "def_3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69",
-      "definition_sha256": "3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69"
     },
     {
       "capability_id": "web_search",

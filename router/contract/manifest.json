@@ -100,7 +100,6 @@
     "http_outcomes": "http-outcomes.json",
     "frame_cases": "frame-cases.json",
     "generated_fields": "generated-fields.json",
-    "transport_differential": "transport-differential.json",
-    "workflow_phase0_http": "workflow-phase0-http.json"
+    "transport_differential": "transport-differential.json"
   }
 }

@@ -58,8 +58,8 @@ func handlerIndexByOperation(t *testing.T, handlers []RootControlHandler, operat
 
 func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 	manifest := loadCurrentRootManifest(t)
-	require.Equal(t, 3, manifest.Revision)
-	require.Len(t, manifest.Tools, 18)
+	require.Equal(t, 2, manifest.Revision)
+	require.Len(t, manifest.Tools, 17)
 
 	operations := make(map[string]ManifestTool, len(manifest.Tools))
 	for _, tool := range manifest.Tools {
@@ -68,13 +68,6 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 		operations[tool.OperationID] = tool
 	}
 	require.Len(t, operations, len(manifest.Tools))
-
-	workflow, found := operations["workflow.transition"]
-	require.True(t, found, "current manifest must include revision-three workflow.transition")
-	require.Equal(t, "mecha_workflow_transition", workflow.CapabilityID)
-	require.Equal(t, "mecha_workflow_transition", workflow.Name)
-	require.Equal(t, "def_3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69", workflow.DefinitionID)
-	require.Equal(t, "3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69", workflow.DefinitionSHA256)
 
 	search, found := operations["web.search"]
 	require.True(t, found, "current manifest must include revision-two web.search")
@@ -116,7 +109,7 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 			require.Equal(t, "reconciled", reconciled.Content)
 		}
 	}
-	require.Equal(t, int32(34), calls.Load(), "each available owner must delegate execute and reconcile exactly once")
+	require.Equal(t, int32(32), calls.Load(), "each available owner must delegate execute and reconcile exactly once")
 }
 
 func TestRootControlHandlerRegistryRejectsEveryClosureMutation(t *testing.T) {
@@ -154,18 +147,6 @@ func TestRootControlHandlerRegistryRejectsEveryClosureMutation(t *testing.T) {
 			name: "duplicate owner",
 			mutate: func(handlers []RootControlHandler) []RootControlHandler {
 				return append(append([]RootControlHandler{}, handlers...), handlers[0])
-			},
-		},
-		{
-			name: "workflow.transition removed",
-			mutate: func(handlers []RootControlHandler) []RootControlHandler {
-				mutated := make([]RootControlHandler, 0, len(handlers)-1)
-				for _, handler := range handlers {
-					if handler.Identity().OperationID != "workflow.transition" {
-						mutated = append(mutated, handler)
-					}
-				}
-				return mutated
 			},
 		},
 		{

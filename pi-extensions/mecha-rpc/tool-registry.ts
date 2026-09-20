@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import {
   hashCanonicalJson,
   parameterSchemaJson,
-  ROOT_ONLY_OPERATION_IDS,
   type DesiredManifest,
   type JsonRecord,
   type ManifestTool,
@@ -198,9 +197,6 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
         const requestId = randomUUID();
         const contextRef = options.getContextRef(context);
         if (contextRef === undefined) return errorResult("The current managed context is unavailable.");
-        if ((ROOT_ONLY_OPERATION_IDS as readonly string[]).includes(tool.operation_id) && contextRef !== "root") {
-          return errorResult("This managed tool requires the root context.");
-        }
         const request: JsonRecord = {
           protocol: "mecha.control/v1",
           request_id: requestId,
@@ -243,15 +239,12 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
     pi.registerTool(closure);
   };
 
-  const installValidatedFull = (desired: DesiredManifest, checkExistingNames = true, omitRootOnly = false): DesiredManifest => {
+  const installValidatedFull = (desired: DesiredManifest, checkExistingNames = true): DesiredManifest => {
     if (accepted !== undefined || fatal) throw new TypeError("A full manifest may install only into a fresh extension runtime");
-    const installedTools = omitRootOnly
-      ? desired.tools.filter((tool) => !(ROOT_ONLY_OPERATION_IDS as readonly string[]).includes(tool.operation_id))
-      : desired.tools;
     const names = checkExistingNames ? existingNames() : new Set<string>();
-    for (const tool of installedTools) if (names.has(tool.name)) throw new TypeError(`Managed tool name collision: ${tool.name}`);
+    for (const tool of desired.tools) if (names.has(tool.name)) throw new TypeError(`Managed tool name collision: ${tool.name}`);
     try {
-      for (const tool of installedTools) register(tool);
+      for (const tool of desired.tools) register(tool);
     } catch (error) {
       fatal = true;
       options.onFatalRegistrationFailure?.(error);
@@ -274,9 +267,7 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
    */
   const installAcceptedSnapshot = (value: DesiredManifest): DesiredManifest => {
     const desired = validateDesiredManifest(value, { requireBaselineCapabilities: true });
-    // Native child factories retain the full accepted identity/fence, but the
-    // root-only workflow transition definition is never registered or exposed.
-    return installValidatedFull(desired, false, true);
+    return installValidatedFull(desired, false);
   };
 
   const installSupplemental = (value: unknown): DesiredManifest => {

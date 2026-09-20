@@ -368,7 +368,7 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	} else {
 		// Message rows are rendered from the selected conversation. Hide legacy
 		// transport bookkeeping so Complete stays a meaningful operational feed.
-		rows, err = s.db.QueryContext(ctx, `SELECT history.agent_id,history.sequence,history.category,history.occurred_at,history.level,history.message,COALESCE(history.presentation_json,''),history.message_content,history.sender_identity,history.tool_input_json FROM managed_complete_history history WHERE history.agent_id=? AND history.sequence>? AND history.category NOT IN ('managed_http','message') AND NOT EXISTS (SELECT 1 FROM managed_parent_compaction_suppressions suppression WHERE suppression.start_event_key=history.event_key OR suppression.end_event_key=history.event_key) AND (? = 0 OR history.sequence < ?) ORDER BY history.sequence DESC LIMIT ?`, agentID, startSequence, before, before, limit+1)
+		rows, err = s.db.QueryContext(ctx, `SELECT agent_id,sequence,category,occurred_at,level,message,COALESCE(presentation_json,''),message_content,sender_identity,tool_input_json FROM managed_complete_history WHERE agent_id=? AND sequence>? AND category NOT IN ('managed_http','message') AND (? = 0 OR sequence < ?) ORDER BY sequence DESC LIMIT ?`, agentID, startSequence, before, before, limit+1)
 	}
 	if err != nil {
 		return ManagedHistoryPage{}, err
