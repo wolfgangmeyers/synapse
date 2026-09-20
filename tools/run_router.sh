@@ -46,6 +46,13 @@ MANAGED_RUNTIME_ROOT="${MECHA_ROUTER_MANAGED_RUNTIME_ROOT:-$ROOT_DIR}"
 # or narrow this router's launch scope.
 MANAGED_CWD_ROOTS="${MECHA_ROUTER_MANAGED_CWD_ROOTS:-$HOME}"
 MANAGED_QUIET_RECIPIENT="${MECHA_ROUTER_MANAGED_QUIET_RECIPIENT:-supervisor}"
+# Local Go caches can be left non-traversable by interrupted tool runs. Keep
+# router recovery independent from that shared cache while honoring an explicit
+# caller-provided GOCACHE.
+if [[ "${GOCACHE+x}" != "x" ]]; then
+  export GOCACHE="$HOME/.mecha-developer/go-build-cache"
+fi
+mkdir -p "$GOCACHE"
 # Serve a built UI when this checkout has one. A clean source checkout leaves
 # the UI path unset; callers may set the path explicitly.
 if [[ "${MECHA_ROUTER_MANAGED_UI_DIST+x}" == "x" ]]; then
