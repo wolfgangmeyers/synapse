@@ -553,7 +553,6 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const selectRouter = (router: SavedRouter): void => { setSettings((current) => setActiveRouter(current, router.url)); setDialog(undefined); };
   const removeRouter = (url: string): void => { setSettings((current) => removeSavedRouter(current, url)); };
   const routerLabel = new URL(activeUrl).host;
-
   const modelOptions = selectedAgent?.source === "router-managed" ? managedHeaderModels : selectModels(selectedAgent);
   const selectedModel = normalizeModelSummary(selectedAgent?.current_model);
   const pendingModelControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "model" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);

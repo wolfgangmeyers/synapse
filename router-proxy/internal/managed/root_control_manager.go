@@ -15,11 +15,10 @@ import (
 )
 
 const (
-	rootControlAppendTimeout              = 10 * time.Second
-	piContextTooSmallError                = "Pi RPC error: Nothing to compact (session too small)"
-	managedContextTooSmallErrorCode       = "CONTEXT_TOO_SMALL"
-	managedContextTooSmallSafeSummary     = "Compaction skipped: session is too small."
-	managedContextTooSmallControlResponse = "Compaction skipped: session is too small to compact."
+	rootControlAppendTimeout          = 10 * time.Second
+	piContextTooSmallError            = "Pi RPC error: Nothing to compact (session too small)"
+	managedContextTooSmallErrorCode   = "CONTEXT_TOO_SMALL"
+	managedContextTooSmallSafeSummary = "Compaction skipped: session is too small."
 )
 
 var errRootControlHandlerPanic = errors.New("managed root control handler failed internally")
@@ -365,9 +364,6 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 			ErrorCode:    "HANDLER_FAILED",
 			ErrorMessage: boundedRootError(executeErr),
 		}
-		if classification, ok := classifyTrustedManagedControlFailure(claim.Request.OperationID, result); ok {
-			result.Content = classification.ControlResponse
-		}
 	}
 	if result.Details == nil {
 		result.Details = map[string]any{}
@@ -404,12 +400,6 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	completed, err := m.store.CompleteManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, store.ManagedControlResult{Status: result.Status, Content: result.Content, DetailsJSON: string(details), PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(canonical)), DecodedPayloadBytes: len(canonical), ErrorCode: result.ErrorCode, ErrorMessage: result.ErrorMessage, Retryable: result.Retryable})
 	if err == nil && completed != nil {
 		m.emitEvent(managedRootControlResultEvent(*completed))
-		if _, classified := classifyTrustedManagedControlFailure(claim.Request.OperationID, result); classified {
-			// Pi emits a generic start/failed lifecycle even for this exact no-op.
-			// Correlate it before publishing the authoritative skipped result so
-			// those native facts remain durable without creating duplicate cards.
-			_, _ = m.store.RegisterManagedParentCompactionNoOp(ctx, fence, claim.Request.RequestID)
-		}
 		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, claim.Request.OperationID, claim.Request.RequestID, result)
 		if result.Status == "ok" && claim.Request.OperationID == "web.search" {
 			m.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "tool", ID: claim.Request.RequestID})
@@ -454,29 +444,6 @@ func (m *Manager) failRootControlHandler(ctx context.Context, binding *managedBi
 	m.appendRootControlResult(ctx, binding, *failed)
 }
 
-type trustedManagedControlFailure struct {
-	Code            string
-	Summary         string
-	ControlResponse string
-}
-
-// classifyTrustedManagedControlFailure is the single allowlist boundary for
-// failure text that may be presented to a user. All unmatched handler errors
-// retain generic redacted copy.
-func classifyTrustedManagedControlFailure(operationID string, result RootControlHandlerResult) (trustedManagedControlFailure, bool) {
-	// Pi exposes this expected no-op only as stable RPC error text. Require the
-	// exact operation, router error class, and full text before using fixed safe
-	// presentation copy.
-	if operationID == "context.control" && result.ErrorCode == "HANDLER_FAILED" && result.ErrorMessage == piContextTooSmallError {
-		return trustedManagedControlFailure{
-			Code:            managedContextTooSmallErrorCode,
-			Summary:         managedContextTooSmallSafeSummary,
-			ControlResponse: managedContextTooSmallControlResponse,
-		}, true
-	}
-	return trustedManagedControlFailure{}, false
-}
-
 // recordRootControlHistory uses immutable control identity plus a closed
 // classification of the terminal result. Raw result content and error text can
 // contain untrusted data and must never cross into the timeline projection.
@@ -510,13 +477,16 @@ func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolNam
 		default:
 			message = "Tool failed"
 		}
-		if classification, ok := classifyTrustedManagedControlFailure(operationID, result); ok {
+		// Pi exposes this expected no-op only as stable RPC error text.
+		// Require the exact operation, router error class, and full text before
+		// replacing redacted failure copy with a fixed safe classification.
+		if operationID == "context.control" && result.ErrorCode == "HANDLER_FAILED" && result.ErrorMessage == piContextTooSmallError {
 			outcome = "warning"
 			level = "warning"
 			message = "Compaction skipped"
 			presentation.Outcome = "warning"
-			presentation.Summary = classification.Summary
-			presentation.Error = &store.ManagedHistoryError{Code: classification.Code, Retryable: false, DetailAvailable: false}
+			presentation.Summary = managedContextTooSmallSafeSummary
+			presentation.Error = &store.ManagedHistoryError{Code: managedContextTooSmallErrorCode, Retryable: false, DetailAvailable: false}
 		}
 	}
 	entry, err := m.store.RecordManagedCompleteHistoryWithPresentation(ctx, agentID, "managed_control", level, message, "managed-control:"+requestID+":"+outcome, presentation)

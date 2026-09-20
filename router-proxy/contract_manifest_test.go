@@ -82,7 +82,6 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 		"frame_cases":            "frame-cases.json",
 		"generated_fields":       "generated-fields.json",
 		"transport_differential": "transport-differential.json",
-		"workflow_phase0_http":   "workflow-phase0-http.json",
 	}, manifest.Fixtures)
 
 	fixtures, err := loadManifestFixtures(contractDir, manifest)

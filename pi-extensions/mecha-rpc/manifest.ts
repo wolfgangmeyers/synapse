@@ -78,11 +78,6 @@ const BASELINE_DEFINITION_SHA256: Readonly<Record<typeof BASELINE_TOOL_NAMES[num
   mecha_worker: "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
 });
 
-export const ROOT_ONLY_OPERATION_IDS = Object.freeze(["workflow.transition"] as const);
-const CURRENT_SHORT_DEFINITION_SHA256 = Object.freeze({
-  mecha_workflow_transition: "3f7363dcead17fa388fd74644a7b64df121da1ae25aac5b10afdac97849bde69",
-} as const);
-
 function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -365,11 +360,7 @@ export function validateDesiredManifest(value: unknown, options: { requireBaseli
     const originalBaselineName = baselineCapability !== undefined
       && tool.name === baselineCapability
       && tool.definition_sha256 === BASELINE_DEFINITION_SHA256[baselineCapability];
-    const currentShortCapability = tool.capability_id as keyof typeof CURRENT_SHORT_DEFINITION_SHA256;
-    const currentShortName = Object.hasOwn(CURRENT_SHORT_DEFINITION_SHA256, currentShortCapability)
-      && tool.name === currentShortCapability
-      && tool.definition_sha256 === CURRENT_SHORT_DEFINITION_SHA256[currentShortCapability];
-    if (tool.name !== immutableName && !originalBaselineName && !currentShortName) {
+    if (tool.name !== immutableName && !originalBaselineName) {
       fail(`tool name does not match its immutable definition identity: ${tool.capability_id}`);
     }
     names.add(tool.name); capabilityIds.add(tool.capability_id); definitions.add(tool.definition_sha256);

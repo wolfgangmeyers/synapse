@@ -86,7 +86,6 @@ var rootControlOperationIdentity = map[string]struct{ capability, name string }{
 	"ops.state":                {"mecha_state", "mecha_state"},
 	"ops.verification_handoff": {"mecha_verification_handoff", "mecha_verification_handoff"},
 	"ops.worker":               {"mecha_worker", "mecha_worker"},
-	"workflow.transition":      {"mecha_workflow_transition", "mecha_workflow_transition"},
 	"web.search":               {"web_search", ""},
 }
 
@@ -164,7 +163,7 @@ func (h operationRootControlHandler) Reconcile(ctx context.Context, invocation R
 	return h.executor.ReconcileRootControl(ctx, h.identity, invocation)
 }
 
-// NewOperationalRootControlHandlers creates the closed concrete 18-operation
+// NewOperationalRootControlHandlers creates the closed concrete 17-operation
 // owner set used by the router host. mail.parent remains a dedicated child-only
 // handler; all other entries delegate through the correlation-aware host seam.
 func NewOperationalRootControlHandlers(manifest Manifest, executor RootControlOperationExecutor) ([]RootControlHandler, error) {

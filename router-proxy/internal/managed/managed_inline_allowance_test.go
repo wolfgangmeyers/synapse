@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -96,69 +95,6 @@ func TestHandlerFailureCompletesDynamicInlineAllowanceRequest(t *testing.T) {
 	require.Equal(t, "error", completed.ResultStatus)
 	require.Equal(t, "HANDLER_FAILED", completed.ErrorCode)
 	require.Equal(t, "The managed control operation could not be completed.", completed.ResultContent)
-}
-
-func TestHandlerFailureControlResponseAllowsOnlyTrustedCompactionReason(t *testing.T) {
-	tests := []struct {
-		name        string
-		operationID string
-		handlerErr  error
-		wantContent string
-	}{
-		{
-			name:        "trusted compact too small",
-			operationID: "context.control",
-			handlerErr:  errors.New(piContextTooSmallError),
-			wantContent: managedContextTooSmallControlResponse,
-		},
-		{
-			name:        "arbitrary compact failure stays redacted",
-			operationID: "context.control",
-			handlerErr:  errors.New("Pi RPC error: password=private"),
-			wantContent: "The managed control operation could not be completed.",
-		},
-		{
-			name:        "same text on another operation stays redacted",
-			operationID: "ops.state",
-			handlerErr:  errors.New(piContextTooSmallError),
-			wantContent: "The managed control operation could not be completed.",
-		},
-	}
-
-	for index, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := context.Background()
-			manager, binding, fence, _, _ := readyInlineAllowanceFixture(t)
-			requestID := fmt.Sprintf("123e4567-e89b-42d3-a456-4266141741%02d", index)
-			reservation, err := manager.store.ReserveManagedControlRequest(ctx, store.ManagedControlRequestInput{
-				RequestID: requestID, ResultID: fmt.Sprintf("123e4567-e89b-42d3-a456-4266141742%02d", index), AgentID: fence.AgentID,
-				ToolCallID: "call-control-response", CapabilityID: "mecha_context", ToolName: "mecha_context",
-				DefinitionID: "def_" + managedInlineAllowanceTestManifestHash, OperationID: test.operationID,
-				CanonicalArgumentsSHA256: managedInlineAllowanceTestManifestHash, RequestFingerprint: managedInlineAllowanceTestManifestHash,
-				Fence: fence, ReceivedAt: "2026-09-12T00:00:00.000Z",
-			})
-			require.NoError(t, err)
-			claim, err := manager.store.ClaimManagedControlHandler(ctx, requestID, fmt.Sprintf("123e4567-e89b-42d3-a456-4266141743%02d", index), fence)
-			require.NoError(t, err)
-
-			manager.finishRootControlHandler(ctx, binding, nil, claim, RootControlHandlerResult{}, test.handlerErr, false)
-
-			completed, err := manager.store.ManagedControlRequest(ctx, reservation.RequestID)
-			require.NoError(t, err)
-			require.Equal(t, "error", completed.ResultStatus)
-			require.Equal(t, "HANDLER_FAILED", completed.ErrorCode)
-			require.Equal(t, test.wantContent, completed.ResultContent)
-			require.NotContains(t, completed.ResultContent, "private")
-			if test.wantContent == managedContextTooSmallControlResponse {
-				manager.handleParentCompactionEvent(binding, map[string]any{"sequence": int64(100), "state": "compacting"})
-				manager.handleParentCompactionEvent(binding, map[string]any{"sequence": int64(101), "state": "idle", "outcome": "failed"})
-				page, pageErr := manager.store.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
-				require.NoError(t, pageErr)
-				require.Len(t, page.Entries, 1)
-				require.Equal(t, "Compaction skipped", page.Entries[0].Message)
-			}
-		})
-	}
 }
 
 func TestHandlerFailureWithUTF8BoundaryCompletesDynamicInlineAllowanceRequest(t *testing.T) {

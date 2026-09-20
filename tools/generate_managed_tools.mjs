@@ -69,13 +69,6 @@ function definitions() {
     mecha_recall: { prompt_snippet: "Enable, disable, or inspect process-local Markdown recall", prompt_guidelines: ["Use mecha_recall with action enable, disable, or status for recall stores.", "Call pi__mecha_recall through the Cursor pi bridge."] },
     mecha_settled_notifications: { prompt_snippet: "Enable, disable, or inspect settled mailbox notifications", prompt_guidelines: ["Use mecha_settled_notifications with action enable, disable, or status for worker settled notifications.", "Call pi__mecha_settled_notifications through the Cursor pi bridge."] },
     mecha_context: { prompt_snippet: "Inspect context-threshold policy or request Pi self-compaction", prompt_guidelines: ["Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.", "Call pi__mecha_context through the Cursor pi bridge."] },
-    mecha_workflow_transition: {
-      prompt_snippet: "Transition the current managed workflow from its latest state entry",
-      prompt_guidelines: [
-        "Use only the exact entry ID and a listed destination name or complete from the latest workflow entry message; a concise note is optional; never invent a target.",
-        "Call pi__mecha_workflow_transition through the Cursor pi bridge.",
-      ],
-    },
     web_search: { prompt_snippet: "Search the web and return linked source results", prompt_guidelines: ["Use web_search when current or external source-backed information is needed.", "Choose live for time-sensitive facts, cached for stable information, and indexed when freshness is not required."] },
   };
   return [
@@ -95,7 +88,6 @@ function definitions() {
     definition("mecha_verification_handoff", "Verification handoff", "Record a verification handoff.", action(["record"], { task, reminderId: task, successor: string(4000, 1), remoteVerified: { type: "string", maxLength: 16, enum: ["pending", "true", "false"] } }, ["action", "task", "reminderId", "successor"]), "ops.verification_handoff"),
     definition("mecha_reminder", "Mecha reminder", "Manage reminders through fixed operations.", action(["list", "create", "update", "delete"], { reminderId: task, message: text, subject: optionalSubject, delayMinutes: { type: "integer", minimum: 1, maximum: 10080 }, scheduledAt: string(64), intervalMinutes: { type: "integer", minimum: 1, maximum: 10080 } }), "reminder.control"),
     definition("mecha_worker", "Managed worker", "Manage existing tmux workers through fixed operations.", action(["list", "launch", "cleanup", "send"], { alias: string(120, 1), worker: task, message: text, subject: string(200) }), "ops.worker"),
-    definition("mecha_workflow_transition", "Managed workflow transition", "Transition the current managed workflow using its exact state-entry identity and a listed exit.", closed({ entryId: string(36, 36), exit: string(256, 1), note: string(4096) }, ["entryId", "exit"]), "workflow.transition", metadata.mecha_workflow_transition),
     definition("mecha_pr", "Mecha pull request", "Read pull request status.", action(["status"], { pullRequest: { type: "integer", minimum: 1, maximum: 1000000000 } }, ["action", "pullRequest"]), "ops.pr_status"),
     definition("mecha_git", "Mecha git", "Read task git status.", action(["status"], { task: task }, ["action", "task"]), "ops.git_status"),
     definition("mecha_router", "Mecha router", "Read or control fixed router operations.", action(["health", "retry", "dismiss"], { messageId: task }), "router.control"),
@@ -103,7 +95,7 @@ function definitions() {
   ].sort((left, right) => Buffer.compare(Buffer.from(left.capability_id), Buffer.from(right.capability_id)));
 }
 
-const desired = { protocol: "mecha.tools/v1", revision: 3, tools: definitions() };
+const desired = { protocol: "mecha.tools/v1", revision: 2, tools: definitions() };
 const rendered = `${JSON.stringify(desired, null, 2)}\n`;
 if (process.argv.includes("--check")) {
   const existing = readFileSync(output, "utf8");
