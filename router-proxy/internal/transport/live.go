@@ -355,10 +355,15 @@ func (r *Router) connectedAgents(ctx context.Context, includeModels bool) map[st
 	}
 	activitySnapshotVersion := r.nextVersion
 	r.mu.Unlock()
+	agentIDs := make([]string, 0, len(candidates))
+	for _, s := range candidates {
+		agentIDs = append(agentIDs, s.agentID)
+	}
+	durableSnapshot, _ := r.store.ConnectedAgentSnapshot(ctx, agentIDs, r.lifecycleAvailable)
 	agents := make([]map[string]any, 0, len(candidates))
 	for _, s := range candidates {
-		lease, err := r.store.LeaseFor(ctx, s.agentID)
-		if err != nil || lease == nil || lease.LeaseID != s.leaseID || lease.InstanceID != s.deliveryInstance || lease.ExpiresAt <= timestamp(now) {
+		lease, leaseOK := durableSnapshot.Leases[s.agentID]
+		if !leaseOK || lease.LeaseID != s.leaseID || lease.InstanceID != s.deliveryInstance || lease.ExpiresAt <= timestamp(now) {
 			continue
 		}
 		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "inline_tool_control_available": s.inlineToolControl}
@@ -403,17 +408,13 @@ func (r *Router) connectedAgents(ctx context.Context, includeModels bool) map[st
 		}
 		state, lifecycleOK := lifecycle[s.agentID]
 		if !lifecycleOK && r.lifecycleAvailable {
-			producer, producerErr := r.store.LifecycleProducerFor(ctx, s.agentID)
-			if producerErr == nil && producer != nil && producer.Authority == "v2" {
-				agent, projectionErr := r.store.LifecycleAgentProjection(ctx, s.agentID)
-				if projectionErr == nil {
-					children := make([]map[string]any, 0, len(agent.Subagents))
-					for _, child := range agent.Subagents {
-						children = append(children, lifecycleChildFrame(child))
-					}
-					state = lifecycleAgent{version: agent.SubagentVersion, subagents: children}
-					lifecycleOK = true
+			if durableLifecycle, ok := durableSnapshot.Lifecycle[s.agentID]; ok && durableLifecycle.Producer.Authority == "v2" {
+				children := make([]map[string]any, 0, len(durableLifecycle.Agent.Subagents))
+				for _, child := range durableLifecycle.Agent.Subagents {
+					children = append(children, lifecycleChildFrame(child))
 				}
+				state = lifecycleAgent{version: durableLifecycle.Agent.SubagentVersion, subagents: children}
+				lifecycleOK = true
 			}
 		}
 		if lifecycleOK {
