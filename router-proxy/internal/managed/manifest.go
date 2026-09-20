@@ -19,21 +19,23 @@ import (
 
 var baselineManagedNames = []string{"goal", "goal_snooze", "mecha_context", "mecha_git", "mecha_mailbox_send", "mecha_parent_message", "mecha_pr", "mecha_priority", "mecha_recall", "mecha_reminder", "mecha_request_inline_tool_allowance", "mecha_router", "mecha_settled_notifications", "mecha_state", "mecha_verification_handoff", "mecha_worker"}
 
-// Managed manifest revision two retains every revision-one definition and
-// adds the immutable, source-backed web search bridge. The static router
-// consumes this whole current manifest at launch rather than treating search
-// as an unfenced browser-side capability.
-const managedManifestRevision = 2
+// Managed manifest revision three retains every earlier definition and adds
+// the root-only managed workflow transition contract. The static router
+// consumes this whole current manifest at launch; no running root receives a
+// dynamically injected workflow tool.
+const managedManifestRevision = 3
+const managedWorkflowTransitionToolName = "mecha_workflow_transition"
 const managedWebSearchToolName = "web_search__4f4ca2a3ae8ea237531b8c5264d53d15474c0848fc8d7eeada0fef5b85b139ac"
 
-var managedCurrentToolNames = append(append([]string{}, baselineManagedNames...), managedWebSearchToolName)
+var managedCurrentToolNames = append(append([]string{}, baselineManagedNames...), managedWorkflowTransitionToolName, managedWebSearchToolName)
 
 var managedManifestOperations = map[string]string{
 	"goal": "goal.control", "goal_snooze": "goal.snooze", "mecha_context": "context.control", "mecha_git": "ops.git_status",
 	"mecha_mailbox_send": "mail.send", "mecha_parent_message": "mail.parent", "mecha_pr": "ops.pr_status", "mecha_priority": "ops.priority",
 	"mecha_recall": "recall.control", "mecha_reminder": "reminder.control", "mecha_request_inline_tool_allowance": "policy.inline_allowance",
 	"mecha_router": "router.control", "mecha_settled_notifications": "notifications.settled", "mecha_state": "ops.state",
-	"mecha_verification_handoff": "ops.verification_handoff", "mecha_worker": "ops.worker", "web_search": "web.search",
+	"mecha_verification_handoff": "ops.verification_handoff", "mecha_worker": "ops.worker", "mecha_workflow_transition": "workflow.transition",
+	"web_search": "web.search",
 }
 
 type Manifest struct {
@@ -582,6 +584,9 @@ func validateValueEnum(schema map[string]any, value any) error {
 func expectedManifestName(capability, name, definitionSHA string) bool {
 	if capability == "web_search" {
 		return name == managedWebSearchToolName && name == capability+"__"+definitionSHA
+	}
+	if capability == managedWorkflowTransitionToolName {
+		return name == managedWorkflowTransitionToolName
 	}
 	for _, candidate := range baselineManagedNames {
 		if candidate == capability {

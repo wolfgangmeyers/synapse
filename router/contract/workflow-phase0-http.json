@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "v1",
+  "phase": "managed-workflows-phase-0",
+  "status": "pending_implementation",
+  "authority": "MANAGED_WORKFLOWS_PHASE_0.md",
+  "responseConventions": {
+    "cacheControl": "no-store",
+    "cacheControlAppliesTo": "every response including errors",
+    "jsonContentType": "application/json; charset=utf-8",
+    "jsonMembers": "lowerCamelCase",
+    "errorCodes": "lowercase_snake_case",
+    "correlationHeader": "X-Correlation-ID"
+  },
+  "routing": {
+    "aliasesAccepted": false,
+    "optionalTrailingSlashAccepted": false,
+    "unlistedQueryParametersAccepted": false,
+    "collectionQueryParameters": [],
+    "pathIdentifiers": {
+      "definitionId": "canonical lowercase UUID",
+      "runId": "canonical lowercase UUID",
+      "revision": "canonical positive base-10 integer without leading zeroes"
+    }
+  },
+  "requestId": {
+    "header": "X-Request-ID",
+    "format": "canonical lowercase UUID",
+    "requiredForMutations": true,
+    "mutationMethods": ["POST", "PUT", "DELETE"],
+    "scope": "HTTP method plus X-Request-ID",
+    "replay": "byte-equivalent stored status and JSON response",
+    "changedPathOrCanonicalBody": {
+      "status": 409,
+      "code": "idempotency_conflict"
+    },
+    "successBodyPlacement": "absent",
+    "validErrorBodyPlacements": ["requestId", "error.details.requestId"],
+    "invalidOrAbsentErrorBodyPlacement": "absent"
+  },
+  "requestBodies": {
+    "maximumBytes": 65536,
+    "contentType": "application/json",
+    "closedObjects": true,
+    "duplicateKeysAccepted": false,
+    "trailingValuesAccepted": false,
+    "loneSurrogatesAccepted": false,
+    "deleteBody": "forbidden"
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/workflow-definitions",
+      "successStatus": 200,
+      "successEnvelope": ["definitions"],
+      "sort": ["name", "definitionId"],
+      "operation": "workflow_definition_list"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workflow-definitions",
+      "successStatus": 201,
+      "successEnvelope": ["definition", "revision"],
+      "requestFields": ["name", "description", "status", "snapshot"],
+      "requiredRequestFields": ["name", "snapshot"],
+      "defaults": {"description": "", "status": "disabled"},
+      "operation": "workflow_definition_create"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workflow-definitions/{definitionId}",
+      "successStatus": 200,
+      "successEnvelope": ["definition", "revision"],
+      "operation": "workflow_definition_read"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workflow-definitions/{definitionId}",
+      "successStatus": 200,
+      "successEnvelope": ["definition", "revision"],
+      "requestFields": ["expectedVersion", "expectedRevision", "name", "description", "status", "snapshot"],
+      "requiredRequestFields": ["expectedVersion", "expectedRevision", "name", "description", "status", "snapshot"],
+      "operation": "workflow_definition_update"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workflow-definitions/{definitionId}",
+      "successStatus": 200,
+      "successEnvelope": ["deleted"],
+      "deletedFields": ["definitionId"],
+      "operation": "workflow_definition_delete"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workflow-definitions/{definitionId}/revisions",
+      "successStatus": 200,
+      "successEnvelope": ["revisions"],
+      "sort": ["revision desc"],
+      "operation": "workflow_revision_list"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workflow-definitions/{definitionId}/revisions/{revision}",
+      "successStatus": 200,
+      "successEnvelope": ["revision"],
+      "operation": "workflow_revision_read"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workflow-eligible-agents",
+      "successStatus": 200,
+      "successEnvelope": ["agents"],
+      "sort": ["agentId"],
+      "operation": "workflow_eligible_agent_list"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workflow-runs",
+      "successStatus": 201,
+      "successEnvelope": ["run"],
+      "requestFields": ["definitionId", "expectedRevision", "agentId", "inputs"],
+      "requiredRequestFields": ["definitionId", "expectedRevision", "agentId", "inputs"],
+      "phase0Inputs": {},
+      "operation": "workflow_run_launch"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workflow-runs/{runId}",
+      "successStatus": 200,
+      "successEnvelope": ["run"],
+      "operation": "workflow_run_read"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workflow-runs/{runId}/journal",
+      "successStatus": 200,
+      "successEnvelope": ["runId", "events"],
+      "sort": ["sequence"],
+      "operation": "workflow_run_journal_read"
+    }
+  ],
+  "closedResponseMembers": {
+    "definition": ["definitionId", "name", "description", "status", "version", "currentRevision", "validation", "createdAt", "updatedAt"],
+    "revision": ["definitionId", "revision", "snapshot", "validation", "createdAt"],
+    "revisionSummary": ["definitionId", "revision", "validation", "createdAt"],
+    "validation": ["valid", "issues"],
+    "validationIssue": ["path", "code", "message"],
+    "snapshot": ["format", "inputs", "entryStateId", "states"],
+    "state": ["stateId", "name", "entryText", "compactOnExit", "exits"],
+    "completeExit": ["targetKind", "description"],
+    "stateExit": ["targetKind", "targetStateId", "description"],
+    "eligibleAgent": ["agentId", "name", "ready", "acceptingPrompts", "hasActiveWorkflow", "manifest"],
+    "manifestIdentity": ["revision", "sha256"],
+    "run": ["runId", "definitionId", "definitionName", "revision", "agentId", "status", "phase", "version", "currentState", "currentEntryId", "availableExits", "notification", "startedAt", "completedAt", "finalExit"],
+    "currentState": ["stateId", "name"],
+    "notification": ["state", "wakeState"],
+    "journalEvent": ["sequence", "type", "at", "stateId", "entryId", "exit", "note"],
+    "deleted": ["definitionId"]
+  },
+  "literalValues": {
+    "snapshotFormat": "mecha.workflow-definition/v1",
+    "definitionStatuses": ["enabled", "disabled", "archived"],
+    "exitTargetKinds": ["state", "complete"],
+    "phase0RunActive": {"status": "active", "phase": "active"},
+    "phase0RunCompleted": {"status": "completed", "phase": "terminal", "currentState": null, "currentEntryId": null, "availableExits": [], "finalExit": "complete"},
+    "initialNotification": {"state": "queued", "wakeState": "pending"}
+  },
+  "errorEnvelope": {
+    "topLevelMembersWithValidRequestId": ["error", "requestId"],
+    "topLevelMembersWithoutValidRequestId": ["error"],
+    "errorMembers": ["code", "message", "details"],
+    "detailsRequiredMembers": ["operation", "state"],
+    "detailsState": "rejected",
+    "validRequestIdAlsoInDetails": true,
+    "detailsAreClosedPerOperation": true,
+    "forbiddenDetailContent": ["SQL", "process data", "definition text", "entry text", "inputs", "notes"],
+    "exampleWithValidRequestId": {
+      "error": {
+        "code": "workflow_not_found",
+        "message": "Workflow definition was not found.",
+        "details": {
+          "operation": "workflow_definition_read",
+          "state": "rejected",
+          "requestId": "b7ba25de-50ee-4b66-b780-4b31dc5e3725"
+        }
+      },
+      "requestId": "b7ba25de-50ee-4b66-b780-4b31dc5e3725"
+    }
+  },
+  "errors": [
+    {"status": 400, "codes": ["invalid_request_id", "invalid_json", "unknown_field", "invalid_identifier", "invalid_request"]},
+    {"status": 404, "codes": ["workflow_not_found", "revision_not_found", "run_not_found"]},
+    {"status": 409, "codes": ["idempotency_conflict", "definition_revision_conflict", "definition_has_active_run", "agent_has_active_run"]},
+    {"status": 413, "codes": ["payload_too_large"]},
+    {"status": 422, "codes": ["workflow_invalid", "definition_name_conflict", "invalid_launch_inputs", "agent_not_eligible"]},
+    {"status": 500, "codes": ["internal_error"]},
+    {"status": 503, "codes": ["managed_disabled", "agent_not_ready", "workflow_delivery_unavailable"]}
+  ],
+  "phase0JournalTypesInCompletedOrder": ["run_launched", "state_entered", "transition_requested", "transition_completed", "run_completed"]
+}

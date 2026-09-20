@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -139,6 +141,51 @@ func TestManagedParentCompactionNotificationRequiresCompletedTransitionAndIsIdem
 	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
 	require.Equal(t, "Post-compaction notification delivered", page.Entries[0].Message)
+}
+
+func TestKnownNoOpCompactionSuppressesOnlyItsDuplicateNativeCards(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+
+	noOp := lifecycleControlInput(1401, fence.AgentID, fence)
+	_, err := durable.ReserveManagedControlRequest(ctx, noOp)
+	require.NoError(t, err)
+	created, err := durable.RegisterManagedParentCompactionNoOp(ctx, fence, noOp.RequestID)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	start := ManagedParentCompactionEvent{Sequence: 1, State: "compacting"}
+	failed := ManagedParentCompactionEvent{Sequence: 2, State: "idle", Outcome: "failed"}
+	_, err = durable.ApplyManagedParentCompaction(ctx, fence, start)
+	require.NoError(t, err)
+	_, err = durable.ApplyManagedParentCompaction(ctx, fence, failed)
+	require.NoError(t, err)
+
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Empty(t, page.Entries, "the managed skipped result is the sole UI presentation")
+	_, err = durable.ManagedParentCompactionHistoryEntry(ctx, fence, start)
+	require.True(t, errors.Is(err, sql.ErrNoRows), "a suppressed live fact must not be published")
+	var transitions, retainedNativeRows int
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_parent_compaction_transitions WHERE agent_id=?`, fence.AgentID).Scan(&transitions))
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=? AND category='managed_parent_compaction'`, fence.AgentID).Scan(&retainedNativeRows))
+	require.Equal(t, 2, transitions)
+	require.Equal(t, 2, retainedNativeRows, "suppression must not erase native audit facts")
+
+	unknown := lifecycleControlInput(1402, fence.AgentID, fence)
+	_, err = durable.ReserveManagedControlRequest(ctx, unknown)
+	require.NoError(t, err)
+	_, err = durable.RegisterManagedParentCompactionNoOp(ctx, fence, unknown.RequestID)
+	require.NoError(t, err)
+	_, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 3, State: "compacting"})
+	require.NoError(t, err)
+	_, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 4, State: "idle", Outcome: "reconciled_unknown"})
+	require.NoError(t, err)
+	page, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 2)
+	require.Equal(t, "Context compaction interrupted — outcome unknown", page.Entries[0].Message)
+	require.Equal(t, "Compacting context", page.Entries[1].Message)
 }
 
 func TestManagedParentCompactionPreservesExactOutcomesAndFencesDelayedEvents(t *testing.T) {

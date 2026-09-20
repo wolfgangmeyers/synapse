@@ -520,7 +520,7 @@ func TestManagedGoalEvaluatorInstalledPiCoreFunctionalSlice(t *testing.T) {
 	manifest, _, err := managed.LoadManifest(filepath.Join(root, "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	expectedTools := expectedManagedActiveToolsForTransport(manifest)
-	require.Len(t, manifest.Tools, 17, "revision 2 manifest count is derived from the checked-in manifest")
+	require.Len(t, manifest.Tools, 18, "revision 3 manifest count is derived from the checked-in manifest")
 	for _, testCase := range []struct {
 		name       string
 		evaluator  string

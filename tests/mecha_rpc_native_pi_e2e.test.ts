@@ -890,7 +890,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     const expectedToolNames = new Set(manifestTools.flatMap((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as JsonRecord).name === "string" ? [(tool as JsonRecord).name] : []));
     for (const name of expectedToolNames) assert.ok(advertisedNames.has(name), `Pi did not advertise managed tool ${name}`);
     assert.deepEqual(advertisedNames, new Set([...expectedToolNames, ...FIXED_SUBAGENT_TOOL_NAMES]));
-    assert.equal(expectedToolNames.size, 17);
+    assert.equal(expectedToolNames.size, 18);
     const advertisedDefinitions = new Map(advertisedTools.flatMap((tool) => {
       if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return [];
       const definition = (tool as JsonRecord).function;
@@ -1306,7 +1306,11 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
     const advertisedNames = requestToolNames(childRequest);
     const manifestTools = manifest.tools;
     assert.ok(Array.isArray(manifestTools));
-    assert.equal(manifestTools.length, 17);
+    assert.equal(manifestTools.length, 18);
+    const childManifestTools = manifestTools.filter((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool)
+      && (tool as JsonRecord).operation_id !== "workflow.transition");
+    assert.equal(childManifestTools.length, 17);
+    assert.equal(advertisedNames.has("mecha_workflow_transition"), false, "root-only workflow transition leaked into a child model request");
     const advertisedDefinitions = new Map((childRequest.tools as unknown[]).flatMap((tool) => {
       if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return [];
       const definition = (tool as JsonRecord).function;
@@ -1315,7 +1319,7 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
         ? [[(definition as JsonRecord).name as string, definition as JsonRecord]]
         : [];
     }));
-    for (const manifestTool of manifestTools) {
+    for (const manifestTool of childManifestTools) {
       assert.ok(manifestTool !== null && typeof manifestTool === "object" && !Array.isArray(manifestTool));
       const expected = manifestTool as JsonRecord;
       const name = expected.name;
@@ -1456,6 +1460,7 @@ test("stock Pi 0.85 proves AC-090 duplicate, disposer, and owner-release factory
     const names = requestToolNames(request);
     const managed = new Set((manifest.tools as JsonRecord[]).map((tool) => String(tool.name)));
     assert.equal([...names].filter((name) => managed.has(name)).length, 17, `${description} lost a Mecha child definition`);
+    assert.equal(names.has("mecha_workflow_transition"), false, `${description} exposed a root-only workflow tool`);
     assert.equal(names.has("phase1_ac090_marker"), markerExpected, description);
   };
   try {

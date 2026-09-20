@@ -39,6 +39,35 @@ func managedParentCompactionHistoryKey(fence ManagedRuntimeFence, event ManagedP
 	return "parent-compaction:" + hex.EncodeToString(sum[:])
 }
 
+// RegisterManagedParentCompactionNoOp records the exact managed control result
+// that authorizes suppressing Pi's following generic start/failed lifecycle
+// presentation. The native transitions remain durable and continue to drive
+// activity state; only their duplicate Complete cards are suppressed.
+func (s *Store) RegisterManagedParentCompactionNoOp(ctx context.Context, fence ManagedRuntimeFence, requestID string) (bool, error) {
+	if ctx == nil || !validManagedRuntimeFence(fence) || requestID == "" {
+		return false, errors.New("managed parent compaction suppression is invalid")
+	}
+	created := false
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `INSERT INTO managed_parent_compaction_suppressions(request_id,agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,state,created_at)
+			SELECT request_id,agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,'pending',?
+			FROM managed_control_requests
+			WHERE request_id=? AND agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?
+			ON CONFLICT(request_id) DO NOTHING`, now, requestID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		created = count == 1
+		return nil
+	})
+	return created, err
+}
+
 // ApplyManagedParentCompaction records the authoritative installed-Pi event
 // and updates the live badge atomically. A newer source sequence is required,
 // so a delayed end cannot clear a later compaction start.
@@ -147,6 +176,27 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 		if err != nil {
 			return err
 		}
+		if event.State == "compacting" {
+			// One Pi process compacts serially. Claim only the oldest classified
+			// no-op for this exact runtime fence; ordinary/manual compactions have
+			// no pending marker and retain their normal lifecycle presentation.
+			_, err = s.db.ExecContext(ctx, `UPDATE managed_parent_compaction_suppressions SET state='started',start_event_key=?
+				WHERE request_id=(SELECT request_id FROM managed_parent_compaction_suppressions WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=? AND state='pending' ORDER BY created_at,request_id LIMIT 1)`,
+				key, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		} else if event.Outcome == "failed" {
+			_, err = s.db.ExecContext(ctx, `UPDATE managed_parent_compaction_suppressions SET state='consumed',end_event_key=?,consumed_at=?
+				WHERE request_id=(SELECT suppression.request_id FROM managed_parent_compaction_suppressions suppression JOIN managed_parent_compaction_transitions start ON start.event_key=suppression.start_event_key WHERE suppression.agent_id=? AND suppression.pi_session_id=? AND suppression.session_epoch=? AND suppression.process_incarnation=? AND suppression.runtime_generation=? AND suppression.state='started' AND start.source_sequence<? ORDER BY start.source_sequence DESC LIMIT 1)`,
+				key, now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, event.Sequence)
+		} else {
+			// A completed or outcome-unknown lifecycle is authoritative. Remove a
+			// mismatched marker so neither its start nor terminal fact is hidden.
+			_, err = s.db.ExecContext(ctx, `DELETE FROM managed_parent_compaction_suppressions
+				WHERE request_id=(SELECT suppression.request_id FROM managed_parent_compaction_suppressions suppression JOIN managed_parent_compaction_transitions start ON start.event_key=suppression.start_event_key WHERE suppression.agent_id=? AND suppression.pi_session_id=? AND suppression.session_epoch=? AND suppression.process_incarnation=? AND suppression.runtime_generation=? AND suppression.state='started' AND start.source_sequence<? ORDER BY start.source_sequence DESC LIMIT 1)`,
+				fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, event.Sequence)
+		}
+		if err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
 			return err
 		}
@@ -240,7 +290,7 @@ func (s *Store) ManagedParentCompactionHistoryEntry(ctx context.Context, fence M
 	var sequence int64
 	var presentation sql.NullString
 	entry := ManagedHistoryEntry{AgentID: fence.AgentID}
-	err := s.db.QueryRowContext(ctx, `SELECT sequence,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key=?`, managedParentCompactionHistoryKey(fence, event)).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &presentation)
+	err := s.db.QueryRowContext(ctx, `SELECT sequence,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history history WHERE event_key=? AND NOT EXISTS (SELECT 1 FROM managed_parent_compaction_suppressions suppression WHERE suppression.start_event_key=history.event_key OR suppression.end_event_key=history.event_key)`, managedParentCompactionHistoryKey(fence, event)).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &presentation)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
