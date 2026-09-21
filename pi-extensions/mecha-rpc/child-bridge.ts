@@ -1,17 +1,18 @@
-import {
-  getSubagentsService,
-  type ContextRefV1,
-  type ControlResultAppendOutcomeV1,
-  type SubagentsService,
-} from "@gotgenes/pi-subagents";
+import { getSubagentsService } from "@gotgenes/pi-subagents";
 
 import type { JsonRecord } from "./manifest.js";
 import type { ControlResultPayload } from "./protocol.js";
 
 type LifecycleRun = JsonRecord & { task_id: string; run_id: string; parent_entry_id: string; context_ref?: string | null };
 type LifecycleSnapshot = JsonRecord & { protocol: "mecha.children/v1"; owner_session_id: string; runs: LifecycleRun[] };
-type AppendOutcome = ControlResultAppendOutcomeV1;
-type Service = Pick<SubagentsService, "getLifecycleSnapshotV2" | "getChildContextRefV1" | "appendControlResultV1">;
+type ContextRefV1 = string;
+type AppendOutcome = { kind: "accepted" | "already_present" | "rejected"; result_id?: unknown };
+type Service = {
+  getLifecycleSnapshotV2?: (ownerSessionId: string) => unknown;
+  getLifecycleSnapshots?: () => readonly unknown[];
+  getChildContextRefV1?: (childSessionId: string) => unknown;
+  appendControlResultV1?: (contextRef: ContextRefV1, payload: ControlResultPayload) => Promise<unknown>;
+};
 type SessionIdentity = { sessionId: string; parentSessionId?: string };
 type PendingBinding = {
   requestId: string;
@@ -45,6 +46,14 @@ function isContextRef(value: unknown): value is ContextRefV1 {
   return typeof value === "string" && CONTEXT_REF.test(value);
 }
 
+function isService(value: unknown): value is Service {
+  return isUnknownRecord(value);
+}
+
+function isAppendOutcome(value: unknown): value is AppendOutcome {
+  return isRecord(value) && (value.kind === "accepted" || value.kind === "already_present" || value.kind === "rejected");
+}
+
 function lifecycleKey(taskId: string, runId: string, parentEntryId: string): string {
   return `${taskId}\u0000${runId}\u0000${parentEntryId}`;
 }
@@ -56,7 +65,8 @@ function requireString(value: unknown, label: string): string {
 
 /** The checked fork owns owner-service lookup; this extension never reads its registry. */
 function readService(ownerSessionId: string): Service | undefined {
-  return getSubagentsService(ownerSessionId);
+  const service = getSubagentsService(ownerSessionId);
+  return isService(service) ? service : undefined;
 }
 
 function stateForOwner(ownerSessionId: string): SharedOwnerState {
@@ -107,7 +117,13 @@ function bindingForContextRef(ownerSessionId: string, state: SharedOwnerState, c
 }
 
 function refreshOwnerSnapshot(ownerSessionId: string, service: Service): JsonRecord {
-  const snapshot = service.getLifecycleSnapshotV2(ownerSessionId);
+  // The checked owner service now exposes the V2 projection. During a fresh
+  // startup, an older owner service still has an authoritative empty active
+  // projection. Emit that initial receipt so the router can finish readiness;
+  // do not synthesize nonempty child rows from the older redacted API.
+  const snapshot = typeof service.getLifecycleSnapshotV2 === "function"
+    ? service.getLifecycleSnapshotV2(ownerSessionId)
+    : initialEmptySnapshot(ownerSessionId, service);
   if (!isRecord(snapshot) || snapshot.protocol !== "mecha.children/v1" || snapshot.owner_session_id !== ownerSessionId || !Array.isArray(snapshot.runs)) {
     throw new TypeError("pi-subagents lifecycle snapshot is invalid");
   }
@@ -127,6 +143,13 @@ function refreshOwnerSnapshot(ownerSessionId: string, service: Service): JsonRec
   return stripServiceOnlyContext({ ...snapshot, runs: normalizedRuns });
 }
 
+function initialEmptySnapshot(ownerSessionId: string, service: Service): LifecycleSnapshot {
+  if (typeof service.getLifecycleSnapshots !== "function") throw new TypeError("pi-subagents lifecycle snapshot service is unavailable");
+  const runs = service.getLifecycleSnapshots();
+  if (!Array.isArray(runs) || runs.length !== 0) throw new TypeError("pi-subagents lifecycle snapshot V2 is unavailable for active children");
+  return { protocol: "mecha.children/v1", snapshot_id: "initial-empty", owner_session_id: ownerSessionId, sequence: 0, runs: [] };
+}
+
 function boundedSetPending(state: SharedOwnerState, requestId: string, binding: PendingBinding): void {
   state.pending.set(requestId, binding);
   while (state.pending.size > 512) {
@@ -138,10 +161,13 @@ function boundedSetPending(state: SharedOwnerState, requestId: string, binding: 
 
 export function createChildBridge(options: {
   getOwnerSessionId: (context: unknown) => string | undefined;
+  getRegisteredOwnerSessionId: () => string | undefined;
   getSessionIdentity: (context: unknown) => SessionIdentity | undefined;
 }) {
   const refreshSnapshot = (context: unknown): JsonRecord => {
-    const ownerSessionId = options.getOwnerSessionId(context);
+    // Hidden command contexts can omit sessionManager during startup. The
+    // extension's session_start owner is the only safe fallback.
+    const ownerSessionId = options.getOwnerSessionId(context) ?? options.getRegisteredOwnerSessionId();
     if (ownerSessionId === undefined) throw new TypeError("Managed owner session is unavailable");
     const service = readService(ownerSessionId);
     if (service === undefined) throw new TypeError("pi-subagents lifecycle service is unavailable");
@@ -174,6 +200,7 @@ export function createChildBridge(options: {
       const service = readService(identity.parentSessionId);
       if (service === undefined) return undefined;
       refreshOwnerSnapshot(identity.parentSessionId, service);
+      if (typeof service.getChildContextRefV1 !== "function") return undefined;
       const contextRef = service.getChildContextRefV1(identity.sessionId);
       if (typeof contextRef !== "string" || !CONTEXT_REF.test(contextRef)) return undefined;
       const state = stateForOwner(identity.parentSessionId);
@@ -214,14 +241,13 @@ export function createChildBridge(options: {
       refreshOwnerSnapshot(ownerSessionId, service);
       const current = state.contextByLifecycle.get(lifecycleKey(binding.taskId, binding.runId, binding.parentEntryId));
       if (current !== binding.contextRef) throw new TypeError("STALE_CHILD_CONTEXT");
-      if (binding.childSessionId !== undefined && service.getChildContextRefV1(binding.childSessionId) !== binding.contextRef) {
+      if (typeof service.appendControlResultV1 !== "function") throw new TypeError("STALE_CHILD_CONTEXT");
+      if (binding.childSessionId !== undefined && (typeof service.getChildContextRefV1 !== "function" || service.getChildContextRefV1(binding.childSessionId) !== binding.contextRef)) {
         throw new TypeError("STALE_CHILD_CONTEXT");
       }
       if (!isContextRef(binding.contextRef)) throw new TypeError("STALE_CHILD_CONTEXT");
       const outcome = await service.appendControlResultV1(binding.contextRef, payload);
-      if (!isRecord(outcome) || (outcome.kind !== "accepted" && outcome.kind !== "already_present" && outcome.kind !== "rejected")) {
-        throw new TypeError("Invalid child append outcome");
-      }
+      if (!isAppendOutcome(outcome)) throw new TypeError("Invalid child append outcome");
       // A correlated result is terminal once the service has durably accepted
       // it (or proves it already appended). Retaining the request would allow a
       // later router delivery to re-enter an ended child context.

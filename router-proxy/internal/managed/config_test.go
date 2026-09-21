@@ -56,6 +56,24 @@ func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
 	require.Error(t, ValidateManagedLaunchConfig(config))
 }
 
+func TestManagedChildPathUsesNVMRuntimeBehindStableShim(t *testing.T) {
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "stable-bin")
+	nvmDir := filepath.Join(root, "nvm-bin")
+	entrypointDir := filepath.Join(root, "pi-package", "dist")
+	require.NoError(t, os.MkdirAll(shimDir, 0o700))
+	require.NoError(t, os.MkdirAll(nvmDir, 0o700))
+	require.NoError(t, os.MkdirAll(entrypointDir, 0o700))
+	entrypoint := filepath.Join(entrypointDir, "cli.js")
+	nvmLauncher := filepath.Join(nvmDir, "pi")
+	shim := filepath.Join(shimDir, "pi")
+	require.NoError(t, os.WriteFile(entrypoint, []byte("#!/usr/bin/env node\n"), 0o700))
+	require.NoError(t, os.Symlink(entrypoint, nvmLauncher))
+	require.NoError(t, os.Symlink(nvmLauncher, shim))
+
+	require.Equal(t, nvmDir+":"+shimDir+":"+managedSystemPath, managedChildPath(shim))
+}
+
 func TestManagedRouterURLForListenerUsesAnOwningLoopbackURL(t *testing.T) {
 	url, err := ManagedRouterURLForListener("0.0.0.0", 18775)
 	require.NoError(t, err)

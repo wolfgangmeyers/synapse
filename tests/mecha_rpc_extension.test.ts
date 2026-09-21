@@ -85,7 +85,7 @@ function bootstrap(current: ReturnType<typeof fixture>) {
     protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174001",
     runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
     desired_manifest: desired, manifest_sha256: current.extension.hashManifest(desired),
-    restored_request_ids: [], inline_policy: { enabled: true, credits: {} },
+    restored_request_ids: [], inline_policy: { enabled: false, credits: {} },
     recall_projection: { enabled: false, stores: [], content: "" },
   };
   return current.commands.get("mecha-bootstrap-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
@@ -513,7 +513,7 @@ test("managed active selection exposes Pi coding tools without turning them into
       });
       await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
         protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-        manifest_sha256: current.extension.hashManifest(manifest()), policy: { inline: { enabled: true, credits: { [name]: 1 } } },
+        manifest_sha256: current.extension.hashManifest(manifest()), policy: { inline: { enabled: false, credits: { [name]: 1 } } },
       }), current.context);
       assert.equal(hook({ toolCallId: `${name}-allowed`, toolName: name }, current.context), undefined);
       assert.deepEqual(hook({ toolCallId: `${name}-exhausted`, toolName: name }, current.context), {
@@ -705,11 +705,34 @@ test("tool-call hooks fail closed without raw managed input and consume only gra
   assert.deepEqual(blockedInline, { block: true, reason: "This managed runtime requires an inline-tool allowance." });
   await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
     protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: { inline: { enabled: true, credits: { bash: 1 } } },
+    manifest_sha256: current.extension.hashManifest(manifest()), policy: { inline: { enabled: false, credits: { bash: 1 } } },
   }), current.context);
   assert.equal(hook({ toolCallId: "bash-two", toolName: "bash" }, current.context), undefined);
   const exhausted = hook({ toolCallId: "bash-three", toolName: "bash" }, current.context) as RecordValue;
   assert.equal(exhausted.block, true);
+});
+
+test("a root bootstrap remains usable when the public service lacks optional child registration", async () => {
+  const symbol = Symbol.for("@gotgenes/pi-subagents:service-registry");
+  const previous = Object.getOwnPropertyDescriptor(globalThis, symbol);
+  const service = { getLifecycleSnapshots: () => [] };
+  Object.defineProperty(globalThis, symbol, { configurable: true, value: { services: new Map([["root-session", service]]) } });
+  try {
+    const current = fixture();
+    await bootstrap(current);
+    const snapshot = await current.commands.get("mecha-child-snapshot-v1")!.handler(encodeHiddenEnvelope({
+      protocol: "mecha.child-snapshot/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    }), {});
+    assert.deepEqual(snapshot, {
+      protocol: "mecha.children/v1", snapshot_id: "initial-empty", owner_session_id: "root-session", sequence: 0, runs: [],
+    });
+    const receipt = current.sent.at(-1)?.message;
+    assert.equal(receipt?.customType, "mecha.child.snapshot.v1");
+    assert.deepEqual(receipt?.details, snapshot);
+  } finally {
+    if (previous === undefined) delete (globalThis as Record<PropertyKey, unknown>)[symbol];
+    else Object.defineProperty(globalThis, symbol, previous);
+  }
 });
 
 test("child bridge uses service-only context references and strips them from wire snapshots and deltas", async () => {
@@ -934,7 +957,7 @@ function bootstrapEnvelope(current: ReturnType<typeof fixture>, delivery = deliv
     protocol: "mecha.bootstrap/v1", delivery_id: delivery,
     runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
     desired_manifest: desired, manifest_sha256: manifestHash(desired), restored_request_ids: [],
-    inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+    inline_policy: { enabled: false, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
   };
 }
 

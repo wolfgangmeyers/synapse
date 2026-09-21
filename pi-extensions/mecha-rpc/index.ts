@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 
-import { getSubagentsService, type SubagentsService } from "@gotgenes/pi-subagents";
+import { getSubagentsService } from "@gotgenes/pi-subagents";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createChildBridge } from "./child-bridge.js";
@@ -126,12 +126,34 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-type ChildExtensionFactoryService = Pick<SubagentsService, "registerChildExtensionV1">;
+type ChildExtensionFactoryService = {
+  registerChildExtensionV1: (registration: { name: string; factory: (childPi: ExtensionAPI) => void }) => unknown;
+};
+type CompletionHookService = {
+  registerBeforeCompletionHookV1: (hook: (record: unknown) => Promise<void>) => unknown;
+};
 
-/** Read the package's public owner-bound service capability, never its manager or child sessions. */
+function isDisposer(value: unknown): value is () => void {
+  return typeof value === "function";
+}
+
+/** Validate optional legacy capabilities at the package boundary. */
+function isChildExtensionFactoryService(value: unknown): value is ChildExtensionFactoryService {
+  return isUnknownRecord(value) && typeof value.registerChildExtensionV1 === "function";
+}
+
+function isCompletionHookService(value: unknown): value is CompletionHookService {
+  return isUnknownRecord(value) && typeof value.registerBeforeCompletionHookV1 === "function";
+}
+
 function childExtensionFactoryService(ownerSessionId: string): ChildExtensionFactoryService | undefined {
   const service = getSubagentsService(ownerSessionId);
-  return service !== undefined && typeof service.registerChildExtensionV1 === "function" ? service : undefined;
+  return isChildExtensionFactoryService(service) ? service : undefined;
+}
+
+function completionHookService(ownerSessionId: string): CompletionHookService | undefined {
+  const service = getSubagentsService(ownerSessionId);
+  return isCompletionHookService(service) ? service : undefined;
 }
 function installationDelivery(value: JsonRecord, protocol: "mecha.bootstrap/v1" | "mecha.tools-install/v1"): InstallationDelivery | undefined {
   if (value.protocol !== protocol || typeof value.delivery_id !== "string" || !UUID.test(value.delivery_id)) return undefined;
@@ -284,12 +306,16 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       protocol: "mecha.tools/v1", reason: receipt.reason ?? "invalid installation", runtime_generation: generation, session_epoch: epoch,
     }, { triggerTurn: false });
   };
+  // session_start owns this identity. Command contexts can be absent during
+  // native startup, so child snapshots use it only as a fallback.
+  let registeredOwnerSessionId: string | undefined;
   const childBridge = createChildBridge({
     getOwnerSessionId: (context) => {
       if (!isUnknownRecord(context) || !isUnknownRecord(context.sessionManager) || typeof context.sessionManager.getSessionId !== "function") return undefined;
       const sessionId = context.sessionManager.getSessionId();
       return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
     },
+    getRegisteredOwnerSessionId: () => registeredOwnerSessionId,
     getSessionIdentity: (context) => {
       if (!isUnknownRecord(context) || !isUnknownRecord(context.sessionManager) || typeof context.sessionManager.getSessionId !== "function") return undefined;
       const sessionId = context.sessionManager.getSessionId();
@@ -459,7 +485,6 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   let commandRegistrationAttempts = 0;
   let commandsRegistered = false;
   let commandRegistrationFailed = false;
-  let registeredOwnerSessionId: string | undefined;
   let disposeChildFactory: (() => void) | undefined;
   let disposeCompletionHook: (() => void) | undefined;
   // Each entry is consumed by its matching completion hook; shutdown clears the in-flight set.
@@ -485,15 +510,18 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     disposeCompletionHook?.();
     disposeCompletionHook = undefined;
     if (ownerSessionId === undefined) return;
-    const service = getSubagentsService(ownerSessionId);
-    if (service === undefined || typeof service.registerBeforeCompletionHookV1 !== "function") return;
-    disposeCompletionHook = service.registerBeforeCompletionHookV1(async (record) => {
+    const service = completionHookService(ownerSessionId);
+    if (service === undefined) return;
+    const disposer = service.registerBeforeCompletionHookV1(async (record) => {
+      if (!isUnknownRecord(record) || typeof record.id !== "string") throw new TypeError("pi-subagents completion record is invalid.");
       if (registeredOwnerSessionId !== ownerSessionId) throw new Error("Managed child session closed before terminal delta append.");
       const acknowledgement = terminalDeltaAcknowledgements.get(record.id);
       if (acknowledgement === undefined) return;
       terminalDeltaAcknowledgements.delete(record.id);
       if (!await acknowledgement) throw new Error("Managed terminal child delta was not durably appended.");
     });
+    if (!isDisposer(disposer)) throw new TypeError("pi-subagents completion hook disposer is invalid.");
+    disposeCompletionHook = disposer;
   };
   const queuedCommands: Array<{ name: string; command: Command }> = [];
   const queueCommand = (name: string, command: Command): void => {
@@ -540,13 +568,15 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     disposeChildFactory?.();
     disposeChildFactory = undefined;
     // This closure intentionally captures only the cloned, parent-validated manifest.
-    disposeChildFactory = service.registerChildExtensionV1({
+    const disposer = service.registerChildExtensionV1({
       name: CHILD_FACTORY_NAME,
       factory: (childPi: ExtensionAPI) => {
         if (!isPiApi(childPi)) throw new TypeError("Pi child extension API is invalid.");
         createMechaRpcExtension(childPi, { initialAcceptedManifest: acceptedManifest });
       },
     });
+    if (!isDisposer(disposer)) throw new TypeError("pi-subagents child factory disposer is invalid.");
+    disposeChildFactory = disposer;
   };
 
   const replayInstallationReceipt = async (delivery: InstallationDelivery | undefined): Promise<InstallationReceipt | undefined> => {
