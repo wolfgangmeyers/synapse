@@ -36,3 +36,6 @@ VERIFY.md
 .worktrees/
 harness/router.db
 web/router-ui-react/coverage/
+
+# Local router proxy build
+router-proxy/router-proxy
