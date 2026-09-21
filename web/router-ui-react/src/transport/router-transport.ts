@@ -139,6 +139,9 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const diagnosticSink = options.onDiagnostic ?? defaultDiagnosticSink;
   let refreshGeneration = 0; let remindersRefreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let refreshInFlight: Promise<void> | undefined;
+  let refreshInFlightToken: object | undefined;
+  let refreshPending = false;
+  let pendingRefreshReason: RefreshRepairReason | undefined;
   let refreshRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let goalControlAvailable = false;
   let inlineToolControlAvailable = false;
@@ -155,10 +158,12 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     if (refreshInFlight !== undefined) return refreshInFlight;
     clearRefreshRetry();
     const generation = ++refreshGeneration;
+    const connectionGeneration = socket.identity.generation;
+    const requestToken = {};
     const request = (async (): Promise<void> => {
       try {
         const result = await http.agents();
-        if (generation !== refreshGeneration) {
+        if (generation !== refreshGeneration || socket.identity.generation !== connectionGeneration || !socket.registered) {
           if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "stale_response" });
           return;
         }
@@ -172,19 +177,45 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
         if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: boundedCount(result.agents.length), reason: repairReason });
       } catch (error: unknown) {
         if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "request_failed" });
-        if (allowRetry && socket.registered && refreshRetryTimer === undefined) {
+        if (allowRetry && socket.registered && socket.identity.generation === connectionGeneration && refreshRetryTimer === undefined) {
           refreshRetryTimer = setTimeout(() => {
             refreshRetryTimer = undefined;
-            void refreshAgents(undefined, false).catch(() => undefined);
+            if (socket.registered && socket.identity.generation === connectionGeneration) void refreshAgents(undefined, false).catch(() => undefined);
           }, LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
         }
         throw error;
       } finally {
-        refreshInFlight = undefined;
+        if (refreshInFlightToken === requestToken) {
+          refreshInFlight = undefined;
+          refreshInFlightToken = undefined;
+          const shouldRefresh = refreshPending;
+          const nextReason = pendingRefreshReason;
+          refreshPending = false;
+          pendingRefreshReason = undefined;
+          if (shouldRefresh && socket.registered) void refreshAgents(nextReason).catch(() => undefined);
+        }
       }
     })();
     refreshInFlight = request;
+    refreshInFlightToken = requestToken;
     return request;
+  };
+  const scheduleAgentRefresh = (reason: RefreshRepairReason): void => {
+    if (!socket.registered) return;
+    if (refreshInFlight !== undefined) {
+      refreshPending = true;
+      pendingRefreshReason = reason;
+      return;
+    }
+    void refreshAgents(reason).catch(() => undefined);
+  };
+  const clearRefreshScheduling = (): void => {
+    clearRefreshRetry();
+    refreshPending = false;
+    pendingRefreshReason = undefined;
+    refreshGeneration += 1;
+    clearInterval(refreshTimer);
+    refreshTimer = undefined;
   };
   const removeControl = (controlId: string): PendingControl | undefined => {
     const timer = controlTimers.get(controlId);
@@ -203,8 +234,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       inlineToolControlAvailable = false;
       controlTimeoutMs = 30_000;
       emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false });
-      void refreshAgents("registered").catch(() => undefined);
-      clearInterval(refreshTimer); refreshTimer = setInterval(() => { void refreshAgents("registered").catch(() => undefined); }, LEGACY_AGENT_REFRESH_INTERVAL_MS);
+      scheduleAgentRefresh("registered");
+      clearInterval(refreshTimer); refreshTimer = setInterval(() => { if (socket.registered) void refreshAgents("registered").catch(() => undefined); }, LEGACY_AGENT_REFRESH_INTERVAL_MS);
       const capabilityGeneration = identity.generation;
       void http.capabilities().then((capabilities) => {
         if (socket.identity.generation !== capabilityGeneration || !socket.registered) return;
@@ -227,7 +258,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       return;
     }
     if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); return; }
-    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") return;
+    if (frame.type === "agent_activity") { scheduleAgentRefresh("agent_projection_frame"); return; }
+    if (frame.type === "agent_model_catalog" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") return;
     if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); return; }
     if (frame.type === "reminders_changed") {
       void refreshReminders();
@@ -278,7 +310,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     emit({ type: "reminders", reminders: result.reminders });
   };
   const invalidateControls = (): void => { const invalidated = controls.invalidate(); for (const timer of controlTimers.values()) clearTimeout(timer); controlTimers.clear(); if (invalidated.length > 0) emit({ type: "controls-invalidated", reason: "router_reconnecting" }); };
-  const socketOptions: WebSocketClientOptions = { routerUrl: options.routerUrl, ...(options.agentId === undefined ? {} : { agentId: options.agentId }), ...(options.defaultAgentId === undefined ? {} : { defaultAgentId: options.defaultAgentId }), ...(options.storage === undefined ? {} : { storage: options.storage }), ...(options.webSocketFactory === undefined ? {} : { webSocketFactory: options.webSocketFactory }), ...(options.autoReconnect === undefined ? {} : { autoReconnect: options.autoReconnect }), onStatus: (status, identity) => { if (status !== "connected") { invalidateControls(); if (goalControlAvailable || inlineToolControlAvailable) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); } } emit({ type: "status", status, identity }); }, onFrame, onProtocolError: (error) => emit({ type: "error", error }), onInvalidate: () => { invalidateControls(); if (goalControlAvailable || inlineToolControlAvailable) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); } } };
+  const socketOptions: WebSocketClientOptions = { routerUrl: options.routerUrl, ...(options.agentId === undefined ? {} : { agentId: options.agentId }), ...(options.defaultAgentId === undefined ? {} : { defaultAgentId: options.defaultAgentId }), ...(options.storage === undefined ? {} : { storage: options.storage }), ...(options.webSocketFactory === undefined ? {} : { webSocketFactory: options.webSocketFactory }), ...(options.autoReconnect === undefined ? {} : { autoReconnect: options.autoReconnect }), onStatus: (status, identity) => { if (status !== "connected") { clearRefreshScheduling(); invalidateControls(); if (goalControlAvailable || inlineToolControlAvailable) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); } } emit({ type: "status", status, identity }); }, onFrame, onProtocolError: (error) => emit({ type: "error", error }), onInvalidate: () => { clearRefreshScheduling(); invalidateControls(); if (goalControlAvailable || inlineToolControlAvailable) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); } } };
   const socket = createWebSocketClient(socketOptions);
   const sendControl = (frame: ClientFrame, pending: PendingControl): boolean => {
     controls.add({ ...pending, requestId: frame.frame_id });
@@ -296,7 +328,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     get inlineToolControlAvailable() { return inlineToolControlAvailable; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     connect: socket.connect,
-    close() { clearInterval(refreshTimer); clearRefreshRetry(); refreshGeneration += 1; goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
+    close() { clearInterval(refreshTimer); clearRefreshScheduling(); goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
     refreshReminders,
     conversation: (owner, peer) => http.conversations(owner, peer),

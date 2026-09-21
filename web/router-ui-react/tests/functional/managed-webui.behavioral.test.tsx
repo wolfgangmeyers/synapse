@@ -2,12 +2,13 @@ import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { unlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
 import type { SocketEvent, WebSocketFactory, WebSocketLike } from "../../src/transport/websocket-client";
 import { createUILiveClient, type UILiveClient } from "../../src/transport/ui-live-client";
 import { startManagedGoRouter } from "./managed-go-router.mjs";
+import { connectFixturePeer } from "../support/node-router.mjs";
 
 interface JsonRecord { [key: string]: unknown }
 type FunctionalRouter = Awaited<ReturnType<typeof startManagedGoRouter>>;
@@ -86,11 +87,14 @@ async function waitForManagedAgentReady(router: FunctionalRouter, agentID: strin
 
 let router: FunctionalRouter | undefined;
 let historyObserver: UILiveClient | undefined;
+let regularPeer: Awaited<ReturnType<typeof connectFixturePeer>> | undefined;
 
 afterEach(async () => {
   cleanup();
   historyObserver?.close();
   historyObserver = undefined;
+  await regularPeer?.close();
+  regularPeer = undefined;
   if (router !== undefined) {
     const closed = await router.close();
     expect(closed.rootRemoved).toBe(true);
@@ -101,6 +105,24 @@ afterEach(async () => {
 });
 
 describe("real managed router to React WebUI behavioral seam", () => {
+  it("projects regular-worker activity into the shared row indicator promptly", async () => {
+    router = await startManagedGoRouter();
+    regularPeer = await connectFixturePeer(router, { agent_id: "regular-worker", instance_id: "regular-worker-instance", role: "agent" });
+    render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
+
+    const rowButton = await screen.findByRole("button", { name: "Regular Worker (regular-worker)" });
+    const row = rowButton.closest<HTMLElement>('[role="listitem"]');
+    expect(row).not.toBeNull();
+    if (row === null) throw new Error("regular worker row missing");
+    expect(within(row).queryByLabelText("Working")).toBeNull();
+
+    regularPeer.send({ version: "v1", frame_id: "regular-active", type: "activity", agent_id: regularPeer.agent_id, instance_id: regularPeer.instance_id, lease_id: regularPeer.registered.lease_id, activity_state: "active", subagent_count: 0, subagents: [] });
+    expect(await within(row).findByLabelText("Working")).toHaveAttribute("aria-label", "Working");
+
+    regularPeer.send({ version: "v1", frame_id: "regular-settled", type: "activity", agent_id: regularPeer.agent_id, instance_id: regularPeer.instance_id, lease_id: regularPeer.registered.lease_id, activity_state: "settled", subagent_count: 0, subagents: [] });
+    await waitFor(() => expect(within(row).queryByLabelText("Working")).toBeNull());
+  }, 60_000);
+
   it("projects a committed managed row through HTTP and UI-live into the real DOM", async () => {
     // Matrix: source/state/activity projection. The assertion starts at a real
     // SQLite-backed Go projection and ends at the real AgentRow component.

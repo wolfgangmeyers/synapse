@@ -19,9 +19,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-function legacyAgent(agentId: string): Agent {
+function legacyAgent(agentId: string, activity_state: "active" | "idle" = "idle"): Agent {
   const model = { provider: "openai-codex", id: "gpt-5.6-terra" };
-  return { agent_id: agentId, instance_id: `${agentId}-instance`, agent_role: "agent", connected_at: "2030-01-01T00:00:00.000Z", lease_expires_at: "2030-01-02T00:00:00.000Z", activity_state: "idle", subagent_count: 0, subagents: [], current_model: model, available_models: [model], model_catalog_total_count: 1, model_catalog_truncated: false };
+  return { agent_id: agentId, instance_id: `${agentId}-instance`, agent_role: "agent", connected_at: "2030-01-01T00:00:00.000Z", lease_expires_at: "2030-01-02T00:00:00.000Z", activity_state, subagent_count: 0, subagents: [], current_model: model, available_models: [model], model_catalog_total_count: 1, model_catalog_truncated: false };
 }
 
 function managedAgent(): ManagedAgent {
@@ -43,35 +43,140 @@ class RefreshSocket implements WebSocketLike {
   emit(type: string, event: SocketEvent): void { for (const listener of this.listeners.get(type) ?? []) listener(event); }
 }
 
-function activityFrame(frameId: string): string {
-  return JSON.stringify({ version: "v1", frame_id: frameId, type: "agent_activity", agent_id: "peer", instance_id: "peer-instance", activity_state: "active", subagent_count: 0, subagents: [], generated_at: "2030-01-01T00:00:00.000Z" });
+function activityFrame(frameId: string, activity_state: "active" | "idle"): string {
+  return JSON.stringify({ version: "v1", frame_id: frameId, type: "agent_activity", agent_id: "peer", instance_id: "peer-instance", activity_state, subagent_count: 0, subagents: [], generated_at: "2030-01-01T00:00:00.000Z" });
 }
 
 async function flush(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
-function setup(fetchImpl: FetchLike): { transport: RouterTransport; socket: RefreshSocket; events: TransportEvent[] } {
-  let socket: RefreshSocket | undefined;
+function setup(fetchImpl: FetchLike): { transport: RouterTransport; socket: RefreshSocket; sockets: RefreshSocket[]; events: TransportEvent[] } {
+  const sockets: RefreshSocket[] = [];
   const webSocketFactory: WebSocketFactory = () => {
-    socket = new RefreshSocket();
-    queueMicrotask(() => { if (!socket) return; socket.readyState = 1; socket.emit("open", {}); });
+    const socket = new RefreshSocket();
+    sockets.push(socket);
+    queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
     return socket;
   };
   const transport = createRouterTransport({ routerUrl: "http://router.test", agentId: "web-ui", fetchImpl, webSocketFactory, autoReconnect: false });
   const events: TransportEvent[] = [];
   transport.subscribe((event) => events.push(event));
   transport.connect();
+  const socket = sockets[0];
   if (socket === undefined) throw new Error("socket was not created");
   transports.push(transport);
-  return { transport, socket, events };
+  return { transport, socket, sockets, events };
 }
 
 afterEach(() => { while (transports.length > 0) transports.pop()?.close(); vi.useRealTimers(); });
 
 describe("legacy agent refresh orchestration", () => {
-  it("loads immediately, ignores repeated activity until the next interval, then refreshes once", async () => {
+  it("refreshes promptly when an activity frame commits active state", async () => {
+    let agentRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
+      if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
+      agentRequests += 1;
+      return jsonResponse({ agents: [legacyAgent("peer", agentRequests === 2 ? "active" : "idle")] });
+    });
+    const { socket, events } = setup(fetchImpl);
+    await vi.waitFor(() => expect(agentRequests).toBe(1));
+
+    socket.emit("message", { data: activityFrame("active-event", "active") });
+    await vi.waitFor(() => expect(events.filter((event) => event.type === "agents").at(-1)).toMatchObject({ agents: [{ agent_id: "peer", activity_state: "active" }] }));
+
+    expect(agentRequests).toBe(2);
+  });
+
+  it("keeps an activity burst bounded to one trailing refresh without overlap", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    let agentRequests = 0;
+    let requestsInFlight = 0;
+    let maxRequestsInFlight = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
+      if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
+      agentRequests += 1;
+      requestsInFlight += 1;
+      maxRequestsInFlight = Math.max(maxRequestsInFlight, requestsInFlight);
+      const response = agentRequests === 1 ? first.promise : agentRequests === 2 ? second.promise : Promise.resolve(jsonResponse({ agents: [legacyAgent("peer")] }));
+      return response.then((value) => { requestsInFlight -= 1; return value; });
+    });
+    const { socket } = setup(fetchImpl);
+    await vi.waitFor(() => expect(agentRequests).toBe(1));
+    for (let index = 0; index < 20; index += 1) socket.emit("message", { data: activityFrame(`burst-${index}`, "active") });
+    expect(agentRequests).toBe(1);
+
+    first.resolve(jsonResponse({ agents: [legacyAgent("peer", "active")] }));
+    await vi.waitFor(() => expect(agentRequests).toBe(2));
+    second.resolve(jsonResponse({ agents: [legacyAgent("peer", "active")] }));
+    await vi.waitFor(() => expect(requestsInFlight).toBe(0));
+    expect(agentRequests).toBe(2);
+    expect(maxRequestsInFlight).toBe(1);
+  });
+
+  it("reconciles an active-to-idle transition with one trailing refresh", async () => {
+    const activeResponse = deferred<Response>();
+    let agentRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
+      if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
+      agentRequests += 1;
+      if (agentRequests === 2) return activeResponse.promise;
+      return jsonResponse({ agents: [legacyAgent("peer", agentRequests === 1 ? "idle" : "idle")] });
+    });
+    const { socket, events } = setup(fetchImpl);
+    await vi.waitFor(() => expect(agentRequests).toBe(1));
+
+    socket.emit("message", { data: activityFrame("active-event", "active") });
+    await vi.waitFor(() => expect(agentRequests).toBe(2));
+    socket.emit("message", { data: activityFrame("idle-event", "idle") });
+    expect(agentRequests).toBe(2);
+
+    activeResponse.resolve(jsonResponse({ agents: [legacyAgent("peer", "active")] }));
+    await vi.waitFor(() => expect(agentRequests).toBe(3));
+    await vi.waitFor(() => expect(events.filter((event) => event.type === "agents").at(-1)).toMatchObject({ agents: [{ agent_id: "peer", activity_state: "idle" }] }));
+  });
+
+  it("queues one post-reconnect refresh behind a deferred old-generation request", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    let agentRequests = 0;
+    let requestsInFlight = 0;
+    let maxRequestsInFlight = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
+      if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
+      agentRequests += 1;
+      requestsInFlight += 1;
+      maxRequestsInFlight = Math.max(maxRequestsInFlight, requestsInFlight);
+      const response = agentRequests === 1 ? first.promise : agentRequests === 2 ? second.promise : Promise.resolve(jsonResponse({ agents: [legacyAgent("peer")] }));
+      return response.then((value) => { requestsInFlight -= 1; return value; });
+    });
+    const { transport, socket, sockets } = setup(fetchImpl);
+    await vi.waitFor(() => expect(agentRequests).toBe(1));
+
+    socket.emit("close", {});
+    transport.connect();
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    expect(agentRequests).toBe(1);
+
+    first.resolve(jsonResponse({ agents: [legacyAgent("peer")] }));
+    await vi.waitFor(() => expect(agentRequests).toBe(2));
+    expect(maxRequestsInFlight).toBe(1);
+
+    second.resolve(jsonResponse({ agents: [legacyAgent("peer")] }));
+    await vi.waitFor(() => expect(requestsInFlight).toBe(0));
+    expect(agentRequests).toBe(2);
+  });
+
+  it("does not poll while disconnected", async () => {
     vi.useFakeTimers();
     let agentRequests = 0;
     const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
@@ -79,20 +184,31 @@ describe("legacy agent refresh orchestration", () => {
       if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
       if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
       agentRequests += 1;
-      return jsonResponse({ agents: [legacyAgent(`legacy-${agentRequests}`)] });
+      return jsonResponse({ agents: [legacyAgent("peer")] });
     });
-    const { socket, events } = setup(fetchImpl);
-    await flush();
-    expect(agentRequests).toBe(1);
-    for (let index = 0; index < 20; index += 1) socket.emit("message", { data: activityFrame(`activity-${index}`) });
-    await flush();
-    expect(agentRequests).toBe(1);
+    const { socket } = setup(fetchImpl);
+    await vi.waitFor(() => expect(agentRequests).toBe(1));
 
-    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS - 1);
+    socket.emit("close", {});
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS * 2);
     expect(agentRequests).toBe(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(agentRequests).toBe(2);
-    expect(events.filter((event) => event.type === "agents").at(-1)).toMatchObject({ agents: [{ agent_id: "legacy-2" }] });
+  });
+
+  it("does not emit a deferred snapshot after disconnect", async () => {
+    const first = deferred<Response>();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/capabilities") return jsonResponse({ subagent_lifecycle_v2: false });
+      if (path !== "/v1/agents") throw new Error(`unexpected request: ${path}`);
+      return first.promise;
+    });
+    const { transport, socket, events } = setup(fetchImpl);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    socket.emit("close", {});
+
+    first.resolve(jsonResponse({ agents: [legacyAgent("peer")] }));
+    await transport.refreshAgents();
+    expect(events.filter((event) => event.type === "agents")).toHaveLength(0);
   });
 
   it("keeps a slow refresh from overlapping the next interval request", async () => {
