@@ -80,6 +80,7 @@ type launchRPC struct {
 	policyEnvelope         map[string]any
 	snapshotEnvelope       map[string]any
 	failAt                 string
+	readinessErr           error
 	stateErr               error
 	beforeState            func()
 	abortCalls             int
@@ -120,6 +121,9 @@ func (r *launchRPC) GetActiveTools(context.Context) ([]string, error) {
 	return append(active, managedCurrentToolNames...), nil
 }
 func (r *launchRPC) readinessFailure(step string) error {
+	if r.readinessErr != nil {
+		return r.readinessErr
+	}
 	if r.failAt == step {
 		return errors.New("scripted " + step + " failure")
 	}
@@ -357,6 +361,115 @@ func TestManagerSourceReadinessFailuresNeverAdmitTheInitialInstruction(t *testin
 	}
 }
 
+func TestManagerReadinessFailureRecordsLiveBindingSubreasonAndLaunchContext(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 809, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+	rpc := &launchRPC{}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{PiExecutable: "/opt/mecha/pi", AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return false },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "leader-rejected", Cwd: root, RequestID: "leader-rejected-request"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "leader-rejected")
+		return readErr == nil && agent.LifecycleState == "failed"
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "leader-rejected")
+	require.NoError(t, err)
+	require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+	require.Contains(t, agent.LastErrorMessage, "process_group_leader_unverified")
+	require.Contains(t, agent.LastErrorMessage, "launch command: pi --mode rpc --provider openai-codex --model gpt-5.6-sol")
+	require.NotContains(t, agent.LastErrorMessage, "exited with code")
+	require.Empty(t, rpc.calls)
+	require.Equal(t, 1, process.Stops())
+}
+
+func TestManagerLaterReadinessGuardsRetainLiveBindingSubreason(t *testing.T) {
+	for _, test := range []struct {
+		name                     string
+		failedGroupCheck         int
+		guard                    string
+		wantCalls                []string
+		wantPolicy, wantSnapshot bool
+	}{
+		{
+			name:             "policy confirmation",
+			failedGroupCheck: 3,
+			guard:            "before policy confirmation",
+			wantCalls:        []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt"},
+		},
+		{
+			name:             "child snapshot",
+			failedGroupCheck: 4,
+			guard:            "before child snapshot",
+			wantCalls:        []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt"},
+			wantPolicy:       true,
+		},
+		{
+			name:             "child snapshot confirmation",
+			failedGroupCheck: 5,
+			guard:            "before child snapshot confirmation",
+			wantCalls:        []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt", "snapshot", "snapshot-receipt"},
+			wantPolicy:       true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, durable.Close()) })
+			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+			require.NoError(t, err)
+			root := t.TempDir()
+			process := &launchProcess{identity: ProcessIdentity{PID: 810, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+			rpc := &launchRPC{}
+			groupChecks := 0
+			manager, err := NewManager(ManagerOptions{
+				Store: durable, Config: Config{PiExecutable: "/private/token=do-not-retain/pi", AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+				ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Available: true}),
+				ProcessGroupLeaderVerifier: func(ProcessIdentity) bool {
+					groupChecks++
+					return groupChecks != test.failedGroupCheck
+				},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+			_, err = manager.Launch(ctx, LaunchRequest{Name: "later-readiness-guard", Cwd: root, InitialInstruction: "must not send", RequestID: "later-readiness-request"})
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				agent, readErr := durable.ManagedAgent(ctx, "later-readiness-guard")
+				return readErr == nil && agent.LifecycleState == "failed"
+			}, time.Second, time.Millisecond)
+			agent, err := durable.ManagedAgent(ctx, "later-readiness-guard")
+			require.NoError(t, err)
+			require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+			require.Contains(t, agent.LastErrorMessage, test.guard)
+			require.Contains(t, agent.LastErrorMessage, "process_group_leader_unverified")
+			require.Contains(t, agent.LastErrorMessage, "launch command: pi --mode rpc --provider openai-codex --model gpt-5.6-sol")
+			require.NotContains(t, agent.LastErrorMessage, "token=do-not-retain")
+			require.LessOrEqual(t, len(agent.LastErrorMessage), 512)
+			require.Equal(t, test.wantCalls, rpc.calls)
+			require.Zero(t, rpc.promptCount)
+			source, err := durable.ManagedReadinessSource(ctx, "later-readiness-guard")
+			require.NoError(t, err)
+			require.Equal(t, test.wantPolicy, source.AppliedPolicy != nil)
+			require.Equal(t, test.wantSnapshot, source.Snapshot != nil)
+		})
+	}
+}
+
 func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
@@ -369,7 +482,7 @@ func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 	process := &launchProcess{identity: ProcessIdentity{PID: 801, StartMarker: "start", Incarnation: "incarnation"}, waitErr: &managedProcessExitError{cause: processExit, detail: "fatal token=do-not-retain /private/router/session.json"}, stopped: make(chan struct{})}
 	rpc := &launchRPC{stateErr: io.EOF}
 	root := t.TempDir()
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{PiExecutable: "/opt/mecha/pi", AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	rpc.beforeState = func() {
 		// Simulate stdout closing at the same time as the process exits, then wait
@@ -407,6 +520,8 @@ func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 	require.Len(t, retry.CrashTimes, 1)
 	require.NotEmpty(t, retry.RetryAt)
 	require.Contains(t, agent.LastErrorMessage, "code 17")
+	require.Contains(t, agent.LastErrorMessage, "launch command: pi --mode rpc --provider openai-codex --model gpt-5.6-sol")
+	require.LessOrEqual(t, len(agent.LastErrorMessage), 512)
 	for _, forbidden := range []string{"do-not-retain", "/private/router/session.json"} {
 		require.NotContains(t, agent.LastErrorMessage, forbidden)
 	}
@@ -460,7 +575,7 @@ func TestManagerDoesNotClassifyManagerInducedExitAsProcessExit(t *testing.T) {
 	require.Equal(t, 0, rpc.promptCount)
 }
 
-func TestManagerKeepsEOFWhenWaitStaysUnavailableWithinBound(t *testing.T) {
+func TestManagerKeepsEOFWhenWaitIsUnavailableWithoutCaptureDelay(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
@@ -494,7 +609,9 @@ func TestManagerKeepsEOFWhenWaitStaysUnavailableWithinBound(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "stalled-eof")
 		return readErr == nil && agent.LifecycleState == "failed"
 	}, time.Second, time.Millisecond)
-	require.Less(t, time.Since(started), 500*time.Millisecond)
+	// The child never publishes an exit until Stop. Readiness cleanup must not
+	// spend the former 500ms capture window waiting for it.
+	require.Less(t, time.Since(started), 250*time.Millisecond)
 	agent, err := durable.ManagedAgent(ctx, "stalled-eof")
 	require.NoError(t, err)
 	require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)

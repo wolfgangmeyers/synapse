@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -542,14 +543,18 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.mu.Unlock()
 	fence := bindingFence(agent.AgentID, binding)
 	if err = m.readinessGate(ctx, binding, fence); err != nil {
+		// Capture an already-published child exit before readiness cleanup changes
+		// its outcome. This does not wait: an unavailable waiter must not delay an
+		// ordinary readiness failure.
+		if waitErr, exited := captureReadinessExit(binding); exited {
+			_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
+			m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr, spec)
+			return
+		}
+		diagnostic := readinessFailureDiagnostic(err, spec)
 		// Only a result published before cleanup began describes a child exit.
 		// A result released by Stop belongs to manager cleanup and remains EOF.
 		if errors.Is(err, io.EOF) {
-			if waitErr, exited := completedBindingWait(binding); exited {
-				_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
-				m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr)
-				return
-			}
 			_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
 			limit := m.config.Limits.GracefulStop
 			if limit <= 0 {
@@ -559,7 +564,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 			stopErr := process.Stop(stopCtx)
 			cancel()
 			if stopErr == nil {
-				if m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "READINESS_FAILED", sanitizeError(err)) == nil {
+				if m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "READINESS_FAILED", diagnostic) == nil {
 					binding.serial.Lock()
 					binding.reaped = true
 					binding.serial.Unlock()
@@ -573,7 +578,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 				// Process absence, when proven, still permits the binding to be
 				// cleared. An RPC close error is never a stop failure.
 				if m.processOps.Probe(identity).State == ProcessAbsent {
-					if m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "READINESS_FAILED", sanitizeError(err)) == nil {
+					if m.store.MarkManagedFailedForFenceAndOperation(context.Background(), fence, request.RequestID, "READINESS_FAILED", diagnostic) == nil {
 						binding.serial.Lock()
 						binding.reaped = true
 						binding.serial.Unlock()
@@ -584,7 +589,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 					}
 					return
 				}
-				message := "readiness: " + sanitizeError(err) + "; cleanup: " + sanitizeError(stopErr)
+				message := "readiness: " + diagnostic + "; cleanup: " + sanitizeError(stopErr)
 				binding.serial.Lock()
 				binding.retainBinding = true
 				binding.serial.Unlock()
@@ -594,20 +599,20 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		}
 		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
-		m.fail(agent.AgentID, "READINESS_FAILED", sanitizeError(err))
+		m.fail(agent.AgentID, "READINESS_FAILED", diagnostic)
 		return
 	}
 	if waitErr, exited := completedBindingWait(binding); exited {
 		_ = closeRPCAndWait(rpc) // diagnostic only; RPC closure does not decide ownership.
-		m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr)
+		m.recordPreReadinessProcessExit(binding, process, identity, fence, request.RequestID, waitErr, spec)
 		return
 	}
 	binding.serial.Lock()
-	if !m.liveBindingForFence(durableCtx, binding, fence) {
+	if live, subreason := m.liveBindingForFenceReason(durableCtx, binding, fence); !live {
 		binding.serial.Unlock()
 		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
-		m.fail(agent.AgentID, "READINESS_FAILED", "managed runtime binding changed before ready")
+		m.fail(agent.AgentID, "READINESS_FAILED", readinessFailureDiagnostic(fmt.Errorf("managed runtime binding changed before ready: %s", subreason), spec))
 		return
 	}
 	if err = m.store.MarkManagedReadyFromSources(durableCtx, fence); err != nil {
@@ -638,11 +643,11 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.installQualifiedGoalActivityReceiver(binding)
 	m.installBuiltinToolLifecycleReceiver(binding)
 	binding.serial.Lock()
-	if !m.liveBindingForFence(durableCtx, binding, fence) {
+	if live, subreason := m.liveBindingForFenceReason(durableCtx, binding, fence); !live {
 		binding.serial.Unlock()
 		_ = closeRPCAndWait(rpc)
 		_ = process.Stop(context.Background())
-		m.fail(agent.AgentID, "READINESS_FAILED", "managed runtime binding changed before root control activation")
+		m.fail(agent.AgentID, "READINESS_FAILED", readinessFailureDiagnostic(fmt.Errorf("managed runtime binding changed before root control activation: %s", subreason), spec))
 		return
 	}
 	if request.InitialInstruction != "" {
@@ -792,11 +797,18 @@ func completedBindingWait(binding *managedBinding) (error, bool) {
 	}
 }
 
+// captureReadinessExit reads only the exit result the launch-owned waiter has
+// already published. It never calls Process.Wait or waits for publication, so
+// readiness cleanup remains immediate for a live child.
+func captureReadinessExit(binding *managedBinding) (error, bool) {
+	return completedBindingWait(binding)
+}
+
 // recordPreReadinessProcessExit keeps an exit found before readiness on the
 // launch's exact durable fence. The bounded stop also proves that a natural
 // leader exit did not leave descendants behind before PROCESS_EXITED is saved.
-func (m *Manager) recordPreReadinessProcessExit(binding *managedBinding, process Process, identity ProcessIdentity, fence store.ManagedRuntimeFence, operationID string, waitErr error) {
-	diagnostic := ManagedProcessExitDiagnostic(waitErr)
+func (m *Manager) recordPreReadinessProcessExit(binding *managedBinding, process Process, identity ProcessIdentity, fence store.ManagedRuntimeFence, operationID string, waitErr error, spec CommandSpec) {
+	diagnostic := readinessFailureDiagnostic(errors.New(ManagedProcessExitDiagnostic(waitErr)), spec)
 	cleanupErr := m.stopPreReadinessProcess(process, identity)
 	if cleanupErr == nil {
 		_, recordErr := m.store.RecordManagedStartupExit(context.Background(), fence, operationID, diagnostic)
@@ -1877,6 +1889,36 @@ func sanitizeError(err error) string {
 	return RedactedStderr(err.Error())
 }
 
+// readinessFailureDiagnostic keeps launch failures useful without allowing
+// unbounded child output or local paths into the durable managed-agent record.
+func readinessFailureDiagnostic(err error, spec CommandSpec) string {
+	return boundedManagedDiagnostic(sanitizeError(err), managedLaunchCommandContext(spec))
+}
+
+func managedLaunchCommandContext(spec CommandSpec) string {
+	executable := filepath.Base(spec.PiExecutable)
+	if executable == "." || executable == string(filepath.Separator) {
+		executable = "pi"
+	}
+	return fmt.Sprintf("launch command: %s --mode rpc --provider %s --model %s", executable, spec.Provider, spec.ModelID)
+}
+
+func boundedManagedDiagnostic(detail, context string) string {
+	const maxDiagnosticBytes = 512
+	const maxContextBytes = 256
+	const separator = "; "
+	context = RedactedStderr(context)
+	if len(context) > maxContextBytes {
+		context = context[:maxContextBytes]
+	}
+	available := maxDiagnosticBytes - len(separator) - len(context)
+	detail = RedactedStderr(detail)
+	if len(detail) > available {
+		detail = detail[:available]
+	}
+	return RedactedStderr(detail + separator + context)
+}
+
 var managedNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var hiddenCommands = []string{"mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1"}
 var legacyCommands = []string{"goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}
@@ -1943,11 +1985,13 @@ func readinessGateState(ctx context.Context, rpc RPC, manifest Manifest, session
 // readinessGate owns the serialized source confirmation phase. The fixed
 // Phase 1 gates stay in the compatibility helper above; this method keeps the
 // binding lock from the first durable/live check through both source commits.
+const managedChildSnapshotReceiptTimeout = 30 * time.Second
+
 func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) error {
 	binding.serial.Lock()
 	defer binding.serial.Unlock()
-	if !m.liveBindingForFence(ctx, binding, fence) {
-		return errors.New("managed runtime binding is not live")
+	if live, subreason := m.liveBindingForFenceReason(ctx, binding, fence); !live {
+		return fmt.Errorf("managed runtime binding is not live: %s", subreason)
 	}
 	restorable, err := m.store.ListRestorableManagedControlRequests(ctx, fence)
 	if err != nil {
@@ -1971,8 +2015,8 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 	if !ok {
 		return errors.New("managed RPC does not support readiness sources")
 	}
-	if !m.liveBindingForFence(ctx, binding, fence) {
-		return errors.New("managed runtime binding changed before policy")
+	if live, subreason := m.liveBindingForFenceReason(ctx, binding, fence); !live {
+		return fmt.Errorf("managed runtime binding changed before policy: %s", subreason)
 	}
 	desired, err := m.store.LoadManagedDesiredPolicy(ctx, fence.AgentID)
 	if err != nil {
@@ -2012,19 +2056,27 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 	if err != nil || string(receiptCanonical) != string(desired.Canonical) || receiptHash != desired.SHA256 {
 		return errors.New("policy receipt does not match desired policy")
 	}
-	if !m.liveBindingForFence(ctx, binding, fence) {
-		return errors.New("managed runtime binding changed before policy confirmation")
+	if live, subreason := m.liveBindingForFenceReason(ctx, binding, fence); !live {
+		return fmt.Errorf("managed runtime binding changed before policy confirmation: %s", subreason)
 	}
 	if err := m.store.ConfirmManagedPolicyApplied(context.Background(), fence, store.ManagedDesiredPolicy{Canonical: receiptCanonical, SHA256: receiptHash}); err != nil {
 		return err
 	}
 
-	if !m.liveBindingForFence(ctx, binding, fence) {
-		return errors.New("managed runtime binding changed before child snapshot")
+	if live, subreason := m.liveBindingForFenceReason(ctx, binding, fence); !live {
+		return fmt.Errorf("managed runtime binding changed before child snapshot: %s", subreason)
 	}
 	snapshotEnvelope := map[string]any{"protocol": "mecha.child-snapshot/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "manifest_sha256": fence.ManifestHash}
-	snapshotResponse, err := sourceRPC.RequestChildSnapshot(ctx, snapshotEnvelope)
+	// A missing custom receipt used to leave a managed launch waiting on an
+	// unbounded caller context. Keep this startup seam finite and report a fixed
+	// diagnostic that cannot include Pi output or command input.
+	snapshotCtx, cancelSnapshot := context.WithTimeout(ctx, managedChildSnapshotReceiptTimeout)
+	defer cancelSnapshot()
+	snapshotResponse, err := sourceRPC.RequestChildSnapshot(snapshotCtx, snapshotEnvelope)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.New("managed child snapshot command timed out")
+		}
 		return err
 	}
 	var responseSnapshot map[string]any
@@ -2040,8 +2092,11 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 			return err
 		}
 	}
-	snapshotReceipt, err := sourceRPC.WaitForChildSnapshot(ctx)
+	snapshotReceipt, err := sourceRPC.WaitForChildSnapshot(snapshotCtx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.New("managed child snapshot receipt timed out")
+		}
 		return err
 	}
 	receiptSnapshot, err := normalizeChildSnapshotReceipt(snapshotReceipt)
@@ -2058,8 +2113,8 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 	if responseSnapshot != nil && (receiptSnapshot["snapshot_id"] != responseSnapshot["snapshot_id"] || string(receiptSnapshotCanonical) != string(responseSnapshotCanonical) || receiptSnapshotHash != responseSnapshotHash) {
 		return errors.New("child snapshot response and receipt do not match")
 	}
-	if !m.liveBindingForFence(ctx, binding, fence) {
-		return errors.New("managed runtime binding changed before child snapshot confirmation")
+	if live, subreason := m.liveBindingForFenceReason(ctx, binding, fence); !live {
+		return fmt.Errorf("managed runtime binding changed before child snapshot confirmation: %s", subreason)
 	}
 	sequence, ok := readinessInteger(receiptSnapshot["sequence"])
 	if !ok {

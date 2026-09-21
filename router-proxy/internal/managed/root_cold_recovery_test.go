@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -573,7 +574,7 @@ func TestRecoverManagedRootColdStartReadinessFailureClosesExactTarget(t *testing
 	require.NoError(t, err)
 	old := store.ManagedAgentRecord{AgentID: "readiness-failure", Name: "readiness-failure", SlotHeld: true, Cwd: paths["work"], SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", AcceptingPrompts: true, PiSessionID: "old-session", SessionEpoch: 1, ProcessPID: 901, ProcessStartMarker: "old-start", ProcessIncarnation: "old-inc", RuntimeGeneration: "old-runtime", ManifestRevision: manifest.Revision, ManifestHash: manifest.CanonicalSHA256}
 	seedColdRecoveryAgent(t, durable, old, store.ManagedOperation{OperationID: "readiness-failure-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "readiness-failure-operation", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)})
-	rpc := &launchRPC{active: expectedManagedActiveTools(manifest), failAt: "policy-command"}
+	rpc := &launchRPC{active: expectedManagedActiveTools(manifest), readinessErr: errors.New("scripted policy-command failure api_key=do-not-retain at /private/managed/session")}
 	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
 	factory := &launchFactory{process: process, rpc: rpc}
 	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}
@@ -589,14 +590,58 @@ func TestRecoverManagedRootColdStartReadinessFailureClosesExactTarget(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "failed", action.Stage)
 	require.Equal(t, "RECOVERY_READINESS_FAILED", action.FailureCode)
+	require.Contains(t, action.FailureMessage, "replacement readiness gate failed: scripted policy-command failure")
+	require.Contains(t, action.FailureMessage, "launch command: pi --mode rpc --provider openai-codex --model gpt-5.6-terra")
+	require.NotContains(t, action.FailureMessage, "do-not-retain")
+	require.NotContains(t, action.FailureMessage, "/private/managed/session")
+	require.LessOrEqual(t, len(action.FailureMessage), 512)
 	current, err := durable.ManagedAgent(ctx, old.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "failed", current.LifecycleState)
+	require.Equal(t, action.FailureMessage, current.LastErrorMessage)
 	ops.mu.Lock()
 	defer ops.mu.Unlock()
 	require.Equal(t, []ProcessIdentity{process.identity}, ops.closed)
 	require.Contains(t, ops.waited, process.identity)
 	require.Empty(t, ops.signals)
+}
+
+func TestRecoverManagedRootColdStartReadinessFailurePersistsCompletedTargetExit(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	config, paths := managedLaunchConfigFixture(t)
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	old := store.ManagedAgentRecord{AgentID: "readiness-exit", Name: "readiness-exit", SlotHeld: true, Cwd: paths["work"], SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", AcceptingPrompts: true, PiSessionID: "old-session", SessionEpoch: 1, ProcessPID: 901, ProcessStartMarker: "old-start", ProcessIncarnation: "old-inc", RuntimeGeneration: "old-runtime", ManifestRevision: manifest.Revision, ManifestHash: manifest.CanonicalSHA256}
+	seedColdRecoveryAgent(t, durable, old, store.ManagedOperation{OperationID: "readiness-exit-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "readiness-exit-operation", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)})
+	exitErr := exec.Command("/bin/sh", "-c", "exit 23").Run()
+	require.Error(t, exitErr)
+	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, waitErr: &managedProcessExitError{cause: exitErr, detail: "fatal child launch failure"}, stopped: make(chan struct{}), waitDone: make(chan struct{})}
+	rpc := &launchRPC{active: expectedManagedActiveTools(manifest), failAt: "policy-command", beforeState: func() {
+		process.Reap()
+		<-process.waitDone
+	}}
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: &launchFactory{process: process, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
+	require.NoError(t, err)
+	defer manager.Close(ctx)
+	recipe, err := manager.managedLaunchRecipe(old)
+	require.NoError(t, err)
+	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, old.AgentID, recipe))
+
+	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+	action, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", action.Stage)
+	require.Equal(t, "RECOVERY_READINESS_FAILED", action.FailureCode)
+	require.Contains(t, action.FailureMessage, "managed Pi exited with code 23")
+	require.Contains(t, action.FailureMessage, "fatal child launch failure")
+	require.NotContains(t, action.FailureMessage, "scripted policy-command failure")
+	current, err := durable.ManagedAgent(ctx, old.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, action.FailureMessage, current.LastErrorMessage)
 }
 
 func TestRecoverManagedRootColdStartCleanupFailureRecordsUnsafeOrphan(t *testing.T) {

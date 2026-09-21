@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -672,7 +673,8 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return err
 	}
-	process, err := m.processFactory.Start(m.runCtx, CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)})
+	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
+	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		code := "RECOVERY_TARGET_UNKNOWN"
 		if StartErrorProvesNoChild(err) {
@@ -716,8 +718,15 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	}
 	target.rpc = targetRPC
 	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
+		// The watcher owns the only wait. Use the same nonblocking capture as an
+		// ordinary launch so a concurrently published exit retains its code and
+		// stderr without delaying readiness cleanup for a live target.
+		diagnostic := readinessFailureDiagnostic(fmt.Errorf("replacement readiness gate failed: %w", err), spec)
+		if waitErr, exited := captureReadinessExit(target); exited {
+			diagnostic = readinessFailureDiagnostic(errors.New(ManagedProcessExitDiagnostic(waitErr)), spec)
+		}
 		_ = closeRPCAndWait(targetRPC)
-		return m.failColdRecoveryReplacement(ctx, action, old, targetFence, target, orderlyStop, "RECOVERY_READINESS_FAILED", "replacement readiness gate failed")
+		return m.failColdRecoveryReplacement(ctx, action, old, targetFence, target, orderlyStop, "RECOVERY_READINESS_FAILED", diagnostic)
 	}
 	// Legacy rows can retain a valid recovery recipe without the private launch
 	// operation that owns the durable binding. Check that owner before installing

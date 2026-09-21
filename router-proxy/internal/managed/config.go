@@ -335,6 +335,8 @@ func containedPath(path, root string) error {
 	return nil
 }
 
+const managedSystemPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 func ChildEnvironment(c Config) []string {
 	return ChildEnvironmentFor(c, "", 1)
 }
@@ -343,11 +345,90 @@ func ChildEnvironmentFor(c Config, runtimeGeneration string, sessionEpoch int64)
 	session, _ := filepath.Abs(c.SessionRoot)
 	temp := filepath.Join(home, "tmp")
 	piAgentDir, _ := filepath.Abs(c.PiAgentDir)
-	environment := []string{"HOME=" + home, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + piAgentDir, "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1", "MECHA_ROUTER_URL=" + c.RouterURL}
+	environment := []string{"HOME=" + home, "PATH=" + managedChildPath(c.PiExecutable), "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + piAgentDir, "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1", "MECHA_ROUTER_URL=" + c.RouterURL}
 	if runtimeGeneration != "" {
 		environment = append(environment, "MECHA_RPC_RUNTIME_GENERATION="+runtimeGeneration, fmt.Sprintf("MECHA_RPC_SESSION_EPOCH=%d", sessionEpoch))
 	}
 	return append(environment, c.TestOnlyEnvironment...)
+}
+
+// managedChildPath adds only directories traversed while resolving the
+// configured launcher. Pi's launcher uses `#!/usr/bin/env node`; a stable shim
+// can point at an NVM launcher which in turn points at the JS entrypoint.
+func managedChildPath(piExecutable string) string {
+	directories, ok := managedLauncherDirectories(piExecutable)
+	if !ok || len(directories) == 0 {
+		return managedSystemPath
+	}
+	return strings.Join(append(directories, strings.Split(managedSystemPath, ":")...), ":")
+}
+
+const maxManagedLauncherSymlinks = 32
+
+func managedLauncherDirectories(piExecutable string) ([]string, bool) {
+	if piExecutable == "" {
+		return nil, false
+	}
+	current, err := filepath.Abs(piExecutable)
+	if err != nil {
+		return nil, false
+	}
+	seenPaths := make(map[string]struct{}, maxManagedLauncherSymlinks)
+	directories := make([]string, 0, 2)
+	seenDirectories := make(map[string]struct{}, 2)
+	addDirectory := func(path string) bool {
+		directory := filepath.Dir(path)
+		if !filepath.IsAbs(directory) || strings.ContainsRune(directory, filepath.ListSeparator) {
+			return false
+		}
+		for _, systemDirectory := range strings.Split(managedSystemPath, ":") {
+			if directory == systemDirectory {
+				return true
+			}
+		}
+		if _, duplicate := seenDirectories[directory]; !duplicate {
+			directories = append(directories, directory)
+			seenDirectories[directory] = struct{}{}
+		}
+		return true
+	}
+	for links := 0; links <= maxManagedLauncherSymlinks; links++ {
+		if _, duplicate := seenPaths[current]; duplicate {
+			return nil, false
+		}
+		seenPaths[current] = struct{}{}
+		info, err := os.Lstat(current)
+		if err != nil {
+			return nil, false
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			if !info.Mode().IsRegular() {
+				return nil, false
+			}
+			if len(directories) == 0 && !addDirectory(current) {
+				return nil, false
+			}
+			for left, right := 0, len(directories)-1; left < right; left, right = left+1, right-1 {
+				directories[left], directories[right] = directories[right], directories[left]
+			}
+			return directories, true
+		}
+		if !addDirectory(current) {
+			return nil, false
+		}
+		target, err := os.Readlink(current)
+		if err != nil {
+			return nil, false
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(current), target)
+		}
+		current, err = filepath.Abs(target)
+		if err != nil {
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
