@@ -97,25 +97,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("set_reminder.py", output)
         self.assertNotIn("--- Reminders ---", output)
 
-    @staticmethod
-    def _pi_extensions(command):
-        return [
-            command[index + 1]
-            for index, part in enumerate(command)
-            if part == "--extension"
-        ]
-
-    def test_pi_extensions_are_canonical_existing_entrypoints(self):
-        for extension in (
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ):
-            with self.subTest(extension=extension):
-                self.assertEqual(extension, os.path.realpath(extension))
-                self.assertTrue(os.path.isfile(extension), extension)
-
-    def test_pi_startup_does_not_load_settings_duplicates(self):
-        """The real Pi CLI must start with settings that rediscover both packages."""
+    def test_pi_fresh_and_resumed_startup_load_configured_goal_then_messaging(self):
+        """Run generated argv with real packages and an isolated, offline home."""
         pi = shutil.which("pi")
         if pi is None:
             self.skipTest("pi is not installed")
@@ -123,37 +106,75 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         home = self.tmp_path / "pi-startup-home"
         settings_dir = home / ".pi" / "agent"
         settings_dir.mkdir(parents=True)
-        (settings_dir / "settings.json").write_text(json.dumps({
-            "packages": [
-                str(pathlib.Path(worker_launch.PI_SUBAGENTS_EXTENSION_PATH).parent.parent),
-                str(pathlib.Path(worker_launch.PI_MESSAGING_EXTENSION_PATH).parent),
-            ],
-        }), encoding="utf-8")
-
-        commands, _ = self._run_main("pi-startup-worker", agent="pi", home=home)
-        launcher_argv = shlex.split(commands[0])
-        pi_index = launcher_argv.index("pi")
-        pi_argv = launcher_argv[pi_index:]
-        session_flags = {"--session-id", "--session"}
-        session_index = next(index for index, part in enumerate(pi_argv) if part in session_flags)
-        del pi_argv[session_index:session_index + 2]
-        pi_argv.extend(["--no-session", "--offline", "--print", "startup probe"])
-
-        result = subprocess.run(
-            [pi, *pi_argv[1:]],
-            cwd=self.tmpdir.name,
-            env={**os.environ, "HOME": str(home), "PI_OFFLINE": "1"},
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        # No provider credential is needed: reaching Pi's normal provider error proves
-        # extension startup completed, while duplicate package loading fails first.
-        startup_output = result.stdout + result.stderr
-        self.assertNotIn("conflicts with", startup_output)
-        self.assertNotIn("Failed to load extension", startup_output)
-        self.assertRegex(startup_output, r"No API key|offline|Offline")
+        repo = pathlib.Path(__file__).resolve().parents[4]
+        goal = repo / "pi-extensions" / "mecha-goal"
+        messaging = repo / "pi-extensions" / "mecha-messaging"
+        probe_output = home / "startup.json"
+        probe = home / "probe.ts"
+        probe.write_text(textwrap.dedent("""\
+            import { writeFileSync } from 'node:fs';
+            export default function (pi) {
+              pi.on('session_start', (_event, ctx) => {
+                writeFileSync(process.env.STARTUP_PROBE_OUTPUT, JSON.stringify({
+                  sessionId: ctx.sessionManager.getSessionId(),
+                  sessionFile: ctx.sessionManager.getSessionFile(),
+                  tools: pi.getAllTools(),
+                  activeTools: pi.getActiveTools(),
+                  header: ctx.sessionManager.getHeader(),
+                  entries: ctx.sessionManager.getEntries(),
+                }));
+                // Stop after startup. This probe must never submit a model prompt.
+                process.exit(0);
+              });
+            }
+            """), encoding="utf-8")
+        settings = settings_dir / "settings.json"
+        settings_text = json.dumps({"packages": [str(goal), str(messaging), str(probe)]})
+        settings.write_text(settings_text, encoding="utf-8")
+        session_id = worker_launch.pi_session_id(self.tmpdir.name, "pi-startup-worker")
+        resume = []
+        for phase in ("fresh", "resume"):
+            with self.subTest(phase=phase):
+                commands, _ = self._run_main("pi-startup-worker", *resume, agent="pi", home=home)
+                launcher_argv = shlex.split(commands[0])
+                pi_argv = launcher_argv[launcher_argv.index("pi") + 1:]
+                result = subprocess.run(
+                    [pi, *pi_argv, "--offline", "--mode", "rpc"],
+                    cwd=self.tmpdir.name,
+                    # No TMUX identity, provider credentials, or inherited Pi directory:
+                    # Messaging cannot connect to a live worker or router from this home.
+                    env={"PATH": os.environ["PATH"], "HOME": str(home),
+                         "PI_CODING_AGENT_DIR": str(settings_dir), "PI_OFFLINE": "1",
+                         "STARTUP_PROBE_OUTPUT": str(probe_output)},
+                    input="", capture_output=True, text=True, timeout=30,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                self.assertNotIn("conflicts with", output)
+                self.assertNotIn("Failed to load extension", output)
+                self.assertTrue(probe_output.exists(), output)
+                observed = json.loads(probe_output.read_text(encoding="utf-8"))
+                probe_output.unlink()
+                self.assertEqual(observed["sessionId"], session_id)
+                goals = [tool for tool in observed["tools"] if tool["name"] == "goal"]
+                self.assertEqual(len(goals), 1)
+                self.assertEqual(pathlib.Path(goals[0]["sourceInfo"]["path"]).resolve(), goal)
+                self.assertIn("goal", observed["activeTools"])
+                names = [tool["name"] for tool in observed["tools"]]
+                self.assertIn("mecha_mailbox_send", names)
+                self.assertLess(names.index("goal"), names.index("mecha_mailbox_send"))
+                self.assertEqual(len(names), len(set(names)))
+                self.assertEqual(settings.read_text(encoding="utf-8"), settings_text)
+                session_file = pathlib.Path(observed["sessionFile"])
+                if phase == "fresh":
+                    # Pi defers disk persistence until an assistant response. Save its
+                    # startup snapshot so resume can be exercised without an LLM call.
+                    session_file.write_text("".join(
+                        json.dumps(entry) + "\n"
+                        for entry in [observed["header"], *observed["entries"]]
+                    ), encoding="utf-8")
+                self.assertTrue(session_file.is_file())
+                resume = ["--resume", str(session_file)]
 
     def test_main_defaults_to_pinned_pi_gpt_5_6_sol(self):
         with patch.dict(os.environ, {
@@ -165,11 +186,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-sol", commands[0])
-        self.assertIn("--no-extensions", command)
-        self.assertEqual(self._pi_extensions(command), [
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ])
+        self.assertTrue({"--extension", "-e", "--no-extensions", "-ne"}.isdisjoint(command))
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
@@ -511,20 +528,10 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn("default_agent", stderr.getvalue())
         window_exists.assert_not_called()
 
-    def test_missing_canonical_pi_extension_fails_before_tmux_side_effects(self):
-        argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name, "--agent", "pi"]
-        missing = str(self.tmp_path / "missing-mecha-messaging.ts")
-        with patch.dict(os.environ, {worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765"}, clear=True), \
-             patch.object(worker_launch, "PI_MESSAGING_EXTENSION_PATH", missing), \
-             patch.object(worker_launch.sys, "argv", argv), \
-             patch.object(worker_launch, "window_exists") as window_exists, \
-             contextlib.redirect_stderr(stderr := io.StringIO()), \
-             self.assertRaises(SystemExit) as raised:
-            worker_launch.main()
-
-        self.assertEqual(raised.exception.code, 1)
-        self.assertIn(missing, stderr.getvalue())
-        window_exists.assert_not_called()
+    def test_pi_launch_does_not_require_unconfigured_checkout_entrypoints(self):
+        with patch.object(worker_launch.os.path, "isfile", return_value=False):
+            commands, _ = self._run_main("pi-worker", agent="pi")
+        self.assertEqual(len(commands), 1)
 
     def test_invalid_claude_router_url_fails_before_tmux_side_effects(self):
         argv = ["worker_launch.py", "--window", "claude-worker", "--dir", self.tmpdir.name, "--agent", "claude"]
@@ -543,20 +550,16 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         ensure_session.assert_not_called()
         new_window.assert_not_called()
 
-    def test_managed_pi_command_explicitly_loads_canonical_worker_extensions(self):
+    def test_managed_pi_command_uses_configured_default_extensions(self):
         with patch.dict(os.environ, {
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         command = shlex.split(commands[0])
-        self.assertIn("--no-extensions", command)
-        self.assertEqual(self._pi_extensions(command), [
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ])
+        self.assertTrue({"--extension", "-e", "--no-extensions", "-ne"}.isdisjoint(command))
 
-    def test_main_maps_resume_to_pi_session_with_explicit_worker_extensions(self):
+    def test_main_maps_resume_to_pi_session_with_default_extensions(self):
         with patch.dict(os.environ, {
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
@@ -565,11 +568,9 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--session") + 1], "session-123")
         self.assertNotIn("resume", command)
-        self.assertIn("--no-extensions", command)
-        self.assertEqual(self._pi_extensions(command), [
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ])
+        self.assertNotIn("--resume", command)
+        self.assertNotIn("--session-id", command)
+        self.assertTrue({"--extension", "-e", "--no-extensions", "-ne"}.isdisjoint(command))
 
     def test_pi_launch_exports_router_configuration_but_not_identity_or_settled_recipient_by_default(self):
         with patch.dict(os.environ, {
