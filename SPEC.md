@@ -107,3 +107,19 @@ This is the chosen approach. The router owns the browser-facing shape, so list a
 - Terminating/removing one agent cannot clear or replace unrelated managed rows.
 - No router restart, push, staging, or commit is required for this specification phase.
 - Only this `SPEC.md` is created for the scoped fix; existing dirty avatar/UI work remains untouched.
+
+# Goal Extension Loading Specification
+
+## Behavior
+
+Every managed Pi worker launch and resume command must start Pi with `--no-extensions` and one ordered list containing the Goal, canonical pi-subagents, and canonical mecha-messaging entrypoints exactly once. Goal is derived from `REPOSITORY_ROOT` with `os.path.realpath`; provider, model, session, router, Mailbox, and permission behavior remain unchanged. Missing extensions fail before tmux side effects.
+
+## Acceptance
+
+- New and resumed Pi argv use the same three-entrypoint order and preserve existing session selectors.
+- Goal remains portable across the primary checkout and isolated worktrees.
+- Focused tests prove argv parity, package-discovery duplicate avoidance, and pre-tmux missing-Goal failure.
+
+## Non-goals
+
+Extension discovery, runtime configuration, router/UI changes, global copies, dependency changes, and unrelated refactors are out of scope.
