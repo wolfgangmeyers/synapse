@@ -105,8 +105,50 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             if part == "--extension"
         ]
 
+    def _assert_pi_argv_contract(self, command, *, resume):
+        tokens = shlex.split(command)
+        pi_argv = tokens[tokens.index("pi"):]
+        self.assertEqual(pi_argv.count("--no-extensions"), 1)
+        extensions = self._pi_extensions(pi_argv)
+        self.assertEqual(len(set(extensions)), 3)
+        self.assertEqual(extensions, [
+            worker_launch.PI_GOAL_EXTENSION_PATH,
+            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
+            worker_launch.PI_MESSAGING_EXTENSION_PATH,
+        ])
+        self.assertEqual(pi_argv[pi_argv.index("--provider") + 1], "openai-codex")
+        self.assertEqual(pi_argv[pi_argv.index("--model") + 1], "gpt-5.6-sol")
+        self.assertIn("--approve", pi_argv)
+        self.assertEqual(
+            sorted(token for token in tokens if token.startswith("MECHA_")),
+            [
+                "MECHA_PI_MODEL_KEY=openai-codex/gpt-5.6-sol",
+                "MECHA_ROUTER_URL=http://127.0.0.1:8765",
+            ],
+        )
+        if resume:
+            self.assertEqual(pi_argv.count("--session"), 1)
+            self.assertEqual(pi_argv.count("--session-id"), 0)
+        else:
+            self.assertEqual(pi_argv.count("--session-id"), 1)
+            self.assertEqual(pi_argv.count("--session"), 0)
+
+    def test_goal_extension_path_is_derived_and_canonical(self):
+        expected = os.path.realpath(os.path.join(
+            worker_launch.REPOSITORY_ROOT,
+            "pi-extensions", "mecha-goal", "index.ts",
+        ))
+        self.assertEqual(worker_launch.PI_GOAL_EXTENSION_PATH, expected)
+        self.assertTrue(os.path.isabs(worker_launch.PI_GOAL_EXTENSION_PATH))
+        self.assertEqual(
+            worker_launch.PI_GOAL_EXTENSION_PATH,
+            os.path.realpath(worker_launch.PI_GOAL_EXTENSION_PATH),
+        )
+        self.assertTrue(os.path.isfile(worker_launch.PI_GOAL_EXTENSION_PATH))
+
     def test_pi_extensions_are_canonical_existing_entrypoints(self):
         for extension in (
+            worker_launch.PI_GOAL_EXTENSION_PATH,
             worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
             worker_launch.PI_MESSAGING_EXTENSION_PATH,
         ):
@@ -115,7 +157,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
                 self.assertTrue(os.path.isfile(extension), extension)
 
     def test_pi_startup_does_not_load_settings_duplicates(self):
-        """The real Pi CLI must start with settings that rediscover both packages."""
+        """The real Pi CLI must start with settings that rediscover all required extension packages."""
         pi = shutil.which("pi")
         if pi is None:
             self.skipTest("pi is not installed")
@@ -125,6 +167,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         settings_dir.mkdir(parents=True)
         (settings_dir / "settings.json").write_text(json.dumps({
             "packages": [
+                str(pathlib.Path(worker_launch.PI_GOAL_EXTENSION_PATH).parent),
                 str(pathlib.Path(worker_launch.PI_SUBAGENTS_EXTENSION_PATH).parent.parent),
                 str(pathlib.Path(worker_launch.PI_MESSAGING_EXTENSION_PATH).parent),
             ],
@@ -162,14 +205,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, output = self._run_main("pi-worker", agent=None)
 
         command = shlex.split(commands[0])
-        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
-        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-sol", commands[0])
-        self.assertIn("--no-extensions", command)
-        self.assertEqual(self._pi_extensions(command), [
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ])
+        self._assert_pi_argv_contract(commands[0], resume=False)
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
@@ -526,6 +562,29 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn(missing, stderr.getvalue())
         window_exists.assert_not_called()
 
+    def test_missing_goal_extension_fails_before_any_tmux_side_effects(self):
+        argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name, "--agent", "pi"]
+        missing = str(self.tmp_path / "missing-mecha-goal.ts")
+        with patch.dict(os.environ, {worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765"}, clear=True), \
+             patch.object(worker_launch, "PI_GOAL_EXTENSION_PATH", missing), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             patch.object(worker_launch, "ensure_session") as ensure_session, \
+             patch.object(worker_launch, "new_window") as new_window, \
+             patch.object(worker_launch, "send_text") as send_text, \
+             patch.object(worker_launch, "send_enter") as send_enter, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(missing, stderr.getvalue())
+        window_exists.assert_not_called()
+        ensure_session.assert_not_called()
+        new_window.assert_not_called()
+        send_text.assert_not_called()
+        send_enter.assert_not_called()
+
     def test_invalid_claude_router_url_fails_before_tmux_side_effects(self):
         argv = ["worker_launch.py", "--window", "claude-worker", "--dir", self.tmpdir.name, "--agent", "claude"]
         with patch.dict(os.environ, {worker_launch.PI_ROUTER_URL_ENV: "http://example.com/path"}, clear=True), \
@@ -549,12 +608,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
-        command = shlex.split(commands[0])
-        self.assertIn("--no-extensions", command)
-        self.assertEqual(self._pi_extensions(command), [
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ])
+        self._assert_pi_argv_contract(commands[0], resume=False)
 
     def test_main_maps_resume_to_pi_session_with_explicit_worker_extensions(self):
         with patch.dict(os.environ, {
@@ -565,11 +619,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--session") + 1], "session-123")
         self.assertNotIn("resume", command)
-        self.assertIn("--no-extensions", command)
-        self.assertEqual(self._pi_extensions(command), [
-            worker_launch.PI_SUBAGENTS_EXTENSION_PATH,
-            worker_launch.PI_MESSAGING_EXTENSION_PATH,
-        ])
+        self._assert_pi_argv_contract(commands[0], resume=True)
 
     def test_pi_launch_exports_router_configuration_but_not_identity_or_settled_recipient_by_default(self):
         with patch.dict(os.environ, {

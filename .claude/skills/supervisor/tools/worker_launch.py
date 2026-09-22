@@ -32,7 +32,10 @@ from urllib.parse import urlparse
 TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 REPOSITORY_ROOT = os.path.realpath(os.path.join(TOOLS_DIR, "..", "..", "..", ".."))
 # Pi's package discovery can vary between sessions. These checkout entrypoints are the
-# source of record for the two extensions every managed Pi worker needs.
+# source of record for the extensions every managed Pi worker needs.
+PI_GOAL_EXTENSION_PATH = os.path.realpath(os.path.join(
+    REPOSITORY_ROOT, "pi-extensions", "mecha-goal", "index.ts"
+))
 PI_SUBAGENTS_EXTENSION_PATH = os.path.realpath(os.path.join(
     REPOSITORY_ROOT,
     "..", "pi-packages", "packages", "pi-subagents", "src", "index.ts",
@@ -136,7 +139,13 @@ def pi_session_id(work_dir, window):
 
 def resolve_pi_extensions():
     """Return the required managed-Pi extension entrypoints."""
-    extensions = (PI_SUBAGENTS_EXTENSION_PATH, PI_MESSAGING_EXTENSION_PATH)
+    # Keep Goal first because mecha-messaging bridges Goal state; this tuple is the
+    # complete explicit startup set while --no-extensions disables package discovery.
+    extensions = (
+        PI_GOAL_EXTENSION_PATH,
+        PI_SUBAGENTS_EXTENSION_PATH,
+        PI_MESSAGING_EXTENSION_PATH,
+    )
     missing = [path for path in extensions if not os.path.isfile(path)]
     if missing:
         raise ValueError(
