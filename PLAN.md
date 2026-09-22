@@ -132,3 +132,27 @@ npm run test:coverage -- tests/transport/http-contract.test.ts tests/transport/u
 ```
 
 Run the canonical `dev-loop` phases after this plan: plan review, TDD implementation, focused integration proof, coverage, and implementation review. Do not restart the router, push, stage, or commit during this specification/plan phase. Preserve all pre-existing dirty files, including avatar/UI changes and unrelated managed files.
+
+# Goal Extension Loading Plan
+
+Base: `origin/main` at `5d7559deb023a61155940c5e57409588b276e9e2`. Target: `wolfgang/managed-worker-goals-v2`.
+
+## TDD
+
+Update `.claude/skills/supervisor/tools/test_worker_launch.py` first. Assert the canonical Goal path, the ordered Goal/pi-subagents/mecha-messaging list, `--no-extensions`, provider/model, router/Mailbox exports, permission flag, and new/resumed session selectors. Include Goal in package-discovery duplicate coverage and prove a missing Goal fails before `window_exists`, provisioning, or command submission. The focused test must fail before the launcher change.
+
+## Implementation
+
+Update `.claude/skills/supervisor/tools/worker_launch.py` only for the launcher behavior. Derive Goal from `REPOSITORY_ROOT` with `os.path.realpath`, return one ordered extension tuple from `resolve_pi_extensions()`, validate all entrypoints before tmux activity, and use the tuple for both new and resumed Pi commands. Preserve existing provider, model, session, router, Mailbox, and permission behavior.
+
+## Validation
+
+Run the focused launcher test, affected supervisor-tool tests, and full local supervisor-tool discovery. Run changed-line trace coverage, `py_compile`, `git diff --check`, and the new-base installer inherited comparison. Use deterministic local tests only. Record artifacts outside the repository.
+
+## Review
+
+Review the full focus set: backend/runtime, correctness, security, data, operations, tests, documentation/comments, maintainability, and visual UI. Data persistence and visual UI are N/A because this seam stores no data and changes no UI. Run independent validation and a fresh follow-up review against the final immutable target. Record every finding and disposition in the owner-only target ledger.
+
+## Delivery
+
+Commit exactly once with author and committer `Wolfgang Meyers <wolfgangmeyers@gmail.com>`. Push `wolfgang/managed-worker-goals-v2` normally. Do not rebase, amend, force-push, alter the old branch, push `main`, open a PR, restart workers, or modify the primary checkout.
