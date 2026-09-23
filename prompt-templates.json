@@ -4,7 +4,7 @@
   "templates": [
     {
       "name": "PR Review",
-      "body": "Review the PR at ${URL}. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
+      "body": "Review the PR at ${URL}. This is not a read-only review, I expect you to actually post a review on the PR. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
       "id": "01231aba-fe0a-4fca-99fe-267bd96421cd",
       "updated_at": "2026-08-29T04:01:45.060Z"
     },
@@ -93,10 +93,22 @@
       "updated_at": "2026-09-09T14:01:08.319Z"
     },
     {
+      "name": "Check behavioral test coverage",
+      "body": "BEFORE CLAIMING THIS WORK IS READY, CONFIRM THE BEHAVIORAL FUNCTIONAL TEST REQUIREMENT IS SATISFIED. Continue the current task, but ensure every applicable requirement is covered by a deterministic test that puts the system-owned pieces together and proves the observable behavior. Mock true external dependencies such as LLMs and third-party services as necessary. Unit and component tests are supporting evidence, not substitutes when a cross-component functional test is practical. Fill any material gaps before final handoff, and report any behavior that can only be proven through live acceptance.",
+      "id": "e914f4f8-76c6-4a66-8342-d95c055d0263",
+      "updated_at": "2026-09-13T19:18:02.885Z"
+    },
+    {
       "name": "Confidence Check",
       "body": "Do you have high confidence that the requirements for ${ticket} is met? If not, what would be required to reach high confidence. Give your answer in plain English, and make it easy to understand.",
       "id": "d00d417e-9bc4-4803-84d2-e324fddd5ae4",
       "updated_at": "2026-09-14T16:09:33.890Z"
+    },
+    {
+      "name": "Complete PR sweep",
+      "body": "Sweep only the configured org for open PRs (see ~/AGENTS.md) that need review. These should be PRs not authored by Wolfgang. Wolfgang doesn't need to be requested explicitly. Either Wolfgang hasn't reviewed yet, or there have ben new changes since his last review. Those are the PRs to include in the sweep. For each PR, in sequence, do the following:\n\nUse the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
+      "id": "cb74cb5f-fd53-460d-9a3c-f6f9bbb932af",
+      "updated_at": "2026-09-14T19:25:50.144Z"
     }
   ]
 }
