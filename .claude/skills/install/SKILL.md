@@ -323,8 +323,7 @@ test -f "$REPO_ROOT/pi-extensions/mecha-messaging/mailbox-client.js"
 (cd "$REPO_ROOT/pi-extensions/mecha-messaging" && npm run check:mailbox-client-drift)
 ```
 
-Global registration keeps the package available through Pi settings. Pi launches through `worker_launch.py` use Pi's configured default extensions
-without launcher extension flags.
+Global registration keeps the package available through Pi settings. Managed Pi supervisor, worker, and service launches preserve Pi's normal extension configuration and must not disable, replace, or selectively reconstruct extensions.
 Other runtimes keep their normal extension policy. If an existing bare Pi process
 needs the updated package, reload it after the authorized source change.
 

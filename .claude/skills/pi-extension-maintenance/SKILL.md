@@ -100,11 +100,11 @@ installer, create a symlink, or restore an old installed artifact. Existing bare
 Pi processes need a reload after an authorized source change; do not claim the
 new packages are active before that reload and a controlled wakeup check.
 
-Registration keeps the checkout package available through Pi settings. Pi launches
-through `worker_launch.py` use Pi's configured default extensions without
-launcher extension flags.
-Other runtimes keep their normal extension policy. Keep the managed launch's
-provider, model, and router environment unchanged.
+Registration keeps the checkout package available through Pi settings. Managed
+Pi supervisor, worker, service, and recovery launches preserve Pi's normal
+extension configuration; they must not disable, replace, or selectively reconstruct
+extensions. Other runtimes keep their normal extension policy. Keep the managed
+launch's provider, model, and router environment unchanged.
 
 ## Installer recovery
 
