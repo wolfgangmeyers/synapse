@@ -31,19 +31,6 @@ from urllib.parse import urlparse
 # handed to other processes, so they must be canonical.
 TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 REPOSITORY_ROOT = os.path.realpath(os.path.join(TOOLS_DIR, "..", "..", "..", ".."))
-# Pi's package discovery can vary between sessions. These checkout entrypoints are the
-# source of record for the extensions every managed Pi worker needs.
-PI_GOAL_EXTENSION_PATH = os.path.realpath(os.path.join(
-    REPOSITORY_ROOT, "pi-extensions", "mecha-goal", "index.ts"
-))
-PI_SUBAGENTS_EXTENSION_PATH = os.path.realpath(os.path.join(
-    REPOSITORY_ROOT,
-    "..", "pi-packages", "packages", "pi-subagents", "src", "index.ts",
-))
-PI_MESSAGING_EXTENSION_PATH = os.path.realpath(
-    os.path.join(REPOSITORY_ROOT, "pi-extensions", "mecha-messaging", "index.ts")
-)
-
 sys.path.insert(0, TOOLS_DIR)
 from _sidecar import SIDECAR_SCRIPT_PATH as CLAUDE_SIDECAR_SCRIPT, sidecar_argv
 from _tmux import AGENT_ID
@@ -135,26 +122,6 @@ def _quote_command(argv):
 def pi_session_id(work_dir, window):
     """Return the stable UUID Pi uses for a worker's initial session."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mecha-worker:{work_dir}:{window}"))
-
-
-def resolve_pi_extensions():
-    """Return the required managed-Pi extension entrypoints."""
-    # Keep Goal first because mecha-messaging bridges Goal state; this tuple is the
-    # complete explicit startup set while --no-extensions disables package discovery.
-    extensions = (
-        PI_GOAL_EXTENSION_PATH,
-        PI_SUBAGENTS_EXTENSION_PATH,
-        PI_MESSAGING_EXTENSION_PATH,
-    )
-    missing = [path for path in extensions if not os.path.isfile(path)]
-    if missing:
-        raise ValueError(
-            "required canonical Pi extensions are missing: "
-            + ", ".join(missing)
-            + ". Check out the pi-packages sibling and install the "
-            "mecha-developer packages."
-        )
-    return extensions
 
 
 def resolve_pi_router_url():
@@ -690,12 +657,9 @@ def main():
     # The Claude trust key is resolved separately inside _claude_pretrust_workspace(),
     # because Claude Code looks a project up by its resolved physical path.
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
-    pi_extensions = None
     mailbox_router_url = None
     if args.agent in {"pi", "claude"}:
         try:
-            if args.agent == "pi":
-                pi_extensions = resolve_pi_extensions()
             mailbox_router_url = resolve_pi_router_url()
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
@@ -730,13 +694,9 @@ def main():
             "--name",
             args.window,
         ]
-        # Package discovery can resolve the same checkout package through a directory
-        # while these explicit paths resolve its entrypoint. Loading both creates a
-        # second extension instance and startup tool conflicts, so this managed command
-        # owns the complete extension set explicitly.
-        parts.append("--no-extensions")
-        for extension in pi_extensions:
-            parts.extend(["--extension", extension])
+        # Preserve Pi's normal extension configuration. Managed workers must retain
+        # the same tools (including goal support) as an ordinary Pi session; the
+        # launcher must not disable, replace, or selectively reconstruct that set.
         # Pi has no permission mode. --approve makes the trusted project resources
         # available without a startup prompt, matching the existing launcher default.
         if args.skip_permissions:
