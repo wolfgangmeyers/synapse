@@ -1,15 +1,21 @@
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+
 type AnyRecord = Record<string, unknown>;
 type TimerHandle = ReturnType<typeof setTimeout>;
 type GoalUi = {
   notify?: (message: string, level?: string) => unknown;
 };
-type GoalProvider = {
-  streamSimple: (model: AnyRecord | undefined, request: AnyRecord, options: AnyRecord) => { result: () => Promise<unknown> };
-};
+type GoalCompleteSimple = (
+  model: Model<Api>,
+  context: Context,
+  options?: SimpleStreamOptions,
+) => Promise<AssistantMessage>;
 export type GoalModelRegistry = {
-  getProvider?: (provider: unknown) => unknown;
-  getApiKeyAndHeaders?: (model: AnyRecord | undefined) => Promise<{ ok: boolean; error?: string; apiKey?: unknown; headers?: unknown; env?: unknown }>;
-  complete?: (model: AnyRecord | undefined, request: AnyRecord, options: AnyRecord) => Promise<unknown>;
+  getApiKeyAndHeaders?: (model: Model<Api>) => Promise<
+    | { ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> }
+    | { ok: false; error: string }
+  >;
 };
 type GoalToolHandler = (toolCallId: unknown, params: AnyRecord, signal: AbortSignal | undefined, onUpdate: unknown, ctx: GoalContext) => unknown;
 type GoalCommandHandler = (args: string, ctx: GoalContext) => unknown;
@@ -41,12 +47,13 @@ export type GoalContext = {
     getBranch?: () => AnyRecord[];
     getSessionId?: () => string | undefined;
   };
-  model?: AnyRecord;
+  model?: Model<Api>;
   modelRegistry?: GoalModelRegistry;
   ui?: GoalUi;
   [key: string]: unknown;
 };
 type GoalOptions = {
+  completeSimple?: GoalCompleteSimple;
   clock?: { now?: () => number };
   setTimeout?: (callback: () => void, delay: number) => TimerHandle;
   clearTimeout?: (timer: TimerHandle | undefined) => void;
@@ -198,10 +205,6 @@ function recordGoalDiagnostic(event: string, fields: object = {}): void {
 
 function isRecord(value: unknown): value is AnyRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isGoalProvider(value: unknown): value is GoalProvider {
-  return isRecord(value) && typeof value.streamSimple === "function";
 }
 
 function normalizeGoal(value: unknown) {
@@ -527,29 +530,29 @@ function errorDetails(error: unknown) {
   }
 }
 
-async function completeEvaluator(ctx: GoalContext, request: AnyRecord, signal: AbortSignal): Promise<unknown> {
-  const registry = ctx.modelRegistry;
-  const provider = registry?.getProvider?.(ctx.model?.provider);
-  if (registry !== undefined && isGoalProvider(provider)) {
-    if (registry.getApiKeyAndHeaders === undefined) throw new Error("Model registry cannot evaluate the active goal");
-    const auth = await registry.getApiKeyAndHeaders(ctx.model);
-    if (!auth.ok) throw new Error(auth.error ?? "Model registry authentication failed");
-    return provider.streamSimple(ctx.model, request, {
-      signal,
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      env: auth.env,
-    }).result();
+async function completeEvaluator(
+  ctx: GoalContext,
+  request: Context,
+  signal: AbortSignal,
+  evaluate: GoalCompleteSimple,
+): Promise<unknown> {
+  if (!ctx.model || ctx.modelRegistry?.getApiKeyAndHeaders === undefined) {
+    throw new Error("Model registry cannot evaluate the active goal");
   }
-  if (typeof registry?.complete === "function") {
-    return registry.complete(ctx.model, request, { signal });
-  }
-  throw new Error("Model registry cannot evaluate the active goal");
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+  if (!auth.ok) throw new Error(auth.error);
+  return evaluate(ctx.model, request, {
+    signal,
+    apiKey: auth.apiKey,
+    headers: auth.headers,
+    env: auth.env,
+  });
 }
 
 export { boundedActiveContext, responseEvaluation, responseOutcome };
 
 export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
+  const evaluate = options.completeSimple ?? completeSimple;
   const clockNow = typeof options.clock?.now === "function"
     ? () => options.clock!.now!()
     : () => Date.now();
@@ -1349,8 +1352,8 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
             content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nReturn exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>.` }],
             timestamp: Date.now(),
           }],
-        };
-        const response = await completeEvaluator(ctx, request, controller.signal);
+        } satisfies Context;
+        const response = await completeEvaluator(ctx, request, controller.signal, evaluate);
         if (runGeneration !== generation || controller.signal.aborted) {
           recordWakeupGateRejection("stale_evaluation_result", ctx, { component: "evaluation" });
           return;
