@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_CONTROL_REQUEST_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, GOAL_WORKER_ID_EVENT, responseEvaluation } from "../pi-extensions/mecha-goal/index.ts";
+import { createGoalExtension, GOAL_ACTIVITY_EVENT, GOAL_CONTROL_REQUEST_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, GOAL_WORKER_ID_EVENT, responseEvaluation } from "../pi-extensions/mecha-goal/index.ts";
 
 const GOAL_ENTRY = "goal-state";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 const MAX_CONTEXT_BYTES = 24_000;
 const MAX_NOT_DONE_WAKEUPS = 1000;
 
-function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }, complete, model = { provider: "test", id: "goal" }, provider, onSendMessage, sendMessage, sessionId, extensionOptions } = {}) {
+function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }, completeSimple, model = { provider: "test", id: "goal" }, onSendMessage, sendMessage, sessionId, extensionOptions } = {}) {
   const handlers = new Map();
   const eventHandlers = new Map();
   const emittedEvents = [];
@@ -37,9 +37,7 @@ function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLE
   const context = {
     model,
     modelRegistry: {
-      complete: complete ?? (async () => response),
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "cursor-api-key", headers: {}, env: {} }),
-      getProvider: () => provider,
     },
     sessionManager: {
       getBranch: () => branch,
@@ -48,7 +46,10 @@ function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLE
     },
     ui: { notify(message, type) { notices.push({ message, type }); } },
   };
-  goalExtension(pi, extensionOptions);
+  createGoalExtension(pi, {
+    ...extensionOptions,
+    completeSimple: completeSimple ?? (async () => response),
+  });
   return { branch, commands, context, emittedEvents, entries, eventHandlers, handlers, notices, sent, tools };
 }
 
@@ -350,7 +351,7 @@ test("goal lock gates programmatic set and off, then permits only a fresh comple
 
 test("goal lock completion allowance is fresh and a new goal clears it", async () => {
   const current = fixture({
-    complete: async () => ({ content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: Complete for now." }] }),
+    completeSimple: async () => ({ content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: Complete for now." }] }),
   });
   await setGoal(current, "protected goal");
   await current.commands.get("goal-lock").handler("on", current.context);
@@ -372,7 +373,7 @@ test("goal lock completion allowance is fresh and a new goal clears it", async (
 test("pending mecha_context compaction pauses repeated goal checks until its tool result", async () => {
   const calls = [];
   const current = fixture({
-    complete: async () => {
+    completeSimple: async () => {
       calls.push(true);
       return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] };
     },
@@ -413,7 +414,7 @@ test("pending mecha_context compaction pauses repeated goal checks until its too
 test("session compaction pauses a scheduled evaluator and reactivates it after completion", async () => {
   const calls = [];
   const current = fixture({
-    complete: async () => {
+    completeSimple: async () => {
       calls.push(true);
       return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
     },
@@ -491,7 +492,7 @@ test("stale goal self-wakeups are canceled when the goal changes or turns off", 
 
 test("settled goal evaluation forwards bounded tool-result text without non-text content", async () => {
   const calls = [];
-  const current = fixture({ complete: async (_model, request) => {
+  const current = fixture({ completeSimple: async (_model, request) => {
     calls.push(request);
     return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
   } });
@@ -517,20 +518,13 @@ test("settled goal evaluation forwards bounded tool-result text without non-text
   assert.doesNotMatch(context, /must stay redacted|codex_search|search-call/);
 });
 
-test("settled goal evaluation uses the registered provider stream instead of compat", async () => {
+test("settled goal evaluation uses injected completeSimple with registry auth instead of compat", async () => {
   const calls = [];
   const current = fixture({
     model: { provider: "cursor", api: "cursor-sdk", id: "gpt-5.6-luna" },
-    complete: async () => {
-      throw new Error("compat path must not be used");
-    },
-    provider: {
-      streamSimple(model, request, options) {
-        calls.push({ model, request, options });
-        return {
-          result: async () => ({ content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }),
-        };
-      },
+    completeSimple: async (model, request, options) => {
+      calls.push({ model, request, options });
+      return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
     },
   });
   await setGoal(current, "use the Cursor provider");
@@ -549,7 +543,7 @@ test("settled goal evaluation uses the registered provider stream instead of com
 
 test("settled goal evaluation uses bounded active context and exact steer wakeup options", async () => {
   const calls = [];
-  const current = fixture({ complete: async (model, request, options) => {
+  const current = fixture({ completeSimple: async (model, request, options) => {
     calls.push({ model, request, options });
     return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
   } });
@@ -583,7 +577,7 @@ test("NOT_DONE defers its continuation, skips exactly one injected settle, and e
   const calls = [];
   let injectedSettle;
   const current = fixture({
-    complete: async () => {
+    completeSimple: async () => {
       calls.push(true);
       return { content: [{ type: "text", text: `VERDICT: ${outcomes.shift()}\nREASON: Evaluated current progress.` }] };
     },
@@ -615,7 +609,7 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
     { content: [{ type: "text", text: "" }] },
     undefined,
   ]) {
-    const current = fixture({ complete: async () => response });
+    const current = fixture({ completeSimple: async () => response });
     await setGoal(current, "make progress");
     await current.commands.get("goal-snooze").handler("off", current.context);
     await settle(current);
@@ -625,7 +619,7 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
   }
 
   let reject = true;
-  const current = fixture({ complete: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: A supervisor decision is required." }] }; } });
+  const current = fixture({ completeSimple: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: A supervisor decision is required." }] }; } });
   await setGoal(current, "make progress");
   await current.commands.get("goal-snooze").handler("off", current.context);
   await settle(current);
@@ -638,7 +632,7 @@ test("sendMessage failure leaves the next normal settle available", async () => 
   let fail = true;
   const calls = [];
   const current = fixture({
-    complete: async () => {
+    completeSimple: async () => {
       calls.push(true);
       return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: More work remains." }] };
     },
@@ -663,7 +657,7 @@ test("stale session settles cannot start an evaluation", async () => {
   const calls = [];
   const current = fixture({
     sessionId: "owner-session",
-    complete: async () => {
+    completeSimple: async () => {
       calls.push(true);
       return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
     },
@@ -798,7 +792,7 @@ test("owner-published queued or running subagents defer evaluation until the par
     const calls = [];
     const current = fixture({
       sessionId: ownerSessionId,
-      complete: async () => {
+      completeSimple: async () => {
         calls.push(true);
         return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
       },
@@ -839,7 +833,7 @@ test("the deferred gate rechecks the owner immediately before complete", async (
   try {
     const current = fixture({
       sessionId: "owner-session",
-      complete: async () => {
+      completeSimple: async () => {
         calls.push(true);
         return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: Must not run." }] };
       },
@@ -863,7 +857,7 @@ test("the wakeup macrotask rechecks owner activity after evaluation", async () =
   try {
     const current = fixture({
       sessionId: "owner-session",
-      complete: async () => {
+      completeSimple: async () => {
         if (firstEvaluation) {
           active = true;
           firstEvaluation = false;
@@ -922,7 +916,7 @@ test("a foreign owner's active subagent does not suppress this owner's evaluator
 
 test("goal off cancels an in-flight evaluation and prevents stale injection", async () => {
   let resolve;
-  const current = fixture({ complete: () => new Promise((done) => { resolve = done; }) });
+  const current = fixture({ completeSimple: () => new Promise((done) => { resolve = done; }) });
   await setGoal(current, "cancel safely");
   await current.commands.get("goal-snooze").handler("off", current.context);
   const pending = settle(current);
@@ -935,7 +929,7 @@ test("goal off cancels an in-flight evaluation and prevents stale injection", as
 
 test("goal snooze is enabled by default, parses duration, and injects availability once", async () => {
   const current = fixture({
-    complete: async () => ({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] }),
+    completeSimple: async () => ({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] }),
   });
   const snoozeTool = current.tools.get("goal_snooze");
   assert.ok(snoozeTool);
@@ -993,7 +987,7 @@ test("goal snooze settles immediately and wakes once after its background timer"
   let calls = 0;
   const current = fixture({
     extensionOptions: runtime,
-    complete: async () => {
+    completeSimple: async () => {
       calls += 1;
       return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] };
     },
@@ -1001,6 +995,8 @@ test("goal snooze settles immediately and wakes once after its background timer"
   const resultWakeups = () => current.sent.filter(({ message }) => message.customType === "goal-result");
   await setGoal(current, "make progress");
   await settle(current);
+  runtime.advance(0);
+  await Promise.resolve();
   runtime.advance(0);
   await Promise.resolve();
   runtime.advance(0);

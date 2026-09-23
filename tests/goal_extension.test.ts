@@ -24,12 +24,14 @@ test("goal wakeups reach the retry cap and reset after three completions", async
     model: { provider: "test" },
     sessionManager: { getSessionId: () => "session", getBranch: () => [] },
     modelRegistry: {
-      complete: async () => ({
-        content: [{ type: "text", text: `VERDICT: ${responses.shift()}\nREASON: still checking` }],
-      }),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
     },
   };
-  createGoalExtension(pi);
+  createGoalExtension(pi, {
+    completeSimple: async () => ({
+      content: [{ type: "text", text: `VERDICT: ${responses.shift()}\nREASON: still checking` }],
+    }),
+  });
   await tools.get("goal").execute("x", { action: "set", goal: "ship the fix" }, undefined, undefined, ctx);
   const settle = async () => {
     handlers.get("agent_settled")({ sessionId: "session" }, ctx);
@@ -74,12 +76,14 @@ test("goal wakeup converts an unsupported evaluator verdict to NOT_DONE", async 
     model: { provider: "test" },
     sessionManager: { getSessionId: () => "session", getBranch: () => [] },
     modelRegistry: {
-      complete: async () => ({
-        content: [{ type: "text", text: "VERDICT: NEEDS_REVIEW\nREASON: A different outcome was requested." }],
-      }),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
     },
   };
-  createGoalExtension(pi);
+  createGoalExtension(pi, {
+    completeSimple: async () => ({
+      content: [{ type: "text", text: "VERDICT: NEEDS_REVIEW\nREASON: A different outcome was requested." }],
+    }),
+  });
   await tools.get("goal").execute("x", { action: "set", goal: "ship the fix" }, undefined, undefined, ctx);
 
   handlers.get("agent_settled")({ sessionId: "session" }, ctx);
@@ -89,4 +93,69 @@ test("goal wakeup converts an unsupported evaluator verdict to NOT_DONE", async 
   assert.equal(result.details.goal, "ship the fix");
   assert.equal(result.details.outcome, "NOT_DONE");
   assert.match(result.content, /^NOT_DONE: Review ship the fix and take the next concrete action now\.\nVERDICT: NOT_DONE\nREASON: Invalid evaluator output:/);
+});
+
+test("goal evaluation uses Pi 0.80 model auth with completeSimple", async () => {
+  const handlers = new Map();
+  const tools = new Map();
+  const sent = [];
+  const model = { provider: "test-provider", id: "test-model", api: "test-api" };
+  const auth = {
+    ok: true,
+    apiKey: "registry-key",
+    headers: { authorization: "Bearer registry-token" },
+    env: { TEST_REGION: "local" },
+  };
+  let completionCall;
+  let resolveGoalResult!: () => void;
+  const goalResultDelivered = new Promise<void>((resolve) => { resolveGoalResult = resolve; });
+  const pi = {
+    getSessionId: () => "session",
+    appendEntry: () => {},
+    sendMessage: (message) => {
+      sent.push(message);
+      if (message.customType === "goal-result") resolveGoalResult();
+    },
+    events: { on: () => {}, emit: () => {} },
+    on: (name, handler) => handlers.set(name, handler),
+    registerTool: (tool) => tools.set(tool.name, tool),
+    registerCommand: () => {},
+  };
+  const ctx = {
+    model,
+    sessionManager: {
+      getSessionId: () => "session",
+      getBranch: () => [{
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "The fix is ready." }], timestamp: 123 },
+      }],
+    },
+    modelRegistry: {
+      getApiKeyAndHeaders: async (requestedModel) => {
+        assert.equal(requestedModel, model);
+        return auth;
+      },
+    },
+  };
+  createGoalExtension(pi, {
+    completeSimple: async (requestedModel, request, options) => {
+      completionCall = { requestedModel, request, options };
+      return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The fix is ready." }] };
+    },
+  });
+
+  await tools.get("goal").execute("x", { action: "set", goal: "ship the fix" }, undefined, undefined, ctx);
+  handlers.get("agent_settled")({ sessionId: "session" }, ctx);
+  await goalResultDelivered;
+
+  assert.equal(completionCall.requestedModel, model);
+  assert.equal(completionCall.request.systemPrompt, "goal: ship the fix - return exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>");
+  assert.match(completionCall.request.messages[0].content[0].text, /user: The fix is ready\./);
+  assert.equal(completionCall.options.apiKey, auth.apiKey);
+  assert.equal(completionCall.options.headers, auth.headers);
+  assert.equal(completionCall.options.env, auth.env);
+  assert.ok(completionCall.options.signal instanceof AbortSignal);
+  const result = sent.find((message) => message.customType === "goal-result");
+  assert.equal(result.details.outcome, "COMPLETED");
+  assert.equal(result.details.rationale, "The fix is ready.");
 });
