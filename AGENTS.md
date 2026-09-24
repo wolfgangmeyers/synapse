@@ -20,13 +20,13 @@ Managed worker runtime is machine-local configuration. `worker_launch.py` reads 
 
 The Wolfgang-maintained Pi Subagents fork at `/Users/wolfgang/code/pi-packages` is a required dependency of the mecha-developer system whenever native Pi subagent lifecycle behavior is used.
 
-## Installing Wolfgang's Pi fork
+## Installing upstream Pi
 
 ```sh
-npm install -g 'git+https://github.com/wolfgangmeyers/pi.git#wolfgang/glm5-bedrock-converse-fix'
+npm install -g @earendil-works/pi-coding-agent@latest
 ```
 
-Prefix the command with `sudo` only when the global npm prefix is root-owned. It is not a macOS requirement. Omitting `#wolfgang/glm5-bedrock-converse-fix` follows the fork default `main`, which now includes the repair.
+This installs the regular upstream Pi package. Prefix the command with `sudo` only when the global npm prefix is root-owned. It is not a macOS requirement.
 
 ## Router Proxy
 
