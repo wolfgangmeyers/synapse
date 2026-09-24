@@ -3,6 +3,18 @@
   "version": 1,
   "templates": [
     {
+      "name": "Supervisor Status Update",
+      "body": "Tell me at a high level so it's really easy to understand what everybody's status is right now. Is anyone blocked or has anyone come to a halt when they should be moving",
+      "id": "50f0c2ad-ee34-4380-9e90-3d2377b22e06",
+      "updated_at": "2026-09-02T22:35:50.769Z"
+    },
+    {
+      "name": "Subagent Guidance",
+      "body": "Important: Subagent Guidance\n\nUse subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. Do not abuse the inline tool allowance, or it will be disabled.\n\nAlso please set a 15 minute recurring reminder with the subagent guidance. Don't delete any existing reminders, just start this one up. Make sure to set the reminder on your own window, not the supervisor window.",
+      "id": "858a0a28-4053-4550-b880-2c1f3b09e4de",
+      "updated_at": "2026-09-02T23:50:01.949Z"
+    },
+    {
       "name": "PR Review",
       "body": "Review the PR at ${URL}. This is not a read-only review, I expect you to actually post a review on the PR. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
       "id": "01231aba-fe0a-4fca-99fe-267bd96421cd",
@@ -63,12 +75,6 @@
       "updated_at": "2026-09-01T21:13:26.302Z"
     },
     {
-      "name": "Supervisor Status Update",
-      "body": "Tell me at a high level so it's really easy to understand what everybody's status is right now. Is anyone blocked or has anyone come to a halt when they should be moving?",
-      "id": "512f0ffd-148f-4a6b-9594-ae42e0f49c67",
-      "updated_at": "2026-09-02T21:50:28.925Z"
-    },
-    {
       "name": "PR Sweep",
       "body": "Sweep only the configured org for open PRs (see ~/AGENTS.md) that need review. These should be PRs not authored by Wolfgang. Either Wolfgang has already reviewed them and they have new changes since, Wolfgang has been explicitly requested or re-requested. Those are the PRs to include in the sweep. For each PR, in sequence, do the following:\n\nUse the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
       "id": "37749c5d-2488-43fe-9fbd-c6f7d3dbd9fa",
@@ -93,22 +99,28 @@
       "updated_at": "2026-09-09T14:01:08.319Z"
     },
     {
-      "name": "Check behavioral test coverage",
-      "body": "BEFORE CLAIMING THIS WORK IS READY, CONFIRM THE BEHAVIORAL FUNCTIONAL TEST REQUIREMENT IS SATISFIED. Continue the current task, but ensure every applicable requirement is covered by a deterministic test that puts the system-owned pieces together and proves the observable behavior. Mock true external dependencies such as LLMs and third-party services as necessary. Unit and component tests are supporting evidence, not substitutes when a cross-component functional test is practical. Fill any material gaps before final handoff, and report any behavior that can only be proven through live acceptance.",
-      "id": "e914f4f8-76c6-4a66-8342-d95c055d0263",
-      "updated_at": "2026-09-13T19:18:02.885Z"
-    },
-    {
       "name": "Confidence Check",
       "body": "Do you have high confidence that the requirements for ${ticket} is met? If not, what would be required to reach high confidence. Give your answer in plain English, and make it easy to understand.",
       "id": "d00d417e-9bc4-4803-84d2-e324fddd5ae4",
       "updated_at": "2026-09-14T16:09:33.890Z"
     },
     {
+      "name": "Check behavioral test coverage",
+      "body": "BEFORE CLAIMING THIS WORK IS READY, CONFIRM THE BEHAVIORAL FUNCTIONAL TEST REQUIREMENT IS SATISFIED. Continue the current task, but ensure every applicable requirement is covered by a deterministic test that puts the system-owned pieces together and proves the observable behavior. Mock true external dependencies such as LLMs and third-party services as necessary. Unit and component tests are supporting evidence, not substitutes when a cross-component functional test is practical. Fill any material gaps before final handoff, and report any behavior that can only be proven through live acceptance.",
+      "id": "e914f4f8-76c6-4a66-8342-d95c055d0263",
+      "updated_at": "2026-09-13T19:18:02.885Z"
+    },
+    {
       "name": "Complete PR sweep",
       "body": "Sweep only the configured org for open PRs (see ~/AGENTS.md) that need review. These should be PRs not authored by Wolfgang. Wolfgang doesn't need to be requested explicitly. Either Wolfgang hasn't reviewed yet, or there have ben new changes since his last review. Those are the PRs to include in the sweep. For each PR, in sequence, do the following:\n\nUse the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
       "id": "cb74cb5f-fd53-460d-9a3c-f6f9bbb932af",
       "updated_at": "2026-09-14T19:25:50.144Z"
+    },
+    {
+      "name": "Supervisor Project Oversight",
+      "body": "Launch a subagent to check on ${priority}. Please make sure it goes in the right direction. I need you to make sure it doesn't go off the rails - excessive review loops, getting side tracked, etc. Don't let a bunch of scope creep in. Stick to the requirements - have the subagent go read them, if available - and make sure that all effort being invested is directly in support of them. No side projects. Please don't disable this reminder until the requirements have been met.",
+      "id": "74cd577a-5cbe-41ba-9c5f-2898e020ddaf",
+      "updated_at": "2026-09-24T03:40:01.001Z"
     }
   ]
 }
