@@ -23,9 +23,9 @@ async function runHelper(input, env = {}) {
 test("package root and required Cursor deep imports resolve from the lockfile", async () => {
   const packageJson = JSON.parse(await readFile(new URL("./package.json", import.meta.url), "utf8"));
   assert.deepEqual(packageJson.dependencies, {
-    "@earendil-works/pi-coding-agent": "0.85.0",
-    "@earendil-works/pi-ai": "0.85.0",
-    "@earendil-works/pi-server": "0.85.0",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-server": "0.87.1",
     "pi-cursor-sdk": "0.3.6",
   });
   assert.match(await import.meta.resolve("@earendil-works/pi-coding-agent"), /pi-coding-agent/);
