@@ -64,6 +64,8 @@ func TestValidateEventAcceptsEveryProductionClosedCallSiteValue(t *testing.T) {
 		name  string
 		event transport.Event
 	}{
+		{"delivery timed out queued retry", transport.DeliveryTimedOutEvent("message", "agent", 1, "queued", "delivery_timeout")},
+		{"delivery timed out injection requested termination frozen", transport.DeliveryTimedOutEvent("message", "agent", 1, "injection_requested", "delivery_timeout")},
 		{"delivery timed out dead letter", transport.DeliveryTimedOutEvent("message", "agent", 1, "dead_letter", "delivery_timeout")},
 		{"delivery timed out dead lettered", transport.DeliveryTimedOutEvent("message", "agent", 1, "dead_lettered", "delivery_timeout")},
 		{"reminder invalid", transport.ReminderFailedEvent("reminder", "2026-01-01T00:00:00Z", "invalid_reminder")},
