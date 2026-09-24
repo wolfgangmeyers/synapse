@@ -28,16 +28,17 @@ func (rootAdmissionAppendToken) Release()          {}
 type rootAdmissionRPC struct {
 	*goalProjectionRPC
 
-	mu           sync.Mutex
-	handler      func(RootControlEvent)
-	submissions  []map[string]any
-	acknowledged []string
-	rejected     []string
-	submitted    chan struct{}
-	receiptGate  <-chan struct{}
-	armErr       error
-	submitErr    error
-	recoverEntry bool
+	mu             sync.Mutex
+	handler        func(RootControlEvent)
+	submissions    []map[string]any
+	acknowledged   []string
+	rejected       []string
+	submitted      chan struct{}
+	receiptGate    <-chan struct{}
+	armErr         error
+	submitErr      error
+	recoverEntry   bool
+	recoveryMutate func(map[string]any)
 }
 
 func (r *rootAdmissionRPC) SetRootControlEventHandler(handler func(RootControlEvent)) {
@@ -112,7 +113,11 @@ func (r *rootAdmissionRPC) GetRootControlEntry(_ context.Context, entryID string
 			details[key] = value
 		}
 	}
-	return map[string]any{"id": entryID, "customType": "mecha.control.result.v1", "display": false, "content": payload["content"], "details": details}, nil
+	entry := map[string]any{"id": entryID, "customType": "mecha.control.result.v1", "display": false, "content": payload["content"], "details": details}
+	if r.recoveryMutate != nil {
+		r.recoveryMutate(entry)
+	}
+	return entry, nil
 }
 
 func (r *rootAdmissionRPC) submissionCount() int {
@@ -713,6 +718,75 @@ func TestRootControlRecoveryDeliveryAcknowledgesOnlyAfterDurableReceipt(t *testi
 	row := requireManagedControlDelivered(t, durable, requestID)
 	require.Equal(t, []string{requestID}, rpc.acknowledgments(), "recovery acknowledges only after its exact persisted entry is durably delivered")
 	require.NotEmpty(t, row.ResultEntryID)
+}
+
+func TestControlResultStockReceiptPersistsAndResumesAfterLostAppendResponse(t *testing.T) {
+	manager, durable, binding, fence, tool, rpc, _ := newRootAdmissionFixtureWithReceiver(t, false)
+	requestID := "123e4567-e89b-42d3-a456-426614174292"
+	rpc.submitErr = errors.New("stock append accepted but its response was lost")
+
+	manager.admitAndRunRootControl(context.Background(), binding, rootAdmissionEvent(fence, tool, requestID, rootAdmissionArguments("router")))
+	pending, err := durable.ManagedControlRequest(context.Background(), requestID)
+	require.NoError(t, err)
+	reservedResultID := pending.ResultID
+	reservedPayloadHash := pending.ResultPayloadSHA256
+	reservedFence := pending.Fence
+
+	// A stale persisted receipt must leave the immutable result pending. This
+	// models the first reconciliation after the router has lost the append
+	// response and restarted on the same durable ledger.
+	rpc.mu.Lock()
+	rpc.recoverEntry = true
+	rpc.recoveryMutate = func(entry map[string]any) {
+		entry["details"].(map[string]any)["runtime_generation"] = "123e4567-e89b-42d3-a456-426614174999"
+	}
+	rpc.mu.Unlock()
+	manager.recoverRootControls(binding)
+	afterStale, err := durable.ManagedControlRequest(context.Background(), requestID)
+	require.NoError(t, err)
+	staleFailedClosed := afterStale.State != "delivered" && len(rpc.acknowledgments()) == 0
+
+	// The exact persisted receipt binds the logical request and result, the
+	// canonical payload hash, and every current runtime-fence field. Startup
+	// recovery must reconcile it without issuing another append.
+	rpc.mu.Lock()
+	rpc.recoveryMutate = nil
+	rpc.mu.Unlock()
+	manager.recoverRootControls(binding)
+	delivered, err := durable.ManagedControlRequest(context.Background(), requestID)
+	require.NoError(t, err)
+
+	require.Equal(t, struct {
+		pendingState, reservedResultID, reservedPayloadHash string
+		reservedFence                                       store.ManagedRuntimeFence
+		staleFailedClosed, deliveredExact                   bool
+		appendCount                                         int
+		acknowledgments                                     []string
+	}{
+		pendingState:        "reconcile_pending",
+		reservedResultID:    reservedResultID,
+		reservedPayloadHash: reservedPayloadHash,
+		reservedFence:       fence,
+		staleFailedClosed:   true,
+		deliveredExact:      true,
+		appendCount:         1,
+		acknowledgments:     []string{requestID},
+	}, struct {
+		pendingState, reservedResultID, reservedPayloadHash string
+		reservedFence                                       store.ManagedRuntimeFence
+		staleFailedClosed, deliveredExact                   bool
+		appendCount                                         int
+		acknowledgments                                     []string
+	}{
+		pendingState:        pending.ReconciliationState,
+		reservedResultID:    pending.ResultID,
+		reservedPayloadHash: pending.ResultPayloadSHA256,
+		reservedFence:       reservedFence,
+		staleFailedClosed:   staleFailedClosed,
+		deliveredExact:      delivered.State == "delivered" && delivered.ResultID == reservedResultID && delivered.ResultPayloadSHA256 == reservedPayloadHash && sameBindingFence(delivered.Fence, reservedFence),
+		appendCount:         rpc.submissionCount(),
+		acknowledgments:     rpc.acknowledgments(),
+	})
 }
 
 func TestRootControlDuplicateRequestReusesResultIDAndRejectsChangedFingerprint(t *testing.T) {

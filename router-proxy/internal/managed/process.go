@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +34,7 @@ const (
 type CommandSpec struct {
 	PiExecutable         string
 	SessionRoot          string
+	SessionPath          string
 	SessionID            string
 	LaunchMode           SessionLaunchMode
 	Cwd                  string
@@ -48,8 +51,15 @@ func (s CommandSpec) validLaunchMode() bool {
 	return s.LaunchMode == CreateNew || s.LaunchMode == ResumeExisting
 }
 
+func (s CommandSpec) effectiveSessionPath() string {
+	if s.SessionPath != "" {
+		return s.SessionPath
+	}
+	return s.SessionID
+}
+
 func (s CommandSpec) Args() []string {
-	arguments := []string{"--mode", "rpc", "--session-dir", s.SessionRoot, "--session-id", s.SessionID, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "--provider", s.Provider, "--model", s.ModelID, "-e", s.MechaRPCExtension, "-e", s.PiSubagentsExtension}
+	arguments := []string{"--mode", "rpc", "--session-dir", s.SessionRoot, "--session", s.effectiveSessionPath(), "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--offline", "--provider", s.Provider, "--model", s.ModelID, "-e", s.MechaRPCExtension, "-e", s.PiSubagentsExtension}
 	if s.CursorExtension != "" {
 		arguments = append(arguments, "-e", s.CursorExtension)
 	}
@@ -171,7 +181,7 @@ type execProcessFactory struct{}
 
 func DefaultProcessFactory() ProcessFactory { return execProcessFactory{} }
 func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process, error) {
-	if spec.PiExecutable == "" || spec.SessionRoot == "" || spec.SessionID == "" || spec.Cwd == "" || !spec.validLaunchMode() {
+	if spec.PiExecutable == "" || spec.SessionRoot == "" || spec.effectiveSessionPath() == "" || spec.Cwd == "" || !spec.validLaunchMode() {
 		return nil, errors.New("incomplete managed process specification")
 	}
 	// The supervisor owns controlled termination. CommandContext would kill the
@@ -540,6 +550,93 @@ func signalOwnedProcessGroup(pid int, signal syscall.Signal) error {
 	return syscall.Kill(-pid, signal)
 }
 
+type linuxProcessStat struct {
+	pid         int
+	state       byte
+	pgrp        int
+	startMarker string
+}
+
+func parseLinuxProcessStat(data []byte) (linuxProcessStat, error) {
+	text := string(data)
+	end := strings.LastIndex(text, ") ")
+	if end < 0 {
+		return linuxProcessStat{}, errors.New("Linux process stat is malformed")
+	}
+	open := strings.IndexByte(text, '(')
+	if open < 1 || open >= end {
+		return linuxProcessStat{}, errors.New("Linux process stat has no command")
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(text[:open]))
+	if err != nil || pid < 1 {
+		return linuxProcessStat{}, errors.New("Linux process stat has an invalid pid")
+	}
+	fields := strings.Fields(text[end+2:])
+	if len(fields) < 3 || len(fields[0]) != 1 {
+		return linuxProcessStat{}, errors.New("Linux process stat is incomplete")
+	}
+	group, err := strconv.Atoi(fields[2])
+	if err != nil || group < 0 {
+		return linuxProcessStat{}, errors.New("Linux process stat has an invalid group")
+	}
+	startMarker := ""
+	if len(fields) > 19 {
+		startMarker = fields[19]
+	}
+	return linuxProcessStat{pid: pid, state: fields[0][0], pgrp: group, startMarker: startMarker}, nil
+}
+
+func linuxProcStat(pid int) (byte, int, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, 0, err
+	}
+	stat, err := parseLinuxProcessStat(data)
+	if err != nil {
+		return 0, 0, err
+	}
+	return stat.state, stat.pgrp, nil
+}
+
+// classifyLinuxZombieGroup handles the one state a replacement router cannot
+// reap itself: its predecessor's child has been reparented and is a zombie.
+// The caller has already verified the exact leader start marker. A zombie-only
+// group owns no executable process; any live member keeps the group present.
+func classifyLinuxZombieGroup(identity ProcessIdentity) (ProcessProbeState, bool) {
+	if runtime.GOOS != "linux" {
+		return ProcessUnknown, false
+	}
+	state, _, err := linuxProcStat(identity.PID)
+	if err != nil || state != 'Z' {
+		return ProcessUnknown, false
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return ProcessUnknown, true
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		memberState, group, err := linuxProcStat(pid)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			group, groupErr := syscall.Getpgid(pid)
+			if errors.Is(groupErr, syscall.ESRCH) || groupErr == nil && group != identity.PID {
+				continue
+			}
+			return ProcessUnknown, true
+		}
+		if group == identity.PID && memberState != 'Z' && memberState != 'X' {
+			return ProcessPresent, true
+		}
+	}
+	return ProcessAbsent, true
+}
+
 func (defaultProcessGroupOps) Probe(identity ProcessIdentity) ProcessProbe {
 	if ValidateIdentity(identity) != nil {
 		return ProcessProbe{State: ProcessUnknown}
@@ -573,6 +670,9 @@ func (defaultProcessGroupOps) Probe(identity ProcessIdentity) ProcessProbe {
 	}
 	if marker != identity.StartMarker {
 		return ProcessProbe{State: ProcessMismatch}
+	}
+	if state, classified := classifyLinuxZombieGroup(identity); classified {
+		return ProcessProbe{State: state}
 	}
 	group, err := syscall.Getpgid(identity.PID)
 	if err != nil {
@@ -739,6 +839,17 @@ func ManagedProcessExitDiagnostic(err error) string {
 func processStartMarker(pid int) (string, error) {
 	if pid <= 0 {
 		return "", errors.New("managed process pid is invalid")
+	}
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if err != nil {
+			return "", err
+		}
+		stat, err := parseLinuxProcessStat(data)
+		if err != nil || stat.startMarker == "" {
+			return "", errors.New("Linux process start marker is unavailable")
+		}
+		return "linux:" + stat.startMarker, nil
 	}
 	output, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {

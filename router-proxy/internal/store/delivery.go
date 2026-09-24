@@ -976,7 +976,7 @@ type ManagedDirectAttempt struct {
 	SnapshotID                      string
 	Fence                           ManagedRuntimeFence
 	State                           string
-	// SessionEntryWatermark is Pi's opaque get_entries `since` cursor. The
+	// SessionEntryWatermark stores the immutable reconciliation key. The
 	// historical name is retained because migration 026 owns this column.
 	SessionEntryWatermark                                                       string
 	ReceiptEntryIdentity                                                        string

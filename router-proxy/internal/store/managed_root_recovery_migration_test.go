@@ -8,6 +8,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestManagedRootRecoveryOperatorMigrationAddsDurableCASState(t *testing.T) {
+	durable := openTestStore(t)
+	rows, err := durable.db.Query(`PRAGMA table_info(managed_root_recovery_actions)`)
+	require.NoError(t, err)
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		require.NoError(t, rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey))
+		columns[name] = true
+	}
+	require.NoError(t, rows.Err())
+	for _, name := range []string{"version", "operator_operation_id", "operator_kind", "operator_stage", "operator_owner", "operator_owner_epoch", "operator_agent_updated_at"} {
+		require.Truef(t, columns[name], "missing durable operator column %s", name)
+	}
+}
+
 func TestManagedRootRecoveryMigrationUpgradesExistingManagedRows(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")

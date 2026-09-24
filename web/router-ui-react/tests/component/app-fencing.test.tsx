@@ -69,13 +69,14 @@ const managedAgent = (overrides: Partial<ManagedAgent> = {}): ManagedAgent => ({
 
 function renderManaged(actionResponse: Response | undefined = undefined, options: { childrenFail?: boolean } = {}) {
   let snapshot = managedAgent();
+  let projectionVersion = 1;
   let resolveAction: (() => void) | undefined;
   const actionGate = new Promise<void>((resolve) => { resolveAction = resolve; });
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, goal_control_v1: false, ui_live_v1: false });
     if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
-    if (url.endsWith("/v1/managed-agents") && (init?.method ?? "GET") === "GET") return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: 1, agents: [snapshot] });
+    if (url.endsWith("/v1/managed-agents") && (init?.method ?? "GET") === "GET") return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: projectionVersion, agents: [snapshot] });
     if (url.endsWith("/v1/managed-agents/managed-alpha/children")) {
       if (options.childrenFail) throw new Error("Child projection unavailable");
       return jsonResponse({ agent_id: "managed-alpha", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
@@ -89,6 +90,7 @@ function renderManaged(actionResponse: Response | undefined = undefined, options
       if (actionResponse !== undefined) return actionResponse;
       await actionGate;
       snapshot = managedAgent({ lifecycle_state: "starting", activity_state: "starting", accepting_prompts: false });
+      projectionVersion += 1;
       return jsonResponse({ operation_id: "operation-1" }, 202);
     }
     throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);

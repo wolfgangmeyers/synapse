@@ -172,7 +172,10 @@ input.on("line", (line) => {
   if (request.type === "get_state") { response(request, { sessionId, isCompacting: false }); return; }
   if (request.type === "get_commands") { response(request, { commands }); return; }
   if (request.type === "get_active_tools") { response(request, { active_tools: activeTools }); return; }
-  if (request.type === "get_entries") { response(request, { entries: [], leafId: `functional-cursor-${sessionId}` }); return; }
+  if (request.type === "get_entries") {
+    emit({ id: request.id, type: "response", success: false, error: "Unsupported command: get_entries" });
+    return;
+  }
   if (request.type === "abort") {
     const success = !existsSync(join(sessionRoot, "fail-abort"));
     response(request, { command: "abort", success });

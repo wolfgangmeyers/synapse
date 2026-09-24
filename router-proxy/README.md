@@ -24,11 +24,34 @@ The launcher also enables the read-only tmux/router audit. It checks the existin
 
 Router-managed Pi launch is enabled by default. Set `MECHA_ROUTER_MANAGED=false` to run the legacy router without managed-worker routes; other values are rejected before startup. Enabled mode needs a usable Pi executable, managed home and contained session root, generated manifest, mecha-rpc and pi-subagents entry files, allowed working-directory roots, and a quiet recipient. The normal launcher allows the current user's home directory, so local project folders are selectable without opening the rest of the filesystem. Set `MECHA_ROUTER_MANAGED_CWD_ROOTS` only when a different explicit scope is required. Its built-in fallback catalog uses `openai-codex/gpt-5.6-sol` and makes `openai-codex/gpt-6-astra` available for larger or more difficult tasks. The launcher creates the managed home and session directories with mode `0700`; it does not create tmux windows. Worker routes are locally unauthenticated direct controls for callers that can reach the router. They do not use a UI session, CSRF token, helper, Cursor extension, built UI, version pin, or content hash.
 
-## Shutdown ownership
+## Stop and restart inventory
 
-`tools/run_router.sh` only execs the `make ... run-router` chain. It does not install or stop a service. `cmd/mailbox-router/main.go` handles `SIGINT` and `SIGTERM` and calls `Router.Close`; `internal/transport/router.go` calls `Manager.Close`, which closes managed child RPC/processes. The external signal source is outside this repository, so issue #31's `SIGTERM` attribution remains unknown.
+The historical sender of the issue #31 `SIGTERM` is unknown.
 
-`router-proxy/main.go` can shut down the optional proxy HTTP server, but it does not stop the upstream router. There is no checked-in service definition or stop command. Checked-in `launchctl kickstart` usages are for start/recovery only.
+Production paths:
+
+| Path | Stop or restart behavior |
+|------|--------------------------|
+| `router-proxy/cmd/mailbox-router/main.go` | Handles `SIGINT` and `SIGTERM`, then calls `Router.Close`. |
+| `router-proxy/internal/transport/router.go` | `Router.Close` calls `Manager.Close`, which performs the durable managed-child shutdown. |
+| `router-proxy/cmd/managed-acceptance-router/main.go` | Acceptance-only router with the same signal-to-close behavior. It is not installed as a service. |
+| `router-proxy/main.go` | Handles signals for the optional reverse proxy and closes that proxy's HTTP server. It never stops or restarts the upstream router. |
+| `tools/run_router.sh` and `make -C router-proxy run-router` | Start the production router in the foreground. They contain no stop or restart action. |
+
+Process-level test and acceptance paths:
+
+| Path | Stop or restart behavior |
+|------|--------------------------|
+| `router-proxy/cmd/mailbox-router/main_test.go` | Sends `SIGTERM` to an isolated built router and reopens the same private database for ordering coverage. |
+| `web/router-ui-react/tests/support/isolated-go-router.mjs` | Owns `stopRouterProcess`, isolated-router restart, escalation, port checks, and task-root removal for tests. |
+| `web/router-ui-react/tests/functional/managed-go-router.mjs` | Uses `stopRouterProcess` to restart and close its functional-test router. |
+| `web/router-ui-react/tests/acceptance/bcb-runner.mjs` | Closes routers created by `isolated-go-router.mjs`; its local `stopChild` handles only task Vite, BCB, Chromium, and comparison processes. |
+| `web/router-ui-react/tests/acceptance/bcb-managed-rpc-release-runner.mjs` | Stops and replaces its isolated managed acceptance router. It can also stop that router during cleanup. |
+| `web/router-ui-react/tests/acceptance/bcb-managed-recovery-runner.mjs` and `managed-recovery-harness.mjs` | Send the measured `SIGTERM`, replace only that trial's router, enforce the absolute deadline, capture failure evidence, and clean isolated resources. |
+
+The following in-process transport test files call `Router.Close` on routers they construct: `connected_agent_snapshot_behavioral_test.go`, `delivery_coalescing_test.go`, `domain1_behavioral_functional_test.go`, `lifecycle_test.go`, `managed_disabled_test.go`, `managed_goal_evaluator_native_test.go`, `managed_history_retention_behavioral_test.go`, `managed_http_test.go`, `managed_inline_allowance_native_test.go`, `managed_launch_behavioral_functional_test.go`, `managed_launch_http_test.go`, `managed_launch_validation_behavioral_test.go`, `managed_native_test.go`, `managed_reset_native_test.go`, `managed_root_control_native_test.go`, `managed_termination_native_test.go`, `mixed_managed_legacy_behavioral_test.go`, `phase3a_composed_test.go`, `policy_test.go`, `reminder_lifecycle_behavioral_functional_test.go`, `root_adapters_behavioral_functional_test.go`, `startup_readiness_test.go`, `transport_test.go`, and `ui_live_test.go` under `router-proxy/internal/transport/`. They do not signal or restart an external router.
+
+There is no checked-in router service definition or service-manager stop command. The documented `launchctl kickstart gui/$UID/<label>` command starts or recovers a launchd job. The documented `launchctl kickstart -k gui/$UID/<label>` command is an explicit operator repair that may replace the job after a failed health check. Neither command identifies the historical signal sender. Ordinary operator shutdown is an OS `SIGINT` or `SIGTERM` delivered to the foreground `mailbox-router`; there is no repository wrapper for it.
 
 ## Build and run the proxy
 

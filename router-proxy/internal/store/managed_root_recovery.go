@@ -42,7 +42,8 @@ type ManagedRootRecoveryAction struct {
 	OldManifestHash, RecipeSHA256, TargetRuntimeGeneration                                                string
 	TargetProcessPID                                                                                      int
 	TargetProcessStartMarker, TargetProcessIncarnation, Stage, FailureCode, FailureMessage                string
-	UnexpectedExitCount                                                                                   int
+	UnexpectedExitCount, Version, OperatorOwnerEpoch                                                      int
+	OperatorOperationID, OperatorKind, OperatorStage, OperatorOwner, OperatorAgentUpdatedAt               string
 	CreatedAt, UpdatedAt, ExpiresAt                                                                       string
 }
 
@@ -782,7 +783,7 @@ func (s *Store) InterruptManagedGoalEvaluation(ctx context.Context, fence Manage
 func (s *Store) PruneManagedRootRecovery(ctx context.Context) (int, error) {
 	var removed int
 	err := s.runImmediate(ctx, func() error {
-		result, err := s.db.ExecContext(ctx, `DELETE FROM managed_root_recovery_actions WHERE stage IN ('ready','failed') AND expires_at IS NOT NULL AND expires_at <= ? AND target_process_pid IS NULL AND target_process_start_marker IS NULL AND target_process_incarnation IS NULL`, formatTimestamp(s.clock.Now()))
+		result, err := s.db.ExecContext(ctx, `DELETE FROM managed_root_recovery_actions WHERE stage IN ('ready','failed') AND expires_at IS NOT NULL AND expires_at <= ? AND target_process_pid IS NULL AND target_process_start_marker IS NULL AND target_process_incarnation IS NULL AND (operator_stage IS NULL OR operator_stage='terminal')`, formatTimestamp(s.clock.Now()))
 		if err != nil {
 			return err
 		}
@@ -798,7 +799,7 @@ func (s *Store) PruneManagedRootRecovery(ctx context.Context) (int, error) {
 	return removed, err
 }
 
-const managedRootRecoveryActionColumns = `action_id,agent_id,old_pi_session_id,old_session_epoch,old_process_pid,old_process_start_marker,old_process_incarnation,old_runtime_generation,old_manifest_revision,old_manifest_hash,recipe_sha256,target_runtime_generation,target_process_pid,target_process_start_marker,target_process_incarnation,stage,unexpected_exit_count,failure_code,failure_message,created_at,updated_at,expires_at`
+const managedRootRecoveryActionColumns = `action_id,agent_id,old_pi_session_id,old_session_epoch,old_process_pid,old_process_start_marker,old_process_incarnation,old_runtime_generation,old_manifest_revision,old_manifest_hash,recipe_sha256,target_runtime_generation,target_process_pid,target_process_start_marker,target_process_incarnation,stage,unexpected_exit_count,failure_code,failure_message,version,operator_operation_id,operator_kind,operator_stage,operator_owner,operator_owner_epoch,operator_agent_updated_at,created_at,updated_at,expires_at`
 
 func managedRootRecoveryActionForIDTx(ctx context.Context, db *sql.DB, actionID string) (*ManagedRootRecoveryAction, error) {
 	return managedRootRecoveryActionQuery(ctx, db, `WHERE action_id=?`, actionID)
@@ -806,15 +807,17 @@ func managedRootRecoveryActionForIDTx(ctx context.Context, db *sql.DB, actionID 
 
 func managedRootRecoveryActionQuery(ctx context.Context, db *sql.DB, suffix string, args ...any) (*ManagedRootRecoveryAction, error) {
 	var action ManagedRootRecoveryAction
-	var targetPID, unexpected sql.NullInt64
-	var targetMarker, targetIncarnation, failureCode, failureMessage, expires sql.NullString
-	err := db.QueryRowContext(ctx, `SELECT `+managedRootRecoveryActionColumns+` FROM managed_root_recovery_actions `+suffix, args...).Scan(&action.ActionID, &action.AgentID, &action.OldPiSessionID, &action.OldSessionEpoch, &action.OldProcessPID, &action.OldProcessStartMarker, &action.OldProcessIncarnation, &action.OldRuntimeGeneration, &action.OldManifestRevision, &action.OldManifestHash, &action.RecipeSHA256, &action.TargetRuntimeGeneration, &targetPID, &targetMarker, &targetIncarnation, &action.Stage, &unexpected, &failureCode, &failureMessage, &action.CreatedAt, &action.UpdatedAt, &expires)
+	var targetPID, unexpected, operatorOwnerEpoch sql.NullInt64
+	var targetMarker, targetIncarnation, failureCode, failureMessage, operatorOperationID, operatorKind, operatorStage, operatorOwner, operatorAgentUpdatedAt, expires sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT `+managedRootRecoveryActionColumns+` FROM managed_root_recovery_actions `+suffix, args...).Scan(&action.ActionID, &action.AgentID, &action.OldPiSessionID, &action.OldSessionEpoch, &action.OldProcessPID, &action.OldProcessStartMarker, &action.OldProcessIncarnation, &action.OldRuntimeGeneration, &action.OldManifestRevision, &action.OldManifestHash, &action.RecipeSHA256, &action.TargetRuntimeGeneration, &targetPID, &targetMarker, &targetIncarnation, &action.Stage, &unexpected, &failureCode, &failureMessage, &action.Version, &operatorOperationID, &operatorKind, &operatorStage, &operatorOwner, &operatorOwnerEpoch, &operatorAgentUpdatedAt, &action.CreatedAt, &action.UpdatedAt, &expires)
 	if err != nil {
 		return nil, err
 	}
 	action.TargetProcessPID = int(targetPID.Int64)
 	action.TargetProcessStartMarker, action.TargetProcessIncarnation = targetMarker.String, targetIncarnation.String
 	action.UnexpectedExitCount, action.FailureCode, action.FailureMessage, action.ExpiresAt = int(unexpected.Int64), failureCode.String, failureMessage.String, expires.String
+	action.OperatorOperationID, action.OperatorKind, action.OperatorStage, action.OperatorOwner = operatorOperationID.String, operatorKind.String, operatorStage.String, operatorOwner.String
+	action.OperatorOwnerEpoch, action.OperatorAgentUpdatedAt = int(operatorOwnerEpoch.Int64), operatorAgentUpdatedAt.String
 	return &action, nil
 }
 

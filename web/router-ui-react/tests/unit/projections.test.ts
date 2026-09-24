@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyLifecycleReplay, applyLifecycleSnapshot, projectConnectedAgents, upsertLifecycleAgent } from "../../src/state/agent-projection";
+import { applyLifecycleReplay, applyLifecycleSnapshot, mergeAgentSources, projectConnectedAgents, upsertLifecycleAgent } from "../../src/state/agent-projection";
 import type { Agent } from "../../src/state/agent-projection";
 import { createInitialState } from "../../src/state/app-state";
 import { reducer } from "../../src/state/reducer";
@@ -53,6 +53,32 @@ describe("agent projections", () => { it("uses connected agents as authority and
     expect(state.managedChildrenProjectionVersion).toBe(4);
     expect(state.managedChildren["managed-peer"]?.lifecycle_version).toBe(4);
   });
+  it("stamps accepted managed snapshots and deltas with per-row frame versions", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const alpha = managed("alpha");
+    const beta = managed("beta");
+    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 7, agents: [alpha, beta] });
+    expect(state.managedAgents?.map((candidate) => candidate.managedProjectionVersion)).toEqual([7, 7]);
+
+    state = reducer(state, { type: "managed/delta", scope, version: 8, baseVersion: 7, agent: { ...alpha, lifecycle_state: "ready", activity_state: "active" } });
+    expect(state.managedAgents?.find((candidate) => candidate.agent_id === "alpha")?.managedProjectionVersion).toBe(8);
+    expect(state.managedAgents?.find((candidate) => candidate.agent_id === "beta")?.managedProjectionVersion).toBe(7);
+    expect(mergeAgentSources([], state.managedAgents ?? [])[0]).toMatchObject({ managedProjectionVersion: 8 });
+
+    const equal = reducer(state, { type: "managed/delta", scope, version: 8, baseVersion: 8, agent: { ...alpha, lifecycle_state: "failed" } });
+    const stale = reducer(state, { type: "managed/delta", scope, version: 7, baseVersion: 6, agent: { ...alpha, lifecycle_state: "starting" } });
+    expect(equal).toBe(state);
+    expect(stale).toBe(state);
+  });
+  it("rejects stale and equal managed snapshots before they overwrite a row freshness fence", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const current = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 7, agents: [{ ...managed("alpha"), lifecycle_state: "ready" }] });
+    const equal = reducer(current, { type: "managed/snapshot", scope, version: 7, agents: [{ ...managed("alpha"), lifecycle_state: "failed" }] });
+    const stale = reducer(current, { type: "managed/snapshot", scope, version: 6, agents: [{ ...managed("alpha"), lifecycle_state: "starting" }] });
+    expect(equal).toBe(current);
+    expect(stale).toBe(current);
+    expect(current.managedAgents?.[0]).toMatchObject({ lifecycle_state: "ready", managedProjectionVersion: 7 });
+  });
   it("fences an absent-agent removal without touching other live rows or children", () => {
     const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
     const alpha = managed("alpha");
@@ -62,7 +88,7 @@ describe("agent projections", () => { it("uses connected agents as authority and
     state = reducer(state, { type: "managed/children", scope, version: 7, children: [{ agent_id: "alpha", source: "router-managed", lifecycle_version: 7, recovery_state: "current", children: [] }, { agent_id: "beta", source: "router-managed", lifecycle_version: 7, recovery_state: "current", children: [betaChild] }] });
     const absent = reducer(state, { type: "managed/removed", scope, version: 8, baseVersion: 7, agentId: "missing" });
     expect(absent.managedProjectionVersion).toBe(8);
-    expect(absent.managedAgents).toEqual([alpha, beta]);
+    expect(absent.managedAgents).toEqual([{ ...alpha, managedProjectionVersion: 7 }, { ...beta, managedProjectionVersion: 7 }]);
     expect(absent.managedChildren).toEqual(state.managedChildren);
     expect(reducer(state, { type: "managed/removed", scope, version: 9, baseVersion: 7, agentId: "missing" })).toBe(state);
     expect(reducer(state, { type: "managed/removed", scope, version: 9, baseVersion: 8, agentId: "missing" })).toBe(state);

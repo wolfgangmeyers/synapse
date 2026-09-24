@@ -700,7 +700,7 @@ function customMessages(events: JsonRecord[], customType: string): JsonRecord[] 
   });
 }
 
-test("locked Pi G4 persists deterministic root results through get_entry and preserves stock RPC behavior", { timeout: 45_000 }, async () => {
+test("locked Pi G4 persists deterministic root results and preserves stock RPC behavior", { timeout: 45_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "mecha-rpc-g4-"));
   mkdirSync(join(home, "tmp"), { recursive: true });
   const provider = await startHeldRootProvider();
@@ -716,9 +716,9 @@ test("locked Pi G4 persists deterministic root results through get_entry and pre
     const manifestHash = hashCanonicalJson(manifest);
     await bootstrapCurrentManifest(rpc, manifest, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174049");
 
-    const beforeRootAppend = await rpc.request({ type: "get_entry", entryId: rootEntryId });
-    successful(beforeRootAppend);
-    assert.deepEqual(beforeRootAppend.data, { entry: null });
+    const unsupportedEntryLookup = await rpc.request({ type: "get_entry", entryId: rootEntryId });
+    assert.equal(unsupportedEntryLookup.success, false, JSON.stringify(unsupportedEntryLookup));
+    assert.equal(recordsIn(join(home, "sessions")).some((entry) => entry.id === rootEntryId), false);
 
     const rootTurn = rpc.request({ type: "prompt", message: "Queue a managed root result." });
     const requestEvent = await waitFor(() => customMessages(rpc.events, "mecha.control.request.v1").at(-1), "root control request");
@@ -735,20 +735,16 @@ test("locked Pi G4 persists deterministic root results through get_entry and pre
     const appendDuringStream = rpc.request({ type: "prompt", message: `/mecha-control-result-v1 ${resultEnvelope}` });
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     assert.equal(rpc.events.filter((event) => event.type === "message_end" && event.entryId === rootEntryId).length, 0);
-    const beforeRelease = await rpc.request({ type: "get_entry", entryId: rootEntryId });
-    successful(beforeRelease);
-    assert.deepEqual(beforeRelease.data, { entry: null });
+    assert.equal(recordsIn(join(home, "sessions")).some((entry) => entry.id === rootEntryId), false);
 
     provider.release();
     successful(await appendDuringStream);
     successful(await rootTurn);
     assert.equal(provider.requests.length, 2, "the root tool call gets exactly one provider continuation before result append");
-    const rootLookup = await rpc.request({ type: "get_entry", entryId: rootEntryId });
-    successful(rootLookup);
-    const rootData = rootLookup.data;
-    assert.ok(rootData !== null && typeof rootData === "object" && !Array.isArray(rootData));
-    const rootEntry = (rootData as JsonRecord).entry;
-    assert.ok(rootEntry !== null && typeof rootEntry === "object" && !Array.isArray(rootEntry));
+    const rootEntry = await waitFor(
+      () => recordsIn(join(home, "sessions")).find((entry) => entry.id === rootEntryId),
+      "persisted root result",
+    );
     assert.deepEqual({
       type: (rootEntry as JsonRecord).type,
       id: (rootEntry as JsonRecord).id,
@@ -788,9 +784,7 @@ test("locked Pi G4 persists deterministic root results through get_entry and pre
       { mode: "duplicate", outcome: "already_present", rejected: false },
       { mode: "changed", outcome: undefined, rejected: true },
     ]);
-    const directLookup = await rpc.request({ type: "get_entry", entryId: directEntryId });
-    successful(directLookup);
-    assert.ok((directLookup.data as JsonRecord).entry !== null);
+    assert.ok(recordsIn(join(home, "sessions")).some((entry) => entry.id === directEntryId));
     assert.equal(rpc.events.filter((event) => event.type === "message_end" && event.entryId === directEntryId).length, 1);
 
     const sessionPath = sessionFileFromState(await rpc.request({ type: "get_state" }));
@@ -799,23 +793,22 @@ test("locked Pi G4 persists deterministic root results through get_entry and pre
       sessionPath,
       extensions: [EXTENSION, SUBAGENTS_EXTENSION, G4_EXPLICIT_ENTRY_ID_PROBE],
     });
-    const resumedLookup = await rpc.request({ type: "get_entry", entryId: rootEntryId });
-    successful(resumedLookup);
-    assert.deepEqual(resumedLookup.data, rootLookup.data);
-    successful(await rpc.request({ type: "get_state" }));
+    const resumedState = await rpc.request({ type: "get_state" });
+    successful(resumedState);
+    assert.equal(sessionFileFromState(resumedState), sessionPath);
+    assert.deepEqual(recordsIn(join(home, "sessions")).find((entry) => entry.id === rootEntryId), rootEntry);
     successful(await rpc.request({ type: "abort" }));
-    const entriesResponse = await rpc.request({ type: "get_entries" });
-    successful(entriesResponse);
-    assert.ok(Array.isArray((entriesResponse.data as JsonRecord).entries));
+    const unsupportedEntriesLookup = await rpc.request({ type: "get_entries" });
+    assert.equal(unsupportedEntriesLookup.success, false, JSON.stringify(unsupportedEntriesLookup));
 
     writeAcceptanceArtifact("pi-g4-lifecycle.json", {
       source_lock: PI_TARGET.sourceLock as unknown as JsonRecord,
       installed_pi_package_root: PI_TARGET.packageRoot,
       installed_pi_executable: PI_TARGET.bin,
       installed_pi_version: PI_TARGET.version,
-      get_entry_before_append: beforeRootAppend.data as JsonRecord,
-      get_entry_after_append: rootLookup.data as JsonRecord,
-      get_entry_after_resume: resumedLookup.data as JsonRecord,
+      absent_before_append: true,
+      persisted_after_append: rootEntry,
+      persisted_after_resume: recordsIn(join(home, "sessions")).find((entry) => entry.id === rootEntryId),
       root_entry_id: rootEntryId,
       direct_entry_id: directEntryId,
     });

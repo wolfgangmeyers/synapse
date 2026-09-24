@@ -32,21 +32,24 @@ const (
 // ManagedControlRequest is the immutable request/result ledger projection.
 // Callers receive a copy and must use fenced transition methods to change it.
 type ManagedControlRequest struct {
-	RequestID, ResultID, AgentID, ToolCallID, CapabilityID string
-	ToolName, DefinitionID, OperationID                    string
-	CanonicalArgumentsSHA256, RequestFingerprint           string
-	Fence                                                  ManagedRuntimeFence
-	State                                                  string
-	ResultStatus, ResultContent, ResultDetailsJSON         string
-	ResultPayloadSHA256, ResultEntryID                     string
-	DecodedPayloadBytes, AppendAttempt                     int
-	NextAppendAt, ReceivedAt                               string
-	HandlerOwner, HandlerStartedAt, HandlerDeadlineAt      string
-	SideEffectCommittedAt, HandlerCompletedAt              string
-	AppendOwner, AppendStartedAt, AppendWatermark          string
-	AppendSubmittedAt, ReceiptEntryIdentity                string
-	DeliveredAt, TerminalAt, ErrorCode, ErrorDetail        string
-	Retryable                                              bool
+	RequestID, ResultID, AgentID, ToolCallID, CapabilityID       string
+	ToolName, DefinitionID, OperationID                          string
+	CanonicalArgumentsSHA256, RequestFingerprint                 string
+	Fence                                                        ManagedRuntimeFence
+	State                                                        string
+	ResultStatus, ResultContent, ResultDetailsJSON               string
+	ResultPayloadSHA256, ResultEntryID                           string
+	DecodedPayloadBytes, AppendAttempt                           int
+	NextAppendAt, ReceivedAt                                     string
+	HandlerOwner, HandlerStartedAt, HandlerDeadlineAt            string
+	SideEffectCommittedAt, HandlerCompletedAt                    string
+	AppendOwner, AppendStartedAt, AppendWatermark                string
+	AppendSubmittedAt, ReceiptEntryIdentity                      string
+	DeliveryProtocol, DeliveryPayloadSHA256, ReconciliationState string
+	ReceiptID, ReceiptRuntimeGeneration, ReceiptManifestHash     string
+	ReceiptSessionEpoch                                          int64
+	ReceiptAt, DeliveredAt, TerminalAt, ErrorCode, ErrorDetail   string
+	Retryable                                                    bool
 }
 
 type ManagedControlHandlerClaim struct {
@@ -68,6 +71,7 @@ type ManagedControlAppendClaim struct {
 
 type ManagedControlReceipt struct {
 	RequestID, AppendOwner, EntryIdentity string
+	PayloadSHA256, ReceiptID              string
 	Attempt                               int
 	Fence                                 ManagedRuntimeFence
 }
@@ -137,12 +141,14 @@ func managedControlForTx(ctx context.Context, db *sql.DB, requestID string) (*Ma
 	var epoch, pid, revision int64
 	var decoded, attempt int
 	var retryable int
-	err := db.QueryRowContext(ctx, `SELECT request_id,result_id,agent_id,tool_call_id,capability_id,tool_name,definition_id,operation_id,canonical_arguments_sha256,request_fingerprint,state,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,COALESCE(result_status,''),COALESCE(result_content,''),COALESCE(result_details_json,''),COALESCE(result_payload_sha256,''),COALESCE(result_entry_id,''),COALESCE(decoded_payload_bytes,0),append_attempt,COALESCE(next_append_at,''),received_at,COALESCE(handler_owner,''),COALESCE(handler_started_at,''),COALESCE(handler_deadline_at,''),COALESCE(side_effect_committed_at,''),COALESCE(handler_completed_at,''),COALESCE(append_owner,''),COALESCE(append_started_at,''),COALESCE(append_watermark,''),COALESCE(append_submitted_at,''),COALESCE(receipt_entry_identity,''),COALESCE(delivered_at,''),COALESCE(terminal_at,''),COALESCE(error_code,''),COALESCE(error_detail,''),COALESCE(retryable,0) FROM managed_control_requests WHERE request_id=?`, requestID).Scan(
+	err := db.QueryRowContext(ctx, `SELECT request_id,result_id,agent_id,tool_call_id,capability_id,tool_name,definition_id,operation_id,canonical_arguments_sha256,request_fingerprint,state,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,COALESCE(result_status,''),COALESCE(result_content,''),COALESCE(result_details_json,''),COALESCE(result_payload_sha256,''),COALESCE(result_entry_id,''),COALESCE(decoded_payload_bytes,0),append_attempt,COALESCE(next_append_at,''),received_at,COALESCE(handler_owner,''),COALESCE(handler_started_at,''),COALESCE(handler_deadline_at,''),COALESCE(side_effect_committed_at,''),COALESCE(handler_completed_at,''),COALESCE(append_owner,''),COALESCE(append_started_at,''),COALESCE(append_watermark,''),COALESCE(append_submitted_at,''),COALESCE(receipt_entry_identity,''),COALESCE(delivery_protocol,''),COALESCE(delivery_payload_sha256,''),COALESCE(reconciliation_state,''),COALESCE(receipt_id,''),COALESCE(receipt_runtime_generation,''),COALESCE(receipt_session_epoch,0),COALESCE(receipt_manifest_hash,''),COALESCE(receipt_at,''),COALESCE(delivered_at,''),COALESCE(terminal_at,''),COALESCE(error_code,''),COALESCE(error_detail,''),COALESCE(retryable,0) FROM managed_control_requests WHERE request_id=?`, requestID).Scan(
 		&row.RequestID, &row.ResultID, &row.AgentID, &row.ToolCallID, &row.CapabilityID, &row.ToolName, &row.DefinitionID, &row.OperationID, &row.CanonicalArgumentsSHA256, &row.RequestFingerprint, &row.State,
 		&row.Fence.PiSessionID, &epoch, &pid, &row.Fence.ProcessStartMarker, &row.Fence.ProcessIncarnation, &row.Fence.RuntimeGeneration, &revision, &row.Fence.ManifestHash,
 		&row.ResultStatus, &row.ResultContent, &row.ResultDetailsJSON, &row.ResultPayloadSHA256, &row.ResultEntryID, &decoded, &attempt, &row.NextAppendAt, &row.ReceivedAt,
 		&row.HandlerOwner, &row.HandlerStartedAt, &row.HandlerDeadlineAt, &row.SideEffectCommittedAt, &row.HandlerCompletedAt,
-		&row.AppendOwner, &row.AppendStartedAt, &row.AppendWatermark, &row.AppendSubmittedAt, &row.ReceiptEntryIdentity, &row.DeliveredAt, &row.TerminalAt, &row.ErrorCode, &row.ErrorDetail, &retryable,
+		&row.AppendOwner, &row.AppendStartedAt, &row.AppendWatermark, &row.AppendSubmittedAt, &row.ReceiptEntryIdentity,
+		&row.DeliveryProtocol, &row.DeliveryPayloadSHA256, &row.ReconciliationState, &row.ReceiptID, &row.ReceiptRuntimeGeneration, &row.ReceiptSessionEpoch, &row.ReceiptManifestHash, &row.ReceiptAt,
+		&row.DeliveredAt, &row.TerminalAt, &row.ErrorCode, &row.ErrorDetail, &retryable,
 	)
 	if err != nil {
 		return nil, err
@@ -294,9 +300,9 @@ func (s *Store) CompleteManagedControl(ctx context.Context, requestID, owner str
 		}
 		entryID := "mcr1_" + strings.ReplaceAll(row.ResultID, "-", "")
 		now := formatTimestamp(s.clock.Now())
-		args := []any{value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, nullIfEmpty(value.ErrorCode), nullIfEmpty(value.ErrorMessage), now, requestID, owner, managedControlEffectCommitted}
+		args := []any{value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, nullIfEmpty(value.ErrorCode), nullIfEmpty(value.ErrorMessage), now, value.PayloadSHA256, requestID, owner, managedControlEffectCommitted}
 		args = append(args, managedControlFenceArgs(fence)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='completed',result_status=?,result_content=?,result_details_json=?,result_payload_sha256=?,decoded_payload_bytes=?,result_entry_id=?,error_code=?,error_detail=?,handler_completed_at=?,next_append_at=NULL WHERE request_id=? AND handler_owner=? AND state=? AND `+managedControlFenceWhere(), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='completed',result_status=?,result_content=?,result_details_json=?,result_payload_sha256=?,decoded_payload_bytes=?,result_entry_id=?,error_code=?,error_detail=?,handler_completed_at=?,next_append_at=NULL,delivery_protocol='stock_transcript_receipt_v2',delivery_payload_sha256=?,reconciliation_state='append_pending' WHERE request_id=? AND handler_owner=? AND state=? AND `+managedControlFenceWhere(), args...)
 		if err != nil {
 			return err
 		}
@@ -308,6 +314,7 @@ func (s *Store) CompleteManagedControl(ctx context.Context, requestID, owner str
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
 		row.State, row.ResultStatus, row.ResultContent, row.ResultDetailsJSON, row.ResultPayloadSHA256, row.DecodedPayloadBytes, row.ResultEntryID, row.ErrorCode, row.ErrorDetail, row.HandlerCompletedAt = managedControlCompleted, value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, value.ErrorCode, value.ErrorMessage, now
+		row.DeliveryProtocol, row.DeliveryPayloadSHA256, row.ReconciliationState = "stock_transcript_receipt_v2", value.PayloadSHA256, "append_pending"
 		completed = row
 		return nil
 	})
@@ -368,7 +375,7 @@ func (s *Store) MarkManagedControlAppendSubmitted(ctx context.Context, requestID
 		now := formatTimestamp(s.clock.Now())
 		args := []any{now, requestID, owner, attempt, managedControlAppendPending}
 		args = append(args, managedControlFenceArgs(fence)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='awaiting_append',append_submitted_at=? WHERE request_id=? AND append_owner=? AND append_attempt=? AND state=? AND `+managedControlFenceWhere(), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='awaiting_append',append_submitted_at=?,reconciliation_state='reconcile_pending' WHERE request_id=? AND append_owner=? AND append_attempt=? AND state=? AND `+managedControlFenceWhere(), args...)
 		if err != nil {
 			return err
 		}
@@ -384,7 +391,7 @@ func (s *Store) MarkManagedControlAppendSubmitted(ctx context.Context, requestID
 }
 
 func (s *Store) DeliverManagedControlReceipt(ctx context.Context, receipt ManagedControlReceipt) error {
-	if !managedCanonicalUUIDRE.MatchString(receipt.RequestID) || !managedCanonicalUUIDRE.MatchString(receipt.AppendOwner) || receipt.Attempt < 1 || receipt.Attempt > 5 || !isLifecycleText(receipt.EntryIdentity) || !validManagedRuntimeFence(receipt.Fence) {
+	if !managedCanonicalUUIDRE.MatchString(receipt.RequestID) || !managedCanonicalUUIDRE.MatchString(receipt.AppendOwner) || receipt.Attempt < 1 || receipt.Attempt > 5 || !isLifecycleText(receipt.EntryIdentity) || !isLifecycleText(receipt.ReceiptID) || !managedSHA256RE.MatchString(receipt.PayloadSHA256) || !validManagedRuntimeFence(receipt.Fence) {
 		return errors.New("managed control receipt is invalid")
 	}
 	return s.runImmediate(ctx, func() error {
@@ -392,13 +399,13 @@ func (s *Store) DeliverManagedControlReceipt(ctx context.Context, receipt Manage
 		if err != nil {
 			return err
 		}
-		if row.State != managedControlAwaitingAppend || row.AppendOwner != receipt.AppendOwner || row.AppendAttempt != receipt.Attempt || !sameManagedControlFence(row.Fence, receipt.Fence) {
+		if row.State != managedControlAwaitingAppend || row.ReconciliationState != "reconcile_pending" || row.DeliveryProtocol != "stock_transcript_receipt_v2" || row.DeliveryPayloadSHA256 != receipt.PayloadSHA256 || row.ResultPayloadSHA256 != receipt.PayloadSHA256 || row.AppendOwner != receipt.AppendOwner || row.AppendAttempt != receipt.Attempt || !sameManagedControlFence(row.Fence, receipt.Fence) {
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
 		now := formatTimestamp(s.clock.Now())
-		args := []any{receipt.EntryIdentity, now, now, receipt.RequestID, receipt.AppendOwner, receipt.Attempt, managedControlAwaitingAppend}
+		args := []any{receipt.EntryIdentity, receipt.ReceiptID, receipt.Fence.RuntimeGeneration, receipt.Fence.SessionEpoch, receipt.Fence.ManifestHash, now, now, now, receipt.RequestID, receipt.AppendOwner, receipt.Attempt, managedControlAwaitingAppend, "reconcile_pending", "stock_transcript_receipt_v2", receipt.PayloadSHA256}
 		args = append(args, managedControlFenceArgs(receipt.Fence)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='delivered',receipt_entry_identity=?,delivered_at=?,terminal_at=?,retryable=0,next_append_at=NULL WHERE request_id=? AND append_owner=? AND append_attempt=? AND state=? AND `+managedControlFenceWhere(), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='delivered',reconciliation_state='delivered',receipt_entry_identity=?,receipt_id=?,receipt_runtime_generation=?,receipt_session_epoch=?,receipt_manifest_hash=?,receipt_at=?,delivered_at=?,terminal_at=?,retryable=0,next_append_at=NULL WHERE request_id=? AND append_owner=? AND append_attempt=? AND state=? AND reconciliation_state=? AND delivery_protocol=? AND delivery_payload_sha256=? AND `+managedControlFenceWhere(), args...)
 		if err != nil {
 			return err
 		}
@@ -509,9 +516,9 @@ func (s *Store) FailManagedControlWithResult(ctx context.Context, requestID, own
 		}
 		entryID := "mcr1_" + strings.ReplaceAll(row.ResultID, "-", "")
 		now := formatTimestamp(s.clock.Now())
-		args := []any{value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, now, value.ErrorCode, value.ErrorMessage, now, requestID, owner}
+		args := []any{value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, now, value.ErrorCode, value.ErrorMessage, now, value.PayloadSHA256, requestID, owner}
 		args = append(args, managedControlFenceArgs(fence)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='failed',result_status=?,result_content=?,result_details_json=?,result_payload_sha256=?,decoded_payload_bytes=?,result_entry_id=?,terminal_at=?,error_code=?,error_detail=?,handler_completed_at=?,retryable=0,next_append_at=NULL WHERE request_id=? AND handler_owner=? AND state IN ('executing','side_effect_committed') AND `+managedControlFenceWhere(), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='failed',result_status=?,result_content=?,result_details_json=?,result_payload_sha256=?,decoded_payload_bytes=?,result_entry_id=?,terminal_at=?,error_code=?,error_detail=?,handler_completed_at=?,retryable=0,next_append_at=NULL,delivery_protocol='stock_transcript_receipt_v2',delivery_payload_sha256=?,reconciliation_state='append_pending' WHERE request_id=? AND handler_owner=? AND state IN ('executing','side_effect_committed') AND `+managedControlFenceWhere(), args...)
 		if err != nil {
 			return err
 		}
@@ -523,6 +530,7 @@ func (s *Store) FailManagedControlWithResult(ctx context.Context, requestID, own
 			return &ManagedControlStaleError{AgentID: row.AgentID}
 		}
 		row.State, row.ResultStatus, row.ResultContent, row.ResultDetailsJSON, row.ResultPayloadSHA256, row.DecodedPayloadBytes, row.ResultEntryID, row.ErrorCode, row.ErrorDetail, row.HandlerCompletedAt, row.TerminalAt, row.Retryable = managedControlFailed, value.Status, value.Content, value.DetailsJSON, value.PayloadSHA256, value.DecodedPayloadBytes, entryID, value.ErrorCode, value.ErrorMessage, now, now, false
+		row.DeliveryProtocol, row.DeliveryPayloadSHA256, row.ReconciliationState = "stock_transcript_receipt_v2", value.PayloadSHA256, "append_pending"
 		failed = row
 		if _, err = s.pruneManagedControlTerminalTx(ctx, row.AgentID, s.clock.Now()); err != nil {
 			return err

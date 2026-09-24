@@ -981,7 +981,7 @@ func normalizeParentActivityEvent(event map[string]any, sequence uint64) (map[st
 	switch event["type"] {
 	case "agent_start":
 		return map[string]any{"sequence": int64(sequence), "state": "active"}, nil
-	case "agent_settled":
+	case "agent_settled", "agent_end":
 		return map[string]any{"sequence": int64(sequence), "state": "idle"}, nil
 	default:
 		return nil, errors.New("parent activity event is invalid")

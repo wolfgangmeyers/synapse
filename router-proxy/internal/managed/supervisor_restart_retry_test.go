@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -138,6 +139,111 @@ func TestTerminateEscapesFailedRestartTargetOnlyAfterSafeAbsence(t *testing.T) {
 			require.Nil(t, action.SourceFence, "termination after failed target cleanup must not carry the old source")
 		})
 	}
+}
+
+func prepareFailedRootRecoveryOperatorTest(t *testing.T, state ProcessProbeState) (*Manager, *store.Store, store.ManagedAgentRecord, *coldRecoveryOps) {
+	t.Helper()
+	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: state, 902: ProcessOwned}}
+	manager, durable, agent, tracked, _ := setupColdRecovery(t, nil, nil, ops, nil, nil)
+	stored, err := durable.ManagedAgent(context.Background(), agent.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.LaunchRecipe)
+	action, _, err := durable.ClaimManagedRootRecovery(context.Background(), agent.AgentID, storedAgentFence(stored), stored.LaunchRecipe.SHA256, "failed-target-generation")
+	require.NoError(t, err)
+	require.NoError(t, durable.FailManagedRootRecovery(context.Background(), action.ActionID, "ORPHAN_IDENTITY_UNSAFE", "retained process identity was unsafe"))
+	require.NoError(t, durable.MarkManagedFailedForFence(context.Background(), storedAgentFence(stored), "ORPHAN_IDENTITY_UNSAFE", "retained process identity was unsafe"))
+	return manager, durable, agent, tracked
+}
+
+func TestFailedRootRecoveryRetryReservesExactVersionAndCanonicalRequestIdempotently(t *testing.T) {
+	manager, durable, agent, _ := prepareFailedRootRecoveryOperatorTest(t, ProcessAbsent)
+	request := RestartRequest{AgentID: agent.AgentID, Method: "POST", CanonicalPath: "/v1/managed-agents/" + agent.AgentID + "/restart", RequestID: "123e4567-e89b-42d3-a456-000000000101", CanonicalBodyHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	first, err := manager.ReserveRestart(context.Background(), request)
+	require.NoError(t, err)
+	require.False(t, first.Replayed)
+	require.Eventually(t, func() bool {
+		op, readErr := durable.FindManagedOperation(context.Background(), request.Method, request.RequestID)
+		current, agentErr := durable.ManagedAgent(context.Background(), agent.AgentID)
+		return readErr == nil && op.State == "terminal" && agentErr == nil && current.LifecycleState == "running" && current.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+
+	replayed, err := manager.ReserveRestart(context.Background(), request)
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+	conflict := request
+	conflict.CanonicalBodyHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	_, err = manager.ReserveRestart(context.Background(), conflict)
+	var idempotency *store.ManagedIdempotencyConflictError
+	require.ErrorAs(t, err, &idempotency)
+}
+
+func TestFailedRootRecoveryRetryAdoptsCurrentRecipeOnlyAfterAbsenceOrExactOwnership(t *testing.T) {
+	for _, state := range []ProcessProbeState{ProcessAbsent, ProcessOwned, ProcessMismatch, ProcessUnknown, ProcessPresent} {
+		t.Run(string(state), func(t *testing.T) {
+			manager, durable, agent, tracked := prepareFailedRootRecoveryOperatorTest(t, state)
+			manager.config.TestOnlyExtensions = []string{"/current/operator-retry.ts"}
+			request := RestartRequest{AgentID: agent.AgentID, Method: "POST", CanonicalPath: "/v1/managed-agents/" + agent.AgentID + "/restart", RequestID: "123e4567-e89b-42d3-a456-000000000102", CanonicalBodyHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+			_, err := manager.ReserveRestart(context.Background(), request)
+			if state == ProcessMismatch || state == ProcessUnknown || state == ProcessPresent {
+				require.Error(t, err)
+				tracked.mu.Lock()
+				require.Empty(t, tracked.signals)
+				tracked.mu.Unlock()
+				stored, readErr := durable.ManagedAgent(context.Background(), agent.AgentID)
+				require.NoError(t, readErr)
+				require.Equal(t, "failed", stored.LifecycleState)
+				return
+			}
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				stored, readErr := durable.ManagedAgent(context.Background(), agent.AgentID)
+				return readErr == nil && stored.LifecycleState == "running"
+			}, time.Second, time.Millisecond)
+			recipe, readErr := durable.ManagedLaunchRecipe(context.Background(), agent.AgentID)
+			require.NoError(t, readErr)
+			require.Equal(t, []string{"/current/operator-retry.ts"}, recipe.TestOnlyExtensions)
+		})
+	}
+}
+
+func TestFailedRootRecoveryReservationResumesAfterOwnerLoss(t *testing.T) {
+	manager, durable, agent, _ := prepareFailedRootRecoveryOperatorTest(t, ProcessAbsent)
+	failed, err := durable.LatestRetryableManagedRootRecovery(context.Background(), agent.AgentID)
+	require.NoError(t, err)
+	requestID := "123e4567-e89b-42d3-a456-000000000104"
+	operation := store.ManagedOperation{OperationID: requestID, Method: "POST", CanonicalPath: "/v1/managed-agents/" + agent.AgentID + "/restart", RequestID: requestID, CanonicalBodyHash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	_, err = durable.ReserveManagedRootRecoveryOperator(context.Background(), store.ManagedRootRecoveryOperatorReservation{ActionID: failed.ActionID, ExpectedVersion: failed.Version, Kind: "retry", Owner: "lost-router-owner", Operation: operation})
+	require.NoError(t, err)
+
+	require.NoError(t, manager.RecoverManagedRootRecoveryOperators(context.Background()))
+	require.Eventually(t, func() bool {
+		op, operationErr := durable.FindManagedOperation(context.Background(), operation.Method, requestID)
+		current, agentErr := durable.ManagedAgent(context.Background(), agent.AgentID)
+		return operationErr == nil && op.State == "terminal" && agentErr == nil && current.LifecycleState == "running"
+	}, time.Second, time.Millisecond)
+	resumed, err := durable.ManagedRootRecoveryActionByID(context.Background(), failed.ActionID)
+	require.NoError(t, err)
+	require.Equal(t, "terminal", resumed.OperatorStage)
+	require.Greater(t, resumed.OperatorOwnerEpoch, 1)
+}
+
+func TestFailedRootRecoveryTerminationGatesAliasUntilCleanupCompletes(t *testing.T) {
+	manager, durable, agent, _ := prepareFailedRootRecoveryOperatorTest(t, ProcessMismatch)
+	failed, err := durable.LatestRetryableManagedRootRecovery(context.Background(), agent.AgentID)
+	require.NoError(t, err)
+	requestID := "123e4567-e89b-42d3-a456-000000000105"
+	operation := store.ManagedOperation{OperationID: requestID, Method: "DELETE", CanonicalPath: "/v1/managed-agents/" + agent.AgentID, RequestID: requestID, CanonicalBodyHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	_, err = durable.ReserveManagedRootRecoveryOperator(context.Background(), store.ManagedRootRecoveryOperatorReservation{ActionID: failed.ActionID, ExpectedVersion: failed.Version, Kind: "terminate", Owner: "lost-router-owner", Operation: operation})
+	require.NoError(t, err)
+
+	_, err = manager.Launch(context.Background(), LaunchRequest{Name: agent.Name, Cwd: agent.Cwd, RequestID: "123e4567-e89b-42d3-a456-000000000106"})
+	var nameConflict *store.ManagedNameConflictError
+	require.ErrorAs(t, err, &nameConflict)
+	require.NoError(t, manager.RecoverManagedRootRecoveryOperators(context.Background()))
+	_, err = durable.ManagedAgent(context.Background(), agent.AgentID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	_, err = manager.Launch(context.Background(), LaunchRequest{Name: agent.Name, Cwd: agent.Cwd, RequestID: "123e4567-e89b-42d3-a456-000000000107"})
+	require.NoError(t, err)
 }
 
 func TestRestartFailedUnboundRetryFailsClosedForMismatchAndUnknown(t *testing.T) {

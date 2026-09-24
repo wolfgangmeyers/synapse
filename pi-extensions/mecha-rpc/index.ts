@@ -18,6 +18,7 @@ import {
   validateChildSnapshotEnvelope,
   validateControlResultPayload,
   validateMailboxDeliverEnvelope,
+  validateMailboxReconcileEnvelope,
   validatePolicyApplyEnvelope,
 } from "./protocol.js";
 import {
@@ -35,6 +36,7 @@ type CommandContext = {
   sessionManager?: {
     getSessionId?: () => string | undefined;
     getHeader?: () => { parentSession?: unknown } | null | undefined;
+    getEntries?: () => readonly unknown[];
   };
   ui?: { notify?: (message: string, level?: string) => void };
 };
@@ -66,6 +68,18 @@ const FIXED_SUBAGENTS_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_su
 // they execute locally; the existing tool_call policy guards mutations.
 const FIXED_MANAGED_CODING_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
 const MAX_INSTALL_DELIVERY_RECEIPTS = 128;
+const MAX_CONTROL_RESULT_TRANSCRIPT_ENTRIES = 256;
+const MAX_CONTROL_RESULT_TRANSCRIPT_BYTES = 1024 * 1024;
+
+function writeAcceptanceManagedRecoveryCompletion(payload: JsonRecord): void {
+  const path = process.env.MECHA_MANAGED_RECOVERY_COMPLETION_FILE;
+  if (path === undefined || path.length === 0) return;
+  try {
+    writeFileSync(path, JSON.stringify(payload), { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch {
+    // The acceptance authority treats a missing or invalid signal as failure.
+  }
+}
 
 // These hooks exist only while the installed-Pi S4 fixture is enabled. They
 // expose no production command or message type: the fixture uses them to drive
@@ -231,6 +245,49 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   if (typeof generation !== "string" || !UUID.test(generation) || typeof epoch !== "number" || !Number.isSafeInteger(epoch) || epoch < 1) throw new TypeError("Managed runtime identity is invalid");
   let acceptedHash: string | undefined;
   const rootPendingRequestIds = new Set<string>();
+  const boundedTranscriptEntries = (context: CommandContext): readonly unknown[] => {
+    const entries = context.sessionManager?.getEntries?.();
+    if (!Array.isArray(entries)) throw new TypeError("Managed transcript is unavailable.");
+    if (entries.length > MAX_CONTROL_RESULT_TRANSCRIPT_ENTRIES) throw new TypeError("Managed transcript exceeds the reconciliation entry limit.");
+    let bytes = 0;
+    for (const entry of entries) {
+      bytes += Buffer.byteLength(JSON.stringify(entry), "utf8");
+      if (bytes > MAX_CONTROL_RESULT_TRANSCRIPT_BYTES) throw new TypeError("Managed transcript exceeds the reconciliation byte limit.");
+    }
+    return entries;
+  };
+  const pendingRootControlResults = new Map<string, { payload: JsonRecord; payloadHash: string }>();
+  const retainPendingRootControlResult = (requestId: string, payload: JsonRecord): { payload: JsonRecord; payloadHash: string } => {
+    const payloadHash = hashCanonicalJson(payload);
+    const existing = pendingRootControlResults.get(requestId);
+    if (existing !== undefined) {
+      if (existing.payloadHash !== payloadHash) throw new TypeError("Control result replay payload mismatch.");
+      return existing;
+    }
+    while (pendingRootControlResults.size >= 512) {
+      const oldest = pendingRootControlResults.keys().next().value;
+      if (typeof oldest !== "string") break;
+      pendingRootControlResults.delete(oldest);
+    }
+    const retained = { payload: structuredClone(payload), payloadHash };
+    pendingRootControlResults.set(requestId, retained);
+    return retained;
+  };
+  const readRootControlResult = (context: CommandContext, expected: { payload: JsonRecord; payloadHash: string }): 0 | 1 => {
+    let exact = 0;
+    for (const value of boundedTranscriptEntries(context)) {
+      if (!isUnknownRecord(value) || (value.type !== "custom_message" && value.type !== "custom")
+        || value.customType !== "mecha.control.result.v1" || !isRecord(value.details)) continue;
+      const details = value.details;
+      if (details.request_id !== expected.payload.request_id && details.result_id !== expected.payload.result_id) continue;
+      if (typeof value.content !== "string") throw new TypeError("Control result transcript payload mismatch.");
+      const candidate: JsonRecord = { ...details, content: value.content };
+      if (hashCanonicalJson(candidate) !== expected.payloadHash) throw new TypeError("Control result transcript payload mismatch.");
+      exact += 1;
+    }
+    if (exact > 1) throw new TypeError("Duplicate control result transcript entries.");
+    return exact === 1 ? 1 : 0;
+  };
   const nativeRootControlTestEnabled = process.env.MECHA_RPC_TEST_ROOT_CONTROL_PROBE === "1";
   const nativeRootControlHoldFirstEmission = process.env.MECHA_RPC_TEST_ROOT_CONTROL_HOLD_FIRST_EMISSION === "1";
   let nativeRootControlNextOrdinal = 0;
@@ -689,10 +746,18 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       const payload = validateControlResultPayload(decodeHiddenEnvelope(argumentsText));
       requireControlResultRuntime(payload, generation, epoch, acceptedHash);
       if (childBridge.hasPendingRequest(context, payload.request_id)) return childBridge.appendControlResult(context, payload);
-      if (!rootPendingRequestIds.has(payload.request_id)) throw new TypeError("STALE_CHILD_CONTEXT");
+      const wasPending = rootPendingRequestIds.has(payload.request_id);
+      if (!wasPending && !pendingRootControlResults.has(payload.request_id)) throw new TypeError("STALE_CHILD_CONTEXT");
+      const retained = retainPendingRootControlResult(payload.request_id, payload);
+      const persisted = readRootControlResult(context, retained);
+      if (persisted === 1) {
+        rootPendingRequestIds.delete(payload.request_id);
+        return { kind: "already_present", result_id: payload.result_id };
+      }
+      if (!wasPending) throw new TypeError("Control result persistence is not proven.");
       const nativeRecord = nativeRootControlRecords.get(payload.request_id);
       if (nativeRecord !== undefined) {
-        nativeRecord.pendingBeforeResult = rootPendingRequestIds.has(payload.request_id);
+        nativeRecord.pendingBeforeResult = true;
         nativeRecord.sendResolvedBeforeResult = nativeRecord.sendResolved;
         publishNativeRootControlObservation();
       }
@@ -707,30 +772,54 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         details: payload.details,
         ...(payload.error === undefined ? {} : { error: payload.error }),
       };
-      const entryId = `mcr1_${payload.result_id.replaceAll("-", "")}`;
-      // The result is a deferred hidden append while the root turn is active.
-      // Pi flushes it after the tool-result continuation, preserving the exact
-      // entry ID without starting a second model turn.
-      const outcome = await sendHiddenCustomMessageWithEntryId(
-        pi,
-        "mecha.control.result.v1",
-        payload.content,
-        details,
-        entryId,
-      );
-      if (outcome.entryId !== entryId) throw new TypeError("Explicit control-result entry ID mismatch.");
+      await sendHiddenCustomMessage(pi, "mecha.control.result.v1", payload.content, details, { triggerTurn: false });
       if (nativeRecord !== undefined) {
-        nativeRecord.appendOutcome = outcome.kind;
+        nativeRecord.appendOutcome = "accepted";
         nativeRecord.resultContent = payload.content;
         nativeRecord.resultDetails = structuredClone(details);
-        nativeRecord.resultEntryId = entryId;
       }
       rootPendingRequestIds.delete(payload.request_id);
       if (nativeRecord !== undefined) {
-        nativeRecord.pendingAfterAppend = rootPendingRequestIds.has(payload.request_id);
+        nativeRecord.pendingAfterAppend = false;
         publishNativeRootControlObservation();
       }
-      return { kind: outcome.kind, result_id: payload.result_id };
+      return { kind: "accepted", result_id: payload.result_id };
+    },
+  });
+
+  queueCommand("mecha-control-result-reconcile-v1", {
+    description: "Reconcile a root control result against the bounded session transcript.",
+    async handler(argumentsText, context) {
+      const envelope = decodeHiddenEnvelope(argumentsText);
+      const keys = Object.keys(envelope).sort();
+      const expectedKeys = ["manifest_sha256", "payload_hash", "protocol", "request_id", "result_id", "runtime_generation", "session_epoch"].sort();
+      if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])
+        || envelope.protocol !== "mecha.control-result-reconcile/v1"
+        || typeof envelope.request_id !== "string" || !UUID.test(envelope.request_id)
+        || typeof envelope.result_id !== "string" || !UUID.test(envelope.result_id)
+        || typeof envelope.payload_hash !== "string" || !/^[0-9a-f]{64}$/i.test(envelope.payload_hash)) {
+        throw new TypeError("Invalid control result reconciliation envelope.");
+      }
+      requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
+      const retained = pendingRootControlResults.get(envelope.request_id);
+      if (retained === undefined || retained.payload.result_id !== envelope.result_id
+        || retained.payloadHash !== envelope.payload_hash
+        || retained.payload.runtime_generation !== envelope.runtime_generation
+        || retained.payload.target_session_epoch !== envelope.session_epoch
+        || retained.payload.manifest_sha256 !== envelope.manifest_sha256) {
+        throw new TypeError("Control result reconciliation mismatch.");
+      }
+      if (readRootControlResult(context, retained) !== 1) throw new TypeError("Control result persistence is not proven.");
+      return {
+        protocol: "mecha.control.result.persisted.v1",
+        receipt_id: `mcrr1_${hashCanonicalJson(envelope)}`,
+        request_id: envelope.request_id,
+        result_id: envelope.result_id,
+        payload_hash: envelope.payload_hash,
+        runtime_generation: generation,
+        session_epoch: epoch,
+        manifest_sha256: acceptedHash,
+      };
     },
   });
 
@@ -742,8 +831,42 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       if (typeof envelope.content !== "string" || typeof envelope.message_id !== "string") throw new TypeError("INVALID_ENVELOPE");
       await sendHiddenCustomMessage(pi, "mecha.mailbox.appended.v1", envelope.content, {
         protocol: "mecha.mailbox/v1", message_id: envelope.message_id, runtime_generation: generation, session_epoch: epoch,
+        manifest_sha256: envelope.manifest_sha256,
       }, { deliverAs: "followUp", triggerTurn: true });
       return { appended: true };
+    },
+  });
+
+  queueCommand("mecha-mailbox-reconcile-v1", {
+    description: "Reconcile one direct mailbox delivery against the bounded session transcript.",
+    async handler(argumentsText, context) {
+      const envelope = validateMailboxReconcileEnvelope(decodeHiddenEnvelope(argumentsText));
+      requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
+      let exact = 0;
+      for (const value of boundedTranscriptEntries(context)) {
+        if (!isUnknownRecord(value) || (value.type !== "custom_message" && value.type !== "custom")
+          || value.customType !== "mecha.mailbox.appended.v1" || !isRecord(value.details)) continue;
+        const details = value.details;
+        if (details.message_id !== envelope.message_id) continue;
+        const keys = Object.keys(details).sort();
+        const expected = ["manifest_sha256", "message_id", "protocol", "runtime_generation", "session_epoch"].sort();
+        if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])
+          || details.protocol !== "mecha.mailbox/v1" || value.display !== false || value.content !== envelope.content
+          || details.runtime_generation !== envelope.runtime_generation || details.session_epoch !== envelope.session_epoch
+          || details.manifest_sha256 !== envelope.manifest_sha256) {
+          throw new TypeError("Mailbox transcript receipt mismatch.");
+        }
+        exact += 1;
+      }
+      if (exact !== 1) throw new TypeError(exact === 0 ? "Mailbox transcript receipt is absent." : "Duplicate mailbox transcript receipts.");
+      return {
+        protocol: "mecha.mailbox.appended.persisted.v1",
+        receipt_id: `mmrr1_${hashCanonicalJson(envelope)}`,
+        message_id: envelope.message_id,
+        runtime_generation: generation,
+        session_epoch: epoch,
+        manifest_sha256: acceptedHash,
+      };
     },
   });
 
@@ -917,7 +1040,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
           });
         }
       }
-      // The acceptance matrix includes the commit fence after all 15 command
+      // The acceptance matrix includes the commit fence after all 16 command
       // writes. This test-only position proves a runtime cannot escape after a
       // complete-looking but uncommitted registry update.
       if (forcedCommandRegistrationFailureAt === commands.length + 1) {
@@ -1014,6 +1137,23 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   pi.on("agent_start", () => {
     const evaluator = goalEvaluationTurn;
     if (evaluator !== undefined && evaluator.phase === "armed" && isCurrentGoalEvaluationTurn(evaluator)) evaluator.phase = "running";
+  });
+  pi.on("agent_end", (_event, context) => {
+    const trialId = process.env.MECHA_ACCEPTANCE_TRIAL_ID;
+    const token = process.env.MECHA_MANAGED_RECOVERY_TOKEN;
+    if (trialId === undefined || trialId.length === 0 || token === undefined || token.length === 0) return;
+    const sessionId = sessionIdFromContext(context);
+    if (sessionId === undefined) return;
+    // Pi emits native idle after extension handlers return. Defer the private
+    // acceptance signal until that frame has been written.
+    setImmediate(() => {
+      writeAcceptanceManagedRecoveryCompletion({
+        event: "managed_recovery_complete",
+        trial_id: trialId,
+        token,
+        pi_session_id: sessionId,
+      });
+    });
   });
   pi.on("message_end", (event) => {
     const evaluator = goalEvaluationTurn;

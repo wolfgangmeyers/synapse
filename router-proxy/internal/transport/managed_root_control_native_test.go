@@ -233,8 +233,8 @@ func (r *nativeRootActivityRPC) ArmRootControlResult(requestID, entryID string) 
 func (r *nativeRootActivityRPC) SubmitRootControlResult(ctx context.Context, token managed.RootControlAppendToken, payload map[string]any) (<-chan managed.RootControlResultReceipt, error) {
 	return r.RPC.(managed.RootControlRPC).SubmitRootControlResult(ctx, token, payload)
 }
-func (r *nativeRootActivityRPC) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
-	return r.RPC.(managed.RootControlRPC).GetRootControlEntry(ctx, entryID)
+func (r *nativeRootActivityRPC) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (managed.RootControlPersistedReceipt, error) {
+	return r.RPC.(managed.RootControlRPC).ReconcileRootControlResult(ctx, payload)
 }
 func (r *nativeRootActivityRPC) SettlePreparedRestartTurn(ctx context.Context, fence store.ManagedRuntimeFence) error {
 	return r.RPC.(managed.RestartTurnSettler).SettlePreparedRestartTurn(ctx, fence)
@@ -496,9 +496,7 @@ func TestManagedRootControlInstalledPi(t *testing.T) {
 	require.Zero(t, handlerExecutions.Load(), "reset recovery must not replay the manager-owned goal handler")
 	replacement := rpcFactory.latestRPC(t)
 	require.NotSame(t, replacement, nil)
-	oldEntry, err := replacement.GetRootControlEntry(ctx, "mcr1_"+strings.ReplaceAll(resetRow.ResultID, "-", ""))
-	require.NoError(t, err)
-	require.Nil(t, oldEntry, "the replacement session must not receive the cancelled old-fence result")
+	require.Equal(t, "cancelled", cancelled.State, "the replacement session must not reconcile the cancelled old-fence result")
 	require.GreaterOrEqual(t, provider.sequence.Load(), int64(4), "the provider mock must cover both normal agent turns")
 
 	// Keep the artifact bound to the exact checked-out candidate and the locked
@@ -516,7 +514,7 @@ func TestManagedRootControlInstalledPi(t *testing.T) {
 		_, writeErr := fmt.Fprintf(candidateHash, "%s\x00%s\n", relative, hex.EncodeToString(sum[:]))
 		require.NoError(t, writeErr)
 	}
-	artifact := map[string]any{"protocol": "mecha.phase2.root-control-s4/v2", "result": "pass", "mecha_base_head": commandOutput(t, root, "git", "rev-parse", "HEAD"), "mecha_base_tree": commandOutput(t, root, "git", "rev-parse", "HEAD^{tree}"), "candidate_content_sha256": hex.EncodeToString(candidateHash.Sum(nil)), "candidate_paths": managedRootControlCandidatePaths, "locked_pi": map[string]any{"executable_sha256": lockedPi.executableSHA256, "source_commit": lockedPi.sourceCommit, "source_tree": lockedPi.sourceTree, "pi_packages_commit": lockedPi.piPackagesCommit, "pi_packages_tree": lockedPi.piPackagesTree}, "assertions": map[string]bool{"provider_mock_used": true, "normal_turn_settled": lastSequence > 0, "queued_root_result": true, "old_fence_cancelled": cancelled.State == "cancelled", "handler_effects_zero": handlerExecutions.Load() == 0, "entry_unique": rows[0].ResultEntryID != rows[1].ResultEntryID, "replacement_old_entry_absent": oldEntry == nil}}
+	artifact := map[string]any{"protocol": "mecha.phase2.root-control-s4/v2", "result": "pass", "mecha_base_head": commandOutput(t, root, "git", "rev-parse", "HEAD"), "mecha_base_tree": commandOutput(t, root, "git", "rev-parse", "HEAD^{tree}"), "candidate_content_sha256": hex.EncodeToString(candidateHash.Sum(nil)), "candidate_paths": managedRootControlCandidatePaths, "locked_pi": map[string]any{"executable_sha256": lockedPi.executableSHA256, "source_commit": lockedPi.sourceCommit, "source_tree": lockedPi.sourceTree, "pi_packages_commit": lockedPi.piPackagesCommit, "pi_packages_tree": lockedPi.piPackagesTree}, "assertions": map[string]bool{"provider_mock_used": true, "normal_turn_settled": lastSequence > 0, "queued_root_result": true, "old_fence_cancelled": cancelled.State == "cancelled", "handler_effects_zero": handlerExecutions.Load() == 0, "entry_unique": rows[0].ResultEntryID != rows[1].ResultEntryID, "replacement_cancelled_result_absent": cancelled.State == "cancelled"}}
 	encoded, err := json.MarshalIndent(artifact, "", "  ")
 	require.NoError(t, err)
 	artifactPath := filepath.Join("/tmp", "mecha-rpc-acceptance", commandOutput(t, root, "git", "rev-parse", "HEAD"), "phase2-root-control-s4", "root-control-s4-v2.json")

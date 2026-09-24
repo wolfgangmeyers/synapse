@@ -61,7 +61,6 @@ func TestManagedDirectRPCComposedBehavioralGate(t *testing.T) {
 	process := &composedRPCProcess{identity: ProcessIdentity{PID: 1701, StartMarker: "start", Incarnation: "incarnation"}, stdin: stdinWriter, stdout: stdoutReader, done: make(chan struct{})}
 	promptSeen := make(chan struct{}, 1)
 	promptResponseRelease := make(chan struct{})
-	getEntriesSeen := make(chan struct{}, 1)
 	policyReceiptDetails := policyDetails(runtimeGeneration, 1)
 	policyReceiptDetails["applied"].(map[string]any)["inline_enabled"] = false
 	_, err = normalizeAppliedPolicyReceipt(policyReceiptDetails["applied"])
@@ -89,12 +88,6 @@ func TestManagedDirectRPCComposedBehavioralGate(t *testing.T) {
 				response["data"] = map[string]any{"commands": append(append([]string{}, hiddenCommands...), legacyCommands...)}
 			case "get_active_tools":
 				response["data"] = map[string]any{"tools": expectedManagedActiveTools(manifest)}
-			case "get_entries":
-				response["data"] = map[string]any{"entries": []any{}, "leafId": "cursor-before-message"}
-				select {
-				case getEntriesSeen <- struct{}{}:
-				default:
-				}
 			case "prompt":
 				// Private control prompts acknowledge with the exact four-field RPC
 				// response envelope. Their semantic payload follows as message_end.
@@ -183,11 +176,6 @@ func TestManagedDirectRPCComposedBehavioralGate(t *testing.T) {
 	_, err = durable.ResolveMessageTarget(ctx, "composed-message")
 	require.NoError(t, err)
 	manager.OfferDirect("composed-agent")
-	select {
-	case <-getEntriesSeen:
-	case <-time.After(time.Second):
-		t.Fatal("real get_entries was not called")
-	}
 	select {
 	case <-promptSeen:
 	case <-time.After(time.Second):

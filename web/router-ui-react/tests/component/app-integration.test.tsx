@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "../../src/App";
 import { createInitialState } from "../../src/state/app-state";
+import { reducer } from "../../src/state/reducer";
 import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTER_ALIASES_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
 import { MANAGED_RECENT_FOLDERS_KEY } from "../../src/persistence/managed-folder-history";
 import { HistoryRepository } from "../../src/persistence/history-repository";
@@ -119,8 +120,8 @@ describe("App integration", () => {
 
   it("sends directly to the selected managed worker and settles the receipt", async () => {
     const managedAgent: ManagedAgent = { agent_id: "managed-direct", source: "router-managed", cwd: "/tmp/managed-direct", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
-    const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
-    state.managedAgents = [managedAgent];
+    const scope = { routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" };
+    const state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 1, agents: [managedAgent] });
     state.selectedPeer = "router-managed:managed-direct";
     const user = (await import("@testing-library/user-event")).default.setup();
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

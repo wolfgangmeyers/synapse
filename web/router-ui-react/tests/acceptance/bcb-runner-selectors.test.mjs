@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -18,11 +19,35 @@ import {
   requireNarrowViewport,
   runRequested,
   setViewport,
+  stopChild,
 } from "./bcb-runner.mjs";
 
 test("release dispatcher requires the complete isolated managed-RPC mode pair", async () => {
-  await assert.rejects(runRequested(["--managed-rpc"]), /Usage: test:acceptance:bcb \[--managed-rpc --release\]/);
-  await assert.rejects(runRequested(["--release"]), /Usage: test:acceptance:bcb \[--managed-rpc --release\]/);
+  await assert.rejects(runRequested(["--managed-rpc"]), /Usage: test:acceptance:bcb/);
+  await assert.rejects(runRequested(["--release"]), /Usage: test:acceptance:bcb/);
+});
+
+test("task child cleanup escalates to SIGKILL and succeeds once the exact PID is absent", { timeout: 5_000 }, async () => {
+  const child = spawn(process.execPath, ["-e", `
+    process.on("SIGTERM", () => process.stdout.write("term\\n"));
+    process.stdout.write("ready\\n");
+    setInterval(() => {}, 1_000);
+  `], { stdio: ["ignore", "pipe", "ignore"] });
+  const pid = child.pid;
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  await new Promise((resolveReady) => child.stdout.once("data", resolveReady));
+
+  try {
+    await stopChild(child, "term-resistant task child", 50);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+
+  assert.equal(child.signalCode, "SIGKILL");
+  assert.match(output, /term/);
+  assert.throws(() => process.kill(pid, 0), (error) => error?.code === "ESRCH");
 });
 
 test("managed release runner uses the router-built UI and visible child selection", async () => {
@@ -150,6 +175,7 @@ test("CfT launch arguments use a fresh headed window at the Vite URL", () => {
   const url = "http://127.0.0.1:4173";
   const args = buildChromeArgs({ profile: "/tmp/cft-profile", cdpPort: 9222, extension: "/tmp/bcb-extension", url });
   assert.deepEqual(args.slice(-2), [`--window-size=${INITIAL_WINDOW_SIZE.width},${INITIAL_WINDOW_SIZE.height}`, url]);
+  assert.ok(args.includes("--no-sandbox"));
   assert.ok(args.includes("--new-window"));
   assert.ok(args.includes("--remote-allow-origins=*"));
   assert.equal(args.some((arg) => arg.startsWith("--headless")), false);

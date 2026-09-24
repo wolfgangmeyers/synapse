@@ -382,6 +382,29 @@ func TestTerminationRecoveryWithoutBindingRecordsAbortUnavailableAndReaps(t *tes
 	process.Reap()
 }
 
+func TestFailedRootRecoveryTerminationRetiresUnboundUnsafeRowWithoutSignallingStoredIdentity(t *testing.T) {
+	for _, state := range []ProcessProbeState{ProcessAbsent, ProcessMismatch, ProcessUnknown, ProcessPresent} {
+		t.Run(string(state), func(t *testing.T) {
+			manager, durable, agent, tracked := prepareFailedRootRecoveryOperatorTest(t, state)
+			request := TerminateRequest{AgentID: agent.AgentID, Method: "DELETE", CanonicalPath: "/v1/managed-agents/" + agent.AgentID, RequestID: "123e4567-e89b-42d3-a456-000000000103", CanonicalBodyHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+			first, err := manager.Terminate(context.Background(), request)
+			require.NoError(t, err)
+			require.False(t, first.Replayed)
+			require.Eventually(t, func() bool {
+				op, operationErr := durable.FindManagedOperation(context.Background(), request.Method, request.RequestID)
+				_, agentErr := durable.ManagedAgent(context.Background(), agent.AgentID)
+				return operationErr == nil && op.State == "terminal" && errors.Is(agentErr, sql.ErrNoRows)
+			}, 3*time.Second, time.Millisecond)
+			tracked.mu.Lock()
+			require.Empty(t, tracked.signals)
+			tracked.mu.Unlock()
+			replayed, err := manager.Terminate(context.Background(), request)
+			require.NoError(t, err)
+			require.True(t, replayed.Replayed)
+		})
+	}
+}
+
 func requireTerminationDiagnostic(t *testing.T, databasePath, actionID, code string) {
 	t.Helper()
 	database, err := sql.Open("sqlite", databasePath)

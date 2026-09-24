@@ -4,11 +4,43 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { AgentRow } from "../../src/components/AgentRow";
 import { avatarForAgent } from "../../src/components/AgentAvatar";
+import { mergeAgentSources } from "../../src/state/agent-projection";
+import { createInitialState } from "../../src/state/app-state";
+import { reducer } from "../../src/state/reducer";
+import type { ManagedAgent } from "../../src/protocol/types";
 import "../../src/app.css";
 
 afterEach(cleanup);
 
 describe("AgentRow", () => {
+  it("renders a managed row's accepted projection version, lifecycle, and activity", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const managedAgent: ManagedAgent = { agent_id: "managed-build", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "ready", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
+    const state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 12, agents: [managedAgent] });
+    const [row] = mergeAgentSources([], state.managedAgents ?? []);
+    expect(row).toBeDefined();
+
+    const { container } = render(<AgentRow agent={row!} />);
+    const element = container.querySelector(".agent-row");
+    expect(element).toHaveAttribute("data-managed-projection-version", "12");
+    expect(element).toHaveAttribute("data-managed-lifecycle", "ready");
+    expect(element).toHaveAttribute("data-managed-activity", "idle");
+  });
+
+  it("keeps private managed runtime identity out of DOM output", () => {
+    const managedAgent = {
+      agent_id: "managed-build", source: "router-managed" as const, cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "ready", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null,
+      process_pid: 424242, pi_session_id: "private-session-value", session_id: "private-session-alias", process_incarnation: "private-incarnation-value", runtime_generation: "private-runtime-generation", generation: "private-generation-value",
+    };
+    const [row] = mergeAgentSources([], [{ ...managedAgent, managedProjectionVersion: 21 }]);
+    expect(row).toBeDefined();
+
+    const { container } = render(<AgentRow agent={row!} />);
+    const html = container.innerHTML;
+    expect(html).not.toMatch(/424242|private-session|private-incarnation|private-runtime-generation|private-generation-value/);
+    expect(html).not.toMatch(/pid|session|incarnation|runtime-generation|data-generation/i);
+  });
+
   it("uses the agent ID to select its bundled avatar", () => {
     const agentId = "build agent";
     const { container } = render(<AgentRow agent={{ agent_id: agentId, activity_state: "idle" }} />);

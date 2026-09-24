@@ -43,6 +43,33 @@ func TestManagedRootControlDurablyCompletesAndDeliversOneExactResult(t *testing.
 	require.ErrorAs(t, err, &stale)
 }
 
+func TestManagedRootControlStockReceiptTransitionsToReconcilePending(t *testing.T) {
+	store, ctx, agent, _ := restartFixture(t)
+	fence := restartFenceFromAgent(&agent)
+	input := lifecycleControlInput(905, agent.AgentID, fence)
+	_, err := store.ReserveManagedControlRequest(ctx, input)
+	require.NoError(t, err)
+	owner := lifecycleUUID(906)
+	_, err = store.ClaimManagedControlHandler(ctx, input.RequestID, owner, fence)
+	require.NoError(t, err)
+	require.NoError(t, store.CommitManagedControlSideEffect(ctx, input.RequestID, owner, fence))
+	_, err = store.CompleteManagedControl(ctx, input.RequestID, owner, fence, ManagedControlResult{Status: "ok", Content: "stock result", DetailsJSON: `{}`, PayloadSHA256: testManifestHash, DecodedPayloadBytes: 128})
+	require.NoError(t, err)
+
+	var protocol, payloadHash, reconciliation string
+	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT delivery_protocol,delivery_payload_sha256,reconciliation_state FROM managed_control_requests WHERE request_id=?`, input.RequestID).Scan(&protocol, &payloadHash, &reconciliation))
+	require.Equal(t, "stock_transcript_receipt_v2", protocol)
+	require.Equal(t, testManifestHash, payloadHash)
+	require.Equal(t, "append_pending", reconciliation)
+
+	appendOwner := lifecycleUUID(907)
+	claim, err := store.ClaimManagedControlAppend(ctx, input.RequestID, appendOwner, "stock-append", fence)
+	require.NoError(t, err)
+	require.NoError(t, store.MarkManagedControlAppendSubmitted(ctx, input.RequestID, appendOwner, claim.Request.AppendAttempt, fence))
+	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT reconciliation_state FROM managed_control_requests WHERE request_id=?`, input.RequestID).Scan(&reconciliation))
+	require.Equal(t, "reconcile_pending", reconciliation)
+}
+
 func TestManagedRootControlAppendRetryStopsAtFiveAndCancellationWins(t *testing.T) {
 	store, ctx, agent, _ := restartFixture(t)
 	fence := restartFenceFromAgent(&agent)

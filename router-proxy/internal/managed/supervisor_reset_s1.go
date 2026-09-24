@@ -684,6 +684,7 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 	m.installParentActivityReceiver(candidate)
 	m.installQualifiedGoalActivityReceiver(candidate)
 	m.installBuiltinToolLifecycleReceiver(candidate)
+	m.startRootControlRecovery(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = "reset"
 	candidate.serial.Unlock()

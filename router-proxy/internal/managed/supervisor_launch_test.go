@@ -70,6 +70,7 @@ func (p *launchProcess) Waits() int {
 
 type launchRPC struct {
 	session                string
+	sessionFile            string
 	calls                  []string
 	promptCount            int
 	promptDone             chan struct{}
@@ -97,7 +98,7 @@ func (r *launchRPC) GetState(context.Context) (map[string]any, error) {
 	if r.stateErr != nil {
 		return nil, r.stateErr
 	}
-	return map[string]any{"sessionId": r.session}, nil
+	return map[string]any{"sessionId": r.session, "sessionFile": r.sessionFile}, nil
 }
 func (r *launchRPC) GetCommands(context.Context) ([]string, error) {
 	r.calls = append(r.calls, "commands")
@@ -197,6 +198,7 @@ func (f *launchFactory) Start(_ context.Context, spec CommandSpec) (Process, err
 	f.startCalls++
 	f.spec = spec
 	f.rpc.session = spec.SessionID
+	f.rpc.sessionFile = spec.SessionPath
 	return f.process, nil
 }
 
@@ -848,7 +850,7 @@ func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releasePrompt) }) }
 	rpc := &launchRPC{promptEntered: make(chan struct{}), promptContextCancelled: make(chan struct{}), releasePrompt: releasePrompt}
 	factory := &launchFactory{process: process, rpc: rpc}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	t.Cleanup(release)
@@ -879,7 +881,7 @@ func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
 	agent, err := durable.ManagedAgent(ctx, "alpha")
 	require.NoError(t, err)
 	require.True(t, agent.InitialInstructionSent)
-	require.Empty(t, agent.PendingInitialInstruction)
+	require.Equal(t, "hello", agent.PendingInitialInstruction)
 	require.Equal(t, "stopped", agent.ActivityState)
 	op, err := durable.ManagedOperation(ctx, "request")
 	require.NoError(t, err)

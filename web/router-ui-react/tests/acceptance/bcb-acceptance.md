@@ -41,6 +41,24 @@ It requires `MECHA_PI_SOURCE_LOCK`, `MECHA_PI_PACKAGE_ROOT`, `MECHA_PI_BIN`, a B
 
 The acceptance-only router command is the only path that installs `pi-extensions/mecha-rpc/tests/fixtures/managed-rpc-release-probe.mjs`; production `mailbox-router` continues to omit test extensions and test environment values. The automated run proves the real nested child from installed Pi, the existing `mecha.child.delta.v1` lifecycle path durably merged through the current managed fence, selected/expanded desktop DOM visibility while compacting, reconnect while compacting and after completion, parent-session reset/recovery, and an isolated-router restart that reports bounded `reconstructing` state rather than inventing a terminal child result. It captures the compacting state, compacting reconnect, completed reconnect, and the restart's reconstructing state with retained child records marked `interrupted_unknown`. The private bridge owns one active Chromium-for-Testing tab, which the runner verifies by exact tab ID, URL, title, selected parent, and visible child state before each `bcb_screenshot`. Each image artifact records its SHA-256 plus those values. Missing prerequisites, lifecycle evidence, an identity record, or a supported desktop browser route block acceptance.
 
+## Managed recovery proof
+
+Run the five-trial orderly-restart proof with:
+
+```sh
+npm --prefix web/router-ui-react run test:acceptance:bcb -- --managed-recovery --trials 5
+```
+
+Use the same locked Pi and browser prerequisites as the managed-RPC release proof: `MECHA_PI_SOURCE_LOCK`, `MECHA_PI_PACKAGE_ROOT`, `MECHA_PI_BIN`, `MECHA_BCB_ROOT`, `MECHA_BCB_PYTHON`, and `MECHA_CFT_BIN` or `CHROME_FOR_TESTING_BIN`. The command must contain `--trials 5`; smaller or larger trial counts are rejected.
+
+Each trial allocates a new task root, router database and log, managed HOME and session root, PID file, router/provider/BCB/CDP ports, private BCB copy, Chromium-for-Testing profile, Chromium process, and one task tab. It starts a real router-managed Pi session with a unique token. The deterministic provider holds the first token-bound request so the runner can persist and immediately recheck an acknowledged in-progress barrier against the isolated database fence. The runner then sends `SIGTERM` only to that trial's router process. The historical sender of the original issue #31 `SIGTERM` is unknown.
+
+The 30-second deadline uses one absolute `performance.now()` timestamp taken immediately before the successful signal call. Router exit, replacement startup, HTTP reads, BCB reads, DOM freshness, session persistence, and completion must finish before that timestamp plus 30 seconds. The page must reconnect and update itself. The runner does not reload, refresh, reconnect, click, or submit anything after the boundary.
+
+A passing artifact proves the retained Pi session ID, changed runtime generation and process incarnation, current private database fence, changed DOM projection version, post-boundary BCB observation, and exact token/generation-bound completion event. Public router, DOM, and console evidence is checked for private PID, session, process identity, generation, and incarnation values. A timeout first captures router, DOM, console, log, provider, and process evidence. Cleanup then stops only the isolated processes, removes the task root and browser profile, and checks that every private port is reusable. Artifacts remain under `MECHA_BCB_ARTIFACT_DIR` or the reported `/tmp/mecha-managed-recovery-*` directory.
+
+Any failed or timed-out trial exits nonzero. Its result does not count. Fix the failure and rerun the command; the next sequence starts with a new trial 1 and fresh resources. The mode never connects to or mutates port 8765, `mecha-0:router`, `mecha-0:webui`, shared configuration, or user browser tabs.
+
 ## After the run
 
 - Recheck task process and listener ownership.

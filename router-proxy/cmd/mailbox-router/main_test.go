@@ -355,6 +355,59 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	require.Contains(t, string(logBytes), `"event":"router_stopped"`)
 }
 
+func TestSIGTERMRouterCloseReopenOrdering(t *testing.T) {
+	directory := t.TempDir()
+	database := filepath.Join(directory, "router.db")
+	logPath := filepath.Join(directory, "router.jsonl")
+	binary := filepath.Join(directory, "mailbox-router")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
+	build.Dir = filepath.Dir(filepath.Join(".", "main.go"))
+	require.NoError(t, build.Run())
+
+	run := func() {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := listener.Addr().(*net.TCPAddr).Port
+		require.NoError(t, listener.Close())
+		command := exec.Command(binary, "--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port), "--managed=false")
+		stdout, err := command.StdoutPipe()
+		require.NoError(t, err)
+		stderr, err := command.StderrPipe()
+		require.NoError(t, err)
+		require.NoError(t, command.Start())
+		lines := make(chan string, 32)
+		go collectLines(stdout, lines)
+		go collectLines(stderr, lines)
+		deadline := time.After(30 * time.Second)
+		for {
+			select {
+			case line := <-lines:
+				if !strings.HasPrefix(line, "MECHA_V2_ROUTER_READY ") {
+					continue
+				}
+				response, healthErr := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/health")
+				require.NoError(t, healthErr)
+				require.Equal(t, http.StatusOK, response.StatusCode)
+				require.NoError(t, response.Body.Close())
+				require.NoError(t, command.Process.Signal(syscall.SIGTERM))
+				require.NoError(t, command.Wait())
+				return
+			case <-deadline:
+				_ = command.Process.Kill()
+				_ = command.Wait()
+				t.Fatal("timed out waiting for production router readiness")
+			}
+		}
+	}
+
+	run()
+	run()
+	logBytes, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(t, 2, strings.Count(string(logBytes), `"event":"router_started"`))
+	require.Equal(t, 2, strings.Count(string(logBytes), `"event":"router_stopped"`))
+}
+
 func TestEventLogRotatesAfterOneDay(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "router.jsonl")

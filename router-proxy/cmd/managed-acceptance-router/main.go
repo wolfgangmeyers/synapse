@@ -267,6 +267,15 @@ func main() {
 		os.Exit(2)
 	}
 	defer durable.Close()
+	recoveryCompletionFile := options.database + ".managed-recovery-completion.json"
+	recoveryAuthority, err := newManagedRecoveryAuthority(options.database, options.providerURL, acceptanceTrialID(os.Getenv("MECHA_ACCEPTANCE_TRIAL_ID")), os.Getenv("MECHA_MANAGED_RECOVERY_TOKEN"), recoveryCompletionFile, os.Getpid())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if recoveryAuthority != nil {
+		defer recoveryAuthority.Close()
+	}
 	attachmentStore, err := attachments.New(attachments.Options{Directory: options.database + ".attachments", Referenced: func(id string) bool {
 		referenced, _ := durable.ConversationAttachmentReferenced(context.Background(), id)
 		return referenced
@@ -288,6 +297,13 @@ func main() {
 	testEnvironment := []string{"MECHA_TEST_BASE_URL=" + options.providerURL}
 	if options.fixtureMode != "" {
 		testEnvironment = append(testEnvironment, "MECHA_TEST_FIXTURE_MODE="+options.fixtureMode)
+	}
+	if recoveryAuthority != nil {
+		testEnvironment = append(testEnvironment,
+			"MECHA_ACCEPTANCE_TRIAL_ID="+recoveryAuthority.trialID,
+			"MECHA_MANAGED_RECOVERY_TOKEN="+recoveryAuthority.token,
+			"MECHA_MANAGED_RECOVERY_COMPLETION_FILE="+recoveryAuthority.completionFile,
+		)
 	}
 	config := managed.Config{
 		Enabled: true, PiExecutable: options.pi, ManagedHome: options.home, PiAgentDir: filepath.Join(options.home, ".pi", "agent"), SessionRoot: options.sessions, RouterURL: routerURL,
@@ -320,7 +336,7 @@ func main() {
 		}
 		defer providerAuth.Close()
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentStore, EventLogger: logger, Managed: manager, ProviderAuth: providerAuth, StaticUIRoot: options.staticUIRoot})
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentStore, EventLogger: logger, Managed: manager, ProviderAuth: providerAuth, StaticUIRoot: options.staticUIRoot, TestOnlyHTTPHandler: recoveryAuthority})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)

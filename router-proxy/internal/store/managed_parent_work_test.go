@@ -320,6 +320,181 @@ func TestReconcileManagedParentActivityPreservesNativeActiveUntilNewerIdle(t *te
 	require.Equal(t, "idle", agent.ActivityState)
 }
 
+func TestReconcileManagedParentIdleFromTranscriptSettlesExactActiveFenceAndBumpsOnce(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	updated, err := durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 7, State: "active"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	attempt := parentWorkAttempt(fence, "transcript-idle")
+	openParentWorkForTest(t, durable, attempt)
+	_, err = durable.db.Exec(`UPDATE managed_agents SET accepting_prompts=1 WHERE agent_id=?`, fence.AgentID)
+	require.NoError(t, err)
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	changed, err := durable.ReconcileManagedParentIdleFromTranscript(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, changed)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before+1, after)
+
+	var sequence int64
+	var compacting, active int
+	require.NoError(t, durable.db.QueryRow(`SELECT source_sequence,compacting,active FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&sequence, &compacting, &active))
+	require.Zero(t, compacting)
+	require.Zero(t, active)
+	require.Equal(t, "settled", parentWorkState(t, durable, attempt))
+
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", agent.LifecycleState)
+	require.Equal(t, "idle", agent.ActivityState)
+	require.True(t, agent.AcceptingPrompts)
+
+	changed, err = durable.ReconcileManagedParentIdleFromTranscript(ctx, fence)
+	require.NoError(t, err)
+	require.False(t, changed)
+	afterRepeat, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, after, afterRepeat)
+
+	changed, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 7, State: "active"})
+	require.NoError(t, err)
+	require.False(t, changed)
+	afterLateDuplicate, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, afterRepeat, afterLateDuplicate)
+
+	changed, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 8, State: "active"})
+	require.NoError(t, err)
+	require.True(t, changed)
+	afterNextSequence, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, afterLateDuplicate+1, afterNextSequence)
+	require.NoError(t, durable.db.QueryRow(`SELECT source_sequence FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&sequence))
+	require.Equal(t, int64(8), sequence)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+}
+
+func TestReconcileManagedParentIdleFromTranscriptRejectsMissingSourceWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	attempt := parentWorkAttempt(fence, "transcript-missing-source")
+	openParentWorkForTest(t, durable, attempt)
+	_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id=?`, fence.AgentID)
+	require.NoError(t, err)
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	changed, err := durable.ReconcileManagedParentIdleFromTranscript(ctx, fence)
+	require.ErrorIs(t, err, ErrManagedParentActivitySourcePending)
+	require.False(t, changed)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	var sourceCount int
+	require.NoError(t, durable.db.QueryRow(`SELECT COUNT(*) FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&sourceCount))
+	require.Zero(t, sourceCount)
+	require.Equal(t, "pending_turn", parentWorkState(t, durable, attempt))
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+}
+
+func TestReconcileManagedParentIdleFromTranscriptDoesNotBumpForIdleOrStaleFence(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	attempt := parentWorkAttempt(fence, "transcript-already-idle")
+	openParentWorkForTest(t, durable, attempt)
+	beforeInitialIdle, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	updated, err := durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 1, State: "idle"})
+	require.NoError(t, err)
+	require.False(t, updated)
+	afterInitialIdle, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, beforeInitialIdle, afterInitialIdle)
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	changed, err := durable.ReconcileManagedParentIdleFromTranscript(ctx, fence)
+	require.NoError(t, err)
+	require.False(t, changed)
+	afterIdle, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, afterIdle)
+	require.Equal(t, "settled", parentWorkState(t, durable, attempt))
+
+	var sequence int64
+	var compacting, active int
+	require.NoError(t, durable.db.QueryRow(`SELECT source_sequence,compacting,active FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&sequence, &compacting, &active))
+	require.Equal(t, int64(1), sequence)
+	require.Zero(t, compacting)
+	require.Zero(t, active)
+
+	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 8, State: "active"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	beforeStale, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	stale := fence
+	stale.RuntimeGeneration = "stale-runtime-generation"
+	changed, err = durable.ReconcileManagedParentIdleFromTranscript(ctx, stale)
+	require.NoError(t, err)
+	require.False(t, changed)
+	afterStale, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, beforeStale, afterStale)
+
+	require.NoError(t, durable.db.QueryRow(`SELECT source_sequence,compacting,active FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&sequence, &compacting, &active))
+	require.Equal(t, int64(8), sequence)
+	require.Zero(t, compacting)
+	require.Equal(t, 1, active)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", agent.LifecycleState)
+	require.Equal(t, "active", agent.ActivityState)
+}
+
+func TestManagedParentActivityRecomputeBumpsProjectionVersionExactlyOnceOnPublicRowChange(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id=?`, fence.AgentID)
+	require.NoError(t, err)
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	updated, err := durable.RecomputeManagedParentActivity(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, updated)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before+1, after)
+
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+}
+
+func TestManagedParentActivityRecomputeDoesNotBumpProjectionVersionWhenUnchanged(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+
+	updated, err := durable.RecomputeManagedParentActivity(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, updated)
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 func TestManagedParentActivityKeepsOtherActiveWorkVisibleUntilAllSourcesSettle(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)
