@@ -190,7 +190,7 @@ function isTransientBcbTabEditError(error) {
   return error instanceof Error && /tabs cannot be edited right now|extension did not respond within/i.test(error.message);
 }
 
-async function bcbCommandOnce(bcb, args) {
+async function bcbCommandOnce(bcb, args, timeoutMs = TIMEOUT) {
   const child = spawn(bcb.python, ["-m", ...args], { cwd: BCB_SOURCE, env: { ...process.env, BCB_HOST: bcb.host, BCB_HTTP_PORT: String(bcb.httpPort), BCB_WS_PORT: String(bcb.wsPort) }, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
@@ -201,17 +201,17 @@ async function bcbCommandOnce(bcb, args) {
       child.once("error", reject);
       child.once("close", (code) => code === 0 ? resolveResult() : reject(new Error(stderr || stdout || `BCB command exited ${code}`)));
     }),
-    delay(TIMEOUT).then(() => { child.kill("SIGKILL"); throw new Error("BCB command timed out"); }),
+    delay(timeoutMs).then(() => { child.kill("SIGKILL"); throw new Error("BCB command timed out"); }),
   ]);
   if (!stdout.trim()) return undefined;
   try { return JSON.parse(stdout); } catch { return stdout.trim(); }
 }
 
-async function bcbCommand(bcb, args) {
+async function bcbCommand(bcb, args, timeoutMs = TIMEOUT) {
   let lastError;
   for (let attempt = 0; attempt < BCB_TAB_EDIT_RETRIES; attempt++) {
     try {
-      return await bcbCommandOnce(bcb, args);
+      return await bcbCommandOnce(bcb, args, timeoutMs);
     } catch (error) {
       lastError = error;
       if (!isTransientBcbTabEditError(error) || attempt === BCB_TAB_EDIT_RETRIES - 1) throw error;
@@ -222,11 +222,11 @@ async function bcbCommand(bcb, args) {
 }
 
 async function tabs(bcb) { return bcbCommand(bcb, ["cli.bcb_tabs", "--json"]); }
-async function execBrowser(bcb, tab, code) {
-  const args = ["cli.bcb_exec", "--json", "--world", "auto", "--timeout", "40"];
+async function execBrowser(bcb, tab, code, timeoutMs = TIMEOUT) {
+  const args = ["cli.bcb_exec", "--json", "--world", "auto", "--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1000)))];
   if (tab !== undefined) args.push("--tab", String(tab));
   args.push(code);
-  const result = await bcbCommand(bcb, args);
+  const result = await bcbCommand(bcb, args, timeoutMs);
   if (!result?.success) fail(`BCB browser JavaScript failed: ${result?.error ?? "unknown error"}`);
   return result.result;
 }
@@ -335,7 +335,7 @@ async function startProvider() {
   return { baseUrl: `http://127.0.0.1:${address.port}/v1`, summary, close: () => new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose())) };
 }
 
-async function startManagedRouter(root, prerequisites, provider, staticUIRoot, fixtureMode = "parent-matrix") {
+async function startManagedRouter(root, prerequisites, provider, staticUIRoot, fixtureMode = "parent-matrix", environment = {}) {
   const database = join(root, "managed-router.db");
   const log = join(root, "managed-router.jsonl");
   const binary = join(root, "managed-acceptance-router");
@@ -348,26 +348,32 @@ async function startManagedRouter(root, prerequisites, provider, staticUIRoot, f
   await mkdir(sessions, { recursive: true, mode: 0o700 });
   await mkdir(cwd, { recursive: true, mode: 0o700 });
   await writeFile(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { [ACCEPTANCE_PROVIDER]: { baseUrl: provider.baseUrl, api: "openai-completions", apiKey: "managed-rpc-release", models: [{ id: "managed-rpc-release", name: "Managed RPC release fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_768, maxTokens: 1_024 }] } } }), { mode: 0o600 });
-  // The wrapper preserves the exact locked Pi argv while retaining stderr in
-  // the disposable task root if the installed runtime exits before evidence.
-  await writeFile(piWrapper, `#!/bin/sh\nexec ${JSON.stringify(prerequisites.piBin)} "$@" 2>${JSON.stringify(piStderr)}\n`, { mode: 0o700 });
+  // Recovery supplies its current Node runtime because the managed child PATH
+  // intentionally excludes version-manager shims. Release keeps its locked
+  // executable invocation unchanged.
+  const piExec = prerequisites.nodeBin === undefined
+    ? `exec ${JSON.stringify(prerequisites.piBin)} "$@"`
+    : `exec ${JSON.stringify(prerequisites.nodeBin)} ${JSON.stringify(prerequisites.piBin)} "$@"`;
+  await writeFile(piWrapper, `#!/bin/sh\n${piExec} 2>${JSON.stringify(piStderr)}\n`, { mode: 0o700 });
   await execFileAsync("go", ["build", "-o", binary, "./cmd/managed-acceptance-router"], { cwd: join(REPOSITORY, "router-proxy"), timeout: TIMEOUT });
   const port = await allocateLoopbackPort();
+  const launchEnv = { ...process.env, ...environment };
   const router = await spawnRouterProcess({
     command: binary,
     args: ["--database", database, "--log", log, "--host", "127.0.0.1", "--port", String(port), "--managed-pi", piWrapper, "--managed-home", home, "--managed-session-root", sessions, "--managed-manifest", join(REPOSITORY, "router", "contract", "managed-tools-v1.json"), "--managed-mecha-rpc", join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "--managed-pi-subagents", prerequisites.subagents, "--managed-probe-extension", join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "--managed-cwd-root", cwd, "--test-provider-url", provider.baseUrl, "--test-provider", ACCEPTANCE_PROVIDER, "--static-ui-root", staticUIRoot, "--provider-auth-fixture", ...(fixtureMode === "" ? [] : ["--fixture-mode", fixtureMode])],
     cwd: REPOSITORY,
     root,
+    env: launchEnv,
     expectedPort: port,
   });
-  return { ...router, database, log, home, sessions, cwd, piStderr, staticUIRoot };
+  return { ...router, database, log, home, sessions, cwd, piStderr, staticUIRoot, launchEnv };
 }
 
 async function restartManagedRouter(router, root, { makeChildFenceUncertain = false } = {}) {
   const stopped = await stopRouterProcess(router);
   if (makeChildFenceUncertain) await makePersistedChildFenceUncertain(router.database);
-  const replacement = await spawnRouterProcess({ command: router.command, args: router.args, cwd: router.cwd, root, expectedPort: router.port });
-  return { router: { ...replacement, database: router.database, log: router.log, home: router.home, sessions: router.sessions, cwd: router.cwd, piStderr: router.piStderr, staticUIRoot: router.staticUIRoot }, stopped };
+  const replacement = await spawnRouterProcess({ command: router.command, args: router.args, cwd: router.cwd, root, env: router.launchEnv, expectedPort: router.port });
+  return { router: { ...replacement, database: router.database, log: router.log, home: router.home, sessions: router.sessions, cwd: router.cwd, piStderr: router.piStderr, staticUIRoot: router.staticUIRoot, launchEnv: router.launchEnv }, stopped };
 }
 
 /** Test-only crash boundary: an unmatched persisted source fence must render as uncertain after restart. */
@@ -376,9 +382,9 @@ async function makePersistedChildFenceUncertain(database) {
   await execFileAsync("python3", ["-c", source, database, CHILD_AGENT], { cwd: REPOSITORY, timeout: TIMEOUT });
 }
 
-async function sqliteRows(database, query, parameters = []) {
+async function sqliteRows(database, query, parameters = [], timeoutMs = TIMEOUT) {
   const source = "import json, sqlite3, sys\ndatabase, query, parameters = sys.argv[1:]\nconnection = sqlite3.connect(database)\nconnection.row_factory = sqlite3.Row\nrows = [dict(row) for row in connection.execute(query, json.loads(parameters)).fetchall()]\nconnection.close()\nprint(json.dumps(rows, sort_keys=True))";
-  const { stdout } = await execFileAsync("python3", ["-c", source, database, query, JSON.stringify(parameters)], { cwd: REPOSITORY, timeout: TIMEOUT });
+  const { stdout } = await execFileAsync("python3", ["-c", source, database, query, JSON.stringify(parameters)], { cwd: REPOSITORY, timeout: timeoutMs });
   return JSON.parse(stdout);
 }
 
@@ -1187,3 +1193,5 @@ export async function runManagedRpcRelease() {
   if (cleanupFailure !== undefined) throw cleanupFailure;
   return report;
 }
+
+export { buildRouterUI, bcbCommand, execBrowser, lockedPiPrerequisites, preflight, reactInputScript, sqliteRows, startManagedRouter };

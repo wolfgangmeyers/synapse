@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -46,6 +48,64 @@ func TestOwnedProcessGroupSignalReachesManagedDescendant(t *testing.T) {
 	require.Error(t, signalOwnedProcessGroup(0, syscall.SIGTERM))
 }
 
+func TestParseLinuxProcessStat(t *testing.T) {
+	tests := []struct {
+		name      string
+		stat      string
+		wantPID   int
+		wantState byte
+		wantPgrp  int
+		wantErr   bool
+	}{
+		{name: "ordinary", stat: "123 (pi) S 1 123 123 0", wantPID: 123, wantState: 'S', wantPgrp: 123},
+		{name: "zombie with closing parenthesis in name", stat: "456 (pi worker)) Z 1 456 456 0", wantPID: 456, wantState: 'Z', wantPgrp: 456},
+		{name: "missing fields", stat: "123 (pi) Z 1", wantErr: true},
+		{name: "invalid pid", stat: "pid (pi) Z 1 123", wantErr: true},
+		{name: "invalid state", stat: "123 (pi) zombie 1 123", wantErr: true},
+		{name: "invalid group", stat: "123 (pi) Z 1 group", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stat, err := parseLinuxProcessStat([]byte(test.stat))
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.wantPID, stat.pid)
+			require.Equal(t, test.wantState, stat.state)
+			require.Equal(t, test.wantPgrp, stat.pgrp)
+		})
+	}
+}
+
+func TestLinuxProbeTreatsExactOwnedZombieOnlyGroupAsAbsent(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux /proc process state is required")
+	}
+	command := exec.Command("/bin/sh", "-c", "exit 0")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, command.Start())
+	defer func() { _ = command.Wait() }()
+
+	marker, err := processStartMarker(command.Process.Pid)
+	require.NoError(t, err)
+	identity := ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: "test"}
+	require.Eventually(t, func() bool {
+		data, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(command.Process.Pid), "stat"))
+		if readErr != nil {
+			return false
+		}
+		stat, parseErr := parseLinuxProcessStat(data)
+		return parseErr == nil && stat.state == 'Z'
+	}, time.Second, 10*time.Millisecond)
+
+	mismatched := identity
+	mismatched.StartMarker = "different-start"
+	require.Equal(t, ProcessMismatch, DefaultProcessGroupOps().Probe(mismatched).State)
+	require.Equal(t, ProcessAbsent, DefaultProcessGroupOps().Probe(identity).State)
+}
+
 func TestProcessGroupOps(t *testing.T) {
 	command := exec.Command("/bin/sh", "-c", "sleep 30 & wait")
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -73,8 +133,9 @@ func TestProcessGroupOps(t *testing.T) {
 }
 
 func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {
-	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionID: "session", LaunchMode: CreateNew, Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts", CursorExtension: "cursor-sdk.js"}
-	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session-id", "session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts", "-e", "cursor-sdk.js"}, spec.Args())
+	sessionPath := "/managed/sessions/session.jsonl"
+	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionPath: sessionPath, SessionID: "session", LaunchMode: CreateNew, Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts", CursorExtension: "cursor-sdk.js"}
+	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session", sessionPath, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts", "-e", "cursor-sdk.js"}, spec.Args())
 	env := ChildEnvironmentFor(Config{ManagedHome: "/managed/home", PiAgentDir: "/ordinary/.pi/agent", SessionRoot: filepath.Join("/managed/home", "sessions"), RouterURL: "http://127.0.0.1:18775"}, "123e4567-e89b-42d3-a456-426614174000", 2)
 	require.Equal(t, []string{
 		"HOME=/managed/home", "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=/managed/home/tmp", "LANG=C", "LC_ALL=C",
@@ -82,6 +143,24 @@ func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {
 		"MECHA_RPC_RUNTIME_GENERATION=123e4567-e89b-42d3-a456-426614174000", "MECHA_RPC_SESSION_EPOCH=2",
 	}, env)
 	require.NotContains(t, env, "OPENAI_API_KEY=secret")
+}
+
+func TestCommandSpecStockPiFreshUsesReservedAbsoluteSessionPath(t *testing.T) {
+	reservedPath := filepath.Join(t.TempDir(), "sessions", "reserved.jsonl")
+	spec := CommandSpec{SessionRoot: filepath.Dir(reservedPath), SessionID: reservedPath, LaunchMode: CreateNew, Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts"}
+	arguments := spec.Args()
+	require.NotContains(t, arguments, "--session-id", "stock Pi must not use unsupported session-ID lookup")
+	require.NotContains(t, arguments, "--approve", "stock Pi 0.73.1 has no managed --approve contract")
+	index := -1
+	for candidate, argument := range arguments {
+		if argument == "--session" {
+			index = candidate
+			break
+		}
+	}
+	require.GreaterOrEqual(t, index, 0, "stock Pi must receive the reserved absolute session path")
+	require.Less(t, index+1, len(arguments))
+	require.Equal(t, reservedPath, arguments[index+1])
 }
 
 func TestExpectedManagedActiveToolsIncludesBuiltinCodingTools(t *testing.T) {

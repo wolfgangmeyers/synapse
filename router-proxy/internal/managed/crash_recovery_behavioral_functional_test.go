@@ -67,6 +67,9 @@ func (f *crashRecoveryProcessFactory) Start(_ context.Context, spec CommandSpec)
 	}
 	if f.rpc != nil {
 		f.rpc.session = spec.SessionID
+		if spec.SessionPath != "" {
+			f.rpc.sessionFile = spec.SessionPath
+		}
 	}
 	return f.processes[index], nil
 }

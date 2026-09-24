@@ -4322,7 +4322,7 @@ func (s *Store) MarkManagedStopped(ctx context.Context, agentID string) error {
 func (s *Store) MarkManagedInitialInstructionSent(ctx context.Context, agentID string) error {
 	return s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET initial_instruction_sent = 1, pending_initial_instruction = NULL, updated_at = ? WHERE agent_id = ? AND initial_instruction_sent = 0`, now, agentID)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET initial_instruction_sent = 1, updated_at = ? WHERE agent_id = ? AND initial_instruction_sent = 0`, now, agentID)
 		if err != nil {
 			return err
 		}

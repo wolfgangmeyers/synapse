@@ -33,6 +33,32 @@ func (s *Store) QueueManagedRootRecoveryWakeup(ctx context.Context, actionID str
 	return wakeup, err
 }
 
+// SuppressManagedRootRecoveryWakeup durably consumes the action's one wakeup
+// without leaving an ordinary message for direct delivery.
+func (s *Store) SuppressManagedRootRecoveryWakeup(ctx context.Context, actionID string) error {
+	if ctx == nil || actionID == "" {
+		return errors.New("managed root recovery wakeup suppression is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		var wakeup *ManagedRootRecoveryWakeup
+		if err := s.queueManagedRootRecoveryWakeupTx(ctx, actionID, &wakeup); err != nil || wakeup == nil {
+			return err
+		}
+		result, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=? AND state='queued'`, wakeup.MessageID)
+		if err != nil {
+			return err
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if deleted != 1 {
+			return errors.New("managed root recovery wakeup suppression changed concurrently")
+		}
+		return nil
+	})
+}
+
 // QueueManagedRootRecoveryWakeupForAgent repairs the crash window between a
 // ready recovery transaction and the notice transaction. It selects only the
 // ready action whose target fence is the agent's current fence.
@@ -68,6 +94,14 @@ func (s *Store) QueueManagedRootRecoveryWakeupForAgent(ctx context.Context, agen
 func (s *Store) queueManagedRootRecoveryWakeupTx(ctx context.Context, actionID string, result **ManagedRootRecoveryWakeup) error {
 	marker, err := managedRootRecoveryWakeupForActionTx(ctx, s.db, actionID)
 	if err == nil {
+		var queued int
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM messages WHERE id=? AND state='queued'`, marker.MessageID).Scan(&queued)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		*result = marker
 		return nil
 	}

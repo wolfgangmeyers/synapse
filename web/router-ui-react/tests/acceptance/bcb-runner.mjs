@@ -41,14 +41,49 @@ function spawnLogged(command, args, options = {}) {
   return child;
 }
 
-async function stopChild(child, label) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const closed = new Promise((resolveClose) => child.once("close", resolveClose));
+function spawnedChildIsAbsent(child, pid) {
+  if (child.pid !== pid) throw new Error(`spawned child identity changed from PID ${pid} to ${child.pid ?? "unknown"}`);
+  if (child.exitCode === null && child.signalCode === null) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    if (error?.code === "ESRCH") return true;
+    if (error?.code === "EPERM") return false;
+    throw error;
+  }
+}
+
+async function waitForSpawnedChildAbsence(child, pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (spawnedChildIsAbsent(child, pid)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(20, remaining)));
+  }
+}
+
+export async function stopChild(child, label, shutdownMs = TIMEOUTS.shutdown) {
+  if (!child) return;
+  const pid = child.pid;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    throw new Error(`${label} has no spawned process PID`);
+  }
+  if (spawnedChildIsAbsent(child, pid)) return;
+
   child.kill("SIGTERM");
-  if (await Promise.race([closed.then(() => true), new Promise((resolveWait) => setTimeout(() => resolveWait(false), TIMEOUTS.shutdown))])) return;
+  if (await waitForSpawnedChildAbsence(child, pid, shutdownMs)) return;
+
+  // Only signal the still-running ChildProcess this runner spawned. Never find
+  // or terminate a process by executable name, command line, or listening port.
+  if (child.pid !== pid || child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`${label} PID ${pid} was replaced or reused before SIGKILL`);
+  }
   child.kill("SIGKILL");
-  await closed;
-  throw new Error(`${label} did not stop after SIGTERM`);
+  if (await waitForSpawnedChildAbsence(child, pid, shutdownMs)) return;
+  throw new Error(`${label} PID ${pid} remained present after SIGTERM and SIGKILL`);
 }
 
 async function copyBcb(taskRoot, wsPort) {
@@ -93,7 +128,7 @@ function cftBinary() {
 export function buildChromeArgs({ profile, cdpPort, extension, url }) {
   return [
     `--user-data-dir=${profile}`, `--remote-debugging-port=${cdpPort}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`,
-    "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--new-window", "--remote-allow-origins=*",
+    "--no-sandbox", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--new-window", "--remote-allow-origins=*",
     `--window-size=${INITIAL_WINDOW_SIZE.width},${INITIAL_WINDOW_SIZE.height}`, url,
   ];
 }
@@ -640,7 +675,15 @@ export async function runRequested(arguments_ = process.argv.slice(2)) {
     const { runManagedRpcRelease } = await import("./bcb-managed-rpc-release-runner.mjs");
     return runManagedRpcRelease();
   }
-  throw new Error("Usage: test:acceptance:bcb [--managed-rpc --release]");
+  if (arguments_.length === 3 && arguments_[0] === "--managed-recovery" && arguments_[1] === "--trials") {
+    const [{ parseManagedRecoveryArguments }, { runManagedRecovery }] = await Promise.all([
+      import("./managed-recovery-harness.mjs"),
+      import("./bcb-managed-recovery-runner.mjs"),
+    ]);
+    const options = parseManagedRecoveryArguments(arguments_);
+    return runManagedRecovery({ trials: options.trials });
+  }
+  throw new Error("Usage: test:acceptance:bcb [--managed-rpc --release | --managed-recovery --trials 5]");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

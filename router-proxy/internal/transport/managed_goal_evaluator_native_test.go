@@ -191,11 +191,8 @@ func (r *nativeGoalActivityBridge) ArmRootControlResult(requestID, entryID strin
 func (r *nativeGoalActivityBridge) SubmitRootControlResult(ctx context.Context, token managed.RootControlAppendToken, payload map[string]any) (<-chan managed.RootControlResultReceipt, error) {
 	return r.RPC.(managed.RootControlRPC).SubmitRootControlResult(ctx, token, payload)
 }
-func (r *nativeGoalActivityBridge) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
-	return r.RPC.(managed.RootControlRPC).GetRootControlEntry(ctx, entryID)
-}
-func (r *nativeGoalActivityBridge) PrepareManagedMailbox(ctx context.Context) (string, error) {
-	return r.RPC.(managed.DirectMailboxRPC).PrepareManagedMailbox(ctx)
+func (r *nativeGoalActivityBridge) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (managed.RootControlPersistedReceipt, error) {
+	return r.RPC.(managed.RootControlRPC).ReconcileRootControlResult(ctx, payload)
 }
 func (r *nativeGoalActivityBridge) PromptManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (<-chan managed.DirectMailboxEvent, error) {
 	return r.RPC.(managed.DirectMailboxRPC).PromptManagedMailbox(ctx, attempt)

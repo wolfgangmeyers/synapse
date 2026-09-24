@@ -1,10 +1,10 @@
-import type { Agent } from "./agent-projection";
+import type { Agent, ManagedAgentView } from "./agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
 import type { Arrival } from "../domain/arrivals";
 import type { RouterScope } from "./scopes";
-import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
+import type { ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
 export interface PendingControl { peer: string; instanceId?: string; leaseId?: string; connectionGeneration?: number; reminderId?: string; revision?: number; action?: string; afterCreate?: boolean }
@@ -15,7 +15,7 @@ export interface AppState extends RouterScope {
   leaseId?: string;
   agents: Agent[];
   managedAvailable: boolean;
-  managedAgents?: ManagedAgent[];
+  managedAgents?: ManagedAgentView[];
   managedProjectionVersion?: number;
   managedChildrenProjectionVersion?: number;
   managedChildren: Record<string, ManagedChildrenProjection>;

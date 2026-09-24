@@ -59,6 +59,13 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	lane := m.laneFor(request.AgentID)
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
+	failedRoot, rootErr := m.store.LatestRetryableManagedRootRecovery(ctx, request.AgentID)
+	if rootErr == nil {
+		return m.reserveFailedRootRecoveryTermination(ctx, request, agent, failedRoot)
+	}
+	if !errors.Is(rootErr, sql.ErrNoRows) {
+		return TerminateResult{}, rootErr
+	}
 	var source store.ManagedRuntimeFence
 	var sourcePtr *store.ManagedRuntimeFence
 	var retryOf string

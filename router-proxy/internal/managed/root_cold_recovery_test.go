@@ -6,11 +6,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -64,6 +67,40 @@ func (o *coldRecoveryOps) WaitForProcessGroupEmpty(_ context.Context, identity P
 	}
 	o.states[identity.PID] = ProcessAbsent
 	return ProcessProbe{State: ProcessAbsent}
+}
+
+type immediateReplayActivityRPC struct {
+	*launchRPC
+	raw             *rpcClient
+	writer          io.Writer
+	mu              sync.Mutex
+	manager         *Manager
+	agentID         string
+	bindingObserved bool
+	handlerObserved bool
+}
+
+func (r *immediateReplayActivityRPC) SetParentActivityEventHandler(handler func(map[string]any)) {
+	r.mu.Lock()
+	r.handlerObserved = handler != nil
+	r.mu.Unlock()
+	r.raw.SetParentActivityEventHandler(handler)
+}
+
+func (r *immediateReplayActivityRPC) ParentActivitySequence() uint64 {
+	return r.raw.ParentActivitySequence()
+}
+
+func (r *immediateReplayActivityRPC) Prompt(_ context.Context, _ string) error {
+	r.mu.Lock()
+	_, r.bindingObserved = r.manager.bindingFor(r.agentID)
+	r.mu.Unlock()
+	if err := writeRPC(r.writer, map[string]any{"type": "agent_start"}); err != nil {
+		return err
+	}
+	return writeRPC(r.writer, map[string]any{"type": "agent_end", "messages": []any{
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "done"}}},
+	}})
 }
 
 type identityColdRecoveryOps struct {
@@ -395,6 +432,95 @@ func TestRecoverManagedRootColdStartRetriesWakeupWithoutReapingReadyBinding(t *t
 	require.True(t, bound)
 }
 
+func TestRecoverManagedRootColdStartImmediateReplayCompletionStaysIdle(t *testing.T) {
+	ctx := context.Background()
+	baseRPC := &launchRPC{}
+	stdoutReader, stdoutWriter := io.Pipe()
+	rawRPC := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, rawRPC.Close()) })
+	rpc := &immediateReplayActivityRPC{launchRPC: baseRPC, raw: rawRPC, writer: stdoutWriter, agentID: "fault-agent"}
+	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
+	manager, durable, agent, _, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: baseRPC}, launchRPCFactory{rpc: rpc.launchRPC}, nil, process, baseRPC)
+	rpc.manager = manager
+	manager.rpcFactory = RPCFactoryFunc(func(context.Context, Process) (RPC, error) { return rpc, nil })
+
+	db := installColdRecoveryTrigger(t, databasePath, "SELECT 1")
+	defer db.Close()
+	current, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	relativePath := hashString(current.LaunchOperationID) + ".jsonl"
+	reservationID := hashString("managed-stock-pi-session\x00" + current.LaunchOperationID)
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='starting',pending_initial_instruction='finish the recovered task',initial_instruction_sent=0 WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, durable.ReserveManagedPiSession(ctx, store.ManagedPiSessionReservation{
+		ReservationID: reservationID, AgentID: current.AgentID, SessionEpoch: current.SessionEpoch,
+		LaunchOperationID: current.LaunchOperationID, RootRelativePath: relativePath,
+	}))
+	_, err = materializeFreshStockPiSession(filepath.Join(manager.config.SessionRoot, relativePath), current.PiSessionID, current.Cwd, formatManagedTime(time.Now()))
+	require.NoError(t, err)
+	require.NoError(t, durable.BindManagedPiSession(ctx, reservationID, current.LaunchOperationID, current.PiSessionID, relativePath, storedAgentFence(current)))
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='running' WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+
+	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+	rpc.mu.Lock()
+	require.True(t, rpc.bindingObserved, "the replacement binding must own replay before Prompt")
+	require.True(t, rpc.handlerObserved, "replay events must have an installed activity receiver")
+	rpc.mu.Unlock()
+	require.Eventually(t, func() bool {
+		current, readErr := durable.ManagedAgent(ctx, agent.AgentID)
+		return readErr == nil && current.LifecycleState == "running" && current.ActivityState == "idle" && current.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+}
+
+func TestRecoverManagedRootColdStartSkipsPersistedInitialInstructionReplay(t *testing.T) {
+	ctx := context.Background()
+	prompt := "finish the recovered task"
+	rpc := &launchRPC{}
+	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
+	manager, durable, agent, _, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, nil, process, rpc)
+	db := installColdRecoveryTrigger(t, databasePath, "SELECT 1")
+	defer db.Close()
+
+	current, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	relativePath := hashString(current.LaunchOperationID) + ".jsonl"
+	sessionPath := filepath.Join(manager.config.SessionRoot, relativePath)
+	reservationID := hashString("managed-stock-pi-session\x00" + current.LaunchOperationID)
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='starting',pending_initial_instruction=?,initial_instruction_sent=0 WHERE agent_id=?`, prompt, agent.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, durable.ReserveManagedPiSession(ctx, store.ManagedPiSessionReservation{
+		ReservationID: reservationID, AgentID: current.AgentID, SessionEpoch: current.SessionEpoch,
+		LaunchOperationID: current.LaunchOperationID, RootRelativePath: relativePath,
+	}))
+	_, err = materializeFreshStockPiSession(sessionPath, current.PiSessionID, current.Cwd, formatManagedTime(time.Now()))
+	require.NoError(t, err)
+	transcript, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = transcript.WriteString(`{"type":"message","message":{"role":"user","content":"finish the recovered task"}}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, transcript.Close())
+	persisted, err := stockPiTranscriptContainsUserInstruction(sessionPath, prompt)
+	require.NoError(t, err)
+	require.True(t, persisted)
+	require.NoError(t, durable.BindManagedPiSession(ctx, reservationID, current.LaunchOperationID, current.PiSessionID, relativePath, storedAgentFence(current)))
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='running' WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+
+	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+	require.Zero(t, rpc.promptCount, "an exact persisted user message must not be sent again")
+	require.Equal(t, ResumeExisting, manager.processFactory.(*launchFactory).spec.LaunchMode)
+	require.Equal(t, sessionPath, manager.processFactory.(*launchFactory).spec.SessionPath)
+	require.Equal(t, current.PiSessionID, manager.processFactory.(*launchFactory).spec.SessionID)
+	recovered, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, prompt, recovered.PendingInitialInstruction)
+	binding, bound := manager.bindingFor(agent.AgentID)
+	require.True(t, bound)
+	require.True(t, sameBindingFence(bindingFence(agent.AgentID, binding), storedAgentFence(recovered)))
+	require.Equal(t, relativePath, binding.sessionRelativePath)
+}
+
 func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadiness(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
@@ -685,7 +811,23 @@ func TestFailedColdRecoveryTargetIsCleanedByNextManagerWithoutReplacement(t *tes
 	process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
 	rpc := &launchRPC{failAt: "policy-command"}
 	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}, failReapFor: map[int]bool{902: true}}
-	manager, durable, agent, _, _ := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+	manager, durable, agent, _, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+	db := installColdRecoveryTrigger(t, databasePath, "UPDATE managed_agents SET lifecycle_state='starting' WHERE agent_id='fault-agent'")
+	defer db.Close()
+	current, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	relativePath := hashString(current.LaunchOperationID) + ".jsonl"
+	reservationID := hashString("managed-stock-pi-session\x00" + current.LaunchOperationID)
+	require.NoError(t, durable.ReserveManagedPiSession(ctx, store.ManagedPiSessionReservation{
+		ReservationID: reservationID, AgentID: current.AgentID, SessionEpoch: current.SessionEpoch,
+		LaunchOperationID: current.LaunchOperationID, RootRelativePath: relativePath,
+	}))
+	_, err = materializeFreshStockPiSession(filepath.Join(manager.config.SessionRoot, relativePath), current.PiSessionID, current.Cwd, formatManagedTime(time.Now()))
+	require.NoError(t, err)
+	require.NoError(t, durable.BindManagedPiSession(ctx, reservationID, current.LaunchOperationID, current.PiSessionID, relativePath, storedAgentFence(current)))
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='running' WHERE agent_id='fault-agent'`)
+	require.NoError(t, err)
+
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	failed, err := durable.ManagedRootRecoveryAction(ctx, agent.AgentID)
 	require.NoError(t, err)

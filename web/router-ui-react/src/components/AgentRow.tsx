@@ -45,7 +45,10 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
   const className = ["agent-row", selected ? "active" : "", working ? "working" : "", compacting ? "compacting" : "", expanded ? "expanded" : "", hasSubagents ? "has-subagents" : ""].filter(Boolean).join(" ");
   const stopActionPropagation = (event: React.SyntheticEvent<HTMLButtonElement>): void => { event.stopPropagation(); };
 
-  return <div role="listitem" className={className} aria-selected={selected} data-agent-id={agent.agent_id}>
+  return <div role="listitem" className={className} aria-selected={selected} data-agent-id={agent.agent_id}
+    data-managed-projection-version={managed ? agent.managedProjectionVersion : undefined}
+    data-managed-lifecycle={managed ? agent.managed_agent?.lifecycle_state : undefined}
+    data-managed-activity={managed ? agent.managed_agent?.activity_state : undefined}>
     <div className="agent-row-select" role="button" tabIndex={0} onClick={() => onSelect?.(agent.agent_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect?.(agent.agent_id); } }} aria-pressed={selected} aria-label={`${humanName(agent.agent_id)} (${agent.agent_id})`}>
       <span className={`avatar ${working ? "working" : compacting ? "compacting" : ""}`} aria-hidden="true"><AgentAvatar agentId={agent.agent_id} /></span>
       <span className="agent-row-text">

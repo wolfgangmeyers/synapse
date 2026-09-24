@@ -510,6 +510,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	m.installParentActivityReceiver(candidate)
 	m.installQualifiedGoalActivityReceiver(candidate)
 	m.installBuiltinToolLifecycleReceiver(candidate)
+	m.startRootControlRecovery(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = ""
 	candidate.serial.Unlock()

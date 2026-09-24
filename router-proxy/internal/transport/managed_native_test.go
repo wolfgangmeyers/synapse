@@ -135,13 +135,6 @@ func (r nativeLifecycleGatedRPC) WaitForChildSnapshot(ctx context.Context) (map[
 	}
 	return source.WaitForChildSnapshot(ctx)
 }
-func (r nativeLifecycleGatedRPC) PrepareManagedMailbox(ctx context.Context) (string, error) {
-	source, ok := r.RPC.(managed.DirectMailboxRPC)
-	if !ok {
-		return "", errors.New("native locked Pi RPC does not support direct mail")
-	}
-	return source.PrepareManagedMailbox(ctx)
-}
 func (r nativeLifecycleGatedRPC) PromptManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (<-chan managed.DirectMailboxEvent, error) {
 	source, ok := r.RPC.(managed.DirectMailboxRPC)
 	if !ok {
@@ -439,13 +432,6 @@ func (r *nativeSettlementBarrierRPC) WaitForChildSnapshot(ctx context.Context) (
 		return nil, errors.New("installed Pi RPC does not support readiness snapshot")
 	}
 	return source.WaitForChildSnapshot(ctx)
-}
-func (r *nativeSettlementBarrierRPC) PrepareManagedMailbox(ctx context.Context) (string, error) {
-	direct, ok := r.RPC.(managed.DirectMailboxRPC)
-	if !ok {
-		return "", errors.New("installed Pi RPC does not support direct mail")
-	}
-	return direct.PrepareManagedMailbox(ctx)
 }
 func (r *nativeSettlementBarrierRPC) PromptManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (<-chan managed.DirectMailboxEvent, error) {
 	direct, ok := r.RPC.(managed.DirectMailboxRPC)

@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import { BoundedChildDeltaBuffer, MAX_BUFFERED_CHILD_DELTAS } from "../pi-extensions/mecha-rpc/child-delta-buffer.ts";
 import { createMechaRpcExtension } from "../pi-extensions/mecha-rpc/index.ts";
 import { hashCanonicalJson, validateDesiredManifest } from "../pi-extensions/mecha-rpc/manifest.ts";
 import { decodeHiddenEnvelope, encodeHiddenEnvelope } from "../pi-extensions/mecha-rpc/protocol.ts";
+import managedRpcReleaseProbe from "../pi-extensions/mecha-rpc/tests/fixtures/managed-rpc-release-probe.mjs";
 
 type RecordValue = Record<string, unknown>;
 type Command = { handler: (argumentsText: string, context: RecordValue) => Promise<unknown> | unknown };
@@ -13,7 +16,6 @@ type Command = { handler: (argumentsText: string, context: RecordValue) => Promi
 function fixture(
   sessionId = "root-session",
   parentSessionId?: string,
-  explicitOutcome: "accepted" | "already_present" = "accepted",
   installedToolNames: readonly string[] = [],
 ) {
   const commands = new Map<string, Command>();
@@ -21,8 +23,10 @@ function fixture(
   for (const name of installedToolNames) tools.set(name, { name });
   const handlers = new Map<string, (event: RecordValue, context: RecordValue) => unknown>();
   const sent: Array<{ message: RecordValue; options: RecordValue | undefined }> = [];
+  const transcript: RecordValue[] = [];
   const events = new Map<string, (event: RecordValue) => void>();
   let activeTools: string[] = [];
+  let transcriptSequence = 0;
   const pi = {
     getAllTools: () => [...tools.values()],
     getActiveTools: () => [...activeTools],
@@ -32,23 +36,127 @@ function fixture(
     registerCommand(name: string, command: Command) { commands.set(name, command); },
     on(name: string, handler: (event: RecordValue, context: RecordValue) => unknown) { handlers.set(name, handler); },
     events: { on(name: string, listener: (event: RecordValue) => void) { events.set(name, listener); } },
-    sendMessage(message: RecordValue, options?: RecordValue) {
+    sendMessage(message: RecordValue, options?: RecordValue): unknown {
       sent.push({ message, options });
-      const entryId = options?.entryId;
-      return typeof entryId === "string" ? Promise.resolve({ kind: explicitOutcome, entryId }) : undefined;
+      transcript.push({
+        id: `entry-${++transcriptSequence}`,
+        parentId: null,
+        timestamp: transcriptSequence,
+        type: "custom_message",
+        ...structuredClone(message),
+      });
+      return undefined;
     },
   };
   const context = {
     sessionManager: {
       getSessionId: () => sessionId,
       getHeader: () => parentSessionId === undefined ? {} : { parentSession: parentSessionId },
+      getEntries: () => transcript,
     },
     ui: { notify() { throw new Error("managed bridge must not use UI console"); } },
   };
   const extension = createMechaRpcExtension(pi, { getRuntimeGeneration: () => "123e4567-e89b-42d3-a456-426614174000", getSessionEpoch: () => 1 });
   handlers.get("session_start")!({}, context);
-  return { activeTools, commands, context, events, extension, handlers, pi, sent, tools };
+  return { activeTools, commands, context, events, extension, handlers, pi, sent, tools, transcript };
 }
+
+test("managed recovery receipt is owned by the stock extension and deferred past agent_end", async () => {
+  const previousTrial = process.env.MECHA_ACCEPTANCE_TRIAL_ID;
+  const previousToken = process.env.MECHA_MANAGED_RECOVERY_TOKEN;
+  const previousCompletionFile = process.env.MECHA_MANAGED_RECOVERY_COMPLETION_FILE;
+  const previousFetch = globalThis.fetch;
+  const current = fixture("managed-recovery-session");
+  const requests: Array<{ url: string; body: RecordValue }> = [];
+  const tempDirectory = mkdtempSync(join(tmpdir(), "mecha-rpc-recovery-"));
+  const completionFile = join(tempDirectory, "completion.json");
+  delete process.env.MECHA_ACCEPTANCE_TRIAL_ID;
+  delete process.env.MECHA_MANAGED_RECOVERY_TOKEN;
+  delete process.env.MECHA_MANAGED_RECOVERY_COMPLETION_FILE;
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), body: JSON.parse(String(init?.body)) as RecordValue });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    current.handlers.get("agent_end")!({}, current.context);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests, []);
+    assert.equal(existsSync(completionFile), false);
+
+    process.env.MECHA_ACCEPTANCE_TRIAL_ID = "trial-1";
+    process.env.MECHA_MANAGED_RECOVERY_TOKEN = "token-1";
+    process.env.MECHA_MANAGED_RECOVERY_COMPLETION_FILE = completionFile;
+    current.handlers.get("agent_end")!({}, current.context);
+    assert.deepEqual(requests, []);
+    assert.equal(existsSync(completionFile), false, "completion signal must wait until agent_end returns");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const expected = {
+      event: "managed_recovery_complete",
+      trial_id: "trial-1",
+      token: "token-1",
+      pi_session_id: "managed-recovery-session",
+    };
+    assert.deepEqual(requests, []);
+    assert.deepEqual(JSON.parse(readFileSync(completionFile, "utf8")), expected);
+    assert.equal(statSync(completionFile).mode & 0o777, 0o600);
+
+    process.env.MECHA_ACCEPTANCE_TRIAL_ID = "trial-2";
+    process.env.MECHA_MANAGED_RECOVERY_TOKEN = "token-2";
+    current.handlers.get("agent_end")!({}, current.context);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests, []);
+    assert.deepEqual(JSON.parse(readFileSync(completionFile, "utf8")), expected, "completion signal must not be overwritten");
+    assert.deepEqual(readdirSync(tempDirectory), [basename(completionFile)], "completion signal must be written once");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousTrial === undefined) delete process.env.MECHA_ACCEPTANCE_TRIAL_ID;
+    else process.env.MECHA_ACCEPTANCE_TRIAL_ID = previousTrial;
+    if (previousToken === undefined) delete process.env.MECHA_MANAGED_RECOVERY_TOKEN;
+    else process.env.MECHA_MANAGED_RECOVERY_TOKEN = previousToken;
+    if (previousCompletionFile === undefined) delete process.env.MECHA_MANAGED_RECOVERY_COMPLETION_FILE;
+    else process.env.MECHA_MANAGED_RECOVERY_COMPLETION_FILE = previousCompletionFile;
+    rmSync(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test("managed recovery session_start does not fetch the transcript or trigger a turn", async () => {
+  const symbol = Symbol.for("@gotgenes/pi-subagents:service-registry");
+  const previousRegistry = Object.getOwnPropertyDescriptor(globalThis, symbol);
+  const previousMode = process.env.MECHA_TEST_FIXTURE_MODE;
+  const handlers = new Map<string, (event: RecordValue, context: RecordValue) => unknown>();
+  const sent: Array<{ message: RecordValue; options: RecordValue | undefined }> = [];
+  let transcriptReads = 0;
+  let childRegistrations = 0;
+  Object.defineProperty(globalThis, symbol, {
+    configurable: true,
+    value: { services: new Map([["managed-recovery-session", {
+      registerChildExtensionV1() { childRegistrations += 1; },
+    }]]) },
+  });
+  process.env.MECHA_TEST_FIXTURE_MODE = "managed-recovery";
+  try {
+    managedRpcReleaseProbe({
+      on(name: string, handler: (event: RecordValue, context: RecordValue) => unknown) { handlers.set(name, handler); },
+      registerCommand() {},
+      sendMessage(message: RecordValue, options?: RecordValue) { sent.push({ message, options }); },
+    });
+    await handlers.get("session_start")!({}, {
+      sessionManager: {
+        getSessionId: () => "managed-recovery-session",
+        getEntries() { transcriptReads += 1; return []; },
+      },
+    });
+    assert.equal(childRegistrations, 1);
+    assert.equal(transcriptReads, 0);
+    assert.deepEqual(sent, []);
+  } finally {
+    if (previousMode === undefined) delete process.env.MECHA_TEST_FIXTURE_MODE;
+    else process.env.MECHA_TEST_FIXTURE_MODE = previousMode;
+    if (previousRegistry === undefined) delete (globalThis as Record<PropertyKey, unknown>)[symbol];
+    else Object.defineProperty(globalThis, symbol, previousRegistry);
+  }
+});
 
 function manifest(): RecordValue {
   return JSON.parse(readFileSync("router/contract/managed-tools-v1.json", "utf8")) as RecordValue;
@@ -281,10 +389,10 @@ test("clearing an old in-flight child delivery restarts draining for the replace
   assert.deepEqual(delivered, [1, 2]);
 });
 
-test("the extension preflights all 16 command names and registers no Mailbox bridge", () => {
+test("the extension preflights all 18 command names and registers no Mailbox bridge", () => {
   const current = fixture();
   assert.deepEqual([...current.commands.keys()], [
-    "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
+    "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-control-result-reconcile-v1", "mecha-mailbox-deliver-v1", "mecha-mailbox-reconcile-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
     "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
   ]);
   assert.equal(current.commands.has("mecha-mailbox"), false);
@@ -462,7 +570,7 @@ test("a managed goal policy rejects malformed goal settings before it acknowledg
 
 test("every legacy command preserves raw input and root or child availability in one typed request", async () => {
   const current = fixture();
-  for (const [index, name] of [...current.commands.keys()].slice(7).entries()) {
+  for (const [index, name] of [...current.commands.keys()].slice(9).entries()) {
     const raw = ` raw input ${index}  `;
     await current.commands.get(name)!.handler(raw, current.context);
     const call = current.sent.at(-1);
@@ -495,7 +603,7 @@ test("managed active selection exposes Pi coding tools without turning them into
   try {
     const codingTools = ["read", "bash", "edit", "write"];
     const fixedSubagentTools = ["subagent", "get_subagent_result", "steer_subagent"];
-    const current = fixture("root-session", undefined, "accepted", [...codingTools, ...fixedSubagentTools, "ambient_extension_tool"]);
+    const current = fixture("root-session", undefined, [...codingTools, ...fixedSubagentTools, "ambient_extension_tool"]);
     await bootstrap(current);
 
     const manifestNames = (manifest().tools as RecordValue[]).map((tool) => String(tool.name));
@@ -548,17 +656,18 @@ test("bootstrap is atomic before model tools exist and a raw coercive tool call 
   assert.equal(current.sent.filter(({ message }) => message.customType === "mecha.control.request.v1").length, 1);
   const queuedRequest = current.sent.at(-1)!.message.details as RecordValue;
   const resultId = "123e4567-e89b-42d3-a456-426614174002";
-  await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
+  const appendResponse = await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
     protocol: "mecha.control/v1", result_id: resultId, request_id: queuedRequest.request_id,
     target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
     manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "Complete", details: {},
   }), current.context);
+  assert.deepEqual(appendResponse, { kind: "accepted", result_id: resultId });
   const completion = current.sent.at(-1)!;
   assert.equal(completion.message.customType, "mecha.control.result.v1");
   assert.equal(completion.message.display, false);
-  assert.deepEqual(completion.options, { triggerTurn: false, entryId: `mcr1_${resultId.replaceAll("-", "")}` });
+  assert.deepEqual(completion.options, { triggerTurn: false });
   assert.deepEqual(Object.keys(completion.message.details as RecordValue).sort(), ["details", "manifest_sha256", "protocol", "request_id", "result_id", "runtime_generation", "status", "target_session_epoch"]);
-  assert.equal(JSON.stringify(completion.message).includes("mcr1_"), false);
+  assert.equal(JSON.stringify({ message: completion.message, options: completion.options }).includes("mcr1_"), false);
   await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
     protocol: "mecha.control/v1", result_id: "123e4567-e89b-42d3-a456-426614174003", request_id: queuedRequest.request_id,
     target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
@@ -566,8 +675,92 @@ test("bootstrap is atomic before model tools exist and a raw coercive tool call 
   }), current.context));
 });
 
-test("a root result accepts an already_present explicit Pi outcome before consuming its correlation", async () => {
-  const current = fixture("root-session", undefined, "already_present");
+test("stock control result append returns void and reconciliation proves exactly one transcript entry", async () => {
+  const current = fixture();
+  const transcript: RecordValue[] = [];
+  let entrySequence = 0;
+  let transcriptReads = 0;
+  current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+    current.sent.push({ message, options });
+    transcript.push({
+      id: `entry-${++entrySequence}`,
+      parentId: null,
+      timestamp: entrySequence,
+      type: "custom_message",
+      ...structuredClone(message),
+    });
+    return undefined;
+  };
+  const context = {
+    ...current.context,
+    sessionManager: {
+      ...current.context.sessionManager,
+      getEntries() {
+        transcriptReads += 1;
+        return transcript.slice(-64);
+      },
+    },
+  };
+
+  await bootstrap({ ...current, context });
+  const goal = current.tools.get("goal");
+  assert.ok(goal);
+  const execute = goal.execute as (id: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id: "stock-result", name: "goal", arguments: { action: "status" } }] } }, context);
+  await execute("stock-result", { action: "status" }, undefined, undefined, context);
+  const request = current.sent.at(-1)!.message.details as RecordValue;
+  const payload = {
+    protocol: "mecha.control/v1",
+    result_id: "123e4567-e89b-42d3-a456-426614174004",
+    request_id: request.request_id,
+    target_session_epoch: 1,
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
+    manifest_sha256: current.extension.hashManifest(manifest()),
+    status: "ok",
+    content: "Persisted by stock Pi",
+    details: {},
+  };
+  const payloadHash = hashCanonicalJson(payload);
+  const appendCommand = current.commands.get("mecha-control-result-v1")!;
+
+  await appendCommand.handler(encodeHiddenEnvelope(payload), context);
+  const matchingResults = () => transcript.filter((entry) => entry.type === "custom_message"
+    && entry.customType === "mecha.control.result.v1"
+    && (entry.details as RecordValue | undefined)?.request_id === payload.request_id
+    && (entry.details as RecordValue | undefined)?.result_id === payload.result_id);
+  assert.equal(matchingResults().length, 1);
+  const appendWire = current.sent.findLast(({ message }) => message.customType === "mecha.control.result.v1");
+  assert.ok(appendWire);
+  assert.deepEqual(appendWire.options, { triggerTurn: false });
+
+  const reconcileCommand = current.commands.get("mecha-control-result-reconcile-v1")!;
+  const receipt = await reconcileCommand.handler(encodeHiddenEnvelope({
+    protocol: "mecha.control-result-reconcile/v1",
+    request_id: payload.request_id,
+    result_id: payload.result_id,
+    payload_hash: payloadHash,
+    runtime_generation: payload.runtime_generation,
+    session_epoch: payload.target_session_epoch,
+    manifest_sha256: payload.manifest_sha256,
+  }), context) as RecordValue;
+  assert.equal(receipt.protocol, "mecha.control.result.persisted.v1");
+  assert.equal(receipt.request_id, payload.request_id);
+  assert.equal(receipt.result_id, payload.result_id);
+  assert.equal(receipt.payload_hash, payloadHash);
+  assert.equal(receipt.runtime_generation, payload.runtime_generation);
+  assert.equal(receipt.session_epoch, payload.target_session_epoch);
+  assert.equal(receipt.manifest_sha256, payload.manifest_sha256);
+  assert.match(String(receipt.receipt_id), /^mcrr1_[0-9a-f]{64}$/i);
+
+  const appendedBeforeReplay = matchingResults().length;
+  await appendCommand.handler(encodeHiddenEnvelope(payload), context);
+  assert.equal(matchingResults().length, appendedBeforeReplay);
+  assert.ok(transcriptReads >= 3);
+  assert.doesNotMatch(JSON.stringify(current.sent), /"(?:get_entry|get_entries)"/);
+});
+
+test("a root result accepts an exact transcript replay without appending again", async () => {
+  const current = fixture();
   await bootstrap(current);
   const goal = current.tools.get("goal");
   assert.ok(goal);
@@ -580,11 +773,24 @@ test("a root result accepts an already_present explicit Pi outcome before consum
     target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
     manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "Already persisted", details: {},
   };
+  current.transcript.push({
+    id: "preexisting-result",
+    parentId: null,
+    timestamp: current.transcript.length + 1,
+    type: "custom_message",
+    customType: "mecha.control.result.v1",
+    display: false,
+    content: payload.content,
+    details: Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "content")),
+  });
+  const resultCount = () => current.sent.filter(({ message }) => message.customType === "mecha.control.result.v1").length;
+  const beforeReplay = resultCount();
   const response = await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
   assert.deepEqual(response, { kind: "already_present", result_id: payload.result_id });
-  const resultCall = current.sent.at(-1)!;
-  assert.deepEqual(resultCall.options, { triggerTurn: false, entryId: `mcr1_${payload.result_id.replaceAll("-", "")}` });
-  await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context));
+  assert.equal(resultCount(), beforeReplay);
+  const replay = await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
+  assert.deepEqual(replay, { kind: "already_present", result_id: payload.result_id });
+  assert.equal(resultCount(), beforeReplay);
 });
 
 test("root registration exists before emission settles and send failure rolls it back", async () => {

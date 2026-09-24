@@ -6,7 +6,9 @@ export const HIDDEN_COMMAND_NAMES = Object.freeze([
   "mecha-bootstrap-v1",
   "mecha-install-tools-v1",
   "mecha-control-result-v1",
+  "mecha-control-result-reconcile-v1",
   "mecha-mailbox-deliver-v1",
+  "mecha-mailbox-reconcile-v1",
   "mecha-policy-apply-v1",
   "mecha-child-snapshot-v1",
   "mecha-post-compaction-notification-v1",
@@ -296,6 +298,17 @@ export function validateMailboxDeliverEnvelope(value: unknown): JsonRecord {
   if (!isRecord(value)) protocolError("mailbox delivery envelope is invalid");
   assertExactKeys(value, ["protocol", "message_id", "content", "runtime_generation", "session_epoch"], ["manifest_sha256"]);
   if (value.protocol !== "mecha.mailbox-deliver/v1") protocolError("mailbox delivery protocol is invalid");
+  boundedString(value.message_id, "mailbox message ID", 128);
+  boundedString(value.content, "mailbox content", MAX_ENVELOPE_STRING_BYTES, true);
+  validateHiddenCommandFence(value);
+  return value;
+}
+
+/** Closes direct-mail transcript reconciliation to one immutable delivery and full runtime fence. */
+export function validateMailboxReconcileEnvelope(value: unknown): JsonRecord {
+  if (!isRecord(value)) protocolError("mailbox reconciliation envelope is invalid");
+  assertExactKeys(value, ["protocol", "message_id", "content", "runtime_generation", "session_epoch", "manifest_sha256"]);
+  if (value.protocol !== "mecha.mailbox-reconcile/v1") protocolError("mailbox reconciliation protocol is invalid");
   boundedString(value.message_id, "mailbox message ID", 128);
   boundedString(value.content, "mailbox content", MAX_ENVELOPE_STRING_BYTES, true);
   validateHiddenCommandFence(value);

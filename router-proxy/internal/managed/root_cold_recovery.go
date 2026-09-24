@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -66,6 +68,9 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	if err := m.PruneManagedRootRecovery(ctx); err != nil {
 		return err
 	}
+	if err := m.RecoverManagedRootRecoveryOperators(ctx); err != nil {
+		return err
+	}
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {
 		return err
@@ -88,12 +93,12 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		// A live binding identifies the replacement owned by this router. Only
 		// that binding may retry the notice here; an unbound ready action belongs
 		// to an older runtime and must be superseded before a new notice is made.
-		if _, bound := m.bindingFor(agent.AgentID); bound {
+		if binding, bound := m.bindingFor(agent.AgentID); bound {
 			wakeup, wakeupErr := m.store.QueueManagedRootRecoveryWakeupForAgent(ctx, agent.AgentID)
 			if wakeupErr != nil {
 				return wakeupErr
 			}
-			if wakeup != nil {
+			if wakeup != nil && !managedRootInitialReplayPending(binding) {
 				m.OfferDirect(agent.AgentID)
 			}
 		}
@@ -134,8 +139,7 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 				return err
 			}
 			if binding, live := m.bindingFor(agent.AgentID); live {
-				m.recoverManagedGoalProjection(binding)
-				if err := m.recoverManagedDirectAttemptsForAgent(ctx, agent.AgentID); err != nil {
+				if err := m.finishManagedRootRecovery(ctx, binding); err != nil {
 					return err
 				}
 			}
@@ -167,12 +171,87 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 			return err
 		}
 		if binding, live := m.bindingFor(agent.AgentID); live {
-			m.recoverManagedGoalProjection(binding)
-			if err := m.recoverManagedDirectAttemptsForAgent(ctx, agent.AgentID); err != nil {
+			if err := m.finishManagedRootRecovery(ctx, binding); err != nil {
 				return err
 			}
 		}
 	}
+	return nil
+}
+
+const (
+	managedInitialReplayTranscriptPoll = 25 * time.Millisecond
+	// Stock Pi can emit delayed active after durable assistant persistence, so
+	// transcript completion must remain stable before final idle authority.
+	managedInitialReplayTranscriptQuiescence = 5 * time.Second
+)
+
+func managedRootInitialReplayPending(binding *managedBinding) bool {
+	if binding == nil {
+		return false
+	}
+	binding.serial.Lock()
+	defer binding.serial.Unlock()
+	return binding.initialReplayPending
+}
+
+func (m *Manager) managedRootInitialReplayCurrent(target *managedBinding, targetFence store.ManagedRuntimeFence) bool {
+	if target == nil {
+		return false
+	}
+	target.serial.Lock()
+	defer target.serial.Unlock()
+	current, bound := m.bindingFor(target.agentID)
+	return bound && current == target && target.initialReplayPending && sameBindingFence(bindingFence(target.agentID, target), targetFence) && m.liveBindingForFence(m.runCtx, target, targetFence)
+}
+
+func (m *Manager) completeManagedRootInitialReplay(target *managedBinding, targetFence store.ManagedRuntimeFence, runFollowups bool) error {
+	if !m.managedRootInitialReplayCurrent(target, targetFence) {
+		return nil
+	}
+	updated, err := m.store.ReconcileManagedParentIdleFromTranscript(context.Background(), targetFence)
+	if err != nil {
+		return err
+	}
+	if updated {
+		m.publishProjection()
+	}
+
+	target.serial.Lock()
+	current, bound := m.bindingFor(target.agentID)
+	live := bound && current == target && target.initialReplayPending && sameBindingFence(bindingFence(target.agentID, target), targetFence) && m.liveBindingForFence(m.runCtx, target, targetFence)
+	if live {
+		target.initialReplayPending = false
+	}
+	target.serial.Unlock()
+	if !live || !runFollowups {
+		return nil
+	}
+	return m.finishManagedRootRecovery(context.Background(), target)
+}
+
+func (m *Manager) failManagedRootInitialReplay(action *store.ManagedRootRecoveryAction, old, targetFence store.ManagedRuntimeFence, target *managedBinding, orderlyStop bool, targetRPC RPC) {
+	if !m.managedRootInitialReplayCurrent(target, targetFence) || m.runCtx.Err() != nil {
+		return
+	}
+	_ = closeRPCAndWait(targetRPC)
+	m.clearBinding(target)
+	_ = m.failColdRecoveryReplacement(context.Background(), action, old, targetFence, target, orderlyStop, "RECOVERY_READINESS_FAILED", "replacement initial instruction replay failed")
+}
+
+// finishManagedRootRecovery preserves the post-recovery FIFO. None of this
+// work may reach Pi while the resumed initial instruction is still being
+// accepted, because a goal projection can arm an evaluator for that replay.
+func (m *Manager) finishManagedRootRecovery(ctx context.Context, binding *managedBinding) error {
+	if binding == nil || managedRootInitialReplayPending(binding) {
+		return nil
+	}
+	m.recoverManagedGoalProjection(binding)
+	m.startRootControlRecovery(binding)
+	if err := m.recoverManagedDirectAttemptsForAgent(ctx, binding.agentID); err != nil {
+		return err
+	}
+	m.OfferDirect(binding.agentID)
 	return nil
 }
 
@@ -218,6 +297,9 @@ func (m *Manager) cleanupFailedColdRecoveryTarget(ctx context.Context, agentID s
 	}
 	if err != nil {
 		return false, err
+	}
+	if action.OperatorStage != "" && action.OperatorStage != "terminal" {
+		return true, nil
 	}
 	if (action.Stage != "starting" && action.Stage != "failed") || action.TargetProcessPID <= 0 {
 		return false, nil
@@ -536,7 +618,7 @@ func (m *Manager) validateColdRecoveryPreflight(ctx context.Context, agent *stor
 		if action.TargetProcessPID > 0 {
 			target := ProcessIdentity{PID: action.TargetProcessPID, StartMarker: action.TargetProcessStartMarker, Incarnation: action.TargetProcessIncarnation}
 			if target != oldFenceIdentity(old) && m.processOps.Probe(target).State == ProcessOwned && !m.reapRestartGroup(ctx, target, nil) {
-				code, message = "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped"
+				code, message = "ORPHAN_IDENTITY_UNSAFE", "preflight replacement process group could not be reaped"
 			}
 		}
 		if err := m.failColdRecoveryAction(ctx, action, code, message); err != nil {
@@ -554,14 +636,14 @@ func (m *Manager) hasColdRecoveryTarget(ctx context.Context, agent *store.Manage
 func (m *Manager) failColdRecoveryTarget(ctx context.Context, action *store.ManagedRootRecoveryAction, target store.ManagedRuntimeFence) error {
 	identity := oldFenceIdentity(target)
 	if m.processOps.Probe(identity).State == ProcessOwned && !m.reapRestartGroup(ctx, identity, nil) {
-		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "reserved replacement process group could not be reaped")
 	}
 	return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
 }
 
 func (m *Manager) failColdRecoveryReplacement(ctx context.Context, action *store.ManagedRootRecoveryAction, old, target store.ManagedRuntimeFence, targetBinding *managedBinding, orderlyStop bool, code, message string) error {
 	if targetBinding == nil || !m.cleanupRecoveredTarget(targetBinding, target) {
-		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+		return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "readiness replacement cleanup failed after "+message)
 	}
 	if action == nil || !orderlyStop {
 		return m.failColdRecoveryAction(ctx, action, code, message)
@@ -648,7 +730,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		if action.TargetProcessPID > 0 {
 			identity := ProcessIdentity{PID: action.TargetProcessPID, StartMarker: action.TargetProcessStartMarker, Incarnation: action.TargetProcessIncarnation}
 			if m.processOps.Probe(identity).State == ProcessOwned && !m.reapRestartGroup(ctx, identity, nil) {
-				return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+				return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "previous-owner replacement process group could not be reaped")
 			}
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_UNKNOWN", "replacement process was already reserved by an earlier recovery attempt")
@@ -666,6 +748,10 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 			return err
 		}
 	}
+	sessionRelativePath, err := m.store.BoundManagedPiSessionPath(ctx, agent.AgentID, old.SessionEpoch, old.PiSessionID)
+	if err != nil {
+		return m.failColdRecoveryAction(ctx, action, "RECOVERY_SESSION_BINDING_INVALID", "bound managed session could not be resolved")
+	}
 	if err := m.store.BeginManagedRootRecoveryTarget(ctx, action.ActionID, action.TargetRuntimeGeneration); err != nil {
 		var stale *store.ManagedRootRecoveryTargetStaleError
 		if errors.As(err, &stale) {
@@ -673,7 +759,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return err
 	}
-	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionPath: filepath.Join(m.config.SessionRoot, sessionRelativePath), SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.TestOnlyEnvironment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
 	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		code := "RECOVERY_TARGET_UNKNOWN"
@@ -694,7 +780,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	}
 	if err := m.store.InstallManagedRootRecoveryTarget(ctx, action.ActionID, store.ManagedProcessIdentity{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}, action.TargetRuntimeGeneration); err != nil {
 		if !m.cleanupUninstalledTarget(process, identity, nil) {
-			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "unrecorded replacement process group could not be reaped")
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process target could not be recorded")
 	}
@@ -706,11 +792,11 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	targetFence.RuntimeGeneration = action.TargetRuntimeGeneration
 	if err := m.store.InstallManagedRootRecoveryFence(ctx, old, targetFence); err != nil {
 		if !m.cleanupUninstalledTarget(process, identity, nil) {
-			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "replacement process group could not be reaped")
+			return m.failColdRecoveryAction(ctx, action, "ORPHAN_IDENTITY_UNSAFE", "uninstalled replacement fence process group could not be reaped")
 		}
 		return m.failColdRecoveryAction(ctx, action, "RECOVERY_TARGET_START_FAILED", "replacement process fence could not be installed")
 	}
-	target := &managedBinding{agentID: agent.AgentID, lane: m.laneFor(agent.AgentID), operationID: action.ActionID, lifecycleAction: "root-recovery", token: targetFence.RuntimeGeneration, process: process, identity: identity, sessionID: targetFence.PiSessionID, sessionEpoch: targetFence.SessionEpoch, runtimeGeneration: targetFence.RuntimeGeneration, manifestRevision: targetFence.ManifestRevision, manifestHash: targetFence.ManifestHash}
+	target := &managedBinding{agentID: agent.AgentID, lane: m.laneFor(agent.AgentID), operationID: action.ActionID, lifecycleAction: "root-recovery", token: targetFence.RuntimeGeneration, process: process, identity: identity, sessionID: targetFence.PiSessionID, sessionEpoch: targetFence.SessionEpoch, runtimeGeneration: targetFence.RuntimeGeneration, manifestRevision: targetFence.ManifestRevision, manifestHash: targetFence.ManifestHash, sessionRelativePath: sessionRelativePath, sessionPath: spec.SessionPath}
 	m.watchRestartProcess(target)
 	targetRPC, err := m.rpcFactory.Open(m.runCtx, process)
 	if err != nil {
@@ -740,6 +826,23 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		_ = closeRPCAndWait(targetRPC)
 		return m.failColdRecoveryReplacement(ctx, action, old, targetFence, target, orderlyStop, "RECOVERY_LAUNCH_OWNER_MISSING", "managed launch operation owner is unavailable")
 	}
+	replayInitialInstruction := ""
+	shouldPromptInitialInstruction := false
+	if authoritativeAgent.PendingInitialInstruction != "" {
+		replayState, scanErr := stockPiTranscriptReplayState(spec.SessionPath, authoritativeAgent.PendingInitialInstruction)
+		if scanErr != nil {
+			_ = closeRPCAndWait(targetRPC)
+			return m.failColdRecoveryReplacement(ctx, action, old, targetFence, target, orderlyStop, "RECOVERY_READINESS_FAILED", "replacement transcript reconciliation failed")
+		}
+		switch replayState {
+		case stockPiReplayAbsent:
+			replayInitialInstruction = authoritativeAgent.PendingInitialInstruction
+			shouldPromptInitialInstruction = true
+		case stockPiReplayPending:
+			replayInitialInstruction = authoritativeAgent.PendingInitialInstruction
+		}
+	}
+	target.initialReplayPending = replayInitialInstruction != ""
 	if !m.installBinding(target) {
 		_ = closeRPCAndWait(targetRPC)
 		return m.failColdRecoveryReplacement(ctx, action, old, targetFence, target, orderlyStop, "RECOVERY_READINESS_FAILED", "replacement binding could not be installed")
@@ -752,7 +855,12 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	// The replacement is already the authoritative running binding. If the
 	// notice transaction fails, keep that binding and let the next sweep retry;
 	// reaping it would leave desired-running with no recoverable owner.
-	_, wakeupErr := m.store.QueueManagedRootRecoveryWakeup(ctx, action.ActionID)
+	var wakeupErr error
+	if replayInitialInstruction == "" {
+		_, wakeupErr = m.store.QueueManagedRootRecoveryWakeup(ctx, action.ActionID)
+	} else {
+		wakeupErr = m.store.SuppressManagedRootRecoveryWakeup(ctx, action.ActionID)
+	}
 	// Recovery temporarily uses its action ID as the binding owner so all work
 	// stays fenced until the ready transaction commits. Restore the durable
 	// launch owner before clearing that lifecycle hold; a stale callback must not
@@ -772,7 +880,77 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 	m.installQualifiedGoalActivityReceiver(target)
 	m.installBuiltinToolLifecycleReceiver(target)
 	m.startRecoveredRootWatcher(target, targetFence)
-	m.OfferDirect(agent.AgentID)
+	// Match fresh launch ordering: the replacement must be the committed,
+	// receiver-equipped authoritative binding before a replay can produce
+	// activity or agent_end events. Replay stays pending until the exact binding
+	// and fence have a completed transcript turn.
+	if replayInitialInstruction != "" {
+		replayDeadline, hasReplayDeadline := ctx.Deadline()
+		m.startManagedTask(func() {
+			if !m.managedRootInitialReplayCurrent(target, targetFence) {
+				return
+			}
+			replayCtx := m.runCtx
+			cancelReplay := func() {}
+			if hasReplayDeadline {
+				replayCtx, cancelReplay = context.WithDeadline(m.runCtx, replayDeadline)
+			}
+			defer cancelReplay()
+
+			var promptResult <-chan error
+			if shouldPromptInitialInstruction {
+				result := make(chan error, 1)
+				if !m.startManagedTask(func() {
+					result <- targetRPC.Prompt(replayCtx, replayInitialInstruction)
+				}) {
+					return
+				}
+				promptResult = result
+			}
+			ticker := time.NewTicker(managedInitialReplayTranscriptPoll)
+			defer ticker.Stop()
+			var completionObservedAt time.Time
+			for {
+				select {
+				case err := <-promptResult:
+					if err != nil {
+						m.failManagedRootInitialReplay(action, old, targetFence, target, orderlyStop, targetRPC)
+						return
+					}
+					promptResult = nil
+				case <-ticker.C:
+					status, scanErr := stockPiTranscriptReplayState(target.sessionPath, replayInitialInstruction)
+					if scanErr != nil {
+						m.failManagedRootInitialReplay(action, old, targetFence, target, orderlyStop, targetRPC)
+						return
+					}
+					if status != stockPiReplayComplete {
+						completionObservedAt = time.Time{}
+						continue
+					}
+					if completionObservedAt.IsZero() {
+						completionObservedAt = time.Now()
+						continue
+					}
+					if time.Since(completionObservedAt) < managedInitialReplayTranscriptQuiescence {
+						continue
+					}
+					if err := m.completeManagedRootInitialReplay(target, targetFence, false); err != nil {
+						if errors.Is(err, store.ErrManagedParentActivitySourcePending) {
+							continue
+						}
+						m.failManagedRootInitialReplay(action, old, targetFence, target, orderlyStop, targetRPC)
+						return
+					}
+					return
+				case <-replayCtx.Done():
+					m.failManagedRootInitialReplay(action, old, targetFence, target, orderlyStop, targetRPC)
+					return
+				}
+			}
+		})
+		return wakeupErr
+	}
 	return wakeupErr
 }
 
@@ -802,9 +980,22 @@ func (m *Manager) restoreRecoveredBindingOwner(ctx context.Context, target *mana
 	return true, nil
 }
 
-func recoveryEnvironment(stable []string, routerURL, generation string, epoch int64) []string {
-	environment := append([]string(nil), stable...)
-	environment = append(environment, "MECHA_ROUTER_URL="+routerURL, "MECHA_RPC_RUNTIME_GENERATION="+generation, "MECHA_RPC_SESSION_EPOCH="+strconv.FormatInt(epoch, 10))
+func recoveryEnvironment(stable, testOnly []string, routerURL, generation string, epoch int64) []string {
+	environment := make([]string, 0, len(stable)+len(testOnly)+3)
+	seen := make(map[string]struct{}, cap(environment))
+	appendUnique := func(values ...string) {
+		for _, value := range values {
+			key, _, _ := strings.Cut(value, "=")
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			environment = append(environment, value)
+		}
+	}
+	appendUnique(stable...)
+	appendUnique("MECHA_ROUTER_URL="+routerURL, "MECHA_RPC_RUNTIME_GENERATION="+generation, "MECHA_RPC_SESSION_EPOCH="+strconv.FormatInt(epoch, 10))
+	appendUnique(testOnly...)
 	return environment
 }
 

@@ -217,8 +217,8 @@ func (r *nativeInlineAllowanceActivityRPC) ArmRootControlResult(requestID, entry
 func (r *nativeInlineAllowanceActivityRPC) SubmitRootControlResult(ctx context.Context, token managed.RootControlAppendToken, payload map[string]any) (<-chan managed.RootControlResultReceipt, error) {
 	return r.RPC.(managed.RootControlRPC).SubmitRootControlResult(ctx, token, payload)
 }
-func (r *nativeInlineAllowanceActivityRPC) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
-	return r.RPC.(managed.RootControlRPC).GetRootControlEntry(ctx, entryID)
+func (r *nativeInlineAllowanceActivityRPC) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (managed.RootControlPersistedReceipt, error) {
+	return r.RPC.(managed.RootControlRPC).ReconcileRootControlResult(ctx, payload)
 }
 
 type nativeInlineAllowanceRPCFactory struct {

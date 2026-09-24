@@ -136,6 +136,9 @@ describe("protocol guards", () => {
     expect(isUILiveFrame({ ...delta, undocumented: true })).toBe(false);
     expect(isUILiveFrame({ ...removed, undocumented: true })).toBe(false);
     expect(isUILiveFrame({ ...delta, changes: { ...managedAgent, record_kind: "archived" } })).toBe(false);
+    for (const privateField of ["pid", "process_pid", "session_id", "pi_session_id", "process_incarnation", "runtime_generation", "generation", "managedProjectionVersion"]) {
+      expect(isUILiveFrame({ ...delta, changes: { ...managedAgent, [privateField]: "private-runtime-identity" } })).toBe(false);
+    }
     expect(isUILiveFrame({ ...delta, projection_version: -1 })).toBe(false);
     expect(isUILiveFrame({ ...delta, agent_id: "bad id" })).toBe(false);
   });

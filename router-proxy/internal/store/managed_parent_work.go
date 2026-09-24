@@ -281,7 +281,11 @@ func managedParentSourceActiveTx(ctx context.Context, db *sql.DB, fence ManagedR
 	return false, nil
 }
 func (s *Store) recomputeManagedParentActivityTx(ctx context.Context, fence ManagedRuntimeFence) error {
-	_, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
+	changed, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
+	if err != nil || !changed {
+		return err
+	}
+	_, err = s.bumpManagedProjectionVersion(ctx)
 	return err
 }
 
@@ -422,8 +426,7 @@ func (s *Store) RecomputeManagedParentActivity(ctx context.Context, fence Manage
 			return err
 		}
 		updated = true
-		_, err := s.bumpManagedProjectionVersion(ctx)
-		return err
+		return nil
 	})
 	return updated, err
 }

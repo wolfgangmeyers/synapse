@@ -182,7 +182,12 @@ type managedBinding struct {
 	runtimeGeneration       string
 	manifestRevision        int
 	manifestHash            string
+	sessionReservationID    string
+	sessionRelativePath     string
+	sessionPath             string
+	launchReservation       *ownedLaunchSessionReservation
 	parentCompacting        *bool
+	initialReplayPending    bool
 	reaped                  bool
 	token                   string
 	waitDone                <-chan error
@@ -232,6 +237,7 @@ type Manager struct {
 	restartAllDispatcher                       RestartAllDispatcher
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	rootControlHandlers                        *RootControlHandlerRegistry
+	rootRecoveryOperatorOwner                  string
 	projectionPublisher                        func()
 	completeHistoryPublisher                   CompleteHistoryPublisher
 	directReplyPublisher                       DirectReplyPublisher
@@ -320,8 +326,12 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	if deadlineFactory == nil {
 		deadlineFactory = context.WithTimeout
 	}
+	operatorOwner, err := (managerIDs{}).Next()
+	if err != nil {
+		return nil, err
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
 	// every surviving active builtin row before any manager can expose history.
@@ -428,13 +438,30 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 	if err := m.store.ReserveManagedLaunchWithLimit(ctx, agent, op, m.config.Limits.MaxAgents); err != nil {
 		return LaunchResult{}, err
 	}
+	sessionPathHash := hashString(request.RequestID)
+	sessionRelativePath := sessionPathHash + ".jsonl"
+	sessionReservationID := hashString("managed-stock-pi-session\x00" + request.RequestID)
+	if err := m.store.ReserveManagedPiSession(ctx, store.ManagedPiSessionReservation{
+		ReservationID: sessionReservationID, AgentID: agent.AgentID, SessionEpoch: agent.SessionEpoch,
+		LaunchOperationID: request.RequestID, RootRelativePath: sessionRelativePath,
+	}); err != nil {
+		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "SESSION_RESERVATION_FAILED", "managed session path reservation failed")
+		return LaunchResult{}, err
+	}
+	sessionPath := filepath.Join(m.config.SessionRoot, sessionRelativePath)
+	launchReservation, err := materializeFreshStockPiSession(sessionPath, agent.PiSessionID, agent.Cwd, now)
+	if err != nil {
+		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "SESSION_RESERVATION_FAILED", "managed session file materialization failed")
+		return LaunchResult{}, err
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		rollbackErr := launchReservation.rollback()
 		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "MANAGER_CLOSED", "managed manager closed")
-		return LaunchResult{}, errors.New("managed manager is closed")
+		return LaunchResult{}, errors.Join(errors.New("managed manager is closed"), rollbackErr)
 	}
-	binding := &managedBinding{agentID: agent.AgentID, lane: lane, operationID: request.RequestID, lifecycleAction: "launch", token: agent.RuntimeGeneration, sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash}
+	binding := &managedBinding{agentID: agent.AgentID, lane: lane, operationID: request.RequestID, lifecycleAction: "launch", token: agent.RuntimeGeneration, sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash, sessionReservationID: sessionReservationID, sessionRelativePath: sessionRelativePath, sessionPath: sessionPath, launchReservation: launchReservation}
 	m.bindings[agent.AgentID] = binding
 	m.operationIDs[agent.AgentID] = request.RequestID
 	m.startWG.Add(1)
@@ -485,7 +512,14 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 			lane.serial.Unlock()
 		}
 	}()
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionPath: binding.sessionPath, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
+	launchReservation := binding.launchReservation
+	reservationTransferred := false
+	defer func() {
+		if !reservationTransferred && launchReservation != nil {
+			_ = launchReservation.rollback()
+		}
+	}()
 	pending, pendingErr := m.store.ManagedLaunchStillPending(durableCtx, agent.AgentID, request.RequestID)
 	if pendingErr != nil {
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(pendingErr))
@@ -496,11 +530,23 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		// external start boundary. It already terminalized the launch replay row.
 		return
 	}
+	if launchReservation == nil {
+		m.fail(agent.AgentID, "SESSION_RESERVATION_FAILED", "managed session file reservation is missing")
+		return
+	}
 	process, err := m.processFactory.Start(ctx, spec)
 	if err != nil {
+		if rollbackErr := launchReservation.rollback(); rollbackErr != nil {
+			err = errors.Join(err, rollbackErr)
+		}
+		launchReservation = nil
 		m.fail(agent.AgentID, "PROCESS_START_FAILED", sanitizeError(err))
 		return
 	}
+	// Process.Start transferred the reservation to stock Pi. Later cleanup uses
+	// the normal artifact lifecycle and never this launch rollback owner.
+	reservationTransferred = true
+	binding.launchReservation = nil
 	identity := process.Identity()
 	if err = ValidateIdentity(identity); err != nil {
 		_ = process.Stop(context.Background())
@@ -542,6 +588,45 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.rpcs[agent.AgentID] = rpc
 	m.mu.Unlock()
 	fence := bindingFence(agent.AgentID, binding)
+	state, stateErr := rpc.GetState(ctx)
+	if stateErr != nil {
+		_ = closeRPCAndWait(rpc)
+		_ = process.Stop(context.Background())
+		m.fail(agent.AgentID, "SESSION_BIND_FAILED", sanitizeError(stateErr))
+		return
+	}
+	piSessionID, ok := state["sessionId"].(string)
+	if !ok || piSessionID == "" {
+		_ = closeRPCAndWait(rpc)
+		_ = process.Stop(context.Background())
+		m.fail(agent.AgentID, "SESSION_BIND_FAILED", "get_state returned no session ID")
+		return
+	}
+	if piSessionID != agent.PiSessionID {
+		_ = closeRPCAndWait(rpc)
+		_ = process.Stop(context.Background())
+		m.fail(agent.AgentID, "SESSION_BIND_FAILED", "get_state returned a different session ID")
+		return
+	}
+	if sessionFile, supplied := state["sessionFile"]; supplied {
+		path, valid := sessionFile.(string)
+		if !valid || path == "" || filepath.Clean(path) != filepath.Clean(binding.sessionPath) {
+			_ = closeRPCAndWait(rpc)
+			_ = process.Stop(context.Background())
+			m.fail(agent.AgentID, "SESSION_BIND_FAILED", "get_state returned a different session file")
+			return
+		}
+	}
+	if err = m.store.BindManagedPiSession(durableCtx, binding.sessionReservationID, request.RequestID, piSessionID, binding.sessionRelativePath, fence); err != nil {
+		_ = closeRPCAndWait(rpc)
+		_ = process.Stop(context.Background())
+		m.fail(agent.AgentID, "SESSION_BIND_FAILED", sanitizeError(err))
+		return
+	}
+	binding.serial.Lock()
+	binding.sessionID = piSessionID
+	fence = bindingFence(agent.AgentID, binding)
+	binding.serial.Unlock()
 	if err = m.readinessGate(ctx, binding, fence); err != nil {
 		// Capture an already-published child exit before readiness cleanup changes
 		// its outcome. This does not wait: an unavailable waiter must not delay an
@@ -642,6 +727,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.installParentActivityReceiver(binding)
 	m.installQualifiedGoalActivityReceiver(binding)
 	m.installBuiltinToolLifecycleReceiver(binding)
+	m.startRootControlRecovery(binding)
 	binding.serial.Lock()
 	if live, subreason := m.liveBindingForFenceReason(durableCtx, binding, fence); !live {
 		binding.serial.Unlock()
@@ -1189,6 +1275,13 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if err != nil {
 		return RestartResult{}, err
 	}
+	failedRoot, rootErr := m.store.LatestRetryableManagedRootRecovery(ctx, request.AgentID)
+	if rootErr == nil {
+		return m.reserveFailedRootRecoveryRetry(ctx, request, agent, failedRoot)
+	}
+	if !errors.Is(rootErr, sql.ErrNoRows) {
+		return RestartResult{}, rootErr
+	}
 	predecessor, retryErr := m.store.LatestRetryableManagedRestart(ctx, request.AgentID)
 	if retryErr == nil {
 		return m.reserveFailedLifecycleRestart(ctx, request, agent, predecessor)
@@ -1202,10 +1295,11 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	}
 	binding.serial.Lock()
 	live := m.liveBinding(agent, binding)
+	initialReplayPending := binding.initialReplayPending
 	currentOperationID := binding.operationID
 	source := bindingFence(request.AgentID, binding)
 	binding.serial.Unlock()
-	if !live {
+	if !live || initialReplayPending {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
 	selectedModel := agent.SelectedModel
@@ -1423,7 +1517,7 @@ func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) erro
 	if err != nil {
 		return err
 	}
-	if agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || !m.liveBinding(agent, binding) {
+	if agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || binding.initialReplayPending || !m.liveBinding(agent, binding) {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
 	_, actionErr := m.store.ActiveManagedLifecycleAction(ctx, agentID)
@@ -1623,6 +1717,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	m.installParentActivityReceiver(target)
 	m.installQualifiedGoalActivityReceiver(target)
 	m.installBuiltinToolLifecycleReceiver(target)
+	m.startRootControlRecovery(target)
 	target.serial.Lock()
 	target.lifecycleAction = ""
 	target.serial.Unlock()
@@ -1711,7 +1806,19 @@ func (m *Manager) reapRestartGroup(parent context.Context, identity ProcessIdent
 	if probe.State == ProcessAbsent {
 		return true
 	}
-	if !termSentUnderOwnedProof || probe.State != ProcessPresent || m.processOps.SignalVerifiedProcessGroupAfterLeaderExit(identity) != nil {
+	if !termSentUnderOwnedProof {
+		return false
+	}
+	switch probe.State {
+	case ProcessOwned:
+		if m.processOps.SignalVerifiedProcessGroup(identity, syscall.SIGKILL) != nil {
+			return false
+		}
+	case ProcessPresent:
+		if m.processOps.SignalVerifiedProcessGroupAfterLeaderExit(identity) != nil {
+			return false
+		}
+	default:
 		return false
 	}
 	kill, cancel := context.WithTimeout(context.Background(), m.config.Limits.TermStop)
@@ -2005,6 +2112,13 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 	if err != nil {
 		return err
 	}
+	piSessionID, ok := state["sessionId"].(string)
+	if !ok || piSessionID == "" {
+		return errors.New("Pi get_state omitted session identity")
+	}
+	if sessionFile, present := state["sessionFile"].(string); present && filepath.Clean(sessionFile) != filepath.Clean(binding.sessionPath) {
+		return errors.New("Pi session file does not match reserved path")
+	}
 	if compacting, present := state["isCompacting"].(bool); present {
 		binding.parentCompacting = &compacting
 	} else {
@@ -2173,6 +2287,9 @@ func validateManagedCommandNames(commands []string) error {
 	wantedSet := managedCommandSet()
 	counts := map[string]int{}
 	for _, value := range commands {
+		if value == "get_entry" || value == "get_entries" {
+			return fmt.Errorf("managed command inventory contains unsupported transcript command %q", value)
+		}
 		// Check the raw name first. A normalized view is only useful for
 		// identifying a collision; it must never make a non-canonical managed
 		// command look like the required exact name.
@@ -2554,7 +2671,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		}
 		binding.serial.Lock()
 		agent, err := m.store.ManagedAgent(context.Background(), agentID)
-		if err != nil || !m.liveBinding(agent, binding) || !agent.AcceptingPrompts {
+		if err != nil || binding.initialReplayPending || !m.liveBinding(agent, binding) || !agent.AcceptingPrompts {
 			binding.serial.Unlock()
 			return
 		}
@@ -2569,18 +2686,11 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 			m.scheduleDirectRetry(agentID)
 			return
 		}
-		// The persisted cursor is captured before the matcher is armed and before
-		// the command is written. Recovery reads only entries after this boundary.
-		prepareCtx, prepareCancel := context.WithTimeout(m.runCtx, 10*time.Second)
-		cursor, err := rpc.PrepareManagedMailbox(prepareCtx)
-		prepareCancel()
-		if err != nil {
-			m.releaseManagedDirect(*attempt, "prompt_prepare_failed", sanitizeError(err))
-			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_prepare_failed", "")
-			return
-		}
-		attempt.SessionEntryWatermark = cursor
-		if err := m.store.MarkManagedDirectPrompted(context.Background(), *attempt, cursor); err != nil {
+		// This immutable logical key reserves reconciliation before the command
+		// write. Stock Pi transcript authority stays inside the extension.
+		reconciliationKey := directMailboxReconciliationKey(*attempt)
+		attempt.SessionEntryWatermark = reconciliationKey
+		if err := m.store.MarkManagedDirectPrompted(context.Background(), *attempt, reconciliationKey); err != nil {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_state_persistence_failed", "")
 			m.releaseManagedDirect(*attempt, "prompt_state_persistence_failed", sanitizeError(err))
 			return
@@ -2820,7 +2930,7 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	binding.serial.Lock()
 	currentFence := bindingFence(agentID, binding)
 	rpc, supported := binding.rpc.(DirectMailboxRPC)
-	bindingLive := m.liveBindingForFence(ctx, binding, currentFence)
+	bindingLive := !binding.initialReplayPending && m.liveBindingForFence(ctx, binding, currentFence)
 	binding.serial.Unlock()
 	if !bindingLive || !supported {
 		return nil

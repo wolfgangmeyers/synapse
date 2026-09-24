@@ -104,25 +104,15 @@ func TestRootControlResultArmCapturesReceiptAndUsesOnlyExactEntryLookup(t *testi
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": prompt["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	<-done
 	require.NoError(t, submitErr)
-	// The persisted explicit-ID result is the receipt; it is independently
-	// checked again with G4 get_entry before the store marks delivery.
+	// The persisted explicit-ID result is the receipt; its closed reconciliation
+	// receipt is checked again before the store marks delivery.
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": entryID, "customType": "mecha.control.result.v1", "display": false, "content": "done", "details": map[string]any{"protocol": "mecha.control/v1"}}}))
 	select {
 	case receipt := <-receipts:
+		require.Equal(t, "message_end", receipt.Event["type"])
+		require.Equal(t, entryID, nestedMessage(receipt.Event)["id"])
 		require.Equal(t, "mecha.control.result.v1", nestedMessage(receipt.Event)["customType"])
-		// The follow-up proof command is the narrow get_entry operation. No
-		// prompt/model operation is available on this S4 recovery path.
-		lookupDone := make(chan struct{})
-		var entry map[string]any
-		var lookupErr error
-		go func() { entry, lookupErr = root.GetRootControlEntry(context.Background(), entryID); close(lookupDone) }()
-		lookup := requireRequest(t, requests)
-		require.Equal(t, "get_entry", lookup["type"])
-		require.Equal(t, entryID, lookup["entryId"])
-		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": lookup["id"], "type": "response", "command": "get_entry", "success": true, "data": map[string]any{"entry": map[string]any{"id": entryID}}}))
-		<-lookupDone
-		require.NoError(t, lookupErr)
-		require.Equal(t, entryID, entry["id"])
+		require.Greater(t, receipt.Watermark, token.Watermark())
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for root append receipt")
 	}

@@ -33,6 +33,10 @@ type directRootControlRejector interface {
 	RejectRootControlRequest(requestID string, fence store.ManagedRuntimeFence)
 }
 
+type rootControlEventReceiver interface {
+	SetRootControlEventHandler(func(RootControlEvent))
+}
+
 func acknowledgeDirectRootControlReceipt(rpc RPC, requestID, resultStatus string) {
 	acknowledger, ok := rpc.(directRootControlReceiptAcknowledger)
 	if !ok {
@@ -60,11 +64,17 @@ func rejectDirectRootControl(rpc RPC, requestID string, fence store.ManagedRunti
 // passed normal readiness and becomes the installed binding. This prevents an
 // unready/replaced process from admitting root controls.
 func (m *Manager) installRootControlReceiver(binding *managedBinding) {
-	rpc, ok := binding.rpc.(RootControlRPC)
+	receiver, ok := binding.rpc.(rootControlEventReceiver)
 	if !ok {
 		return
 	}
-	rpc.SetRootControlEventHandler(func(event RootControlEvent) { m.handleRootControlEvent(binding, event) })
+	receiver.SetRootControlEventHandler(func(event RootControlEvent) { m.handleRootControlEvent(binding, event) })
+}
+
+// startRootControlRecovery starts durable reconciliation only after callers
+// have completed any synchronous launch work that must remain first in Pi's
+// semantic FIFO.
+func (m *Manager) startRootControlRecovery(binding *managedBinding) {
 	go m.recoverRootControls(binding)
 }
 
@@ -553,43 +563,17 @@ func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedB
 		m.retryRootControlAppend(ctx, binding, row.RequestID, owner, claim.Request.AppendAttempt, fence, "result payload integrity check failed")
 		return
 	}
-	wait, err := rpc.SubmitRootControlResult(ctx, token, payload)
-	if err != nil {
-		// A command response can be lost after Pi persisted the explicit entry.
-		// Probe that one ID before spending another bounded append attempt.
-		m.reconcileRootControlAppend(ctx, binding, claim.Request)
-		return
-	}
+	_, submitErr := rpc.SubmitRootControlResult(ctx, token, payload)
+	// Once submission starts, its result is uncertain. Persist reconciliation
+	// before inspecting the response so recovery can never append it again.
 	if err := m.store.MarkManagedControlAppendSubmitted(ctx, row.RequestID, owner, claim.Request.AppendAttempt, fence); err != nil {
 		return
 	}
-	// Stock Pi assigns its own persisted entry ID even when the command requests
-	// a deterministic one. Its stdout receipt still carries the complete fenced
-	// result envelope, so accept that exact event instead of retrying a result
-	// the user has already received. Builds that do not emit it retain the
-	// reserved-ID lookup in the timeout recovery path below.
-	deadline, cancel := context.WithTimeout(ctx, rootControlAppendTimeout)
-	defer cancel()
-	for {
-		select {
-		case receipt, open := <-wait:
-			if !open {
-				m.reconcileRootControlAppend(ctx, binding, claim.Request)
-				return
-			}
-			if !validRootControlReceipt(receipt.Event, row, receipt.Watermark, token.Watermark()) {
-				continue
-			}
-			entryIdentity := rootControlReceiptEntryIdentity(receipt.Event, row)
-			if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: entryIdentity, Attempt: claim.Request.AppendAttempt, Fence: fence}) == nil {
-				acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID, row.ResultStatus)
-			}
-			return
-		case <-deadline.Done():
-			m.reconcileRootControlAppend(ctx, binding, claim.Request)
-			return
-		}
+	if submitErr != nil {
+		m.reconcileRootControlAppend(ctx, binding, claim.Request)
+		return
 	}
+	m.reconcileRootControlAppend(ctx, binding, claim.Request)
 }
 
 func (m *Manager) reconcileRootControlAppend(ctx context.Context, binding *managedBinding, row store.ManagedControlRequest) {
@@ -606,17 +590,22 @@ func (m *Manager) reconcileRootControlAppend(ctx context.Context, binding *manag
 	if !m.rootBindingCurrent(ctx, binding, fence) {
 		return
 	}
-	entry, err := rpc.GetRootControlEntry(ctx, row.ResultEntryID)
-	if err == nil && validRootControlEntry(entry, row) {
-		if row.State == "append_pending" {
-			_ = m.store.MarkManagedControlAppendSubmitted(ctx, row.RequestID, row.AppendOwner, row.AppendAttempt, fence)
-		}
-		if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: row.AppendOwner, EntryIdentity: row.ResultEntryID, Attempt: row.AppendAttempt, Fence: fence}) == nil {
-			acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID, row.ResultStatus)
-		}
+	payload, err := m.store.ManagedControlResultEnvelope(ctx, row.RequestID)
+	if err != nil {
 		return
 	}
-	m.retryRootControlAppend(ctx, binding, row.RequestID, row.AppendOwner, row.AppendAttempt, fence, "result entry was absent during recovery")
+	if row.State == "append_pending" {
+		if err := m.store.MarkManagedControlAppendSubmitted(ctx, row.RequestID, row.AppendOwner, row.AppendAttempt, fence); err != nil {
+			return
+		}
+	}
+	receipt, err := rpc.ReconcileRootControlResult(ctx, payload)
+	if err != nil || receipt.RequestID != row.RequestID || receipt.ResultID != row.ResultID || receipt.PayloadSHA256 != row.ResultPayloadSHA256 || receipt.RuntimeGeneration != fence.RuntimeGeneration || receipt.SessionEpoch != fence.SessionEpoch || receipt.ManifestSHA256 != fence.ManifestHash {
+		return
+	}
+	if m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: row.AppendOwner, EntryIdentity: receipt.ReceiptID, PayloadSHA256: receipt.PayloadSHA256, ReceiptID: receipt.ReceiptID, Attempt: row.AppendAttempt, Fence: fence}) == nil {
+		acknowledgeDirectRootControlReceipt(binding.rpc, row.RequestID, row.ResultStatus)
+	}
 }
 
 func (m *Manager) retryRootControlAppend(ctx context.Context, binding *managedBinding, requestID, owner string, attempt int, fence store.ManagedRuntimeFence, detail string) {

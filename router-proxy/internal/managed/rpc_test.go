@@ -1353,7 +1353,7 @@ func TestManagedDirectMatcherClearsAfterCanceledWait(t *testing.T) {
 	require.NotNil(t, second)
 }
 
-func TestManagedDirectRecoveryUsesExactPersistedEntry(t *testing.T) {
+func TestManagedDirectRecoveryUsesClosedReconciliationReceipt(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
 	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
@@ -1364,26 +1364,26 @@ func TestManagedDirectRecoveryUsesExactPersistedEntry(t *testing.T) {
 		recovery DirectMailboxRecovery
 		err      error
 	}, 1)
+	attempt := directMailboxAttempt("message-a")
+	attempt.MessageIncarnationID = "incarnation-a"
+	attempt.AttemptNumber = 1
+	attempt.SessionEntryWatermark = directMailboxReconciliationKey(attempt)
 	go func() {
-		recovery, err := direct.RecoverManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
+		recovery, err := direct.RecoverManagedMailbox(context.Background(), attempt)
 		result <- struct {
 			recovery DirectMailboxRecovery
 			err      error
 		}{recovery, err}
 	}()
 	request := requireRequest(t, requests)
-	require.Equal(t, "get_entries", request["type"])
-	require.Equal(t, "cursor-entry", request["since"])
-	entries := []any{
-		map[string]any{"id": "wrong-content", "type": "custom_message", "customType": "mecha.mailbox.appended.v1", "content": "other", "display": false, "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}},
-		map[string]any{"id": "right", "type": "custom_message", "customType": "mecha.mailbox.appended.v1", "content": "persisted body", "display": false, "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}},
-	}
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "get_entries", "success": true, "data": map[string]any{"entries": entries, "leafId": "right"}}))
+	require.Equal(t, "prompt", request["type"])
+	require.True(t, strings.HasPrefix(request["message"].(string), "/mecha-mailbox-reconcile-v1 "))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{"protocol": "mecha.mailbox.appended.persisted.v1", "receipt_id": "right", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2, "manifest_sha256": strings.Repeat("a", 64)}}))
 	outcome := <-result
 	require.NoError(t, outcome.err)
 	require.NotNil(t, outcome.recovery.Receipt)
 	require.Equal(t, "right", outcome.recovery.Receipt.EntryIdentity)
-	require.Contains(t, outcome.recovery.Diagnostics, "mismatched_receipt")
+	require.Empty(t, outcome.recovery.Diagnostics)
 }
 
 func TestRPCClientOrdersCallsBoundsResponsesAndUsesAcceptedTools(t *testing.T) {
@@ -1971,6 +1971,101 @@ func realPiOrdinaryEventFixtures() []map[string]any {
 	return append(frames, updates...)
 }
 
+func TestOrdinaryAgentSessionEventAcceptsStock0731AgentEnd(t *testing.T) {
+	require.True(t, ordinaryAgentSessionEvent(map[string]any{"type": "agent_end", "messages": []any{}}))
+}
+
+func TestRPCClientStock0731AgentEndProjectsIdle(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	activity := make(chan map[string]any, 2)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_end", "messages": []any{
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "done"}}},
+	}}))
+
+	for sequence, state := range []string{"active", "idle"} {
+		select {
+		case event := <-activity:
+			require.Equal(t, int64(sequence+1), event["sequence"])
+			require.Equal(t, state, event["state"])
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s activity", state)
+		}
+	}
+}
+
+func TestRPCClientRejectsMalformedStock0731AgentEndActivity(t *testing.T) {
+	for name, frame := range map[string]map[string]any{
+		"messages is not an array": {"type": "agent_end", "messages": map[string]any{}},
+		"extra outer field":        {"type": "agent_end", "messages": []any{}, "willRetry": false},
+		"messages exceed bounds":   {"type": "agent_end", "messages": []any{strings.Repeat("x", readinessMaxJSONStringBytes+1)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			normalized, candidate := classifyParentActivityEvent(frame, 2)
+			require.True(t, candidate)
+			require.Nil(t, normalized)
+
+			stdoutReader, stdoutWriter := io.Pipe()
+			client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+			t.Cleanup(func() { require.NoError(t, client.Close()) })
+			activity := make(chan map[string]any, 2)
+			client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+			require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+			select {
+			case event := <-activity:
+				require.Equal(t, "active", event["state"])
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for active activity")
+			}
+			require.NoError(t, writeRPC(stdoutWriter, frame))
+			require.Eventually(t, func() bool { return client.ParentActivitySequence() == 2 }, time.Second, time.Millisecond)
+			select {
+			case event := <-activity:
+				t.Fatalf("rejected agent_end cleared activity: %#v", event)
+			case <-time.After(25 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestRPCClientLegacyAgentSettledStillProjectsIdle(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	activity := make(chan map[string]any, 1)
+	client.SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-activity:
+		require.Equal(t, int64(1), event["sequence"])
+		require.Equal(t, "idle", event["state"])
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for legacy idle activity")
+	}
+}
+
+func TestOrdinaryAgentSessionEventAcceptsStock0731MessageUpdate(t *testing.T) {
+	event := map[string]any{
+		"type": "message_update",
+		"message": map[string]any{
+			"role":       "assistant",
+			"content":    []any{},
+			"api":        "synthetic",
+			"provider":   "synthetic",
+			"model":      "synthetic",
+			"usage":      map[string]any{},
+			"stopReason": "stop",
+			"timestamp":  float64(0),
+		},
+		"assistantMessageEvent": map[string]any{"type": "text_delta", "contentIndex": float64(0), "delta": ""},
+	}
+	require.True(t, ordinaryAgentSessionEvent(event))
+}
+
 func TestOrdinaryAgentSessionEventRejectsMalformedKnownShapes(t *testing.T) {
 	usage := func() map[string]any {
 		return map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "totalTokens": float64(0), "cost": map[string]any{"input": float64(0), "output": float64(0), "cacheRead": float64(0), "cacheWrite": float64(0), "total": float64(0)}}
@@ -2302,6 +2397,22 @@ func TestRPCClientSettlePreparedRestartTurnRejectsUnadmittedQueuedSettlement(t *
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	require.Len(t, client.backlog, 1, "rejected pre-admission settlement must remain unconsumed")
+}
+
+func TestRPCClientRejectsUnsupportedTranscriptCommandBeforeReadiness(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	go func() {
+		_ = writeRPC(stdoutWriter, map[string]any{
+			"id": "managed-1", "type": "response", "command": "get_commands", "success": true,
+			"data": map[string]any{"commands": []any{"get_entries"}},
+		})
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := client.GetCommands(ctx)
+	require.EqualError(t, err, `managed command inventory contains unsupported transcript command "get_entries"`)
 }
 
 func TestRPCClientRejectsNonCanonicalManagedCommandBeforeReadiness(t *testing.T) {

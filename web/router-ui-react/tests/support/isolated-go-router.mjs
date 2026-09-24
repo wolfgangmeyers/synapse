@@ -92,6 +92,19 @@ function parseReadyLine(line) {
   return { httpUrl: match[1], websocketUrl: match[2], databasePath: match[3], logPath: match[4] };
 }
 
+const STARTUP_OUTPUT_LIMIT = 16_384;
+const STARTUP_OUTPUT_TRUNCATED = `[truncated to last ${STARTUP_OUTPUT_LIMIT} characters]\n`;
+
+function appendStartupOutput(current, chunk) {
+  const combined = current + chunk;
+  if (combined.length <= STARTUP_OUTPUT_LIMIT) return combined;
+  return STARTUP_OUTPUT_TRUNCATED + combined.slice(-(STARTUP_OUTPUT_LIMIT - STARTUP_OUTPUT_TRUNCATED.length));
+}
+
+function startupOutput(stdout, stderr) {
+  return `stdout:\n${stdout}\nstderr:\n${stderr}`;
+}
+
 async function stopFailedChild(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = new Promise((resolveClose) => child.once("close", resolveClose));
@@ -105,7 +118,9 @@ async function stopFailedChild(child) {
 
 export async function spawnRouterProcess({ command, args, cwd = REPOSITORY_ROOT, root, env = process.env, expectedPort, timeoutMs = 30_000 }) {
   const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  const output = [];
+  const output = [""];
+  let stdout = "";
+  let stderr = "";
   let lineBuffer = "";
   let settled = false;
   let rejectReady;
@@ -114,10 +129,12 @@ export async function spawnRouterProcess({ command, args, cwd = REPOSITORY_ROOT,
     resolveReady = resolvePromise;
     rejectReady = rejectPromise;
   });
-  const consume = (chunk) => {
+  const consume = (stream) => (chunk) => {
     const text = String(chunk);
-    output.push(text);
-    lineBuffer += text;
+    output[0] = appendStartupOutput(output[0], text);
+    if (stream === "stdout") stdout = appendStartupOutput(stdout, text);
+    else stderr = appendStartupOutput(stderr, text);
+    lineBuffer = appendStartupOutput(lineBuffer, text);
     const lines = lineBuffer.split(/\r?\n/u);
     lineBuffer = lines.pop() ?? "";
     for (const line of lines) {
@@ -128,13 +145,26 @@ export async function spawnRouterProcess({ command, args, cwd = REPOSITORY_ROOT,
       }
     }
   };
-  child.stdout.on("data", consume);
-  child.stderr.on("data", consume);
-  const startupError = new Promise((_, reject) => child.once("error", reject));
-  const timer = setTimeout(() => rejectReady(new Error(`timed out waiting for router readiness\n${output.join("")}`)), timeoutMs);
+  child.stdout.on("data", consume("stdout"));
+  child.stderr.on("data", consume("stderr"));
+  child.once("error", (error) => {
+    if (settled) return;
+    settled = true;
+    rejectReady(error);
+  });
+  child.once("close", (code, signal) => {
+    if (settled) return;
+    settled = true;
+    rejectReady(new Error(`router exited before readiness (code=${String(code)}, signal=${String(signal)})\n${startupOutput(stdout, stderr)}`));
+  });
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    rejectReady(new Error(`timed out waiting for router readiness\n${startupOutput(stdout, stderr)}`));
+  }, timeoutMs);
   let readyInfo;
   try {
-    readyInfo = await Promise.race([ready, startupError]);
+    readyInfo = await ready;
   } catch (error) {
     clearTimeout(timer);
     await stopFailedChild(child);

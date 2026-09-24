@@ -127,6 +127,7 @@ type recoveryDirectFactory struct {
 
 func (f recoveryDirectFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
 	f.rpc.session = spec.SessionID
+	f.rpc.sessionFile = spec.SessionPath
 	return f.process, nil
 }
 
@@ -622,13 +623,15 @@ func TestManagedDirectRecoveryWakeup(t *testing.T) {
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
 	process := &launchProcess{identity: ProcessIdentity{PID: 991, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	rpc := &recoveryDirectRPC{recovery: DirectMailboxRecovery{Receipt: &DirectMailboxReceipt{EntryIdentity: "persisted-append"}}}
 	recoveryEntered := make(chan struct{})
 	releaseRecovery := make(chan struct{})
 	var recoveryHookOnce sync.Once
 	manager, err := NewManager(ManagerOptions{
-		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		Store: durable, Config: Config{SessionRoot: sessionRoot, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
 		ProcessFactory: recoveryDirectFactory{process: process, rpc: rpc}, RPCFactory: recoveryDirectRPCFactory{rpc: rpc},
 		CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		BeforeManagedDirectRecovery: func(context.Context, string) {
@@ -640,20 +643,19 @@ func TestManagedDirectRecoveryWakeup(t *testing.T) {
 		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
 	})
 	require.NoError(t, err)
-	// The post-ready recovery scan holds its lane before it reads attempts. This
-	// lets the test create the retained crash-boundary row without a scheduler
-	// race between launch and recovery.
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "recovery-agent", Cwd: root, RequestID: "recovery-launch"})
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		agent, readErr := durable.ManagedAgent(ctx, "recovery-agent")
-		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
-	}, time.Second, time.Millisecond)
 	select {
 	case <-recoveryEntered:
 	case <-time.After(time.Second):
 		t.Fatal("launch did not enter its direct recovery scan")
 	}
+	close(releaseRecovery)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "recovery-agent")
+		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+
 	agent, err := durable.ManagedAgent(ctx, "recovery-agent")
 	require.NoError(t, err)
 	fence := store.ManagedRuntimeFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}
@@ -667,7 +669,6 @@ func TestManagedDirectRecoveryWakeup(t *testing.T) {
 	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "recovery-cursor"))
 	recoveryDone := make(chan error, 1)
 	go func() { recoveryDone <- manager.RecoverManagedDirectAttempts(ctx) }()
-	close(releaseRecovery)
 	select {
 	case recoveryErr := <-recoveryDone:
 		require.NoError(t, recoveryErr)

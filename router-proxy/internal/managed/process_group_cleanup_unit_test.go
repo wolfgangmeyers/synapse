@@ -27,6 +27,8 @@ func (ops *cleanupMatrixOps) SignalVerifiedProcessGroup(_ ProcessIdentity, signa
 	ops.signals = append(ops.signals, signal)
 	if signal == syscall.SIGTERM {
 		ops.state = ProcessPresent
+	} else if signal == syscall.SIGKILL {
+		ops.state = ProcessAbsent
 	}
 	return nil
 }
@@ -61,6 +63,13 @@ func TestReapRestartGroupRequiresSameAttemptOwnedProofForEscalation(t *testing.T
 			name:        "owned term then leaderless present kill then gone",
 			initial:     ProcessOwned,
 			waits:       []ProcessProbeState{ProcessOwned, ProcessPresent, ProcessAbsent},
+			wantResult:  true,
+			wantSignals: []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL},
+		},
+		{
+			name:        "owned term then stubborn owned leader kill then gone",
+			initial:     ProcessOwned,
+			waits:       []ProcessProbeState{ProcessOwned, ProcessOwned, ProcessAbsent},
 			wantResult:  true,
 			wantSignals: []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL},
 		},

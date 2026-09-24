@@ -3,6 +3,7 @@ package managed
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -85,7 +86,6 @@ type RestartTurnAdmissionRPC interface {
 // DirectMailboxRPC is private to managed delivery. It deliberately does not
 // widen RPC, so launch and readiness callers cannot issue router mail.
 type DirectMailboxRPC interface {
-	PrepareManagedMailbox(context.Context) (string, error)
 	PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error)
 	RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error)
 }
@@ -106,19 +106,24 @@ type RootControlResultReceipt struct {
 	Watermark uint64
 }
 
+type RootControlPersistedReceipt struct {
+	ReceiptID, RequestID, ResultID, PayloadSHA256 string
+	RuntimeGeneration, ManifestSHA256             string
+	SessionEpoch                                  int64
+}
+
 type RootControlAppendToken interface {
 	Watermark() uint64
 	Release()
 }
 
-// RootControlRPC is a private S4 capability. It deliberately exposes only
-// result append, its receipt token, and exact entry lookup; no history method
-// is part of this interface.
+// RootControlRPC is a private S4 capability. Transcript authority stays in the
+// extension and crosses this boundary only as one closed, fenced receipt.
 type RootControlRPC interface {
 	SetRootControlEventHandler(func(RootControlEvent))
 	ArmRootControlResult(requestID, entryID string) (RootControlAppendToken, error)
 	SubmitRootControlResult(context.Context, RootControlAppendToken, map[string]any) (<-chan RootControlResultReceipt, error)
-	GetRootControlEntry(context.Context, string) (map[string]any, error)
+	ReconcileRootControlResult(context.Context, map[string]any) (RootControlPersistedReceipt, error)
 }
 
 // ChildDeltaRPC receives post-readiness child lifecycle deltas. Keeping the
@@ -1613,13 +1618,15 @@ func ordinaryAgentSessionEvent(value map[string]any) bool {
 	case "agent_start", "agent_settled", "turn_start", "summarization_retry_finished":
 		return exactJSONKeys(value, "type")
 	case "agent_end":
-		return exactJSONKeys(value, "type", "messages", "willRetry") && jsonArray(value["messages"]) && jsonBool(value["willRetry"])
+		return exactJSONKeys(value, "type", "messages") && jsonArray(value["messages"]) ||
+			exactJSONKeys(value, "type", "messages", "willRetry") && jsonArray(value["messages"]) && jsonBool(value["willRetry"])
 	case "turn_end":
 		return exactJSONKeys(value, "type", "message", "toolResults") && jsonObject(value["message"]) && jsonArray(value["toolResults"])
 	case "message_start", "message_end":
 		return exactJSONKeys(value, "type", "message") && jsonObject(value["message"])
 	case "message_update":
-		return exactJSONKeys(value, "type", "usage", "assistantMessageEvent") && validUsage(value["usage"]) && validAssistantMessageEvent(value["assistantMessageEvent"])
+		return exactJSONKeys(value, "type", "message", "assistantMessageEvent") && jsonObject(value["message"]) && validAssistantMessageEvent(value["assistantMessageEvent"]) ||
+			exactJSONKeys(value, "type", "usage", "assistantMessageEvent") && validUsage(value["usage"]) && validAssistantMessageEvent(value["assistantMessageEvent"])
 	case "tool_execution_start":
 		return exactJSONKeys(value, "type", "toolCallId", "toolName", "args") && jsonString(value["toolCallId"]) && jsonString(value["toolName"])
 	case "tool_execution_update":
@@ -1960,23 +1967,8 @@ func (c *rpcClient) PromptAdmittedRestartTurn(ctx context.Context, message strin
 	return err
 }
 
-// PrepareManagedMailbox records a persisted session cursor before the fixed
-// command is written. Recovery uses that cursor with Pi's documented
-// get_entries `since` boundary and never falls back to a whole-session scan.
-func (c *rpcClient) PrepareManagedMailbox(ctx context.Context) (string, error) {
-	value, err := c.call(ctx, "get_entries", nil)
-	if err != nil {
-		return "", err
-	}
-	data := unwrap(value)
-	if _, ok := data["entries"].([]any); !ok {
-		return "", errors.New("Pi get_entries response has invalid entries")
-	}
-	cursor, ok := data["leafId"].(string)
-	if !ok || cursor == "" {
-		return "", errors.New("Pi get_entries response has no recovery cursor")
-	}
-	return cursor, nil
+func directMailboxReconciliationKey(attempt store.ManagedDirectAttempt) string {
+	return fmt.Sprintf("stock-transcript-receipt-v1:%s:%s:%d", attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber)
 }
 
 // PromptManagedMailbox installs its receipt matcher while holding the same
@@ -2570,11 +2562,18 @@ func validWireNumber(value any) bool {
 }
 
 func classifyParentActivityEvent(event map[string]any, sequence uint64) (map[string]any, bool) {
-	if event["type"] != "agent_start" && event["type"] != "agent_settled" {
+	switch event["type"] {
+	case "agent_start", "agent_settled":
+		if !exactJSONKeys(event, "type") {
+			return nil, true
+		}
+	case "agent_end":
+		messages, ok := event["messages"].([]any)
+		if !exactJSONKeys(event, "type", "messages") || !ok || !boundedJSON(messages, 1, &jsonBounds{}) {
+			return nil, true
+		}
+	default:
 		return nil, false
-	}
-	if !exactJSONKeys(event, "type") {
-		return nil, true
 	}
 	normalized, err := normalizeParentActivityEvent(event, sequence)
 	if err != nil {
@@ -2624,10 +2623,10 @@ func classifyParentCompactionNotificationEvent(event map[string]any, sequence ui
 
 func isRootControlResultEvent(event map[string]any) bool {
 	message := nestedMessage(event)
-	// Pi's live stdout receipt is a message_end frame, whereas get_entry and
-	// some supported explicit-append paths expose the persisted custom entry
-	// directly. Both forms carry the same closed custom type and are verified
-	// again against the reserved ID before the ledger can settle.
+	// Pi's live stdout receipt is a message_end frame. Supported explicit-append
+	// paths may expose the persisted custom entry directly. Both forms carry the
+	// same closed custom type and are verified against the reserved ID before the
+	// ledger can settle.
 	if message == nil {
 		message = event
 	}
@@ -2751,87 +2750,55 @@ func (c *rpcClient) SubmitRootControlResult(ctx context.Context, rawToken RootCo
 	}
 }
 
-func (c *rpcClient) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
-	if !strings.HasPrefix(entryID, "mcr1_") || len(entryID) != len("mcr1_")+32 {
-		return nil, errors.New("managed control entry ID is invalid")
+func (c *rpcClient) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (RootControlPersistedReceipt, error) {
+	requestID, requestOK := payload["request_id"].(string)
+	resultID, resultOK := payload["result_id"].(string)
+	generation, generationOK := payload["runtime_generation"].(string)
+	manifest, manifestOK := payload["manifest_sha256"].(string)
+	epoch, epochOK := readinessInteger(payload["target_session_epoch"])
+	canonical, err := canonicalJSON(payload)
+	if err != nil || !requestOK || !resultOK || !generationOK || !manifestOK || !epochOK {
+		return RootControlPersistedReceipt{}, errors.New("managed control reconciliation payload is invalid")
 	}
-	value, err := c.call(ctx, "get_entry", map[string]any{"entryId": entryID})
+	hash := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	value, _, err := c.privateCommand(ctx, "mecha-control-result-reconcile-v1", map[string]any{
+		"protocol": "mecha.control-result-reconcile/v1", "request_id": requestID, "result_id": resultID,
+		"payload_hash": hash, "runtime_generation": generation, "session_epoch": epoch, "manifest_sha256": manifest,
+	})
 	if err != nil {
-		return nil, err
+		return RootControlPersistedReceipt{}, err
 	}
-	data := unwrap(value)
-	raw, found := data["entry"]
-	if !found || raw == nil {
-		return nil, nil
+	if exactKeys(value, "protocol", "receipt_id", "request_id", "result_id", "payload_hash", "runtime_generation", "session_epoch", "manifest_sha256") != nil || value["protocol"] != "mecha.control.result.persisted.v1" || value["request_id"] != requestID || value["result_id"] != resultID || value["payload_hash"] != hash || value["runtime_generation"] != generation || value["manifest_sha256"] != manifest || !sameEpoch(value["session_epoch"], epoch) {
+		return RootControlPersistedReceipt{}, errors.New("managed control reconciliation receipt is invalid")
 	}
-	entry, ok := raw.(map[string]any)
-	if !ok {
-		return nil, errors.New("Pi get_entry response is invalid")
+	receiptID, ok := value["receipt_id"].(string)
+	if !ok || receiptID == "" {
+		return RootControlPersistedReceipt{}, errors.New("managed control reconciliation receipt is invalid")
 	}
-	encoded, err := json.Marshal(entry)
-	if err != nil || len(encoded) > 64*1024 {
-		return nil, errors.New("Pi get_entry response is oversized")
-	}
-	return cloneJSONRecord(entry), nil
+	return RootControlPersistedReceipt{ReceiptID: receiptID, RequestID: requestID, ResultID: resultID, PayloadSHA256: hash, RuntimeGeneration: generation, SessionEpoch: epoch, ManifestSHA256: manifest}, nil
 }
 
-// RecoverManagedMailbox accepts a persisted append only when the recorded
-// get_entries cursor yields one exact hidden custom-message entry. It never
-// scans from the beginning of a session and returns metadata-only diagnostics.
+// RecoverManagedMailbox delegates the bounded transcript scan to the extension
+// and accepts only its closed receipt under the attempt's immutable fence.
 func (c *rpcClient) RecoverManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
-	if attempt.SessionEntryWatermark == "" {
-		return DirectMailboxRecovery{Diagnostics: []string{"missing_recovery_cursor"}}, nil
+	if attempt.SessionEntryWatermark != directMailboxReconciliationKey(attempt) {
+		return DirectMailboxRecovery{Diagnostics: []string{"missing_reconciliation_key"}}, nil
 	}
-	value, err := c.call(ctx, "get_entries", map[string]any{"since": attempt.SessionEntryWatermark})
+	value, _, err := c.privateCommand(ctx, "mecha-mailbox-reconcile-v1", map[string]any{
+		"protocol": "mecha.mailbox-reconcile/v1", "message_id": attempt.MessageID, "content": attempt.Message.Body,
+		"runtime_generation": attempt.Fence.RuntimeGeneration, "session_epoch": attempt.Fence.SessionEpoch, "manifest_sha256": attempt.Fence.ManifestHash,
+	})
 	if err != nil {
 		return DirectMailboxRecovery{}, err
 	}
-	data := unwrap(value)
-	entries, ok := data["entries"].([]any)
-	if !ok {
-		return DirectMailboxRecovery{}, errors.New("Pi get_entries response has invalid entries")
+	if exactKeys(value, "protocol", "receipt_id", "message_id", "runtime_generation", "session_epoch", "manifest_sha256") != nil || value["protocol"] != "mecha.mailbox.appended.persisted.v1" || value["message_id"] != attempt.MessageID || value["runtime_generation"] != attempt.Fence.RuntimeGeneration || value["manifest_sha256"] != attempt.Fence.ManifestHash || !sameEpoch(value["session_epoch"], attempt.Fence.SessionEpoch) {
+		return DirectMailboxRecovery{}, errors.New("managed mailbox reconciliation receipt is invalid")
 	}
-	result := DirectMailboxRecovery{}
-	for _, raw := range entries {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		customType, _ := entry["customType"].(string)
-		if customType == "" {
-			continue
-		}
-		if customType != "mecha.mailbox.appended.v1" {
-			result.Diagnostics = append(result.Diagnostics, "wrong_custom_type")
-			continue
-		}
-		identity, diagnostic := exactPersistedMailboxReceipt(entry, attempt)
-		if diagnostic != "" {
-			result.Diagnostics = append(result.Diagnostics, diagnostic)
-			continue
-		}
-		if result.Receipt == nil {
-			result.Receipt = &DirectMailboxReceipt{EntryIdentity: identity}
-		} else {
-			result.Diagnostics = append(result.Diagnostics, "duplicate_receipt")
-		}
+	receiptID, ok := value["receipt_id"].(string)
+	if !ok || receiptID == "" {
+		return DirectMailboxRecovery{}, errors.New("managed mailbox reconciliation receipt is invalid")
 	}
-	return result, nil
-}
-
-func exactPersistedMailboxReceipt(entry map[string]any, attempt store.ManagedDirectAttempt) (string, string) {
-	identity, _ := entry["id"].(string)
-	entryType, typeOK := entry["type"].(string)
-	content, contentOK := entry["content"].(string)
-	display, displayOK := entry["display"].(bool)
-	details, detailsOK := entry["details"].(map[string]any)
-	if identity == "" || !typeOK || entryType != "custom_message" || !contentOK || !displayOK || display || !detailsOK || len(details) != 4 {
-		return "", "malformed_receipt"
-	}
-	if content != attempt.Message.Body || details["protocol"] != "mecha.mailbox/v1" || details["message_id"] != attempt.MessageID || details["runtime_generation"] != attempt.Fence.RuntimeGeneration || !sameEpoch(details["session_epoch"], attempt.Fence.SessionEpoch) {
-		return "", "mismatched_receipt"
-	}
-	return identity, ""
+	return DirectMailboxRecovery{Receipt: &DirectMailboxReceipt{EntryIdentity: receiptID}}, nil
 }
 func (c *rpcClient) Close() error {
 	c.closeOnce.Do(func() {

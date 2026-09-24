@@ -40,7 +40,7 @@ func TestManagedProcessGroupHelper(t *testing.T) {
 	}
 
 	switch mode {
-	case "leader":
+	case "leader", "leader-stubborn":
 		descendant := exec.Command(os.Args[0], "-test.run=TestManagedProcessGroupHelper", "--", "descendant")
 		descendant.Env = append(os.Environ(), managedGroupHelperMode+"=descendant")
 		descendant.ExtraFiles = []*os.File{status}
@@ -57,6 +57,9 @@ func TestManagedProcessGroupHelper(t *testing.T) {
 		defer signalStop(signals)
 		<-signals
 		write("leader-term")
+		if mode == "leader-stubborn" {
+			select {}
+		}
 	case "descendant":
 		write("descendant-ready")
 		signals := make(chan os.Signal, 1)
@@ -87,11 +90,15 @@ type realManagedGroup struct {
 }
 
 func startRealManagedGroup(t *testing.T) realManagedGroup {
+	return startRealManagedGroupMode(t, "leader")
+}
+
+func startRealManagedGroupMode(t *testing.T, mode string) realManagedGroup {
 	t.Helper()
 	statusReader, statusWriter, err := os.Pipe()
 	require.NoError(t, err)
-	command := exec.Command(os.Args[0], "-test.run=TestManagedProcessGroupHelper", "--", "leader")
-	command.Env = append(os.Environ(), managedGroupHelperMode+"=leader")
+	command := exec.Command(os.Args[0], "-test.run=TestManagedProcessGroupHelper", "--", mode)
+	command.Env = append(os.Environ(), managedGroupHelperMode+"="+mode)
 	command.ExtraFiles = []*os.File{statusWriter}
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
@@ -243,6 +250,16 @@ func TestManagedProcessGroupCleanupBehavioralFunctional(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("managed process-group contract requires Unix Setpgid and negative Kill")
 	}
+
+	t.Run("cold recovery reaps a stubborn owned leader before replacement", func(t *testing.T) {
+		group := startRealManagedGroupMode(t, "leader-stubborn")
+		manager := &Manager{processOps: DefaultProcessGroupOps(), config: Config{Limits: Limits{GracefulStop: 40 * time.Millisecond, TermStop: behavioralCleanupTermStop}}}
+
+		reaped := manager.reapRestartGroup(context.Background(), group.identity, group.leaderDone)
+		require.True(t, reaped, "an owned leader that survives TERM must receive verified group KILL")
+		awaitGroupEvent(t, group.events, "leader-term")
+		requireGroupAbsent(t, group.identity)
+	})
 
 	t.Run("termination reaps a stubborn descendant after leader exit", func(t *testing.T) {
 		group := startRealManagedGroup(t)

@@ -14,6 +14,8 @@ type ManagedParentActivityEvent struct {
 	State    string
 }
 
+var ErrManagedParentActivitySourcePending = errors.New("managed parent activity source is pending")
+
 func validManagedParentActivityEvent(event ManagedParentActivityEvent) bool {
 	return event.Sequence >= 0 && (event.State == "active" || event.State == "idle")
 }
@@ -81,6 +83,55 @@ func (s *Store) SetManagedDirectPromptActivity(ctx context.Context, fence Manage
 	return updated, err
 }
 
+// ReconcileManagedParentIdleFromTranscript applies the completed-turn state
+// only to the exact active runtime. Repeated or stale reconciliation is a no-op.
+func (s *Store) ReconcileManagedParentIdleFromTranscript(ctx context.Context, fence ManagedRuntimeFence) (bool, error) {
+	if ctx == nil || !validManagedRuntimeFence(fence) {
+		return false, errors.New("managed transcript activity fence is invalid")
+	}
+	updated := false
+	err := s.runImmediate(ctx, func() error {
+		var sourcePresent int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_parent_compaction_state
+			WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`,
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&sourcePresent)
+		if errors.Is(err, sql.ErrNoRows) {
+			var present int
+			if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running'`, managedFenceValues(fence)...).Scan(&present); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil
+				}
+				return err
+			}
+			return ErrManagedParentActivitySourcePending
+		}
+		if err != nil {
+			return err
+		}
+
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_compaction_state SET active=0,updated_at=?
+			WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`,
+			now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='settled',settled_at=?,terminal_at=COALESCE(terminal_at,?) WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?
+			AND (state='pending_turn' OR (state='final_delivery_pending' AND NOT EXISTS (SELECT 1 FROM managed_parent_final_deliveries d WHERE d.work_id=managed_parent_work.work_id AND d.state IN ('pending','delivering'))))`, append([]any{now, now}, managedFenceValues(fence)...)...); err != nil {
+			return err
+		}
+		changed, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
+		if err != nil || !changed {
+			return err
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
+		updated = true
+		return nil
+	})
+	return updated, err
+}
+
 func (s *Store) ApplyManagedParentActivity(ctx context.Context, fence ManagedRuntimeFence, event ManagedParentActivityEvent) (bool, error) {
 	if !validManagedRuntimeFence(fence) || !validManagedParentActivityEvent(event) {
 		return false, errors.New("managed parent activity event is invalid")
@@ -125,7 +176,8 @@ func (s *Store) ApplyManagedParentActivity(ctx context.Context, fence ManagedRun
 				return err
 			}
 		}
-		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+		changed, err := s.recomputeManagedParentActivityChangedTx(ctx, fence)
+		if err != nil || !changed {
 			return err
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
