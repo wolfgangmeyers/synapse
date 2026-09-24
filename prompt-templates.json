@@ -118,7 +118,7 @@
     },
     {
       "name": "Supervisor Project Oversight",
-      "body": "Launch a subagent to check on ${priority}. Please make sure it goes in the right direction. I need you to make sure it doesn't go off the rails - excessive review loops, getting side tracked, etc. Don't let a bunch of scope creep in. Stick to the requirements - have the subagent go read them, if available - and make sure that all effort being invested is directly in support of them. No side projects. Please don't disable this reminder until the requirements have been met.",
+      "body": "Launch a subagent to check on ${priority}. Please make sure it goes in the right direction. I need you to make sure it doesn't go off the rails - excessive review loops, getting side tracked, etc. Don't let a bunch of scope creep in. Stick to the requirements - have the subagent go read them, if available - and make sure that all effort being invested is directly in support of them. No side projects. And try to follow the path of least resistance. Please don't disable this reminder until the requirements have been met.",
       "id": "74cd577a-5cbe-41ba-9c5f-2898e020ddaf",
       "updated_at": "2026-09-24T03:40:01.001Z"
     }
