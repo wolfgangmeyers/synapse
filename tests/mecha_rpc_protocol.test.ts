@@ -108,7 +108,7 @@ test("all custom details are closed, including legacy availability and nested so
     ["mecha.tools.rejected.v1", { protocol: "mecha.tools/v1", reason: "rejected", runtime_generation: GENERATION, session_epoch: 1 }],
     ["mecha.control.request.v1", { protocol: "mecha.control/v1", request_id: REQUEST_ID, operation_id: "legacy.goal", legacy_command: "goal", raw_arguments: "status", runtime_generation: GENERATION, session_epoch: 1, availability: { session_id: "root-session", kind: "root" } }],
     ["mecha.control.result.v1", { protocol: "mecha.control/v1", result_id: RESULT_ID, request_id: REQUEST_ID, target_session_epoch: 1, runtime_generation: GENERATION, manifest_sha256: MANIFEST_SHA, status: "ok", details: {} }],
-    ["mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: "message", runtime_generation: GENERATION, session_epoch: 1 }],
+    ["mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: "message", runtime_generation: GENERATION, session_epoch: 1, manifest_sha256: MANIFEST_SHA }],
     ["mecha.policy.applied.v1", { protocol: "mecha.policy/v1", runtime_generation: GENERATION, session_epoch: 1, applied: policyApplied() }],
     ["mecha.child.snapshot.v1", { protocol: "mecha.children/v1", snapshot_id: "snapshot", owner_session_id: "owner", sequence: 1, runs: [sourceChild()] }],
     ["mecha.child.delta.v1", { protocol: "mecha.children/v1", owner_session_id: "owner", sequence: 2, task_id: "task", run_id: "run", parent_entry_id: "entry", changes: { description: "Changed" } }],
@@ -118,6 +118,12 @@ test("all custom details are closed, including legacy availability and nested so
   }
 
   assert.throws(() => validateCustomMessageDetails("mecha.unknown.v1" as never, {}));
+  assert.throws(() => validateCustomMessageDetails("mecha.mailbox.appended.v1", {
+    protocol: "mecha.mailbox/v1", message_id: "message", runtime_generation: GENERATION, session_epoch: 1,
+  }));
+  assert.throws(() => validateCustomMessageDetails("mecha.mailbox.appended.v1", {
+    ...valid[4]![1], manifest_sha256: "not-a-sha",
+  }));
   assert.throws(() => validateCustomMessageDetails("mecha.control.request.v1", {
     ...valid[2]![1], availability: { session_id: "root-session", kind: "root", evil: true },
   }));

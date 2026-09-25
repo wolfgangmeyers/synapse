@@ -493,8 +493,8 @@ export function validateCustomMessageDetails(customType: CustomMessageType, deta
       if (typeof details.error.retryable !== "boolean") protocolError("error retryable is invalid");
     }
   } else if (customType === "mecha.mailbox.appended.v1") {
-    validateRuntimeFence(details, ["protocol", "message_id", "runtime_generation", "session_epoch"]);
-    if (details.protocol !== "mecha.mailbox/v1") protocolError("mailbox append protocol is invalid");
+    validateRuntimeFence(details, ["protocol", "message_id", "runtime_generation", "session_epoch", "manifest_sha256"]);
+    if (details.protocol !== "mecha.mailbox/v1" || typeof details.manifest_sha256 !== "string" || !SHA256.test(details.manifest_sha256)) protocolError("mailbox append protocol is invalid");
     boundedString(details.message_id, "message ID", 128);
   } else if (customType === "mecha.policy.applied.v1") {
     if (details.evaluator !== undefined) {
