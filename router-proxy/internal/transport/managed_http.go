@@ -93,6 +93,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && managedResetPath(req.URL.Path) != "":
 		r.handleManagedReset(w, req, managedResetPath(req.URL.Path))
 		return true
+	case req.Method == http.MethodPut && managedModelPath(req.URL.Path) != "":
+		r.handleManagedModel(w, req, managedModelPath(req.URL.Path))
+		return true
 	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
 		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
 		return true
@@ -656,6 +659,70 @@ func managedRestartPath(path string) string {
 	return id
 }
 
+func managedModelPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/model") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/model")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func (r *Router) handleManagedModel(w http.ResponseWriter, req *http.Request, agentID string) {
+	requestID := req.Header.Get("X-Request-ID")
+	if requestID == "" {
+		r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
+		return
+	}
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 4096, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	if len(payload) != 1 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	raw, ok := payload["model"]
+	if !ok {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+		return
+	}
+	var input map[string]json.RawMessage
+	if json.Unmarshal(raw, &input) != nil || len(input) != 2 {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+		return
+	}
+	provider, providerErr := managedString(input, "provider", true)
+	id, idErr := managedString(input, "id", true)
+	if providerErr != nil || idErr != nil {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	if r.managedPathCanonicalizer != nil {
+		canonicalPath = r.managedPathCanonicalizer(req)
+	}
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	result, changeErr := r.managed.ChangeModel(req.Context(), managed.ModelChangeRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), Model: managed.Model{Provider: provider, ID: id}})
+	if changeErr != nil {
+		r.writeManagedError(w, req, managedModelError(changeErr))
+		return
+	}
+	if result.Operation == nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the model operation"})
+		return
+	}
+	r.writeManagedRaw(w, req, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+}
+
 // handleManagedRestart is a direct local control. It intentionally reads no
 // identity, cookie, Origin, or permission data: loopback reachability is the
 // boundary. Durable replay/conflict lookup happens in ReserveRestart before a
@@ -840,6 +907,36 @@ func managedRestartAllError(err error) error {
 		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
 	}
 	return &managedHTTPError{500, "INTERNAL", "Router could not restart managed agents"}
+}
+
+func managedModelError(err error) error {
+	if managed.IsModelUnavailable(err) {
+		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
+	}
+	if strings.Contains(err.Error(), "invalid model") {
+		return &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"}
+	}
+	var missing *store.ManagedAgentNotFoundError
+	if errors.As(err, &missing) {
+		return &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"}
+	}
+	var notReady *store.ManagedAgentNotReadyError
+	if errors.As(err, &notReady) {
+		return &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent is not ready to change model"}
+	}
+	var idempotency *store.ManagedIdempotencyConflictError
+	if errors.As(err, &idempotency) {
+		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
+	}
+	var persistence *managed.ModelStatePersistenceError
+	if errors.As(err, &persistence) {
+		return &managedHTTPError{500, "MODEL_STATE_PERSIST_FAILED", "Managed model state could not be persisted; prompt admission was closed"}
+	}
+	var failed *managed.ModelSwitchFailedError
+	if errors.As(err, &failed) {
+		return &managedHTTPError{409, "MODEL_SWITCH_FAILED", "Managed model change could not be confirmed"}
+	}
+	return &managedHTTPError{500, "INTERNAL", "Router could not change the managed model"}
 }
 
 func managedRestartError(err error) error {

@@ -661,6 +661,36 @@ func TestManagedResetHTTPContract(t *testing.T) {
 	assertError(request(valid, `{}`), http.StatusNotFound, "AGENT_NOT_FOUND", valid)
 }
 
+func TestManagedModelHTTPUsesDedicatedStrictRoute(t *testing.T) {
+	server, _ := newManagedHTTPTestServer(t)
+	request := func(method, id, body string) (*http.Response, map[string]any) {
+		req, err := http.NewRequest(method, server.URL+"/v1/managed-agents/model-agent/model", strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		if id != "" {
+			req.Header.Set("X-Request-ID", id)
+		}
+		response, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer response.Body.Close()
+		payload := map[string]any{}
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&payload))
+		return response, payload
+	}
+	requestID := "123e4567-e89b-42d3-a456-426614174095"
+	response, body := request(http.MethodPut, requestID, `{"model":{"provider":"google","id":"gemini-2.5-pro"}}`)
+	require.Equal(t, http.StatusNotFound, response.StatusCode)
+	require.Equal(t, "AGENT_NOT_FOUND", body["error"].(map[string]any)["code"])
+	require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
+
+	invalid, body := request(http.MethodPut, requestID, `{"model":{"provider":"google","id":"gemini-2.5-pro"},"unexpected":true}`)
+	require.Equal(t, http.StatusBadRequest, invalid.StatusCode)
+	require.Equal(t, "UNKNOWN_FIELD", body["error"].(map[string]any)["code"])
+	wrongMethod, body := request(http.MethodPost, requestID, `{"model":{"provider":"google","id":"gemini-2.5-pro"}}`)
+	require.Equal(t, http.StatusNotFound, wrongMethod.StatusCode)
+	require.Equal(t, "NOT_FOUND", body["error"].(map[string]any)["code"])
+}
+
 func TestManagedRestartAllHTTPContractStoresAndReplaysOneBatchResponse(t *testing.T) {
 	server, durable := newManagedHTTPTestServer(t)
 	requestID := "123e4567-e89b-42d3-a456-426614174090"

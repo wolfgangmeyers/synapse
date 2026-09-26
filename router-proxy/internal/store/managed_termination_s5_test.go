@@ -22,6 +22,10 @@ func terminationActionAtDurableWrite(t *testing.T) (*Store, context.Context, Man
 	require.NoError(t, durable.AdvanceManagedTermination(ctx, requestID, "cleanup", "direct_mail_retire", "cleanup", "agent_cleanup", &source))
 	artifact := ManagedSessionArtifact{ArtifactID: lifecycleUUID(951), AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, RootRelativePath: "sessions/terminated.json", PathSHA256: testManifestHash, DiscoveryState: "not_materialized", CleanupState: "retained", DiscoveredAt: "2026-09-08T00:00:00.000Z", CleanupUpdatedAt: "2026-09-08T00:00:00.000Z"}
 	require.NoError(t, durable.RecordManagedSessionArtifact(ctx, artifact))
+	_, err = durable.db.ExecContext(ctx, `INSERT INTO managed_stock_pi_session_reservations (
+		reservation_id,agent_id,session_epoch,launch_operation_id,root_relative_path,path_sha256,pi_session_id,state,session_artifact_id,created_at,updated_at
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, "termination-reservation", agent.AgentID, agent.SessionEpoch, agent.LaunchOperationID, artifact.RootRelativePath, artifact.PathSHA256, agent.PiSessionID, "materialized", artifact.ArtifactID, artifact.DiscoveredAt, artifact.CleanupUpdatedAt)
+	require.NoError(t, err)
 	require.NoError(t, durable.MarkManagedSessionArtifactCleanup(ctx, artifact.ArtifactID, "retained", "pending"))
 	require.NoError(t, durable.MarkManagedSessionArtifactCleanup(ctx, artifact.ArtifactID, "pending", "unlinked"))
 	require.NoError(t, durable.AdvanceManagedTermination(ctx, requestID, "cleanup", "agent_cleanup", "cleanup", "durable_write", &source))
@@ -169,16 +173,22 @@ func TestCompleteManagedTerminationRollsBackEveryDurableBoundary(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "cleanup", stored.State)
 			require.Equal(t, "durable_write", stored.Stage)
-			_, err = durable.ManagedAgent(ctx, agent.AgentID)
+			retained, err := durable.ManagedAgent(ctx, agent.AgentID)
 			require.NoError(t, err, "the transaction must retain the retry tombstone and agent")
+			require.True(t, retained.SlotHeld)
 			artifact, err := durable.ManagedSessionArtifact(ctx, lifecycleUUID(951))
 			require.NoError(t, err)
 			require.Equal(t, "unlinked", artifact.CleanupState)
+			var reservations int
+			require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_stock_pi_session_reservations WHERE agent_id=?`, agent.AgentID).Scan(&reservations))
+			require.Equal(t, 1, reservations)
 
 			durable.managedTerminationFault = nil
 			require.NoError(t, durable.CompleteManagedTermination(ctx, action.ActionID))
 			_, err = durable.ManagedAgent(ctx, agent.AgentID)
 			require.ErrorIs(t, err, sql.ErrNoRows)
+			require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_stock_pi_session_reservations WHERE agent_id=?`, agent.AgentID).Scan(&reservations))
+			require.Zero(t, reservations)
 			stored, err = durable.ManagedLifecycleAction(ctx, action.ActionID)
 			require.NoError(t, err)
 			require.Equal(t, "succeeded", stored.State)

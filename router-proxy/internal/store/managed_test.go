@@ -438,6 +438,69 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	require.Equal(t, 1, applied)
 }
 
+func modelReservationForTest(agent ManagedAgentRecord, requestID string) ManagedModelChangeReservation {
+	return ManagedModelChangeReservation{
+		Fence: restartFenceFromAgent(&agent),
+		Operation: ManagedOperation{
+			OperationID: requestID, Method: "PUT", CanonicalPath: managedModelOperationPath(agent.AgentID), RequestID: requestID,
+			CanonicalBodyHash: requestID + "-body", State: "pending", ResponseStatus: 202,
+			ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8"}, ResponseBody: []byte(`{"status":"pending"}`),
+		},
+	}
+}
+
+func TestManagedModelReservationsExcludeConcurrentRequestIDs(t *testing.T) {
+	durable, ctx, agent, _ := restartFixture(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, requestID := range []string{"model-request-one", "model-request-two"} {
+		reservation := modelReservationForTest(agent, requestID)
+		go func() {
+			<-start
+			_, _, err := durable.ReserveManagedModelChange(ctx, reservation)
+			results <- err
+		}()
+	}
+	close(start)
+	var succeeded, conflicted int
+	for range 2 {
+		err := <-results
+		if err == nil {
+			succeeded++
+			continue
+		}
+		var conflict *ManagedRestartConflictError
+		require.ErrorAs(t, err, &conflict)
+		conflicted++
+	}
+	require.Equal(t, 1, succeeded)
+	require.Equal(t, 1, conflicted)
+}
+
+func TestManagedModelAndLifecycleReservationsAreMutuallyExclusive(t *testing.T) {
+	t.Run("pending model blocks lifecycle", func(t *testing.T) {
+		durable, ctx, agent, _ := restartFixture(t)
+		_, replayed, err := durable.ReserveManagedModelChange(ctx, modelReservationForTest(agent, "model-before-lifecycle"))
+		require.NoError(t, err)
+		require.False(t, replayed)
+		operationID := "123e4567-e89b-42d3-a456-426614174201"
+		operation := ManagedOperation{OperationID: operationID, Method: "DELETE", CanonicalPath: "/v1/managed-agents/restartable", RequestID: operationID, CanonicalBodyHash: testManifestHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+		_, err = durable.ReserveManagedLifecycle(ctx, ManagedLifecycleReservation{AgentID: agent.AgentID, Kind: "terminate", Source: "direct", Method: operation.Method, CanonicalPath: operation.CanonicalPath, RequestID: operationID, CanonicalBodyHash: operation.CanonicalBodyHash, Fence: restartFenceFromAgent(&agent), Operation: operation})
+		var conflict *ManagedLifecycleConflictError
+		require.ErrorAs(t, err, &conflict)
+	})
+
+	t.Run("lifecycle blocks model", func(t *testing.T) {
+		durable, ctx, agent, launch := restartFixture(t)
+		_, replayed, err := durable.ReserveManagedRestart(ctx, restartReservation(agent, launch))
+		require.NoError(t, err)
+		require.False(t, replayed)
+		_, _, err = durable.ReserveManagedModelChange(ctx, modelReservationForTest(agent, "model-after-lifecycle"))
+		var notReady *ManagedAgentNotReadyError
+		require.ErrorAs(t, err, &notReady)
+	})
+}
+
 func TestReserveManagedRestartAtomicallyStoresTransitionAndOperation(t *testing.T) {
 	durable, ctx, agent, launch := restartFixture(t)
 	before, err := durable.GetProjectionVersion(ctx)

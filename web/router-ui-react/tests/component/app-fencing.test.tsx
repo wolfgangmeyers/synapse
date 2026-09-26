@@ -84,8 +84,13 @@ function renderManaged(actionResponse: Response | undefined = undefined, options
     if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: "managed-alpha", high_water_sequence: 0, messages: [] });
     if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
     if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
-    if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [modelOne], default_model: null });
+    if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [{ ...modelOne, available: true }, { ...modelTwo, available: true }], default_model: null });
     if (url.endsWith("/v1/managed-agents/managed-alpha/goal")) return jsonResponse({ goal_state: DEFAULT_GOAL_STATE });
+    if (url.endsWith("/v1/managed-agents/managed-alpha/model") && init?.method === "PUT") {
+      snapshot = managedAgent({ model: { provider: modelTwo.provider, id: modelTwo.id } });
+      projectionVersion += 1;
+      return jsonResponse({ operation_id: "model-operation-1" });
+    }
     if (init?.method === "POST" || init?.method === "DELETE") {
       if (actionResponse !== undefined) return actionResponse;
       await actionGate;
@@ -182,6 +187,17 @@ describe("App control fencing and managed lifecycle projections", () => {
       const current = screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" });
       expect(current).toBeDisabled();
     });
+  });
+
+  it("changes a managed model through PUT without calling restart", async () => {
+    const user = userEvent.setup();
+    const { fetchImpl } = renderManaged();
+    await user.click(await screen.findByRole("button", { name: "Managed Alpha (managed-alpha)" }));
+    await user.click(screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" }));
+    await user.click(screen.getByRole("option", { name: /Gemini 2.5 Pro/ }));
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/model") && init?.method === "PUT")).toBe(true));
+    expect(fetchImpl.mock.calls.some(([input]) => String(input).endsWith("/restart"))).toBe(false);
+    await waitFor(() => expect(screen.getByRole("button", { name: "google/gemini-2.5-pro" })).toBeInTheDocument());
   });
 
   it("projects a successful managed restart and disables actions while it is pending", async () => {

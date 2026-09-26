@@ -3,6 +3,7 @@ package managed
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -209,7 +210,11 @@ func newRealCleanupManager(t *testing.T, group realManagedGroup, storedMarker st
 	require.NoError(t, err)
 	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, manager.Close(context.Background())) })
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, manager.Close(closeCtx))
+	})
 
 	agent := store.ManagedAgentRecord{
 		AgentID: "real-process-cleanup", Name: "real-process-cleanup", SlotHeld: true, Cwd: paths["work"],
@@ -281,7 +286,7 @@ func TestManagedProcessGroupCleanupBehavioralFunctional(t *testing.T) {
 		require.Contains(t, string(stored.ResponseBody), cwd)
 	})
 
-	t.Run("mismatched start marker sends no signal and keeps unsafe state", func(t *testing.T) {
+	t.Run("mismatched start marker sends no signal and deletes durable state", func(t *testing.T) {
 		group := startRealManagedGroup(t)
 		manager, durable, cwd := newRealCleanupManager(t, group, group.identity.StartMarker+"-mismatch")
 		request := TerminateRequest{
@@ -291,13 +296,13 @@ func TestManagedProcessGroupCleanupBehavioralFunctional(t *testing.T) {
 		_, err := manager.Terminate(context.Background(), request)
 		require.NoError(t, err)
 		action := waitForManagedAction(t, durable, request.RequestID)
-		require.Equal(t, "failed", action.State)
-		require.Equal(t, "TERMINATION_PROCESS_IDENTITY_UNSAFE", action.TerminalCode)
-		require.False(t, action.Retryable)
-		agent, err := durable.ManagedAgent(context.Background(), request.AgentID)
+		require.Equal(t, "succeeded", action.State)
+		require.Equal(t, "TERMINATED", action.TerminalCode)
+		_, err = durable.ManagedAgent(context.Background(), request.AgentID)
+		require.ErrorIs(t, err, sql.ErrNoRows)
+		stored, err := durable.FindManagedOperation(context.Background(), request.Method, request.RequestID)
 		require.NoError(t, err)
-		require.Equal(t, cwd, agent.Cwd)
-		require.Equal(t, "TERMINATION_PROCESS_IDENTITY_UNSAFE", agent.LastErrorCode)
+		require.Contains(t, string(stored.ResponseBody), cwd)
 		select {
 		case event := <-group.events:
 			require.NotEqual(t, "leader-term", event, "mismatched identity must receive zero signals")

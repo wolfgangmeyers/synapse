@@ -581,7 +581,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     if (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts !== true) return;
     setManagedPending(true); setManagedError(undefined);
     try {
-      await session.transport.http.restartManaged(selectedAgent.agent_id, { provider: model.provider, id: model.id });
+      await session.transport.http.changeManagedModel(selectedAgent.agent_id, { provider: model.provider, id: model.id });
       await refreshManaged();
     } catch (cause) {
       setManagedError(managedRequestErrorMessage(cause, "Managed model could not be changed."));
