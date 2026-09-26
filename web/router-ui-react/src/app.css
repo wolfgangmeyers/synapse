@@ -927,6 +927,9 @@ p:empty { display: none; }
   flex: 0 0 auto;
 }
 .peer-activity { min-height: 22px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; color: var(--muted); font-size: 13px; }
+.managed-failure-alert { display: inline-flex; align-items: baseline; gap: 7px; max-width: min(100%, 680px); padding: 4px 8px; border: 1px solid rgba(255,180,171,0.42); border-radius: 8px; background: rgba(127,29,29,0.18); color: var(--danger); font-weight: 700; line-height: 1.35; }
+.managed-failure-alert i { flex: 0 0 auto; }
+.managed-failure-code { padding: 1px 4px; border-radius: 4px; background: rgba(255,180,171,0.10); color: inherit; font-size: 0.82em; overflow-wrap: anywhere; }
 .peer-activity .subagent-indicator, .peer-activity .compacting-indicator { margin-top: 0; max-width: min(100%, 420px); }
 .messages {
   display: flex;

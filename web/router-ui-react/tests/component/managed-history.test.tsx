@@ -198,10 +198,38 @@ describe("Selected-agent conversation modes", () => {
     expect([...timeline.querySelectorAll<HTMLElement>("[data-message-id], [data-activity-id]")].map((item) => item.dataset.messageId ?? item.dataset.activityId)).toEqual(["complete:1", "complete:2", "message-seq-2", "complete:10"]);
   });
 
-  it("reports a failed managed agent in the selected-agent header", () => {
-    const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "failed", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed process exited before readiness", at: "2030-01-01T00:01:00.000Z" } };
-    render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "failed", managed_agent: managedAgent }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Unavailable: Managed process exited before readiness");
+  it("reports a failed managed agent as an explicit accessible header error", () => {
+    const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "failed", activity_state: "active", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed process exited before readiness", at: "2030-01-01T00:01:00.000Z" } };
+    const { container } = render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "compacting", managed_agent: managedAgent }} />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass("managed-failure-alert");
+    expect(alert).toHaveTextContent("Unavailable: Managed process exited before readiness");
+    expect(alert).toHaveTextContent("PROCESS_STOP_FAILED");
+    expect(within(alert).getByRole("img", { name: "Warning" })).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText("Compacting")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Working")).not.toBeInTheDocument();
+    expect(container.querySelector(".avatar.compacting, .avatar.working")).not.toBeInTheDocument();
+  });
+
+  it("uses the safe managed failure fallback when no error code is available", () => {
+    const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
+    render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "active", managed_agent: managedAgent }} />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Unavailable: managed worker failed.");
+    expect(alert.querySelector(".managed-failure-code")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Working")).not.toBeInTheDocument();
+  });
+
+  it("lets managed failure suppress contradictory terminating presentation", () => {
+    const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "terminated", lifecycle_state: "terminating", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_EXITED", message: "Managed process exited", at: "2030-01-01T00:01:00.000Z" } };
+    const { container } = render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "idle", managed_agent: managedAgent }} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Unavailable: Managed process exited");
+    expect(screen.queryByText("Terminating…")).not.toBeInTheDocument();
+    expect(container.querySelector(".avatar.terminating")).not.toBeInTheDocument();
   });
 
   it("shows managed controls and terminating progress without a raw State popup action", async () => {

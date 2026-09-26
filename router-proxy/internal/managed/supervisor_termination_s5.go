@@ -40,6 +40,12 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return TerminateResult{}, err
 	}
+	lane := m.laneFor(request.AgentID)
+	lane.admission.Lock()
+	defer lane.admission.Unlock()
+	// A concurrent identical DELETE can finish after the fast replay lookup and
+	// before this request enters the agent's admission lane. Replay again under
+	// the lane before reading mutable agent state.
 	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
 		if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
 			return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
@@ -56,9 +62,6 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	if err != nil {
 		return TerminateResult{}, err
 	}
-	lane := m.laneFor(request.AgentID)
-	lane.admission.Lock()
-	defer lane.admission.Unlock()
 	failedRoot, rootErr := m.store.LatestRetryableManagedRootRecovery(ctx, request.AgentID)
 	if rootErr == nil {
 		return m.reserveFailedRootRecoveryTermination(ctx, request, agent, failedRoot)
@@ -66,40 +69,21 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	if !errors.Is(rootErr, sql.ErrNoRows) {
 		return TerminateResult{}, rootErr
 	}
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
 	var source store.ManagedRuntimeFence
 	var sourcePtr *store.ManagedRuntimeFence
 	var retryOf string
-	sourceUnavailable := false
-	if failedRestart, restartErr := m.store.LatestRetryableManagedRestart(ctx, request.AgentID); restartErr == nil {
-		escaped, escapeErr := m.prepareFailedRestartTerminationEscape(ctx, agent, failedRestart)
-		if escapeErr != nil {
-			return TerminateResult{}, escapeErr
-		}
-		if escaped {
-			// The failed replacement target was cleared without a trustworthy
-			// source process. The termination action must carry an all-null source
-			// so its executor cannot signal the old or replacement identity.
-			sourceUnavailable = true
-			agent, err = m.store.ManagedAgent(ctx, request.AgentID)
-			if err != nil {
-				return TerminateResult{}, err
-			}
-		}
-	} else if !errors.Is(restartErr, sql.ErrNoRows) {
-		return TerminateResult{}, restartErr
-	}
 	predecessor, retryErr := m.store.LatestRetryableManagedTermination(ctx, request.AgentID)
 	if retryErr == nil {
 		retryOf = predecessor.ActionID
-		if !sourceUnavailable && predecessor.SourceFence != nil {
+		if predecessor.SourceFence != nil {
 			source, sourcePtr = *predecessor.SourceFence, predecessor.SourceFence
 		}
 	} else if !errors.Is(retryErr, sql.ErrNoRows) {
 		return TerminateResult{}, retryErr
-	} else if !sourceUnavailable {
-		if current := storedAgentFence(agent); validRestartFence(current) {
-			source, sourcePtr = current, &source
-		}
+	} else if current := storedAgentFence(agent); validRestartFence(current) {
+		source, sourcePtr = current, &source
 	}
 
 	if sourcePtr != nil {
@@ -154,47 +138,6 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 }
 
-func (m *Manager) prepareFailedRestartTerminationEscape(ctx context.Context, agent *store.ManagedAgentRecord, restart *store.ManagedLifecycleAction) (bool, error) {
-	if agent == nil || restart == nil || restart.TerminalCode != "RESTART_TARGET_REAP_FAILED" || restart.TargetFence == nil {
-		return false, nil
-	}
-	current := storedAgentFence(agent)
-	target := *restart.TargetFence
-	if !sameBindingFence(current, target) {
-		return false, nil
-	}
-	if binding, ok := m.bindingFor(agent.AgentID); ok {
-		binding.serial.Lock()
-		live := !binding.reaped && binding.process != nil && binding.identity.PID == target.ProcessPID && binding.identity.StartMarker == target.ProcessStartMarker && binding.identity.Incarnation == target.ProcessIncarnation
-		binding.serial.Unlock()
-		if live {
-			return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
-		}
-		return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
-	}
-	identity := oldFenceIdentity(target)
-	switch m.processOps.Probe(identity).State {
-	case ProcessOwned:
-		if !m.reapRestartGroup(ctx, identity, nil) {
-			return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
-		}
-	case ProcessAbsent:
-		// The target is already gone; this is the only other state that can
-		// safely remove the retry fence before termination admission.
-	default:
-		// Present, mismatch, and unknown do not prove the target absent. Keep
-		// the retryable action and refuse a termination with an unsafe source.
-		return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
-	}
-	if restart.SourceFence == nil {
-		return false, &store.ManagedLifecycleConflictError{AgentID: agent.AgentID}
-	}
-	if err := m.store.ClearManagedLifecycleRestartTargetAfterVerifiedAbsence(ctx, restart.ActionID, *restart.SourceFence, target); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBinding) {
 	// Every exit follows a durable lifecycle transition. Publishing afterward
 	// lets UI-live replace the terminating row only after terminal cleanup has
@@ -210,7 +153,11 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 	}
 	source := action.SourceFence
 	if action.State == "terminating" && action.Stage == "abort" {
-		m.abortTerminationTurn(actionID, source, candidate)
+		if source == nil || m.processOps.Probe(oldFenceIdentity(*source)).State == ProcessOwned {
+			m.abortTerminationTurn(actionID, source, candidate)
+		} else {
+			_ = m.store.RecordManagedTerminationDiagnostic(context.Background(), actionID, "ABORT_UNAVAILABLE")
+		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "terminating", "abort", "terminating", "terminate_reap", source); err != nil {
 			return
 		}
@@ -238,8 +185,8 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 					return
 				}
 			default:
-				m.failTermination(actionID, "TERMINATION_PROCESS_IDENTITY_UNSAFE", false, source)
-				return
+				// The exact fenced worker is not owned by this router. Never signal
+				// the observed process; deletion still owns the durable agent row.
 			}
 		}
 		if candidate != nil {

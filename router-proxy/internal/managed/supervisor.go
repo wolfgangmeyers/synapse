@@ -188,6 +188,7 @@ type managedBinding struct {
 	launchReservation       *ownedLaunchSessionReservation
 	parentCompacting        *bool
 	initialReplayPending    bool
+	modelTruthUnknown       bool
 	reaped                  bool
 	token                   string
 	waitDone                <-chan error
@@ -1517,7 +1518,7 @@ func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) erro
 	if err != nil {
 		return err
 	}
-	if agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || binding.initialReplayPending || !m.liveBinding(agent, binding) {
+	if agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || binding.initialReplayPending || binding.modelTruthUnknown || !m.liveBinding(agent, binding) {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
 	_, actionErr := m.store.ActiveManagedLifecycleAction(ctx, agentID)

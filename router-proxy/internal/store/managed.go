@@ -26,7 +26,7 @@ var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var managedSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var managedCanonicalUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-// ManagedModel is the immutable provider/model pair selected for a launch.
+// ManagedModel is the provider/model pair selected for a managed runtime.
 type ManagedModel struct {
 	Provider string `json:"provider"`
 	ID       string `json:"id"`
@@ -250,6 +250,19 @@ type ManagedRestartReservation struct {
 	CurrentLifecycleAction string
 	Transition             ManagedRestartTransition
 	Operation              ManagedOperation
+}
+
+// ManagedModelChangeReservation uses the existing HTTP operation as both the
+// idempotency record and the durable pre-mutation recovery fence.
+type ManagedModelChangeReservation struct {
+	Fence     ManagedRuntimeFence
+	Operation ManagedOperation
+}
+
+type PendingManagedModelChange struct {
+	AgentID   string
+	Malformed bool
+	Operation ManagedOperation
 }
 
 // ManagedAgentSnapshot is the one-read-transaction projection boundary.
@@ -500,6 +513,197 @@ func (s *Store) SetDefaultModelAndPutManagedOperation(ctx context.Context, model
 		operation.TerminalAt = formatTimestamp(now)
 		operation.ExpiresAt = formatTimestamp(now.Add(24 * time.Hour))
 		return insertManagedOperation(ctx, s.db, operation)
+	})
+}
+
+func managedModelOperationPath(agentID string) string {
+	return "/v1/managed-agents/" + agentID + "/model"
+}
+
+func managedModelAgentFromPath(path string) (string, bool) {
+	const prefix, suffix = "/v1/managed-agents/", "/model"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	agentID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return agentID, agentID != "" && !strings.Contains(agentID, "/")
+}
+
+func managedModelOperationMatches(operation *ManagedOperation, fence ManagedRuntimeFence) bool {
+	return operation != nil && operation.State == "pending" && operation.Method == "PUT" && operation.CanonicalPath == managedModelOperationPath(fence.AgentID)
+}
+
+// ReserveManagedModelChange writes the durable ambiguity fence before the
+// caller can issue set_model. Replay resolution and every eligibility check
+// run under the same immediate transaction.
+func (s *Store) ReserveManagedModelChange(ctx context.Context, reservation ManagedModelChangeReservation) (*ManagedOperation, bool, error) {
+	operation := reservation.Operation
+	if !validManagedRuntimeFence(reservation.Fence) || operation.OperationID == "" || operation.OperationID != operation.RequestID || operation.Method != "PUT" || operation.CanonicalPath != managedModelOperationPath(reservation.Fence.AgentID) || operation.CanonicalBodyHash == "" {
+		return nil, false, errors.New("managed model reservation is invalid")
+	}
+	if operation.State == "" {
+		operation.State = "pending"
+	}
+	if operation.CreatedAt == "" {
+		operation.CreatedAt = formatTimestamp(s.clock.Now())
+	}
+	var result *ManagedOperation
+	var replayed bool
+	err := s.runImmediate(ctx, func() error {
+		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, operation.Method, operation.RequestID)
+		if err == nil {
+			if existing.CanonicalPath != operation.CanonicalPath || existing.CanonicalBodyHash != operation.CanonicalBodyHash {
+				return &ManagedIdempotencyConflictError{}
+			}
+			result, replayed = existing, true
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id=?`, reservation.Fence.AgentID), nil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &ManagedAgentNotFoundError{AgentID: reservation.Fence.AgentID}
+		}
+		if err != nil {
+			return err
+		}
+		if !sameManagedRestartFence(restartFenceFromAgent(agent), reservation.Fence) || agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || (agent.ActivityState != "active" && agent.ActivityState != "idle") {
+			return &ManagedAgentNotReadyError{AgentID: reservation.Fence.AgentID}
+		}
+		var activeLifecycle int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_lifecycle_actions WHERE agent_id=? AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`, reservation.Fence.AgentID).Scan(&activeLifecycle); err != nil {
+			return err
+		}
+		if activeLifecycle != 0 {
+			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
+		}
+		var pending int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_http_operations WHERE state='pending' AND method='PUT' AND canonical_path=?`, operation.CanonicalPath).Scan(&pending); err != nil {
+			return err
+		}
+		if pending != 0 {
+			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
+		}
+		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
+			return err
+		}
+		result = &operation
+		return nil
+	})
+	return result, replayed, err
+}
+
+func (s *Store) completeManagedModelOperationTx(ctx context.Context, fence ManagedRuntimeFence, operationID string, status int, headers map[string]string, body []byte) error {
+	operation, err := managedOperationForTx(ctx, s.db, operationID)
+	if err != nil || !managedModelOperationMatches(operation, fence) {
+		if err != nil {
+			return err
+		}
+		return &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	encodedHeaders, err := json.Marshal(headers)
+	if err != nil {
+		return err
+	}
+	if len(body) > 64*1024 {
+		return errors.New("managed replay response is too large")
+	}
+	now := s.clock.Now()
+	result, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',response_status=?,response_headers_json=?,response_body=?,terminal_at=?,expires_at=? WHERE operation_id=? AND state='pending'`, status, string(encodedHeaders), string(body), formatTimestamp(now), formatTimestamp(now.Add(24*time.Hour)), operationID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	return nil
+}
+
+// CompleteManagedModelChange commits runtime truth, the next cold-start recipe,
+// and the final replay response as one transaction.
+func (s *Store) CompleteManagedModelChange(ctx context.Context, fence ManagedRuntimeFence, model ManagedModel, operationID string, status int, headers map[string]string, body []byte) error {
+	if !validManagedRuntimeFence(fence) || !managedIdentifierRE.MatchString(model.Provider) || !managedIdentifierRE.MatchString(model.ID) {
+		return errors.New("invalid managed model update")
+	}
+	return s.runImmediate(ctx, func() error {
+		operation, err := managedOperationForTx(ctx, s.db, operationID)
+		if err != nil || !managedModelOperationMatches(operation, fence) {
+			if err != nil {
+				return err
+			}
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET selected_model_provider=?,selected_model_id=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND accepting_prompts=1 AND slot_held=1`, append([]any{model.Provider, model.ID, now}, managedFenceValues(fence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		recipe, err := loadManagedLaunchRecipeQuery(ctx, s.db, fence.AgentID)
+		if err != nil {
+			return err
+		}
+		recipe.Provider, recipe.ModelID = model.Provider, model.ID
+		updatedRecipe, err := ManagedLaunchRecipeDigest(*recipe)
+		if err != nil {
+			return err
+		}
+		if err := replaceManagedLaunchRecipeTx(ctx, s.db, fence.AgentID, updatedRecipe, now); err != nil {
+			return err
+		}
+		if err := s.completeManagedModelOperationTx(ctx, fence, operationID, status, headers, body); err != nil {
+			return err
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+func (s *Store) RejectManagedModelChange(ctx context.Context, fence ManagedRuntimeFence, operationID string, status int, headers map[string]string, body []byte) error {
+	if !validManagedRuntimeFence(fence) {
+		return errors.New("invalid managed model rejection")
+	}
+	return s.runImmediate(ctx, func() error {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running'`, managedFenceValues(fence)...).Scan(&present); err != nil {
+			return err
+		}
+		return s.completeManagedModelOperationTx(ctx, fence, operationID, status, headers, body)
+	})
+}
+
+func (s *Store) FailManagedModelChange(ctx context.Context, fence ManagedRuntimeFence, operationID, code, message string, status int, headers map[string]string, body []byte) error {
+	if !validManagedRuntimeFence(fence) || code == "" || message == "" {
+		return errors.New("invalid managed model failure")
+	}
+	message = RedactedManagedDiagnostic(message)
+	return s.runImmediate(ctx, func() error {
+		operation, err := managedOperationForTx(ctx, s.db, operationID)
+		if err != nil || !managedModelOperationMatches(operation, fence) {
+			if err != nil {
+				return err
+			}
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='failed',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running'`, append([]any{code, message, now, now}, managedFenceValues(fence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		if err := s.completeManagedModelOperationTx(ctx, fence, operationID, status, headers, body); err != nil {
+			return err
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
 	})
 }
 
@@ -1102,6 +1306,13 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 		if reservation.Kind == "terminate" && agent.DesiredState == "terminated" && reservation.RetryOf == "" {
 			return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
 		}
+		var pendingModel int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_http_operations WHERE state='pending' AND method='PUT' AND canonical_path=?`, managedModelOperationPath(reservation.AgentID)).Scan(&pendingModel); err != nil {
+			return err
+		}
+		if pendingModel != 0 {
+			return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
+		}
 
 		var activeID, activeKind string
 		err = s.db.QueryRowContext(ctx, `SELECT action_id,kind FROM managed_lifecycle_actions WHERE agent_id=? AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`, reservation.AgentID).Scan(&activeID, &activeKind)
@@ -1389,6 +1600,11 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE operation_id IN (SELECT operation_id FROM managed_lifecycle_actions WHERE agent_id=? AND action_id<>?)`, action.AgentID, actionID); err != nil {
+			return err
+		}
+		// Stock-Pi reservations own both the live agent and, when materialized,
+		// its session artifact. Remove that ownership before either dependent row.
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_stock_pi_session_reservations WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_session_artifacts WHERE agent_id=?`, action.AgentID); err != nil {
@@ -1787,6 +2003,13 @@ func (s *Store) ReserveManagedRestart(ctx context.Context, reservation ManagedRe
 			return err
 		}
 		if current.State != "terminal" || restartActionHasHigherPriority(reservation.CurrentLifecycleAction) {
+			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
+		}
+		var pendingModel int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_http_operations WHERE state='pending' AND method='PUT' AND canonical_path=?`, managedModelOperationPath(reservation.Fence.AgentID)).Scan(&pendingModel); err != nil {
+			return err
+		}
+		if pendingModel != 0 {
 			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
 		}
 		if err := insertManagedOperation(ctx, s.db, operation); err != nil {

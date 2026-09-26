@@ -65,6 +65,9 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
+	if err := m.RecoverPendingManagedModelChanges(ctx); err != nil {
+		return err
+	}
 	if err := m.PruneManagedRootRecovery(ctx); err != nil {
 		return err
 	}
