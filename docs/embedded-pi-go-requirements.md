@@ -2,21 +2,21 @@
 
 ## One-screen overview
 
-**Scope:** Replace only the router-owned Pi RPC process for managed roots with an embedded `github.com/sky-valley/pi` session. Keep router HTTP, SQLite, mailbox, and UI contracts. Supervisor-owned tmux workers, their extensions, and their WebSocket delivery path stay unchanged. This is a requirements document, not a claim that the replacement is ready.
+**Scope:** Run managed roots in-process in the Go router and launch independent managed workers inside that router, each with its own identity, mailbox, session, and lifecycle. Keep router HTTP, SQLite, mailbox, and UI contracts. Existing supervisor-owned tmux workers, their extensions, and their WebSocket delivery path remain supported but are not the native managed-worker launch path. Native recursive subagents are deferred. This is a requirements document, not a claim that the replacement is ready.
 
-**Why this needs work:** `coding.NewSession` can run in the Go host, but embedding removes a process boundary without supplying the router's durable mail/control receipts, child-agent service, TypeScript extensions, or complete provider-login flow. The Go recorder also delays creating a *new* session file until the first assistant message. Those are release blockers, not details to hide behind an in-memory session.
+**Why this needs work:** `coding.NewSession` can run in the Go host, but embedding removes a process boundary without supplying durable ordered conversation/checkpoint writes, SQLite mail receipts, managed-worker lifecycle, TypeScript extension replacements, or Codex OAuth login/refresh. The Go recorder also delays creating a *new* session file until the first assistant message. Those are release blockers, not details to hide behind an in-memory session.
 
 **Does sky-valley/pi have subagents? No built-in; Go primitives only.** `CustomTools` can expose a host-implemented child manager. Parallel tool-call batches are concurrent tool executions, not child agents. `ParentSessionID` is session metadata, not a lifecycle service. [Go session options](../../pi-go/coding/session.go) · [tool loop](../../pi-go/agent/loop.go) · [session metadata](../../pi-go/protocol/messages.go)
 
-### Decisions to make before building
+### Resolved v1 decisions
 
-| Decision | Choice needed / release implication |
+| Decision | V1 contract |
 | --- | --- |
-| Failure isolation | **Open:** accept a shared router/agent crash domain with tested containment, or keep a separate host/process boundary. In-process Go is not process isolation. |
-| Session compatibility | **Open:** require existing Pi JSONL sessions to resume in place, or ship an explicit migration/opt-in boundary. Prove both old and new files before conversion. |
-| First-release parity | **Open:** decide which current managed-root tools, child behaviors, UI controls, and histories are mandatory at launch. Missing TypeScript extension behavior cannot silently disappear. |
-| Provider support | **Open:** enumerate required providers, login/logout, refresh, model availability, and credential storage. Go auth primitives do not prove Web UI OAuth parity. |
-| Uncertain append | **Open:** choose an evidence-based retry/reconciliation policy for an append that may have reached a transcript without a saved router receipt. A timeout or failed lookup is not proof of absence. Do not promise exactly-once delivery without proving it. |
+| Failure isolation | Native roots and managed workers run in-process in the router. Accept the shared crash domain with tested containment; no process-isolation claim. |
+| Sessions | After router crash, reopen the router-owned session and compaction checkpoint, then resume prior conversation in order. No old Pi session import or automatic migration. Reset explicitly starts a new conversation. |
+| Workers and tools | Native managed workers are independent router-launched agents with their own identity/mailbox/lifecycle, not tmux launches or recursive subagents. Recursive native subagents are deferred. Preserve agreed managed controls and history; map needed TypeScript behavior to Go rather than assuming extension compatibility. |
+| Provider | Codex OAuth only: login, refresh, durable credentials, Codex Responses streaming/tools/model selection. Google, Cursor, and generic OpenAI API-key parity are outside v1. |
+| Receipts and uncertainty | SQLite is authoritative for accepted mail and ACK. The Pi transcript is conversation evidence, not a mail receipt. After crash, visibly flag an interrupted mid-turn external effect as uncertain; never auto-replay it. |
 
 ## Requirements
 
@@ -24,29 +24,29 @@
 
 - **I1.** Keep the same managed-agent ID, source, desired state, working directory, selected model, launch request/operation replay, and router-owned session epoch across a normal restart. A repeated `X-Request-ID` must not launch a second root.
 - **I2.** Bind every turn, event, tool call, receipt, and control result to the current agent/session/epoch/runtime generation. Reject late work from an older run even if its agent name matches.
-- **I3.** Resume the exact saved conversation on ordinary restart. Reset creates a new conversation without inheriting stale tools, children, mail attempts, or callbacks. Decide and test how existing Pi session files are handled.
-- **I4.** An accepted initial instruction or inbound mail needs durable evidence before its transcript append is complete: check write errors and explicitly flush/sync (or commit an equivalently durable storage transaction). `StartSession` may create a fresh file before the first assistant message, but neither that creation nor a returned entry ID is a receipt. [Go recorder](../../pi-go/coding/session_store.go) · [router launch](router-architecture/workers.html#direct)
+- **I3.** After router crash, reopen the ordered prior conversation and its compaction checkpoint for each root and managed worker. Resume without silently dropping or reordering context. Reset creates a new conversation without inheriting stale tools, workers, mail attempts, or callbacks. Do not import old Pi sessions or silently treat a fresh start as recovery.
+- **I4.** Persist ordered conversation entries and compaction checkpoints with checked write errors and explicit flush/sync (or an equivalently durable transaction) before reporting a transcript append complete. Reopen and verify after crash, including before first assistant output. Neither `StartSession` file creation nor a returned entry ID is a durable append. Transcript durability is not mail acceptance or ACK; SQLite owns those receipts. [Go recorder](../../pi-go/coding/session_store.go) · [historical gate](embedded-pi-go-i4m2-gate.md)
 - **I5.** Preserve full transcript and bounded quiet/complete histories as distinct browser views. Compare ordering, tool results, compaction, and resume with the current RPC path.
 
 ### Mail and replies
 
-- **M1.** Keep SQLite as the queue and routing authority: duplicate message IDs, limits, expiry, fixed destination once chosen, and the tmux WebSocket path retain their existing behavior.
-- **M2.** For direct managed mail, record the attempt and generation before append. Acknowledge only after checked writes and explicit flush/sync (or an equivalently durable storage transaction) establish a verifiable entry in the intended session; an entry ID or initial file creation is insufficient. Reconcile an interrupted append against the exact message/attempt before retrying; mark genuinely uncertain outcomes as uncertain.
-- **M3.** Serialize direct deliveries per root. Attribute a final assistant reply to its own incoming message/turn, not merely the latest receipt. Queue one stable reply to the original sender only after that turn settles; streamed text alone is not a reply. Test late events across two senders. [Current risk](router-architecture/failures.html#append)
+- **M1.** Keep SQLite authoritative for accepted mail, attempts, routing, and ACK: duplicate message IDs, limits, expiry, fixed destination once chosen, and the existing tmux WebSocket path retain their behavior. Route native managed-worker mail through its own identity/mailbox.
+- **M2.** For direct managed mail, persist the accepted message and delivery attempt/generation in SQLite before delivery. Commit ACK in SQLite only for the exact message/attempt after a checked, durable ordered conversation append to the intended session. A transcript entry ID, file creation, or transcript lookup is not a mail receipt. On interruption reconcile SQLite state and durable conversation evidence before any retry; keep unknown outcomes explicit and never replay an uncertain external effect.
+- **M3.** Serialize direct deliveries per managed agent (root or worker). Attribute a final assistant reply to its own incoming message/turn, not merely the latest receipt. Queue one stable reply to the original sender only after that turn settles; streamed text alone is not a reply. Test late events across two senders. [Current risk](router-architecture/failures.html#append)
 - **M4.** Keep explicit `mecha_mailbox_send` separate from automatic replies. Preserve the tool's recipient, request correlation, validation, and independent queue admission.
 
 ### Tools and children
 
 - **T1.** Before the first model request, install a fixed, approved tool manifest with the effective names, argument bounds, and per-action validation of the agreed first-release parity set. No untrusted caller can add executable tools by claiming an identity.
 - **T2.** Host-implemented tools may return `queued` before router admission. Persist request IDs and results, enforce generation fences, and deliver correlated result/error entries into the correct conversation. A saved host result is not a transcript receipt or proof an external worker exists.
-- **T3.** For an external effect such as `mecha_worker launch`, reconcile the host's saved result and supervisor/tmux state before considering a retry. Unknown outcome stays unknown. Do not relaunch from a timeout. The existing tmux launch path remains the owner of tmux workers. [Control sequence](router-architecture/workers.html#tool)
-- **T4.** If first-release parity includes native children, implement a real host child manager: create/cancel, parent/run ownership, bounded concurrency, result retrieval, and restart/session-switch behavior. Publish authoritative child snapshots and ordered, fenced deltas; never infer child state from parent text or `ParentSessionID` alone.
-- **T5.** Map required current TypeScript extension features to host Go implementations or explicitly defer them through the parity decision. No assumption that `.ts` extensions run inside `pi-go`. [Current extension bridge](router-architecture/architecture.html#map) · [prior RPC research](../RPC_RESEARCH.html)
+- **T3.** For an external effect such as `mecha_worker launch`, reconcile the host's saved result and router-managed worker state before considering a retry. Unknown outcome stays unknown, visibly marked to the user after an interrupted mid-turn effect. Do not auto-replay or relaunch from a timeout or crash. Native managed workers launch inside the router; the separate existing tmux path continues to own tmux workers. [Historical control sequence](router-architecture/workers.html#tool)
+- **T4.** Implement independent router-managed workers with their own IDs, mailboxes, sessions, launch/cancel lifecycle, bounded concurrency, result retrieval, and restart/session-switch behavior. Publish authoritative worker snapshots and ordered, fenced deltas; never infer worker state from root text or `ParentSessionID` alone. Recursive native subagents are deferred.
+- **T5.** Map v1-required TypeScript extension features to host Go implementations; explicitly exclude others from v1. No assumption that `.ts` extensions run inside `pi-go`. [Current extension bridge](router-architecture/architecture.html#map) · [prior RPC research](../RPC_RESEARCH.html)
 
 ### Provider auth and UI
 
 - **A1.** Preserve the managed HTTP/UI contract for launch, restart, reset, terminate, models, provider status/login/logout, goal and inline-tool controls, and full/current agent views. Keep the router's saved state authoritative and live updates fenced by run.
-- **A2.** Implement and test the selected provider credential flows end to end, including OAuth interaction/refresh where required. Go provider/auth types are not themselves a Web UI sign-in coordinator. Keep secrets out of SQLite, browser status projections, logs, and transcripts. [Go auth](../../pi-go/ai/auth_types.go) · [current UI/control routes](router-architecture/architecture.html#map)
+- **A2.** Implement and test Codex OAuth login/refresh with durable credentials, plus Codex Responses streaming, tool calls, and model selection. Go provider/auth types are not themselves a Web UI sign-in coordinator. Keep secrets out of SQLite, browser status projections, logs, and transcripts. No Google, Cursor, or generic OpenAI API-key parity in v1. [Go auth](../../pi-go/ai/auth_types.go) · [current UI/control routes](router-architecture/architecture.html#map)
 - **A3.** On auth or model changes, make the next turn use the intended available provider/model. Test idle and active roots, failed credentials, reconnect, and a router restart; a model catalog row is not proof a request succeeds.
 
 ### Failures, security, and rollout
@@ -59,11 +59,11 @@
 
 ## Acceptance gates
 
-1. **Decision record:** resolve the five table rows and list the exact first-release tool/provider/child parity set. Unresolved rows block a production cutover.
-2. **Contract comparison:** run the same deterministic model fixtures against RPC and embedded roots for launch, restart, reset, tools, history, UI snapshots, and mixed managed/tmux mail. Differences are reviewed, not silently accepted.
-3. **Real persistence seam:** with the real Go recorder, crash before first assistant message and around each mail/control append and SQLite acknowledgment. Verify recovery from durable evidence, no wrong-session acknowledgment, no duplicate external launch, and an explicit uncertain state where proof is missing. [The pinned I4/M2 probe](embedded-pi-go-i4m2-gate.md) failed; this gate is blocked until a checked durable append primitive exists.
-4. **End-to-end control:** a root tool requests a real tmux launch, gets its correlated result, and sends/receives mail. Inject a host crash after tmux starts and before result save; verify unknown remains unknown and no second launch occurs. [Proposed tests](router-architecture/tests.html#limits)
-5. **Isolation, auth, and rollout:** demonstrate the chosen crash policy, provider sign-in/out and secret boundaries, reproducible build, opt-in rollout, and clean RPC rollback with existing tmux workers unaffected.
+1. **V1 scope:** verify the resolved decisions above against the exact approved tool manifest, independent managed-worker lifecycle, and Codex-only provider contract. Unimplemented mandatory behaviors block a production cutover.
+2. **Contract comparison:** run deterministic model fixtures against RPC and embedded roots for launch, restart, reset, tools, history, UI snapshots, and mixed managed/tmux mail. Add independent native managed-worker lifecycle and crash/resume fixtures. Differences are reviewed, not silently accepted; deferred provider and recursive-subagent parity is not required.
+3. **Real persistence seam:** with the real Go recorder, crash before first assistant output and around ordered conversation/checkpoint writes, mail delivery, and SQLite ACK. Verify checked durable append, checkpoint/reopen order, SQLite-owned accepted-mail/ACK state, no wrong-session ACK, no duplicate external effect, and a visible uncertain state where proof is missing. [The pinned I4/M2 probe](embedded-pi-go-i4m2-gate.md) is a historical failure of the unchecked recorder seam. Its old transcript-as-mail-receipt interpretation is superseded by SQLite-owned acceptance and ACK; its observed write failures still block durable conversation recovery.
+4. **End-to-end control:** a root tool requests a real independent router-managed worker, gets its correlated result, and sends/receives mail through that worker's identity. Inject a router crash after launch and before result save; verify unknown is visibly marked and no second launch occurs. Test the existing tmux path separately. [Historical test limits](router-architecture/tests.html#limits)
+5. **Isolation, auth, and rollout:** demonstrate shared-crash containment, Codex OAuth login/refresh and secret boundaries, reproducible build, opt-in rollout, and clean RPC rollback with existing tmux workers unaffected.
 
 ## Source trail
 
