@@ -70,7 +70,7 @@ test("target delivery hands off once, records body-free status, and uses ordinar
   const delivery = { messageId: sentinelMessage.id, attemptNumber: 1 };
   await Promise.all([coordinator.onEnvelope(sentinelMessage, delivery), coordinator.onEnvelope(sentinelMessage, delivery)]);
 
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls, [sentinelMessage]);
   assert.deepEqual(receipts.map(({ type }) => type), ["injection_requested", "ack"]);
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].message.details, {
@@ -78,7 +78,9 @@ test("target delivery hands off once, records body-free status, and uses ordinar
   });
   assert.equal(sent[0].message.display, false);
   assert.doesNotMatch(JSON.stringify(sent), /private scheduled prompt/);
-  assert.doesNotMatch(JSON.stringify(sent), /caller-selected-model/);
+  assert.doesNotMatch(JSON.stringify(sent), /caller-selected-model|Reply via mailbox to/);
+  assert.equal(sent[0].message.customType, "mecha-sentinel-status");
+  coordinator.close();
 });
 
 test("a pre-handoff native spawn failure uses the ordinary delivery retry path", async () => {
@@ -760,6 +762,34 @@ test("checkpoint retry acknowledges the original attempt after a newer retry arr
   coordinator.close();
 });
 
+test("ordinary mailbox injections render the reply instruction for the envelope reply target", () => {
+  const sent = [];
+  const receipts = [];
+  let time = 1_000;
+  const coordinator = coverageCoordinator({
+    pi: { sendMessage: (message) => sent.push(message) },
+    client: { sendReceipt: (type) => receipts.push(type) },
+    readSessionFile: () => "",
+    pendingReinjectionDelayMs: 5_000,
+    now: () => time,
+  });
+  const wolfgangMessage = { id: "from-wolfgang", from: "wolfgang", to: "supervisor", subject: "status", body: "first body" };
+  const supervisorMessage = { id: "reply-to-supervisor", from: "supervisor", to: "worker", body: "second body" };
+
+  coordinator.onEnvelope(wolfgangMessage, { messageId: wolfgangMessage.id, attemptNumber: 1, items: [] });
+  coordinator.onEnvelope(supervisorMessage, { messageId: supervisorMessage.id, attemptNumber: 1, items: [] });
+  time += 5_000;
+  coordinator.onEnvelope(supervisorMessage, { messageId: supervisorMessage.id, attemptNumber: 2, items: [] });
+
+  assert.equal(sent.length, 3);
+  assert.equal(sent[0].content, "Mailbox message from wolfgang\nSubject: status\n\nfirst body\n\nReply via mailbox to wolfgang");
+  assert.equal(sent[1].content, "Mailbox message from supervisor\n\nsecond body\n\nReply via mailbox to supervisor");
+  assert.equal(sent[2].content, sent[1].content);
+  assert.deepEqual(receipts, ["injection_requested", "injection_requested", "injection_requested"]);
+  coordinator.close();
+
+});
+
 test("an absent pending delivery is reinjected only after the retry delay", () => {
   const sent = [];
   const receipts = [];
@@ -785,6 +815,14 @@ test("an absent pending delivery is reinjected only after the retry delay", () =
   coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 3, items: [{ ...item, attemptNumber: 3 }] });
 
   assert.equal(sent.length, 2);
+  for (const [index, attemptNumber] of [1, 3].entries()) {
+    assert.deepEqual(sent[index], [{
+      customType: "mecha-agent-message", display: true,
+      content: "Mailbox message from sender\n\nbody\n\nReply via mailbox to sender",
+      details: { message_id: message.id, from: "sender", to: "parent",
+        message_incarnation_id: "incarnation-1", delivery_items: [{ ...item, attemptNumber }] },
+    }, { deliverAs: "steer", triggerTurn: true }]);
+  }
   assert.deepEqual(receipts, [
     { type: "injection_requested", attemptNumber: 1 },
     { type: "injection_requested", attemptNumber: 2 },

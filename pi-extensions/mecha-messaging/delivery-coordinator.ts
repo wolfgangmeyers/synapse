@@ -206,7 +206,7 @@ function mailboxCustomMessage(message: MailboxMessage, delivery: MailboxDelivery
   const subject = message.subject === undefined ? "" : `\nSubject: ${message.subject}`;
   return {
     customType: MAILBOX_MESSAGE_TYPE,
-    content: `Mailbox message from ${message.from}${subject}\n\n${message.body}`,
+    content: `Mailbox message from ${message.from}${subject}\n\n${message.body}\n\nReply via mailbox to ${message.from}`,
     display: true,
     details: {
       message_id: message.id,
