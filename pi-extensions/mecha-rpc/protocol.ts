@@ -65,6 +65,18 @@ const MAX_JSON_STRING_BYTES = 8 * 1024;
 // Control result content and serialized details each have a distinct 16 KiB
 // contract. The generic transport parser must not reject those values first.
 const MAX_ENVELOPE_STRING_BYTES = 16 * 1024;
+// The admitted sender has at most 128 UTF-16 units (384 UTF-8 bytes).
+// Preserve the old mailbox body range plus one sender and "\n\nReply via mailbox to ".
+const MAX_MAILBOX_CONTENT_BYTES = MAX_ENVELOPE_STRING_BYTES + 384 + 23;
+
+function validateEnvelopeJson(value: unknown): boolean {
+  if (isRecord(value) && (value.protocol === "mecha.mailbox-deliver/v1" || value.protocol === "mecha.mailbox-reconcile/v1")) {
+    return typeof value.content === "string"
+      && validateJsonValue(value.content, 2, { nodes: 0 }, MAX_MAILBOX_CONTENT_BYTES)
+      && validateJsonValue({ ...value, content: "" }, 1, { nodes: 0 }, MAX_ENVELOPE_STRING_BYTES);
+  }
+  return validateJsonValue(value, 1, { nodes: 0 }, MAX_ENVELOPE_STRING_BYTES);
+}
 const BASE64_URL = /^[A-Za-z0-9_-]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -247,12 +259,12 @@ export function decodeHiddenEnvelope(raw: string): JsonRecord {
   if (decoded.length === 0 || decoded.length > MAX_DECODED_BYTES || decoded.toString("base64url") !== raw) protocolError("encoded command is not canonical base64url");
   const text = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
   const value = new StrictJsonParser(text).parse();
-  if (!isRecord(value) || !validateJsonValue(value, 1, { nodes: 0 }, MAX_ENVELOPE_STRING_BYTES)) protocolError("decoded command is not a bounded object");
+  if (!isRecord(value) || !validateEnvelopeJson(value)) protocolError("decoded command is not a bounded object");
   return value;
 }
 
 export function encodeHiddenEnvelope(value: JsonRecord): string {
-  if (!validateJsonValue(value, 1, { nodes: 0 }, MAX_ENVELOPE_STRING_BYTES)) protocolError("cannot encode an unbounded value");
+  if (!validateEnvelopeJson(value)) protocolError("cannot encode an unbounded value");
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
   if (encoded.length > MAX_ENCODED_BYTES) protocolError("encoded command exceeds limit");
   return encoded;
@@ -299,7 +311,7 @@ export function validateMailboxDeliverEnvelope(value: unknown): JsonRecord {
   assertExactKeys(value, ["protocol", "message_id", "content", "runtime_generation", "session_epoch"], ["manifest_sha256"]);
   if (value.protocol !== "mecha.mailbox-deliver/v1") protocolError("mailbox delivery protocol is invalid");
   boundedString(value.message_id, "mailbox message ID", 128);
-  boundedString(value.content, "mailbox content", MAX_ENVELOPE_STRING_BYTES, true);
+  boundedString(value.content, "mailbox content", MAX_MAILBOX_CONTENT_BYTES, true);
   validateHiddenCommandFence(value);
   return value;
 }
@@ -310,7 +322,7 @@ export function validateMailboxReconcileEnvelope(value: unknown): JsonRecord {
   assertExactKeys(value, ["protocol", "message_id", "content", "runtime_generation", "session_epoch", "manifest_sha256"]);
   if (value.protocol !== "mecha.mailbox-reconcile/v1") protocolError("mailbox reconciliation protocol is invalid");
   boundedString(value.message_id, "mailbox message ID", 128);
-  boundedString(value.content, "mailbox content", MAX_ENVELOPE_STRING_BYTES, true);
+  boundedString(value.content, "mailbox content", MAX_MAILBOX_CONTENT_BYTES, true);
   validateHiddenCommandFence(value);
   return value;
 }

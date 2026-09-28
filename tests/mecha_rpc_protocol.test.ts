@@ -3,9 +3,31 @@ import test from "node:test";
 
 import {
   decodeHiddenEnvelope,
+  encodeHiddenEnvelope,
+  validateMailboxDeliverEnvelope,
+  validateMailboxReconcileEnvelope,
   validateControlResultPayload,
   validateCustomMessageDetails,
 } from "../pi-extensions/mecha-rpc/protocol.ts";
+
+test("mailbox footer allowance is byte-bounded and limited to mailbox content", () => {
+  const maximum = 16 * 1024 + 407;
+  for (const protocol of ["mecha.mailbox-deliver/v1", "mecha.mailbox-reconcile/v1"]) {
+    const envelope = { protocol, message_id: "message", content: "雪".repeat(Math.floor(maximum / 3)) + "x".repeat(maximum % 3), runtime_generation: GENERATION, session_epoch: 1, manifest_sha256: MANIFEST_SHA };
+    assert.equal(Buffer.byteLength(envelope.content), maximum);
+    assert.deepEqual(decodeHiddenEnvelope(encodeHiddenEnvelope(envelope)), envelope);
+    const validate = protocol === "mecha.mailbox-deliver/v1" ? validateMailboxDeliverEnvelope : validateMailboxReconcileEnvelope;
+    assert.deepEqual(validate(envelope), envelope);
+    for (const oversized of [{ ...envelope, content: envelope.content + "x" }, { ...envelope, message_id: "x".repeat(16 * 1024 + 1) }, { ...envelope, extra: { nested: "x".repeat(16 * 1024 + 1) } }]) {
+      assert.throws(() => decodeHiddenEnvelope(encodeRaw(oversized)));
+      assert.throws(() => encodeHiddenEnvelope(oversized));
+      assert.throws(() => validate(oversized));
+    }
+  }
+  const control = controlResult({ content: "x".repeat(16 * 1024 + 1) });
+  assert.throws(() => decodeHiddenEnvelope(encodeRaw(control)));
+  assert.throws(() => validateControlResultPayload(control));
+});
 
 type RecordValue = Record<string, unknown>;
 

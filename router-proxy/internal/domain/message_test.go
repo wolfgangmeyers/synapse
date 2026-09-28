@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -20,6 +22,25 @@ func TestBatchFormattingPreservesSenderSubjectAndReplyHint(t *testing.T) {
 	built := BuildDeliveryMessage([]Message{first, second})
 	require.Equal(t, body, built.Body)
 	require.Equal(t, "agent", built.Envelope().To)
+}
+
+// TestMailboxFooterBatchFixture exports the real builder for cross-runtime tests.
+func TestMailboxFooterBatchFixture(t *testing.T) {
+	subject, empty := "status", ""
+	rows := []Message{
+		{ID: "batch-1", From: "wolfgang", To: "batch-target", Body: "first body", CreatedAt: "2026-06-01T00:00:00Z", MessageIncarnationID: "inc-1", Source: protocol.MessageSource{Kind: "human"}},
+		{ID: "batch-2", From: "supervisor", To: "batch-target", Subject: &empty, Body: "second\n雪", CreatedAt: "2026-06-01T00:00:01Z", MessageIncarnationID: "inc-2", Source: protocol.MessageSource{Kind: "agent"}},
+		{ID: "batch-3", From: "worker-a17", To: "batch-target", Subject: &subject, Body: "third body\n[existing hint]", CreatedAt: "2026-06-01T00:00:02Z", MessageIncarnationID: "inc-3", Source: protocol.MessageSource{Kind: "agent"}},
+	}
+	message := BuildDeliveryMessage(rows)
+	expected := "Mailbox message batch\n\nFrom: wolfgang\n\nfirst body\n\n[Reply via mailbox to wolfgang.]\n\n---\n\nFrom: supervisor\nSubject: \n\nsecond\n雪\n\n[Reply via mailbox to supervisor.]\n\n---\n\nFrom: worker-a17\nSubject: status\n\nthird body\n[existing hint]\n\n[Reply via mailbox to worker-a17.]"
+	require.Equal(t, expected, message.Body)
+	if path := os.Getenv("MAILBOX_FOOTER_BATCH_OUTPUT"); path != "" {
+		items := []DeliveryItem{{MessageID: "batch-1", MessageIncarnationID: "inc-1", AttemptNumber: 1}, {MessageID: "batch-2", MessageIncarnationID: "inc-2", AttemptNumber: 2}, {MessageID: "batch-3", MessageIncarnationID: "inc-3", AttemptNumber: 3}}
+		data, err := json.Marshal(map[string]any{"message": message.Envelope(), "items": items})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0600))
+	}
 }
 
 func TestBatchContentDoesNotNestAnExistingBatchHeader(t *testing.T) {

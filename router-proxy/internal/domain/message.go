@@ -99,6 +99,11 @@ type Lease struct {
 	Recovered  bool   `json:"recovered"`
 }
 
+// MailboxContent adds runtime reply instructions without changing the stored body.
+func MailboxContent(body, from string) string {
+	return body + "\n\nReply via mailbox to " + from
+}
+
 func BatchItem(message Message) string {
 	parts := []string{"From: " + message.From}
 	if message.Subject != nil {

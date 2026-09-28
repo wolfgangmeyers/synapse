@@ -126,7 +126,7 @@ export function sanitizeTerminalText(text) {
 
 export function claudeMailboxPrompt(message) {
   const subject = message.subject === undefined ? "" : `\nSubject: ${message.subject}`;
-  return sanitizeTerminalText(`Mailbox message from ${message.from}${subject}\n\n${message.body}`);
+  return sanitizeTerminalText(`Mailbox message from ${message.from}${subject}\n\n${message.body}\n\nReply via mailbox to ${message.from}`);
 }
 
 export function rotateBodyFreeLog(logPath, maxBytes = DEFAULT_MAX_LOG_BYTES) {

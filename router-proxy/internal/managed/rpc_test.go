@@ -89,7 +89,7 @@ func snapshotDetails() map[string]any {
 }
 
 func directMailboxAttempt(id string) store.ManagedDirectAttempt {
-	return store.ManagedDirectAttempt{MessageID: id, SessionEntryWatermark: "cursor-entry", Message: domain.Message{Body: "persisted body"}, Fence: store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}}
+	return store.ManagedDirectAttempt{MessageID: id, SessionEntryWatermark: "cursor-entry", Message: domain.Message{From: "worker-a17", To: "supervisor", Body: "persisted body"}, Fence: store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}}
 }
 
 func TestRPCClientManagedGoalEvaluationConsumesOnlyItsExactFencedResult(t *testing.T) {
@@ -1025,7 +1025,7 @@ func TestManagedDirectMailboxAllowsAnEmptyBody(t *testing.T) {
 	require.NoError(t, err)
 	var envelope map[string]any
 	require.NoError(t, json.Unmarshal(payload, &envelope))
-	require.Equal(t, "", envelope["content"])
+	require.Equal(t, "\n\nReply via mailbox to worker-a17", envelope["content"])
 
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "empty-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "empty-message", "runtime_generation": "generation", "session_epoch": 2}}}))

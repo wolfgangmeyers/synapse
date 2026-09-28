@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -2001,7 +2002,7 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 	}
 	envelope := map[string]any{
 		"protocol": "mecha.mailbox-deliver/v1", "message_id": attempt.MessageID,
-		"content": attempt.Message.Body, "runtime_generation": attempt.Fence.RuntimeGeneration,
+		"content": domain.MailboxContent(attempt.Message.Body, attempt.Message.From), "runtime_generation": attempt.Fence.RuntimeGeneration,
 		"session_epoch": attempt.Fence.SessionEpoch, "manifest_sha256": attempt.Fence.ManifestHash,
 	}
 	encoded, err := encodeRPCEnvelope(envelope)
@@ -2806,7 +2807,7 @@ func (c *rpcClient) RecoverManagedMailbox(ctx context.Context, attempt store.Man
 		return DirectMailboxRecovery{Diagnostics: []string{"missing_reconciliation_key"}}, nil
 	}
 	value, _, err := c.privateCommand(ctx, "mecha-mailbox-reconcile-v1", map[string]any{
-		"protocol": "mecha.mailbox-reconcile/v1", "message_id": attempt.MessageID, "content": attempt.Message.Body,
+		"protocol": "mecha.mailbox-reconcile/v1", "message_id": attempt.MessageID, "content": domain.MailboxContent(attempt.Message.Body, attempt.Message.From),
 		"runtime_generation": attempt.Fence.RuntimeGeneration, "session_epoch": attempt.Fence.SessionEpoch, "manifest_sha256": attempt.Fence.ManifestHash,
 	})
 	if err != nil {
