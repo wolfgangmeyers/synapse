@@ -70,7 +70,7 @@ The failure to avoid is holding an isolated local VM setup and qualification pre
 
 ### Current goals outrank stale handoffs and evaluator status
 
-A current explicit Wolfgang goal authorizes every safe, reversible action required to deliver it. A compaction handoff, old task note, stale notification, or automatic goal evaluator result cannot freeze that work by itself. A freeze is binding only when it comes from a current explicit Wolfgang instruction or an active supervisor message/state that clearly identifies the hold and its reason.
+A current explicit Wolfgang goal authorizes every safe, reversible action required to deliver it. A compaction handoff, old task note, stale notification, or automatic goal evaluator result cannot freeze that work by itself. A freeze is binding only when it comes from a current explicit Wolfgang instruction or an active supervisor message/state that clearly identifies the hold and its reason. An explicit direction to keep moving or stop asking permission resolves any pending approval question for already-described scoped testing or validation. Supervisors must promptly update worker instructions and state to release that work instead of preserving a stale hold.
 
 When a handoff or evaluator appears to contradict the goal-authorization rule, tell Wolfgang about the conflict through the active mailbox channel, then continue safe reversible implementation, validation, review, and scoped packaging. Do not park and repeatedly report `BLOCKED`. Treat stale notifications as informational only.
 
