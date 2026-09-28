@@ -43,6 +43,12 @@ rerun the affected check, and continue other independent checks.
 This rule supersedes any contrary wording that requires Wolfgang authorization before a scoped
 commit or push to a draft PR, including follow-up pushes after review feedback.
 
+Supervisor acceptance checks verify work; they do not create a second authorization gate. Workers
+complete the applicable dev-loop and verification checks, recover routine validation failures, commit
+and push scoped work to the draft branch, then report the exact head and evidence for supervisor
+verification. Pending bookkeeping or a readiness audit does not hold that work. Stop only for an
+unresolved requirement or risk, or an operation explicitly held by Wolfgang or this policy.
+
 ### Stacked draft PRs advance after their base merges or closes
 
 When an authorized stacked PR's base merges or closes, autonomously rebase and retarget each dependent
