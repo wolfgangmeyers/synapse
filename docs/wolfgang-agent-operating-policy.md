@@ -184,6 +184,10 @@ For a PR sweep, include every PR where the target reviewer previously posted a r
 
 When Wolfgang asks whether PRs are stacked, answer from their actual commit and diff dependency and the review and merge order. Do not rely on base-branch metadata when it creates a misleading formal distinction.
 
+### Describe PRs relative to their target branch
+
+PR titles and descriptions must say what the PR adds or changes relative to its target branch. Do not describe abandoned or replaced work as existing or shipped when it never merged. Commit messages may still describe each commit's delta. Leave existing history unchanged.
+
 ### Check stacked blockers against later work
 
 Before posting a blocker on a stacked PR, read its existing threads and inspect later stack tips or replacement PRs. A defect can be real in the exact mid-stack head without being an unresolved stack blocker. If an existing thread documents a later fix, do not post a duplicate changes-requested review. Either scope the finding to that exact PR head or do not post it.
