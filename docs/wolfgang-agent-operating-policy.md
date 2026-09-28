@@ -52,7 +52,15 @@ that specific PR or the action would discard unrelated or other-author work.
 
 ### A concrete goal authorizes ordinary scoped work
 
-A concrete Wolfgang goal, including `/goal set`, authorizes execution of ordinary scoped work. Immediately hand off one owner, the exact next action, base and branch, done conditions, and push limits. Do not ask for second authorization or leave a worker waiting; if a worker says it is waiting for authorization, correct the handoff. Gate only operations that truly require approval, not preparatory implementation.
+A concrete Wolfgang goal or delegated outcome, including `/goal set`, authorizes the ordinary, scoped, reversible work needed to complete it. This includes local setup, minimal tool installation, runtime, VM, or container creation or repair, test infrastructure, local service restarts, diagnostics, builds, tests, retries, and disposable local state.
+
+Supervisors make these calls themselves. Local compute, isolated local writes, elapsed time, and the chance of failure do not create a second approval gate. Immediately hand off one owner, the exact next action, base and branch, done conditions, and push limits. If a worker waits for authorization this rule already grants, release it immediately and fix the handoff. Do not forward the invented gate to Wolfgang.
+
+Ask Wolfgang only for a genuinely new external or irreversible decision: credential or key access or disclosure, paid or external network use outside the approved scope, spending, production or shared-runtime mutation, deployment, PR merge or undraft, IAM or ruleset changes, destructive loss of unrelated work, security or legal decisions, or a materially ambiguous product choice.
+
+When one part is gated, continue every independent local prerequisite. Do not park a worker overnight for a decision that existing delegation already covers.
+
+The failure to avoid is holding an isolated local VM setup and qualification prerequisite for approval while Wolfgang is unavailable. Existing delegation authorizes that work. Supervisors must recognize this pattern and keep the local prerequisite moving.
 
 ### Current goals outrank stale handoffs and evaluator status
 
