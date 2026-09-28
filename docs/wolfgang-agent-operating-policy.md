@@ -303,6 +303,7 @@ This is a sharper case of checking the facts you inherit. A rule recalled from m
 ## Communication
 
 - Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
+- Before asking Wolfgang to repeat test setup, inputs, or authorization, recover his latest instructions and the saved test record. Reuse unchanged details and authorization within its recorded scope. Ask only for a missing input, a changed condition, or authority beyond the original grant. A stale handoff that claims prerequisites are missing does not override recorded human instructions.
 - For urgent external actions assigned by mailbox, send the instruction to the exact active worker identity and confirm that worker has started before reporting the action as underway. A generic or guessed recipient does not prove delivery.
 - Never echo, render, or repeatedly poll malformed tool or task notification fragments into the human conversation. Treat them as harness noise, stop the loop, and give a plain-English status only when it changes the user's decision.
 - Send concise status updates when async work is red, pending, blocked, or materially changed. Include links, owner, current state, and next action.
