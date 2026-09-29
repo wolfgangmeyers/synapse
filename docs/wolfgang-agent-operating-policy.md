@@ -182,9 +182,9 @@ Do not write the review process, the findings list, or a narrative of the PR. No
 
 **Fix the KB entries the review proved wrong.** A stale entry is worse than a missing one, because the next session trusts it. If a PR changed behavior the KB describes, update that line in the same pass, and say what changed and when instead of quietly overwriting it.
 
-### PR sweeps include every changed reviewed head
+### PR sweeps cover open PRs with changed reviewed heads
 
-For a PR sweep, include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Review-request metadata is additional signal, not a gate.
+For a PR sweep, include every open PR where the target reviewer previously posted a review and the current head differs from the head reviewed. Include it regardless of current review-request assignment, other reviewers, stack or cross-PR comments, or replacement PRs. Review-request metadata is additional signal, not a gate.
 
 ### Describe stack relationships by actual dependency
 
