@@ -235,6 +235,7 @@ Key readiness evidence to the immutable base, target tree/head, stated requireme
 - For user-facing changes, run the behavior. Code inspection alone is not enough.
 - For CI fixes, inspect the actual failing job, reproduce locally when possible, run the closest CI-equivalent checks, push only scoped fixes, and keep a reminder/status loop until the PR head is green or the next failure is routed.
 - Aggregate PR check summaries do not prove that a preview deployed. When preview evidence matters, inspect the exact deployment run and job, then verify the deployed stage and head before reporting it as available.
+- After end-to-end testing in an isolated PR preview, leave safe, representative synthetic data there by default so Wolfgang can demo the change. Cleanse or reset it only when Wolfgang explicitly asks, the data is sensitive, unsafe, or invalid, or retaining it would interfere with another authorized use. Always report what preview data was intentionally retained.
 - Never refuse to approve a PR solely because CI fails. Actual code defects remain blockers; CI, infrastructure, and known non-product failures do not.
 - Use source-of-truth history when a claim about prior behavior is challenged. Git evidence beats memory.
 - An author saying they fixed something is a claim. Re-fetch the head, diff the fix commit against what you reviewed, and re-run whatever found the problem in the first place.
