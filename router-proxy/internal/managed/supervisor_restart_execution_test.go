@@ -15,6 +15,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -243,7 +244,13 @@ func (factory *restartExecutionFactory) Start(_ context.Context, spec CommandSpe
 	defer factory.mu.Unlock()
 	factory.specs = append(factory.specs, spec)
 	process := factory.processes[factory.count]
-	factory.rpcs[factory.count].session = spec.SessionID
+	rpc := factory.rpcs[factory.count]
+	rpc.session = spec.SessionID
+	if spec.LaunchMode == CreateNew {
+		rpc.sessionFile = spec.SessionPath
+	} else {
+		rpc.sessionFile = factory.rpcs[0].sessionFile
+	}
 	factory.count++
 	return process, nil
 }
@@ -273,7 +280,7 @@ type restartExecutionFixture struct {
 	database  string
 }
 
-func newRestartExecutionFixture(t *testing.T, gracefulStop time.Duration) *restartExecutionFixture {
+func newRestartExecutionFixture(t *testing.T, gracefulStop time.Duration, extraModels ...Model) *restartExecutionFixture {
 	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "router.db")
@@ -290,10 +297,8 @@ func newRestartExecutionFixture(t *testing.T, gracefulStop time.Duration) *resta
 	factory := &restartExecutionFactory{processes: []*restartExecutionProcess{old, target}, rpcs: []*restartExecutionRPC{oldRPC, targetRPC}}
 	ops := &restartExecutionOps{states: map[int]ProcessProbeState{7001: ProcessOwned, 7002: ProcessOwned}, process: map[int]*restartExecutionProcess{7001: old, 7002: target}}
 	root := t.TempDir()
-	sessionFile := filepath.Join(root, "session.json")
-	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
-	oldRPC.sessionFile, targetRPC.sessionFile = sessionFile, sessionFile
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: gracefulStop, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: &restartExecutionRPCFactory{factory: factory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
+	models := append([]Model{{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}}, extraModels...)
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: gracefulStop, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: &restartExecutionRPCFactory{factory: factory}, CatalogSource: CatalogFromModels(models...), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "restart-agent", Cwd: root, InitialInstruction: "one-time", RequestID: "launch"})
@@ -312,13 +317,15 @@ func retainRestartSourceArtifact(t *testing.T, fixture *restartExecutionFixture,
 	t.Helper()
 	agent, err := fixture.durable.ManagedAgent(context.Background(), "restart-agent")
 	require.NoError(t, err)
-	info, err := os.Stat(filepath.Join(fixture.root, "session.json"))
+	info, err := os.Stat(fixture.oldRPC.sessionFile)
 	require.NoError(t, err)
 	device, inode, err := deviceInode(info)
 	require.NoError(t, err)
+	relativePath, err := filepath.Rel(fixture.root, fixture.oldRPC.sessionFile)
+	require.NoError(t, err)
 	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(context.Background(), store.ManagedSessionArtifact{
 		ArtifactID: artifactID, AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch,
-		RootRelativePath: "session.json", PathSHA256: artifactPathHash("session.json"), DiscoveryState: "materialized",
+		RootRelativePath: relativePath, PathSHA256: artifactPathHash(relativePath), DiscoveryState: "materialized",
 		FileDevice: device, FileInode: inode, CleanupState: "retained", DiscoveredAt: formatManagedTime(time.Now()), CleanupUpdatedAt: formatManagedTime(time.Now()),
 	}))
 }
@@ -402,9 +409,6 @@ func TestRestartExecution(t *testing.T) {
 	processFactory := &restartExecutionFactory{processes: []*restartExecutionProcess{old, target}, rpcs: []*restartExecutionRPC{oldRPC, targetRPC}}
 	ops := &restartExecutionOps{states: map[int]ProcessProbeState{7001: ProcessOwned, 7002: ProcessOwned}, process: map[int]*restartExecutionProcess{7001: old, 7002: target}}
 	root := t.TempDir()
-	sessionFile := filepath.Join(root, "session.json")
-	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
-	oldRPC.sessionFile, targetRPC.sessionFile = sessionFile, sessionFile
 	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: time.Millisecond, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: &restartExecutionRPCFactory{factory: processFactory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
 	defer manager.Close(context.Background())
@@ -583,11 +587,13 @@ func TestRestartRecovery(t *testing.T) {
 	// Recovery may lose the source after source_settle and has no RPC from
 	// which to discover a session file. Keep the exact retained artifact in the
 	// store before admission, without attaching it at the active boundary.
-	info, err := os.Stat(filepath.Join(fixture.root, "session.json"))
+	info, err := os.Stat(fixture.oldRPC.sessionFile)
 	require.NoError(t, err)
 	device, inode, err := deviceInode(info)
 	require.NoError(t, err)
-	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(context.Background(), store.ManagedSessionArtifact{ArtifactID: "123e4567-e89b-42d3-a456-000000000097", AgentID: sourceAgent.AgentID, PiSessionID: sourceAgent.PiSessionID, SessionEpoch: sourceAgent.SessionEpoch, RootRelativePath: "session.json", PathSHA256: artifactPathHash("session.json"), DiscoveryState: "materialized", FileDevice: device, FileInode: inode, CleanupState: "retained", DiscoveredAt: formatManagedTime(time.Now()), CleanupUpdatedAt: formatManagedTime(time.Now())}))
+	relativePath, err := filepath.Rel(fixture.root, fixture.oldRPC.sessionFile)
+	require.NoError(t, err)
+	require.NoError(t, fixture.durable.RecordManagedSessionArtifact(context.Background(), store.ManagedSessionArtifact{ArtifactID: "123e4567-e89b-42d3-a456-000000000097", AgentID: sourceAgent.AgentID, PiSessionID: sourceAgent.PiSessionID, SessionEpoch: sourceAgent.SessionEpoch, RootRelativePath: relativePath, PathSHA256: artifactPathHash(relativePath), DiscoveryState: "materialized", FileDevice: device, FileInode: inode, CleanupState: "retained", DiscoveredAt: formatManagedTime(time.Now()), CleanupUpdatedAt: formatManagedTime(time.Now())}))
 	fixture.oldRPC.settleRelease = make(chan struct{})
 	fixture.reserve(t)
 	require.Eventually(t, func() bool {
@@ -608,6 +614,123 @@ func TestRestartRecovery(t *testing.T) {
 		return err == nil && agent.LifecycleState == "running" && agent.RuntimeGeneration == "target-generation" && agent.AcceptingPrompts
 	}, time.Second, time.Millisecond)
 	requireManagedParentTerminalForTest(t, fixture.database, sourceAttempt, "interrupted", "interrupted")
+}
+
+func TestRestartRequestedModelReachesNativeReplacementAcrossRecoveryAndReplay(t *testing.T) {
+	ctx := context.Background()
+	replacement := Model{Provider: "google", ID: "gemini-2.5-pro", Available: true}
+	fixture := newRestartExecutionFixture(t, 100*time.Millisecond, replacement)
+	source, err := fixture.durable.ManagedAgent(ctx, "restart-agent")
+	require.NoError(t, err)
+	retainRestartSourceArtifact(t, fixture, "123e4567-e89b-42d3-a456-000000000094")
+	fixture.oldRPC.settleRelease = make(chan struct{})
+	db, err := sql.Open("sqlite", fixture.database)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id='restart-agent'`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	request := RestartRequest{AgentID: "restart-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/restart-agent/restart", RequestID: "restart-model-recovery", CanonicalBodyHash: "model-b", Model: &replacement}
+	result, err := fixture.manager.ReserveRestart(ctx, request)
+	require.NoError(t, err)
+	require.False(t, result.Replayed)
+	require.Equal(t, replacement.Provider, result.Agent.SelectedModel.Provider)
+	require.Equal(t, replacement.ID, result.Agent.SelectedModel.ID)
+	require.Eventually(t, func() bool {
+		action, readErr := fixture.durable.ManagedLifecycleAction(ctx, request.RequestID)
+		return readErr == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
+	}, time.Second, time.Millisecond)
+
+	// Finish the original manager's controlled shutdown before recovery can
+	// claim target_start. An old-process exit callback must not see the new
+	// manager's pre-bind start marker while the original manager is still alive.
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- fixture.manager.Close(ctx) }()
+	require.Eventually(t, fixture.manager.isClosed, time.Second, time.Millisecond)
+	close(fixture.oldRPC.settleRelease)
+	require.NoError(t, <-closeDone)
+	action, err := fixture.durable.ManagedLifecycleAction(ctx, request.RequestID)
+	require.NoError(t, err)
+	require.Equal(t, "starting_target", action.State)
+	require.Equal(t, "target_start", action.Stage)
+	require.Empty(t, action.RecoveryOwner, "shutdown must leave no pre-bind start marker")
+	require.Nil(t, action.TargetFence)
+
+	// Recovery must start from the retained source fence and the model
+	// selected atomically at admission.
+	recovered, err := NewManager(ManagerOptions{Store: fixture.durable, Config: Config{SessionRoot: fixture.root, AllowedWorkingDirectoryRoots: []string{fixture.root}, Limits: Limits{GracefulStop: time.Millisecond, TermStop: time.Millisecond}}, Manifest: fixture.manifest, ProcessFactory: fixture.factory, RPCFactory: &restartExecutionRPCFactory{factory: fixture.factory}, CatalogSource: CatalogFromModels(replacement), IDSource: deterministic.NewSequenceIDSource(), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: fixture.ops})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = recovered.Close(context.Background()) })
+	require.NoError(t, recovered.RecoverManagedLifecycleControls(ctx))
+	if !assert.Eventually(t, func() bool {
+		action, readErr := fixture.durable.ManagedLifecycleAction(ctx, request.RequestID)
+		return readErr == nil && action.State == "succeeded"
+	}, time.Second, time.Millisecond) {
+		// Fixed metadata only: never log raw command specs, paths, environment, or terminal messages.
+		logFence := func(label string, fence *store.ManagedRuntimeFence) {
+			if fence == nil {
+				t.Logf("%s fence=nil", label)
+				return
+			}
+			t.Logf("%s fence: agent=%q session=%q epoch=%d pid=%d start_marker=%q incarnation=%q generation=%q manifest_revision=%d manifest_hash=%q",
+				label, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash)
+		}
+		action, actionErr := fixture.durable.ManagedLifecycleAction(ctx, request.RequestID)
+		if actionErr != nil {
+			t.Logf("action snapshot error type=%T", actionErr)
+		} else {
+			t.Logf("action: state=%q stage=%q terminal_code=%q recovery_owner=%q target_artifact_id=%q",
+				action.State, action.Stage, action.TerminalCode, action.RecoveryOwner, action.TargetArtifactID)
+			logFence("source", action.SourceFence)
+			logFence("target", action.TargetFence)
+		}
+		agent, agentErr := fixture.durable.ManagedAgent(ctx, "restart-agent")
+		if agentErr != nil {
+			t.Logf("agent snapshot error type=%T", agentErr)
+		} else {
+			t.Logf("agent: lifecycle=%q activity=%q generation=%q selected_model=%q/%q accepting_prompts=%t",
+				agent.LifecycleState, agent.ActivityState, agent.RuntimeGeneration, agent.SelectedModel.Provider, agent.SelectedModel.ID, agent.AcceptingPrompts)
+		}
+		fixture.factory.mu.Lock()
+		starts := fixture.factory.count
+		specs := append([]CommandSpec(nil), fixture.factory.specs...)
+		fixture.factory.mu.Unlock()
+		t.Logf("factory starts=%d specs=%d", starts, len(specs))
+		for index, spec := range specs {
+			t.Logf("factory spec[%d]: launch_mode=%q session_id=%q provider=%q model_id=%q",
+				index, spec.LaunchMode, spec.SessionID, spec.Provider, spec.ModelID)
+		}
+		fixture.oldRPC.mu.Lock()
+		settleCalls := fixture.oldRPC.settleCalls
+		fixture.oldRPC.mu.Unlock()
+		t.Logf("old RPC settle_calls=%d", settleCalls)
+		t.FailNow()
+	}
+	action, err = fixture.durable.ManagedLifecycleAction(ctx, request.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, action.SourceFence)
+	require.Equal(t, storedAgentFence(source), *action.SourceFence)
+	require.NotNil(t, action.TargetFence)
+	require.Equal(t, fixture.target.identity.PID, action.TargetFence.ProcessPID)
+	require.Equal(t, "target-generation", action.TargetFence.RuntimeGeneration)
+	fixture.factory.mu.Lock()
+	specs := append([]CommandSpec(nil), fixture.factory.specs...)
+	fixture.factory.mu.Unlock()
+	require.Len(t, specs, 2)
+	require.Equal(t, ResumeExisting, specs[1].LaunchMode)
+	require.Equal(t, source.PiSessionID, specs[1].SessionID)
+	require.Equal(t, fixture.oldRPC.sessionFile, specs[1].SessionPath, "resume must use the verified retained artifact path")
+	require.Equal(t, specs[1].SessionPath, specs[1].effectiveSessionPath())
+	require.Equal(t, replacement.Provider, specs[1].Provider)
+	require.Equal(t, replacement.ID, specs[1].ModelID)
+
+	replay, err := recovered.ReserveRestart(ctx, request)
+	require.NoError(t, err)
+	require.True(t, replay.Replayed)
+	require.NoError(t, recovered.RecoverManagedLifecycleControls(ctx))
+	fixture.factory.mu.Lock()
+	starts := fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 2, starts, "replay and recovery must not start a second replacement")
 }
 
 func TestRestartStaleBindingCleanup(t *testing.T) {

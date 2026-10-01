@@ -26,9 +26,28 @@ var ErrIDSourceExhausted = errors.New("deterministic ID source exhausted")
 // FixedClock is a thread-safe, manually advanced clock for deterministic
 // tests. It records every Now call so a fixture can assert the call order.
 type FixedClock struct {
-	mu    sync.Mutex
-	now   time.Time
-	calls []time.Time
+	mu     sync.Mutex
+	now    time.Time
+	calls  []time.Time
+	timers map[*fixedTimer]struct{}
+}
+
+type fixedTimer struct {
+	at       time.Time
+	callback func()
+}
+
+// AfterFunc fires callbacks when Advance reaches their deadline. Cancel is
+// idempotent; callbacks run outside the clock lock.
+func (c *FixedClock) AfterFunc(delay time.Duration, callback func()) func() {
+	c.mu.Lock()
+	if c.timers == nil {
+		c.timers = make(map[*fixedTimer]struct{})
+	}
+	t := &fixedTimer{at: c.now.Add(delay), callback: callback}
+	c.timers[t] = struct{}{}
+	c.mu.Unlock()
+	return func() { c.mu.Lock(); delete(c.timers, t); c.mu.Unlock() }
 }
 
 // NewFixedClock creates a clock at start. The start time must be valid.
@@ -53,6 +72,18 @@ func (c *FixedClock) Advance(delta time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(delta)
+	var ready []func()
+	for timer := range c.timers {
+		if !c.now.Before(timer.at) {
+			ready = append(ready, timer.callback)
+			delete(c.timers, timer)
+		}
+	}
+	go func() {
+		for _, callback := range ready {
+			callback()
+		}
+	}()
 	return nil
 }
 

@@ -57,26 +57,28 @@ var recallPolicy = map[string]any{
 }
 
 var errorMessages = map[string]string{
-	"invalid_request":                   "Request does not match the mailbox protocol.",
-	"escaped_newlines":                  "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
-	"payload_too_large":                 "Request exceeds local mailbox limits.",
-	"queue_full":                        "Recipient queue is full.",
-	"rate_limited":                      "Sender rate limit exceeded.",
-	"reserved_sender":                   "Sender is reserved for native router policy messages.",
-	"idempotency_conflict":              "Message ID already belongs to a different request.",
-	"dead_letter_required":              "Message is not a dead letter.",
-	"invalid_reminder":                  "Reminder request is invalid.",
-	"prompt_template_capacity_exceeded": "Prompt template collection is full.",
-	"prompt_template_name_conflict":     "Prompt template name already exists.",
-	"invalid_prompt_template":           "Prompt template request is invalid.",
-	"reminder_idempotency_conflict":     "Reminder ID already belongs to a different request.",
-	"reminder_not_cancelable":           "Reminder is already linked to a delivery.",
-	"reminder_target_unavailable":       "Reminder target has never connected.",
-	"not_found":                         "Resource was not found.",
-	"internal_error":                    "Router could not complete the request.",
-	"tmux_unavailable":                  "The tmux session is unavailable.",
-	"tmux_invalid_name":                 "The tmux session name is invalid.",
-	"tmux_operation_failed":             "The tmux operation failed.",
+	"invalid_request":                         "Request does not match the mailbox protocol.",
+	"escaped_newlines":                        "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
+	"payload_too_large":                       "Request exceeds local mailbox limits.",
+	"queue_full":                              "Recipient queue is full.",
+	"conversation_receipt_capacity":           "Conversation receipt capacity is exhausted. Eligible expired receipts are pruned in bounded batches; retry after maintenance or resolve outstanding deliveries.",
+	"conversation_receipt_expired_unresolved": "Conversation receipt expired while its original delivery remains unresolved. Resolve the delivery before reusing this ID; reusing an ID after 30 days can duplicate an earlier real-world effect.",
+	"rate_limited":                            "Sender rate limit exceeded.",
+	"reserved_sender":                         "Sender is reserved for native router policy messages.",
+	"idempotency_conflict":                    "Message ID already belongs to a different request.",
+	"dead_letter_required":                    "Message is not a dead letter.",
+	"invalid_reminder":                        "Reminder request is invalid.",
+	"prompt_template_capacity_exceeded":       "Prompt template collection is full.",
+	"prompt_template_name_conflict":           "Prompt template name already exists.",
+	"invalid_prompt_template":                 "Prompt template request is invalid.",
+	"reminder_idempotency_conflict":           "Reminder ID already belongs to a different request.",
+	"reminder_not_cancelable":                 "Reminder is already linked to a delivery.",
+	"reminder_target_unavailable":             "Reminder target has never connected.",
+	"not_found":                               "Resource was not found.",
+	"internal_error":                          "Router could not complete the request.",
+	"tmux_unavailable":                        "The tmux session is unavailable.",
+	"tmux_invalid_name":                       "The tmux session name is invalid.",
+	"tmux_operation_failed":                   "The tmux operation failed.",
 }
 
 type httpError struct {
@@ -90,6 +92,10 @@ func httpCode(code string) int {
 	switch code {
 	case "payload_too_large":
 		return http.StatusRequestEntityTooLarge
+	case "conversation_receipt_capacity":
+		return http.StatusInsufficientStorage
+	case "conversation_receipt_expired_unresolved":
+		return http.StatusGone
 	case "queue_full", "rate_limited":
 		return http.StatusTooManyRequests
 	case "idempotency_conflict", "dead_letter_required", "reminder_idempotency_conflict", "reminder_not_cancelable", "prompt_template_name_conflict", "prompt_template_capacity_exceeded", "reminder_target_unavailable":
@@ -414,12 +420,6 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 		r.writeError(w, err)
 		return
 	}
-	if existing, _ := r.store.MessageFor(req.Context(), envelope.ID); existing == nil {
-		if err := r.rateLimit(envelope.From); err != nil {
-			r.writeError(w, err)
-			return
-		}
-	}
 	var pending []attachments.Pending
 	if r.attachments != nil && len(inputs) > 0 {
 		pending, err = r.attachments.WriteBatch(envelope.ID, inputs)
@@ -434,17 +434,33 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	}
 	source := r.httpMessageSource(envelope)
 	envelope.Source = &source
-	quietEligible := false
-	// Ordinary local HTTP traffic remains unauthenticated and can never opt
-	// itself into quiet history by declaring source.kind=agent. Only the fenced
-	// managed mail.send path consumes the one-time control authorization.
+	quietRequestID := ""
+	// Ordinary local HTTP traffic cannot opt into quiet history by declaring
+	// source.kind=agent. Store consumes the fenced, single-use authorization
+	// only when its conversation admission commits.
 	if controlRequestID := req.Header.Get("X-Mecha-Managed-Control-Request-ID"); controlRequestID != "" {
 		if recipient, settingErr := r.store.GetCanonicalQuietRecipient(req.Context()); settingErr == nil && recipient != "" && envelope.To == recipient {
-			quietEligible, _ = r.store.ConsumeManagedQuietSendAuthorization(req.Context(), controlRequestID, envelope.From, envelope.To)
+			quietRequestID = controlRequestID
 		}
 	}
 	releaseConversation := r.lockConversation(envelope.From, envelope.To)
-	result, err := r.store.Enqueue(req.Context(), envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &conversation.Body, Attachments: conversation.Attachments, Source: &source, QuietEligible: quietEligible}})
+	result, err := r.store.Enqueue(req.Context(), envelope, store.EnqueueOptions{
+		Conversation:          &store.ConversationOptions{Body: &conversation.Body, Attachments: conversation.Attachments, Source: &source},
+		ManagedQuietRequestID: quietRequestID,
+		OnFreshAdmission: func() (func(bool), error) {
+			reservation, err := r.reserveRate(envelope.From)
+			if err != nil {
+				return nil, err
+			}
+			return func(committed bool) {
+				if committed {
+					r.finalizeRateReservation(reservation)
+				} else {
+					r.cancelRateReservation(reservation)
+				}
+			}, nil
+		},
+	})
 	if err != nil {
 		releaseConversation()
 		for _, item := range pending {
@@ -456,8 +472,12 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	for _, item := range pending {
 		_ = item
 	}
-	r.afterEnqueue(result)
-	if quietEligible && result.ConversationCreated && result.ConversationMessage != nil && r.uiLive != nil {
+	// A live idempotent retry must not re-offer an already leased message:
+	// a second offer can inject the same attempt into a real pane twice.
+	if result.Created || result.ConversationCreated {
+		r.afterEnqueue(result)
+	}
+	if result.QuietEligible && result.ConversationCreated && result.ConversationMessage != nil && r.uiLive != nil {
 		r.uiLive.publishHistory("quiet", map[string]any{"id": result.ConversationMessage.ID, "agent_id": envelope.From, "at": result.ConversationMessage.RecordedAt, "level": "message", "message": result.ConversationMessage.Body})
 	}
 	releaseConversation()
@@ -643,6 +663,23 @@ func attachmentBody(body string, pending []attachments.Pending) string {
 		suffix = ""
 	}
 	return fmt.Sprintf("%s%sAttached image%s:\n%s", text, separator, suffix, strings.Join(refs, "\n"))
+}
+
+// persistEmbeddedReply uses the same ordinary conversation and delivery path.
+// The outbox owns all envelope fields; never mint an ID or timestamp here.
+func (r *Router) persistEmbeddedReply(ctx context.Context, reply store.EmbeddedReply) error {
+	source := protocol.MessageSource{Kind: "agent"}
+	envelope := protocol.Envelope{ID: reply.ReplyID, From: reply.From, To: reply.To, Body: reply.Body, CreatedAt: reply.CreatedAt, Source: &source}
+	releaseConversation := r.lockConversation(envelope.From, envelope.To)
+	defer releaseConversation()
+	result, err := r.store.Enqueue(ctx, envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &reply.Body, Source: &source}})
+	if err != nil {
+		return err
+	}
+	if result.Created || result.ConversationCreated {
+		r.afterEnqueue(result)
+	}
+	return nil
 }
 
 // persistManagedDirectReply turns the trusted final text from a fenced managed
@@ -1200,6 +1237,15 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		value = candidate
 	case *store.IdempotencyConflictError:
 		value = &httpError{409, "idempotency_conflict", 0}
+	case *store.ConversationReceiptExpiredUnresolvedError:
+		value = &httpError{status: http.StatusGone, code: candidate.Code()}
+		details = map[string]any{
+			"message_id":             candidate.MessageID,
+			"accepted_at":            candidate.AcceptedAt,
+			"deadline_at":            candidate.DeadlineAt,
+			"delivery_state":         candidate.DeliveryState,
+			"message_incarnation_id": candidate.IncarnationID,
+		}
 	case *store.QueueLimitError:
 		value = &httpError{429, "queue_full", 0}
 	case *store.ReminderValidationError:

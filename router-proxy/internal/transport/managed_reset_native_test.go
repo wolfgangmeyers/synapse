@@ -24,8 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const managedResetG4SourceLock = "/private/tmp/rpc-phase2-pi-g4-source-lock.json"
-
 type managedResetG4Lock struct {
 	Schema string `json:"schema"`
 	Pi     struct {
@@ -72,7 +70,14 @@ type managedResetLockedPi struct {
 
 func requireManagedResetLockedPi(t *testing.T, root string) managedResetLockedPi {
 	t.Helper()
-	return requireManagedResetLockedPiFromLock(t, root, managedResetG4SourceLock)
+	sourceLockPath := os.Getenv("MECHA_PI_SOURCE_LOCK")
+	require.True(t, filepath.IsAbs(sourceLockPath), "MECHA_PI_SOURCE_LOCK must name an absolute G4 source lock for native proof")
+	contents, err := os.ReadFile(sourceLockPath)
+	require.NoError(t, err, "the accepted G4 source lock is required for native proof")
+	fixtureDir := t.TempDir() // testing creates the parent with mode 0700.
+	fixturePath := filepath.Join(fixtureDir, "pi-g4-source-lock.json")
+	require.NoError(t, os.WriteFile(fixturePath, contents, 0o600))
+	return requireManagedResetLockedPiFromLock(t, root, fixturePath)
 }
 
 // requireManagedResetLockedPiFromLock verifies a caller-selected G4 lock. The

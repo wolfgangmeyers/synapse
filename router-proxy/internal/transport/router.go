@@ -231,6 +231,12 @@ type Options struct {
 	PolicyTimeout         time.Duration
 	PolicySender          PolicySender
 	Managed               *managed.Manager
+	// StartupManaged runs after durable recovery, before readiness. Only the
+	// command supplies an explicit embedded-root reservation here.
+	StartupManaged func(context.Context, *managed.Manager) error
+	// DefaultEmbeddedRoot selects embedded for bare managed launch requests on
+	// this router only. The zero value preserves the RPC launch contract.
+	DefaultEmbeddedRoot bool
 	// ManagedBridge is the authenticated loopback bridge handler. The command
 	// binary constructs it so route ownership is explicit and closeable.
 	ManagedBridge *ManagedBridgeHandler
@@ -314,15 +320,22 @@ type Router struct {
 	deliveryOffersCancel  context.CancelFunc
 	server                *http.Server
 	listener              net.Listener
-	serveDone             chan struct{}
-	startupCancel         context.CancelFunc
-	startupDone           chan struct{}
-	startupWork           func(context.Context) error
-	readinessStatus       string
-	sweepCancel           context.CancelFunc
-	sweepDone             chan struct{}
-	closed                bool
-	sessions              map[string]*session
+	// Bound Router incarnation, never shared across Router instances.
+	embeddedProcessGeneration int64
+	// An inconclusive mint disposition is sticky for this Router instance.
+	embeddedProcessGenerationError error
+	// Narrow mint-result seam for deterministic post-COMMIT error tests.
+	embeddedProcessGenerationMint func(context.Context) (int64, error)
+	serveDone                     chan struct{}
+	startupCancel                 context.CancelFunc
+	startupDone                   chan struct{}
+	startupWork                   func(context.Context) error
+	startupManaged                func(context.Context, *managed.Manager) error
+	readinessStatus               string
+	sweepCancel                   context.CancelFunc
+	sweepDone                     chan struct{}
+	closed                        bool
+	sessions                      map[string]*session
 	// uiSessions are connected browsers, not durable mailbox recipient
 	// identities. Keeping them outside sessions prevents a page refresh from
 	// claiming a durable agent identity or replacing a tmux/managed owner.
@@ -330,22 +343,26 @@ type Router struct {
 	// uiDeliveryOwners selects at most one memory-only browser client per
 	// mailbox target. It is intentionally separate from sessions: browser
 	// refreshes cannot create a durable agent identity or displace Pi.
-	uiDeliveryOwners         map[string]*session
-	convos                   map[string]map[string]*session
-	conversationOrder        map[string][]string
-	activities               map[string]activity
-	models                   map[string]modelProjection
-	goals                    map[string]goalState
-	inlineToolStates         map[string]inlineToolState
-	latestGoalRevision       map[string]int64
-	lastSweepRecord          time.Time
-	pendingMod               map[string]*pendingControl
-	pendingGoal              map[string]*pendingControl
-	pendingLock              map[string]*pendingControl
-	pendingInlineTool        map[string]*pendingControl
-	lifecycleState           map[string]lifecycleAgent
-	nextVersion              int64
+	uiDeliveryOwners   map[string]*session
+	convos             map[string]map[string]*session
+	conversationOrder  map[string][]string
+	activities         map[string]activity
+	models             map[string]modelProjection
+	goals              map[string]goalState
+	inlineToolStates   map[string]inlineToolState
+	latestGoalRevision map[string]int64
+	lastSweepRecord    time.Time
+	pendingMod         map[string]*pendingControl
+	pendingGoal        map[string]*pendingControl
+	pendingLock        map[string]*pendingControl
+	pendingInlineTool  map[string]*pendingControl
+	lifecycleState     map[string]lifecycleAgent
+	nextVersion        int64
+	// rateMu protects only the in-memory rate window and pending admissions.
+	// Never hold it while acquiring mu or calling Store.
+	rateMu                   sync.Mutex
 	rates                    map[string][]time.Time
+	rateReservations         map[*rateReservation]struct{}
 	selectedTmux             string
 	windowIDs                map[string]string
 	tmuxProvisionals         map[string]*tmuxProvisioning
@@ -353,6 +370,7 @@ type Router struct {
 	goalAvailable            bool
 	lifecycleAvailable       bool
 	managed                  *managed.Manager
+	defaultEmbeddedRoot      bool
 	managedBridge            *ManagedBridgeHandler
 	providerAuth             *managed.ProviderAuthCoordinator
 	managedPathCanonicalizer func(*http.Request) string
@@ -608,8 +626,9 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok"}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok"}
 	r.startupWork = r.runStartup
+	r.startupManaged = options.StartupManaged
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
@@ -618,6 +637,8 @@ func New(options Options) (*Router, error) {
 		options.Managed.SetProjectionPublisher(func() { r.uiLive.publish(context.Background()) })
 		options.Managed.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) { r.uiLive.publishHistory("complete", managedHistoryFrame(entry)) })
 		options.Managed.SetDirectReplyPublisher(r.persistManagedDirectReply)
+		options.Managed.SetEmbeddedReplyPublisher(r.persistEmbeddedReply)
+		options.Managed.SetEmbeddedMailPublisher(r.afterEnqueue)
 	}
 	if options.ProviderAuth != nil {
 		options.ProviderAuth.SetPublisher(r.publishProviderAuth)
@@ -706,6 +727,12 @@ func (r *Router) Listen(ctx context.Context) error {
 		_ = listener.Close()
 	}()
 
+	// Binding is the authority boundary. A failed bind must not consume a
+	// generation, and startup recovery must not run under an unknown one.
+	if err := r.initEmbeddedProcessGeneration(ctx); err != nil {
+		return err
+	}
+
 	if r.managed != nil {
 		server := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 		serveDone := make(chan struct{})
@@ -785,6 +812,36 @@ func (r *Router) Listen(ctx context.Context) error {
 	return nil
 }
 
+// initEmbeddedProcessGeneration runs under lifecycleMu, after a successful
+// bind and before any startup recovery. Retry uses the assigned generation even
+// after its unreferenced mapping expires. It cannot gain fresh wake authority.
+func (r *Router) initEmbeddedProcessGeneration(ctx context.Context) error {
+	if r.embeddedProcessGenerationError != nil {
+		return fmt.Errorf("embedded process generation: %w", r.embeddedProcessGenerationError)
+	}
+	if r.embeddedProcessGeneration > 0 {
+		return nil
+	}
+	mint := r.store.MintNewEmbeddedProcessGeneration
+	if r.embeddedProcessGenerationMint != nil {
+		mint = r.embeddedProcessGenerationMint
+	}
+	generation, err := mint(ctx)
+	// A post-COMMIT permission failure still owns this exact assignment.
+	// Pin before returning the error; Listen must not enter startup yet.
+	if generation > 0 {
+		r.embeddedProcessGeneration = generation
+	}
+	if err != nil {
+		var uncertain *store.EmbeddedProcessGenerationUncertain
+		if errors.As(err, &uncertain) {
+			r.embeddedProcessGenerationError = err
+		}
+		return fmt.Errorf("embedded process generation: %w", err)
+	}
+	return nil
+}
+
 func (r *Router) runStartup(ctx context.Context) error {
 	if r.managed != nil {
 		r.mu.RLock()
@@ -806,6 +863,14 @@ func (r *Router) runStartup(ctx context.Context) error {
 		if err := r.managed.RecoverPendingManagedLaunches(ctx); err != nil {
 			return err
 		}
+		// Saved embedded roles are durable. Recover them even when this command
+		// has no bootstrap configured; no request body can grant root authority.
+		if err := r.managed.SetEmbeddedStartupGeneration(r.embeddedProcessGeneration); err != nil {
+			return err
+		}
+		if err := r.managed.RecoverEmbeddedRoots(ctx); err != nil {
+			return err
+		}
 		if err := r.managed.RecoverManagedRestartTransitions(ctx); err != nil {
 			return err
 		}
@@ -822,6 +887,11 @@ func (r *Router) runStartup(ctx context.Context) error {
 	if r.managed != nil {
 		if err := r.managed.RecoverManagedDirectAttempts(ctx); err != nil {
 			return err
+		}
+		if r.startupManaged != nil {
+			if err := r.startupManaged(ctx, r.managed); err != nil {
+				return err
+			}
 		}
 	}
 	return r.runSweep(ctx)

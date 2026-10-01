@@ -40,23 +40,33 @@ func TestMain(m *testing.M) {
 }
 
 type managedFunctionalEvent struct {
-	Kind string            `json:"kind"`
-	Type string            `json:"type,omitempty"`
-	ID   string            `json:"id,omitempty"`
-	Text string            `json:"text,omitempty"`
-	Cwd  string            `json:"cwd,omitempty"`
-	PID  int               `json:"pid,omitempty"`
-	Args []string          `json:"args,omitempty"`
-	Env  map[string]string `json:"env,omitempty"`
+	Kind      string            `json:"kind"`
+	Type      string            `json:"type,omitempty"`
+	ID        string            `json:"id,omitempty"`
+	SessionID string            `json:"session_id,omitempty"`
+	Text      string            `json:"text,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
+	PID       int               `json:"pid,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
 }
 
 func runManagedFunctionalFakePi() {
 	fifo := os.Getenv("MECHA_FUNCTIONAL_EVENT_FIFO")
 	events, err := os.OpenFile(fifo, os.O_WRONLY, 0)
 	if err != nil {
+		_ = os.WriteFile(os.Getenv("MECHA_FUNCTIONAL_EXIT_FILE"), []byte("event_fifo_open_failed"), 0o600)
 		return
 	}
 	defer events.Close()
+	termination := "returned"
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			termination = "panic"
+			defer panic(recovered)
+		}
+		_ = os.WriteFile(os.Getenv("MECHA_FUNCTIONAL_EXIT_FILE"), []byte(termination), 0o600)
+	}()
 	emit := func(event managedFunctionalEvent) {
 		encoded, marshalErr := json.Marshal(event)
 		if marshalErr == nil {
@@ -64,11 +74,24 @@ func runManagedFunctionalFakePi() {
 		}
 	}
 	args := append([]string(nil), os.Args...)
+	// Stock Pi reads its identity from the materialized v3 session file.
 	sessionID := ""
-	for index := 0; index+1 < len(args); index++ {
-		if args[index] == "--session-id" {
-			sessionID = args[index+1]
+	if path := argumentAfter(args, "--session"); filepath.IsAbs(path) {
+		if file, openErr := os.Open(path); openErr == nil {
+			var header struct {
+				Type    string `json:"type"`
+				Version int    `json:"version"`
+				ID      string `json:"id"`
+			}
+			if json.NewDecoder(file).Decode(&header) == nil && header.Type == "session" && header.Version == 3 {
+				sessionID = header.ID
+			}
+			_ = file.Close()
 		}
+	}
+	if sessionID == "" {
+		termination = "invalid_session_header"
+		return
 	}
 	environment := map[string]string{}
 	for _, value := range os.Environ() {
@@ -80,11 +103,13 @@ func runManagedFunctionalFakePi() {
 	emit(managedFunctionalEvent{Kind: "started", Cwd: mustFunctionalCwd(), PID: os.Getpid(), Args: args, Env: environment})
 	if os.Getenv("MECHA_FUNCTIONAL_IMMEDIATE_FAILURE") == "1" {
 		_, _ = fmt.Fprintln(os.Stderr, "/usr/bin/env: 'node': No such file or directory api_key=do-not-retain cwd=/private/managed/session")
+		_ = os.WriteFile(os.Getenv("MECHA_FUNCTIONAL_EXIT_FILE"), []byte("fixture_exit_127"), 0o600)
 		os.Exit(127)
 	}
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	activeTools := strings.Split(os.Getenv("MECHA_FUNCTIONAL_ACTIVE_TOOLS"), ",")
+	gotGetState, returnedEmptyID, respondedGetState := 0, 0, 0
 	commands := []string{
 		"mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1",
 		"mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
@@ -94,14 +119,37 @@ func runManagedFunctionalFakePi() {
 	for {
 		var request map[string]any
 		if err := decoder.Decode(&request); err != nil {
+			termination = "decode_error"
+			parseKind := "other"
+			var syntax *json.SyntaxError
+			var typeError *json.UnmarshalTypeError
+			switch {
+			case errors.Is(err, io.EOF):
+				parseKind = "stdin_eof"
+			case errors.Is(err, io.ErrUnexpectedEOF):
+				parseKind = "truncated_json"
+			case errors.As(err, &syntax):
+				parseKind = "invalid_json"
+			case errors.As(err, &typeError):
+				parseKind = "invalid_type"
+			}
+			eofAfterResponse := 0
+			if parseKind == "stdin_eof" && respondedGetState != 0 {
+				eofAfterResponse = 1
+			}
+			_ = os.WriteFile(os.Getenv("MECHA_FUNCTIONAL_PARSE_FILE"), []byte(fmt.Sprintf("%s got_get_state=%d returned_empty_id=%d EOF_after_response=%d", parseKind, gotGetState, returnedEmptyID, eofAfterResponse)), 0o600)
 			return
 		}
 		id, _ := request["id"].(string)
 		typ, _ := request["type"].(string)
-		emit(managedFunctionalEvent{Kind: "rpc", Type: typ, ID: id})
+		emit(managedFunctionalEvent{Kind: "rpc", Type: typ, ID: id, SessionID: sessionID})
 		response := map[string]any{"id": id, "type": "response", "command": typ, "success": true, "data": map[string]any{}}
 		switch typ {
 		case "get_state":
+			gotGetState = 1
+			if sessionID == "" {
+				returnedEmptyID = 1
+			}
 			response["data"] = map[string]any{"sessionId": sessionID}
 		case "get_commands":
 			response["data"] = map[string]any{"commands": commands}
@@ -126,7 +174,9 @@ func runManagedFunctionalFakePi() {
 				}
 			}
 		}
-		_ = encoder.Encode(response)
+		if encoder.Encode(response) == nil && typ == "get_state" {
+			respondedGetState = 1
+		}
 	}
 }
 
@@ -199,6 +249,10 @@ type managedFunctionalFixture struct {
 	piLauncherTarget string
 	fifo             string
 	barrier          string
+	exitFile         string
+	parseFile        string
+	readerResult     chan string
+	rpcTrace         []string
 	events           chan managedFunctionalEvent
 	durable          *store.Store
 	router           *Router
@@ -228,7 +282,8 @@ func newManagedFunctionalFixture(t *testing.T, extraEnvironment ...string) *mana
 	barrier := filepath.Join(t.TempDir(), "prompt-barrier.fifo")
 	require.NoError(t, syscall.Mkfifo(barrier, 0o600))
 	events := make(chan managedFunctionalEvent, 128)
-	go readManagedFunctionalEvents(fifo, events)
+	readerResult := make(chan string, 1)
+	go readManagedFunctionalEvents(fifo, events, readerResult)
 	piShimDir := filepath.Join(home, "stable-bin")
 	piRuntimeDir := filepath.Join(home, "nvm-bin")
 	piLauncherDir := filepath.Join(home, "pi-package", "dist")
@@ -246,9 +301,11 @@ func newManagedFunctionalFixture(t *testing.T, extraEnvironment ...string) *mana
 	// Use a shell runner so the real `env node` launcher is exercised. POSIX
 	// shells set PWD to the command working directory before exec, which makes
 	// the child environment match the managed command's configured Cwd.
+	exitFile := filepath.Join(t.TempDir(), "child-exit")
+	parseFile := filepath.Join(t.TempDir(), "child-parse")
 	nodeFixture := filepath.Join(piRuntimeDir, "node")
 	require.NoError(t, os.WriteFile(nodeFixture, []byte("#!/bin/sh\nexec \"$MECHA_FUNCTIONAL_TEST_BINARY\" \"$@\"\n"), 0o700))
-	testEnvironment := []string{"MECHA_MANAGED_FUNCTIONAL_FAKE_PI=1", "MECHA_FUNCTIONAL_TEST_BINARY=" + testBinary, "MECHA_FUNCTIONAL_EVENT_FIFO=" + fifo, "MECHA_FUNCTIONAL_PROMPT_BARRIER=" + barrier, "MECHA_FUNCTIONAL_ACTIVE_TOOLS=" + strings.Join(active, ",")}
+	testEnvironment := []string{"MECHA_MANAGED_FUNCTIONAL_FAKE_PI=1", "MECHA_FUNCTIONAL_TEST_BINARY=" + testBinary, "MECHA_FUNCTIONAL_EVENT_FIFO=" + fifo, "MECHA_FUNCTIONAL_PROMPT_BARRIER=" + barrier, "MECHA_FUNCTIONAL_ACTIVE_TOOLS=" + strings.Join(active, ","), "MECHA_FUNCTIONAL_EXIT_FILE=" + exitFile, "MECHA_FUNCTIONAL_PARSE_FILE=" + parseFile}
 	testEnvironment = append(testEnvironment, extraEnvironment...)
 	config := managed.Config{
 		Enabled: true, PiExecutable: piExecutable, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: sessionRoot,
@@ -266,14 +323,15 @@ func newManagedFunctionalFixture(t *testing.T, extraEnvironment ...string) *mana
 	require.NoError(t, err)
 	require.NoError(t, router.Listen(ctx))
 	serverURL, _ := router.URLs()
-	fixture := &managedFunctionalFixture{t: t, ctx: ctx, root: root, home: home, session: sessionRoot, piRuntimeDir: piRuntimeDir, piExecutable: piExecutable, piLauncherTarget: piLauncherTarget, fifo: fifo, barrier: barrier, events: events, durable: durable, router: router, serverURL: serverURL}
+	fixture := &managedFunctionalFixture{t: t, ctx: ctx, root: root, home: home, session: sessionRoot, piRuntimeDir: piRuntimeDir, piExecutable: piExecutable, piLauncherTarget: piLauncherTarget, fifo: fifo, barrier: barrier, exitFile: exitFile, parseFile: parseFile, readerResult: readerResult, events: events, durable: durable, router: router, serverURL: serverURL}
 	t.Cleanup(func() { fixture.close() })
 	return fixture
 }
 
-func readManagedFunctionalEvents(fifo string, events chan<- managedFunctionalEvent) {
+func readManagedFunctionalEvents(fifo string, events chan<- managedFunctionalEvent, result chan<- string) {
 	file, err := os.Open(fifo)
 	if err != nil {
+		result <- "fifo_open_error"
 		close(events)
 		return
 	}
@@ -285,6 +343,11 @@ func readManagedFunctionalEvents(fifo string, events chan<- managedFunctionalEve
 			events <- event
 		}
 	}
+	outcome := "clean_eof"
+	if scanner.Err() != nil {
+		outcome = "scan_error"
+	}
+	result <- outcome
 	close(events)
 }
 
@@ -299,18 +362,68 @@ func (f *managedFunctionalFixture) close() {
 	_ = os.Remove(f.barrier)
 }
 
+func (f *managedFunctionalFixture) recordRPCEvent(event managedFunctionalEvent) {
+	if event.Kind != "rpc" {
+		return
+	}
+	typ := "other"
+	switch event.Type {
+	case "get_state", "get_commands", "get_active_tools", "prompt":
+		typ = event.Type
+	}
+	// Only protocol identity fields, never prompt bodies, environment or auth.
+	entry := fmt.Sprintf("type=%s id=%q session_id=%q", typ, event.ID, event.SessionID)
+	if len(f.rpcTrace) == 16 {
+		copy(f.rpcTrace, f.rpcTrace[1:])
+		f.rpcTrace = f.rpcTrace[:15]
+	}
+	f.rpcTrace = append(f.rpcTrace, entry)
+}
+
+func (f *managedFunctionalFixture) failEventEOF(want string) {
+	f.failEventBoundary(want, "fifo_closed")
+}
+
+func (f *managedFunctionalFixture) failEventBoundary(want, cause string) {
+	f.t.Helper()
+	f.t.Fatal(f.eventBoundaryDiagnostic(want, cause))
+}
+
+func (f *managedFunctionalFixture) eventBoundaryDiagnostic(want, cause string) string {
+	reader := "pending"
+	select {
+	case reader = <-f.readerResult:
+	default:
+	}
+	exitStatus := "not-recorded"
+	if data, err := os.ReadFile(f.exitFile); err == nil {
+		exitStatus = strings.TrimSpace(string(data))
+	}
+	parseStatus := "not-recorded"
+	if data, err := os.ReadFile(f.parseFile); err == nil {
+		parseStatus = strings.TrimSpace(string(data))
+	}
+	agent, err := f.durable.ManagedAgent(f.ctx, "alpha")
+	if err != nil {
+		return fmt.Sprintf("fake Pi %s before %s: expected_agent=alpha lookup_error=%v reader=%s rpc=%v exit=%q parse=%q", cause, want, err, reader, f.rpcTrace, exitStatus, parseStatus)
+	}
+	return fmt.Sprintf("fake Pi %s before %s: expected_agent=%q expected_request=%q expected_session=%q epoch=%d generation=%q lifecycle=%q activity=%q error_code=%q error=%q reader=%s rpc=%v exit=%q parse=%q", cause, want, agent.AgentID, agent.LaunchOperationID, agent.PiSessionID, agent.SessionEpoch, agent.RuntimeGeneration, agent.LifecycleState, agent.ActivityState, agent.LastErrorCode, store.RedactedManagedDiagnostic(agent.LastErrorMessage), reader, f.rpcTrace, exitStatus, parseStatus)
+}
+
 func (f *managedFunctionalFixture) waitEvent(kind string) managedFunctionalEvent {
 	f.t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	select {
-	case event := <-f.events:
+	case event, ok := <-f.events:
+		if !ok {
+			f.failEventEOF(fmt.Sprintf("event %q", kind))
+		}
+		f.recordRPCEvent(event)
 		require.Equal(f.t, kind, event.Kind)
 		return event
-	case <-time.After(5 * time.Second):
-		agent, err := f.durable.ManagedAgent(f.ctx, "alpha")
-		if err == nil {
-			f.t.Fatalf("timed out waiting for fake Pi event %q: lifecycle=%q error=%q", kind, agent.LifecycleState, agent.LastErrorMessage)
-		}
-		f.t.Fatalf("timed out waiting for fake Pi event %q", kind)
+	case <-timer.C:
+		f.failEventBoundary(fmt.Sprintf("event %q", kind), "timer_expired")
 		return managedFunctionalEvent{}
 	}
 }
@@ -333,6 +446,11 @@ func managedFunctionalRequest(t *testing.T, method, url, requestID string, body 
 
 func TestManagedLaunchBehavioralFunctional(t *testing.T) {
 	fixture := newManagedFunctionalFixture(t)
+	defer func() {
+		if t.Failed() {
+			t.Log(fixture.eventBoundaryDiagnostic("launch contract", "assertion_failed"))
+		}
+	}()
 	body := []byte(fmt.Sprintf(`{"name":"alpha","cwd":%q,"initial_instruction":"hello from functional test"}`, fixture.root))
 	requestID := "123e4567-e89b-42d3-a456-426614174081"
 	status, firstBody := managedFunctionalRequest(t, http.MethodPost, fixture.serverURL+"/v1/managed-agents", requestID, body)
@@ -359,18 +477,24 @@ func TestManagedLaunchBehavioralFunctional(t *testing.T) {
 	require.Equal(t, fixture.root, started.Env["PWD"], "the shell fixture must preserve the configured child working directory")
 	require.Equal(t, "C", started.Env["LANG"])
 	require.Equal(t, "C", started.Env["LC_ALL"])
-	for _, key := range []string{"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL", "MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH", "MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY", "MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER", "MECHA_FUNCTIONAL_ACTIVE_TOOLS"} {
+	for _, key := range []string{"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL", "MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH", "MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY", "MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER", "MECHA_FUNCTIONAL_ACTIVE_TOOLS", "MECHA_FUNCTIONAL_EXIT_FILE", "MECHA_FUNCTIONAL_PARSE_FILE"} {
 		require.Contains(t, started.Env, key)
 	}
 	for key := range started.Env {
-		require.Contains(t, []string{"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL", "MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH", "MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY", "MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER", "MECHA_FUNCTIONAL_ACTIVE_TOOLS"}, key)
+		require.Contains(t, []string{"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL", "MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH", "MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY", "MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER", "MECHA_FUNCTIONAL_ACTIVE_TOOLS", "MECHA_FUNCTIONAL_EXIT_FILE", "MECHA_FUNCTIONAL_PARSE_FILE"}, key)
 	}
 	var rpcKinds []string
 	var promptMessages []string
 	initialPromptCount := 0
+	initialTimer := time.NewTimer(5 * time.Second)
+	defer initialTimer.Stop()
 	for {
 		select {
-		case event := <-fixture.events:
+		case event, ok := <-fixture.events:
+			if !ok {
+				fixture.failEventEOF("the initial instruction")
+			}
+			fixture.recordRPCEvent(event)
 			switch event.Kind {
 			case "rpc":
 				rpcKinds = append(rpcKinds, event.Type)
@@ -392,16 +516,16 @@ func TestManagedLaunchBehavioralFunctional(t *testing.T) {
 				_, releaseErr = release.Write([]byte{1})
 				require.NoError(t, releaseErr)
 				require.NoError(t, release.Close())
+				t.Logf("launch_phase=initial_observed_barrier_released agent=%s request=%s session=%s ready=running/idle accepting=true initial_sent=false", readyBeforePrompt.AgentID, requestID, readyBeforePrompt.PiSessionID)
 				goto initialObserved
 			}
-		case <-time.After(5 * time.Second):
-			agent, readErr := fixture.durable.ManagedAgent(fixture.ctx, "alpha")
-			require.NoError(t, readErr)
-			t.Fatalf("timed out waiting for the initial instruction: lifecycle=%q error=%q", agent.LifecycleState, agent.LastErrorMessage)
+		case <-initialTimer.C:
+			fixture.failEventBoundary("the initial instruction", "timer_expired")
 		}
 	}
 initialObserved:
-	require.Equal(t, []string{"get_state", "get_commands", "prompt", "prompt", "prompt", "prompt"}, rpcKinds)
+	require.Equal(t, []string{"get_state", "get_state", "get_commands", "prompt", "prompt", "prompt", "prompt"}, rpcKinds, "exact binding then readiness state reads before commands and four prompts")
+	t.Logf("launch_phase=exact_binding_readiness_rpc_checked rpc=%v", rpcKinds)
 	require.Equal(t, 1, initialPromptCount, "the fake Pi must receive the initial instruction exactly once")
 	require.Len(t, promptMessages, 4)
 	for _, message := range promptMessages[:3] {
@@ -411,6 +535,7 @@ initialObserved:
 	status, replayBody := managedFunctionalRequest(t, http.MethodPost, fixture.serverURL+"/v1/managed-agents", requestID, body)
 	require.Equal(t, http.StatusAccepted, status)
 	require.Equal(t, firstBody, replayBody)
+	t.Logf("launch_phase=request_replay_checked request=%s", requestID)
 	status, projectionBody := managedFunctionalRequest(t, http.MethodGet, fixture.serverURL+"/v1/managed-agents/alpha", "", nil)
 	require.Equal(t, http.StatusOK, status)
 	var projection struct {
@@ -438,6 +563,7 @@ initialObserved:
 	require.Greater(t, childPID, 0)
 	fixture.close()
 	require.Eventually(t, func() bool { return processGroupAbsent(childPID) }, time.Second, time.Millisecond)
+	t.Log("launch_phase=all_launch_assertions_and_cleanup_checked")
 }
 
 func TestManagedLaunchBehavioralRetainsImmediateChildFailure(t *testing.T) {

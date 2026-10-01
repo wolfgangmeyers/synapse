@@ -65,9 +65,6 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
-	if err := m.RecoverPendingManagedModelChanges(ctx); err != nil {
-		return err
-	}
 	if err := m.PruneManagedRootRecovery(ctx); err != nil {
 		return err
 	}
@@ -79,7 +76,9 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
-		if agent == nil {
+		if agent == nil || agent.Runtime == "embedded" {
+			// Embedded sessions recover through their saved role and owner lease,
+			// never through the RPC process cold-recovery path.
 			continue
 		}
 		cleanupOnly, cleanupErr := m.cleanupFailedProcessStopAgent(ctx, agent)

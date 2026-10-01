@@ -19,7 +19,17 @@ function modelSummary(model) {
   };
 }
 
-async function createRuntime({ authPath, signal }) {
+// Shared-store helper discovery must neither resolve nor refresh the ordinary
+// Pi Codex projection. Go supplies Codex status/catalog under its file lock.
+export function useRouterOwnedCodex(runtime) {
+  const provider = runtime.getProvider("openai-codex");
+  if (!provider) throw new Error("Codex provider is unavailable");
+  runtime.registerNativeProvider({ ...provider, auth: { apiKey: {
+    name: "Router-owned Codex", resolve: async () => undefined, check: async () => undefined,
+  } } });
+}
+
+async function createRuntime({ authPath, signal, ownedCodex = false }) {
   if (typeof authPath !== "string" || authPath.length === 0) throw new Error("ordinary Pi auth path is required");
   const runtime = await ModelRuntime.create({
     authPath,
@@ -28,6 +38,7 @@ async function createRuntime({ authPath, signal }) {
     allowModelNetwork: false,
     signal,
   });
+  if (ownedCodex) useRouterOwnedCodex(runtime);
   // The exact pinned SDK remains isolated to managed Pi/helper wiring. Its key
   // is resolved from Pi's credential store, never copied into router state.
   runtime.registerProvider("cursor", {
@@ -86,9 +97,9 @@ async function snapshot(runtime, signal) {
   return { providers: statuses, models: projectCatalog(available.filter((model) => authenticated.has(model.provider)).map(modelSummary)).models };
 }
 
-export async function discoverProviderSnapshot({ authPath }) {
+export async function discoverProviderSnapshot({ authPath, ownedCodex = false }) {
   const signal = AbortSignal.timeout(CATALOG_TIMEOUT_MS);
-  const runtime = await createRuntime({ authPath, signal });
+  const runtime = await createRuntime({ authPath, signal, ownedCodex });
   return snapshot(runtime, signal);
 }
 
@@ -99,10 +110,11 @@ export async function discoverAvailableModels({ authPath }) {
 // executeProviderOperation accepts only one mapped provider. All interaction
 // callbacks are supplied by index.mjs, which turns them into bounded JSONL
 // prompts and waits for a single prompt-response record.
-export async function executeProviderOperation({ authPath, provider, operation, interaction, signal }) {
+export async function executeProviderOperation({ authPath, provider, operation, interaction, signal, ownedCodex = false }) {
   const config = PROVIDERS[provider];
   if (!config || (operation !== "login" && operation !== "logout")) throw new Error("unsupported provider operation");
-  const runtime = await createRuntime({ authPath, signal });
+  if (ownedCodex && provider === "openai-codex") throw new Error("Codex auth belongs to the router");
+  const runtime = await createRuntime({ authPath, signal, ownedCodex });
   if (operation === "logout") {
     await runtime.logout(provider, { signal });
   } else {

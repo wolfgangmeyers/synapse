@@ -69,7 +69,7 @@ try {
     // for EOF prevents a second JSONL line from being ignored as it was in P3.
     await lines.closed();
     if (oversized || lines.length !== 0) throw new Error("invalid request count");
-    emit(await discoverProviderSnapshot({ authPath: process.env.MECHA_PI_AUTH_PATH }));
+    emit(await discoverProviderSnapshot({ authPath: process.env.MECHA_PI_AUTH_PATH, ownedCodex: process.env.MECHA_ROUTER_OWNS_CODEX === "true" }));
   } else {
     const controller = new AbortController();
     const expiration = setTimeout(() => controller.abort(), OPERATION_TIMEOUT_MS);
@@ -102,6 +102,7 @@ try {
     try {
       const result = await executeProviderOperation({
         authPath: process.env.MECHA_PI_AUTH_PATH,
+        ownedCodex: process.env.MECHA_ROUTER_OWNS_CODEX === "true",
         provider: request.provider,
         operation: request.operation,
         interaction,

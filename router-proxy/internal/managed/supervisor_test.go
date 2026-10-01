@@ -924,6 +924,9 @@ type restartPreparationFactory struct {
 
 func (f restartPreparationFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
 	f.rpc.session = spec.SessionID
+	if spec.LaunchMode == CreateNew {
+		f.rpc.sessionFile = spec.SessionPath
+	}
 	return f.process, nil
 }
 
@@ -940,10 +943,8 @@ func readyRestartManager(t *testing.T, preparationError error, models ...Model) 
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
-	sessionFile := filepath.Join(root, "session.json")
-	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
 	process := &launchProcess{identity: ProcessIdentity{PID: 321, StartMarker: "restart-start", Incarnation: "restart-incarnation"}, stopped: make(chan struct{})}
-	rpc := &restartPreparationRPC{active: expectedManagedActiveTools(manifest), preparationError: preparationError, sessionFile: sessionFile}
+	rpc := &restartPreparationRPC{active: expectedManagedActiveTools(manifest), preparationError: preparationError}
 	if len(models) == 0 {
 		models = []Model{{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}}
 	}

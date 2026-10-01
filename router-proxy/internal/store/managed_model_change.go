@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,10 @@ func (s *Store) RecoverPendingManagedModelChanges(ctx context.Context) error {
 		}
 
 		for _, operation := range operations {
-			agentID, validPath := managedModelAgentFromPath(operation.CanonicalPath)
+			const prefix, suffix = "/v1/managed-agents/", "/model"
+			path := operation.CanonicalPath
+			agentID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+			validPath := strings.HasPrefix(path, prefix) && strings.HasSuffix(path, suffix) && agentID != "" && !strings.Contains(agentID, "/")
 			code := "MODEL_CHANGE_RECOVERY_FAILED"
 			message := "managed model change was interrupted and its runtime model is unknown"
 			status := 500

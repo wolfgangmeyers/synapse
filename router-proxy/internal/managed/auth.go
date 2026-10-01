@@ -58,6 +58,12 @@ type ProviderAuthSnapshotHelper interface {
 	Snapshot(context.Context) ([]store.ManagedProviderStatus, []store.ManagedProviderModel, error)
 }
 
+// ProviderAuthSnapshotCommitter is the narrow shared-Codex composition seam.
+// Ordinary RPC helpers retain the original snapshot/terminal contract.
+type ProviderAuthSnapshotCommitter interface {
+	CommitSnapshot(context.Context, *store.Store) (store.ManagedProviderSnapshot, error)
+}
+
 type ProviderAuthCoordinator struct {
 	store   *store.Store
 	manager *Manager
@@ -110,6 +116,9 @@ func (a *ProviderAuthCoordinator) publishEvent(event ProviderAuthEvent) {
 }
 
 func (a *ProviderAuthCoordinator) Snapshot(ctx context.Context) (store.ManagedProviderSnapshot, error) {
+	if committer, ok := a.helper.(ProviderAuthSnapshotCommitter); ok {
+		return committer.CommitSnapshot(ctx, a.store)
+	}
 	reader, ok := a.helper.(ProviderAuthSnapshotHelper)
 	if !ok {
 		return a.store.ManagedProviderSnapshot(ctx)
@@ -237,7 +246,17 @@ func (a *ProviderAuthCoordinator) finish(operation *providerAuthOperation, event
 	_ = operation.run.Wait()
 	success := event.Kind == "terminal" && event.Status == "succeeded"
 	if success {
-		if _, err := a.store.CommitManagedProviderSnapshot(context.Background(), event.Providers, event.Models); err != nil {
+		var commitErr error
+		if committer, ok := a.helper.(ProviderAuthSnapshotCommitter); ok {
+			var snapshot store.ManagedProviderSnapshot
+			snapshot, commitErr = committer.CommitSnapshot(context.Background(), a.store)
+			if commitErr == nil {
+				event.Providers, event.Models = snapshot.Providers, snapshot.Models
+			}
+		} else {
+			_, commitErr = a.store.CommitManagedProviderSnapshot(context.Background(), event.Providers, event.Models)
+		}
+		if commitErr != nil {
 			event = ProviderAuthEvent{Kind: "state", OperationID: operation.id, Provider: operation.provider, Status: "failed", Error: "Provider sign-in could not be saved"}
 			success = false
 		}

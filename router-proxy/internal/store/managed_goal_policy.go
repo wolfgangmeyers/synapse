@@ -124,6 +124,16 @@ func scanManagedGoalPolicy(scanner interface{ Scan(...any) error }) (*ManagedGoa
 
 const managedGoalPolicyColumns = `agent_id,history_scope_id,desired_revision,applied_revision,goal_enabled,goal_text,settings_json,projection_state,projection_attempts,next_projection_at,last_error_code,last_error_message,last_error_at,evaluator_state,evaluator_lease_until,last_outcome,evaluator_attempts,not_done_wakeups,rearm_activity_count,next_wakeup_at,snoozed_until,last_settled_sequence,evaluator_id,evaluator_goal_revision,evaluator_settled_sequence,evaluator_pi_session_id,evaluator_session_epoch,evaluator_process_pid,evaluator_process_start_marker,evaluator_process_incarnation,evaluator_runtime_generation,evaluator_reason,wakeup_message_id,snooze_pi_session_id,snooze_session_epoch,snooze_process_pid,snooze_process_start_marker,snooze_process_incarnation,snooze_runtime_generation,created_at,updated_at`
 
+// embeddedProjectionGoalTx reads an embedded agent's saved policy inside the
+// caller's projection transaction. A fresh agent has no policy yet.
+func (s *Store) embeddedProjectionGoalTx(ctx context.Context, agentID string) (*ManagedGoalPolicy, error) {
+	policy, err := scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, agentID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return policy, err
+}
+
 func (s *Store) ManagedGoalPolicyFor(ctx context.Context, agentID string) (*ManagedGoalPolicy, error) {
 	if agentID == "" {
 		return nil, errors.New("managed goal agent is required")
@@ -188,28 +198,34 @@ func (s *Store) UpdateManagedGoalPolicy(ctx context.Context, fence ManagedRuntim
 			}
 			return err
 		}
-		now := formatTimestamp(s.clock.Now())
-		if err := s.ensureManagedGoalPolicyTx(ctx, fence.AgentID, now); err != nil {
-			return err
-		}
-		update, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET desired_revision=desired_revision+1,goal_enabled=?,goal_text=?,settings_json=?,projection_state='pending',projection_attempts=0,next_projection_at=?,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,evaluator_state=CASE WHEN ?=1 THEN 'idle' ELSE 'done' END,last_outcome=NULL,evaluator_attempts=0,not_done_wakeups=0,rearm_activity_count=0,next_wakeup_at=NULL,snoozed_until=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,evaluator_lease_until=NULL,evaluator_id=NULL,evaluator_goal_revision=NULL,evaluator_settled_sequence=NULL,evaluator_pi_session_id=NULL,evaluator_session_epoch=NULL,evaluator_process_pid=NULL,evaluator_process_start_marker=NULL,evaluator_process_incarnation=NULL,evaluator_runtime_generation=NULL,evaluator_reason=NULL,wakeup_message_id=NULL,updated_at=? WHERE agent_id=?`, boolInt(config.Enabled), config.Goal, settings, now, boolInt(config.Enabled), now, fence.AgentID)
-		if err != nil {
-			return err
-		}
-		count, err := update.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if count != 1 {
-			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
-		}
-		if _, err = s.db.ExecContext(ctx, `DELETE FROM managed_goal_activity WHERE agent_id=?`, fence.AgentID); err != nil {
-			return err
-		}
-		result, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		result, err = s.updateManagedGoalPolicyTx(ctx, fence.AgentID, config, settings)
 		return err
 	})
 	return result, err
+}
+
+// updateManagedGoalPolicyTx is shared by the RPC fence and the embedded owner
+// fence. Call only inside runImmediate after checking the relevant authority.
+func (s *Store) updateManagedGoalPolicyTx(ctx context.Context, agentID string, config ManagedGoalConfig, settings string) (*ManagedGoalPolicy, error) {
+	now := formatTimestamp(s.clock.Now())
+	if err := s.ensureManagedGoalPolicyTx(ctx, agentID, now); err != nil {
+		return nil, err
+	}
+	update, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET desired_revision=desired_revision+1,goal_enabled=?,goal_text=?,settings_json=?,projection_state='pending',projection_attempts=0,next_projection_at=?,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,evaluator_state=CASE WHEN ?=1 THEN 'idle' ELSE 'done' END,last_outcome=NULL,evaluator_attempts=0,not_done_wakeups=0,rearm_activity_count=0,next_wakeup_at=NULL,snoozed_until=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,evaluator_lease_until=NULL,evaluator_id=NULL,evaluator_goal_revision=NULL,evaluator_settled_sequence=NULL,evaluator_pi_session_id=NULL,evaluator_session_epoch=NULL,evaluator_process_pid=NULL,evaluator_process_start_marker=NULL,evaluator_process_incarnation=NULL,evaluator_runtime_generation=NULL,evaluator_reason=NULL,wakeup_message_id=NULL,updated_at=? WHERE agent_id=?`, boolInt(config.Enabled), config.Goal, settings, now, boolInt(config.Enabled), now, agentID)
+	if err != nil {
+		return nil, err
+	}
+	count, err := update.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if count != 1 {
+		return nil, &ManagedReadinessSourceStaleError{AgentID: agentID}
+	}
+	if _, err = s.db.ExecContext(ctx, `DELETE FROM managed_goal_activity WHERE agent_id=?`, agentID); err != nil {
+		return nil, err
+	}
+	return scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, agentID))
 }
 
 // ConfirmManagedGoalPolicyApplied accepts only the current revision and fence.

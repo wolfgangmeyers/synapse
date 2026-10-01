@@ -178,6 +178,29 @@ func setupColdRecovery(t *testing.T, factory ProcessFactory, rpcFactory RPCFacto
 	return manager, durable, agent, tracked, databasePath
 }
 
+func bindColdRecoverySession(t *testing.T, manager *Manager, durable *store.Store, databasePath, agentID string) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := durable.ManagedAgent(ctx, agentID)
+	require.NoError(t, err)
+	db := installColdRecoveryTrigger(t, databasePath, "SELECT 1")
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='starting' WHERE agent_id=?`, agentID)
+	require.NoError(t, err)
+	relativePath := hashString(current.LaunchOperationID) + ".jsonl"
+	reservationID := hashString("managed-stock-pi-session\x00" + current.LaunchOperationID)
+	require.NoError(t, durable.ReserveManagedPiSession(ctx, store.ManagedPiSessionReservation{
+		ReservationID: reservationID, AgentID: current.AgentID, SessionEpoch: current.SessionEpoch,
+		LaunchOperationID: current.LaunchOperationID, RootRelativePath: relativePath,
+	}))
+	_, err = materializeFreshStockPiSession(filepath.Join(manager.config.SessionRoot, relativePath), current.PiSessionID, current.Cwd, formatManagedTime(time.Now()))
+	require.NoError(t, err)
+	err = durable.BindManagedPiSession(ctx, reservationID, current.LaunchOperationID, current.PiSessionID, relativePath, storedAgentFence(current))
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE managed_agents SET lifecycle_state='running' WHERE agent_id=?`, agentID)
+	require.NoError(t, err)
+}
+
 func TestColdRecoveryManagedLaunchRecipeMismatchOptIn(t *testing.T) {
 	ctx := context.Background()
 	for _, testCase := range []struct {
@@ -236,7 +259,8 @@ func TestRecoverFailedStopUsesOnlyExactOwnedFence(t *testing.T) {
 			process := &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}
 			rpc := &launchRPC{}
 			ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: testCase.state, 902: ProcessOwned}}
-			manager, durable, agent, tracked, _ := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+			manager, durable, agent, tracked, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+			bindColdRecoverySession(t, manager, durable, databasePath, agent.AgentID)
 			fence := storedAgentFence(&agent)
 			require.NoError(t, durable.MarkManagedFailedForFenceAndOperation(ctx, fence, "fault-operation", "PROCESS_STOP_FAILED", "stop failed"))
 			factory := manager.processFactory.(*launchFactory)
@@ -307,6 +331,7 @@ func TestRecoverManagedRootColdStartStoreFaultsLeavePriorStageRecoverable(t *tes
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, durable, agent, _, databasePath := setupColdRecovery(t, nil, nil, nil, nil, nil)
+			bindColdRecoverySession(t, manager, durable, databasePath, agent.AgentID)
 			db := installColdRecoveryTrigger(t, databasePath, `CREATE TRIGGER reject_recovery_transition BEFORE UPDATE OF stage ON managed_root_recovery_actions
 				WHEN OLD.stage = '`+test.from+`' AND NEW.stage = '`+test.to+`' BEGIN SELECT RAISE(FAIL, 'recovery transition failed'); END`)
 			require.Error(t, manager.RecoverManagedRootColdStarts(context.Background()))
@@ -361,6 +386,7 @@ func TestRecoverManagedRootColdStartFailurePathsCleanUpAndTerminalize(t *testing
 				rpcFactory = RPCFactoryFunc(func(context.Context, Process) (RPC, error) { return nil, errors.New("scripted RPC open failure") })
 			}
 			manager, durable, agent, ops, databasePath := setupColdRecovery(t, factory, rpcFactory, nil, process, rpc)
+			bindColdRecoverySession(t, manager, durable, databasePath, agent.AgentID)
 			if test.trigger != "" {
 				db := installColdRecoveryTrigger(t, databasePath, test.trigger)
 				t.Cleanup(func() { _ = db.Close() })
@@ -398,6 +424,7 @@ func TestRecoverManagedRootColdStartRetriesWakeupWithoutReapingReadyBinding(t *t
 	require.NoError(t, err)
 	rpc := &launchRPC{active: expectedManagedActiveTools(manifest)}
 	manager, durable, agent, _, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}, process, rpc)
+	bindColdRecoverySession(t, manager, durable, databasePath, agent.AgentID)
 	triggerDB := installColdRecoveryTrigger(t, databasePath, "CREATE TRIGGER reject_recovery_wakeup BEFORE INSERT ON messages WHEN NEW.id LIKE 'mrrw_%' BEGIN SELECT RAISE(FAIL, 'wakeup insert failed'); END")
 	defer triggerDB.Close()
 
@@ -463,10 +490,11 @@ func TestRecoverManagedRootColdStartImmediateReplayCompletionStaysIdle(t *testin
 	require.NoError(t, err)
 
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
-	rpc.mu.Lock()
-	require.True(t, rpc.bindingObserved, "the replacement binding must own replay before Prompt")
-	require.True(t, rpc.handlerObserved, "replay events must have an installed activity receiver")
-	rpc.mu.Unlock()
+	require.Eventually(t, func() bool {
+		rpc.mu.Lock()
+		defer rpc.mu.Unlock()
+		return rpc.bindingObserved && rpc.handlerObserved
+	}, time.Second, time.Millisecond, "the replacement binding and activity receiver must exist before replay Prompt")
 	require.Eventually(t, func() bool {
 		current, readErr := durable.ManagedAgent(ctx, agent.AgentID)
 		return readErr == nil && current.LifecycleState == "running" && current.ActivityState == "idle" && current.AcceptingPrompts
@@ -523,7 +551,8 @@ func TestRecoverManagedRootColdStartSkipsPersistedInitialInstructionReplay(t *te
 
 func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadiness(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	config, paths := managedLaunchConfigFixture(t)
@@ -532,7 +561,6 @@ func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadines
 	old := store.ManagedAgentRecord{AgentID: "cold-agent", Name: "cold-agent", SlotHeld: true, Cwd: paths["work"], SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", AcceptingPrompts: true, PiSessionID: "old-session", SessionEpoch: 1, ProcessPID: 901, ProcessStartMarker: "old-start", ProcessIncarnation: "old-inc", RuntimeGeneration: "old-runtime", ManifestRevision: manifest.Revision, ManifestHash: manifest.CanonicalSHA256}
 	op := store.ManagedOperation{OperationID: "cold-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "cold-operation", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	oldFence := seedColdRecoveryAgent(t, durable, old, op)
-	require.NoError(t, durable.MarkManagedOperationTerminal(ctx, op.OperationID))
 	rpc := &launchRPC{active: expectedManagedActiveTools(manifest)}
 	manager, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("target-runtime", "restart-runtime"), ProcessFactory: &launchFactory{process: &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}})
 	require.NoError(t, err)
@@ -540,6 +568,12 @@ func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadines
 	recipe, err := manager.managedLaunchRecipe(old)
 	require.NoError(t, err)
 	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, old.AgentID, recipe))
+	bindColdRecoverySession(t, manager, durable, databasePath, old.AgentID)
+	// Finish the seeded launch only after its exact session is bound and ready.
+	require.NoError(t, durable.MarkManagedOperationTerminal(ctx, op.OperationID))
+	completed, err := durable.ManagedOperation(ctx, op.OperationID)
+	require.NoError(t, err)
+	require.Equal(t, "terminal", completed.State)
 
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	current, err := durable.ManagedAgent(ctx, old.AgentID)
@@ -637,6 +671,7 @@ func TestRecoverManagedRootColdStartMissingLaunchOwnerReapsBeforeReady(t *testin
 	rpc := &launchRPC{active: nil}
 	ops := &coldRecoveryOps{states: map[int]ProcessProbeState{901: ProcessAbsent, 902: ProcessOwned}}
 	manager, durable, agent, tracked, databasePath := setupColdRecovery(t, &launchFactory{process: process, rpc: rpc}, launchRPCFactory{rpc: rpc}, ops, process, rpc)
+	bindColdRecoverySession(t, manager, durable, databasePath, agent.AgentID)
 	db := installColdRecoveryTrigger(t, databasePath, "SELECT 1")
 	defer db.Close()
 	_, err := db.Exec(`UPDATE managed_agents SET launch_operation_id=NULL WHERE agent_id=?`, agent.AgentID)
@@ -692,7 +727,8 @@ func TestRecoveredTargetCleanupDoesNotReapNewerProcessWithReusedPID(t *testing.T
 
 func TestRecoverManagedRootColdStartReadinessFailureClosesExactTarget(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	config, paths := managedLaunchConfigFixture(t)
@@ -710,6 +746,7 @@ func TestRecoverManagedRootColdStartReadinessFailureClosesExactTarget(t *testing
 	recipe, err := manager.managedLaunchRecipe(old)
 	require.NoError(t, err)
 	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, old.AgentID, recipe))
+	bindColdRecoverySession(t, manager, durable, databasePath, old.AgentID)
 
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	action, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
@@ -734,7 +771,8 @@ func TestRecoverManagedRootColdStartReadinessFailureClosesExactTarget(t *testing
 
 func TestRecoverManagedRootColdStartReadinessFailurePersistsCompletedTargetExit(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	config, paths := managedLaunchConfigFixture(t)
@@ -756,6 +794,7 @@ func TestRecoverManagedRootColdStartReadinessFailurePersistsCompletedTargetExit(
 	recipe, err := manager.managedLaunchRecipe(old)
 	require.NoError(t, err)
 	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, old.AgentID, recipe))
+	bindColdRecoverySession(t, manager, durable, databasePath, old.AgentID)
 
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	action, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
@@ -772,7 +811,8 @@ func TestRecoverManagedRootColdStartReadinessFailurePersistsCompletedTargetExit(
 
 func TestRecoverManagedRootColdStartCleanupFailureRecordsUnsafeOrphan(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	config, paths := managedLaunchConfigFixture(t)
@@ -789,6 +829,7 @@ func TestRecoverManagedRootColdStartCleanupFailureRecordsUnsafeOrphan(t *testing
 	recipe, err := manager.managedLaunchRecipe(old)
 	require.NoError(t, err)
 	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, old.AgentID, recipe))
+	bindColdRecoverySession(t, manager, durable, databasePath, old.AgentID)
 
 	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 	action, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
@@ -929,7 +970,8 @@ func TestManagedRootRecoveryPruneRetainsExpiredFailedTargetUntilCleared(t *testi
 
 func TestRecoverManagedRootColdStartDoesNotStartAfterReadyTargetOnSecondRouter(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	config, paths := managedLaunchConfigFixture(t)
@@ -944,6 +986,7 @@ func TestRecoverManagedRootColdStartDoesNotStartAfterReadyTargetOnSecondRouter(t
 	rpc := &launchRPC{active: expectedManagedActiveTools(manifest)}
 	first, err := NewManager(ManagerOptions{Store: durable, Config: config, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("target-runtime"), ProcessFactory: &launchFactory{process: &launchProcess{identity: ProcessIdentity{PID: 902, StartMarker: "new-start", Incarnation: "new-inc"}, stopped: make(chan struct{})}, rpc: rpc}, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
+	bindColdRecoverySession(t, first, durable, databasePath, old.AgentID)
 	require.NoError(t, first.RecoverManagedRootColdStarts(ctx))
 	target, err := durable.ManagedAgent(ctx, old.AgentID)
 	require.NoError(t, err)

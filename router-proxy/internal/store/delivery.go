@@ -27,6 +27,15 @@ func (e *IdempotencyConflictError) Error() string {
 }
 func (e *IdempotencyConflictError) Code() string { return "idempotency_conflict" }
 
+// ConversationReceiptCapacityError means the bounded accepted-ID ledger is
+// full. Protected retries/conflicts remain available at capacity.
+type ConversationReceiptCapacityError struct{}
+
+func (e *ConversationReceiptCapacityError) Error() string {
+	return "conversation send receipt capacity exhausted"
+}
+func (e *ConversationReceiptCapacityError) Code() string { return "conversation_receipt_capacity" }
+
 type QueueLimitError struct{ Recipient string }
 
 func (e *QueueLimitError) Error() string {
@@ -65,8 +74,15 @@ type ConversationOptions struct {
 	QuietEligible bool
 }
 type EnqueueOptions struct {
-	DisableBatching bool
-	Conversation    *ConversationOptions
+	DisableBatching       bool
+	Conversation          *ConversationOptions
+	ManagedQuietRequestID string
+	// OnFreshAdmission runs only after the authoritative replay/conflict checks,
+	// inside the write transaction and before either fresh acceptance path.
+	// It must only touch the rate clock/map: no Store, router.mu, or external I/O.
+	// The caller may already hold router.mu. The returned function settles
+	// this admission with the actual SQLite COMMIT outcome, even on a later error.
+	OnFreshAdmission func() (settle func(committed bool), err error)
 }
 type EnqueueResult struct {
 	Created             bool                        `json:"created"`
@@ -74,6 +90,7 @@ type EnqueueResult struct {
 	Message             domain.Message              `json:"message"`
 	ConversationMessage *domain.ConversationMessage `json:"conversation_message,omitempty"`
 	ConversationCreated bool                        `json:"conversation_created,omitempty"`
+	QuietEligible       bool                        `json:"-"`
 }
 type LeaseRequest struct {
 	AgentID, InstanceID, LeaseID string
@@ -119,6 +136,14 @@ type BatchFailureResult struct {
 }
 
 func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options ...EnqueueOptions) (EnqueueResult, error) {
+	var option *EnqueueOptions
+	if len(options) > 0 {
+		option = &options[0]
+	}
+	return s.enqueue(ctx, envelope, option, nil)
+}
+
+func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option *EnqueueOptions, producer *EmbeddedToolInvocation) (EnqueueResult, error) {
 	if err := protocol.ValidateEnvelope(envelope, s.maxBodyBytes); err != nil {
 		return EnqueueResult{}, err
 	}
@@ -130,8 +155,8 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 		return EnqueueResult{}, err
 	}
 	var enqueueOptions EnqueueOptions
-	if len(options) > 0 {
-		enqueueOptions = options[0]
+	if option != nil {
+		enqueueOptions = *option
 	}
 	_ = enqueueOptions.DisableBatching // batching is a claim-time property.
 	conversation, err := prepareConversation(candidate, enqueueOptions.Conversation)
@@ -139,7 +164,39 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 		return EnqueueResult{}, err
 	}
 	var result EnqueueResult
-	err = s.runImmediate(ctx, func() error {
+	var settleAdmission func(bool)
+	committed, conclusive, transactionErr := s.runImmediateWithCommitOutcome(ctx, func() error {
+		if producer != nil {
+			if err := s.embeddedToolMailGuardTx(ctx, producer, candidate); err != nil {
+				return err
+			}
+		}
+		admittedAt := s.clock.Now().UTC().Truncate(time.Millisecond)
+		now := formatTimestamp(admittedAt)
+		receipt, accepted, acceptedAt, deadlineAt, err := s.conversationReceipt(ctx, candidate.ID)
+		if err != nil {
+			return err
+		}
+		if receipt != nil && s.receiptLifecycle && now >= deadlineAt {
+			resolved, state, reason, err := s.receiptResolution(ctx, candidate.ID, accepted.MessageIncarnationID)
+			if err != nil {
+				return err
+			}
+			if !resolved {
+				return &ConversationReceiptExpiredUnresolvedError{MessageID: candidate.ID, AcceptedAt: acceptedAt, DeadlineAt: deadlineAt, DeliveryState: state, Reason: reason, IncarnationID: accepted.MessageIncarnationID}
+			}
+			if _, err := s.pruneConversationReceiptsFor(ctx, now, candidate.ID); err != nil {
+				return err
+			}
+			receipt = nil
+		}
+		if receipt != nil {
+			if conversation == nil || !sameConversation(receipt, conversation) || (accepted.ID == candidate.ID && !sameEnvelope(accepted, candidate)) {
+				return &IdempotencyConflictError{ID: candidate.ID}
+			}
+			result = EnqueueResult{Message: *accepted, ConversationMessage: receipt}
+			return nil
+		}
 		if conversation != nil {
 			latest, err := s.latestConversation(ctx, candidate.ID)
 			if err != nil {
@@ -154,10 +211,19 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 					return err
 				}
 				if message == nil {
-					return errors.New("conversation delivery message disappeared")
+					// History from before migration 078 still owns the accepted ID.
+					message = &domain.Message{ID: latest.ID, From: latest.From, To: latest.To, Subject: latest.Subject, Body: latest.Body, CreatedAt: latest.CreatedAt, MessageIncarnationID: latest.MessageIncarnationID, State: domain.MessageAcknowledged, Source: latest.Source}
+				}
+				if message.ID == candidate.ID && !sameEnvelope(message, candidate) {
+					return &IdempotencyConflictError{ID: candidate.ID}
 				}
 				result = EnqueueResult{Message: *message, ConversationMessage: latest}
 				return nil
+			}
+		}
+		if conversation != nil && s.receiptLifecycle {
+			if _, err := s.pruneConversationReceipts(ctx, now); err != nil {
+				return err
 			}
 		}
 		existing, err := s.messageForTx(ctx, candidate.ID)
@@ -175,6 +241,12 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 		if err != nil {
 			return err
 		}
+		if enqueueOptions.OnFreshAdmission != nil {
+			settleAdmission, err = enqueueOptions.OnFreshAdmission()
+			if err != nil {
+				return err
+			}
+		}
 		if duplicate != nil {
 			result = EnqueueResult{Deduped: true, Message: *duplicate}
 			if conversation != nil {
@@ -182,12 +254,18 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 				if err != nil {
 					return err
 				}
-				recorded := formatTimestamp(s.clock.Now())
-				row, err := s.insertConversation(ctx, conversation, incarnation, duplicate.ID, recorded)
+				if enqueueOptions.ManagedQuietRequestID != "" {
+					conversation.QuietEligible, err = s.consumeManagedQuietSendAuthorizationTx(ctx, enqueueOptions.ManagedQuietRequestID, candidate.From, candidate.To, now)
+					if err != nil {
+						return err
+					}
+				}
+				recorded := now
+				row, err := s.insertConversation(ctx, conversation, incarnation, recorded, duplicate)
 				if err != nil {
 					return err
 				}
-				result.ConversationMessage, result.ConversationCreated = row, true
+				result.ConversationMessage, result.ConversationCreated, result.QuietEligible = row, true, conversation.QuietEligible
 			}
 			return nil
 		}
@@ -198,7 +276,6 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 		if count >= s.maxQueuedMessages || bytes+envelopeBytes(candidate) > s.maxQueuedBytes {
 			return &QueueLimitError{Recipient: candidate.To}
 		}
-		now := formatTimestamp(s.clock.Now())
 		expires, err := protocol.TimestampAfter(now, time.Hour)
 		if err != nil {
 			return err
@@ -206,6 +283,12 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 		incarnation, err := s.ids.Next()
 		if err != nil {
 			return err
+		}
+		if conversation != nil && enqueueOptions.ManagedQuietRequestID != "" {
+			conversation.QuietEligible, err = s.consumeManagedQuietSendAuthorizationTx(ctx, enqueueOptions.ManagedQuietRequestID, candidate.From, candidate.To, now)
+			if err != nil {
+				return err
+			}
 		}
 		if _, err = s.db.ExecContext(ctx, `INSERT INTO agents (agent_id, first_seen_at) VALUES (?, ?) ON CONFLICT (agent_id) DO NOTHING`, candidate.To, now); err != nil {
 			return err
@@ -223,15 +306,21 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 		}
 		result = EnqueueResult{Created: true, Message: *message}
 		if conversation != nil {
-			row, err := s.insertConversation(ctx, conversation, message.MessageIncarnationID, message.ID, formatTimestamp(s.clock.Now()))
+			row, err := s.insertConversation(ctx, conversation, message.MessageIncarnationID, now, message)
 			if err != nil {
 				return err
 			}
-			result.ConversationMessage, result.ConversationCreated = row, true
+			result.ConversationMessage, result.ConversationCreated, result.QuietEligible = row, true, conversation.QuietEligible
 		}
 		return nil
 	})
-	return result, err
+	if producer != nil {
+		producer.recordDomainDisposition(committed, conclusive, transactionErr)
+	}
+	if settleAdmission != nil && conclusive {
+		settleAdmission(committed)
+	}
+	return result, transactionErr
 }
 
 func (s *Store) AcquireAgentLease(ctx context.Context, request LeaseRequest) (domain.Lease, error) {

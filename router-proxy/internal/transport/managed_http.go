@@ -87,14 +87,14 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedLaunch(w, req)
 		return true
+	case req.Method == http.MethodPost && managedPromptPath(req.URL.Path) != "":
+		r.handleManagedPrompt(w, req, managedPromptPath(req.URL.Path))
+		return true
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents/restart-all":
 		r.handleManagedRestartAll(w, req)
 		return true
 	case req.Method == http.MethodPost && managedResetPath(req.URL.Path) != "":
 		r.handleManagedReset(w, req, managedResetPath(req.URL.Path))
-		return true
-	case req.Method == http.MethodPut && managedModelPath(req.URL.Path) != "":
-		r.handleManagedModel(w, req, managedModelPath(req.URL.Path))
 		return true
 	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
 		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
@@ -501,7 +501,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for key := range payload {
-		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" {
+		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" {
 			r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
 			return
 		}
@@ -540,6 +540,17 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		}
 		selected = &managed.Model{Provider: provider, ID: id}
 	}
+	runtime := "rpc"
+	if r.defaultEmbeddedRoot {
+		runtime = "embedded"
+	}
+	if _, ok := payload["runtime"]; ok {
+		runtime, err = managedString(payload, "runtime", true)
+		if err != nil || (runtime != "rpc" && runtime != "embedded") {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_RUNTIME", "Runtime is invalid"})
+			return
+		}
+	}
 	canonicalPath := req.URL.Path
 	if r.managedPathCanonicalizer != nil {
 		canonicalPath = r.managedPathCanonicalizer(req)
@@ -558,7 +569,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 		return
 	}
-	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, InitialInstruction: instruction, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, Runtime: runtime, InitialInstruction: instruction, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
 	if launchErr != nil {
 		var idempotencyConflict *store.ManagedIdempotencyConflictError
 		if errors.As(launchErr, &idempotencyConflict) {
@@ -657,70 +668,6 @@ func managedRestartPath(path string) string {
 		return ""
 	}
 	return id
-}
-
-func managedModelPath(path string) string {
-	const prefix = "/v1/managed-agents/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/model") {
-		return ""
-	}
-	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/model")
-	if id == "" || strings.Contains(id, "/") {
-		return ""
-	}
-	return id
-}
-
-func (r *Router) handleManagedModel(w http.ResponseWriter, req *http.Request, agentID string) {
-	requestID := req.Header.Get("X-Request-ID")
-	if requestID == "" {
-		r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
-		return
-	}
-	if !canonicalUUID(requestID) {
-		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
-		return
-	}
-	payload, _, err := decodeManagedObject(req, 4096, true)
-	if err != nil {
-		r.writeManagedError(w, req, err)
-		return
-	}
-	if len(payload) != 1 {
-		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
-		return
-	}
-	raw, ok := payload["model"]
-	if !ok {
-		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
-		return
-	}
-	var input map[string]json.RawMessage
-	if json.Unmarshal(raw, &input) != nil || len(input) != 2 {
-		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
-		return
-	}
-	provider, providerErr := managedString(input, "provider", true)
-	id, idErr := managedString(input, "id", true)
-	if providerErr != nil || idErr != nil {
-		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
-		return
-	}
-	canonicalPath := req.URL.Path
-	if r.managedPathCanonicalizer != nil {
-		canonicalPath = r.managedPathCanonicalizer(req)
-	}
-	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
-	result, changeErr := r.managed.ChangeModel(req.Context(), managed.ModelChangeRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), Model: managed.Model{Provider: provider, ID: id}})
-	if changeErr != nil {
-		r.writeManagedError(w, req, managedModelError(changeErr))
-		return
-	}
-	if result.Operation == nil {
-		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the model operation"})
-		return
-	}
-	r.writeManagedRaw(w, req, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
 }
 
 // handleManagedRestart is a direct local control. It intentionally reads no
@@ -907,36 +854,6 @@ func managedRestartAllError(err error) error {
 		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
 	}
 	return &managedHTTPError{500, "INTERNAL", "Router could not restart managed agents"}
-}
-
-func managedModelError(err error) error {
-	if managed.IsModelUnavailable(err) {
-		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
-	}
-	if strings.Contains(err.Error(), "invalid model") {
-		return &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"}
-	}
-	var missing *store.ManagedAgentNotFoundError
-	if errors.As(err, &missing) {
-		return &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"}
-	}
-	var notReady *store.ManagedAgentNotReadyError
-	if errors.As(err, &notReady) {
-		return &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent is not ready to change model"}
-	}
-	var idempotency *store.ManagedIdempotencyConflictError
-	if errors.As(err, &idempotency) {
-		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
-	}
-	var persistence *managed.ModelStatePersistenceError
-	if errors.As(err, &persistence) {
-		return &managedHTTPError{500, "MODEL_STATE_PERSIST_FAILED", "Managed model state could not be persisted; prompt admission was closed"}
-	}
-	var failed *managed.ModelSwitchFailedError
-	if errors.As(err, &failed) {
-		return &managedHTTPError{409, "MODEL_SWITCH_FAILED", "Managed model change could not be confirmed"}
-	}
-	return &managedHTTPError{500, "INTERNAL", "Router could not change the managed model"}
 }
 
 func managedRestartError(err error) error {
@@ -1363,6 +1280,34 @@ func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, er
 }
 
 func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, agentID string) {
+	agent, lookupErr := r.store.ManagedAgent(req.Context(), agentID)
+	if lookupErr == nil && agent.Runtime == "embedded" {
+		binding := store.EmbeddedBinding{AgentID: agent.AgentID, SessionID: agent.PiSessionID, Epoch: agent.SessionEpoch, Generation: agent.RuntimeGeneration}
+		role, roleErr := r.store.SavedEmbeddedSessionRole(req.Context(), binding)
+		if roleErr != nil || (role != "root" && role != "worker") {
+			r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
+			return
+		}
+		policy, policyErr := r.store.ManagedGoalPolicyFor(req.Context(), agent.AgentID)
+		if policyErr != nil {
+			r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
+			return
+		}
+		settings := policy.Config.Settings
+		state := managedGoalState(map[string]any{"goal_state": map[string]any{
+			"enabled": policy.Config.Enabled, "goal": policy.Config.Goal,
+			"goal_lock_enabled": settings.GoalLockEnabled, "snooze_enabled": settings.SnoozeEnabled,
+			"snooze_duration_ms": settings.SnoozeDurationMS, "snooze_turn_limit": settings.SnoozeTurnLimit,
+			"snooze_budget_cap_ms":     settings.SnoozeBudgetCapMS,
+			"snooze_refill_yield_ms":   settings.SnoozeRefillYieldMS,
+			"snooze_refill_elapsed_ms": settings.SnoozeRefillElapsedMS,
+		}})
+		state["desired_revision"] = policy.DesiredRevision
+		state["applied_revision"] = policy.AppliedRevision
+		state["projection_state"] = policy.ProjectionState
+		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"goal_state": state}, nil)
+		return
+	}
 	result, err := r.managed.DirectRootControl(req.Context(), agentID, "", "goal.control", map[string]any{"action": "status"})
 	if err != nil || result.Status != "ok" {
 		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
@@ -1421,13 +1366,29 @@ func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, 
 	if settings != nil {
 		arguments["settings"] = settings
 	}
-	result, controlErr := r.managed.DirectRootControl(req.Context(), agentID, requestID, "goal.control", arguments)
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}}
+	agent, agentErr := r.store.ManagedAgent(req.Context(), agentID)
+	embedded := agentErr == nil && agent.Runtime == "embedded"
+	var receipt *store.ManagedOperation
+	if embedded {
+		receipt = &operation
+	}
+	result, controlErr := r.managed.DirectRootControl(req.Context(), agentID, requestID, "goal.control", arguments, receipt)
+	var conflict *store.ManagedIdempotencyConflictError
+	if errors.As(controlErr, &conflict) {
+		r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+		return
+	}
 	if controlErr != nil || result.Status != "ok" {
 		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed goal could not be updated"})
 		return
 	}
 	body, _ := json.Marshal(map[string]any{"goal_state": managedGoalState(result.Details)})
-	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, ResponseBody: body}
+	if embedded {
+		r.writeManagedRaw(w, req, operation.ResponseStatus, operation.ResponseHeaders, operation.ResponseBody)
+		return
+	}
+	operation.ResponseBody = body
 	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
 		var conflict *store.ManagedIdempotencyConflictError
 		if errors.As(err, &conflict) {
@@ -1482,12 +1443,27 @@ func (r *Router) handleManagedInlineToolsPUT(w http.ResponseWriter, req *http.Re
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
 		return
 	}
-	if err := r.managed.SetManagedInlineTools(req.Context(), agentID, enabled); err != nil {
+	body, _ := json.Marshal(map[string]any{"enabled": enabled})
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, ResponseBody: body}
+	agent, agentErr := r.store.ManagedAgent(req.Context(), agentID)
+	embedded := agentErr == nil && agent.Runtime == "embedded"
+	var receipt *store.ManagedOperation
+	if embedded {
+		receipt = &operation
+	}
+	if err := r.managed.SetManagedInlineTools(req.Context(), agentID, enabled, receipt); err != nil {
+		var conflict *store.ManagedIdempotencyConflictError
+		if errors.As(err, &conflict) {
+			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+			return
+		}
 		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed inline-tool settings could not be updated"})
 		return
 	}
-	body, _ := json.Marshal(map[string]any{"enabled": enabled})
-	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, ResponseBody: body}
+	if embedded {
+		r.writeManagedRaw(w, req, operation.ResponseStatus, operation.ResponseHeaders, operation.ResponseBody)
+		return
+	}
 	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
 		var conflict *store.ManagedIdempotencyConflictError
 		if errors.As(err, &conflict) {

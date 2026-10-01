@@ -29,16 +29,22 @@ type TerminateResult struct {
 }
 
 func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (TerminateResult, error) {
+	return m.terminateWithEmbeddedProducer(ctx, request, nil)
+}
+
+func (m *Manager) terminateWithEmbeddedProducer(ctx context.Context, request TerminateRequest, producer *store.EmbeddedToolInvocation) (TerminateResult, error) {
 	if request.AgentID == "" || request.Method == "" || request.CanonicalPath == "" || request.RequestID == "" || request.CanonicalBodyHash == "" {
 		return TerminateResult{}, errors.New("managed termination request is incomplete")
 	}
-	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
-		if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
-			return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
+	if producer == nil {
+		if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
+			if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
+				return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
+			}
+			return TerminateResult{Operation: existing, Replayed: true}, nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return TerminateResult{}, err
 		}
-		return TerminateResult{Operation: existing, Replayed: true}, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return TerminateResult{}, err
 	}
 	lane := m.laneFor(request.AgentID)
 	lane.admission.Lock()
@@ -46,13 +52,15 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	// A concurrent identical DELETE can finish after the fast replay lookup and
 	// before this request enters the agent's admission lane. Replay again under
 	// the lane before reading mutable agent state.
-	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
-		if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
-			return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
+	if producer == nil {
+		if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
+			if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
+				return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
+			}
+			return TerminateResult{Operation: existing, Replayed: true}, nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return TerminateResult{}, err
 		}
-		return TerminateResult{Operation: existing, Replayed: true}, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return TerminateResult{}, err
 	}
 
 	agent, err := m.store.ManagedAgent(ctx, request.AgentID)
@@ -64,6 +72,9 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	}
 	failedRoot, rootErr := m.store.LatestRetryableManagedRootRecovery(ctx, request.AgentID)
 	if rootErr == nil {
+		if producer != nil {
+			return TerminateResult{}, errors.New("worker cleanup cannot enter root process recovery")
+		}
 		return m.reserveFailedRootRecoveryTermination(ctx, request, agent, failedRoot)
 	}
 	if !errors.Is(rootErr, sql.ErrNoRows) {
@@ -86,7 +97,7 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 		source, sourcePtr = current, &source
 	}
 
-	if sourcePtr != nil {
+	if sourcePtr != nil && producer == nil {
 		_ = m.store.InterruptManagedParentWork(context.Background(), source)
 	}
 	responseAgent := *agent
@@ -98,8 +109,22 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 		return TerminateResult{}, err
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
-	admission, err := m.store.ReserveManagedLifecycle(ctx, store.ManagedLifecycleReservation{AgentID: request.AgentID, Kind: "terminate", Source: "direct", Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Fence: source, RetryOf: retryOf, Operation: operation})
-	if err != nil {
+	reservation := store.ManagedLifecycleReservation{AgentID: request.AgentID, Kind: "terminate", Source: "direct", Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Fence: source, RetryOf: retryOf, Operation: operation}
+	var admission store.ManagedLifecycleAdmission
+	if producer == nil {
+		admission, err = m.store.ReserveManagedLifecycle(ctx, reservation)
+	} else {
+		if m.embeddedBeforeToolDomain != nil {
+			m.embeddedBeforeToolDomain()
+		}
+		admission, err = m.store.ReserveEmbeddedToolCleanup(ctx, reservation, producer)
+	}
+	admissionErr := err
+	if producer != nil {
+		if !m.claimEmbeddedToolHandoff(producer) {
+			return TerminateResult{}, errors.Join(err, errors.New("cleanup admission not known committed"))
+		}
+	} else if err != nil {
 		return TerminateResult{}, err
 	}
 	if admission.Replayed {
@@ -130,11 +155,17 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 			}
 		}
 	}
-	m.startManagedTask(func() {
+	started := m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
 		m.executeTerminationInLane(admission.Action.ActionID, binding)
 	})
+	if producer != nil {
+		if !started {
+			admissionErr = errors.Join(admissionErr, errors.New("committed cleanup handoff unavailable: manager closed"))
+		}
+		return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, admissionErr
+	}
 	return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 }
 
