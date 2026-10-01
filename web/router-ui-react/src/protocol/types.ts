@@ -848,6 +848,7 @@ export interface ManagedChild {
 export interface ManagedAgent {
   agent_id: AgentId;
   source: "router-managed";
+  runtime?: "rpc" | "embedded";
   cwd: string;
   model: ManagedModel;
   desired_state: string;
@@ -859,7 +860,11 @@ export interface ManagedAgent {
   started_at: RouterTimestamp | null;
   updated_at: RouterTimestamp;
   last_error: ManagedError | null;
-  goal_state?: GoalState;
+  goal_state?: GoalState & {
+    desired_revision?: number;
+    applied_revision?: number;
+    projection_state?: "pending" | "applied" | "failed";
+  };
 }
 
 export interface ManagedArchiveDelivery {

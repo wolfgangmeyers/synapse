@@ -157,12 +157,25 @@ export function isRouterUtcTimestamp(value: unknown): value is string {
 
 export function isManagedAgent(value: unknown): value is ManagedAgent {
   const required = ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"];
-  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state", "runtime"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
+  if (Object.hasOwn(value, "runtime") && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
   const model = value.model; const manifest = value.manifest; const lastError = value.last_error;
   if (!isAgentId(value.agent_id) || value.source !== "router-managed" || !isSafeString(value.cwd, 1, 4096) || !isSafeString(value.desired_state, 1, 64) || !isSafeString(value.lifecycle_state, 1, 64) || !isSafeString(value.activity_state, 1, 64) || typeof value.accepting_prompts !== "boolean" || !isRouterUtcTimestamp(value.created_at) || (value.started_at !== null && !isRouterUtcTimestamp(value.started_at)) || !isRouterUtcTimestamp(value.updated_at)) return false;
   if (!isExactRecord(model, ["provider", "id"]) || !isSafeString(model.provider, 1, 128) || !isSafeString(model.id, 1, 256)) return false;
   if (!isExactRecord(manifest, ["revision", "sha256", "installed_tool_count"]) || !isSafeInteger(manifest.revision, 1) || !isPatternString(manifest.sha256, /^[0-9a-f]{64}$/, 64, 64) || !isSafeInteger(manifest.installed_tool_count, 0, 1024)) return false;
-  return (value.goal_state === undefined || isGoalState(value.goal_state)) && (lastError === null || isExactRecord(lastError, ["code", "message", "at"]) && isSafeString(lastError.code, 1, 128) && isSafeString(lastError.message, 1, 1024) && isRouterUtcTimestamp(lastError.at));
+  return (value.goal_state === undefined || isManagedAgentGoalState(value.goal_state)) && (lastError === null || isExactRecord(lastError, ["code", "message", "at"]) && isSafeString(lastError.code, 1, 128) && isSafeString(lastError.message, 1, 1024) && isRouterUtcTimestamp(lastError.at));
+}
+
+// Embedded inventory carries durable policy revisions alongside the browser
+// goal fields. Keep that closed shape separate from legacy RPC goal frames.
+function isManagedAgentGoalState(value: unknown): boolean {
+  if (isGoalState(value)) return true;
+  if (!isRecord(value)) return false;
+  const { desired_revision, applied_revision, projection_state, ...browserState } = value;
+  return isSafeInteger(desired_revision, 0) && isSafeInteger(applied_revision, 0)
+    && applied_revision <= desired_revision
+    && (projection_state === "pending" || projection_state === "applied" || projection_state === "failed")
+    && isGoalState(browserState);
 }
 
 function isManagedArchiveDelivery(value: unknown): boolean {

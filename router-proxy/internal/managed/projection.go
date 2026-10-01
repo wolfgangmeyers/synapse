@@ -57,6 +57,7 @@ func PublicAgentWithGoal(agent *store.ManagedAgentRecord, policy *store.ManagedG
 		"enabled": policy.Config.Enabled, "goal": goal,
 		"desired_revision": policy.DesiredRevision, "applied_revision": policy.AppliedRevision,
 		"projection_state":  policy.ProjectionState,
+		"outcome_counts":    map[string]any{"COMPLETED": 0, "NOT_DONE": 0},
 		"goal_lock_enabled": settings.GoalLockEnabled, "snooze_enabled": settings.SnoozeEnabled,
 		"snooze_duration_ms": settings.SnoozeDurationMS, "snooze_turn_limit": settings.SnoozeTurnLimit,
 		"snooze_budget_cap_ms":   settings.SnoozeBudgetCapMS,
