@@ -733,6 +733,11 @@ func (m *Manager) RecoverPendingManagedLaunches(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
+		if agent.Runtime == "embedded" {
+			// Embedded launch reservations survive a restart. Their durable
+			// owner lease is reclaimed by RecoverEmbeddedRoots instead.
+			continue
+		}
 		lane := m.laneFor(agent.AgentID)
 		lane.serial.Lock()
 		fence := storedAgentFence(agent)

@@ -146,8 +146,11 @@ func (h *uiLiveHub) snapshot(ctx context.Context) (*uiLiveProjection, error) {
 func uiLiveProjectionFromStored(stored store.ManagedAgentsSnapshot, childrenVersion int64, childrenGeneratedAt string, children []map[string]any) *uiLiveProjection {
 	agents := make(map[string]map[string]any, len(stored.Agents))
 	for _, record := range stored.Agents {
-		public := managed.PublicAgent(record)
-		if record != nil && record.AgentID != "" {
+		if record == nil {
+			continue
+		}
+		public := managed.PublicAgentWithGoal(record, stored.GoalPolicies[record.AgentID])
+		if record.AgentID != "" {
 			agents[record.AgentID] = public
 		}
 	}

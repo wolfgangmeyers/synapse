@@ -103,13 +103,15 @@ func (s *Store) BindManagedPiSession(ctx context.Context, reservationID, launchO
 		if changed != 1 {
 			return &ManagedPiSessionBindStaleError{ReservationID: reservationID}
 		}
-		// The reservation CAS above has already proven the complete current parent
-		// fence inside this transaction. Rekey the one current source row by its
-		// lifetime identity; its manifest fields may have advanced during RPC
-		// negotiation after process installation.
+		// The reservation CAS proves the full current agent fence. The readiness
+		// source must still belong to that same process and runtime generation;
+		// its manifest may have advanced during RPC negotiation.
 		sourceResult, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources
 			SET pi_session_id=?
-			WHERE agent_id=? AND pi_session_id=? AND session_epoch=?`, piSessionID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch)
+			WHERE agent_id=? AND pi_session_id=? AND session_epoch=?
+				AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=?`,
+			piSessionID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch,
+			fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration)
 		if err != nil {
 			if isConstraintError(err) {
 				return &ManagedPiSessionBindStaleError{ReservationID: reservationID}

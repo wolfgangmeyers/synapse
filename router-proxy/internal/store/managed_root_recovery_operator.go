@@ -401,6 +401,9 @@ func (s *Store) PromoteManagedRootRecoveryOperatorTermination(ctx context.Contex
 		if err != nil || changed != 1 {
 			return &ManagedLifecycleConflictError{AgentID: action.AgentID}
 		}
+		if err := s.cancelPendingEmbeddedOwnRemindersTx(ctx, action.AgentID); err != nil {
+			return err
+		}
 		result, err = s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET operator_stage='executing',operator_agent_updated_at=?,version=version+1,updated_at=? WHERE action_id=? AND version=? AND operator_owner=? AND operator_owner_epoch=? AND operator_stage='identity_resolved'`, now, now, actionID, version, owner, ownerEpoch)
 		if err != nil {
 			return err

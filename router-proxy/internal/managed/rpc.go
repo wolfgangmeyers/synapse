@@ -70,12 +70,6 @@ type managedGoalEvaluationCleanupStateRPC interface {
 	ManagedGoalEvaluationCleanupPending() bool
 }
 
-// NativeModelRPC is stock Pi's in-place set_model command. It stays narrower
-// than RPC so non-native test and legacy bindings remain source-compatible.
-type NativeModelRPC interface {
-	SetModel(context.Context, string, string) (Model, error)
-}
-
 // RestartTurnSettler is deliberately narrower than RPC. Existing launch-only
 // callers remain source-compatible; controlled active restart requires this
 // binding-scoped stdout capability.
@@ -974,21 +968,6 @@ func unwrap(value map[string]any) map[string]any {
 func (c *rpcClient) GetState(ctx context.Context) (map[string]any, error) {
 	value, err := c.call(ctx, "get_state", nil)
 	return unwrap(value), err
-}
-
-func (c *rpcClient) SetModel(ctx context.Context, provider, modelID string) (Model, error) {
-	value, err := c.call(ctx, "set_model", map[string]any{"provider": provider, "modelId": modelID})
-	if err != nil {
-		return Model{}, err
-	}
-	data := unwrap(value)
-	actualProvider, providerOK := data["provider"].(string)
-	actualID, idOK := data["id"].(string)
-	if !providerOK || !idOK || actualProvider != provider || actualID != modelID {
-		return Model{}, errors.New("set_model response does not match requested model")
-	}
-	name, _ := data["name"].(string)
-	return Model{Provider: actualProvider, ID: actualID, Name: name, Available: true}, nil
 }
 
 // Abort intentionally uses the public wire command rather than a prompt

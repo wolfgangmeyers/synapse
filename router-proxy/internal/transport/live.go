@@ -293,10 +293,69 @@ func (r *Router) expireActivity(agentID string, now time.Time) error {
 	return nil
 }
 
+// rateReservation is an opaque, per-admission identity. The pointer, not the
+// timestamp, identifies the exact pending charge to cancel or finalize.
+// This window is process-local; it does not add cross-process or crash safety.
+type rateReservation struct {
+	sender string
+	at     time.Time
+}
+
 func (r *Router) rateLimit(sender string) error {
 	now := r.now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.rateMu.Lock()
+	defer r.rateMu.Unlock()
+	if err := r.checkRateLocked(sender, now); err != nil {
+		return err
+	}
+	r.rates[sender] = append(r.rates[sender], now)
+	return nil
+}
+
+// reserveRate counts a pending ordinary send before its Store transaction.
+// Callers must cancel on rejection or finalize on success, outside rateMu.
+func (r *Router) reserveRate(sender string) (*rateReservation, error) {
+	now := r.now()
+	r.rateMu.Lock()
+	defer r.rateMu.Unlock()
+	if err := r.checkRateLocked(sender, now); err != nil {
+		return nil, err
+	}
+	reservation := &rateReservation{sender: sender, at: now}
+	r.rateReservations[reservation] = struct{}{}
+	return reservation, nil
+}
+
+// cancelRateReservation removes only this admission's pending charge. A late
+// cancel cannot remove another request's charge or a finalized charge.
+func (r *Router) cancelRateReservation(reservation *rateReservation) {
+	r.rateMu.Lock()
+	delete(r.rateReservations, reservation)
+	r.rateMu.Unlock()
+}
+
+// finalizeRateReservation keeps the successful admission's original timestamp
+// in the ordinary window. Repeated or late finalization has no effect.
+func (r *Router) finalizeRateReservation(reservation *rateReservation) {
+	r.rateMu.Lock()
+	if _, pending := r.rateReservations[reservation]; pending {
+		delete(r.rateReservations, reservation)
+		values := r.rates[reservation.sender]
+		// Store completions may finish out of order. Keep the oldest first
+		// so Retry-After remains correct for ordinary and reserved sends.
+		index := sort.Search(len(values), func(i int) bool { return values[i].After(reservation.at) })
+		values = append(values, time.Time{})
+		copy(values[index+1:], values[index:])
+		values[index] = reservation.at
+		r.rates[reservation.sender] = values
+	}
+	r.rateMu.Unlock()
+}
+
+// checkRateLocked prunes both kinds of charge and applies the same one-minute,
+// 60-admission limit used by reminder and ordinary HTTP sends. No Store, mu,
+// or other external operation is called while rateMu is held.
+func (r *Router) checkRateLocked(sender string, now time.Time) error {
 	cutoff := now.Add(-time.Minute)
 	for key, values := range r.rates {
 		kept := values[:0]
@@ -311,15 +370,30 @@ func (r *Router) rateLimit(sender string) error {
 			r.rates[key] = kept
 		}
 	}
-	values := r.rates[sender]
-	if len(values) >= 60 {
-		retry := int(values[0].Add(time.Minute).Sub(now).Seconds())
+	count := len(r.rates[sender])
+	var oldest time.Time
+	if count > 0 {
+		oldest = r.rates[sender][0]
+	}
+	for reservation := range r.rateReservations {
+		if !reservation.at.After(cutoff) {
+			delete(r.rateReservations, reservation)
+			continue
+		}
+		if reservation.sender == sender {
+			count++
+			if oldest.IsZero() || reservation.at.Before(oldest) {
+				oldest = reservation.at
+			}
+		}
+	}
+	if count >= 60 {
+		retry := int(oldest.Add(time.Minute).Sub(now).Seconds())
 		if retry < 1 {
 			retry = 1
 		}
 		return &httpError{status: http.StatusTooManyRequests, code: "rate_limited", retryAfter: retry}
 	}
-	r.rates[sender] = append(values, now)
 	return nil
 }
 

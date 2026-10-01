@@ -14,7 +14,18 @@ var errManagedControlsUnavailable = errors.New("managed agent is not ready for c
 // active managed process. Direct Web UI controls use the same host handler as
 // a Pi tool request, while the HTTP request ID gives the host adapter its
 // idempotency key.
-func (m *Manager) DirectRootControl(ctx context.Context, agentID, requestID, operationID string, arguments map[string]any) (RootControlHandlerResult, error) {
+func (m *Manager) DirectRootControl(ctx context.Context, agentID, requestID, operationID string, arguments map[string]any, receipt ...*store.ManagedOperation) (RootControlHandlerResult, error) {
+	agent, err := m.store.ManagedAgent(ctx, agentID)
+	if err != nil {
+		return RootControlHandlerResult{}, err
+	}
+	if agent.Runtime == "embedded" {
+		var operation *store.ManagedOperation
+		if len(receipt) > 0 {
+			operation = receipt[0]
+		}
+		return m.directEmbeddedBrowserGoal(ctx, agentID, operationID, arguments, operation)
+	}
 	binding, fence, err := m.currentDirectControlBinding(ctx, agentID)
 	if err != nil {
 		return RootControlHandlerResult{}, err
@@ -76,7 +87,18 @@ func (m *Manager) ManagedInlineToolsEnabled(ctx context.Context, agentID string)
 // SetManagedInlineTools changes the router-owned policy and waits for the
 // active managed Pi process to confirm the new guard projection before
 // reporting success to the UI.
-func (m *Manager) SetManagedInlineTools(ctx context.Context, agentID string, enabled bool) error {
+func (m *Manager) SetManagedInlineTools(ctx context.Context, agentID string, enabled bool, receipt ...*store.ManagedOperation) error {
+	agent, err := m.store.ManagedAgent(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	if agent.Runtime == "embedded" {
+		var operation *store.ManagedOperation
+		if len(receipt) > 0 {
+			operation = receipt[0]
+		}
+		return m.setEmbeddedBrowserInline(ctx, agentID, enabled, operation)
+	}
 	binding, fence, err := m.currentDirectControlBinding(ctx, agentID)
 	if err != nil {
 		return err

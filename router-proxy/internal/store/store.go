@@ -86,6 +86,7 @@ type SweepResult struct {
 	ExpiredLeases        []ExpiredLease
 	GoalControlStates    int
 	ConversationMessages int
+	ReceiptsPruned       int
 	LifecycleStates      int
 	LifecycleEvents      int
 	LifecycleProducers   int
@@ -112,14 +113,16 @@ type Store struct {
 	maxBatchBodyChars    int
 	reminderIncarnations map[string]string
 	migrations           []Migration
+	receiptLifecycle     bool
 	// managed027Fault, managedRestartAllFault, managedGraphFault, and
 	// managedTerminationFault are test-only failure seams. They keep rollback
 	// tests on the real single SQLite connection.
-	managed027Fault         func(string) error
-	managedRestartAllFault  func(string) error
-	managedGraphFault       func(string) error
-	managedTerminationFault func(string) error
-	managedBridgeFault      func(string) error
+	managed027Fault               func(string) error
+	managedRestartAllFault        func(string) error
+	managedGraphFault             func(string) error
+	managedTerminationFault       func(string) error
+	managedBridgeFault            func(string) error
+	embeddedGoalContinuationFault func(string) error // test-only rollback seam
 	// These process-local bounds reset on restart; reconciliation is idempotent.
 	managedParentActivityReconcileMu        sync.Mutex
 	managedParentActivityReconcileCursor    string
@@ -236,6 +239,9 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 		return closeOnError(err)
 	}
 	if err := store.applyMigrations(ctx, migrations); err != nil {
+		return closeOnError(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id='082_conversation_send_receipt_lifecycle')`).Scan(&store.receiptLifecycle); err != nil {
 		return closeOnError(err)
 	}
 	if err := store.backfillClosedManagedHistoryIncarnations(ctx); err != nil {
@@ -479,6 +485,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 			}
 			if migration.ID == "005_message_incarnation" {
 				if err := s.backfillMessageIncarnations(ctx); err != nil {
+					return err
+				}
+			}
+			if migration.ID == "082_conversation_send_receipt_lifecycle" {
+				accepted := s.clock.Now().UTC().Truncate(time.Millisecond)
+				if _, err := s.db.ExecContext(ctx, `UPDATE conversation_send_receipts SET accepted_at=?, deadline_at=? WHERE accepted_at IS NULL`, formatTimestamp(accepted), formatTimestamp(accepted.Add(conversationReceiptHorizon))); err != nil {
 					return err
 				}
 			}
@@ -942,23 +954,37 @@ func (s *Store) backfillMessageIncarnations(ctx context.Context) error {
 }
 
 func (s *Store) runImmediate(ctx context.Context, operation func() error) error {
+	_, _, err := s.runImmediateWithCommitOutcome(ctx, operation)
+	return err
+}
+
+// runImmediateWithCommitOutcome distinguishes transaction failure from errors
+// after COMMIT (notably state-file permissions). A caller with an in-memory
+// admission reservation must settle it using committed, not err == nil.
+func (s *Store) runImmediateWithCommitOutcome(ctx context.Context, operation func() error) (committed, conclusive bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return errors.New("store is closed")
+		return false, true, errors.New("store is closed")
 	}
 	if _, err := s.db.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
+		return false, true, err
+	}
+	rollback := func(cause error) (bool, bool, error) {
+		if _, rollbackErr := s.db.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+			// An unsuccessful rollback cannot prove the write was undone. Do
+			// not refund an admission whose final state is unknown.
+			return false, false, fmt.Errorf("%w; rollback failed: %v", cause, rollbackErr)
+		}
+		return false, true, cause
 	}
 	if err := operation(); err != nil {
-		_, _ = s.db.ExecContext(context.Background(), "ROLLBACK")
-		return err
+		return rollback(err)
 	}
 	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {
-		_, _ = s.db.ExecContext(context.Background(), "ROLLBACK")
-		return err
+		return rollback(err)
 	}
-	return chmodStateFiles(s.path)
+	return true, true, chmodStateFiles(s.path)
 }
 
 // Sweep removes the currently bounded, store-owned resources in one immediate
@@ -1042,6 +1068,12 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 				return err
 			}
 		}
+		// Embedded ACK keeps ordinary state visible until accepted expiry.
+		// Both sweep paths must prune it; the router recovers only queued mail.
+		// The attempt/evidence cascades; the SDK entry stays with its session.
+		if _, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE state='acknowledged' AND expires_at<=? AND id IN (SELECT message_id FROM embedded_attempts) AND NOT EXISTS (SELECT 1 FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE a.message_id=messages.id AND o.state='pending')`, nowText); err != nil {
+			return err
+		}
 		var expiredLeases []ExpiredLease
 		result.Leases, expiredLeases, err = s.pruneExpiredLeases(ctx, nowText)
 		if !pruneQueued {
@@ -1055,6 +1087,10 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 			return err
 		}
 		result.ConversationMessages, err = s.pruneConversation(ctx, now, policy)
+		if err != nil {
+			return err
+		}
+		result.ReceiptsPruned, err = s.pruneConversationReceipts(ctx, nowText)
 		if err != nil {
 			return err
 		}
@@ -1089,7 +1125,7 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 		// intentionally not part of generic retention; a later terminate or
 		// restart must not make a failed name silently reusable.
 		result.ManagedAgents = 0
-		return err
+		return s.pruneEmbeddedProcessGenerationsTx(ctx)
 	}); err != nil {
 		return SweepResult{}, err
 	}
@@ -1202,8 +1238,9 @@ func (s *Store) pruneStaleAgents(ctx context.Context, now string) (int, error) {
 				WHERE reminders.target = agents.agent_id
 				AND (reminders.state = 'scheduled'
 					OR (reminders.interval_ms IS NULL AND reminders.linked_message_id IS NOT NULL))
-			))
-			OR (disconnected_at IS NOT NULL AND disconnected_at <= ?)
+			) AND NOT EXISTS (SELECT 1 FROM messages WHERE recipient = agents.agent_id))
+			OR (disconnected_at IS NOT NULL AND disconnected_at <= ?
+				AND NOT EXISTS (SELECT 1 FROM messages WHERE recipient = agents.agent_id))
 		)
 		ORDER BY agent_id ASC`, threshold, threshold)
 	if err != nil {

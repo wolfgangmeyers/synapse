@@ -40,16 +40,23 @@ func (s *Store) ConsumeManagedQuietSendAuthorization(ctx context.Context, reques
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_quiet_send_authorizations WHERE expires_at <= ?`, now); err != nil {
 			return err
 		}
-		result, err := s.db.ExecContext(ctx, `DELETE FROM managed_quiet_send_authorizations WHERE request_id = ? AND sender_agent_id = ? AND recipient_agent_id = ? AND expires_at > ?`, requestID, senderAgentID, recipientAgentID, now)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		consumed = changed == 1
-		return nil
+		var err error
+		consumed, err = s.consumeManagedQuietSendAuthorizationTx(ctx, requestID, senderAgentID, recipientAgentID, now)
+		return err
 	})
 	return consumed, err
+}
+
+// Called only inside runImmediate. A rejected admission rolls this deletion
+// back with its conversation receipt and delivery; never refund a token later.
+func (s *Store) consumeManagedQuietSendAuthorizationTx(ctx context.Context, requestID, senderAgentID, recipientAgentID, now string) (bool, error) {
+	if !managedIdentifierRE.MatchString(requestID) || !managedIdentifierRE.MatchString(senderAgentID) || !managedRecipientRE.MatchString(recipientAgentID) {
+		return false, nil
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM managed_quiet_send_authorizations WHERE request_id = ? AND sender_agent_id = ? AND recipient_agent_id = ? AND expires_at > ?`, requestID, senderAgentID, recipientAgentID, now)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }

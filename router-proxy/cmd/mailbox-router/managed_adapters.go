@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -40,6 +41,7 @@ func parseManagedRoots(value string) []string {
 type fixedAuthHelper struct {
 	config         managed.Config
 	nodeExecutable string
+	ownedCodex     bool // Codex status and rotation belong to the configured Go store.
 }
 
 func (h fixedAuthHelper) Start(ctx context.Context, operationID, provider, action string) (managed.ProviderAuthRun, error) {
@@ -114,8 +116,38 @@ func (h fixedAuthHelper) Snapshot(ctx context.Context) ([]store.ManagedProviderS
 	return providers, models, nil
 }
 
+// consumeCodexCredential feeds ordinary RPC Pi's existing AuthStorage contract.
+// Only a private pipe carries tokens. Reused on browser login/logout and every
+// Go-owned rotation, not a one-time embedded credential import.
+func (h fixedAuthHelper) consumeCodexCredential(ctx context.Context, credential *store.CodexCredential) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var value any
+	if credential != nil {
+		value = map[string]any{"type": "oauth", "access": credential.AccessToken, "refresh": credential.RefreshToken, "expires": credential.ExpiresAt.UnixMilli(), "accountId": credential.AccountID}
+	}
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw) > 64*1024 || h.nodeExecutable == "" || h.config.AuthHelperPath == "" {
+		return errors.New("provider credential synchronization failed")
+	}
+	command := exec.CommandContext(ctx, h.nodeExecutable, filepath.Join(filepath.Dir(h.config.AuthHelperPath), "codex-consumer.mjs"))
+	command.Env = h.environment()
+	command.Stdin = bytes.NewReader(append(raw, '\n'))
+	output := &boundedHelperOutput{limit: 128}
+	command.Stdout = output
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil || string(output.Bytes()) != "{\"synchronized\":true}\n" {
+		return errors.New("provider credential synchronization failed")
+	}
+	return nil
+}
+
 func (h fixedAuthHelper) environment() []string {
-	return append(managed.ChildEnvironment(h.config), "MECHA_PI_AUTH_PATH="+filepath.Join(h.config.PiAgentDir, "auth.json"))
+	environment := append(managed.ChildEnvironment(h.config), "MECHA_PI_AUTH_PATH="+filepath.Join(h.config.PiAgentDir, "auth.json"))
+	if h.ownedCodex {
+		environment = append(environment, "MECHA_ROUTER_OWNS_CODEX=true")
+	}
+	return environment
 }
 
 type boundedHelperOutput struct {

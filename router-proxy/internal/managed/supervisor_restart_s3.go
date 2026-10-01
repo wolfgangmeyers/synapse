@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -396,10 +397,13 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	if err != nil || action.State != "starting_target" || action.Stage != "target_start" || action.TargetFence != nil || action.RecoveryOwner != "" {
 		return
 	}
-	if _, err := m.verifyLifecycleRestartArtifact(action, source); err != nil {
+	artifact, err := m.verifyLifecycleRestartArtifact(action, source)
+	if err != nil {
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
 		return
 	}
+	sessionRelativePath := artifact.RootRelativePath
+	sessionPath := filepath.Join(m.config.SessionRoot, sessionRelativePath)
 	agent, err := m.store.ManagedAgent(context.Background(), source.AgentID)
 	if err != nil || !sameBindingFence(storedAgentFence(agent), source) || agent.LifecycleState != "restarting" || agent.ActivityState != "stopped" || agent.AcceptingPrompts || !agent.SlotHeld || action.PlannedTargetRuntimeGeneration == "" {
 		_ = m.store.RecordManagedLifecycleRestartFailure(context.Background(), actionID, "RESTART_IDENTITY_UNSAFE", source)
@@ -416,7 +420,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	if err := m.store.ClaimManagedLifecycleRestartTargetStart(context.Background(), actionID, attemptID, source, action.PlannedTargetRuntimeGeneration); err != nil {
 		return
 	}
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: source.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, action.PlannedTargetRuntimeGeneration, source.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionPath: sessionPath, SessionID: source.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, action.PlannedTargetRuntimeGeneration, source.SessionEpoch)}
 	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		if StartErrorProvesNoChild(err) {
@@ -433,7 +437,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 		return
 	}
 	identity := process.Identity()
-	candidate := &managedBinding{agentID: source.AgentID, lane: m.laneFor(source.AgentID), operationID: actionID, lifecycleAction: "restart", process: process, identity: identity, sessionID: source.PiSessionID, sessionEpoch: source.SessionEpoch, runtimeGeneration: action.PlannedTargetRuntimeGeneration, manifestRevision: source.ManifestRevision, manifestHash: source.ManifestHash}
+	candidate := &managedBinding{agentID: source.AgentID, lane: m.laneFor(source.AgentID), operationID: actionID, lifecycleAction: "restart", process: process, identity: identity, sessionID: source.PiSessionID, sessionEpoch: source.SessionEpoch, runtimeGeneration: action.PlannedTargetRuntimeGeneration, manifestRevision: source.ManifestRevision, manifestHash: source.ManifestHash, sessionRelativePath: sessionRelativePath, sessionPath: spec.SessionPath}
 	m.watchLifecycleRestartProcess(candidate)
 	if ValidateIdentity(identity) != nil || identity.Incarnation == source.ProcessIncarnation || m.processOps.Probe(identity).State != ProcessOwned {
 		if m.cleanupUninstalledTarget(process, identity, candidate.waitDone) {

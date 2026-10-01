@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -21,6 +23,8 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/agent"
+	"github.com/sky-valley/pi/ai"
 )
 
 type LaunchRequest struct {
@@ -28,6 +32,7 @@ type LaunchRequest struct {
 	Cwd                string
 	Model              *Model
 	InitialInstruction string
+	Runtime            string
 	Method             string
 	CanonicalPath      string
 	RequestID          string
@@ -48,6 +53,17 @@ type ManagerOptions struct {
 	Manifest                          Manifest
 	ProcessFactory                    ProcessFactory
 	RPCFactory                        RPCFactory
+	EmbeddedRunnerFactory             func(context.Context, store.ManagedAgentRecord) error
+	EmbeddedModelResolver             func(store.ManagedAgentRecord) *ai.Model
+	CodexCredentialStore              *store.LocalCodexCredentialStore
+	CodexRefresh                      func(context.Context, store.CodexCredential) (store.CodexCredential, error)
+	CodexHTTPTransport                http.RoundTripper
+	EmbeddedGoalEvaluator             func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error)
+	EmbeddedExternalTool              *agent.AgentTool
+	EmbeddedAfterIntent               func(context.Context)
+	EmbeddedAfterCheckedIntent        func(context.Context)
+	EmbeddedAfterGoalCommit           func(context.Context)
+	EmbeddedAfterWorkerLaunch         func(context.Context)
 	CatalogSource                     ModelSource
 	Clock                             deterministic.Clock
 	IDSource                          deterministic.IDSource
@@ -126,6 +142,7 @@ type ResetResult struct {
 type managedAgentLane struct {
 	serial    sync.Mutex
 	admission sync.Mutex
+	selection sync.Mutex // saved model snapshot at SDK turn admission only
 }
 
 const (
@@ -208,12 +225,33 @@ type managedBinding struct {
 }
 
 type Manager struct {
-	store                                      *store.Store
-	eventSink                                  EventSink
-	config                                     Config
-	manifest                                   Manifest
-	processFactory                             ProcessFactory
-	rpcFactory                                 RPCFactory
+	store                      *store.Store
+	eventSink                  EventSink
+	config                     Config
+	manifest                   Manifest
+	processFactory             ProcessFactory
+	rpcFactory                 RPCFactory
+	embeddedRunnerFactory      func(context.Context, store.ManagedAgentRecord) error
+	embeddedModelResolver      func(store.ManagedAgentRecord) *ai.Model
+	codexCredentialStore       *store.LocalCodexCredentialStore
+	codexRefresh               func(context.Context, store.CodexCredential) (store.CodexCredential, error)
+	codexHTTPTransport         http.RoundTripper
+	embeddedStatusObserver     func(embeddedTransportTrace)
+	embeddedGoalEvaluator      func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error)
+	embeddedExternalTool       *agent.AgentTool
+	embeddedAfterIntent        func(context.Context)
+	embeddedAfterCheckedIntent func(context.Context)
+	embeddedAfterUserAppend    func(context.Context)
+	embeddedBashAfterStart     func(int, *os.File)
+	embeddedAfterGoalCommit    func(context.Context)
+	embeddedAfterWorkerLaunch  func(context.Context)
+	embeddedStartupGeneration  int64
+	embeddedOwners             map[string]embeddedOwner
+	// Test-only tick/cleanup barrier for the production owner heartbeat.
+	embeddedOwnerTicker                        func() (<-chan time.Time, func())
+	embeddedRecovery                           map[string]store.EmbeddedBinding
+	embeddedGoalTimers                         map[string]*embeddedGoalTimer
+	embeddedFreshWrites                        map[embeddedWriteAdmission]struct{}
 	catalog                                    ModelSource
 	clock                                      deterministic.Clock
 	ids                                        deterministic.IDSource
@@ -242,6 +280,10 @@ type Manager struct {
 	projectionPublisher                        func()
 	completeHistoryPublisher                   CompleteHistoryPublisher
 	directReplyPublisher                       DirectReplyPublisher
+	embeddedReplyPublisher                     func(context.Context, store.EmbeddedReply) error
+	embeddedMailPublisher                      func(store.EnqueueResult)
+	embeddedBeforeToolHandoff                  func(*store.EmbeddedToolInvocation) // test-only, original committed handoff
+	embeddedBeforeToolDomain                   func()                              // test-only, after owner checks, before producer transaction
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -332,7 +374,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
 	// every surviving active builtin row before any manager can expose history.
@@ -359,11 +401,36 @@ func (managerIDs) Next() (string, error) {
 }
 
 func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResult, error) {
+	return m.launchWithEmbeddedRole(ctx, request, "worker", nil)
+}
+
+// Root authority is internal to the router, never supplied by HTTP.
+func (m *Manager) LaunchEmbeddedRoot(ctx context.Context, request LaunchRequest) (LaunchResult, error) {
+	if request.Runtime != "embedded" {
+		return LaunchResult{}, errors.New("embedded root requires embedded runtime")
+	}
+	return m.launchWithEmbeddedRole(ctx, request, "root", nil)
+}
+
+func (m *Manager) launchEmbeddedWorkerFromOwner(ctx context.Context, request LaunchRequest, owner embeddedOwner) (LaunchResult, error) {
+	if err := m.authorizeEmbeddedWorkerLaunch(ctx, owner); err != nil {
+		return LaunchResult{}, err
+	}
+	return m.launchWithEmbeddedRole(ctx, request, "worker", &owner)
+}
+
+func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequest, embeddedRole string, parent *embeddedOwner) (LaunchResult, error) {
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()
 	if closed {
 		return LaunchResult{}, errors.New("managed manager is closed")
+	}
+	if request.Runtime == "" {
+		request.Runtime = "rpc"
+	}
+	if request.Runtime != "rpc" && request.Runtime != "embedded" {
+		return LaunchResult{}, errors.New("invalid managed runtime")
 	}
 	if !managedNameRE.MatchString(request.Name) {
 		return LaunchResult{}, errors.New("invalid managed agent name")
@@ -389,8 +456,27 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 			}
 		}
 	}
+	// Embedded selection never derives credential authority from Pi catalog
+	// availability. RPC continues to use the shared catalog unchanged.
+	if request.Runtime == "embedded" && (err == nil || IsModelUnavailable(err)) {
+		candidate := selected
+		if IsModelUnavailable(err) && request.Model != nil {
+			candidate = *request.Model
+		}
+		unavailable := IsModelUnavailable(err)
+		selected, err = m.admitEmbeddedModel(ctx, candidate)
+		if err == nil && unavailable {
+			sdk := ai.GetModel(selected.Provider, selected.ID)
+			selected = Model{Provider: sdk.Provider, ID: sdk.ID, Name: sdk.Name, Available: true}
+		}
+	}
 	if err != nil {
 		return LaunchResult{}, err
+	}
+	if request.Runtime == "embedded" {
+		if err := m.validateEmbeddedWorkingDirectory(cwd); err != nil {
+			return LaunchResult{}, err
+		}
 	}
 	sessionID, err := m.ids.Next()
 	if err != nil {
@@ -413,10 +499,40 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 		request.CanonicalPath = "/v1/managed-agents"
 	}
 	if request.CanonicalBodyHash == "" {
-		request.CanonicalBodyHash = hashString(request.Name + "\x00" + cwd + "\x00" + selected.Provider + "\x00" + selected.ID + "\x00" + request.InitialInstruction)
+		bodyIdentity := request.Name + "\x00" + cwd + "\x00" + selected.Provider + "\x00" + selected.ID + "\x00" + request.InitialInstruction
+		if request.Runtime == "embedded" {
+			bodyIdentity += "\x00embedded\x00" + embeddedRole
+		}
+		request.CanonicalBodyHash = hashString(bodyIdentity)
+	}
+	if request.Runtime == "embedded" {
+		if parent != nil {
+			if err := m.authorizeEmbeddedWorkerLaunch(ctx, *parent); err != nil {
+				return LaunchResult{}, err
+			}
+		}
+		prior, lookupErr := m.store.ManagedOperation(ctx, request.RequestID)
+		if lookupErr == nil {
+			if prior.Method != request.Method || prior.CanonicalPath != request.CanonicalPath || prior.CanonicalBodyHash != request.CanonicalBodyHash {
+				return LaunchResult{}, &store.ManagedIdempotencyConflictError{}
+			}
+			saved, readErr := m.store.ManagedAgent(ctx, request.Name)
+			if readErr != nil || saved.LaunchOperationID != request.RequestID || saved.Runtime != "embedded" {
+				return LaunchResult{}, &store.ManagedIdempotencyConflictError{}
+			}
+			binding := store.EmbeddedBinding{AgentID: saved.AgentID, SessionID: saved.PiSessionID, Epoch: saved.SessionEpoch, Generation: saved.RuntimeGeneration}
+			role, roleErr := m.store.EmbeddedSessionRole(ctx, binding)
+			if roleErr != nil || role != embeddedRole {
+				return LaunchResult{}, &store.ManagedIdempotencyConflictError{}
+			}
+			return LaunchResult{Agent: saved, Replayed: true}, nil
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return LaunchResult{}, lookupErr
+		}
 	}
 	now := formatManagedTime(m.clock.Now())
-	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: cwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now}
+	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: cwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now}
 	if m.config.Enabled {
 		recipe, recipeErr := m.managedLaunchRecipe(agent)
 		if recipeErr != nil {
@@ -436,8 +552,40 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 	lane := m.laneFor(agent.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
-	if err := m.store.ReserveManagedLaunchWithLimit(ctx, agent, op, m.config.Limits.MaxAgents); err != nil {
+	var toolProducer *store.EmbeddedToolInvocation
+	if agent.Runtime == "embedded" {
+		if parent != nil {
+			if producer, ok := ctx.Value(embeddedToolInvocationContextKey{}).(*store.EmbeddedToolInvocation); ok {
+				toolProducer = producer
+				if m.embeddedBeforeToolDomain != nil {
+					m.embeddedBeforeToolDomain()
+				}
+				err = m.store.ReserveEmbeddedToolWorkerLaunch(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding, producer)
+			} else {
+				err = m.store.ReserveManagedEmbeddedWorkerFromOwner(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding)
+			}
+		} else {
+			err = m.store.ReserveManagedEmbeddedLaunch(ctx, agent, op, m.config.Limits.MaxAgents, embeddedRole)
+		}
+	} else {
+		err = m.store.ReserveManagedLaunchWithLimit(ctx, agent, op, m.config.Limits.MaxAgents)
+	}
+	if toolProducer != nil {
+		if !m.claimEmbeddedToolHandoff(toolProducer) {
+			return LaunchResult{}, errors.Join(err, errors.New("worker launch admission not known committed"))
+		}
+		if m.isClosed() {
+			return LaunchResult{Agent: &agent}, errors.Join(err, errors.New("committed worker handoff unavailable: manager closed"))
+		}
+		m.startEmbeddedRoot(agent, request.RequestID, false)
+		return LaunchResult{Agent: &agent}, err
+	}
+	if err != nil {
 		return LaunchResult{}, err
+	}
+	if agent.Runtime == "embedded" {
+		m.startEmbeddedRoot(agent, request.RequestID, false)
+		return LaunchResult{Agent: &agent}, nil
 	}
 	sessionPathHash := hashString(request.RequestID)
 	sessionRelativePath := sessionPathHash + ".jsonl"
@@ -779,6 +927,14 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		handled, shutdownErr = m.shutdownRestartBinding(context.Background(), binding)
 		if handled {
 			m.recordCloseError(shutdownErr)
+			return
+		}
+		// Close owns generic shutdown. Its binding snapshot may still be waiting
+		// for this launch lane, so leave the handle installed for that one owner.
+		if m.isClosed() {
+			binding.serial.Lock()
+			binding.retainBinding = true
+			binding.serial.Unlock()
 			return
 		}
 		lane.serial.Lock()
@@ -1276,6 +1432,9 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if err != nil {
 		return RestartResult{}, err
 	}
+	if agent.Runtime == "embedded" && request.Model != nil {
+		return m.reserveEmbeddedModelSelection(ctx, request, agent)
+	}
 	failedRoot, rootErr := m.store.LatestRetryableManagedRootRecovery(ctx, request.AgentID)
 	if rootErr == nil {
 		return m.reserveFailedRootRecoveryRetry(ctx, request, agent, failedRoot)
@@ -1505,6 +1664,14 @@ func (m *Manager) RestartAfterAuthChange(ctx context.Context, operationID string
 }
 
 func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) error {
+	candidate, lookupErr := m.store.ManagedAgent(ctx, agentID)
+	if lookupErr == nil && candidate.Runtime == "embedded" {
+		id, err := m.ids.Next()
+		if err != nil {
+			return err
+		}
+		return m.AdmitPromptWithRequestID(ctx, agentID, message, id)
+	}
 	lane := m.laneFor(agentID)
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
@@ -2445,6 +2612,10 @@ func (m *Manager) OfferDirect(agentID string) {
 	if agentID == "" {
 		return
 	}
+	if agent, err := m.store.ManagedAgent(context.Background(), agentID); err == nil && agent.Runtime == "embedded" {
+		m.startManagedTask(func() { m.dispatchEmbeddedMail(agentID) })
+		return
+	}
 	m.startManagedTask(func() {
 		binding, ok := m.bindingFor(agentID)
 		if !ok {
@@ -3079,12 +3250,43 @@ func (m *Manager) AbortStartup(ctx context.Context) error {
 	return firstErr
 }
 
+// failedUnstartedLaunch matches only a terminal launch reservation that never
+// acquired a process. The caller holds its lifecycle lane, so startup has
+// finished before these private and durable identities are compared.
+func (m *Manager) failedUnstartedLaunch(binding *managedBinding) bool {
+	binding.serial.Lock()
+	unstarted := binding.lifecycleAction == "launch" && binding.process == nil && binding.rpc == nil && binding.waitDone == nil && binding.waitSignal == nil && binding.identity == (ProcessIdentity{})
+	fence, operationID := bindingFence(binding.agentID, binding), binding.operationID
+	binding.serial.Unlock()
+	if !unstarted || operationID == "" {
+		return false
+	}
+	m.mu.Lock()
+	current := m.bindings[binding.agentID]
+	owned := m.processes[binding.agentID]
+	currentOperation := m.operationIDs[binding.agentID]
+	m.mu.Unlock()
+	if owned != nil || (current != nil && (current != binding || currentOperation != operationID)) {
+		return false
+	}
+	agent, err := m.store.ManagedAgent(context.Background(), binding.agentID)
+	if err != nil || agent.Runtime != "rpc" || agent.LifecycleState != "failed" || agent.LastErrorCode != "PROCESS_START_FAILED" || agent.LaunchOperationID != operationID || !sameBindingFence(storedAgentFence(agent), fence) {
+		return false
+	}
+	operation, err := m.store.ManagedOperation(context.Background(), operationID)
+	return err == nil && operation.State == "terminal"
+}
+
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	firstClose := !m.closed
 	if firstClose {
 		m.closed = true
 		m.cancel()
+		for _, timer := range m.embeddedGoalTimers {
+			timer.cancel()
+		}
+		clear(m.embeddedGoalTimers)
 	}
 	// A marker-write fault leaves its binding in the map. A later Close call
 	// must retry that exact binding even though the manager remains closed to
@@ -3120,6 +3322,15 @@ func (m *Manager) Close(ctx context.Context) error {
 		lane := binding.lane
 		if lane != nil {
 			lane.serial.Lock()
+		}
+		// The snapshot above can outlive a failed Start and its clearBinding
+		// defer. A no-child launch failure has no valid orderly-stop fence.
+		if m.failedUnstartedLaunch(binding) {
+			m.clearBinding(binding)
+			if lane != nil {
+				lane.serial.Unlock()
+			}
+			continue
 		}
 		binding.serial.Lock()
 		rpc, process := binding.rpc, binding.process

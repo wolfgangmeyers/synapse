@@ -449,7 +449,7 @@ func (s *Store) enqueueReminderTx(ctx context.Context, reminder *domain.Reminder
 		if err != nil {
 			return nil, nil, err
 		}
-		row, err := s.insertConversation(ctx, conversation, incarnation, existing.ID, now)
+		row, err := s.insertConversation(ctx, conversation, incarnation, now, existing)
 		return existing, row, err
 	}
 	sentinel, err := protocol.SentinelJSON(candidate.Sentinel)
@@ -465,7 +465,7 @@ func (s *Store) enqueueReminderTx(ctx context.Context, reminder *domain.Reminder
 		if err != nil {
 			return nil, nil, err
 		}
-		row, err := s.insertConversation(ctx, conversation, incarnation, duplicate.ID, now)
+		row, err := s.insertConversation(ctx, conversation, incarnation, now, duplicate)
 		return duplicate, row, err
 	}
 	count, bytes, err := s.queueUsage(ctx, candidate.To)
@@ -494,7 +494,7 @@ func (s *Store) enqueueReminderTx(ctx context.Context, reminder *domain.Reminder
 	if err != nil || message == nil {
 		return message, nil, err
 	}
-	row, err := s.insertConversation(ctx, conversation, message.MessageIncarnationID, message.ID, now)
+	row, err := s.insertConversation(ctx, conversation, message.MessageIncarnationID, now, message)
 	if err != nil {
 		return nil, nil, err
 	}
