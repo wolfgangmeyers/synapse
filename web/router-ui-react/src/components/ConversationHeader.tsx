@@ -56,8 +56,14 @@ function operationalStatus(agent: Agent | undefined): string | undefined {
   return undefined;
 }
 
+function isManagedAgent(agent: Agent | undefined): boolean {
+  if (agent === undefined) return false;
+  return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
+}
+
 export function ConversationHeader({ agent, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onLogs, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, expanded = false }: ConversationHeaderProps): ReactElement {
-  const showConversationViews = agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
+  const isManaged = isManagedAgent(agent);
+  const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
   const managedFailure = failedManagedAgent(agent);
   const visibleActivity = managedFailure === undefined ? agent?.activity_state : undefined;
   const terminating = managedFailure === undefined && agent?.source === "router-managed" && agent.managed_agent?.lifecycle_state === "terminating";
