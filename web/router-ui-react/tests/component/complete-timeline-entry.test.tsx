@@ -113,7 +113,7 @@ describe("Complete timeline entry", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Ran read" });
     const parameters = within(dialog).getByText(/"path": "\/workspace\/report\.md"/);
-    expect(within(dialog).getByRole("heading", { name: "Tool parameters" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Parameters" })).toBeInTheDocument();
     expect(parameters).toHaveTextContent('"offset": 12');
     expect(parameters).toHaveTextContent('"hidden": false');
     expect(parameters).toHaveTextContent('"secret": "[REDACTED]"');
@@ -132,11 +132,14 @@ describe("Complete timeline entry", () => {
     fireEvent.click(card);
 
     const dialog = screen.getByRole("dialog", { name: "Ran bash" });
-    expect(within(dialog).getByRole("heading", { name: "Tool parameters" })).toBeInTheDocument();
-    expect(within(dialog).getByText(/"command": "ls -la"/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Command" })).toBeInTheDocument();
+    expect(within(dialog).getByText("ls -la")).toBeInTheDocument();
     expect(within(dialog).getByRole("heading", { name: "Output" })).toBeInTheDocument();
-    expect(within(dialog).getByText(/file1\.txt/)).toBeInTheDocument();
-    expect(within(dialog).getByText("Completed successfully")).toBeInTheDocument();
+    const outputPayload = within(dialog).getByRole("heading", { name: "Output" }).closest("section")?.querySelector("pre");
+    expect(outputPayload?.textContent).toBe("file1.txt\nfile2.txt");
+    expect(within(dialog).queryByText(/exit=0/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Completed successfully")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Event type")).not.toBeInTheDocument();
   });
 
   it("provides detail inspection for tool entry even without tool_input if detail is available", () => {
@@ -275,5 +278,28 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(".fa-arrow-right")).not.toBeInTheDocument();
     expect(container.querySelector(".fa-compress")).toBeInTheDocument();
     expect(container.querySelector(".fa-rotate")).toBeInTheDocument();
+  });
+
+  it("simplifies tool dialog to command and cleaned output without noise", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:bash-proof", agent_id: "test", at, message: "Ran bash",
+      tool_input: { command: "echo details-proof" },
+      message_content: "exit=0\ndetails-proof",
+      presentation: { kind: "tool", tool_name: "bash", outcome: "success", summary: "Completed successfully" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Ran bash.*View details/i });
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "Ran bash" });
+    expect(within(dialog).getByRole("heading", { name: "Command" })).toBeInTheDocument();
+    expect(within(dialog).getByText("echo details-proof")).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Output" })).toBeInTheDocument();
+    expect(within(dialog).getByText("details-proof")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/exit=0/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Activity details")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Event type")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Outcome")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Completed successfully")).not.toBeInTheDocument();
   });
 });
