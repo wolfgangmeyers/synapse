@@ -31,6 +31,10 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   const [codeCopied, setCodeCopied] = useState(false);
   const promptInputRef = useRef<HTMLInputElement>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks whether we have observed the prompt's provider as not-authenticated at
+  // least once since the prompt arrived. Prevents auto-dismissing when the dialog
+  // mounts into an already-authenticated state (e.g. test fixtures, stale prompt).
+  const seenUnauthenticated = useRef(false);
   const refresh = async (): Promise<void> => {
     // Auth status remains useful even while a separate model catalog refresh is
     // temporarily unavailable. Do not hide the only way to repair sign-in.
@@ -45,12 +49,31 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   useEffect(() => {
     // A newly issued prompt must never inherit input from an earlier prompt.
     setValue("");
+    seenUnauthenticated.current = false;
   }, [prompt?.operation_id, prompt?.prompt.id]);
   useEffect(() => {
     if (!open || !prompt) return;
+    // manual_code prompts have no response input — nothing to focus.
+    if (prompt.prompt.kind === "manual_code") return;
     const frame = requestAnimationFrame(() => promptInputRef.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [open, prompt?.operation_id, prompt?.prompt.id]);
+  // Bug fix: when the provider transitions to authenticated while a prompt is
+  // active (device auth completes automatically), dismiss the prompt section.
+  // We only dismiss after we have first observed the provider as not-authenticated
+  // to avoid a false positive when the dialog mounts with a stale or already-
+  // satisfied prompt.
+  useEffect(() => {
+    if (!prompt || !auth) return;
+    const providerStatus = auth.providers.find((p) => p.provider === prompt.provider);
+    if (!providerStatus?.authenticated) {
+      seenUnauthenticated.current = true;
+      return;
+    }
+    if (seenUnauthenticated.current) {
+      onPromptHandled?.();
+    }
+  }, [auth, prompt, onPromptHandled]);
   const begin = async (provider: "openai-codex" | "google" | "cursor", action: "login" | "logout"): Promise<void> => {
     setStatus(action === "login" ? `Starting ${providerLabels[provider]} sign-in…` : `Signing out of ${providerLabels[provider]}…`);
     try { await client.startProviderAuth(provider, action); await refresh(); setStatus("Waiting for provider sign-in to finish."); }
@@ -121,8 +144,10 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         );
       })() : <p>{prompt.prompt.message}</p>}
       {prompt.prompt.url ? <a href={prompt.prompt.url} target="_blank" rel="noopener noreferrer">Open {providerLabels[prompt.provider]} sign-in page</a> : null}
-      <label>{prompt.provider === "google" ? "Google API key" : prompt.prompt.kind === "secret" ? "API key" : "Response"}<input ref={promptInputRef} type={prompt.provider === "google" || prompt.prompt.kind === "secret" ? "password" : "text"} value={value} placeholder={prompt.prompt.placeholder} onChange={(event) => setValue(event.currentTarget.value)} autoComplete="off" /></label>
-      <div className="provider-auth-actions"><button type="button" className="ghost" onClick={handleCancelPrompt}>Cancel</button><button type="button" onClick={() => void submitPrompt()}>Continue</button></div>
+      {prompt.prompt.kind !== "manual_code" && (
+        <label>{prompt.provider === "google" ? "Google API key" : prompt.prompt.kind === "secret" ? "API key" : "Response"}<input ref={promptInputRef} type={prompt.provider === "google" || prompt.prompt.kind === "secret" ? "password" : "text"} value={value} placeholder={prompt.prompt.placeholder} onChange={(event) => setValue(event.currentTarget.value)} autoComplete="off" /></label>
+      )}
+      <div className="provider-auth-actions"><button type="button" className="ghost" onClick={handleCancelPrompt}>Cancel</button>{prompt.prompt.kind !== "manual_code" && <button type="button" onClick={() => void submitPrompt()}>Continue</button>}</div>
     </section> : null}
     <section className="provider-auth-section" aria-labelledby="provider-auth-providers-title">
       <div className="provider-auth-section-heading"><h3 id="provider-auth-providers-title">Providers</h3><p>Connect the providers managed agents can use.</p></div>
