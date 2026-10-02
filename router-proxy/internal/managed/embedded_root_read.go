@@ -18,10 +18,10 @@ import (
 
 const embeddedReadLimit = 64 * 1024
 
-// The saved root or worker launch Cwd is a trusted, private project root.
+// The saved root or worker launch Cwd is a trusted project root.
 // Its descriptor is pinned for this session; a sticky 1777 parent is fine.
 // This does NOT defend against a same-UID adversary renaming directories or
-// changing files inside the private root concurrently.
+// changing files inside the root concurrently.
 func pinEmbeddedReadRoot(cwd string) (int, error) {
 	if !path.IsAbs(cwd) {
 		return -1, errors.New("read root must be absolute")
@@ -35,9 +35,9 @@ func pinEmbeddedReadRoot(cwd string) (int, error) {
 		unix.Close(fd)
 		return -1, err
 	}
-	if st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Mode&0077 != 0 {
+	if st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		unix.Close(fd)
-		return -1, errors.New("read root must be private and owned by router user")
+		return -1, errors.New("read root must be a directory owned by router user")
 	}
 	return fd, nil
 }

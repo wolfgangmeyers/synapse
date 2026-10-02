@@ -33,6 +33,7 @@ func TestEmbeddedRootReadPinnedEscapeDenial(t *testing.T) {
 	_, err = readEmbeddedRootFile(context.Background(), fd, "large.txt")
 	require.Error(t, err)
 	require.NoError(t, os.Chmod(root, 0755))
-	_, err = pinEmbeddedReadRoot(root)
-	require.Error(t, err)
+	fd2, err := pinEmbeddedReadRoot(root)
+	require.NoError(t, err)
+	unix.Close(fd2)
 }
