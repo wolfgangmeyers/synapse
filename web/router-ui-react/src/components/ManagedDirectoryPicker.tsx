@@ -64,6 +64,7 @@ async function localFolderFromDrop(transfer: DataTransfer): Promise<string | und
 // the separate native dialog, and selection is committed only from that dialog.
 export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, list }: ManagedDirectoryPickerProps): ReactElement {
   const inputID = useId();
+  const datalistID = `${inputID}-recent-folders`;
   const [recentOpen, setRecentOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -126,7 +127,26 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
   return <div className={`managed-directory-picker${dragging ? " dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={dropFolder}>
     <div className="managed-directory-field">
       <label htmlFor={inputID}>Working folder</label>
-      <div className="directory-picker-input-row"><input id={inputID} required value={value} onFocus={() => setRecentOpen(true)} onChange={(event) => { onChange(event.currentTarget.value); setRecentOpen(true); }} placeholder="~/code/project" autoComplete="off" spellCheck={false} /><button type="button" className="secondary directory-browse-button" aria-label="Browse folders" title="Browse folders" onClick={openPicker}><i className="fa-solid fa-folder-open" aria-hidden="true" /></button></div>
+      <div className="directory-picker-input-row">
+        <input
+          id={inputID}
+          list={datalistID}
+          required
+          value={value}
+          onFocus={() => setRecentOpen(true)}
+          onClick={() => setRecentOpen(true)}
+          onChange={(event) => { onChange(event.currentTarget.value); setRecentOpen(true); }}
+          placeholder="~/code/project"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <datalist id={datalistID}>
+          {recentFolders.map((folder) => <option key={folder} value={folder} />)}
+        </datalist>
+        <button type="button" className="secondary directory-browse-button" aria-label="Browse folders" title="Browse folders" onClick={openPicker}>
+          <i className="fa-solid fa-folder-open" aria-hidden="true" />
+        </button>
+      </div>
     </div>
     {recentOpen && recentFolders.length > 0 ? <ul className="managed-recent-folders" aria-label="Recent folders">{visibleRecentFolders.map((folder) => <li key={folder}><button type="button" className="secondary" onClick={() => { onChange(folder); setRecentOpen(false); }}>{folder}</button></li>)}</ul> : null}
     <p className="managed-directory-drop-hint">Drop a folder from Finder.</p>
