@@ -1409,3 +1409,22 @@ func TestReadinessGateRejectsExtraCommandOrActiveTool(t *testing.T) {
 	require.Error(t, readinessGate(context.Background(), rpc, manifest, "session", 1, "generation", nil))
 	require.NotContains(t, rpc.calls, "prompt")
 }
+
+func TestPrivateCommandAcknowledgement(t *testing.T) {
+	// disposition-only shape (real Pi preflightResult callback)
+	require.True(t, privateCommandAcknowledgement(map[string]any{"disposition": "queued"}))
+	require.True(t, privateCommandAcknowledgement(map[string]any{"disposition": "accepted"}))
+	require.True(t, privateCommandAcknowledgement(map[string]any{"disposition": ""}))
+	// disposition key present but non-string value is not an ack
+	require.False(t, privateCommandAcknowledgement(map[string]any{"disposition": 42}))
+	// disposition alongside extra keys is not an ack
+	require.False(t, privateCommandAcknowledgement(map[string]any{"disposition": "queued", "extra": true}))
+	// success/command shape (fake Pi / test helpers)
+	require.True(t, privateCommandAcknowledgement(map[string]any{"success": true, "command": "prompt"}))
+	require.True(t, privateCommandAcknowledgement(map[string]any{"success": true, "command": "prompt", "a": 1, "b": 2}))
+	// success/command shape with too many keys is not an ack
+	require.False(t, privateCommandAcknowledgement(map[string]any{"success": true, "command": "prompt", "a": 1, "b": 2, "c": 3}))
+	// unrelated shapes are not acks
+	require.False(t, privateCommandAcknowledgement(map[string]any{"inline_enabled": true}))
+	require.False(t, privateCommandAcknowledgement(map[string]any{}))
+}
