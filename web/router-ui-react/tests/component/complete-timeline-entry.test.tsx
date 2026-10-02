@@ -119,6 +119,38 @@ describe("Complete timeline entry", () => {
     expect(parameters).toHaveTextContent('"secret": "[REDACTED]"');
   });
 
+  it("opens tool call detail inspection with pointer button on click", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:tool-click", agent_id: "managed-worker", at, message: "Ran bash", tool_input: { command: "ls -la" },
+      presentation: { kind: "tool", tool_name: "bash", outcome: "success", summary: "Completed successfully" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Ran bash.*View details/i });
+    expect(card).toHaveAttribute("tabindex", "0");
+    expect(card).toHaveAttribute("aria-haspopup", "dialog");
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "Ran bash" });
+    expect(within(dialog).getByRole("heading", { name: "Tool parameters" })).toBeInTheDocument();
+    expect(within(dialog).getByText(/"command": "ls -la"/)).toBeInTheDocument();
+    expect(within(dialog).getByText("Completed successfully")).toBeInTheDocument();
+  });
+
+  it("provides detail inspection for tool entry even without tool_input if detail is available", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:tool-no-input", agent_id: "managed-worker", at, message: "Ran mecha_state",
+      presentation: { kind: "tool", tool_name: "mecha_state", outcome: "success", summary: "State queried" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Ran mecha_state.*View details/i });
+    expect(card).toHaveAttribute("tabindex", "0");
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "Ran mecha_state" });
+    expect(within(dialog).getByText("State queried")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("Ran mecha_state").length).toBeGreaterThanOrEqual(1);
+  });
+
   it.each([
     { outcome: "success" as const, label: "Ran bash", detail: "Command completed", tone: "green" as const, terminalClass: "activity-entry--terminal-success", icon: "fa-check" },
     { outcome: "error" as const, label: "Bash failed", detail: "Command failed", tone: "danger" as const, terminalClass: "activity-entry--terminal-danger", icon: "fa-terminal", error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } },

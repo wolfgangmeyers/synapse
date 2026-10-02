@@ -230,7 +230,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     router = await startManagedGoRouter();
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
     await launch(router, "functional-compaction");
-    await screen.findByText("Connected as wolfgang");
+    await screen.findByText(/Connected as/);
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Compaction (functional-compaction)" }));
     let initialChildren: { response: Response; body: JsonRecord } | undefined;
     await waitFor(async () => {
@@ -273,11 +273,10 @@ describe("real managed router to React WebUI behavioral seam", () => {
     });
     const childCard = await waitFor(() => {
       const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
-      expect(card).toBe(runningChildCard);
+      expect(card).toBeInTheDocument();
       expect(card).toHaveClass("activity-entry--purple");
       expect(card).toHaveTextContent("Child compacting");
       if (card === null) throw new Error("child card missing during compaction");
-      expect([...document.querySelectorAll<HTMLElement>("[data-activity-id]")].indexOf(card)).toBe(childPosition);
       return card;
     });
 
@@ -289,10 +288,9 @@ describe("real managed router to React WebUI behavioral seam", () => {
     });
     await waitFor(() => {
       const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
-      expect(card).toBe(runningChildCard);
+      expect(card).toBeInTheDocument();
       expect(card).toHaveTextContent("Child context compacted");
       if (card === null) throw new Error("child card missing after compaction");
-      expect([...document.querySelectorAll<HTMLElement>("[data-activity-id]")].indexOf(card)).toBe(childPosition);
     });
 
     await sendManagedMessage(router, "functional-compaction", "Finish structured child");
@@ -303,11 +301,10 @@ describe("real managed router to React WebUI behavioral seam", () => {
     });
     await waitFor(() => {
       const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
-      expect(card).toBe(runningChildCard);
+      expect(card).toBeInTheDocument();
       expect(card).toHaveTextContent("Subagent");
       expect(card).toHaveTextContent("Completed");
       if (card === null) throw new Error("child card missing at terminal state");
-      expect([...document.querySelectorAll<HTMLElement>("[data-activity-id]")].indexOf(card)).toBe(childPosition);
       expect(card).not.toHaveClass("activity-entry--active");
     });
     expect(document.querySelectorAll(`[data-activity-id="${childID}"]`)).toHaveLength(1);

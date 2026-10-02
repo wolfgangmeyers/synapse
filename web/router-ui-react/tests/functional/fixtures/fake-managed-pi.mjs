@@ -2,13 +2,25 @@
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { setImmediate } from "node:timers";
-import { existsSync, watch } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
+let sessionId = "functional-session";
 const sessionIndex = args.indexOf("--session-id");
-const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "functional-session";
+if (sessionIndex >= 0) {
+  sessionId = args[sessionIndex + 1];
+} else {
+  const sessionFlagIndex = args.indexOf("--session");
+  if (sessionFlagIndex >= 0 && existsSync(args[sessionFlagIndex + 1])) {
+    try {
+      const firstLine = readFileSync(args[sessionFlagIndex + 1], "utf8").split("\n")[0];
+      const header = JSON.parse(firstLine);
+      if (header.id) sessionId = header.id;
+    } catch {}
+  }
+}
 const sessionRoot = process.env.MECHA_MANAGED_SESSION_ROOT ?? process.cwd();
 const hiddenCommands = [
   "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1",
@@ -30,7 +42,7 @@ function decodeMessage(message) {
   const json = Buffer.from(encoded, "base64url").toString("utf8");
   return JSON.parse(json);
 }
-function response(request, data = {}) { emit({ id: request.id, type: "response", data }); }
+function response(request, data = {}) { emit({ id: request.id, type: "response", command: request.type, success: true, data }); }
 function privateReceipt(customType, details, id = undefined) {
   emit({ type: "message_end", ...(id === undefined ? {} : { message: { id, customType, details } }), ...(id === undefined ? { customType, details } : {}) });
 }
@@ -99,8 +111,19 @@ async function childDelta(sequence, changes) {
 }
 
 function emitParentCompactionLifecycle() {
-  emit({ type: "compaction_start" });
-  emit({ type: "compaction_end", result: { summary: "deterministic parent compaction" } });
+  emit({ type: "compaction_start", reason: "manual" });
+  emit({
+    type: "compaction_end",
+    reason: "manual",
+    aborted: false,
+    willRetry: false,
+    result: {
+      summary: "deterministic parent compaction",
+      firstKeptEntryId: "entry-1",
+      tokensBefore: 100,
+      estimatedTokensAfter: 50,
+    },
+  });
 }
 
 function emitOmittedChildGap() {
@@ -157,9 +180,9 @@ async function emitDirectLifecycle(envelope) {
   const messageId = envelope.message_id;
   const appendId = `functional-append-${messageId}`;
   privateReceipt("mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: messageId, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch }, appendId);
-  emit({ type: "tool_execution_start", toolCallId: `functional-tool-${messageId}`, toolName: "bash" });
+  emit({ type: "tool_execution_start", toolCallId: `functional-tool-${messageId}`, toolName: "bash", args: { command: "echo functional" } });
   await waitForMarker(join(sessionRoot, "allow-tool-end"));
-  emit({ type: "tool_execution_end", toolCallId: `functional-tool-${messageId}`, toolName: "bash", isError: false });
+  emit({ type: "tool_execution_end", toolCallId: `functional-tool-${messageId}`, toolName: "bash", result: "functional", isError: false });
   emit({ type: "agent_start" });
   emit({ type: "message_end", message: { id: `functional-reply-${messageId}`, role: "assistant", content: [{ type: "text", text: "Deterministic managed reply" }] } });
   emit({ type: "agent_settled" });
@@ -182,7 +205,7 @@ input.on("line", (line) => {
     if (success) setImmediate(() => { input.close(); process.exit(0); });
     return;
   }
-  if (request.type !== "prompt") { response(request, { command: request.type, success: true }); return; }
+  if (request.type !== "prompt") { response(request); return; }
 
   const message = typeof request.message === "string" ? request.message : "";
   response(request, { command: "prompt", success: true });
@@ -202,13 +225,13 @@ input.on("line", (line) => {
     if (existsSync(join(sessionRoot, "omit-child"))) omitChild = true;
     privateReceipt("mecha.child.snapshot.v1", childSnapshot());
   } else if (command === "mecha-mailbox-deliver-v1") {
-    const childCommand = ["Start structured child", "Start child compaction", "Finish child compaction", "Finish structured child"].includes(envelope.content);
+    const childCommand = ["Start structured child", "Start child compaction", "Finish child compaction", "Finish structured child"].find((c) => envelope.content?.startsWith(c));
     if (childCommand) {
       // Each managed prompt commands exactly one source transition. The direct
       // receipt and settlement follow the command on this same Pi stdout.
       privateReceipt("mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: envelope.message_id, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch }, `functional-append-${envelope.message_id}`);
-      void emitChildTransitionCommand(envelope.content).then(() => emit({ type: "agent_settled" }));
-    } else if (envelope.content === "Run parent compaction") {
+      void emitChildTransitionCommand(childCommand).then(() => emit({ type: "agent_settled" }));
+    } else if (envelope.content?.startsWith("Run parent compaction")) {
       privateReceipt("mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: envelope.message_id, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch }, `functional-append-${envelope.message_id}`);
       emitParentCompactionLifecycle();
       emit({ type: "agent_settled" });
