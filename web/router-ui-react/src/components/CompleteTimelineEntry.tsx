@@ -63,7 +63,6 @@ function childTerminalOutcome(presentation: ManagedHistoryPresentation): ChildTe
   // A terminal outcome is authoritative even if a delayed child-state frame
   // still says running, so completed cards never retain a live indicator.
   switch (presentation.outcome) {
-    case "success":
     case "completed": return { detail: "Completed", success: true };
     case "error":
     case "failed": return { detail: "Failed", success: false };
@@ -176,7 +175,8 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
   const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
-  const hasDetails = entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined;
+  const isTool = entry.presentation?.kind === "tool";
+  const hasDetails = entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
   const accessibleName = [visual.label, visual.detail, time.title, hasDetails ? "View details" : undefined].filter((value): value is string => value !== undefined && value !== "").join(". ");
   const presentation = entry.presentation;
   const active = isActivePresentation(presentation);

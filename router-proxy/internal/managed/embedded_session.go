@@ -53,6 +53,7 @@ type embeddedPersistence struct {
 	pendingCompaction string
 	afterUserAppend   func(context.Context)
 	publishComplete   func(store.ManagedHistoryEntry)
+	toolInputs        map[string]any
 }
 
 func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
@@ -74,10 +75,30 @@ func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
 }
 
 func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) error {
+	var assistantContent ai.ContentList
+	switch assistant := message.(type) {
+	case ai.AssistantMessage:
+		assistantContent = assistant.Content
+	case *ai.AssistantMessage:
+		assistantContent = assistant.Content
+	}
+	for _, part := range assistantContent {
+		if call, ok := part.(ai.ToolCall); ok && call.ID != "" {
+			if p.toolInputs == nil {
+				p.toolInputs = make(map[string]any)
+			}
+			p.toolInputs[call.ID] = call.Arguments
+		}
+	}
 	if result, ok := message.(ai.ToolResultMessage); ok {
 		toolName := result.ToolName
 		toolCallID := result.ToolCallID
 		if toolCallID != "" && toolName != "" {
+			var toolInput any
+			if p.toolInputs != nil {
+				toolInput = p.toolInputs[toolCallID]
+				delete(p.toolInputs, toolCallID)
+			}
 			isFailed := result.IsError
 			if !isFailed && toolName == "bash" && len(result.Content) > 0 {
 				if textContent, ok := result.Content[0].(ai.TextContent); ok {
@@ -110,7 +131,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				}
 			}
 			completionKey := fmt.Sprintf("tool:%s:%s", p.binding.AgentID, toolCallID)
-			entry, err := p.db.RecordManagedCompleteHistoryWithPresentation(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres)
+			entry, err := p.db.RecordManagedCompleteHistoryWithPresentationAndInput(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres, toolInput)
 			if err == nil && p.publishComplete != nil {
 				p.publishComplete(entry)
 			}
@@ -504,7 +525,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := validateEmbeddedCodexModel(model); err != nil {
 		return err
 	}
-	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory}
+	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
 			return err
@@ -1017,12 +1038,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
 				invocationKey := fmt.Sprintf("tool:%s:%s", binding.AgentID, toolCallID)
-				entry, err := m.store.RecordManagedCompleteHistoryWithPresentation(callCtx, binding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
+				entry, err := m.store.RecordManagedCompleteHistoryWithPresentationAndInput(callCtx, binding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
 					Kind:     "tool",
 					ToolName: toolName,
 					Outcome:  "active",
 					Summary:  "Running",
-				})
+				}, call.ToolCall.Arguments)
 				if err == nil {
 					m.publishCompleteHistory(entry)
 				}

@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, readFile, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -18,7 +18,13 @@ const execFileAsync = promisify(execFile);
 const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 async function copyExecutable(source, destination) {
-  await copyFile(source, destination);
+  let content = await readFile(source, "utf8");
+  if (content.startsWith("#!/usr/bin/env node")) {
+    content = `#!${process.execPath}\n` + content.slice("#!/usr/bin/env node\n".length);
+    await writeFile(destination, content);
+  } else {
+    await copyFile(source, destination);
+  }
   await chmod(destination, 0o700);
 }
 

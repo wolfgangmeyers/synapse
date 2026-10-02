@@ -127,30 +127,44 @@ func TestEmbeddedToolVisibilityInCompleteHistory(t *testing.T) {
 
 	// Verify tool executions in complete view
 	toolOutcomes := map[string]string{}
+	toolInputs := map[string]string{}
 	for _, entry := range page.Entries {
 		if entry.Presentation != nil && entry.Presentation.Kind == "tool" {
 			key := fmt.Sprintf("%s:%s", entry.Presentation.ToolName, entry.Presentation.Outcome)
 			toolOutcomes[key] = entry.Message
-			t.Logf("Complete entry: id=%s level=%s msg=%q presentation=%+v", entry.ID, entry.Level, entry.Message, entry.Presentation)
+			if len(entry.ToolInput) > 0 {
+				toolInputs[key] = string(entry.ToolInput)
+			}
+			t.Logf("Complete entry: id=%s level=%s msg=%q presentation=%+v input=%s", entry.ID, entry.Level, entry.Message, entry.Presentation, string(entry.ToolInput))
 		}
 	}
 
 	// Assert visibility of tools
 	require.Contains(t, toolOutcomes, "bash:success", "successful bash must appear in complete view")
 	require.Equal(t, "Ran bash", toolOutcomes["bash:success"])
+	require.Contains(t, toolInputs, "bash:success")
+	require.JSONEq(t, `{"command": "ls -la"}`, toolInputs["bash:success"])
 
 	require.Contains(t, toolOutcomes, "bash:failed", "failed bash must appear in complete view")
 	require.Equal(t, "Bash failed", toolOutcomes["bash:failed"])
 
 	require.Contains(t, toolOutcomes, "read:success", "read tool must appear in complete view")
 	require.Equal(t, "Ran read", toolOutcomes["read:success"])
+	require.Contains(t, toolInputs, "read:success")
+	require.JSONEq(t, `{"path": "hello.txt"}`, toolInputs["read:success"])
 
 	require.Contains(t, toolOutcomes, "write:success", "write tool must appear in complete view")
 	require.Equal(t, "Ran write", toolOutcomes["write:success"])
+	require.Contains(t, toolInputs, "write:success")
+	require.JSONEq(t, `{"content": "created file\n", "path": "new.txt"}`, toolInputs["write:success"])
 
 	require.Contains(t, toolOutcomes, "edit:success", "edit tool must appear in complete view")
 	require.Equal(t, "Ran edit", toolOutcomes["edit:success"])
+	require.Contains(t, toolInputs, "edit:success")
+	require.JSONEq(t, `{"edits": [{"newText": "hello universe", "oldText": "hello world"}], "path": "hello.txt"}`, toolInputs["edit:success"])
 
 	require.Contains(t, toolOutcomes, "mecha_mailbox_send:success", "mailbox send must appear in complete view")
 	require.Equal(t, "Ran mecha_mailbox_send", toolOutcomes["mecha_mailbox_send:success"])
+	require.Contains(t, toolInputs, "mecha_mailbox_send:success")
+	require.JSONEq(t, `{"body": "status update", "recipient": "supervisor"}`, toolInputs["mecha_mailbox_send:success"])
 }
