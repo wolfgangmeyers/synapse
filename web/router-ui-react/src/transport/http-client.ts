@@ -362,8 +362,7 @@ export interface RouterHttpClient {
   saveManagedInlineTools(id: string, enabled: boolean): Promise<ManagedInlineToolsResponse>;
   managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
   launchManaged(payload: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
-  restartManaged(id: string): Promise<ManagedOperationResponse>;
-  changeManagedModel(id: string, model: { provider: string; id: string }): Promise<ManagedOperationResponse>;
+  restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
   terminateManaged(id: string): Promise<ManagedOperationResponse>;
   restartAllManaged(): Promise<ManagedOperationResponse>;
@@ -371,6 +370,7 @@ export interface RouterHttpClient {
   providerAuth(): Promise<ProviderAuthResponse>;
   startProviderAuth(provider: ProviderModel["provider"], action: "login" | "logout"): Promise<ManagedOperationResponse>;
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
+  cancelProviderAuth(operationId: string): Promise<{ operation_id: string; status: string }>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
@@ -440,8 +440,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       return managedHistory(await managedRequest(`/v1/history?${query.toString()}`, "GET"));
     },
     launchManaged: async (payload) => managedOperation(await managedRequest("/v1/managed-agents", "POST", payload)),
-    restartManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/restart`, "POST", {})),
-    changeManagedModel: async (id, model) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/model`, "PUT", { model })),
+    restartManaged: async (id, model) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/restart`, "POST", model === undefined ? {} : { model })),
     resetManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/reset`, "POST", {})),
     terminateManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "DELETE")),
     restartAllManaged: async () => managedOperation(await managedRequest("/v1/managed-agents/restart-all", "POST", {})),
@@ -451,6 +450,12 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     // The value is intentionally accepted only as a call argument. This client
     // does not cache, log, return, or add it to a URL.
     respondProviderAuth: async (operationId, promptId, value) => managedOperation(await managedRequest(`/v1/provider-auth/operations/${encodeURIComponent(operationId)}/response`, "POST", { prompt_id: promptId, value })),
+    cancelProviderAuth: async (operationId) => {
+      const raw = await managedRequest(`/v1/provider-auth/operations/${encodeURIComponent(operationId)}/cancel`, "POST", {});
+      const body = recordValue(raw);
+      if (!body || typeof body.operation_id !== "string" || typeof body.status !== "string") throw invalidResponse("Router returned an invalid cancel response", body);
+      return { operation_id: body.operation_id, status: body.status };
+    },
     setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
     routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
     routerLogForAgent: async (agentId, query) => { if (!isAgentId(agentId) || !routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
