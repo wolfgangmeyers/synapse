@@ -244,4 +244,76 @@ describe("Selected-agent conversation modes", () => {
     expect(onManageManaged).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
   });
+
+  it("renders complete view as the only view for router-managed agents without toggle tabs", () => {
+    const onConversationViewChange = vi.fn();
+    render(<Conversation
+      peer={{ agent_id: "managed-worker", source: "router-managed", activity_state: "idle" }}
+      conversationView="quiet"
+      onConversationViewChange={onConversationViewChange}
+      messages={[{ id: "msg-1", from: "managed-worker", to: "wolfgang", body: "Hello from managed worker", created_at: "2030-01-01T10:00:00.000Z" }]}
+      activityEntries={[{ id: "act-1", agent_id: "managed-worker", level: "info", message: "Managed worker restarted", at: "2030-01-01T10:01:00.000Z" }]}
+    />);
+
+    // Toggle tabs must not be rendered for managed agents
+    expect(screen.queryByRole("tab", { name: "Quiet messages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Complete messages and activity" })).not.toBeInTheDocument();
+    expect(document.querySelector(".conversation-view-tabs")).not.toBeInTheDocument();
+
+    // Complete timeline must be rendered with both messages and activity entries
+    expect(screen.getByText("Hello from managed worker")).toBeInTheDocument();
+    expect(screen.getByText("Managed worker restarted")).toBeInTheDocument();
+  });
+
+  it("renders complete view as the only view for embedded runtime agents without toggle tabs", () => {
+    const onConversationViewChange = vi.fn();
+    render(<Conversation
+      peer={{ agent_id: "embedded-worker", activity_state: "idle", managed_agent: { agent_id: "embedded-worker", source: "router-managed", runtime: "embedded", cwd: "/test", model: { provider: "openai-codex", id: "gpt-5.6" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "0".repeat(64), installed_tool_count: 0 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null } }}
+      conversationView="quiet"
+      onConversationViewChange={onConversationViewChange}
+      messages={[{ id: "msg-emb", from: "embedded-worker", to: "wolfgang", body: "Embedded response", created_at: "2030-01-01T10:00:00.000Z" }]}
+      activityEntries={[{ id: "act-emb", agent_id: "embedded-worker", level: "info", message: "Embedded tool execution", at: "2030-01-01T10:01:00.000Z" }]}
+    />);
+
+    // Toggle tabs must not be rendered for embedded agents
+    expect(screen.queryByRole("tab", { name: "Quiet messages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Complete messages and activity" })).not.toBeInTheDocument();
+    expect(document.querySelector(".conversation-view-tabs")).not.toBeInTheDocument();
+
+    // Complete timeline must be rendered
+    expect(screen.getByText("Embedded response")).toBeInTheDocument();
+    expect(screen.getByText("Embedded tool execution")).toBeInTheDocument();
+  });
+
+  it("leaves tmux agent UI intact with toggle tabs when provided", async () => {
+    const user = userEvent.setup();
+    function TmuxConversation(): ReactElement {
+      const [view, setView] = useState<ConversationView>("quiet");
+      return <Conversation
+        peer={{ agent_id: "tmux-worker", source: "tmux", activity_state: "idle" }}
+        conversationView={view}
+        onConversationViewChange={setView}
+        messages={[{ id: "msg-tmux", from: "tmux-worker", to: "wolfgang", body: "Tmux message", created_at: "2030-01-01T10:00:00.000Z" }]}
+        activityEntries={[{ id: "act-tmux", agent_id: "tmux-worker", level: "info", message: "Tmux activity", at: "2030-01-01T10:01:00.000Z" }]}
+      />;
+    }
+
+    render(<TmuxConversation />);
+
+    const quietTab = screen.getByRole("tab", { name: "Quiet messages" });
+    const completeTab = screen.getByRole("tab", { name: "Complete messages and activity" });
+    expect(quietTab).toBeInTheDocument();
+    expect(completeTab).toBeInTheDocument();
+    expect(quietTab).toHaveAttribute("aria-selected", "true");
+
+    // In quiet view, activity entry is not shown
+    expect(screen.getByText("Tmux message")).toBeInTheDocument();
+    expect(screen.queryByText("Tmux activity")).not.toBeInTheDocument();
+
+    // Switching to complete view shows activity entry
+    await user.click(completeTab);
+    expect(completeTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Tmux message")).toBeInTheDocument();
+    expect(screen.getByText("Tmux activity")).toBeInTheDocument();
+  });
 });
