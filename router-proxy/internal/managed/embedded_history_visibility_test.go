@@ -128,6 +128,7 @@ func TestEmbeddedToolVisibilityInCompleteHistory(t *testing.T) {
 	// Verify tool executions in complete view
 	toolOutcomes := map[string]string{}
 	toolInputs := map[string]string{}
+	toolOutputs := map[string]string{}
 	for _, entry := range page.Entries {
 		if entry.Presentation != nil && entry.Presentation.Kind == "tool" {
 			key := fmt.Sprintf("%s:%s", entry.Presentation.ToolName, entry.Presentation.Outcome)
@@ -135,7 +136,10 @@ func TestEmbeddedToolVisibilityInCompleteHistory(t *testing.T) {
 			if len(entry.ToolInput) > 0 {
 				toolInputs[key] = string(entry.ToolInput)
 			}
-			t.Logf("Complete entry: id=%s level=%s msg=%q presentation=%+v input=%s", entry.ID, entry.Level, entry.Message, entry.Presentation, string(entry.ToolInput))
+			if entry.MessageContent != nil {
+				toolOutputs[key] = *entry.MessageContent
+			}
+			t.Logf("Complete entry: id=%s level=%s msg=%q presentation=%+v input=%s output=%s", entry.ID, entry.Level, entry.Message, entry.Presentation, string(entry.ToolInput), toolOutputs[key])
 		}
 	}
 
@@ -144,6 +148,8 @@ func TestEmbeddedToolVisibilityInCompleteHistory(t *testing.T) {
 	require.Equal(t, "Ran bash", toolOutcomes["bash:success"])
 	require.Contains(t, toolInputs, "bash:success")
 	require.JSONEq(t, `{"command": "ls -la"}`, toolInputs["bash:success"])
+	require.Contains(t, toolOutputs, "bash:success")
+	require.Contains(t, toolOutputs["bash:success"], "hello.txt")
 
 	require.Contains(t, toolOutcomes, "bash:failed", "failed bash must appear in complete view")
 	require.Equal(t, "Bash failed", toolOutcomes["bash:failed"])
@@ -152,6 +158,8 @@ func TestEmbeddedToolVisibilityInCompleteHistory(t *testing.T) {
 	require.Equal(t, "Ran read", toolOutcomes["read:success"])
 	require.Contains(t, toolInputs, "read:success")
 	require.JSONEq(t, `{"path": "hello.txt"}`, toolInputs["read:success"])
+	require.Contains(t, toolOutputs, "read:success")
+	require.Contains(t, toolOutputs["read:success"], "hello world")
 
 	require.Contains(t, toolOutcomes, "write:success", "write tool must appear in complete view")
 	require.Equal(t, "Ran write", toolOutcomes["write:success"])

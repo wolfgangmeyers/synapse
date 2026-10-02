@@ -80,10 +80,17 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 	case ai.AssistantMessage:
 		assistantContent = assistant.Content
 	case *ai.AssistantMessage:
-		assistantContent = assistant.Content
+		if assistant != nil {
+			assistantContent = assistant.Content
+		}
 	}
 	for _, part := range assistantContent {
 		if call, ok := part.(ai.ToolCall); ok && call.ID != "" {
+			if p.toolInputs == nil {
+				p.toolInputs = make(map[string]any)
+			}
+			p.toolInputs[call.ID] = call.Arguments
+		} else if call, ok := part.(*ai.ToolCall); ok && call != nil && call.ID != "" {
 			if p.toolInputs == nil {
 				p.toolInputs = make(map[string]any)
 			}
@@ -106,6 +113,27 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 						isFailed = true
 					}
 				}
+			}
+			var outputBuilder strings.Builder
+			for _, item := range result.Content {
+				switch c := item.(type) {
+				case ai.TextContent:
+					outputBuilder.WriteString(c.Text)
+				case *ai.TextContent:
+					if c != nil {
+						outputBuilder.WriteString(c.Text)
+					}
+				}
+			}
+			toolOutput := outputBuilder.String()
+			if toolOutput == "" && result.Details != nil {
+				if detailsBytes, err := json.Marshal(result.Details); err == nil && len(detailsBytes) > 0 && string(detailsBytes) != "{}" && string(detailsBytes) != "null" {
+					toolOutput = string(detailsBytes)
+				}
+			}
+			var contentPtr *string
+			if toolOutput != "" {
+				contentPtr = &toolOutput
 			}
 			level := "info"
 			messageText := "Ran " + toolName
@@ -131,7 +159,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				}
 			}
 			completionKey := fmt.Sprintf("tool:%s:%s", p.binding.AgentID, toolCallID)
-			entry, err := p.db.RecordManagedCompleteHistoryWithPresentationAndInput(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres, toolInput)
+			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres, toolInput, contentPtr)
 			if err == nil && p.publishComplete != nil {
 				p.publishComplete(entry)
 			}
@@ -1037,6 +1065,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			toolName := call.ToolCall.Name
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
+				if p != nil {
+					if p.toolInputs == nil {
+						p.toolInputs = make(map[string]any)
+					}
+					p.toolInputs[toolCallID] = call.ToolCall.Arguments
+				}
 				invocationKey := fmt.Sprintf("tool:%s:%s", binding.AgentID, toolCallID)
 				entry, err := m.store.RecordManagedCompleteHistoryWithPresentationAndInput(callCtx, binding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
 					Kind:     "tool",

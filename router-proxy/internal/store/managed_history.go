@@ -249,10 +249,14 @@ func (s *Store) RecordManagedCompleteHistory(ctx context.Context, agentID, categ
 }
 
 func (s *Store) RecordManagedCompleteHistoryWithPresentation(ctx context.Context, agentID, category, level, message, eventKey string, presentation *ManagedHistoryPresentation) (ManagedHistoryEntry, error) {
-	return s.RecordManagedCompleteHistoryWithPresentationAndInput(ctx, agentID, category, level, message, eventKey, presentation, nil)
+	return s.RecordManagedCompleteHistoryWithDetails(ctx, agentID, category, level, message, eventKey, presentation, nil, nil)
 }
 
 func (s *Store) RecordManagedCompleteHistoryWithPresentationAndInput(ctx context.Context, agentID, category, level, message, eventKey string, presentation *ManagedHistoryPresentation, toolInput any) (ManagedHistoryEntry, error) {
+	return s.RecordManagedCompleteHistoryWithDetails(ctx, agentID, category, level, message, eventKey, presentation, toolInput, nil)
+}
+
+func (s *Store) RecordManagedCompleteHistoryWithDetails(ctx context.Context, agentID, category, level, message, eventKey string, presentation *ManagedHistoryPresentation, toolInput any, messageContent *string) (ManagedHistoryEntry, error) {
 	if ctx == nil || !isLifecycleText(agentID) || category == "" || level == "" || !managedHistoryText(message, 512, false) || len(category) > 64 || len(level) > 32 || len(eventKey) > 200 || !utf8.ValidString(category) || !utf8.ValidString(level) || !utf8.ValidString(eventKey) {
 		return ManagedHistoryEntry{}, errors.New("managed history entry is invalid")
 	}
@@ -267,9 +271,22 @@ func (s *Store) RecordManagedCompleteHistoryWithPresentationAndInput(ctx context
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
+	var cleanContent *string
+	if messageContent != nil {
+		str := strings.ToValidUTF8(*messageContent, "")
+		str = strings.ReplaceAll(str, "\x00", "")
+		if len(str) > 65536 {
+			rIdx := 65536
+			for rIdx > 0 && !utf8.RuneStart(str[rIdx]) {
+				rIdx--
+			}
+			str = str[:rIdx]
+		}
+		cleanContent = &str
+	}
 	var entry ManagedHistoryEntry
 	err = s.runImmediate(ctx, func() error {
-		entry, err = s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation, managedHistoryDetails{ToolInputJSON: toolInputJSON})
+		entry, err = s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation, managedHistoryDetails{ToolInputJSON: toolInputJSON, MessageContent: cleanContent})
 		return err
 	})
 	return entry, err
@@ -321,14 +338,13 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 			effectiveToolInput := storedToolInput.String
 			if effectiveToolInput == "" && detail.ToolInputJSON != "" {
 				effectiveToolInput = detail.ToolInputJSON
-				if _, err = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,presentation_json=?,tool_input_json=NULLIF(?,'') WHERE sequence=?`, level, message, presentationJSON, effectiveToolInput, sequence); err != nil {
-					return ManagedHistoryEntry{}, err
-				}
-				entry.Level = level
-				entry.Message = message
-				entry.Presentation = presentation
-			} else if storedPresentation.String != presentationJSON || entry.Level != level || entry.Message != message {
-				if _, err = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,presentation_json=? WHERE sequence=?`, level, message, presentationJSON, sequence); err != nil {
+			}
+			effectiveContent := storedContent
+			if detail.MessageContent != nil {
+				effectiveContent = sql.NullString{String: *detail.MessageContent, Valid: true}
+			}
+			if storedPresentation.String != presentationJSON || entry.Level != level || entry.Message != message || storedToolInput.String != effectiveToolInput || storedContent.String != effectiveContent.String || storedContent.Valid != effectiveContent.Valid {
+				if _, err = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,presentation_json=?,tool_input_json=NULLIF(?,''),message_content=NULLIF(?,'') WHERE sequence=?`, level, message, presentationJSON, effectiveToolInput, effectiveContent.String, sequence); err != nil {
 					return ManagedHistoryEntry{}, err
 				}
 				entry.Level = level
@@ -339,7 +355,7 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 			}
 			entry.ID = fmt.Sprintf("complete:%d", sequence)
 			entry.AgentID = agentID
-			entry.MessageContent = managedHistoryDetail(storedContent)
+			entry.MessageContent = managedHistoryDetail(effectiveContent)
 			entry.SenderIdentity = managedHistoryDetail(storedSender)
 			entry.ToolInput = rawManagedHistoryJSON(effectiveToolInput)
 			return entry, nil
