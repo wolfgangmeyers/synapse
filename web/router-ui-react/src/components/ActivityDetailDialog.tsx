@@ -1,6 +1,6 @@
 import { useEffect, type ReactElement } from "react";
 import { MarkdownBody } from "../domain/markdown";
-import type { JsonValue, ManagedHistoryEntry } from "../protocol/types";
+import type { JsonValue, ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
 import { DialogShell } from "./DialogShell";
 import { completeTimelineVisual } from "./CompleteTimelineEntry";
 
@@ -21,16 +21,36 @@ function toolInputText(input: JsonValue): string {
   return JSON.stringify(input, null, 2);
 }
 
-function detailRows(entry: ManagedHistoryEntry): Array<[string, string]> {
-  const presentation = entry.presentation;
-  return [
-    ...(entry.sender_identity ? [["Sender", entry.sender_identity] as [string, string]] : []),
-    ["Event type", presentation?.kind ?? "activity"],
-    ...(presentation?.tool_name ? [["Tool", presentation.tool_name.replace(/^functions\./, "")] as [string, string]] : []),
-    ...(presentation?.outcome ? [["Outcome", presentation.outcome.replaceAll("_", " ")] as [string, string]] : []),
-    ...(presentation?.child_state ? [["Child status", presentation.child_state.replaceAll("_", " ")] as [string, string]] : []),
-    ...(presentation?.error ? [["Error code", presentation.error.code] as [string, string]] : []),
-  ];
+function getToolCommand(input: JsonValue | undefined): string | undefined {
+  if (typeof input === "string") return input;
+  if (typeof input === "object" && input !== null && !Array.isArray(input)) {
+    const record = input as Record<string, unknown>;
+    if (typeof record.command === "string") return record.command;
+  }
+  return undefined;
+}
+
+function cleanOutput(text: string | undefined): string {
+  if (!text) return "(no output)";
+  const cleaned = text.replace(/^exit=0[ \t]*(?:\r?\n|$)/, "");
+  return cleaned || "(no output)";
+}
+
+function formatError(error: ManagedHistoryPresentation["error"]): string | undefined {
+  if (!error) return undefined;
+  return error.code || undefined;
+}
+
+function isRedundantSummary(summary: string | undefined): boolean {
+  if (!summary) return true;
+  const s = summary.trim().toLowerCase();
+  return (
+    s === "completed successfully" ||
+    s === "command completed" ||
+    s === "completed" ||
+    s === "success" ||
+    s === "ok"
+  );
 }
 
 /** Details for the router-projected metadata shown by Complete activity cards. */
@@ -45,23 +65,32 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [entry, onClose, open]);
+
   if (entry === undefined) return null;
   const visual = completeTimelineVisual(entry);
   const presentation = entry.presentation;
-  const isTool = presentation?.kind === "tool";
-  const hasOriginalMessage = !isTool && entry.message_content !== undefined;
-  const hasToolOutput = isTool && entry.message_content !== undefined;
+  const isTool = presentation?.kind === "tool" || entry.tool_input !== undefined;
+  const command = getToolCommand(entry.tool_input);
   const hasToolInput = entry.tool_input !== undefined;
+  const hasToolOutput = isTool && entry.message_content !== undefined;
+  const errorText = formatError(presentation?.error);
+  const summaryText = !isRedundantSummary(presentation?.summary) ? presentation?.summary : undefined;
+  const hasOriginalMessage = !isTool && entry.message_content !== undefined;
+
   return <DialogShell open={open} title={visual.label} titleId="activity-detail-dialog-title" description={`${entry.agent_id} · ${displayTime(entry.at)}`} onClose={onClose} {...(onClosed === undefined ? {} : { onClosed })} closeLabel="Close activity details" {...(returnFocus === undefined ? {} : { returnFocus })} className="message-dialog activity-detail-dialog">
-    <div className="activity-detail-heading"><span className={`activity-detail-icon activity-detail-icon--${visual.tone}`} aria-hidden="true"><i className={visual.icon} /></span><p className="message-dialog-label">Activity details</p></div>
     <div className="activity-detail-body">
-      <dl className="activity-detail-metadata">{detailRows(entry).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-      {hasOriginalMessage ? <section><h3>Original message</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? ""} /></div></section> : null}
-      {!hasOriginalMessage && entry.message ? <section><h3>Event</h3><p>{entry.message}</p></section> : null}
-      {!hasOriginalMessage && presentation?.summary ? <section><h3>Summary</h3><p>{presentation.summary}</p></section> : null}
-      {hasToolInput ? <section><h3>Tool parameters</h3><pre className="activity-detail-payload">{toolInputText(entry.tool_input ?? null)}</pre></section> : null}
-      {hasToolOutput ? <section><h3>Output</h3><pre className="activity-detail-payload">{entry.message_content || "(no output)"}</pre></section> : null}
-      {!hasOriginalMessage && !hasToolInput && !hasToolOutput && presentation?.error?.detail_available === false ? <p className="activity-detail-safe-note">No additional details were recorded for this older activity.</p> : null}
+      {entry.sender_identity ? <p className="activity-detail-sender">From <strong>{entry.sender_identity}</strong></p> : null}
+      {isTool ? <>
+        {command !== undefined ? <section><h3>Command</h3><pre className="activity-detail-payload">{command}</pre></section> : hasToolInput ? <section><h3>Parameters</h3><pre className="activity-detail-payload">{toolInputText(entry.tool_input ?? null)}</pre></section> : null}
+        {hasToolOutput ? <section><h3>Output</h3><pre className="activity-detail-payload">{cleanOutput(entry.message_content)}</pre></section> : errorText ? <section><h3>Result</h3><pre className="activity-detail-payload">{errorText}</pre></section> : summaryText ? <section><h3>Result</h3><pre className="activity-detail-payload">{summaryText}</pre></section> : null}
+        {!hasToolInput && !hasToolOutput && !errorText && !summaryText && presentation?.error?.detail_available === false ? <p className="activity-detail-safe-note">No additional details were recorded for this older activity.</p> : null}
+      </> : <>
+        {hasOriginalMessage ? <section><h3>Original message</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? ""} /></div></section> : null}
+        {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
+        {!hasOriginalMessage && !errorText && entry.message && entry.message !== visual.label ? <section><p className="activity-detail-payload">{entry.message}</p></section> : null}
+        {!hasOriginalMessage && !errorText && summaryText && summaryText !== entry.message ? <section><p className="activity-detail-payload">{summaryText}</p></section> : null}
+        {!hasOriginalMessage && !errorText && !summaryText && presentation?.error?.detail_available === false ? <p className="activity-detail-safe-note">No additional details were recorded for this older activity.</p> : null}
+      </>}
     </div>
   </DialogShell>;
 }
