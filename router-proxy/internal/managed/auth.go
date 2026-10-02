@@ -288,6 +288,27 @@ func (a *ProviderAuthCoordinator) finish(operation *providerAuthOperation, event
 	a.publishEvent(event)
 }
 
+// CancelOperation cancels the pending operation identified by operationID. The
+// cancel is a best-effort signal; it does not guarantee the helper exits before
+// the call returns. A mismatch or already-settled operation returns an error so
+// the HTTP layer can reply with an appropriate status without racing internals.
+func (a *ProviderAuthCoordinator) CancelOperation(operationID string) error {
+	if operationID == "" {
+		return errors.New("provider auth operation id is required")
+	}
+	a.mu.Lock()
+	operation := a.current
+	if operation == nil || operation.id != operationID || operation.settled {
+		a.mu.Unlock()
+		return errors.New("provider auth operation is not active")
+	}
+	a.mu.Unlock()
+	// operation.cancel triggers the watch goroutine's ctx.Done branch, which
+	// publishes a "cancelled" terminal event and calls finish.
+	operation.cancel()
+	return nil
+}
+
 // Respond consumes the current prompt before forwarding the value. A second
 // request cannot replay it even if the helper has not yet read stdin.
 func validProviderAuthPrompt(prompt *ProviderAuthPrompt) bool {

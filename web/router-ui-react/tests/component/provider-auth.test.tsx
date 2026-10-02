@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderAuthDialog } from "../../src/components/ProviderAuthDialog";
@@ -21,6 +21,7 @@ function clientFixture(): ProviderAuthClient {
     models: vi.fn(async () => ({ auth_revision: 3, models: [{ provider: "openai-codex" as const, id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true }], default_model: null })),
     startProviderAuth: vi.fn(async () => ({ operation_id: "auth-1" })),
     respondProviderAuth: vi.fn(async () => ({ operation_id: "auth-1" })),
+    cancelProviderAuth: vi.fn(async () => ({ operation_id: "auth-1", status: "cancelled" })),
     setDefaultModel: vi.fn(async () => ({ operation_id: "model-1", default_model: null, effective_fallback: { provider: "openai-codex" as const, id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true } })),
   };
 }
@@ -41,12 +42,54 @@ describe("ProviderAuthDialog", () => {
     expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(2);
   });
 
-  it("keeps a provider's sign-in link available without opening a new window", async () => {
+  it("opens the provider sign-in link in a new tab with noopener noreferrer", async () => {
     const client = clientFixture();
     const prompt = { type: "provider_auth_prompt" as const, protocol: "mecha.web/v1" as const, projection_version: 2, operation_id: "auth-1", provider: "openai-codex" as const, prompt: { id: "code-1", kind: "manual_code" as const, message: "Complete ChatGPT sign-in, then paste the code.", url: "https://auth.openai.com/authorize" } };
     render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    expect(screen.getByRole("link", { name: "Open ChatGPT sign-in page" })).toHaveAttribute("href", "https://auth.openai.com/authorize");
-    expect(screen.getByRole("link", { name: "Open ChatGPT sign-in page" })).not.toHaveAttribute("target");
+    const link = screen.getByRole("link", { name: "Open ChatGPT sign-in page" });
+    expect(link).toHaveAttribute("href", "https://auth.openai.com/authorize");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("Cancel button calls cancelProviderAuth on the backend and dismisses the prompt", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+    const onPromptHandled = vi.fn();
+    const prompt = { type: "provider_auth_prompt" as const, protocol: "mecha.web/v1" as const, projection_version: 2, operation_id: "op-cancel-1", provider: "openai-codex" as const, prompt: { id: "code-1", kind: "manual_code" as const, message: "Enter code" } };
+    render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={onPromptHandled} />);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(client.cancelProviderAuth).toHaveBeenCalledWith("op-cancel-1"));
+    expect(onPromptHandled).toHaveBeenCalledOnce();
+  });
+
+  it("Cancel button still dismisses the prompt when backend cancel fails", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+    (client.cancelProviderAuth as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("already settled"));
+    const onPromptHandled = vi.fn();
+    const prompt = { type: "provider_auth_prompt" as const, protocol: "mecha.web/v1" as const, projection_version: 2, operation_id: "op-cancel-2", provider: "google" as const, prompt: { id: "k1", kind: "secret" as const, message: "Enter key" } };
+    render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={onPromptHandled} />);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    // Dismissal must not block on backend error
+    await waitFor(() => expect(onPromptHandled).toHaveBeenCalledOnce());
+  });
+
+  it("icon-only copy button copies the device code and shows success feedback", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+    let copied = "";
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn(async (text: string) => { copied = text; }) },
+      configurable: true,
+    });
+    const prompt = { type: "provider_auth_prompt" as const, protocol: "mecha.web/v1" as const, projection_version: 2, operation_id: "auth-1", provider: "openai-codex" as const, prompt: { id: "code-1", kind: "manual_code" as const, message: "Your code is ABCD-1234 please enter it." } };
+    render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    const copyBtn = screen.getByRole("button", { name: "Copy code" });
+    // Icon-only: no visible text in the button
+    expect(copyBtn).not.toHaveTextContent(/copy/i);
+    await user.click(copyBtn);
+    expect(copied).toBe("ABCD-1234");
   });
 
   it("submits a secret prompt once and clears input before the next prompt", async () => {

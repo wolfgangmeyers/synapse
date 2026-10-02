@@ -72,6 +72,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && providerAuthResponseID(req.URL.Path) != "":
 		r.handleProviderAuthPromptResponse(w, req, providerAuthResponseID(req.URL.Path))
 		return true
+	case req.Method == http.MethodPost && providerAuthCancelID(req.URL.Path) != "":
+		r.handleProviderAuthCancel(w, req, providerAuthCancelID(req.URL.Path))
+		return true
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/history":
 		r.handleManagedHistoryGET(w, req)
 		return true
@@ -375,6 +378,18 @@ func (r *Router) handleProviderAuthPromptResponse(w http.ResponseWriter, req *ht
 	r.writeManagedRaw(w, req, http.StatusAccepted, operation.ResponseHeaders, response)
 }
 
+func (r *Router) handleProviderAuthCancel(w http.ResponseWriter, req *http.Request, operationID string) {
+	if r.providerAuth == nil {
+		r.writeManagedError(w, req, &managedHTTPError{503, "PROVIDER_AUTH_DISABLED", "Provider sign-in is not available"})
+		return
+	}
+	if err := r.providerAuth.CancelOperation(operationID); err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{409, "OPERATION_NOT_ACTIVE", "Provider sign-in operation is not active"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"operation_id": operationID, "status": "cancelled"}, nil)
+}
+
 func providerAuthResponseID(path string) string {
 	const prefix = "/v1/provider-auth/operations/"
 	if !strings.HasPrefix(path, prefix) {
@@ -382,6 +397,18 @@ func providerAuthResponseID(path string) string {
 	}
 	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
 	if len(parts) != 2 || parts[1] != "response" || !canonicalUUID(parts[0]) {
+		return ""
+	}
+	return parts[0]
+}
+
+func providerAuthCancelID(path string) string {
+	const prefix = "/v1/provider-auth/operations/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) != 2 || parts[1] != "cancel" || !canonicalUUID(parts[0]) {
 		return ""
 	}
 	return parts[0]
