@@ -122,6 +122,7 @@ describe("Complete timeline entry", () => {
   it("opens tool call detail inspection with pointer button on click", () => {
     render(<CompleteTimelineEntry entry={{
       id: "complete:tool-click", agent_id: "managed-worker", at, message: "Ran bash", tool_input: { command: "ls -la" },
+      message_content: "exit=0\nfile1.txt\nfile2.txt",
       presentation: { kind: "tool", tool_name: "bash", outcome: "success", summary: "Completed successfully" },
     }} />);
 
@@ -133,6 +134,8 @@ describe("Complete timeline entry", () => {
     const dialog = screen.getByRole("dialog", { name: "Ran bash" });
     expect(within(dialog).getByRole("heading", { name: "Tool parameters" })).toBeInTheDocument();
     expect(within(dialog).getByText(/"command": "ls -la"/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Output" })).toBeInTheDocument();
+    expect(within(dialog).getByText(/file1\.txt/)).toBeInTheDocument();
     expect(within(dialog).getByText("Completed successfully")).toBeInTheDocument();
   });
 
