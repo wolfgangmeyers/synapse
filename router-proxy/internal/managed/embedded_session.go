@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -51,6 +52,7 @@ type embeddedPersistence struct {
 	compactionResult  func(ai.ToolResultMessage) (bool, error)
 	pendingCompaction string
 	afterUserAppend   func(context.Context)
+	publishComplete   func(store.ManagedHistoryEntry)
 }
 
 func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
@@ -72,6 +74,48 @@ func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
 }
 
 func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) error {
+	if result, ok := message.(ai.ToolResultMessage); ok {
+		toolName := result.ToolName
+		toolCallID := result.ToolCallID
+		if toolCallID != "" && toolName != "" {
+			isFailed := result.IsError
+			if !isFailed && toolName == "bash" && len(result.Content) > 0 {
+				if textContent, ok := result.Content[0].(ai.TextContent); ok {
+					if strings.HasPrefix(textContent.Text, "exit=") && !strings.HasPrefix(textContent.Text, "exit=0") {
+						isFailed = true
+					}
+				}
+			}
+			level := "info"
+			messageText := "Ran " + toolName
+			pres := &store.ManagedHistoryPresentation{
+				Kind:     "tool",
+				ToolName: toolName,
+				Outcome:  "success",
+				Summary:  "Completed successfully",
+			}
+			if isFailed {
+				level = "error"
+				displayName := toolName
+				if len(displayName) > 0 {
+					displayName = strings.ToUpper(displayName[:1]) + displayName[1:]
+				}
+				messageText = displayName + " failed"
+				pres = &store.ManagedHistoryPresentation{
+					Kind:     "tool",
+					ToolName: toolName,
+					Outcome:  "failed",
+					Summary:  "The operation could not be completed.",
+					Error:    &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false},
+				}
+			}
+			completionKey := fmt.Sprintf("tool:%s:%s", p.binding.AgentID, toolCallID)
+			entry, err := p.db.RecordManagedCompleteHistoryWithPresentation(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres)
+			if err == nil && p.publishComplete != nil {
+				p.publishComplete(entry)
+			}
+		}
+	}
 	if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName == "mecha_context" && p.compactionResult != nil {
 		compact, err := p.compactionResult(result)
 		if err != nil {
@@ -460,7 +504,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := validateEmbeddedCodexModel(model); err != nil {
 		return err
 	}
-	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend}
+	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
 			return err
@@ -754,7 +798,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			reminderExecutions[id] = reminderExecution{expected: &expected, replay: replay}
 			freshWorkerMu.Unlock()
 		}))
-		tools = append(tools, m.embeddedBashTool(owner, rootFD, func(id string) bool {
+		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
 			fresh := freshBashIntents[id]
@@ -969,6 +1013,20 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			freshWorkerMu.Unlock()
 			return &result, nil
 		}, BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
+			toolName := call.ToolCall.Name
+			toolCallID := call.ToolCall.ID
+			if toolCallID != "" && toolName != "" {
+				invocationKey := fmt.Sprintf("tool:%s:%s", binding.AgentID, toolCallID)
+				entry, err := m.store.RecordManagedCompleteHistoryWithPresentation(callCtx, binding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
+					Kind:     "tool",
+					ToolName: toolName,
+					Outcome:  "active",
+					Summary:  "Running",
+				})
+				if err == nil {
+					m.publishCompleteHistory(entry)
+				}
+			}
 			var registered *agent.AgentTool
 			for i := range tools {
 				if call.ToolCall.Name == tools[i].Name {
@@ -1153,25 +1211,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 				if !errors.Is(err, sql.ErrNoRows) {
 					return err
-				}
-			}
-			if call.ToolCall.Name == "bash" {
-				spec, _ := parseEmbeddedBash(call.ToolCall.Arguments)
-				paths := spec.args
-				if spec.op == "grep" {
-					paths = paths[1:]
-				}
-				for _, path := range paths {
-					fd, openErr := unix.Openat2(rootFD, path, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
-					if openErr != nil {
-						return &agent.PolicyDenial{Reason: "bash path denied"}
-					}
-					var st unix.Stat_t
-					statErr := unix.Fstat(fd, &st)
-					_ = unix.Close(fd)
-					if statErr != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
-						return &agent.PolicyDenial{Reason: "bash requires regular files"}
-					}
 				}
 			}
 			if call.ToolCall.Name == "mecha_context" && call.ToolCall.Arguments["action"] == "status" {

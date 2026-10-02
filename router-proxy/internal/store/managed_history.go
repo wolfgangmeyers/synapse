@@ -310,9 +310,18 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 		var storedPresentation, storedContent, storedSender, storedToolInput sql.NullString
 		err := s.db.QueryRowContext(ctx, `SELECT sequence,category,occurred_at,level,message,COALESCE(presentation_json,''),message_content,sender_identity,tool_input_json FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &storedCategory, &entry.At, &entry.Level, &entry.Message, &storedPresentation, &storedContent, &storedSender, &storedToolInput)
 		if err == nil {
+			if storedPresentation.String != presentationJSON || entry.Level != level || entry.Message != message {
+				if _, err = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,presentation_json=? WHERE sequence=?`, level, message, presentationJSON, sequence); err != nil {
+					return ManagedHistoryEntry{}, err
+				}
+				entry.Level = level
+				entry.Message = message
+				entry.Presentation = presentation
+			} else {
+				entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
+			}
 			entry.ID = fmt.Sprintf("complete:%d", sequence)
 			entry.AgentID = agentID
-			entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
 			entry.MessageContent = managedHistoryDetail(storedContent)
 			entry.SenderIdentity = managedHistoryDetail(storedSender)
 			entry.ToolInput = rawManagedHistoryJSON(storedToolInput.String)
