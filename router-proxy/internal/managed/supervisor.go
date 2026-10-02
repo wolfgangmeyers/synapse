@@ -2416,6 +2416,17 @@ func readinessPolicyValue(policy store.ManagedDesiredPolicy) (map[string]any, er
 	return normalizeDesiredPolicy(value)
 }
 func privateCommandAcknowledgement(value map[string]any) bool {
+	// Installed Pi (real RPC mode) emits the prompt response before the hidden
+	// command handler has returned: the preflightResult callback fires first
+	// and produces data:{disposition:"..."} (one key, no success/command).
+	// Fake Pi and some test helpers use data:{success:true,command:"prompt"}
+	// for the same ack. Both shapes must be treated as acknowledgements so the
+	// router knows not to treat the unwrapped data as a policy response.
+	if _, hasDisposition := value["disposition"]; hasDisposition && len(value) == 1 {
+		if _, ok := value["disposition"].(string); ok {
+			return true
+		}
+	}
 	return value["success"] == true && value["command"] == "prompt" && len(value) <= 4
 }
 func normalizePolicyResponse(value map[string]any) (map[string]any, error) {
