@@ -111,6 +111,72 @@ func (s *Store) AppendEmbeddedFinalAndReply(ctx context.Context, b EmbeddedBindi
 		if sourceKind == "reminder" {
 			return nil
 		}
+		// If the agent already sent a message to the original sender during this turn,
+		// suppress automatic reply outbox insertion to avoid duplicate replies.
+		entryRows, err := s.db.QueryContext(ctx, `SELECT body FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq > ? AND seq <= ? AND kind='assistant'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, ackSeq, expectedSeq)
+		if err != nil {
+			return err
+		}
+		var bodies [][]byte
+		for entryRows.Next() {
+			var rawBody []byte
+			if err := entryRows.Scan(&rawBody); err != nil {
+				entryRows.Close()
+				return err
+			}
+			bodies = append(bodies, rawBody)
+		}
+		if err := entryRows.Err(); err != nil {
+			entryRows.Close()
+			return err
+		}
+		entryRows.Close()
+
+		var alreadySent bool
+		for _, rawBody := range bodies {
+			msg, err := ai.UnmarshalMessage(rawBody)
+			if err != nil {
+				continue
+			}
+			if intermediateAssistant, ok := msg.(ai.AssistantMessage); ok {
+				for _, c := range intermediateAssistant.Content {
+					var call *ai.ToolCall
+					if tc, ok := c.(ai.ToolCall); ok {
+						call = &tc
+					} else if tc, ok := c.(*ai.ToolCall); ok {
+						call = tc
+					}
+					if call != nil {
+						isMailSend := false
+						if call.Name == "mecha_mailbox_send" {
+							if recipient, ok := call.Arguments["recipient"].(string); ok && recipient == a.Sender {
+								isMailSend = true
+							}
+						} else if call.Name == "mecha_worker" && call.Arguments["action"] == "send" {
+							if name, ok := call.Arguments["name"].(string); ok && name == a.Sender {
+								isMailSend = true
+							}
+						}
+						if isMailSend {
+							var effectState string
+							if err := s.db.QueryRowContext(ctx, `SELECT state FROM embedded_effects WHERE effect_id=? AND agent_id=? AND session_id=? AND epoch=? AND generation=?`, call.ID, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&effectState); err == nil && effectState == "observed" {
+								alreadySent = true
+								break
+							} else if errors.Is(err, sql.ErrNoRows) {
+								alreadySent = true
+								break
+							}
+						}
+					}
+				}
+			}
+			if alreadySent {
+				break
+			}
+		}
+		if alreadySent {
+			return nil
+		}
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
 		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, text.String(), formatTimestamp(s.clock.Now()))

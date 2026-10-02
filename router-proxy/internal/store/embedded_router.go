@@ -348,6 +348,33 @@ func (s *Store) ReadyEmbeddedRoot(ctx context.Context, b EmbeddedBinding, operat
 	})
 }
 
+// SetEmbeddedActivityState updates activity_state on managed_agents for an embedded agent
+// ("active" or "idle") and bumps projection_version if the state changed.
+func (s *Store) SetEmbeddedActivityState(ctx context.Context, b EmbeddedBinding, activityState string) error {
+	if err := validateEmbedded(b); err != nil {
+		return err
+	}
+	if activityState != "active" && activityState != "idle" {
+		return errors.New("invalid embedded activity state")
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND runtime_generation=? AND runtime='embedded' AND desired_state='running' AND lifecycle_state IN ('starting','running') AND activity_state != ?`, activityState, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, activityState)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			_, err = s.bumpManagedProjectionVersion(ctx)
+			return err
+		}
+		return nil
+	})
+}
+
 // ResetEmbeddedSession accepts only the managed row's replacement epoch. The
 // old row remains historical, but loses its current bit atomically with insert.
 func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBinding, role string) error {

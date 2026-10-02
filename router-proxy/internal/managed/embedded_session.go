@@ -413,6 +413,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
 		return err
 	}
+	_ = m.store.SetEmbeddedActivityState(ctx, binding, "active")
+	m.publishProjection()
+	defer func() {
+		_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
+		m.publishProjection()
+	}()
 	// Restored selections are untrusted admission input too. Check the real
 	// SDK identity and private credential before any test substitution, tools,
 	// conversation append, or provider work.
@@ -880,7 +886,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				copy := *opts
 				opts = &copy
 			}
-			opts.MaxTokens = nil
+			existingOnPayload := opts.OnPayload
+			opts.OnPayload = func(payload any, model *ai.Model) (any, error) {
+				if m, ok := payload.(map[string]any); ok {
+					delete(m, "max_output_tokens")
+				}
+				if existingOnPayload != nil {
+					return existingOnPayload(payload, model)
+				}
+				return payload, nil
+			}
 			// The first provider request records the exact bearer it used. The
 			// wrapper may discard only a typed pre-output 401 before the SDK
 			// sees an event or persists a terminal assistant.
