@@ -7,7 +7,7 @@ import { activeRemindersForPeer, lockAfterCreateStatus, lockResultState, reminde
 import { normalizeModelSummary, type ModelSummary } from "./domain/models";
 import { mergeMessages, pendingMessage, reconcileHistoryMessages, settlePendingMessages, type HistoryMessage } from "./domain/history";
 import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, migrateBootstrapRouter, setActiveRouter, setAgentId, setRouterAlias, LEGACY_AGENT_ID_KEY, setSelectedPeer as persistSelectedPeer, selectedPeerFor, removeRouter as removeSavedRouter, type SettingsState, type StorageAdapter } from "./persistence/settings-repository";
-import { loadManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "./persistence/managed-folder-history";
+import { loadManagedRecentFolders, normalizeManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "./persistence/managed-folder-history";
 import { type RouterTransport, type RouterTransportOptions } from "./transport/router-transport";
 import { managedRequestErrorMessage } from "./transport/http-client";
 import { loadManagedGoalProjection } from "./transport/managed-goal-projection";
@@ -218,6 +218,26 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const [managedHeaderModelsLoading, setManagedHeaderModelsLoading] = useState(false);
   const [managedHeaderModelError, setManagedHeaderModelError] = useState<string>();
   const [managedRecentFolders, setManagedRecentFolders] = useState(() => loadManagedRecentFolders(storage));
+  const distinctRecentFolders = useMemo(() => {
+    const knownManagedFolders = (session.state.managedAgents ?? []).map((agent) => agent.cwd);
+    const peerManagedFolders = session.state.agents.map((agent) => agent.managed_agent?.cwd).filter((cwd): cwd is string => Boolean(cwd));
+    return normalizeManagedRecentFolders([...managedRecentFolders, ...knownManagedFolders, ...peerManagedFolders]);
+  }, [managedRecentFolders, session.state.managedAgents, session.state.agents]);
+
+  useEffect(() => {
+    const knownManagedFolders = (session.state.managedAgents ?? []).map((agent) => agent.cwd);
+    const peerManagedFolders = session.state.agents.map((agent) => agent.managed_agent?.cwd).filter((cwd): cwd is string => Boolean(cwd));
+    const knownFolders = [...knownManagedFolders, ...peerManagedFolders];
+    if (knownFolders.length === 0) return;
+    setManagedRecentFolders((current) => {
+      const merged = normalizeManagedRecentFolders([...current, ...knownFolders]);
+      if (merged.length !== current.length || merged.some((folder, index) => folder !== current[index])) {
+        saveManagedRecentFolders(storage, merged);
+        return merged;
+      }
+      return current;
+    });
+  }, [session.state.managedAgents, session.state.agents, storage]);
   const [managedTerminationConfirmation, setManagedTerminationConfirmation] = useState(false);
   const [managedGoalState, setManagedGoalState] = useState<GoalState>();
   const [managedInlineToolsEnabled, setManagedInlineToolsEnabled] = useState<boolean>();
@@ -667,7 +687,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     {selectedLegacyPeer ? <ReminderDialog open={dialog === "reminders"} peer={selectedLegacyPeer} creator={resolvedAgentId} reminders={session.state.reminders} locks={Object.fromEntries(session.state.reminderLocks)} pendingIds={pendingReminderIds} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={lockReminder} /> : selectedManagedAgent ? <ReminderDialog open={dialog === "reminders"} peer={selectedManagedAgent.agent_id} creator={resolvedAgentId} reminders={session.state.reminders} locks={{}} pendingIds={new Set()} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={() => setReminderStatus("Reminder locking is not available for managed agents.")} /> : null}
     <PromptTemplateDialog open={dialog === "prompts"} templates={session.state.templates} loaded={templatesLoaded} {...(promptImportProgress === undefined ? {} : { importProgress: promptImportProgress })} {...(reminderTemplateToUse ? { templateToUse: reminderTemplateToUse } : templateToUse ? { templateToUse } : {})} {...(reminderTemplateToUse && reminderSelection ? { selection: reminderSelection } : !reminderTemplateToUse && composerSelection ? { selection: composerSelection } : {})} onClose={closePromptTemplateDialog} onClosed={reopenDialogAfterPromptClose} onSave={(template) => saveTemplate(template)} onDelete={(id) => deleteTemplate(id)} onImport={(items, overwrite) => importTemplates(items, overwrite)} onInsert={(value, selection) => { if (reminderTemplateToUse) insertReminderTemplate(value, selection); else insertTemplate(value, selection); }} />
     <ArrivalDialog open={dialog === "arrival"} {...(arrivalForDialog ? { arrival: arrivalForDialog } : {})} uiAgentId={resolvedAgentId} onClose={() => setDialog(undefined)} onDismiss={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} />
-    {selectedManagedAgent ? <ManagedControlDialog open={dialog === "managed"} agent={selectedManagedAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} confirmTermination={managedTerminationConfirmation} onConfirmTerminationChange={setManagedTerminationConfirmation} onClose={() => { setDialog(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); }} onAction={manageAction} onGoal={openManagedGoal} onReminders={openManagedReminders} onInlineTools={openManagedInlineTools} /> : <ManagedAgentDialog open={dialog === "managed"} recentFolders={managedRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} />}
+    {selectedManagedAgent ? <ManagedControlDialog open={dialog === "managed"} agent={selectedManagedAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} confirmTermination={managedTerminationConfirmation} onConfirmTerminationChange={setManagedTerminationConfirmation} onClose={() => { setDialog(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); }} onAction={manageAction} onGoal={openManagedGoal} onReminders={openManagedReminders} onInlineTools={openManagedInlineTools} /> : <ManagedAgentDialog open={dialog === "managed"} recentFolders={distinctRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} />}
   </>;
 }
 

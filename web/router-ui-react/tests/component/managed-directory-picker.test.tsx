@@ -146,4 +146,16 @@ describe("ManagedDirectoryPicker", () => {
     fireEvent.drop(picker, { dataTransfer: { getData: () => "", files: [], items: [] } });
     expect(await screen.findByRole("alert")).toHaveTextContent("Finder did not provide the local folder path. Use Browse or paste it.");
   });
+
+  it("provides a datalist with recent folders connected to the input", () => {
+    render(<StatefulPicker />);
+    const input = screen.getByLabelText("Working folder");
+    const datalistId = input.getAttribute("list");
+    expect(datalistId).toBeTruthy();
+    const datalist = document.getElementById(datalistId!);
+    expect(datalist).toBeInTheDocument();
+    expect(datalist?.tagName.toLowerCase()).toBe("datalist");
+    const options = Array.from(datalist?.querySelectorAll("option") ?? []).map((opt) => opt.value);
+    expect(options).toEqual(["/projects/alpha", "/projects/beta"]);
+  });
 });

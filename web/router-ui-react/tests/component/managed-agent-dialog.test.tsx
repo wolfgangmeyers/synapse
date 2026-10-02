@@ -107,4 +107,20 @@ describe("ManagedAgentDialog", () => {
     await user.click(screen.getByRole("button", { name: "Terminate agent" }));
     expect(onAction).toHaveBeenCalledWith("managed-alpha", "terminate");
   });
+
+  it("passes recent folders through to the working folder picker and datalist", async () => {
+    const user = userEvent.setup();
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} recentFolders={["/recent/one", "/recent/two"]} />);
+    const input = screen.getByLabelText("Working folder");
+    const listId = input.getAttribute("list");
+    expect(listId).toBeTruthy();
+    const datalist = document.getElementById(listId!);
+    expect(datalist).toBeInTheDocument();
+    const options = Array.from(datalist?.querySelectorAll("option") ?? []).map((opt) => opt.value);
+    expect(options).toEqual(["/recent/one", "/recent/two"]);
+
+    await user.click(input);
+    expect(screen.getByRole("list", { name: "Recent folders" })).toHaveTextContent("/recent/one");
+    expect(screen.getByRole("list", { name: "Recent folders" })).toHaveTextContent("/recent/two");
+  });
 });
