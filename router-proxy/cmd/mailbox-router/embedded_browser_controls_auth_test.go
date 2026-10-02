@@ -68,7 +68,7 @@ func newBrowserFixFixture(t *testing.T) *browserFixFixture {
 	require.NoError(t, err)
 	node, err := exec.LookPath("node")
 	require.NoError(t, err, "the production auth helper requires Node")
-	helperPath, err := filepath.Abs(filepath.Join("..", "..", "..", "..", "auth-helper", "index.mjs"))
+	helperPath, err := filepath.Abs(filepath.Join("..", "..", "..", "auth-helper", "index.mjs"))
 	require.NoError(t, err)
 	piDir := filepath.Join(base, "pi-agent")
 	require.NoError(t, os.Mkdir(piDir, 0700))
