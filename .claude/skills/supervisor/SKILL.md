@@ -522,6 +522,7 @@ A tmux or managed-window listing only proves that a window exists. Inspect the a
 
 ### Worker goals in normal handoffs
 
+- Standing and native goals belong to workers only. Never set a goal for the supervisor session. Coordinate through managed workers, persistent priorities and task state, and reminders. This does not narrow the authorization provided by a concrete Wolfgang outcome or create a second approval gate for workers.
 - For a durable task with one clear outcome that needs sustained momentum across turns or handoffs, use a worker goal.
 - Set one task-level outcome, not a checklist or parallel set of goals.
 - An explicit concrete goal authorizes the ordinary, bounded, reversible work needed to move toward it. This includes investigation, implementation, tests, review, conflict resolution, rebase, commit, and push when they remain within the recorded scope and requirements. Do not add an authorization gate at a phase boundary or wait for a second approval. Course-correct through the verified mailbox path if execution drifts from the goal, scope, requirements, or evidence plan.
