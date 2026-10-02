@@ -27,6 +27,19 @@ describe("AgentRow", () => {
     expect(element).toHaveAttribute("data-managed-activity", "idle");
   });
 
+  it("renders a failed managed worker as a red, non-color-only status", () => {
+    const managedAgent: ManagedAgent = { agent_id: "managed-failed", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "failed", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed process exited", at: "2030-01-01T00:01:00.000Z" } };
+    const [row] = mergeAgentSources([], [managedAgent]);
+    expect(row).toBeDefined();
+
+    render(<AgentRow agent={row!} selected />);
+
+    const listitem = screen.getByRole("listitem");
+    expect(listitem).toHaveClass("failed", "active");
+    expect(screen.getByRole("alert", { name: "Managed worker failed" })).toHaveTextContent("Failed");
+    expect(screen.getByRole("button", { name: "Managed Failed (managed-failed), failed" })).toBeInTheDocument();
+  });
+
   it("keeps private managed runtime identity out of DOM output", () => {
     const managedAgent = {
       agent_id: "managed-build", source: "router-managed" as const, cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "ready", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null,
@@ -169,6 +182,12 @@ describe("AgentRow", () => {
     expect(screen.getByText("RPC")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Manage" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
+  });
+
+  it("tags worker as Embedded when runtime is embedded", () => {
+    const managedAgent = { agent_id: "emb-1", source: "router-managed" as const, runtime: "embedded" as const, cwd: "/work", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
+    render(<AgentRow agent={{ agent_id: "emb-1", source: "router-managed", managed_agent: managedAgent, activity_state: "idle" }} />);
+    expect(screen.getByText("Embedded")).toBeInTheDocument();
   });
 
   it("shows working and subagent state accessibly", () => {

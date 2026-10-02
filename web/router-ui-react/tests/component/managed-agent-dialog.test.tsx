@@ -87,29 +87,14 @@ describe("ManagedAgentDialog", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("managed-alpha");
   });
 
-  it("defaults runtime to embedded and submits it", async () => {
+  it("submits runtime as embedded directly", async () => {
     const user = userEvent.setup();
     const onLaunch = vi.fn(async () => undefined);
     render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
-    const runtimeSelect = screen.getByLabelText("Runtime");
-    expect(runtimeSelect).toHaveValue("embedded");
     await user.type(screen.getByLabelText("Name"), "agent-embedded");
     await user.type(screen.getByLabelText("Working folder"), "/allowed");
     await user.click(screen.getByRole("button", { name: "Launch" }));
     expect(onLaunch).toHaveBeenCalledWith({ name: "agent-embedded", cwd: "/allowed", runtime: "embedded" });
-  });
-
-  it("allows selecting rpc runtime and submits it explicitly", async () => {
-    const user = userEvent.setup();
-    const onLaunch = vi.fn(async () => undefined);
-    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
-    const runtimeSelect = screen.getByLabelText("Runtime");
-    fireEvent.change(runtimeSelect, { target: { value: "rpc" } });
-    expect(runtimeSelect).toHaveValue("rpc");
-    await user.type(screen.getByLabelText("Name"), "agent-rpc");
-    await user.type(screen.getByLabelText("Working folder"), "/allowed");
-    await user.click(screen.getByRole("button", { name: "Launch" }));
-    expect(onLaunch).toHaveBeenCalledWith({ name: "agent-rpc", cwd: "/allowed", runtime: "rpc" });
   });
 
   it("requires a deliberate termination confirmation", async () => {
