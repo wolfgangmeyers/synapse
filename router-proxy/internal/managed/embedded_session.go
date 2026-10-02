@@ -880,6 +880,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				copy := *opts
 				opts = &copy
 			}
+			opts.MaxTokens = nil
 			// The first provider request records the exact bearer it used. The
 			// wrapper may discard only a typed pre-output 401 before the SDK
 			// sees an event or persists a terminal assistant.
