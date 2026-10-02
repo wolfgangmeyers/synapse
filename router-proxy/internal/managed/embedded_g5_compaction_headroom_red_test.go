@@ -42,10 +42,10 @@ func TestEmbeddedG5OwnCompactionHeadroomColdReopenRED(t *testing.T) {
 			require.NoError(t, err)
 			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 			require.NoError(t, err)
-			// Initial context fits the 8000-token replay budget. The retained
+			// Initial context fits the 10000-token replay budget. The retained
 			// manual call carries 3000 text tokens; its 4000-token summary
 			// reduces the 4500-token user prefix but cannot fit with tool state.
-			const window = 24384
+			const window = 26384
 			const maxTokens = 4096
 			const summary = 16000
 			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{Models: []providers.FauxModelDefinition{{ID: "headroom-fixture", ContextWindow: window, MaxTokens: maxTokens, Input: []string{"text"}}}})
