@@ -361,7 +361,7 @@ export interface RouterHttpClient {
   managedInlineTools(id: string): Promise<ManagedInlineToolsResponse>;
   saveManagedInlineTools(id: string, enabled: boolean): Promise<ManagedInlineToolsResponse>;
   managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
-  launchManaged(payload: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
+  launchManaged(payload: { name: string; cwd: string; runtime?: "rpc" | "embedded"; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
   restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
   terminateManaged(id: string): Promise<ManagedOperationResponse>;

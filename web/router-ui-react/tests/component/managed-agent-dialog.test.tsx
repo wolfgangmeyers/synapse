@@ -24,7 +24,7 @@ describe("ManagedAgentDialog", () => {
     await user.click(within(folderBrowser).getByRole("button", { name: "project" }));
     await user.click(within(folderBrowser).getByRole("button", { name: "Select folder" }));
     await user.click(screen.getByRole("button", { name: "Launch" }));
-    expect(onLaunch).toHaveBeenCalledWith({ name: "My-Agent", cwd: "/allowed/project" });
+    expect(onLaunch).toHaveBeenCalledWith({ name: "My-Agent", cwd: "/allowed/project", runtime: "embedded" });
   });
 
   it.each([
@@ -40,7 +40,7 @@ describe("ManagedAgentDialog", () => {
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed" } });
     expect(nameInput).toHaveValue(typedName);
     await user.click(screen.getByRole("button", { name: "Launch" }));
-    expect(onLaunch).toHaveBeenCalledWith({ name: submittedName, cwd: "/allowed" });
+    expect(onLaunch).toHaveBeenCalledWith({ name: submittedName, cwd: "/allowed", runtime: "embedded" });
   });
 
   it.each(["My/Agent", "-My Agent", "My Agent-"])("preserves invalid candidate %j for server validation", async (typedName) => {
@@ -50,7 +50,7 @@ describe("ManagedAgentDialog", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: typedName } });
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed" } });
     await user.click(screen.getByRole("button", { name: "Launch" }));
-    expect(onLaunch).toHaveBeenCalledWith({ name: typedName.replaceAll(" ", "-"), cwd: "/allowed" });
+    expect(onLaunch).toHaveBeenCalledWith({ name: typedName.replaceAll(" ", "-"), cwd: "/allowed", runtime: "embedded" });
   });
 
   it("uses the searchable model picker and only submits available models", async () => {
@@ -69,7 +69,7 @@ describe("ManagedAgentDialog", () => {
     await user.type(screen.getByLabelText("Name"), "managed-alpha");
     await user.type(screen.getByLabelText("Working folder"), "/allowed/project");
     await user.click(screen.getByRole("button", { name: "Launch" }));
-    expect(onLaunch).toHaveBeenCalledWith({ name: "managed-alpha", cwd: "/allowed/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" } });
+    expect(onLaunch).toHaveBeenCalledWith({ name: "managed-alpha", cwd: "/allowed/project", runtime: "embedded", model: { provider: "openai-codex", id: "gpt-5.6-terra" } });
   });
 
   it("explains when no authenticated provider has model choices", async () => {
@@ -85,6 +85,31 @@ describe("ManagedAgentDialog", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "managed-alpha" } });
     expect(screen.getByRole("alert")).toHaveTextContent("That name is in use by an active or launching agent. Choose another name or wait for it to stop.");
     expect(screen.getByLabelText("Name")).toHaveValue("managed-alpha");
+  });
+
+  it("defaults runtime to embedded and submits it", async () => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
+    const runtimeSelect = screen.getByLabelText("Runtime");
+    expect(runtimeSelect).toHaveValue("embedded");
+    await user.type(screen.getByLabelText("Name"), "agent-embedded");
+    await user.type(screen.getByLabelText("Working folder"), "/allowed");
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({ name: "agent-embedded", cwd: "/allowed", runtime: "embedded" });
+  });
+
+  it("allows selecting rpc runtime and submits it explicitly", async () => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
+    const runtimeSelect = screen.getByLabelText("Runtime");
+    fireEvent.change(runtimeSelect, { target: { value: "rpc" } });
+    expect(runtimeSelect).toHaveValue("rpc");
+    await user.type(screen.getByLabelText("Name"), "agent-rpc");
+    await user.type(screen.getByLabelText("Working folder"), "/allowed");
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({ name: "agent-rpc", cwd: "/allowed", runtime: "rpc" });
   });
 
   it("requires a deliberate termination confirmation", async () => {

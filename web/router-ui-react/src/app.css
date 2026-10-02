@@ -1146,6 +1146,8 @@ p:empty { display: none; }
 .managed-agent-form label, .managed-agent-form fieldset { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
 .managed-agent-form fieldset { grid-template-columns: 1fr; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; }
 .managed-agent-form legend { grid-column: 1 / -1; padding: 0 5px; }
+.managed-agent-form select { width: 100%; border: 1px solid var(--line); border-radius: 14px; background: #10141f; color: var(--text); padding: 11px 12px; outline: none; font: inherit; }
+.managed-agent-form select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(157,168,255,0.14); }
 .managed-agent-form fieldset .model-controls { width: 100%; margin-left: 0; }
 .managed-agent-form fieldset .model-current { width: 100%; min-width: 0; }
 .managed-agent-form textarea { min-height: 130px; resize: vertical; }
