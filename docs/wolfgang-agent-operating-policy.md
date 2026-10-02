@@ -18,11 +18,15 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
 - Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, rebases, and scoped force-pushes needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work. Stop only for a genuinely destructive or external boundary such as deleting someone else's work, changing PR state, or a new product/security/legal decision.
 
+### Standing goals belong to workers
+
+Only workers own standing or native goals. Supervisors never set a goal for their own session. They coordinate through managed workers, persistent priorities and task state, and reminders. Concrete user outcomes still authorize ordinary scoped work, and supervisors release any worker waiting for approval that the outcome already grants.
+
 ### Goal checks are execution gates
 
 Every `NOT_DONE` or `BLOCKED` goal check is an execution gate. Immediately take one concrete safe action, delegate one action with a named owner and done evidence, or record the exact external blocker with its owner and next verification point. A blank acknowledgment or status-only acknowledgment is forbidden.
 
-If the same check is unchanged, inspect fresh evidence and take the next safe action. Do not repeat the old status. When a ticket-sized PR crosses its defined readiness threshold (implemented and reviewed locally, validation green, branch or stack clean and pushed, and a PR opened where appropriate), advance automatically to the next independently unblocked vertical seam with an owner, native goal, and next action. Do not wait for CI unless an explicit dependency, current review finding, or external authorization blocks that seam. Record blockers narrowly.
+If the same check is unchanged, inspect fresh evidence and take the next safe action. Do not repeat the old status. When a ticket-sized PR crosses its defined readiness threshold (implemented and reviewed locally, validation green, branch or stack clean and pushed, and a PR opened where appropriate), advance automatically to the next independently unblocked vertical seam with a worker owner, that worker's native goal, and next action. Do not wait for CI unless an explicit dependency, current review finding, or external authorization blocks that seam. Record blockers narrowly.
 
 Do not request compaction at a delivery boundary. First process every already-received worker completion and hand off the next eligible seam. After compaction, identify completions received before compaction and process those delivery transitions before routine notifications.
 
