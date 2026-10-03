@@ -102,6 +102,15 @@ export function useRouterOwnedCodex(runtime) {
   });
 }
 
+// GoogleGenAI interpolates region into the hostname (https://${location}-aiplatform.googleapis.com).
+// A safe ASCII single host label (RFC 1123) protects URL authority without requiring a fixed region catalog.
+const REGION_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+function isValidVertexRegion(region) {
+  if (typeof region !== "string") return false;
+  return REGION_LABEL_PATTERN.test(region);
+}
+
 function registerGoogleProvider(runtime) {
   const google = runtime.getProvider("google");
   if (!google) return;
@@ -160,7 +169,13 @@ function registerVertexAdcProvider(runtime) {
             placeholder: "us-central1",
           });
           interaction.signal?.throwIfAborted();
-          const location = locationInput && locationInput.trim() ? locationInput.trim() : "us-central1";
+          const trimmedLocation = typeof locationInput === "string" ? locationInput.trim() : "";
+          const location = trimmedLocation || "us-central1";
+          if (!isValidVertexRegion(location)) {
+            throw new Error(
+              `Invalid Google Cloud region: "${location}". Region must be a valid single host label (alphanumeric and hyphens, 1-63 chars).`,
+            );
+          }
           const adcPath = resolveHostAdcPath();
           try {
             await fs.access(adcPath);
