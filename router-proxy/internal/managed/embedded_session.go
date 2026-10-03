@@ -20,7 +20,6 @@ import (
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/coding"
-	"golang.org/x/sys/unix"
 )
 
 // embeddedPersistence serializes one root's checked SDK callbacks in its
@@ -586,7 +585,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	freshWorkerIntents := make(map[string]bool)
 	freshToolIntents := make(map[string]*store.EmbeddedToolInvocation)
 	toolExecutions := make(map[string]*store.EmbeddedToolInvocation)
-	freshWriteIntents := make(map[string]bool)
 	freshBashIntents := make(map[string]bool)
 	freshGoalIntents := make(map[string]*store.EmbeddedGoalInvocation)
 	m.mu.Lock()
@@ -829,13 +827,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err != nil {
 		return err
 	}
-	rootFD := -1
 	if role == "root" || role == "worker" {
-		rootFD, err = pinEmbeddedReadRoot(saved.Cwd)
-		if err != nil {
-			return fmt.Errorf("embedded read root: %w", err)
-		}
-		defer func() { _ = unix.Close(rootFD) }()
 		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_mailbox_send", toolAdmitted, toolCompleted, nil))
 		tools = append(tools, m.embeddedGoalTool(owner, goalAdmitted, goalCompleted))
 		tools = append(tools, m.embeddedGoalSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
@@ -886,21 +878,36 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			bashExecutions[id] = execution
 			freshWorkerMu.Unlock()
 		}))
-		tools = append(tools, m.embeddedRootReadTool(owner, rootFD))
-		tools = append(tools, m.embeddedProjectEditTool(owner, rootFD, func(id string) bool {
-			freshWorkerMu.Lock()
-			defer freshWorkerMu.Unlock()
-			fresh := freshWriteIntents[id]
-			delete(freshWriteIntents, id)
-			return fresh
-		}))
-		tools = append(tools, m.embeddedWorkerWriteTool(owner, rootFD, func(id string) bool {
-			freshWorkerMu.Lock()
-			defer freshWorkerMu.Unlock()
-			fresh := freshWriteIntents[id]
-			delete(freshWriteIntents, id)
-			return fresh
-		}))
+		readTool, err := coding.CreateTool("read", saved.Cwd)
+		if err != nil {
+			return fmt.Errorf("embedded read tool: %w", err)
+		}
+		editTool, err := coding.CreateTool("edit", saved.Cwd)
+		if err != nil {
+			return fmt.Errorf("embedded edit tool: %w", err)
+		}
+		writeTool, err := coding.CreateTool("write", saved.Cwd)
+		if err != nil {
+			return fmt.Errorf("embedded write tool: %w", err)
+		}
+		wrapTool := func(tool agent.AgentTool) agent.AgentTool {
+			original := tool.Execute
+			tool.Execute = func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+				if err := m.store.RenewEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				role, err := m.store.EmbeddedSessionRole(callCtx, owner.binding)
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				if role != "root" && role != "worker" {
+					return agent.AgentToolResult{}, fmt.Errorf("%s requires embedded root or worker", tool.Name)
+				}
+				return original(callCtx, id, args, update)
+			}
+			return tool
+		}
+		tools = append(tools, wrapTool(readTool), wrapTool(editTool), wrapTool(writeTool))
 	}
 	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {
 		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted, func(id string) bool {
@@ -1152,33 +1159,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					return &agent.PolicyDenial{Reason: parseErr.Error()}
 				}
 			}
-			if call.ToolCall.Name == "read" {
+			if call.ToolCall.Name == "read" || call.ToolCall.Name == "edit" || call.ToolCall.Name == "write" {
 				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "read requires embedded root or worker"}
-				}
-				path, ok := call.ToolCall.Arguments["path"].(string)
-				if !ok || !validEmbeddedReadPath(path) {
-					return &agent.PolicyDenial{Reason: "read path must be normalized and relative"}
-				}
-			}
-			if call.ToolCall.Name == "edit" {
-				path, pathOK := call.ToolCall.Arguments["path"].(string)
-				edits, editsOK := call.ToolCall.Arguments["edits"].([]any)
-				if (role != "root" && role != "worker") || !pathOK || len(path) > 4096 || !validEmbeddedReadPath(path) || !editsOK || len(edits) != 1 {
-					return &agent.PolicyDenial{Reason: "edit requires embedded root or worker and bounded normalized relative arguments"}
-				}
-				change, ok := edits[0].(map[string]any)
-				old, oldOK := change["oldText"].(string)
-				newText, newOK := change["newText"].(string)
-				if !ok || len(change) != 2 || !oldOK || len(old) == 0 || len(old) > embeddedReadLimit || !newOK || len(newText) > embeddedReadLimit {
-					return &agent.PolicyDenial{Reason: "invalid edit replacement"}
-				}
-			}
-			if call.ToolCall.Name == "write" {
-				path, pathOK := call.ToolCall.Arguments["path"].(string)
-				content, contentOK := call.ToolCall.Arguments["content"].(string)
-				if (role != "root" && role != "worker") || !pathOK || len(path) > 4096 || !validEmbeddedReadPath(path) || !contentOK || len(content) > embeddedWriteLimit {
-					return &agent.PolicyDenial{Reason: "write requires embedded root or worker and bounded normalized relative arguments"}
+					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
 				}
 			}
 			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" {
@@ -1334,14 +1317,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				freshBashIntents[call.ToolCall.ID] = true
 				freshWorkerMu.Unlock()
 			}
-			if call.ToolCall.Name == "write" || call.ToolCall.Name == "edit" {
-				freshWorkerMu.Lock()
-				freshWriteIntents[call.ToolCall.ID] = true
-				freshWorkerMu.Unlock()
-				if call.ToolCall.Name == "write" {
-					m.admitEmbeddedWrite(binding, call.ToolCall.ID)
-				}
-			}
+
 			if toolAdmission != nil {
 				freshWorkerMu.Lock()
 				freshToolIntents[call.ToolCall.ID] = toolAdmission
