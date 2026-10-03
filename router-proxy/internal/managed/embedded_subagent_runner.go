@@ -229,6 +229,10 @@ func (m *Manager) drainQueueLocked() {
 }
 
 func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Model, agent.StreamFn, error) {
+	if record.SelectedModel.Provider == "" || record.SelectedModel.ID == "" {
+		record.SelectedModel.Provider = "antigravity"
+		record.SelectedModel.ID = "gemini-3.8-flash"
+	}
 	model := ai.GetModel(record.SelectedModel.Provider, record.SelectedModel.ID)
 	var stream agent.StreamFn
 	if m.embeddedModelResolver != nil {
