@@ -571,8 +571,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			model = &copy
 		}
 	}
-	if err := validateEmbeddedCodexModel(model); err != nil {
-		return err
+	if model == nil {
+		return errors.New("embedded model is unavailable")
+	}
+	if model.Provider == "openai-codex" {
+		if err := validateEmbeddedCodexModel(model); err != nil {
+			return err
+		}
 	}
 	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
 	if wake != nil {
@@ -944,6 +949,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	// goal tool result. Never mark a desired revision applied at goal set time.
 	stream := func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 		fail := func(err error) *ai.AssistantMessageEventStream { return ai.ErrorStream(requestModel, err) }
+		if requestModel.Provider != "openai-codex" {
+			return ai.StreamSimple(requestCtx, requestModel, ai.Context{
+				Messages: transcript.Messages,
+			}, opts)
+		}
 		if err := validateEmbeddedCodexModel(requestModel); err != nil {
 			return fail(err)
 		}
