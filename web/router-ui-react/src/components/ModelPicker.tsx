@@ -24,7 +24,7 @@ export interface ModelPickerProps {
   isEmbedded?: boolean;
 }
 
-const ADMITTED_EMBEDDED_PROVIDERS = new Set(['openai-codex', 'google', 'cursor', 'google-vertex']);
+const ADMITTED_EMBEDDED_PROVIDERS = new Set(['openai-codex', 'google', 'cursor', 'google-vertex', 'antigravity']);
 
 export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, status, onChange, label = "Model", isEmbedded }: ModelPickerProps) {
   const normalized = useMemo(() => normalizeModelSummaries(models), [models]);
