@@ -158,6 +158,21 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					Error:    &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false},
 				}
 			}
+			if toolName == "mecha_mailbox_send" {
+				if args, ok := toolInput.(map[string]any); ok {
+					if recipient, ok := args["recipient"].(string); ok {
+						pres.To = recipient
+					}
+					pres.From = p.binding.AgentID
+				}
+			} else if toolName == "mecha_worker" {
+				if args, ok := toolInput.(map[string]any); ok && args["action"] == "send" {
+					if recipient, ok := args["name"].(string); ok {
+						pres.To = recipient
+					}
+					pres.From = p.binding.AgentID
+				}
+			}
 			completionKey := fmt.Sprintf("tool:%s:%s", p.binding.AgentID, toolCallID)
 			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres, toolInput, contentPtr)
 			if err == nil && p.publishComplete != nil {
@@ -232,7 +247,8 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		if !bytes.Equal(body, p.mailMessage) {
 			return errors.New("embedded SDK mail differs from reserved attempt")
 		}
-		if err := p.db.AppendEmbeddedMailSDKAndACK(ctx, p.binding, p.mail.AttemptID, []byte(p.mail.Body), body); err != nil {
+		historyEntry, err := p.db.AppendEmbeddedMailSDKAndACKWithHistory(ctx, p.binding, p.mail.AttemptID, []byte(p.mail.Body), body)
+		if err != nil {
 			p.mailAppendErr = err
 			return err
 		}
@@ -249,6 +265,9 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		p.mailAttempt = p.mail.AttemptID
 		p.mail = nil
 		p.traceChecked(message)
+		if p.publishComplete != nil && historyEntry.ID != "" {
+			p.publishComplete(historyEntry)
+		}
 		return nil
 	}
 	if p.wake != nil {
@@ -282,11 +301,14 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			final = assistant.StopReason == ai.StopStop
 		}
 		if final {
-			entry, err := p.db.AppendEmbeddedFinalAndReply(ctx, p.binding, p.mailAttempt, p.seq, p.digest, body)
+			entry, replyHistoryEntry, err := p.db.AppendEmbeddedFinalAndReplyWithHistory(ctx, p.binding, p.mailAttempt, p.seq, p.digest, body)
 			if err == nil {
 				p.seq, p.digest = entry.Sequence, entry.Digest
 				p.mailAttempt = ""
 				p.traceChecked(message)
+				if p.publishComplete != nil && replyHistoryEntry.ID != "" {
+					p.publishComplete(replyHistoryEntry)
+				}
 			}
 			return err
 		}

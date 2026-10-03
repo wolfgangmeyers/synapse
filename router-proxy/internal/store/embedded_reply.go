@@ -36,7 +36,13 @@ func (s *Store) embeddedReplyTx(ctx context.Context, attemptID string) (*Embedde
 // ordered append path. The owner, ACK, entry head and accepted sender are all
 // verified inside BEGIN IMMEDIATE.
 func (s *Store) AppendEmbeddedFinalAndReply(ctx context.Context, b EmbeddedBinding, attemptID string, expectedSeq int64, expectedDigest string, body []byte) (EmbeddedEntry, error) {
+	entry, _, err := s.AppendEmbeddedFinalAndReplyWithHistory(ctx, b, attemptID, expectedSeq, expectedDigest, body)
+	return entry, err
+}
+
+func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b EmbeddedBinding, attemptID string, expectedSeq int64, expectedDigest string, body []byte) (EmbeddedEntry, ManagedHistoryEntry, error) {
 	var entry EmbeddedEntry
+	var historyEntry ManagedHistoryEntry
 	err := s.runImmediate(ctx, func() error {
 		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
@@ -180,9 +186,23 @@ func (s *Store) AppendEmbeddedFinalAndReply(ctx context.Context, b EmbeddedBindi
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
 		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, text.String(), formatTimestamp(s.clock.Now()))
+		if err != nil {
+			return err
+		}
+		replyBody := text.String()
+		category := "managed_message"
+		messageText := "Message sent"
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: a.Sender}
+		presentationJSON, err := managedHistoryPresentationJSON(presentation)
+		if err != nil {
+			return err
+		}
+		eventKey := fmt.Sprintf("embedded-reply:%s:%s", b.AgentID, replyID)
+		details := managedHistoryDetails{MessageContent: &replyBody, SenderIdentity: &b.AgentID}
+		historyEntry, err = s.recordManagedCompleteHistoryStrictTx(ctx, b.AgentID, category, "info", messageText, eventKey, presentationJSON, presentation, details)
 		return err
 	})
-	return entry, err
+	return entry, historyEntry, err
 }
 
 func (s *Store) PendingEmbeddedReplyAgents(ctx context.Context) ([]string, error) {

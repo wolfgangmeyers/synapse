@@ -1173,14 +1173,20 @@ func (s *Store) NextEmbeddedMail(ctx context.Context, agentID string) (string, e
 // ordinary mail state. A failed transaction leaves an unstarted reservation;
 // no provider/tool execution is implied. Only the exact ACK retries as a no-op.
 func (s *Store) AppendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding, attempt string, body []byte) error {
-	return s.appendEmbeddedMailAndACK(ctx, b, attempt, body, nil)
+	_, err := s.appendEmbeddedMailAndACK(ctx, b, attempt, body, nil)
+	return err
 }
 
 // AppendEmbeddedMailSDKAndACK commits the exact user message passed to
 // RunMessages, before the SDK can enter a provider or tool callback.
 func (s *Store) AppendEmbeddedMailSDKAndACK(ctx context.Context, b EmbeddedBinding, attempt string, body []byte, sdkMessage []byte) error {
+	_, err := s.AppendEmbeddedMailSDKAndACKWithHistory(ctx, b, attempt, body, sdkMessage)
+	return err
+}
+
+func (s *Store) AppendEmbeddedMailSDKAndACKWithHistory(ctx context.Context, b EmbeddedBinding, attempt string, body []byte, sdkMessage []byte) (ManagedHistoryEntry, error) {
 	if len(sdkMessage) == 0 {
-		return errors.New("missing SDK mail message")
+		return ManagedHistoryEntry{}, errors.New("missing SDK mail message")
 	}
 	return s.appendEmbeddedMailAndACK(ctx, b, attempt, body, sdkMessage)
 }
@@ -1192,10 +1198,11 @@ type EmbeddedMailAppendRolledBack struct{ Cause error }
 func (e *EmbeddedMailAppendRolledBack) Error() string { return e.Cause.Error() }
 func (e *EmbeddedMailAppendRolledBack) Unwrap() error { return e.Cause }
 
-func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding, attempt string, body, sdkMessage []byte) error {
+func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding, attempt string, body, sdkMessage []byte) (ManagedHistoryEntry, error) {
 	if attempt == "" {
-		return errors.New("missing attempt")
+		return ManagedHistoryEntry{}, errors.New("missing attempt")
 	}
+	var historyEntry ManagedHistoryEntry
 	committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, func() error {
 		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
@@ -1231,6 +1238,26 @@ func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding,
 			}
 			if sdkMessage != nil && !bytes.Equal(e.Body, sdkMessage) {
 				return errors.New("embedded SDK mail differs from committed entry")
+			}
+			var sourceKind string
+			_ = s.db.QueryRowContext(ctx, `SELECT source_kind FROM messages WHERE id=?`, message).Scan(&sourceKind)
+			category := "managed_message"
+			messageText := "Message received"
+			presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: a.Sender, To: b.AgentID}
+			if sourceKind == "reminder" {
+				category = "reminder"
+				messageText = "Reminder received"
+				presentation = &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
+			}
+			presentationJSON, presErr := managedHistoryPresentationJSON(presentation)
+			if presErr != nil {
+				return presErr
+			}
+			eventKey := fmt.Sprintf("embedded-mail:%s:%s", b.AgentID, attempt)
+			details := managedHistoryDetails{MessageContent: &a.Body, SenderIdentity: &a.Sender}
+			historyEntry, err = s.recordManagedCompleteHistoryStrictTx(ctx, b.AgentID, category, "info", messageText, eventKey, presentationJSON, presentation, details)
+			if err != nil {
+				return err
 			}
 			return checkEmbeddedMailUser(e.Body, a)
 		}
@@ -1276,6 +1303,8 @@ func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding,
 		if err != nil {
 			return err
 		}
+		var sourceKind string
+		_ = s.db.QueryRowContext(ctx, `SELECT source_kind FROM messages WHERE id=?`, message).Scan(&sourceKind)
 		r, err := s.db.ExecContext(ctx, `UPDATE messages SET state='acknowledged' WHERE id=? AND message_incarnation_id=? AND state='queued' AND expires_at>?`, message, a.MessageIncarnationID, formatTimestamp(s.clock.Now()))
 		if err != nil {
 			return err
@@ -1287,12 +1316,30 @@ func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding,
 		if n != 1 {
 			return errors.New("embedded ordinary ACK lost race")
 		}
+		category := "managed_message"
+		messageText := "Message received"
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: a.Sender, To: b.AgentID}
+		if sourceKind == "reminder" {
+			category = "reminder"
+			messageText = "Reminder received"
+			presentation = &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
+		}
+		presentationJSON, err := managedHistoryPresentationJSON(presentation)
+		if err != nil {
+			return err
+		}
+		eventKey := fmt.Sprintf("embedded-mail:%s:%s", b.AgentID, attempt)
+		details := managedHistoryDetails{MessageContent: &a.Body, SenderIdentity: &a.Sender}
+		historyEntry, err = s.recordManagedCompleteHistoryStrictTx(ctx, b.AgentID, category, "info", messageText, eventKey, presentationJSON, presentation, details)
+		if err != nil {
+			return err
+		}
 		return s.completeLinkedReminder(ctx, message)
 	})
 	if err != nil && !committed && conclusive {
-		return &EmbeddedMailAppendRolledBack{Cause: err}
+		return ManagedHistoryEntry{}, &EmbeddedMailAppendRolledBack{Cause: err}
 	}
-	return err
+	return historyEntry, err
 }
 
 func checkEmbeddedMailUser(body []byte, a *EmbeddedMailAttempt) error {

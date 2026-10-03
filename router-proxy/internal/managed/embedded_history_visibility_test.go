@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
 	"github.com/sky-valley/pi/ai"
@@ -175,4 +177,151 @@ func TestEmbeddedToolVisibilityInCompleteHistory(t *testing.T) {
 	require.Equal(t, "Ran mecha_mailbox_send", toolOutcomes["mecha_mailbox_send:success"])
 	require.Contains(t, toolInputs, "mecha_mailbox_send:success")
 	require.JSONEq(t, `{"body": "status update", "recipient": "supervisor"}`, toolInputs["mecha_mailbox_send:success"])
+}
+
+func TestEmbeddedMailVisibilityInCompleteHistory(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	require.NoError(t, os.Chmod(base, 0700))
+	project := filepath.Join(base, "project")
+	require.NoError(t, os.MkdirAll(project, 0700))
+
+	dbPath := filepath.Join(base, "router.sqlite")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	// Initial launch response
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "ready"}}, ai.StopStop)
+		},
+		// Mail turn: run bash then final reply
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo live_verification_from_pi_go"}, "call-bash-mail"),
+			}, ai.StopToolUse)
+		},
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "I received your message and ran the command successfully."},
+			}, ai.StopStop)
+		},
+	})
+
+	m, err := NewManager(ManagerOptions{
+		Store:         db,
+		Manifest:      manifest,
+		Config:        Config{SessionRoot: filepath.Join(base, "sessions"), AllowedWorkingDirectoryRoots: []string{base}},
+		CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(row store.ManagedAgentRecord) *ai.Model {
+			return reg.GetModel()
+		},
+		CodexCredentialStore: testfixture.CodexAdmission(t),
+	})
+	require.NoError(t, err)
+	defer m.Close(context.Background())
+
+	generation, err := db.MintEmbeddedProcessGeneration(ctx, "visibility-test-mail")
+	require.NoError(t, err)
+	require.NoError(t, m.SetEmbeddedStartupGeneration(generation))
+
+	const agentID = "test-embedded-mail-vis"
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               agentID,
+		Cwd:                project,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "ready for mail",
+		RequestID:          "a6666666-6666-4666-8666-666666666611",
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		saved, readErr := db.ManagedAgent(ctx, agentID)
+		return readErr == nil && saved.ActivityState == "idle"
+	}, 10*time.Second, 50*time.Millisecond, "agent must settle to idle after launch")
+
+	// Enqueue mail from pi-go to agent
+	mailID := "mail-from-pi-go-1"
+	_, err = db.Enqueue(ctx, protocol.Envelope{
+		ID:        mailID,
+		From:      "pi-go",
+		To:        agentID,
+		Body:      "Hello test! Please run 'echo live_verification_from_pi_go'",
+		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}, store.EnqueueOptions{})
+	require.NoError(t, err)
+
+	target, err := db.ResolveMessageTarget(ctx, mailID)
+	require.NoError(t, err)
+	require.Equal(t, "managed", target.SourceKind)
+
+	m.OfferDirect(agentID)
+
+	require.Eventually(t, func() bool {
+		msg, readErr := db.MessageFor(ctx, mailID)
+		if readErr != nil || msg == nil || msg.State != domain.MessageAcknowledged {
+			return false
+		}
+		saved, readErr := db.ManagedAgent(ctx, agentID)
+		return readErr == nil && saved.ActivityState == "idle"
+	}, 10*time.Second, 50*time.Millisecond, "mail must be acknowledged and agent must return to idle")
+
+	// Query Complete View history
+	page, err := db.ManagedHistoryPage(ctx, agentID, "complete", 0, 50)
+	require.NoError(t, err)
+
+	for _, entry := range page.Entries {
+		sender := ""
+		if entry.SenderIdentity != nil {
+			sender = *entry.SenderIdentity
+		}
+		content := ""
+		if entry.MessageContent != nil {
+			content = *entry.MessageContent
+		}
+		t.Logf("Entry: id=%s msg=%q sender=%s content=%s pres=%+v", entry.ID, entry.Message, sender, content, entry.Presentation)
+	}
+
+	// 1. Inbound mail entry
+	var inboundEntry *store.ManagedHistoryEntry
+	var toolEntry *store.ManagedHistoryEntry
+	var replyEntry *store.ManagedHistoryEntry
+	for i := range page.Entries {
+		e := &page.Entries[i]
+		if e.Message == "Message received" && e.SenderIdentity != nil && *e.SenderIdentity == "pi-go" {
+			inboundEntry = e
+		}
+		if e.Message == "Ran bash" {
+			toolEntry = e
+		}
+		if e.Message == "Message sent" && e.Presentation != nil && e.Presentation.To == "pi-go" {
+			replyEntry = e
+		}
+	}
+
+	require.NotNil(t, inboundEntry, "inbound message from pi-go must be recorded in complete history")
+	require.Equal(t, "Hello test! Please run 'echo live_verification_from_pi_go'", *inboundEntry.MessageContent)
+	require.Equal(t, "pi-go", *inboundEntry.SenderIdentity)
+	require.Equal(t, "message", inboundEntry.Presentation.Kind)
+	require.Equal(t, "pi-go", inboundEntry.Presentation.From)
+	require.Equal(t, agentID, inboundEntry.Presentation.To)
+
+	require.NotNil(t, toolEntry, "tool entry must be recorded in complete history")
+	require.Contains(t, *toolEntry.MessageContent, "live_verification_from_pi_go")
+
+	require.NotNil(t, replyEntry, "reply message to pi-go must be recorded in complete history")
+	require.Equal(t, "I received your message and ran the command successfully.", *replyEntry.MessageContent)
+	require.Equal(t, agentID, *replyEntry.SenderIdentity)
+	require.Equal(t, "message", replyEntry.Presentation.Kind)
+	require.Equal(t, agentID, replyEntry.Presentation.From)
+	require.Equal(t, "pi-go", replyEntry.Presentation.To)
+	_ = launched
 }
