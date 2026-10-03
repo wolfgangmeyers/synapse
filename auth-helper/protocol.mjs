@@ -2,7 +2,7 @@ const MAX_LINE_BYTES = 64 * 1024;
 const MAX_RESULT_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024;
 const MAX_MODELS = 256;
-const PROVIDERS = new Set(["openai-codex", "google", "cursor"]);
+const PROVIDERS = new Set(["openai-codex", "google", "cursor", "google-vertex", "antigravity"]);
 const OPERATIONS = new Set(["models", "login", "logout"]);
 
 function hasLoneSurrogate(value) {
@@ -18,7 +18,9 @@ function hasLoneSurrogate(value) {
 }
 
 function isRecord(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
-function safeString(value, max) { return typeof value === "string" && value.length > 0 && value.length <= max && !hasLoneSurrogate(value); }
+function safeString(value, max, allowEmpty = false) {
+  return typeof value === "string" && (allowEmpty ? value.length >= 0 : value.length > 0) && value.length <= max && !hasLoneSurrogate(value);
+}
 
 function rejectDuplicateObjectKeys(line) {
   let index = 0;
@@ -93,7 +95,7 @@ export function parseRequest(line) {
 
 export function parseResponse(line) {
   const value = parseJSON(line, MAX_RESPONSE_BYTES);
-  if (!isRecord(value) || Object.keys(value).length !== 3 || value.type !== "response" || !safeString(value.prompt_id, 128) || !safeString(value.value, MAX_RESPONSE_BYTES)) throw new Error("invalid response");
+  if (!isRecord(value) || Object.keys(value).length !== 3 || value.type !== "response" || !safeString(value.prompt_id, 128) || !safeString(value.value, MAX_RESPONSE_BYTES, true)) throw new Error("invalid response");
   return value;
 }
 
@@ -130,7 +132,7 @@ export function terminalResult(request, status, snapshot, error) {
   const result = { type: "terminal", operation_id: request.operation_id, provider: request.provider, status };
   if (status === "succeeded") {
     const statuses = (snapshot?.providers ?? []).map(safeProviderStatus);
-    if (statuses.length !== 3 || statuses.some((item) => item === undefined) || new Set(statuses.map((item) => item.provider)).size !== 3) throw new Error("provider snapshot is invalid");
+    if (statuses.length !== 5 || statuses.some((item) => item === undefined) || new Set(statuses.map((item) => item.provider)).size !== 5) throw new Error("provider snapshot is invalid");
     result.providers = statuses;
     result.models = projectCatalog(snapshot?.models ?? []).models;
   } else {

@@ -73,6 +73,8 @@ func TestEmbeddedCodexAvailableCatalogRechecksPrivateCredential(t *testing.T) {
 				{Provider: "openai-codex", Label: "ChatGPT", Status: "authenticated", Authenticated: true},
 				{Provider: "google", Label: "Google", Status: "signed_out"},
 				{Provider: "cursor", Label: "Cursor", Status: "signed_out"},
+				{Provider: "google-vertex", Label: "Google Vertex AI", Status: "signed_out"},
+				{Provider: "antigravity", Label: "Google Antigravity", Status: "signed_out"},
 			}, []store.ManagedProviderModel{{Provider: "openai-codex", ID: modelID, Name: "catalog model", Available: true}})
 			require.NoError(t, err)
 			catalog := StoreCatalogSource{Store: db}

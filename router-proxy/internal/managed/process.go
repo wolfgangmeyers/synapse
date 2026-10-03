@@ -43,6 +43,7 @@ type CommandSpec struct {
 	MechaRPCExtension    string
 	PiSubagentsExtension string
 	CursorExtension      string
+	AntigravityExtension string
 	TestOnlyExtensions   []string
 	Environment          []string
 }
@@ -62,6 +63,9 @@ func (s CommandSpec) Args() []string {
 	arguments := []string{"--mode", "rpc", "--session-dir", s.SessionRoot, "--session", s.effectiveSessionPath(), "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--offline", "--provider", s.Provider, "--model", s.ModelID, "-e", s.MechaRPCExtension, "-e", s.PiSubagentsExtension}
 	if s.CursorExtension != "" {
 		arguments = append(arguments, "-e", s.CursorExtension)
+	}
+	if s.AntigravityExtension != "" {
+		arguments = append(arguments, "-e", s.AntigravityExtension)
 	}
 	for _, extension := range s.TestOnlyExtensions {
 		arguments = append(arguments, "-e", extension)

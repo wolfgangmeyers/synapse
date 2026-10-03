@@ -67,6 +67,8 @@ func TestEmbeddedCodexCredentialAdmitsWithoutPiCatalogRED(t *testing.T) {
 			{Provider: "openai-codex", Label: "ChatGPT", Status: "signed_out"},
 			{Provider: "google", Label: "Google", Status: "signed_out"},
 			{Provider: "cursor", Label: "Cursor", Status: "signed_out"},
+			{Provider: "google-vertex", Label: "Google Vertex AI", Status: "signed_out"},
+			{Provider: "antigravity", Label: "Google Antigravity", Status: "signed_out"},
 		}, nil)
 	require.NoError(t, err)
 	catalog := managed.StoreCatalogSource{Store: db}

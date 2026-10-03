@@ -4,7 +4,7 @@
   "type": "module",
   "version": "1.0.0",
   "engines": { "node": ">=22.19.0" },
-  "scripts": { "test": "node --test auth-helper.test.mjs codex-consumer.test.mjs" },
+  "scripts": { "test": "node --test auth-helper.test.mjs codex-consumer.test.mjs test-preload-mock-oauth.test.mjs" },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.87.1",
     "@earendil-works/pi-ai": "0.87.1",

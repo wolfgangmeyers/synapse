@@ -109,8 +109,9 @@ try {
         signal: controller.signal,
       });
       emit(terminalResult(request, "succeeded", result));
-    } catch {
-      emit(safeError(request));
+    } catch (err) {
+      const msg = typeof err?.message === "string" && err.message.length <= 512 ? err.message : undefined;
+      emit(terminalResult(request, "failed", undefined, msg));
       process.exitCode = 1;
     } finally {
       clearTimeout(expiration);

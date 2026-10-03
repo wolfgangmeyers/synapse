@@ -153,6 +153,60 @@ describe("protocol guards", () => {
     expect(isUILiveFrame({ ...state, status: "provider-sdk-detail" })).toBe(false);
   });
 
+  it("accepts provider_auth frames for google-vertex and antigravity and rejects unsupported providers", () => {
+    const vertexPrompt = {
+      type: "provider_auth_prompt",
+      protocol: "mecha.web/v1",
+      projection_version: 1,
+      operation_id: "op-vertex-1",
+      provider: "google-vertex",
+      prompt: { id: "project-1", kind: "text", message: "Google Cloud Project ID", placeholder: "my-project" },
+    };
+    expect(isUILiveFrame(vertexPrompt)).toBe(true);
+
+    const antigravityPrompt = {
+      type: "provider_auth_prompt",
+      protocol: "mecha.web/v1",
+      projection_version: 1,
+      operation_id: "op-ag-1",
+      provider: "antigravity",
+      prompt: { id: "ag-code-1", kind: "text", message: "Paste callback URL", url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test" },
+    };
+    expect(isUILiveFrame(antigravityPrompt)).toBe(true);
+
+    const vertexState = {
+      type: "provider_auth_state",
+      protocol: "mecha.web/v1",
+      projection_version: 1,
+      operation_id: "op-vertex-1",
+      provider: "google-vertex",
+      status: "succeeded",
+    };
+    expect(isUILiveFrame(vertexState)).toBe(true);
+
+    const antigravityState = {
+      type: "provider_auth_state",
+      protocol: "mecha.web/v1",
+      projection_version: 1,
+      operation_id: "op-ag-1",
+      provider: "antigravity",
+      status: "pending",
+    };
+    expect(isUILiveFrame(antigravityState)).toBe(true);
+
+    const unsupportedPrompt = {
+      ...vertexPrompt,
+      provider: "aws-bedrock",
+    };
+    expect(isUILiveFrame(unsupportedPrompt)).toBe(false);
+
+    const unsupportedState = {
+      ...vertexState,
+      provider: "aws-bedrock",
+    };
+    expect(isUILiveFrame(unsupportedState)).toBe(false);
+  });
+
   it("requires a closed per-child recovery object", () => {
     const child = {
       id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1,

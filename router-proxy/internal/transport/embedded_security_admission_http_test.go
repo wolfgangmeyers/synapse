@@ -46,6 +46,8 @@ func TestEmbeddedPublicHTTPRejectsGoogleAndCredentialTreeWithoutReservation(t *t
 		{Provider: "openai-codex", Label: "ChatGPT", Status: "signed_out"},
 		{Provider: "google", Label: "Google", Status: "authenticated", Authenticated: true},
 		{Provider: "cursor", Label: "Cursor", Status: "signed_out"},
+		{Provider: "google-vertex", Label: "Google Vertex AI", Status: "signed_out"},
+		{Provider: "antigravity", Label: "Google Antigravity", Status: "signed_out"},
 	}, []store.ManagedProviderModel{{Provider: "google", ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Available: true}})
 	require.NoError(t, err)
 	var calls atomic.Int32

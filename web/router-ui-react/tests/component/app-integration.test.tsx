@@ -191,6 +191,8 @@ describe("App integration", () => {
       if (url.endsWith("/v1/provider-auth")) return jsonResponse({ auth_revision: 0, providers: [
         { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ] });
       if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 0, default_model: null, models: [{ provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true }] });
@@ -209,6 +211,8 @@ describe("App integration", () => {
     await user.click(menuButton);
     await user.click(screen.getByRole("menuitem", { name: "Provider settings" }));
     expect(await screen.findByRole("dialog", { name: "Provider settings" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Providers" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Google authentication method" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(3);
     await user.click(screen.getByRole("button", { name: "Close provider settings" }));
 
@@ -222,7 +226,7 @@ describe("App integration", () => {
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/project" } });
     await user.click(screen.getByRole("button", { name: "Launch" }));
 
-    await waitFor(() => expect(launchPayload).toEqual({ name: "My-Agent", cwd: "/allowed/project" }));
+    await waitFor(() => expect(launchPayload).toEqual({ name: "My-Agent", cwd: "/allowed/project", runtime: "embedded" }));
     await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project", ...recentFolders.slice(0, 9)])));
   });
 
@@ -244,6 +248,8 @@ describe("App integration", () => {
       if (url.endsWith("/v1/provider-auth")) return jsonResponse({ auth_revision: 0, providers: [
         { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ] });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
@@ -265,7 +271,7 @@ describe("App integration", () => {
     await user.click(screen.getByRole("button", { name: "Launch" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("That name is in use by an active or launching agent. Choose another name or wait for it to stop.");
-    expect(launchPayload).toEqual({ name: "My-Agent", cwd: "/allowed/project" });
+    expect(launchPayload).toEqual({ name: "My-Agent", cwd: "/allowed/project", runtime: "embedded" });
     expect(screen.getByLabelText("Name")).toHaveValue("  My Agent  ");
     expect(screen.getByLabelText("Working folder")).toHaveValue("/allowed/project");
   });

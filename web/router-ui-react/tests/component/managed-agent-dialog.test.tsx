@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
@@ -85,6 +85,85 @@ describe("ManagedAgentDialog", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "managed-alpha" } });
     expect(screen.getByRole("alert")).toHaveTextContent("That name is in use by an active or launching agent. Choose another name or wait for it to stop.");
     expect(screen.getByLabelText("Name")).toHaveValue("managed-alpha");
+  });
+
+  it.each([
+    ["google", "gemini-2.5-flash", "Gemini 2.5 Flash"],
+    ["google-vertex", "gemini-2.5-flash", "Gemini 2.5 Flash \\(Vertex\\)"],
+    ["antigravity", "gemini-3.8-flash", "Gemini 3.8 Flash \\(Antigravity\\)"],
+  ])("launches %s model with rpc runtime instead of embedded", async (provider, id, namePattern) => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    const onModels = vi.fn(async (): Promise<ModelsResponse> => ({
+      auth_revision: 1,
+      default_model: null,
+      models: [
+        { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
+        { provider: provider as any, id, name: id, available: true },
+      ],
+    }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onModels={onModels} />);
+    const modelButton = await screen.findByRole("button", { name: "Use router default" });
+    await user.click(modelButton);
+    await user.click(screen.getByRole("option", { name: new RegExp(provider) }));
+    await user.type(screen.getByLabelText("Name"), "agent-google");
+    await user.type(screen.getByLabelText("Working folder"), "/allowed/project");
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({
+      name: "agent-google",
+      cwd: "/allowed/project",
+      runtime: "rpc",
+      model: { provider, id },
+    });
+  });
+
+  it("launches with rpc runtime when router default model is a Google provider", async () => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    const onModels = vi.fn(async (): Promise<ModelsResponse> => ({
+      auth_revision: 1,
+      default_model: { provider: "google-vertex", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Vertex)" },
+      models: [
+        { provider: "google-vertex", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Vertex)", available: true },
+      ],
+    }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onModels={onModels} />);
+    await screen.findByRole("button", { name: "Use router default" });
+    await user.type(screen.getByLabelText("Name"), "default-google-agent");
+    await user.type(screen.getByLabelText("Working folder"), "/allowed/project");
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({
+      name: "default-google-agent",
+      cwd: "/allowed/project",
+      runtime: "rpc",
+    });
+  });
+
+  it("disables submit button and prevents premature launch while catalog is still loading when default model is unresolved", async () => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    let resolveModels: (val: ModelsResponse) => void = () => {};
+    const onModels = vi.fn(() => new Promise<ModelsResponse>((resolve) => { resolveModels = resolve; }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onModels={onModels} />);
+    await user.type(screen.getByLabelText("Name"), "pending-agent");
+    await user.type(screen.getByLabelText("Working folder"), "/allowed/project");
+    const launchBtn = screen.getByRole("button", { name: "Launch" });
+    expect(launchBtn).toBeDisabled();
+    await user.click(launchBtn);
+    expect(onLaunch).not.toHaveBeenCalled();
+
+    resolveModels({
+      auth_revision: 1,
+      default_model: { provider: "antigravity", id: "gemini-3.8-flash" },
+      models: [{ provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini", available: true }],
+    });
+    await waitFor(() => expect(launchBtn).not.toBeDisabled());
+    await user.click(launchBtn);
+    expect(onLaunch).toHaveBeenCalledWith({
+      name: "pending-agent",
+      cwd: "/allowed/project",
+      runtime: "rpc",
+    });
   });
 
   it("submits runtime as embedded directly", async () => {

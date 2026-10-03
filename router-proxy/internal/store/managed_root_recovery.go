@@ -26,6 +26,7 @@ type ManagedLaunchRecipe struct {
 	MechaRPCExtension    string   `json:"mecha_rpc_extension"`
 	PiSubagentsExtension string   `json:"pi_subagents_extension"`
 	CursorExtension      string   `json:"cursor_extension"`
+	AntigravityExtension string   `json:"antigravity_extension,omitempty"`
 	TestOnlyExtensions   []string `json:"test_only_extensions"`
 	Environment          []string `json:"environment"`
 	SHA256               string   `json:"sha256"`
@@ -51,7 +52,7 @@ type ManagedRootRecoveryAction struct {
 // are safe to retain in a launch recipe. Values are still bounded and hashed.
 func IsManagedLaunchEnvironmentKey(key string) bool {
 	switch key {
-	case "HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY":
+	case "HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_HOST_HOME", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG":
 		return true
 	default:
 		return strings.HasPrefix(key, "MECHA_TEST_")
@@ -88,6 +89,9 @@ func ValidateManagedLaunchRecipe(recipe ManagedLaunchRecipe) error {
 		}
 	}
 	if recipe.CursorExtension != "" && !validRecipeValue(recipe.CursorExtension, 4096) {
+		return errors.New("managed launch recipe contains an invalid value")
+	}
+	if recipe.AntigravityExtension != "" && !validRecipeValue(recipe.AntigravityExtension, 4096) {
 		return errors.New("managed launch recipe contains an invalid value")
 	}
 	if len(recipe.Environment) > 128 || len(recipe.TestOnlyExtensions) > 32 || len(recipe.SHA256) != 64 || !isLowerHex(recipe.SHA256) {
@@ -155,9 +159,9 @@ func (s *Store) putManagedLaunchRecipeTx(ctx context.Context, recipe ManagedLaun
 	}
 	var existing ManagedLaunchRecipe
 	var existingTestJSON, existingEnvJSON string
-	err = s.db.QueryRowContext(ctx, `SELECT pi_executable,session_root,cwd,provider,model_id,mecha_rpc_extension,pi_subagents_extension,cursor_extension,test_extensions_json,environment_json,recipe_sha256,created_at,updated_at FROM managed_launch_recipes WHERE agent_id=?`, agentID).Scan(&existing.PiExecutable, &existing.SessionRoot, &existing.Cwd, &existing.Provider, &existing.ModelID, &existing.MechaRPCExtension, &existing.PiSubagentsExtension, &existing.CursorExtension, &existingTestJSON, &existingEnvJSON, &existing.SHA256, &existing.CreatedAt, &existing.UpdatedAt)
+	err = s.db.QueryRowContext(ctx, `SELECT pi_executable,session_root,cwd,provider,model_id,mecha_rpc_extension,pi_subagents_extension,cursor_extension,antigravity_extension,test_extensions_json,environment_json,recipe_sha256,created_at,updated_at FROM managed_launch_recipes WHERE agent_id=?`, agentID).Scan(&existing.PiExecutable, &existing.SessionRoot, &existing.Cwd, &existing.Provider, &existing.ModelID, &existing.MechaRPCExtension, &existing.PiSubagentsExtension, &existing.CursorExtension, &existing.AntigravityExtension, &existingTestJSON, &existingEnvJSON, &existing.SHA256, &existing.CreatedAt, &existing.UpdatedAt)
 	if err == nil {
-		if existingTestJSON == string(testJSON) && existingEnvJSON == string(envJSON) && existing.PiExecutable == recipe.PiExecutable && existing.SessionRoot == recipe.SessionRoot && existing.Cwd == recipe.Cwd && existing.Provider == recipe.Provider && existing.ModelID == recipe.ModelID && existing.MechaRPCExtension == recipe.MechaRPCExtension && existing.PiSubagentsExtension == recipe.PiSubagentsExtension && existing.CursorExtension == recipe.CursorExtension && existing.SHA256 == recipe.SHA256 {
+		if existingTestJSON == string(testJSON) && existingEnvJSON == string(envJSON) && existing.PiExecutable == recipe.PiExecutable && existing.SessionRoot == recipe.SessionRoot && existing.Cwd == recipe.Cwd && existing.Provider == recipe.Provider && existing.ModelID == recipe.ModelID && existing.MechaRPCExtension == recipe.MechaRPCExtension && existing.PiSubagentsExtension == recipe.PiSubagentsExtension && existing.CursorExtension == recipe.CursorExtension && existing.AntigravityExtension == recipe.AntigravityExtension && existing.SHA256 == recipe.SHA256 {
 			return nil
 		}
 		return errors.New("managed launch recipe is immutable")
@@ -165,7 +169,7 @@ func (s *Store) putManagedLaunchRecipeTx(ctx context.Context, recipe ManagedLaun
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_launch_recipes(agent_id,pi_executable,session_root,cwd,provider,model_id,mecha_rpc_extension,pi_subagents_extension,cursor_extension,test_extensions_json,environment_json,recipe_sha256,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, agentID, recipe.PiExecutable, recipe.SessionRoot, recipe.Cwd, recipe.Provider, recipe.ModelID, recipe.MechaRPCExtension, recipe.PiSubagentsExtension, recipe.CursorExtension, string(testJSON), string(envJSON), recipe.SHA256, recipe.CreatedAt, recipe.UpdatedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_launch_recipes(agent_id,pi_executable,session_root,cwd,provider,model_id,mecha_rpc_extension,pi_subagents_extension,cursor_extension,antigravity_extension,test_extensions_json,environment_json,recipe_sha256,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, agentID, recipe.PiExecutable, recipe.SessionRoot, recipe.Cwd, recipe.Provider, recipe.ModelID, recipe.MechaRPCExtension, recipe.PiSubagentsExtension, recipe.CursorExtension, recipe.AntigravityExtension, string(testJSON), string(envJSON), recipe.SHA256, recipe.CreatedAt, recipe.UpdatedAt)
 	return err
 }
 
@@ -181,7 +185,7 @@ func (s *Store) ManagedLaunchRecipe(ctx context.Context, agentID string) (*Manag
 func loadManagedLaunchRecipeQuery(ctx context.Context, db *sql.DB, agentID string) (*ManagedLaunchRecipe, error) {
 	var recipe ManagedLaunchRecipe
 	var testJSON, envJSON string
-	err := db.QueryRowContext(ctx, `SELECT pi_executable,session_root,cwd,provider,model_id,mecha_rpc_extension,pi_subagents_extension,cursor_extension,test_extensions_json,environment_json,recipe_sha256,created_at,updated_at FROM managed_launch_recipes WHERE agent_id=?`, agentID).Scan(&recipe.PiExecutable, &recipe.SessionRoot, &recipe.Cwd, &recipe.Provider, &recipe.ModelID, &recipe.MechaRPCExtension, &recipe.PiSubagentsExtension, &recipe.CursorExtension, &testJSON, &envJSON, &recipe.SHA256, &recipe.CreatedAt, &recipe.UpdatedAt)
+	err := db.QueryRowContext(ctx, `SELECT pi_executable,session_root,cwd,provider,model_id,mecha_rpc_extension,pi_subagents_extension,cursor_extension,antigravity_extension,test_extensions_json,environment_json,recipe_sha256,created_at,updated_at FROM managed_launch_recipes WHERE agent_id=?`, agentID).Scan(&recipe.PiExecutable, &recipe.SessionRoot, &recipe.Cwd, &recipe.Provider, &recipe.ModelID, &recipe.MechaRPCExtension, &recipe.PiSubagentsExtension, &recipe.CursorExtension, &recipe.AntigravityExtension, &testJSON, &envJSON, &recipe.SHA256, &recipe.CreatedAt, &recipe.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

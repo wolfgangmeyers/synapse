@@ -63,8 +63,20 @@ type ManagedProviderSnapshot struct {
 
 const maxManagedProviderModels = 256
 
-var managedProviderNames = map[string]bool{"openai-codex": true, "google": true, "cursor": true}
-var managedProviderLabels = map[string]string{"openai-codex": "ChatGPT", "google": "Google", "cursor": "Cursor"}
+var managedProviderNames = map[string]bool{
+	"openai-codex":  true,
+	"google":        true,
+	"cursor":        true,
+	"google-vertex": true,
+	"antigravity":   true,
+}
+var managedProviderLabels = map[string]string{
+	"openai-codex":  "ChatGPT",
+	"google":        "Google",
+	"cursor":        "Cursor",
+	"google-vertex": "Google Vertex AI",
+	"antigravity":   "Google Antigravity",
+}
 
 func validManagedProvider(value string) bool { return managedProviderNames[value] }
 
@@ -570,8 +582,8 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 // canceled helper never calls this method, so the revision and catalog stay
 // unchanged together.
 func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []ManagedProviderStatus, models []ManagedProviderModel) (int64, error) {
-	if len(providers) != 3 {
-		return 0, errors.New("provider snapshot must contain exactly three providers")
+	if len(providers) != 5 {
+		return 0, errors.New("provider snapshot must contain exactly five providers")
 	}
 	seen := make(map[string]bool, len(providers))
 	authenticated := make(map[string]bool, len(providers))
@@ -582,7 +594,7 @@ func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []M
 		seen[provider.Provider] = true
 		authenticated[provider.Provider] = provider.Authenticated
 	}
-	for _, provider := range []string{"openai-codex", "google", "cursor"} {
+	for _, provider := range []string{"openai-codex", "google", "cursor", "google-vertex", "antigravity"} {
 		if !seen[provider] {
 			return 0, errors.New("provider snapshot is incomplete")
 		}
@@ -4541,6 +4553,11 @@ func loadManagedRuntimeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRe
 	return db.QueryRowContext(ctx, `SELECT runtime FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&agent.Runtime)
 }
 
+// loadManagedLaunchRecipeTx attaches the durable launch recipe to an agent
+// record if present. Pre-045 stores lack the table entirely, and pre-086
+// migration test fixtures lack the antigravity_extension column; both partial
+// historical states safely yield no recipe. Any missing column on a post-086
+// database, or any other schema corruption, must surface as an error.
 func loadManagedLaunchRecipeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
 	if agent == nil {
 		return nil
@@ -4548,6 +4565,16 @@ func loadManagedLaunchRecipeTx(ctx context.Context, db *sql.DB, agent *ManagedAg
 	recipe, err := loadManagedLaunchRecipeQuery(ctx, db, agent.AgentID)
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table")) {
 		return nil
+	}
+	if err != nil && strings.Contains(err.Error(), "no such column: antigravity_extension") {
+		var applied int
+		checkErr := db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE id='086_google_auth_methods'`).Scan(&applied)
+		if errors.Is(checkErr, sql.ErrNoRows) {
+			// Real pre-086 schema (migrations 045-085) lacks the column legitimately.
+			return nil
+		}
+		// On post-086 schemas (or if version check fails), do not suppress the error.
+		return err
 	}
 	if err != nil {
 		return err

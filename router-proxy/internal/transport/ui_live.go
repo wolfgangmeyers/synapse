@@ -274,7 +274,13 @@ func managedModelSummary(value map[string]any) string {
 	if !providerOK || !idOK || provider == "" || id == "" {
 		return "Selected model"
 	}
-	label := map[string]string{"openai-codex": "ChatGPT", "google": "Google", "cursor": "Cursor"}[provider]
+	label := map[string]string{
+		"openai-codex":  "ChatGPT",
+		"google":        "Google",
+		"cursor":        "Cursor",
+		"google-vertex": "Google Vertex AI",
+		"antigravity":   "Google Antigravity",
+	}[provider]
 	if label == "" {
 		label = "Selected model"
 	}

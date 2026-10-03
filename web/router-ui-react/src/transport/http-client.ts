@@ -7,7 +7,7 @@ import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
-import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
+import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
 export interface Capabilities extends Record<string, unknown> {}
@@ -25,8 +25,8 @@ export interface ManagedChildrenResponse extends ManagedChildrenProjection {}
 export interface ManagedHistoryResponse { view: "quiet" | "complete"; entries: ManagedHistoryEntry[]; next_before: number | null }
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
-export interface ProviderModel { provider: "openai-codex" | "google" | "cursor"; id: string; name: string; available: boolean }
-export interface ProviderStatus { provider: "openai-codex" | "google" | "cursor"; label: "ChatGPT" | "Google" | "Cursor"; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
+export interface ProviderModel { provider: ManagedProvider; id: string; name: string; available: boolean }
+export interface ProviderStatus { provider: ManagedProvider; label: string; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
 export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
 export interface RouterLogQuery { query: string; from: string | null; to: string | null; cursor: string | null }
@@ -255,7 +255,9 @@ function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || (breadcrumbItems !== undefined && (!Array.isArray(breadcrumbItems) || !breadcrumbItems.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); }))) || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
   return { path: root.path, parent: root.parent, ...(breadcrumbItems === undefined ? {} : { breadcrumbs: breadcrumbItems.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) }), directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
-function providerName(value: unknown): value is ProviderModel["provider"] { return value === "openai-codex" || value === "google" || value === "cursor"; }
+function providerName(value: unknown): value is ProviderModel["provider"] {
+  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex" || value === "antigravity";
+}
 function providerModel(value: unknown): value is ProviderModel {
   const item = recordValue(value);
   return !!item && providerName(item.provider) && nonEmptyString(item.id) && nonEmptyString(item.name) && typeof item.available === "boolean";
@@ -263,12 +265,18 @@ function providerModel(value: unknown): value is ProviderModel {
 function providerStatus(value: unknown): value is ProviderStatus {
   const item = recordValue(value);
   if (!item || !providerName(item.provider) || typeof item.authenticated !== "boolean" || (item.status !== "authenticated" && item.status !== "signed_out") || item.authenticated !== (item.status === "authenticated") || !isRouterUtcTimestamp(item.updated_at) || (Object.hasOwn(item, "account_label") && !nonEmptyString(item.account_label)) || (Object.hasOwn(item, "error") && !nonEmptyString(item.error))) return false;
-  const labels = { "openai-codex": "ChatGPT", google: "Google", cursor: "Cursor" } as const;
-  return item.label === labels[item.provider];
+  const labels: Record<ManagedProvider, readonly string[]> = {
+    "openai-codex": ["ChatGPT"],
+    google: ["Google"],
+    cursor: ["Cursor"],
+    "google-vertex": ["Google Vertex AI", "Vertex AI", "Google Cloud Vertex AI", "Vertex"],
+    antigravity: ["Google Antigravity", "Antigravity", "Google Account"],
+  };
+  return typeof item.label === "string" && (labels[item.provider]?.includes(item.label) ?? false);
 }
 function providerAuth(value: unknown): ProviderAuthResponse {
   const root = recordValue(value);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 3 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 3) throw invalidResponse("Router returned invalid provider state", value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 5 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 5) throw invalidResponse("Router returned invalid provider state", value);
   return { auth_revision: root.auth_revision, providers: root.providers };
 }
 function savedModel(value: unknown): { provider: string; id: string; name?: string } | null | undefined {

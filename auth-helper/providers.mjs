@@ -1,3 +1,8 @@
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import os from "node:os";
+import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { discoverModels } from "pi-cursor-sdk/dist/model-discovery.js";
 import { streamCursorLazy } from "pi-cursor-sdk/dist/cursor-provider-lazy.js";
@@ -8,6 +13,8 @@ const PROVIDERS = {
   "openai-codex": { label: "ChatGPT", authType: "oauth" },
   google: { label: "Google", authType: "api_key" },
   cursor: { label: "Cursor", authType: "api_key" },
+  "google-vertex": { label: "Google Vertex AI", authType: "api_key" },
+  antigravity: { label: "Google Antigravity", authType: "oauth" },
 };
 
 function modelSummary(model) {
@@ -19,18 +26,192 @@ function modelSummary(model) {
   };
 }
 
+export function resolveHostAdcPath() {
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GOOGLE_APPLICATION_CREDENTIALS.trim()) {
+    return path.resolve(process.env.GOOGLE_APPLICATION_CREDENTIALS.trim());
+  }
+  if (process.env.CLOUDSDK_CONFIG && process.env.CLOUDSDK_CONFIG.trim()) {
+    return path.resolve(process.env.CLOUDSDK_CONFIG.trim(), "application_default_credentials.json");
+  }
+  const hostHome = process.env.MECHA_HOST_HOME?.trim() || os.homedir();
+  return path.resolve(hostHome, ".config", "gcloud", "application_default_credentials.json");
+}
+
+export function resolveAntigravityExtensionPath() {
+  const envVal = process.env.MECHA_ANTIGRAVITY_EXTENSION?.trim();
+  if (!envVal) {
+    return null;
+  }
+  return path.resolve(envVal);
+}
+
+async function loadAntigravityModules(extensionPath) {
+  if (!extensionPath || !existsSync(extensionPath)) {
+    return null;
+  }
+
+  const dir = path.dirname(extensionPath);
+  const modelsPath = path.join(dir, "models", "index.ts");
+  const authPath = path.join(dir, "auth", "index.ts");
+  const streamPath = path.join(dir, "stream", "index.ts");
+
+  if (!existsSync(modelsPath) || !existsSync(authPath)) {
+    return null;
+  }
+
+  const loaderUrl = new URL("./core/extensions/jiti-static-loader.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+  const { createJiti } = await import(loaderUrl.href);
+
+  const piAiPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
+  const piAiCompatPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/compat"));
+  const piCodingPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+  const undiciPath = fileURLToPath(import.meta.resolve("undici"));
+
+  const jiti = createJiti(import.meta.url, {
+    alias: {
+      "@earendil-works/pi-ai": piAiPath,
+      "@earendil-works/pi-ai/compat": piAiCompatPath,
+      "@earendil-works/pi-coding-agent": piCodingPath,
+      undici: undiciPath,
+    },
+  });
+
+  const [modelsMod, authMod, streamMod] = await Promise.all([
+    jiti.import(modelsPath),
+    jiti.import(authPath),
+    jiti.import(streamPath).catch(() => null),
+  ]);
+
+  return { modelsMod, authMod, streamMod };
+}
+
 // Shared-store helper discovery must neither resolve nor refresh the ordinary
 // Pi Codex projection. Go supplies Codex status/catalog under its file lock.
 export function useRouterOwnedCodex(runtime) {
   const provider = runtime.getProvider("openai-codex");
   if (!provider) throw new Error("Codex provider is unavailable");
-  runtime.registerNativeProvider({ ...provider, auth: { apiKey: {
-    name: "Router-owned Codex", resolve: async () => undefined, check: async () => undefined,
-  } } });
+  runtime.registerNativeProvider({
+    ...provider,
+    auth: {
+      apiKey: {
+        name: "Router-owned Codex",
+        resolve: async () => undefined,
+        check: async () => undefined,
+      },
+    },
+  });
+}
+
+function registerGoogleProvider(runtime) {
+  const google = runtime.getProvider("google");
+  if (!google) return;
+
+  runtime.registerNativeProvider({
+    ...google,
+    auth: {
+      apiKey: {
+        name: "Gemini API key",
+        login: async (interaction) => {
+          interaction.signal?.throwIfAborted();
+          const rawKey = await interaction.prompt({
+            type: "secret",
+            message: "Enter Gemini API key",
+          });
+          interaction.signal?.throwIfAborted();
+          const key = typeof rawKey === "string" ? rawKey.trim() : "";
+          if (!key) {
+            throw new Error("Gemini API key cannot be empty");
+          }
+          return {
+            type: "api_key",
+            key,
+          };
+        },
+        resolve: google.auth?.apiKey?.resolve,
+      },
+    },
+  });
+}
+
+function registerVertexAdcProvider(runtime) {
+  const vertex = runtime.getProvider("google-vertex");
+  if (!vertex) return;
+
+  runtime.registerNativeProvider({
+    ...vertex,
+    auth: {
+      apiKey: {
+        name: "Google Cloud credentials",
+        login: async (interaction) => {
+          interaction.signal?.throwIfAborted();
+          const rawProject = await interaction.prompt({
+            type: "text",
+            message: "Enter Google Cloud Project ID",
+            placeholder: "my-gcp-project",
+          });
+          interaction.signal?.throwIfAborted();
+          const project = typeof rawProject === "string" ? rawProject.trim() : "";
+          if (!project) {
+            throw new Error("Google Cloud Project ID cannot be empty");
+          }
+          const locationInput = await interaction.prompt({
+            type: "text",
+            message: "Enter Google Cloud Region (default: us-central1)",
+            placeholder: "us-central1",
+          });
+          interaction.signal?.throwIfAborted();
+          const location = locationInput && locationInput.trim() ? locationInput.trim() : "us-central1";
+          const adcPath = resolveHostAdcPath();
+          try {
+            await fs.access(adcPath);
+          } catch {
+            throw new Error(
+              `Host Application Default Credentials not found at ${adcPath}. Run 'gcloud auth application-default login' on the host first.`,
+            );
+          }
+          return {
+            type: "api_key",
+            env: {
+              GOOGLE_CLOUD_PROJECT: project,
+              GOOGLE_CLOUD_LOCATION: location,
+              GOOGLE_APPLICATION_CREDENTIALS: adcPath,
+            },
+          };
+        },
+        resolve: vertex.auth?.apiKey?.resolve,
+      },
+    },
+  });
+}
+
+async function registerAntigravityProvider(runtime) {
+  const extensionPath = resolveAntigravityExtensionPath();
+  const agMods = await loadAntigravityModules(extensionPath);
+  if (!agMods?.modelsMod || !agMods?.authMod) {
+    return false;
+  }
+
+  const catalog = agMods.modelsMod.getCurrentAntigravityCatalog();
+  runtime.registerProvider("antigravity", {
+    name: "Google Antigravity",
+    baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+    api: "antigravity",
+    models: catalog.models,
+    oauth: {
+      name: "Google Antigravity",
+      login: agMods.authMod.loginAntigravity,
+      refreshToken: agMods.authMod.refreshAntigravityToken,
+      getApiKey: agMods.authMod.getApiKey,
+    },
+    ...(agMods.streamMod?.streamAntigravity ? { streamSimple: agMods.streamMod.streamAntigravity } : {}),
+  });
+  return true;
 }
 
 async function createRuntime({ authPath, signal, ownedCodex = false }) {
-  if (typeof authPath !== "string" || authPath.length === 0) throw new Error("ordinary Pi auth path is required");
+  if (typeof authPath !== "string" || authPath.length === 0) {
+    throw new Error("ordinary Pi auth path is required");
+  }
   const runtime = await ModelRuntime.create({
     authPath,
     modelsPath: null,
@@ -38,9 +219,13 @@ async function createRuntime({ authPath, signal, ownedCodex = false }) {
     allowModelNetwork: false,
     signal,
   });
+
   if (ownedCodex) useRouterOwnedCodex(runtime);
-  // The exact pinned SDK remains isolated to managed Pi/helper wiring. Its key
-  // is resolved from Pi's credential store, never copied into router state.
+  registerGoogleProvider(runtime);
+  registerVertexAdcProvider(runtime);
+  await registerAntigravityProvider(runtime);
+
+  // Pinned Cursor SDK registration
   runtime.registerProvider("cursor", {
     name: "Cursor",
     baseUrl: "https://cursor.com",
@@ -49,6 +234,7 @@ async function createRuntime({ authPath, signal, ownedCodex = false }) {
     models: [],
     streamSimple: streamCursorLazy,
   });
+
   return runtime;
 }
 
@@ -58,8 +244,6 @@ async function refreshCursorCatalog(runtime, signal) {
     const cursorAuth = await runtime.getAuth("cursor", { signal });
     cursorApiKey = typeof cursorAuth?.auth?.apiKey === "string" ? cursorAuth.auth.apiKey : undefined;
   } catch {
-    // A signed-out Cursor account has no dynamic models; the rest of the
-    // provider snapshot remains useful and no error detail leaves this helper.
     return;
   }
   if (!cursorApiKey) return;
@@ -76,25 +260,44 @@ async function refreshCursorCatalog(runtime, signal) {
 }
 
 async function snapshot(runtime, signal) {
-  // ModelRuntime snapshots credentials during refresh. Keep that refresh local:
-  // it validates the current auth file without contacting a provider.
+  // ModelRuntime snapshots credentials during refresh without contacting providers
   await runtime.refresh({ allowNetwork: false, signal });
   await refreshCursorCatalog(runtime, signal);
-  const statuses = Object.entries(PROVIDERS).map(([provider, config]) => {
-    const auth = runtime.getProviderAuthStatus(provider);
-    return {
-      provider,
-      label: config.label,
-      authenticated: auth.configured === true,
-      status: auth.configured === true ? "authenticated" : "signed_out",
-      ...(typeof auth.label === "string" && auth.label !== "" ? { account_label: auth.label.slice(0, 256) } : {}),
-    };
-  });
-  const authenticated = new Set(statuses.filter((status) => status.authenticated).map((status) => status.provider));
+
+  const statuses = await Promise.all(
+    Object.entries(PROVIDERS).map(async ([provider, config]) => {
+      const auth = runtime.getProviderAuthStatus(provider);
+      let accountLabel = typeof auth.label === "string" && auth.label !== "" ? auth.label.slice(0, 256) : undefined;
+      if (!accountLabel && auth.configured) {
+        try {
+          const cred = await runtime.credentials.read(provider);
+          if (cred?.email && typeof cred.email === "string") {
+            accountLabel = cred.email.slice(0, 256);
+          } else if (cred?.env?.GOOGLE_CLOUD_PROJECT && typeof cred.env.GOOGLE_CLOUD_PROJECT === "string") {
+            accountLabel = cred.env.GOOGLE_CLOUD_PROJECT.slice(0, 256);
+          }
+        } catch {
+          // ignore credential read error
+        }
+      }
+      return {
+        provider,
+        label: config.label,
+        authenticated: auth.configured === true,
+        status: auth.configured === true ? "authenticated" : "signed_out",
+        ...(accountLabel ? { account_label: accountLabel } : {}),
+      };
+    }),
+  );
+
+  const authenticated = new Set(
+    statuses.filter((status) => status.authenticated).map((status) => status.provider),
+  );
   const available = await runtime.getAvailable(undefined, { signal });
-  // Built-in static lists can exist even when a provider has no usable auth.
-  // They are not a launch catalog and must never make status look authenticated.
-  return { providers: statuses, models: projectCatalog(available.filter((model) => authenticated.has(model.provider)).map(modelSummary)).models };
+  return {
+    providers: statuses,
+    models: projectCatalog(available.filter((model) => authenticated.has(model.provider)).map(modelSummary)).models,
+  };
 }
 
 export async function discoverProviderSnapshot({ authPath, ownedCodex = false }) {
@@ -107,18 +310,54 @@ export async function discoverAvailableModels({ authPath }) {
   return projectCatalog((await discoverProviderSnapshot({ authPath })).models);
 }
 
-// executeProviderOperation accepts only one mapped provider. All interaction
-// callbacks are supplied by index.mjs, which turns them into bounded JSONL
-// prompts and waits for a single prompt-response record.
-export async function executeProviderOperation({ authPath, provider, operation, interaction, signal, ownedCodex = false }) {
+export async function executeProviderOperation({
+  authPath,
+  provider,
+  operation,
+  interaction,
+  signal,
+  ownedCodex = false,
+}) {
   const config = PROVIDERS[provider];
-  if (!config || (operation !== "login" && operation !== "logout")) throw new Error("unsupported provider operation");
-  if (ownedCodex && provider === "openai-codex") throw new Error("Codex auth belongs to the router");
+  if (!config || (operation !== "login" && operation !== "logout")) {
+    throw new Error("unsupported provider operation");
+  }
+  if (ownedCodex && provider === "openai-codex") {
+    throw new Error("Codex auth belongs to the router");
+  }
+
+  if (provider === "antigravity" && operation === "login") {
+    const extPath = resolveAntigravityExtensionPath();
+    if (!extPath) {
+      throw new Error("Antigravity extension is disabled or not configured (MECHA_ANTIGRAVITY_EXTENSION is unset)");
+    }
+    const agMods = await loadAntigravityModules(extPath);
+    if (!agMods?.modelsMod || !agMods?.authMod) {
+      throw new Error(`Antigravity extension not found or invalid at ${extPath}`);
+    }
+  }
+
   const runtime = await createRuntime({ authPath, signal, ownedCodex });
   if (operation === "logout") {
     await runtime.logout(provider, { signal });
   } else {
-    await runtime.login(provider, config.authType, interaction);
+    let authUrl;
+    const wrappedInteraction = {
+      ...interaction,
+      notify(notice) {
+        if (notice?.url && typeof notice.url === "string") {
+          authUrl = notice.url;
+        }
+        interaction?.notify?.(notice);
+      },
+      async prompt(prompt) {
+        return interaction.prompt({
+          ...prompt,
+          ...((prompt.url || authUrl) ? { url: prompt.url || authUrl } : {}),
+        });
+      },
+    };
+    await runtime.login(provider, config.authType, wrappedInteraction);
   }
   return snapshot(runtime, signal);
 }

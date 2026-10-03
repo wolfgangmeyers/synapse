@@ -427,7 +427,7 @@ func providerAuthActionPath(path string) string {
 }
 
 func managedProvider(value string) bool {
-	return value == "openai-codex" || value == "google" || value == "cursor"
+	return value == "openai-codex" || value == "google" || value == "cursor" || value == "google-vertex" || value == "antigravity"
 }
 
 func decodeManagedObject(req *http.Request, max int, requireJSON bool) (map[string]json.RawMessage, []byte, error) {

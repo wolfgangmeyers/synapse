@@ -42,6 +42,7 @@ func (m *Manager) managedLaunchRecipe(agent store.ManagedAgentRecord) (store.Man
 		MechaRPCExtension:    m.config.MechaRPCExtension,
 		PiSubagentsExtension: m.config.PiSubagentsExtension,
 		CursorExtension:      m.config.CursorExtension,
+		AntigravityExtension: m.config.AntigravityExtension,
 		TestOnlyExtensions:   append([]string(nil), m.config.TestOnlyExtensions...),
 		Environment:          stable,
 	}
@@ -761,7 +762,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return err
 	}
-	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionPath: filepath.Join(m.config.SessionRoot, sessionRelativePath), SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.TestOnlyEnvironment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionPath: filepath.Join(m.config.SessionRoot, sessionRelativePath), SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, AntigravityExtension: recipe.AntigravityExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.TestOnlyEnvironment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
 	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		code := "RECOVERY_TARGET_UNKNOWN"
