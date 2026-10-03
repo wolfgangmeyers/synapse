@@ -21,9 +21,12 @@ export interface ModelPickerProps {
   status?: string;
   onChange: (model: ModelSummary) => void;
   label?: string;
+  isEmbedded?: boolean;
 }
 
-export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, status, onChange, label = "Model" }: ModelPickerProps) {
+const ADMITTED_EMBEDDED_PROVIDERS = new Set(['openai-codex', 'google', 'cursor', 'google-vertex']);
+
+export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, status, onChange, label = "Model", isEmbedded }: ModelPickerProps) {
   const normalized = useMemo(() => normalizeModelSummaries(models), [models]);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -37,7 +40,8 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
-  const visible = normalized.filter((model) => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const pool = isEmbedded ? normalized.filter(m => ADMITTED_EMBEDDED_PROVIDERS.has(m.provider)) : normalized;
+  const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 10);
 
   useEffect(() => {
     if (!open) return;
