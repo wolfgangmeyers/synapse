@@ -85,6 +85,20 @@ async function waitForManagedAgentReady(router: FunctionalRouter, agentID: strin
   });
 }
 
+async function launchWithModel(router: FunctionalRouter, name: string, model?: { provider: string; id: string }, runtime?: "rpc" | "embedded"): Promise<{ status: number; body: JsonRecord }> {
+  const { response, body } = await jsonRequest(router, "/v1/managed-agents", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-request-id": requestIDs[requestIndex++] ?? requestIDs[0]! },
+    body: JSON.stringify({
+      name,
+      cwd: router.cwdRoot,
+      ...(model ? { model } : {}),
+      ...(runtime ? { runtime } : {}),
+    }),
+  });
+  return { status: response.status, body };
+}
+
 let router: FunctionalRouter | undefined;
 let historyObserver: UILiveClient | undefined;
 let regularPeer: Awaited<ReturnType<typeof connectFixturePeer>> | undefined;
@@ -355,4 +369,22 @@ describe("real managed router to React WebUI behavioral seam", () => {
     expect(list(restartAgents.body.agents)).toEqual([]);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Functional Retry (functional-retry)" })).not.toBeInTheDocument());
   }, 90_000);
+
+  it("accepts Google model launch requests with rpc runtime (HTTP 202) while rejecting embedded runtime with HTTP 422", async () => {
+    router = await startManagedGoRouter();
+    // 1. Google model with embedded runtime must be rejected with 422 by Go embedded admission fence
+    const embeddedAttempt = await launchWithModel(router, "google-embedded-fail", { provider: "google", id: "gemini-2.5-flash" }, "embedded");
+    expect(embeddedAttempt.status).toBe(422);
+
+    // 2. Google model with rpc runtime must be accepted with 202
+    const rpcAttempt = await launchWithModel(router, "google-rpc-success", { provider: "google", id: "gemini-2.5-flash" }, "rpc");
+    expect(rpcAttempt.status).toBe(202);
+    expect(rpcAttempt.body).toMatchObject({
+      operation_id: expect.any(String),
+      agent: expect.objectContaining({
+        agent_id: "google-rpc-success",
+        runtime: "rpc",
+      }),
+    });
+  }, 30_000);
 });

@@ -754,28 +754,106 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+
+	// Verify initial baseline snapshot contains all 5 default signed-out providers
+	initialSnapshot, err := durable.ManagedProviderSnapshot(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), initialSnapshot.AuthRevision)
+	require.Len(t, initialSnapshot.Providers, 5)
+	for _, expected := range []struct {
+		provider string
+		label    string
+	}{
+		{"antigravity", "Google Antigravity"},
+		{"cursor", "Cursor"},
+		{"google", "Google"},
+		{"google-vertex", "Google Vertex AI"},
+		{"openai-codex", "ChatGPT"},
+	} {
+		var found *ManagedProviderStatus
+		for i := range initialSnapshot.Providers {
+			if initialSnapshot.Providers[i].Provider == expected.provider {
+				found = &initialSnapshot.Providers[i]
+				break
+			}
+		}
+		require.NotNilf(t, found, "missing provider %s in initial baseline snapshot", expected.provider)
+		require.Equal(t, expected.label, found.Label)
+		require.False(t, found.Authenticated)
+		require.Equal(t, "signed_out", found.Status)
+	}
+
 	providers := []ManagedProviderStatus{
 		{Provider: "openai-codex", Label: "ChatGPT", Authenticated: true, Status: "authenticated"},
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: true, Status: "authenticated"},
+		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
+		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: true, Status: "authenticated", AccountLabel: "user@gmail.com"},
 	}
-	models := []ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}, {Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true}}
+	models := []ManagedProviderModel{
+		{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true},
+		{Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true},
+		{Provider: "antigravity", ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Available: true},
+	}
 	revision, err := durable.CommitManagedProviderSnapshot(ctx, providers, models)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), revision)
 	snapshot, err := durable.ManagedProviderSnapshot(ctx)
 	require.NoError(t, err)
 	require.Equal(t, revision, snapshot.AuthRevision)
-	require.Len(t, snapshot.Providers, 3)
+	require.Len(t, snapshot.Providers, 5)
 	require.ElementsMatch(t, models, snapshot.Models)
 
 	// Invalid input fails before the transaction, retaining the old catalog and
 	// revision rather than creating auth history or a partial provider state.
-	_, err = durable.CommitManagedProviderSnapshot(ctx, providers[:2], nil)
-	require.Error(t, err)
+	_, err = durable.CommitManagedProviderSnapshot(ctx, providers[:4], nil)
+	require.ErrorContains(t, err, "exactly five providers")
 	after, err := durable.ManagedProviderSnapshot(ctx)
 	require.NoError(t, err)
 	require.Equal(t, snapshot, after)
+
+	// Invalid provider name rejected
+	badProvider := make([]ManagedProviderStatus, len(providers))
+	copy(badProvider, providers)
+	badProvider[0] = ManagedProviderStatus{Provider: "unknown", Label: "Unknown", Authenticated: false, Status: "signed_out"}
+	_, err = durable.CommitManagedProviderSnapshot(ctx, badProvider, nil)
+	require.ErrorContains(t, err, "provider status is invalid")
+
+	// Invalid label rejected
+	badLabel := make([]ManagedProviderStatus, len(providers))
+	copy(badLabel, providers)
+	badLabel[3] = ManagedProviderStatus{Provider: "google-vertex", Label: "Wrong Label", Authenticated: false, Status: "signed_out"}
+	_, err = durable.CommitManagedProviderSnapshot(ctx, badLabel, nil)
+	require.ErrorContains(t, err, "provider status is invalid")
+
+	// Duplicate provider rejected
+	dupProvider := make([]ManagedProviderStatus, len(providers))
+	copy(dupProvider, providers)
+	dupProvider[4] = dupProvider[0]
+	_, err = durable.CommitManagedProviderSnapshot(ctx, dupProvider, nil)
+	require.ErrorContains(t, err, "provider status is invalid")
+
+	// Status and Authenticated mismatch rejected
+	mismatch := make([]ManagedProviderStatus, len(providers))
+	copy(mismatch, providers)
+	mismatch[0].Authenticated = false // status is "authenticated"
+	_, err = durable.CommitManagedProviderSnapshot(ctx, mismatch, nil)
+	require.ErrorContains(t, err, "provider status is invalid")
+
+	// Unauthenticated provider model rejected
+	unauthModel := []ManagedProviderModel{
+		{Provider: "google", ID: "gemini-flash", Name: "Gemini Flash", Available: true},
+	}
+	_, err = durable.CommitManagedProviderSnapshot(ctx, providers, unauthModel)
+	require.ErrorContains(t, err, "provider model is invalid")
+
+	// Duplicate model key rejected
+	dupModels := []ManagedProviderModel{
+		{Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true},
+		{Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true},
+	}
+	_, err = durable.CommitManagedProviderSnapshot(ctx, providers, dupModels)
+	require.ErrorContains(t, err, "provider model is invalid")
 
 	var secretRows int
 	require.NoError(t, durable.db.QueryRow(`SELECT count(*) FROM pragma_table_info('managed_provider_status') WHERE lower(name) LIKE '%token%' OR lower(name) LIKE '%secret%' OR lower(name) LIKE '%credential%'`).Scan(&secretRows))

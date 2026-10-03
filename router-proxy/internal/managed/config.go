@@ -50,6 +50,9 @@ type Config struct {
 	// CursorExtension is the optional fixed pi-cursor-sdk extension loaded only by
 	// managed Pi when available. It is never available to ordinary/tmux Pi sessions.
 	CursorExtension string
+	// AntigravityExtension is the optional fixed pi-antigravity extension loaded
+	// by managed Pi when available.
+	AntigravityExtension string
 	// RuntimeRoot is the checked project root that owns the thin extension,
 	// generated manifest, helper, and optional Cursor extension.
 	RuntimeRoot string
@@ -170,6 +173,11 @@ func ValidateManagedLaunchConfig(config Config) error {
 				name string
 				path string
 			}{"Cursor extension", copy.CursorExtension})
+		}
+		if copy.AntigravityExtension != "" {
+			if err := ValidateContainedRegularFile(copy.AntigravityExtension, "", "Antigravity extension"); err != nil {
+				return err
+			}
 		}
 		for _, input := range requiredFiles {
 			if err := ValidateContainedRegularFile(input.path, copy.RuntimeRoot, input.name); err != nil {
@@ -351,6 +359,33 @@ func ChildEnvironmentFor(c Config, runtimeGeneration string, sessionEpoch int64)
 	temp := filepath.Join(home, "tmp")
 	piAgentDir, _ := filepath.Abs(c.PiAgentDir)
 	environment := []string{"HOME=" + home, "PATH=" + managedChildPath(c.PiExecutable), "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + piAgentDir, "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1", "MECHA_ROUTER_URL=" + c.RouterURL}
+	if hostHome, err := os.UserHomeDir(); err == nil && hostHome != "" {
+		environment = append(environment, "MECHA_HOST_HOME="+hostHome)
+	} else if hostHome := os.Getenv("HOME"); hostHome != "" {
+		environment = append(environment, "MECHA_HOST_HOME="+hostHome)
+	}
+	if gCreds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); gCreds != "" {
+		if absCreds, err := filepath.Abs(gCreds); err == nil && absCreds != "" {
+			environment = append(environment, "GOOGLE_APPLICATION_CREDENTIALS="+absCreds)
+		} else {
+			environment = append(environment, "GOOGLE_APPLICATION_CREDENTIALS="+gCreds)
+		}
+	} else if os.Getenv("CLOUDSDK_CONFIG") == "" {
+		if hostHome := os.Getenv("MECHA_HOST_HOME"); hostHome != "" {
+			candidate := filepath.Join(hostHome, ".config", "gcloud", "application_default_credentials.json")
+			if _, err := os.Stat(candidate); err == nil {
+				environment = append(environment, "GOOGLE_APPLICATION_CREDENTIALS="+candidate)
+			}
+		} else if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+			candidate := filepath.Join(userHome, ".config", "gcloud", "application_default_credentials.json")
+			if _, err := os.Stat(candidate); err == nil {
+				environment = append(environment, "GOOGLE_APPLICATION_CREDENTIALS="+candidate)
+			}
+		}
+	}
+	if cloudSDK := os.Getenv("CLOUDSDK_CONFIG"); cloudSDK != "" {
+		environment = append(environment, "CLOUDSDK_CONFIG="+cloudSDK)
+	}
 	if runtimeGeneration != "" {
 		environment = append(environment, "MECHA_RPC_RUNTIME_GENERATION="+runtimeGeneration, fmt.Sprintf("MECHA_RPC_SESSION_EPOCH=%d", sessionEpoch))
 	}

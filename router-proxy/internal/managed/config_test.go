@@ -3,6 +3,7 @@ package managed
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,6 +54,14 @@ func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
 	require.NoError(t, ValidateManagedLaunchConfig(config))
 
 	config.CursorExtension = filepath.Join(paths["work"], "nonexistent.js")
+	require.Error(t, ValidateManagedLaunchConfig(config))
+
+	// AntigravityExtension is optional.
+	config, paths = managedLaunchConfigFixture(t)
+	config.AntigravityExtension = ""
+	require.NoError(t, ValidateManagedLaunchConfig(config))
+
+	config.AntigravityExtension = filepath.Join(paths["work"], "nonexistent-ag.ts")
 	require.Error(t, ValidateManagedLaunchConfig(config))
 }
 
@@ -126,3 +135,166 @@ func TestManagedLaunchConfigRejectsUnsafeCorePaths(t *testing.T) {
 	require.NoError(t, os.Symlink(escaped, link))
 	require.Error(t, ValidateContainedRegularFile(link, paths["work"], "extension"))
 }
+
+func TestChildEnvironmentForDoesNotInjectDefaultGACOverExplicitCloudSDK(t *testing.T) {
+	config, _ := managedLaunchConfigFixture(t)
+
+	fakeHostHome := t.TempDir()
+	defaultGcloudDir := filepath.Join(fakeHostHome, ".config", "gcloud")
+	require.NoError(t, os.MkdirAll(defaultGcloudDir, 0o700))
+	defaultADC := filepath.Join(defaultGcloudDir, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(defaultADC, []byte(`{"type":"authorized_user","client_id":"host-default"}`), 0o600))
+
+	customCloudSDK := t.TempDir()
+	customADC := filepath.Join(customCloudSDK, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(customADC, []byte(`{"type":"authorized_user","client_id":"custom-sdk"}`), 0o600))
+
+	t.Setenv("HOME", fakeHostHome)
+	t.Setenv("MECHA_HOST_HOME", fakeHostHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("CLOUDSDK_CONFIG", customCloudSDK)
+
+	env := ChildEnvironmentFor(config, "", 0)
+
+	var childGAC string
+	var childCloudSDK string
+	for _, entry := range env {
+		if val, found := strings.CutPrefix(entry, "GOOGLE_APPLICATION_CREDENTIALS="); found {
+			childGAC = val
+		}
+		if val, found := strings.CutPrefix(entry, "CLOUDSDK_CONFIG="); found {
+			childCloudSDK = val
+		}
+	}
+
+	require.Equal(t, customCloudSDK, childCloudSDK)
+	require.NotEqual(t, defaultADC, childGAC, "host default GAC must not defeat explicit CLOUDSDK_CONFIG")
+	require.Empty(t, childGAC, "no default GAC should be injected when explicit CLOUDSDK_CONFIG is set without GAC")
+}
+
+func TestChildEnvironmentForExplicitGACWinsOverCloudSDKAndDefault(t *testing.T) {
+	config, _ := managedLaunchConfigFixture(t)
+
+	fakeHostHome := t.TempDir()
+	defaultGcloudDir := filepath.Join(fakeHostHome, ".config", "gcloud")
+	require.NoError(t, os.MkdirAll(defaultGcloudDir, 0o700))
+	defaultADC := filepath.Join(defaultGcloudDir, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(defaultADC, []byte(`{"type":"authorized_user","client_id":"host-default"}`), 0o600))
+
+	customCloudSDK := t.TempDir()
+	customADC := filepath.Join(customCloudSDK, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(customADC, []byte(`{"type":"authorized_user","client_id":"custom-sdk"}`), 0o600))
+
+	gacDir := t.TempDir()
+	explicitGAC := filepath.Join(gacDir, "custom-gac.json")
+	require.NoError(t, os.WriteFile(explicitGAC, []byte(`{"type":"service_account","client_email":"explicit@test"}`), 0o600))
+
+	t.Setenv("HOME", fakeHostHome)
+	t.Setenv("MECHA_HOST_HOME", fakeHostHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", explicitGAC)
+	t.Setenv("CLOUDSDK_CONFIG", customCloudSDK)
+
+	env := ChildEnvironmentFor(config, "", 0)
+
+	var childGAC string
+	var childCloudSDK string
+	for _, entry := range env {
+		if val, found := strings.CutPrefix(entry, "GOOGLE_APPLICATION_CREDENTIALS="); found {
+			childGAC = val
+		}
+		if val, found := strings.CutPrefix(entry, "CLOUDSDK_CONFIG="); found {
+			childCloudSDK = val
+		}
+	}
+
+	absExplicitGAC, err := filepath.Abs(explicitGAC)
+	require.NoError(t, err)
+	require.Equal(t, absExplicitGAC, childGAC, "explicit GAC must take precedence over CloudSDK and default ADC")
+	require.Equal(t, customCloudSDK, childCloudSDK)
+}
+
+func TestChildEnvironmentForFallbackToDefaultWhenCloudSDKUnset(t *testing.T) {
+	config, _ := managedLaunchConfigFixture(t)
+
+	fakeHostHome := t.TempDir()
+	defaultGcloudDir := filepath.Join(fakeHostHome, ".config", "gcloud")
+	require.NoError(t, os.MkdirAll(defaultGcloudDir, 0o700))
+	defaultADC := filepath.Join(defaultGcloudDir, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(defaultADC, []byte(`{"type":"authorized_user","client_id":"host-default"}`), 0o600))
+
+	t.Setenv("HOME", fakeHostHome)
+	t.Setenv("MECHA_HOST_HOME", fakeHostHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("CLOUDSDK_CONFIG", "")
+
+	env := ChildEnvironmentFor(config, "", 0)
+
+	var childGAC string
+	var childCloudSDK string
+	for _, entry := range env {
+		if val, found := strings.CutPrefix(entry, "GOOGLE_APPLICATION_CREDENTIALS="); found {
+			childGAC = val
+		}
+		if val, found := strings.CutPrefix(entry, "CLOUDSDK_CONFIG="); found {
+			childCloudSDK = val
+		}
+	}
+
+	require.Equal(t, defaultADC, childGAC, "when GAC and CLOUDSDK_CONFIG unset, fallback to host default ADC")
+	require.Empty(t, childCloudSDK)
+}
+
+func TestChildEnvironmentUsesChildEnvironmentFor(t *testing.T) {
+	config, paths := managedLaunchConfigFixture(t)
+	env := ChildEnvironment(config)
+
+	var hasHome, hasSessionRoot bool
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "HOME=") {
+			hasHome = true
+		}
+		if entry == "MECHA_MANAGED_SESSION_ROOT="+paths["session"] {
+			hasSessionRoot = true
+		}
+	}
+	require.True(t, hasHome)
+	require.True(t, hasSessionRoot)
+}
+
+func TestChildEnvironmentForMissingCloudSDKDirDoesNotFallbackToDefaultADC(t *testing.T) {
+	config, _ := managedLaunchConfigFixture(t)
+
+	fakeHostHome := t.TempDir()
+	defaultGcloudDir := filepath.Join(fakeHostHome, ".config", "gcloud")
+	require.NoError(t, os.MkdirAll(defaultGcloudDir, 0o700))
+	defaultADC := filepath.Join(defaultGcloudDir, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(defaultADC, []byte(`{"type":"authorized_user","client_id":"host-default"}`), 0o600))
+
+	missingCloudSDK := filepath.Join(t.TempDir(), "nonexistent-cloudsdk-dir")
+
+	t.Setenv("HOME", fakeHostHome)
+	t.Setenv("MECHA_HOST_HOME", fakeHostHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("CLOUDSDK_CONFIG", missingCloudSDK)
+
+	env := ChildEnvironmentFor(config, "", 0)
+
+	var childGAC string
+	var childCloudSDK string
+	for _, entry := range env {
+		if val, found := strings.CutPrefix(entry, "GOOGLE_APPLICATION_CREDENTIALS="); found {
+			childGAC = val
+		}
+		if val, found := strings.CutPrefix(entry, "CLOUDSDK_CONFIG="); found {
+			childCloudSDK = val
+		}
+	}
+
+	require.Equal(t, missingCloudSDK, childCloudSDK, "exact CLOUDSDK_CONFIG must be forwarded even when directory is missing")
+	require.NotEqual(t, defaultADC, childGAC, "broken/missing CLOUDSDK_CONFIG must not quietly fall back to host default ADC")
+	require.Empty(t, childGAC, "no GAC should be injected when explicit CLOUDSDK_CONFIG is set")
+}
+
+
+
+

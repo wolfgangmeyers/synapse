@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,20 @@ func (h fixedAuthHelper) environment() []string {
 	if h.ownedCodex {
 		environment = append(environment, "MECHA_ROUTER_OWNS_CODEX=true")
 	}
+	if hostHome, err := os.UserHomeDir(); err == nil && hostHome != "" {
+		environment = append(environment, "MECHA_HOST_HOME="+hostHome)
+	} else if hostHome := os.Getenv("HOME"); hostHome != "" {
+		environment = append(environment, "MECHA_HOST_HOME="+hostHome)
+	}
+	if gCreds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); gCreds != "" {
+		environment = append(environment, "GOOGLE_APPLICATION_CREDENTIALS="+gCreds)
+	}
+	if cloudSDK := os.Getenv("CLOUDSDK_CONFIG"); cloudSDK != "" {
+		environment = append(environment, "CLOUDSDK_CONFIG="+cloudSDK)
+	}
+	if h.config.AntigravityExtension != "" {
+		environment = append(environment, "MECHA_ANTIGRAVITY_EXTENSION="+h.config.AntigravityExtension)
+	}
 	return environment
 }
 
@@ -275,18 +290,36 @@ type helperWirePrompt struct {
 	URL         string `json:"url"`
 }
 
-// safeProviderPromptURL admits only the ChatGPT OAuth endpoint needed to
-// complete sign-in. Every other helper-owned string remains untrusted display
-// data, so an injected child cannot turn the router UI into an open redirect.
+// safeProviderPromptURL admits only the authorized OAuth endpoints needed to
+// complete sign-in (auth.openai.com for openai-codex, and
+// accounts.google.com/o/oauth2/v2/auth for antigravity). Every other helper-owned
+// string remains untrusted display data, so an injected child cannot turn the
+// router UI into an open redirect.
 func safeProviderPromptURL(provider, raw string) string {
-	if provider != "openai-codex" || raw == "" || len(raw) > 2048 {
+	if raw == "" || len(raw) > 2048 {
 		return ""
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "auth.openai.com") || parsed.Port() != "" || parsed.User != nil || parsed.Fragment != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Port() != "" || parsed.User != nil || parsed.Fragment != "" {
 		return ""
 	}
-	return parsed.String()
+	switch provider {
+	case "openai-codex":
+		if !strings.EqualFold(parsed.Hostname(), "auth.openai.com") {
+			return ""
+		}
+		return parsed.String()
+	case "antigravity":
+		if !strings.EqualFold(parsed.Hostname(), "accounts.google.com") {
+			return ""
+		}
+		if parsed.Path != "/o/oauth2/v2/auth" {
+			return ""
+		}
+		return parsed.String()
+	default:
+		return ""
+	}
 }
 
 func decodeHelperEvent(raw []byte) (managed.ProviderAuthEvent, bool) {

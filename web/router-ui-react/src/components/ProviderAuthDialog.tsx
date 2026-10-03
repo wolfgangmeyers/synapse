@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import type { ProviderAuthPromptFrame } from "../protocol/types";
-import type { DefaultModelResponse, ProviderAuthResponse, ModelsResponse, RouterHttpClient } from "../transport/http-client";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import type { ManagedProvider, ProviderAuthPromptFrame } from "../protocol/types";
+import type { DefaultModelResponse, ProviderAuthResponse, ProviderStatus, ModelsResponse, RouterHttpClient } from "../transport/http-client";
 import { DialogShell } from "./DialogShell";
 
 export type ProviderAuthClient = Pick<
@@ -17,20 +17,71 @@ export interface ProviderAuthDialogProps {
   onPromptHandled: () => void;
 }
 
-const providerLabels: Record<"openai-codex" | "google" | "cursor", string> = {
+export type GoogleAuthMethod = "api_key" | "vertex_adc" | "antigravity";
+
+const googleMethodToProvider: Record<GoogleAuthMethod, ManagedProvider> = {
+  api_key: "google",
+  vertex_adc: "google-vertex",
+  antigravity: "antigravity",
+};
+
+const providerLabels: Record<ManagedProvider, string> = {
   "openai-codex": "ChatGPT",
   google: "Google",
   cursor: "Cursor",
+  "google-vertex": "Google Vertex AI",
+  antigravity: "Google Antigravity",
 };
+
+function isGoogleAuthMethod(value: string): value is GoogleAuthMethod {
+  return value === "api_key" || value === "vertex_adc" || value === "antigravity";
+}
+
+function computeInitialGoogleMethod(providers?: ProviderStatus[]): GoogleAuthMethod {
+  if (!providers) return "api_key";
+  const google = providers.find((p) => p.provider === "google");
+  if (google?.authenticated) return "api_key";
+  const vertex = providers.find((p) => p.provider === "google-vertex");
+  if (vertex?.authenticated) return "vertex_adc";
+  const ag = providers.find((p) => p.provider === "antigravity");
+  if (ag?.authenticated) return "antigravity";
+  return "api_key";
+}
+
+function getInitialPromptValue(prompt?: ProviderAuthPromptFrame): string {
+  if (prompt?.provider === "google-vertex" && prompt.prompt.placeholder === "us-central1") {
+    return "us-central1";
+  }
+  return "";
+}
 
 export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClose, onPromptHandled }: ProviderAuthDialogProps) {
   const [auth, setAuth] = useState<ProviderAuthResponse>();
   const [catalog, setCatalog] = useState<ModelsResponse>();
   const [status, setStatus] = useState("");
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(() => getInitialPromptValue(prompt));
   const [codeCopied, setCodeCopied] = useState(false);
+  const [userSelectedGoogleMethod, setUserSelectedGoogleMethod] = useState<GoogleAuthMethod | null>(null);
   const promptInputRef = useRef<HTMLInputElement>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const selectedGoogleMethod: GoogleAuthMethod =
+    userSelectedGoogleMethod ?? computeInitialGoogleMethod(auth?.providers);
+  const activeGoogleProvider = googleMethodToProvider[selectedGoogleMethod];
+  const activeGoogleStatus = auth?.providers.find((p) => p.provider === activeGoogleProvider);
+  const isGoogleConnected = Boolean(activeGoogleStatus?.authenticated);
+
+  const googleStatusText = useMemo(() => {
+    if (!isGoogleConnected) return "Not connected";
+    if (selectedGoogleMethod === "vertex_adc") {
+      return activeGoogleStatus?.account_label
+        ? `Connected (project: ${activeGoogleStatus.account_label})`
+        : "Connected";
+    }
+    return activeGoogleStatus?.account_label
+      ? `Connected (${activeGoogleStatus.account_label})`
+      : "Connected";
+  }, [isGoogleConnected, selectedGoogleMethod, activeGoogleStatus?.account_label]);
   // Tracks whether we have observed the prompt's provider as not-authenticated at
   // least once since the prompt arrived. Prevents auto-dismissing when the dialog
   // mounts into an already-authenticated state (e.g. test fixtures, stale prompt).
@@ -48,9 +99,12 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   }, [open, client, refreshKey]);
   useEffect(() => {
     // A newly issued prompt must never inherit input from an earlier prompt.
-    setValue("");
+    // However, when a Vertex AI ADC Region prompt arrives with default placeholder "us-central1",
+    // initialize value to "us-central1" so the user can submit the approved default without typing.
+    // Example project placeholders (e.g. "my-project-id") and secrets/passwords remain blank.
+    setValue(getInitialPromptValue(prompt));
     seenUnauthenticated.current = false;
-  }, [prompt?.operation_id, prompt?.prompt.id]);
+  }, [prompt?.operation_id, prompt?.prompt.id, prompt?.provider, prompt?.prompt.placeholder]);
   useEffect(() => {
     if (!open || !prompt) return;
     // manual_code prompts have no response input — nothing to focus.
@@ -74,7 +128,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       onPromptHandled?.();
     }
   }, [auth, prompt, onPromptHandled]);
-  const begin = async (provider: "openai-codex" | "google" | "cursor", action: "login" | "logout"): Promise<void> => {
+  const begin = async (provider: ManagedProvider, action: "login" | "logout"): Promise<void> => {
     setStatus(action === "login" ? `Starting ${providerLabels[provider]} sign-in…` : `Signing out of ${providerLabels[provider]}…`);
     try { await client.startProviderAuth(provider, action); await refresh(); setStatus("Waiting for provider sign-in to finish."); }
     catch { setStatus("Provider request could not be started."); }
@@ -144,17 +198,107 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         );
       })() : <p>{prompt.prompt.message}</p>}
       {prompt.prompt.url ? <a href={prompt.prompt.url} target="_blank" rel="noopener noreferrer">Open {providerLabels[prompt.provider]} sign-in page</a> : null}
-      {prompt.prompt.kind !== "manual_code" && (
-        <label>{prompt.provider === "google" ? "Google API key" : prompt.prompt.kind === "secret" ? "API key" : "Response"}<input ref={promptInputRef} type={prompt.provider === "google" || prompt.prompt.kind === "secret" ? "password" : "text"} value={value} placeholder={prompt.prompt.placeholder} onChange={(event) => setValue(event.currentTarget.value)} autoComplete="off" /></label>
-      )}
+      {prompt.prompt.kind !== "manual_code" && (() => {
+        const isSecret = prompt.provider === "google" || prompt.prompt.kind === "secret";
+        const promptLabel = prompt.provider === "google"
+          ? "Google API key"
+          : (prompt.provider === "google-vertex" || prompt.provider === "antigravity" || prompt.prompt.kind === "text")
+            ? (prompt.prompt.message || "Response")
+            : isSecret
+              ? "API key"
+              : (prompt.prompt.message || "Response");
+        return (
+          <label>
+            {promptLabel}
+            <input
+              ref={promptInputRef}
+              type={isSecret ? "password" : "text"}
+              value={value}
+              placeholder={prompt.prompt.placeholder}
+              onChange={(event) => setValue(event.currentTarget.value)}
+              autoComplete="off"
+            />
+          </label>
+        );
+      })()}
       <div className="provider-auth-actions"><button type="button" className="ghost" onClick={handleCancelPrompt}>Cancel</button>{prompt.prompt.kind !== "manual_code" && <button type="button" onClick={() => void submitPrompt()}>Continue</button>}</div>
     </section> : null}
     <section className="provider-auth-section" aria-labelledby="provider-auth-providers-title">
       <div className="provider-auth-section-heading"><h3 id="provider-auth-providers-title">Providers</h3><p>Connect the providers managed agents can use.</p></div>
-      {(auth?.providers ?? []).map((provider) => <div className="provider-auth-row" key={provider.provider}>
-        <div className="provider-auth-provider"><strong>{provider.label}</strong><p className="provider-auth-connection"><span className={`status-dot${provider.authenticated ? " connected" : ""}`} aria-hidden="true" />{provider.authenticated ? "Connected" : "Not connected"}</p></div>
-        <button type="button" className="secondary" onClick={() => void begin(provider.provider, provider.authenticated ? "logout" : "login")}>{provider.authenticated ? "Sign out" : "Connect"}</button>
-      </div>)}
+      {(() => {
+        const codex = auth?.providers.find((p) => p.provider === "openai-codex");
+        const cursor = auth?.providers.find((p) => p.provider === "cursor");
+        return (
+          <>
+            {codex && (
+              <div className="provider-auth-row" key="openai-codex">
+                <div className="provider-auth-provider">
+                  <strong>{codex.label}</strong>
+                  <p className="provider-auth-connection">
+                    <span className={`status-dot${codex.authenticated ? " connected" : ""}`} aria-hidden="true" />
+                    {codex.authenticated ? "Connected" : "Not connected"}
+                  </p>
+                </div>
+                <button type="button" className="secondary" onClick={() => void begin("openai-codex", codex.authenticated ? "logout" : "login")}>
+                  {codex.authenticated ? "Sign out" : "Connect"}
+                </button>
+              </div>
+            )}
+            <div className="provider-auth-row provider-auth-row-google" key="google-unified">
+              <div className="provider-auth-provider">
+                <strong>Google</strong>
+                <label className="provider-auth-method-label">
+                  <span className="visually-hidden">Google authentication method</span>
+                  <select
+                    aria-label="Google authentication method"
+                    value={selectedGoogleMethod}
+                    onChange={(event) => {
+                      const next = event.currentTarget.value;
+                      if (isGoogleAuthMethod(next)) {
+                        setUserSelectedGoogleMethod(next);
+                      }
+                    }}
+                  >
+                    <option value="api_key">API key</option>
+                    <option value="vertex_adc">Vertex AI ADC</option>
+                    <option value="antigravity">Google Antigravity</option>
+                  </select>
+                </label>
+                <p className="provider-auth-connection">
+                  <span className={`status-dot${isGoogleConnected ? " connected" : ""}`} aria-hidden="true" />
+                  {googleStatusText}
+                </p>
+                {selectedGoogleMethod === "vertex_adc" && (
+                  <p className="provider-auth-guidance">
+                    <small>Requires host credentials. Run <code>gcloud auth application-default login</code> on the host.</small>
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void begin(activeGoogleProvider, isGoogleConnected ? "logout" : "login")}
+              >
+                {isGoogleConnected ? "Sign out" : "Connect"}
+              </button>
+            </div>
+            {cursor && (
+              <div className="provider-auth-row" key="cursor">
+                <div className="provider-auth-provider">
+                  <strong>{cursor.label}</strong>
+                  <p className="provider-auth-connection">
+                    <span className={`status-dot${cursor.authenticated ? " connected" : ""}`} aria-hidden="true" />
+                    {cursor.authenticated ? "Connected" : "Not connected"}
+                  </p>
+                </div>
+                <button type="button" className="secondary" onClick={() => void begin("cursor", cursor.authenticated ? "logout" : "login")}>
+                  {cursor.authenticated ? "Sign out" : "Connect"}
+                </button>
+              </div>
+            )}
+          </>
+        );
+      })()}
     </section>
     <section className="provider-auth-section" aria-labelledby="provider-default-model-title"><div className="provider-auth-section-heading"><h3 id="provider-default-model-title">Default model</h3><p>New managed agents use this model when you do not choose one.</p></div><select aria-label="Default model" value={catalog?.default_model ? `${catalog.default_model.provider}:${catalog.default_model.id}` : ""} onChange={(event) => { const selected = event.currentTarget.value; if (selected === "") { void setDefault(null); return; } const [provider, ...id] = selected.split(":"); if (provider !== undefined) void setDefault({ provider, id: id.join(":") }); }}>
       <option value="">Use ChatGPT default</option>

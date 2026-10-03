@@ -65,6 +65,7 @@ import type {
   ManagedChild,
   ManagedChildrenProjection,
   ManagedHistoryEntry,
+  ManagedProvider,
   JsonValue,
 } from "./types";
 
@@ -226,7 +227,9 @@ export function isManagedChildrenProjection(value: unknown): value is ManagedChi
   return isExactRecord(value, ["agent_id", "source", "lifecycle_version", "recovery_state", "children"]) && isAgentId(value.agent_id) && value.source === "router-managed" && isSafeInteger(value.lifecycle_version, 0) && (value.recovery_state === "current" || value.recovery_state === "reconstructing") && Array.isArray(value.children) && value.children.length <= 999 && value.children.every(isManagedChild);
 }
 
-function isProviderName(value: unknown): value is "openai-codex" | "google" | "cursor" { return value === "openai-codex" || value === "google" || value === "cursor"; }
+export function isProviderName(value: unknown): value is ManagedProvider {
+  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex" || value === "antigravity";
+}
 function isSafeProviderURL(value: unknown): boolean {
   if (!isSafeString(value, 1, 2048)) return false;
   try {

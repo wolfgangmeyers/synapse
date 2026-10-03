@@ -445,6 +445,19 @@ func managedFunctionalRequest(t *testing.T, method, url, requestID string, body 
 }
 
 func TestManagedLaunchBehavioralFunctional(t *testing.T) {
+	syntheticHostHome := t.TempDir()
+	t.Setenv("HOME", syntheticHostHome)
+	t.Setenv("MECHA_HOST_HOME", syntheticHostHome)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("CLOUDSDK_CONFIG", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("GCLOUD_PROJECT", "")
+	t.Setenv("GOOGLE_CLOUD_REGION", "")
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("VERTEX_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
 	fixture := newManagedFunctionalFixture(t)
 	defer func() {
 		if t.Failed() {
@@ -469,19 +482,33 @@ func TestManagedLaunchBehavioralFunctional(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, fixture.piLauncherTarget, resolvedPiLauncher)
 	require.NotEqual(t, fixture.piRuntimeDir, filepath.Dir(resolvedPiLauncher))
-	for key, value := range map[string]string{"HOME": fixture.home, "MECHA_MANAGED_SESSION_ROOT": fixture.session, "MECHA_ROUTER_URL": fixture.serverURL} {
+	for key, value := range map[string]string{
+		"HOME":                       fixture.home,
+		"MECHA_MANAGED_SESSION_ROOT": fixture.session,
+		"MECHA_ROUTER_URL":           fixture.serverURL,
+		"MECHA_HOST_HOME":            syntheticHostHome,
+	} {
 		require.Equal(t, value, started.Env[key], key)
+	}
+	expectedEnvKeys := []string{
+		"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR",
+		"MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL",
+		"MECHA_HOST_HOME",
+		"MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH",
+		"MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY",
+		"MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER",
+		"MECHA_FUNCTIONAL_ACTIVE_TOOLS", "MECHA_FUNCTIONAL_EXIT_FILE", "MECHA_FUNCTIONAL_PARSE_FILE",
 	}
 	require.Equal(t, "1", started.Env["MECHA_MANAGED_ACTIVE_ONLY"])
 	require.Equal(t, fixture.piRuntimeDir, strings.Split(started.Env["PATH"], ":")[0], "Pi's Node runtime directory must lead the managed child PATH")
 	require.Equal(t, fixture.root, started.Env["PWD"], "the shell fixture must preserve the configured child working directory")
 	require.Equal(t, "C", started.Env["LANG"])
 	require.Equal(t, "C", started.Env["LC_ALL"])
-	for _, key := range []string{"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL", "MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH", "MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY", "MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER", "MECHA_FUNCTIONAL_ACTIVE_TOOLS", "MECHA_FUNCTIONAL_EXIT_FILE", "MECHA_FUNCTIONAL_PARSE_FILE"} {
+	for _, key := range expectedEnvKeys {
 		require.Contains(t, started.Env, key)
 	}
 	for key := range started.Env {
-		require.Contains(t, []string{"HOME", "PATH", "PWD", "TMPDIR", "LANG", "LC_ALL", "PI_CODING_AGENT_DIR", "MECHA_MANAGED_SESSION_ROOT", "MECHA_MANAGED_ACTIVE_ONLY", "MECHA_ROUTER_URL", "MECHA_RPC_RUNTIME_GENERATION", "MECHA_RPC_SESSION_EPOCH", "MECHA_MANAGED_FUNCTIONAL_FAKE_PI", "MECHA_FUNCTIONAL_TEST_BINARY", "MECHA_FUNCTIONAL_EVENT_FIFO", "MECHA_FUNCTIONAL_PROMPT_BARRIER", "MECHA_FUNCTIONAL_ACTIVE_TOOLS", "MECHA_FUNCTIONAL_EXIT_FILE", "MECHA_FUNCTIONAL_PARSE_FILE"}, key)
+		require.Contains(t, expectedEnvKeys, key)
 	}
 	var rpcKinds []string
 	var promptMessages []string

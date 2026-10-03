@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -301,7 +303,7 @@ func TestEmbeddedBrowserCodexCancellationKeepsStoreSignedOut(t *testing.T) {
 func TestEmbeddedBrowserCodexLoginRootWorkerRotationLogoutComposition(t *testing.T) {
 	f := newBrowserFixFixture(t)
 	status := f.call(t, "GET", "/v1/provider-auth", "", "")
-	require.Equal(t, 200, status.Code)
+	require.Equal(t, 200, status.Code, status.Body.String())
 	require.Contains(t, status.Body.String(), `"signed_out"`)
 	f.login(t)
 	status = f.call(t, "GET", "/v1/provider-auth", "", "")
@@ -343,12 +345,26 @@ func TestEmbeddedBrowserCodexLoginRootWorkerRotationLogoutComposition(t *testing
 		Providers []store.ManagedProviderStatus `json:"providers"`
 	}
 	require.NoError(t, json.Unmarshal(status.Body.Bytes(), &peerSnapshot))
+	require.Len(t, peerSnapshot.Providers, 5)
+	peerMap := make(map[string]store.ManagedProviderStatus, len(peerSnapshot.Providers))
 	for _, p := range peerSnapshot.Providers {
-		if p.Provider == "openai-codex" {
-			require.False(t, p.Authenticated)
-			require.Equal(t, "signed_out", p.Status)
-		}
+		peerMap[p.Provider] = p
 	}
+	require.Equal(t, "signed_out", peerMap["openai-codex"].Status)
+	require.False(t, peerMap["openai-codex"].Authenticated)
+	require.Equal(t, "ChatGPT", peerMap["openai-codex"].Label)
+	require.Equal(t, "authenticated", peerMap["google"].Status)
+	require.True(t, peerMap["google"].Authenticated)
+	require.Equal(t, "Google", peerMap["google"].Label)
+	require.Equal(t, "signed_out", peerMap["cursor"].Status)
+	require.False(t, peerMap["cursor"].Authenticated)
+	require.Equal(t, "Cursor", peerMap["cursor"].Label)
+	require.Equal(t, "signed_out", peerMap["google-vertex"].Status)
+	require.False(t, peerMap["google-vertex"].Authenticated)
+	require.Equal(t, "Google Vertex AI", peerMap["google-vertex"].Label)
+	require.Equal(t, "signed_out", peerMap["antigravity"].Status)
+	require.False(t, peerMap["antigravity"].Authenticated)
+	require.Equal(t, "Google Antigravity", peerMap["antigravity"].Label)
 	require.NoError(t, peer.Save(ctx, original))
 	status = f.call(t, "GET", "/v1/provider-auth", "", "")
 	require.Equal(t, 200, status.Code)
@@ -439,4 +455,122 @@ func TestEmbeddedBrowserCodexLoginRootWorkerRotationLogoutComposition(t *testing
 	info, err := os.Stat(filepath.Join(f.base, "private", "codex.json.lock"))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+func TestAuthHelperVertexADCIsolationUnderManagedHome(t *testing.T) {
+	node, err := exec.LookPath("node")
+	require.NoError(t, err)
+	preloadPath, err := filepath.Abs(filepath.Join("..", "..", "..", "auth-helper", "test-preload-mock-fetch.mjs"))
+	require.NoError(t, err)
+	helperPath, err := filepath.Abs(filepath.Join("..", "..", "..", "auth-helper", "index.mjs"))
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	managedHome := filepath.Join(tempDir, "managed-home")
+	piAgentDir := filepath.Join(tempDir, "pi-agent")
+	fakeHostHome := filepath.Join(tempDir, "fake-host-home")
+	require.NoError(t, os.MkdirAll(managedHome, 0700))
+	require.NoError(t, os.MkdirAll(piAgentDir, 0700))
+	require.NoError(t, os.MkdirAll(fakeHostHome, 0700))
+
+	// Create fake ADC file in host home: ~/.config/gcloud/application_default_credentials.json
+	gcloudDir := filepath.Join(fakeHostHome, ".config", "gcloud")
+	require.NoError(t, os.MkdirAll(gcloudDir, 0700))
+	adcPath := filepath.Join(gcloudDir, "application_default_credentials.json")
+	require.NoError(t, os.WriteFile(adcPath, []byte(`{"client_id":"fake-adc-client","client_secret":"fake-adc-secret","refresh_token":"fake-adc-refresh","type":"authorized_user"}`), 0600))
+
+	// Ensure managedHome has NO ADC or credentials
+	require.NoFileExists(t, filepath.Join(managedHome, ".config", "gcloud", "application_default_credentials.json"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, node, helperPath)
+	cmd.Env = []string{
+		"NODE_OPTIONS=--import " + preloadPath,
+		"HOME=" + managedHome,
+		"MECHA_HOST_HOME=" + fakeHostHome,
+		"MECHA_PI_AUTH_PATH=" + filepath.Join(piAgentDir, "auth.json"),
+		"PATH=" + os.Getenv("PATH"),
+	}
+
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	cmd.Stderr = os.Stderr
+
+	require.NoError(t, cmd.Start())
+
+	// Perform login for google-vertex
+	// 1. Send login command
+	loginReq := `{"operation":"login","operation_id":"op-vertex-iso","provider":"google-vertex"}` + "\n"
+	_, err = stdin.Write([]byte(loginReq))
+	require.NoError(t, err)
+
+	scanner := bufio.NewScanner(stdout)
+
+	// Expect prompt 1 (Project ID)
+	var prompt1ID string
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var ev map[string]any
+		if json.Unmarshal(line, &ev) == nil && ev["type"] == "prompt" {
+			promptObj := ev["prompt"].(map[string]any)
+			prompt1ID = promptObj["id"].(string)
+			break
+		}
+	}
+	require.NotEmpty(t, prompt1ID)
+
+	// Send Project ID response
+	resp1 := fmt.Sprintf(`{"type":"response","prompt_id":%q,"value":"test-vertex-project"}`+"\n", prompt1ID)
+	_, err = stdin.Write([]byte(resp1))
+	require.NoError(t, err)
+
+	// Expect prompt 2 (Region)
+	var prompt2ID string
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var ev map[string]any
+		if json.Unmarshal(line, &ev) == nil && ev["type"] == "prompt" {
+			promptObj := ev["prompt"].(map[string]any)
+			prompt2ID = promptObj["id"].(string)
+			break
+		}
+	}
+	require.NotEmpty(t, prompt2ID)
+
+	// Send Region response (empty string accepts default us-central1)
+	resp2 := fmt.Sprintf(`{"type":"response","prompt_id":%q,"value":""}`+"\n", prompt2ID)
+	_, err = stdin.Write([]byte(resp2))
+	require.NoError(t, err)
+
+	// Expect terminal success
+	var terminalSuccess bool
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var ev map[string]any
+		if json.Unmarshal(line, &ev) == nil && ev["type"] == "terminal" {
+			if ev["status"] == "succeeded" {
+				terminalSuccess = true
+			}
+			break
+		}
+	}
+	require.True(t, terminalSuccess)
+	_ = cmd.Wait()
+
+	// Verify auth.json in piAgentDir has native ApiKeyCredential under google-vertex
+	savedAuthBytes, err := os.ReadFile(filepath.Join(piAgentDir, "auth.json"))
+	require.NoError(t, err)
+	var savedAuth map[string]any
+	require.NoError(t, json.Unmarshal(savedAuthBytes, &savedAuth))
+	require.Contains(t, savedAuth, "google-vertex")
+	vertexAuth := savedAuth["google-vertex"].(map[string]any)
+	require.Equal(t, "api_key", vertexAuth["type"])
+	envMap := vertexAuth["env"].(map[string]any)
+	require.Equal(t, adcPath, envMap["GOOGLE_APPLICATION_CREDENTIALS"])
+	require.Equal(t, "test-vertex-project", envMap["GOOGLE_CLOUD_PROJECT"])
+	require.Equal(t, "us-central1", envMap["GOOGLE_CLOUD_LOCATION"])
 }

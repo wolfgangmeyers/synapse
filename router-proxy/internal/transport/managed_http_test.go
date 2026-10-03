@@ -162,7 +162,7 @@ func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	require.NoError(t, err)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)
@@ -207,6 +207,8 @@ func (r *providerAuthHTTPRun) Respond(ctx context.Context, promptID, value strin
 		{Provider: "openai-codex", Label: "ChatGPT", Authenticated: true, Status: "authenticated"},
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
+		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
+		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: false, Status: "signed_out"},
 	}, Models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}}}
 	close(r.events)
 	r.finish()

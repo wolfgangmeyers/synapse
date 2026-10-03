@@ -2,8 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -258,3 +262,247 @@ func TestManagedRootRecoveryInterruptsOnlyTheOldFence(t *testing.T) {
 	require.NoError(t, durable.InterruptManagedControlRequests(ctx, fresh))
 	require.NoError(t, durable.InterruptManagedGoalEvaluation(ctx, fresh))
 }
+
+type legacyLaunchRecipeIndependent struct {
+	PiExecutable         string   `json:"pi_executable"`
+	SessionRoot          string   `json:"session_root"`
+	Cwd                  string   `json:"cwd"`
+	Provider             string   `json:"provider"`
+	ModelID              string   `json:"model_id"`
+	MechaRPCExtension    string   `json:"mecha_rpc_extension"`
+	PiSubagentsExtension string   `json:"pi_subagents_extension"`
+	CursorExtension      string   `json:"cursor_extension"`
+	TestOnlyExtensions   []string `json:"test_only_extensions"`
+	Environment          []string `json:"environment"`
+	SHA256               string   `json:"sha256"`
+}
+
+func TestManagedLaunchRecipeDigestLegacyGoldenHashAndAntigravityExtension(t *testing.T) {
+	const goldenLegacyRecipeSHA256 = "d5459e6ae64a72f14a8d76a6f8bd70aad054d3936bc085d44de1f820838a2409"
+
+	// 1. Independent old serialization fixture without AntigravityExtension
+	oldObj := legacyLaunchRecipeIndependent{
+		PiExecutable:         "/managed/bin/pi",
+		SessionRoot:          "/managed/sessions",
+		Cwd:                  "/managed/work",
+		Provider:             "openai-codex",
+		ModelID:              "gpt-5.6-terra",
+		MechaRPCExtension:    "/managed/mecha.ts",
+		PiSubagentsExtension: "/managed/subagents.ts",
+		CursorExtension:      "/managed/cursor.ts",
+		TestOnlyExtensions:   []string{},
+		Environment:          []string{"HOME=/managed/home", "PATH=/usr/bin"},
+		SHA256:               "",
+	}
+	oldBytes, err := json.Marshal(oldObj)
+	require.NoError(t, err)
+	expectedSum := sha256.Sum256(oldBytes)
+	independentComputedHash := hex.EncodeToString(expectedSum[:])
+	require.Equal(t, goldenLegacyRecipeSHA256, independentComputedHash, "independent serialization must match golden constant")
+
+	// 2. Legacy recipe with empty AntigravityExtension must produce identical golden hash
+	legacyRecipe := ManagedLaunchRecipe{
+		PiExecutable:         "/managed/bin/pi",
+		SessionRoot:          "/managed/sessions",
+		Cwd:                  "/managed/work",
+		Provider:             "openai-codex",
+		ModelID:              "gpt-5.6-terra",
+		MechaRPCExtension:    "/managed/mecha.ts",
+		PiSubagentsExtension: "/managed/subagents.ts",
+		CursorExtension:      "/managed/cursor.ts",
+		AntigravityExtension: "",
+		Environment:          []string{"HOME=/managed/home", "PATH=/usr/bin"},
+	}
+	digestedLegacy, err := ManagedLaunchRecipeDigest(legacyRecipe)
+	require.NoError(t, err)
+	require.Equal(t, goldenLegacyRecipeSHA256, digestedLegacy.SHA256, "legacy recipe digest must match golden hash byte-for-byte")
+
+	// 3. Setting a valid non-empty AntigravityExtension must produce a changed, valid hash
+	agRecipe := legacyRecipe
+	agRecipe.AntigravityExtension = "/opt/pi/extensions/antigravity/src/index.ts"
+	digestedAG, err := ManagedLaunchRecipeDigest(agRecipe)
+	require.NoError(t, err)
+	require.NotEqual(t, goldenLegacyRecipeSHA256, digestedAG.SHA256, "non-empty AntigravityExtension must change the hash")
+	require.Len(t, digestedAG.SHA256, 64)
+	require.True(t, isLowerHex(digestedAG.SHA256))
+	require.NoError(t, ValidateManagedLaunchRecipe(digestedAG))
+
+	// 4. ValidateManagedLaunchRecipe rejects invalid AntigravityExtension (> 4096 bytes or invalid utf8)
+	invalidLen := agRecipe
+	invalidLen.AntigravityExtension = strings.Repeat("x", 4097)
+	digestedInvalidLen, err := ManagedLaunchRecipeDigest(invalidLen)
+	require.NoError(t, err)
+	require.ErrorContains(t, ValidateManagedLaunchRecipe(digestedInvalidLen), "invalid value")
+
+	invalidUTF8 := agRecipe
+	invalidUTF8.AntigravityExtension = "bad\xff\xfeutf8"
+	digestedInvalidUTF8, err := ManagedLaunchRecipeDigest(invalidUTF8)
+	require.NoError(t, err)
+	require.ErrorContains(t, ValidateManagedLaunchRecipe(digestedInvalidUTF8), "invalid value")
+
+	// 5. Database round-trip persistence of AntigravityExtension
+	durable := openTestStore(t)
+	ctx := context.Background()
+	fence := seedManagedRootRecoveryAgent(t, durable)
+	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, fence.AgentID, digestedAG))
+
+	loaded, err := durable.ManagedLaunchRecipe(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, agRecipe.AntigravityExtension, loaded.AntigravityExtension)
+	require.Equal(t, digestedAG.SHA256, loaded.SHA256)
+
+	// Active projection load through ManagedAgent (cross-component path)
+	agentRecord, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, agentRecord.LaunchRecipe, "active projection must attach launch recipe")
+	require.Equal(t, agRecipe.AntigravityExtension, agentRecord.LaunchRecipe.AntigravityExtension)
+	require.Equal(t, digestedAG.SHA256, agentRecord.LaunchRecipe.SHA256)
+
+	// 6. replaceManagedLaunchRecipeTx updates AntigravityExtension
+	updatedAG := digestedAG
+	updatedAG.AntigravityExtension = "/opt/pi/extensions/antigravity-v2/src/index.ts"
+	updatedAG, err = ManagedLaunchRecipeDigest(updatedAG)
+	require.NoError(t, err)
+	require.NoError(t, durable.runImmediate(ctx, func() error {
+		return replaceManagedLaunchRecipeTx(ctx, durable.db, fence.AgentID, updatedAG, formatTimestamp(durable.clock.Now()))
+	}))
+	reloaded, err := durable.ManagedLaunchRecipe(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, updatedAG.AntigravityExtension, reloaded.AntigravityExtension)
+	require.Equal(t, updatedAG.SHA256, reloaded.SHA256)
+
+	// Active projection load after replacement
+	reloadedAgent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, reloadedAgent.LaunchRecipe)
+	require.Equal(t, updatedAG.AntigravityExtension, reloadedAgent.LaunchRecipe.AntigravityExtension)
+	require.Equal(t, updatedAG.SHA256, reloadedAgent.LaunchRecipe.SHA256)
+
+	// 7. Error cases for recipe storage and operator replacement
+	require.ErrorContains(t, durable.PutManagedLaunchRecipe(ctx, "", digestedAG), "agent is required")
+	require.ErrorContains(t, durable.runImmediate(ctx, func() error {
+		return replaceManagedLaunchRecipeTx(ctx, durable.db, "nonexistent-agent", updatedAG, formatTimestamp(durable.clock.Now()))
+	}), "unavailable")
+	require.NoError(t, durable.PutManagedLaunchRecipe(ctx, fence.AgentID, updatedAG)) // idempotent duplicate
+
+	// 8. Incomplete and invalid recipe validation branches
+	for _, mutate := range []func(*ManagedLaunchRecipe){
+		func(r *ManagedLaunchRecipe) { r.PiExecutable = "" },
+		func(r *ManagedLaunchRecipe) { r.SessionRoot = "" },
+		func(r *ManagedLaunchRecipe) { r.Cwd = "" },
+		func(r *ManagedLaunchRecipe) { r.Provider = "" },
+		func(r *ManagedLaunchRecipe) { r.ModelID = "" },
+		func(r *ManagedLaunchRecipe) { r.MechaRPCExtension = "" },
+		func(r *ManagedLaunchRecipe) { r.PiSubagentsExtension = "" },
+	} {
+		bad := legacyRecipe
+		mutate(&bad)
+		bad.SHA256 = ""
+		require.ErrorContains(t, ValidateManagedLaunchRecipe(bad), "incomplete")
+	}
+	for _, mutate := range []func(*ManagedLaunchRecipe){
+		func(r *ManagedLaunchRecipe) { r.PiExecutable = strings.Repeat("a", 4097) },
+		func(r *ManagedLaunchRecipe) { r.CursorExtension = strings.Repeat("b", 4097) },
+	} {
+		bad := legacyRecipe
+		mutate(&bad)
+		bad, err := ManagedLaunchRecipeDigest(bad)
+		require.NoError(t, err)
+		require.ErrorContains(t, ValidateManagedLaunchRecipe(bad), "invalid value")
+	}
+
+	// 9. loadManagedLaunchRecipeTx nil and no-recipe cases
+	require.NoError(t, loadManagedLaunchRecipeTx(ctx, durable.db, nil))
+	noRecipeAgent := &ManagedAgentRecord{AgentID: "no-such-recipe-agent"}
+	require.NoError(t, loadManagedLaunchRecipeTx(ctx, durable.db, noRecipeAgent))
+	require.Nil(t, noRecipeAgent.LaunchRecipe)
+}
+
+func TestManagedLaunchRecipeSchemaCorruptionSurfacesError(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Post-086 DB where antigravity_extension is dropped must surface error (NOT swallow)
+	{
+		durable := openTestStore(t)
+		fence := seedManagedRootRecoveryAgent(t, durable)
+		_, err := durable.db.Exec(`ALTER TABLE managed_launch_recipes DROP COLUMN antigravity_extension`)
+		require.NoError(t, err)
+
+		_, err = durable.ManagedAgent(ctx, fence.AgentID)
+		require.Error(t, err, "post-086 corruption dropping antigravity_extension must surface error")
+		require.Contains(t, err.Error(), "antigravity_extension")
+	}
+
+	// 2. Unrelated missing column (cursor_extension dropped) must surface error
+	{
+		durable := openTestStore(t)
+		fence := seedManagedRootRecoveryAgent(t, durable)
+		_, err := durable.db.Exec(`ALTER TABLE managed_launch_recipes DROP COLUMN cursor_extension`)
+		require.NoError(t, err)
+
+		_, err = durable.ManagedAgent(ctx, fence.AgentID)
+		require.Error(t, err, "unrelated schema corruption must surface error, not be swallowed")
+		require.Contains(t, err.Error(), "cursor_extension")
+	}
+
+	// 3. Injected corrupted JSON in test_extensions_json must surface error through ManagedAgent
+	{
+		durable := openTestStore(t)
+		fence := seedManagedRootRecoveryAgent(t, durable)
+		recipe := managedRootRecoveryRecipeFixture()
+		require.NoError(t, durable.PutManagedLaunchRecipe(ctx, fence.AgentID, recipe))
+
+		_, err := durable.db.Exec(`UPDATE managed_launch_recipes SET test_extensions_json='{invalid-json' WHERE agent_id=?`, fence.AgentID)
+		require.NoError(t, err)
+
+		_, err = durable.ManagedAgent(ctx, fence.AgentID)
+		require.Error(t, err, "corrupted JSON must surface error through ManagedAgent")
+	}
+
+	// 4. Real pre-086 schema (via migrations[:idx086]) missing antigravity_extension returns nil recipe and nil error
+	{
+		path := filepath.Join(t.TempDir(), "pre086.db")
+		migrations := DefaultMigrations()
+		idx086 := migrationIndex(t, migrations, "086_google_auth_methods")
+		pre086Store, err := Open(ctx, path, Options{Migrations: migrations[:idx086]})
+		require.NoError(t, err)
+		fence := seedManagedRootRecoveryAgent(t, pre086Store)
+
+		agent, err := pre086Store.ManagedAgent(ctx, fence.AgentID)
+		require.NoError(t, err, "real pre-086 schema missing antigravity_extension returns nil recipe without error")
+		require.Nil(t, agent.LaunchRecipe)
+		require.NoError(t, pre086Store.Close())
+	}
+
+	// 5. Normal 086 schema with non-empty AntigravityExtension projects properly
+	{
+		durable := openTestStore(t)
+		fence := seedManagedRootRecoveryAgent(t, durable)
+		recipe := managedRootRecoveryRecipeFixture()
+		recipe.AntigravityExtension = "/opt/extensions/antigravity.ts"
+		digested, err := ManagedLaunchRecipeDigest(recipe)
+		require.NoError(t, err)
+		require.NoError(t, durable.PutManagedLaunchRecipe(ctx, fence.AgentID, digested))
+
+		agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+		require.NoError(t, err)
+		require.NotNil(t, agent.LaunchRecipe)
+		require.Equal(t, "/opt/extensions/antigravity.ts", agent.LaunchRecipe.AntigravityExtension)
+		require.Equal(t, digested.SHA256, agent.LaunchRecipe.SHA256)
+	}
+
+	// 6. When schema_migrations table itself is corrupted/absent alongside missing AG column, error surfaces
+	{
+		durable := openTestStore(t)
+		fence := seedManagedRootRecoveryAgent(t, durable)
+		_, err := durable.db.Exec(`ALTER TABLE managed_launch_recipes DROP COLUMN antigravity_extension`)
+		require.NoError(t, err)
+		_, err = durable.db.Exec(`DROP TABLE schema_migrations`)
+		require.NoError(t, err)
+
+		_, err = durable.ManagedAgent(ctx, fence.AgentID)
+		require.Error(t, err, "corrupted schema_migrations table must surface error, not suppress")
+	}
+}
+
+

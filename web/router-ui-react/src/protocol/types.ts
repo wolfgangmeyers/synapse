@@ -978,6 +978,8 @@ export interface HistoryEntryFrame {
   view: "quiet" | "complete";
   entry: ManagedHistoryEntry;
 }
+export type ManagedProvider = "openai-codex" | "google" | "cursor" | "google-vertex" | "antigravity";
+
 export interface ProviderAuthPrompt {
   id: string;
   kind: "text" | "secret" | "select" | "manual_code";
@@ -990,7 +992,7 @@ export interface ProviderAuthPromptFrame {
   protocol: "mecha.web/v1";
   projection_version: number;
   operation_id: string;
-  provider: "openai-codex" | "google" | "cursor";
+  provider: ManagedProvider;
   prompt: ProviderAuthPrompt;
 }
 export interface ProviderAuthStateFrame {
@@ -998,7 +1000,7 @@ export interface ProviderAuthStateFrame {
   protocol: "mecha.web/v1";
   projection_version: number;
   operation_id: string;
-  provider: "openai-codex" | "google" | "cursor";
+  provider: ManagedProvider;
   status: "pending" | "succeeded" | "failed" | "expired" | "cancelled";
   error?: string;
 }

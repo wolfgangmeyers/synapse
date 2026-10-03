@@ -20,6 +20,10 @@ export interface ManagedAgentDialogProps {
   onModels?(): Promise<ModelsResponse>;
 }
 
+export function isGoogleProvider(provider: string | undefined): boolean {
+  return provider === "google" || provider === "google-vertex" || provider === "antigravity";
+}
+
 export function ManagedAgentDialog({ open, agent, pending = false, error, recentFolders, onClose, onLaunch, onAction, onListDirectories, onModels }: ManagedAgentDialogProps): ReactElement {
   const [name, setName] = useState("");
   const [cwd, setCwd] = useState("");
@@ -39,9 +43,12 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
   }, [agent, onModels, open]);
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    void onLaunch({ name: normalizeManagedAgentName(name), cwd: cwd.trim(), runtime: "embedded", ...(selectedModel ? { model: { provider: selectedModel.provider, id: selectedModel.id } } : {}), ...(instruction.trim() ? { initial_instruction: instruction } : {}) });
+    const effectiveProvider = selectedModel?.provider ?? catalog?.default_model?.provider;
+    const runtime: "rpc" | "embedded" = isGoogleProvider(effectiveProvider) ? "rpc" : "embedded";
+    void onLaunch({ name: normalizeManagedAgentName(name), cwd: cwd.trim(), runtime, ...(selectedModel ? { model: { provider: selectedModel.provider, id: selectedModel.id } } : {}), ...(instruction.trim() ? { initial_instruction: instruction } : {}) });
   };
   const availableModels = (catalog?.models ?? []).filter((model) => model.available);
+  const submitDisabled = pending || (selectedModel === undefined && catalogLoading);
   return <DialogShell open={open} title={agent ? `Manage ${agent.agent_id}` : "Launch managed agent"} titleId="managed-agent-dialog-title" description="Router-managed agents run locally through the router." onClose={onClose} closeLabel="Close managed agent dialog" className="message-dialog managed-agent-dialog">
     {agent ? <section className="managed-lifecycle-actions" aria-label={`Actions for ${agent.agent_id}`}>
       <p>State: {agent.lifecycle_state} · {agent.activity_state}</p>
@@ -53,7 +60,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
       <fieldset><legend>Model (optional)</legend><ModelPicker models={availableModels} {...(selectedModel ? { currentModel: selectedModel } : {})} loading={catalogLoading} {...(catalog && availableModels.length === 0 ? { emptyMessage: "No connected models. Connect a provider in Provider settings." } : {})} pending={pending} disabled={pending} emptyOption={{ label: "Use router default", description: "Uses the router default when you launch.", onSelect: () => setSelectedModel(undefined) }} onChange={setSelectedModel} /></fieldset>
       {catalogError ? <p className="error" role="alert">{catalogError}</p> : null}
       <label>Initial instruction (optional)<textarea value={instruction} onChange={(event) => setInstruction(event.currentTarget.value)} /></label>
-      <div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" disabled={pending}>Launch</button></div>
+      <div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" disabled={submitDisabled}>Launch</button></div>
     </form>}
     {error ? <p className="error" role="alert">{error}</p> : null}
   </DialogShell>;

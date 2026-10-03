@@ -47,7 +47,7 @@ func (h CodexBrowserAuth) snapshot(ctx context.Context, commit func([]store.Mana
 	if !ok || h.Credentials == nil {
 		return nil, nil, errors.New("provider status is unavailable")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	// Resolve/rotate in Go before helper discovery. The configured ordinary
 	// helper masks Codex resolution, so it can never spend this refresh token.

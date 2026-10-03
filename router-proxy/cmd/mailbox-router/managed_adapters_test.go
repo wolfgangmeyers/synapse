@@ -24,11 +24,13 @@ func TestFixedAuthHelperSnapshotUsesOrdinaryPiAgentDirectory(t *testing.T) {
 	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	helperPath := filepath.Join(root, "helper.mjs")
 	script := fmt.Sprintf(`if (process.env.PI_CODING_AGENT_DIR !== %q || process.env.MECHA_PI_AUTH_PATH !== %q) process.exit(1);
+if (!process.env.MECHA_HOST_HOME) process.exit(2);
+if (process.env.MECHA_ANTIGRAVITY_EXTENSION !== "/opt/pi/ag/src/index.ts") process.exit(3);
 console.log(JSON.stringify({providers:[{provider:"openai-codex",label:"ChatGPT",authenticated:true,status:"authenticated"},{provider:"google",label:"Google",authenticated:false,status:"signed_out"},{provider:"cursor",label:"Cursor",authenticated:false,status:"signed_out"}],models:[{provider:"openai-codex",id:"gpt-5.6-terra",name:"GPT-5.6 Terra",available:true}]}));
 `, piAgentDir, filepath.Join(piAgentDir, "auth.json"))
 	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0o600))
 
-	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath}, nodeExecutable: node}).Snapshot(context.Background())
+	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath, AntigravityExtension: "/opt/pi/ag/src/index.ts"}, nodeExecutable: node}).Snapshot(context.Background())
 	require.NoError(t, err)
 	require.Len(t, providers, 3)
 	require.Equal(t, "openai-codex", providers[0].Provider)
@@ -80,4 +82,28 @@ func TestHelperEventDecoderNeverRelaysChildOwnedStrings(t *testing.T) {
 
 func TestParseManagedRootsDropsEmptyValues(t *testing.T) {
 	require.Equal(t, []string{"/one", "/two"}, parseManagedRoots(" /one, ,/two "))
+}
+
+func TestSafeProviderPromptURL(t *testing.T) {
+	// Antigravity Google OAuth valid
+	validAG := "https://accounts.google.com/o/oauth2/v2/auth?client_id=123&redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Foauth-callback&response_type=code"
+	require.Equal(t, validAG, safeProviderPromptURL("antigravity", validAG))
+
+	// Antigravity invalid paths / hosts
+	require.Empty(t, safeProviderPromptURL("antigravity", "https://accounts.google.com/signin/v2/identifier"))
+	require.Empty(t, safeProviderPromptURL("antigravity", "https://evil.google.com/o/oauth2/v2/auth"))
+	require.Empty(t, safeProviderPromptURL("antigravity", "http://accounts.google.com/o/oauth2/v2/auth"))
+	require.Empty(t, safeProviderPromptURL("antigravity", "https://accounts.google.com:8080/o/oauth2/v2/auth"))
+	require.Empty(t, safeProviderPromptURL("antigravity", "https://user:pass@accounts.google.com/o/oauth2/v2/auth"))
+	require.Empty(t, safeProviderPromptURL("antigravity", "https://accounts.google.com/o/oauth2/v2/auth#fragment"))
+
+	// OpenAI Codex valid
+	validCodex := "https://auth.openai.com/authorize?state=browser-only"
+	require.Equal(t, validCodex, safeProviderPromptURL("openai-codex", validCodex))
+
+	// Cross provider mismatch
+	require.Empty(t, safeProviderPromptURL("openai-codex", validAG))
+	require.Empty(t, safeProviderPromptURL("antigravity", validCodex))
+	require.Empty(t, safeProviderPromptURL("google", validAG))
+	require.Empty(t, safeProviderPromptURL("unknown", validCodex))
 }

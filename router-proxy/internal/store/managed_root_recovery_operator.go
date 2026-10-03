@@ -269,7 +269,7 @@ func replaceManagedLaunchRecipeTx(ctx context.Context, db *sql.DB, agentID strin
 	if err != nil {
 		return err
 	}
-	result, err := db.ExecContext(ctx, `UPDATE managed_launch_recipes SET pi_executable=?,session_root=?,cwd=?,provider=?,model_id=?,mecha_rpc_extension=?,pi_subagents_extension=?,cursor_extension=?,test_extensions_json=?,environment_json=?,recipe_sha256=?,updated_at=? WHERE agent_id=?`, recipe.PiExecutable, recipe.SessionRoot, recipe.Cwd, recipe.Provider, recipe.ModelID, recipe.MechaRPCExtension, recipe.PiSubagentsExtension, recipe.CursorExtension, string(testJSON), string(envJSON), recipe.SHA256, now, agentID)
+	result, err := db.ExecContext(ctx, `UPDATE managed_launch_recipes SET pi_executable=?,session_root=?,cwd=?,provider=?,model_id=?,mecha_rpc_extension=?,pi_subagents_extension=?,cursor_extension=?,antigravity_extension=?,test_extensions_json=?,environment_json=?,recipe_sha256=?,updated_at=? WHERE agent_id=?`, recipe.PiExecutable, recipe.SessionRoot, recipe.Cwd, recipe.Provider, recipe.ModelID, recipe.MechaRPCExtension, recipe.PiSubagentsExtension, recipe.CursorExtension, recipe.AntigravityExtension, string(testJSON), string(envJSON), recipe.SHA256, now, agentID)
 	if err != nil {
 		return err
 	}
