@@ -408,6 +408,107 @@ test("Vertex AI ADC login prompts sequentially for Google Cloud Project ID and R
   assert.equal(stored["google-vertex"].env.GOOGLE_CLOUD_LOCATION, "us-central1");
 });
 
+test("Vertex AI ADC login rejects invalid region syntax without mutating existing credentials", async () => {
+  const badRegions = [
+    "attacker.invalid#",
+    "evil.com/path",
+    "us-central1?param=1",
+    "user@evil.com",
+    "host:8080",
+    "foo\\bar",
+    "us central1",
+    "us%2fcentral1",
+    "attacker.invalid",
+    "-invalid-start",
+    "invalid-end-",
+    "a".repeat(64),
+  ];
+
+  for (const badRegion of badRegions) {
+    const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
+    const authPath = join(home, "auth.json");
+    const hostHome = await mkdtemp(join(tmpdir(), "mecha-host-home-"));
+    const gcloudDir = join(hostHome, ".config", "gcloud");
+    await mkdir(gcloudDir, { recursive: true });
+    const hostAdc = join(gcloudDir, "application_default_credentials.json");
+    await writeFile(hostAdc, "{}");
+
+    const initialCredentials = {
+      google: { type: "api_key", key: "original-google-key" },
+      antigravity: { type: "oauth", access: "original-ag-token", refresh: "original-ag-refresh", expires: Date.now() + 60000 },
+      "google-vertex": {
+        type: "api_key",
+        env: {
+          GOOGLE_CLOUD_PROJECT: "original-project",
+          GOOGLE_CLOUD_LOCATION: "us-central1",
+          GOOGLE_APPLICATION_CREDENTIALS: hostAdc,
+        },
+      },
+    };
+    await writeFile(authPath, JSON.stringify(initialCredentials), { mode: 0o600 });
+
+    const result = await runHelperInteractive(
+      JSON.stringify({ operation: "login", operation_id: "op-vertex-bad-region", provider: "google-vertex" }),
+      async (event) => {
+        if (event.prompt.placeholder === "my-gcp-project") return "new-project";
+        return badRegion;
+      },
+      { HOME: home, authPath, MECHA_HOST_HOME: hostHome }
+    );
+
+    assert.equal(result.exitCode, 1, `badRegion "${badRegion}" should fail login`);
+    const terminal = result.events.find((e) => e.type === "terminal");
+    assert.ok(terminal);
+    assert.equal(terminal.status, "failed");
+    assert.match(terminal.error, /region/i);
+
+    // Existing credentials must be preserved and NOT mutated
+    const stored = JSON.parse(await readFile(authPath, "utf8"));
+    assert.deepEqual(stored.google, initialCredentials.google);
+    assert.deepEqual(stored.antigravity, initialCredentials.antigravity);
+    assert.deepEqual(stored["google-vertex"], initialCredentials["google-vertex"]);
+  }
+});
+
+test("Vertex AI ADC login accepts valid single host label regions including custom and global", async () => {
+  const validRegions = [
+    { input: "", expected: "us-central1" },
+    { input: "   ", expected: "us-central1" },
+    { input: "global", expected: "global" },
+    { input: "us-central1", expected: "us-central1" },
+    { input: "custom-region-42", expected: "custom-region-42" },
+    { input: "  europe-west4  ", expected: "europe-west4" },
+  ];
+
+  for (const { input, expected } of validRegions) {
+    const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
+    const authPath = join(home, "auth.json");
+    const hostHome = await mkdtemp(join(tmpdir(), "mecha-host-home-"));
+    const gcloudDir = join(hostHome, ".config", "gcloud");
+    await mkdir(gcloudDir, { recursive: true });
+    const hostAdc = join(gcloudDir, "application_default_credentials.json");
+    await writeFile(hostAdc, "{}");
+    await writeFile(authPath, "{}", { mode: 0o600 });
+
+    const result = await runHelperInteractive(
+      JSON.stringify({ operation: "login", operation_id: "op-vertex-valid-region", provider: "google-vertex" }),
+      async (event) => {
+        if (event.prompt.placeholder === "my-gcp-project") return "valid-project";
+        return input;
+      },
+      { HOME: home, authPath, MECHA_HOST_HOME: hostHome }
+    );
+
+    assert.equal(result.exitCode, 0, `validRegion "${input}" should succeed`);
+    const terminal = result.events.find((e) => e.type === "terminal");
+    assert.ok(terminal);
+    assert.equal(terminal.status, "succeeded");
+    const stored = JSON.parse(await readFile(authPath, "utf8"));
+    assert.equal(stored["google-vertex"].env.GOOGLE_CLOUD_LOCATION, expected);
+  }
+});
+
+
 test("Antigravity login executes OAuth PKCE, captures redirect, and stores account tokens", async () => {
   const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
   const authPath = join(home, "auth.json");
