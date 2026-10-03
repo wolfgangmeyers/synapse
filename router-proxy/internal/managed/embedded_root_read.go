@@ -54,7 +54,7 @@ func validEmbeddedReadPath(p string) bool {
 	return true
 }
 
-func readEmbeddedRootFile(ctx context.Context, rootFD int, p string) (string, error) {
+func readEmbeddedRootFile(ctx context.Context, rootFD int, p string, offsetVal, limitVal any) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -97,12 +97,55 @@ func readEmbeddedRootFile(ctx context.Context, rootFD int, p string) (string, er
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return result.String(), nil
+	data := result.Bytes()
+	var offset, limit int
+	if offsetVal != nil {
+		switch v := offsetVal.(type) {
+		case int:
+			offset = v
+		case int64:
+			offset = int(v)
+		case float64:
+			offset = int(v)
+		}
+	}
+	if limitVal != nil {
+		switch v := limitVal.(type) {
+		case int:
+			limit = v
+		case int64:
+			limit = int(v)
+		case float64:
+			limit = int(v)
+		}
+	}
+	if offset < 0 {
+		return "", errors.New("offset must be non-negative")
+	}
+	if limit < 0 {
+		return "", errors.New("limit must be non-negative")
+	}
+	lines := strings.Split(string(data), "\n")
+	if offset > 0 {
+		start := offset - 1
+		if start >= len(lines) {
+			return "", nil
+		}
+		lines = lines[start:]
+	}
+	if limit > 0 && limit < len(lines) {
+		lines = lines[:limit]
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func embeddedReadSchema() *ai.Schema {
 	closed := false
-	schema := ai.Object(ai.Prop("path", ai.String()))
+	schema := ai.Object(
+		ai.Prop("path", ai.String()),
+		ai.Opt("offset", ai.Integer()),
+		ai.Opt("limit", ai.Integer()),
+	)
 	schema.AdditionalAllowed = &closed
 	return schema
 }
@@ -143,7 +186,9 @@ func (m *Manager) embeddedRootReadTool(owner embeddedOwner, rootFD int) agent.Ag
 		if err != nil || original.ID != id || original.Name != "read" || !bytes.Equal(before, now) {
 			return agent.AgentToolResult{}, errors.New("read call conflicts with durable intent")
 		}
-		text, err := readEmbeddedRootFile(ctx, rootFD, p)
+		offsetVal := args["offset"]
+		limitVal := args["limit"]
+		text, err := readEmbeddedRootFile(ctx, rootFD, p, offsetVal, limitVal)
 		if err != nil {
 			return agent.AgentToolResult{}, err
 		}

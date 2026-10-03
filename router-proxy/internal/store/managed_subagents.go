@@ -118,14 +118,16 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if err := s.subagentWriteFenceTx(ctx, parent); err != nil {
 			return err
 		}
-		var cwd, provider, model, manifest string
+		var cwd, manifest string
 		var revision int
-		err := s.db.QueryRowContext(ctx, `SELECT cwd,selected_model_provider,selected_model_id,manifest_revision,manifest_hash FROM managed_agents WHERE agent_id=? AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE agent_id=managed_agents.agent_id)`, parent.AgentID).Scan(&cwd, &provider, &model, &revision, &manifest)
+		err := s.db.QueryRowContext(ctx, `SELECT cwd,manifest_revision,manifest_hash FROM managed_agents WHERE agent_id=? AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE agent_id=managed_agents.agent_id)`, parent.AgentID).Scan(&cwd, &revision, &manifest)
 		if err != nil {
 			return fmt.Errorf("subagent parent must be a top-level managed agent: %w", err)
 		}
+		subagentProvider := "antigravity"
+		subagentModel := "gemini-3.8-flash"
 		now := formatTimestamp(s.clock.Now())
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at,runtime) VALUES(?,?,0,?,?,?,'running','running','idle',0,?,1,?,?,?,?,?,'embedded')`, child.AgentID, child.AgentID, cwd, provider, model, child.AgentID+"-session", parent.Generation, revision, manifest, now, now); err != nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at,runtime) VALUES(?,?,0,?,?,?,'running','running','idle',0,?,1,?,?,?,?,?,'embedded')`, child.AgentID, child.AgentID, cwd, subagentProvider, subagentModel, child.AgentID+"-session", parent.Generation, revision, manifest, now, now); err != nil {
 			return err
 		}
 		kind := child.SubagentType
