@@ -49,6 +49,11 @@ function dateLabel(timestamp: number): string | undefined {
   return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
+  if (!entry.message_content) return false;
+  return messages.some((m) => m.body === entry.message_content && (m.from === entry.sender_identity || (entry.presentation?.from !== undefined && m.from === entry.presentation.from) || (entry.presentation?.to !== undefined && m.to === entry.presentation.to)));
+}
+
 export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange }: MessageListProps): ReactElement {
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
@@ -57,7 +62,7 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   const activityLiveInitialized = useRef(false);
   const items = useMemo<FeedItem[]>(() => [
     ...messages.map((message) => ({ type: "message" as const, id: messageKey(message), timestamp: messageTime(message, Number.MAX_SAFE_INTEGER), sequence: message.sequence ?? Number.MAX_SAFE_INTEGER, message })),
-    ...(activityEntries ?? []).filter(isMeaningfulCompleteActivity).map((entry) => ({ type: "activity" as const, id: entry.id, timestamp: activityTime(entry), sequence: activitySequence(entry), entry })),
+    ...(activityEntries ?? []).filter((entry) => isMeaningfulCompleteActivity(entry) && !isAlreadyInMessages(entry, messages)).map((entry) => ({ type: "activity" as const, id: entry.id, timestamp: activityTime(entry), sequence: activitySequence(entry), entry })),
   ].sort((left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence || left.id.localeCompare(right.id)), [activityEntries, messages]);
   const latestItem = items.at(-1);
   const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;

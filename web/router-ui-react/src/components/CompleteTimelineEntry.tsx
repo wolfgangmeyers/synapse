@@ -37,6 +37,13 @@ function toolVisual(presentation: ManagedHistoryPresentation): CompleteTimelineV
   const interrupted = presentation.outcome === "interrupted";
   const active = presentation.outcome === "active";
   const unknown = presentation.outcome === "warning" || presentation.outcome === "unknown";
+  if (toolName === "mecha_mailbox_send") {
+    if (failed || interrupted) {
+      return { icon: "fa-solid fa-paper-plane", tone: "danger", label: "Message send failed", detail: presentation.summary ?? "The operation could not be completed.", isHighValue: true };
+    }
+    if (active) return { icon: "fa-solid fa-paper-plane", tone: "blue", label: "Sending message", isHighValue: false };
+    return { icon: "fa-solid fa-paper-plane", tone: succeeded ? "blue" : "amber", label: "Message sent", detail: presentation.to ? `To ${presentation.to}` : presentation.summary ?? "Completed successfully", isHighValue: false };
+  }
   const tone: CompleteTimelineTone = succeeded ? "green" : failed || interrupted ? "danger" : unknown ? "amber" : toolName === "bash" ? "teal" : toolName === "goal" ? "purple" : toolName === "reminder" ? "yellow" : "blue";
   const icon = succeeded ? "fa-solid fa-check" : toolName === "bash" ? "fa-solid fa-terminal" : toolName === "goal" ? "fa-solid fa-flag" : toolName === "reminder" ? "fa-solid fa-clock" : "fa-solid fa-wrench";
   if (failed || interrupted) {
@@ -113,7 +120,11 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   const hasInboundDetails = entry.message_content !== undefined || entry.sender_identity !== undefined;
   if (hasInboundDetails && (presentation.kind === "message" || presentation.kind === "reminder")) {
     const reminder = presentation.kind === "reminder";
-    return { icon: reminder ? "fa-solid fa-clock" : "fa-solid fa-envelope", tone: reminder ? "yellow" : "blue", label: reminder ? "Reminder received" : "Message received", ...(entry.sender_identity ? { detail: `From ${entry.sender_identity}` } : {}), isHighValue: false };
+    const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || (presentation.from === entry.agent_id && presentation.to !== undefined);
+    if (isOutbound) {
+      return { icon: "fa-solid fa-paper-plane", tone: "blue", label: entry.message || "Message sent", ...(presentation.to ? { detail: `To ${presentation.to}` } : {}), isHighValue: false };
+    }
+    return { icon: reminder ? "fa-solid fa-clock" : "fa-solid fa-envelope", tone: reminder ? "yellow" : "blue", label: reminder ? "Reminder received" : "Message received", ...(entry.sender_identity ? { detail: `From ${entry.sender_identity}` } : presentation.from ? { detail: `From ${presentation.from}` } : {}), isHighValue: false };
   }
   if (presentation.kind === "message") return { icon: "fa-solid fa-circle-check", tone: presentation.outcome === "error" ? "danger" : "blue", label: entry.message || "Recorded activity", ...(presentation.summary ? { detail: presentation.summary } : {}), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "tool") return toolVisual(presentation);

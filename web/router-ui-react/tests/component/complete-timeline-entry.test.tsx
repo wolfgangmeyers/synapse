@@ -101,6 +101,40 @@ describe("Complete timeline entry", () => {
     expect(within(dialog).queryByText(/acknowledged/i)).not.toBeInTheDocument();
   });
 
+  it("renders outbound reply message entry and opens detail dialog", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:reply", agent_id: "managed-worker", at, message: "Reply sent",
+      message_content: "Task completed successfully.", sender_identity: "managed-worker",
+      presentation: { kind: "message", outcome: "success", from: "managed-worker", to: "pi-go" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Reply sent.*To pi-go.*View details/i });
+    expect(card).toBeInTheDocument();
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "Reply sent" });
+    expect(within(dialog).getByText("pi-go")).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Message" })).toBeInTheDocument();
+    expect(within(dialog).getByText("Task completed successfully.")).toBeInTheDocument();
+  });
+
+  it("renders mecha_mailbox_send tool card with message details", () => {
+    render(<CompleteTimelineEntry entry={{
+      id: "complete:mailbox-send", agent_id: "managed-worker", at, message: "Ran mecha_mailbox_send",
+      tool_input: { recipient: "supervisor", body: "Status report: all clear" },
+      presentation: { kind: "tool", tool_name: "mecha_mailbox_send", outcome: "success", to: "supervisor" },
+    }} />);
+
+    const card = screen.getByRole("button", { name: /Message sent.*To supervisor.*View details/i });
+    expect(card).toBeInTheDocument();
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "Message sent" });
+    expect(within(dialog).getByText("supervisor")).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Message" })).toBeInTheDocument();
+    expect(within(dialog).getByText("Status report: all clear")).toBeInTheDocument();
+  });
+
   it("opens readable retained tool parameters from the keyboard", () => {
     render(<CompleteTimelineEntry entry={{
       id: "complete:tool-input", agent_id: "managed-worker", at, message: "Ran read", tool_input: { path: "/workspace/report.md", offset: 12, options: { hidden: false }, secret: "[REDACTED]" },
