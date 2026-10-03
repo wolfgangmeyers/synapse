@@ -71,16 +71,15 @@ describe("direct HTTP transport", () => {
     await expect(client.saveManagedGoal("managed-alpha", { action: "off", goal: "", settings: { goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).resolves.toEqual({ goal_state: goalState });
   });
 
-  it("changes a managed agent model through the dedicated control without restart", async () => {
+  it("restarts a managed agent with an explicitly selected model", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("http://router.test/v1/managed-agents/managed-alpha/model");
-      expect(init?.method).toBe("PUT");
+      expect(String(input)).toBe("http://router.test/v1/managed-agents/managed-alpha/restart");
       expect(init?.credentials).toBe("omit");
       expect(init?.headers).toEqual({ "x-request-id": expect.any(String), "content-type": "application/json" });
       expect(init?.body).toBe(JSON.stringify({ model: { provider: "google", id: "gemini-2.5-pro" } }));
-      return response({ operation_id: "00000000-0000-4000-8000-000000000000" }, 200);
+      return response({ operation_id: "00000000-0000-4000-8000-000000000000" }, 202);
     });
-    await expect(createHttpClient("http://router.test", fetchImpl).changeManagedModel("managed-alpha", { provider: "google", id: "gemini-2.5-pro" })).resolves.toMatchObject({ operation_id: "00000000-0000-4000-8000-000000000000" });
+    await expect(createHttpClient("http://router.test", fetchImpl).restartManaged("managed-alpha", { provider: "google", id: "gemini-2.5-pro" })).resolves.toMatchObject({ operation_id: "00000000-0000-4000-8000-000000000000" });
   });
 
   it("requests only the selected managed agent's activity history", async () => {
