@@ -260,6 +260,35 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 	if model == nil {
 		return nil, nil, errors.New("embedded model is unavailable")
 	}
+	if model.Provider == "openai-codex" || record.SelectedModel.Provider == "openai-codex" {
+		var used string
+		stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
+			if opts == nil {
+				opts = &ai.SimpleStreamOptions{}
+			} else {
+				copy := *opts
+				opts = &copy
+			}
+			existingOnPayload := opts.OnPayload
+			opts.OnPayload = func(payload any, model *ai.Model) (any, error) {
+				if m, ok := payload.(map[string]any); ok {
+					delete(m, "max_output_tokens")
+				}
+				if existingOnPayload != nil {
+					return existingOnPayload(payload, model)
+				}
+				return payload, nil
+			}
+			opts.CodexAuth = func(authCtx context.Context) (ai.ModelAuth, error) {
+				auth, authErr := m.embeddedCodexAuth(authCtx)
+				if authErr == nil {
+					used = auth.APIKey
+				}
+				return auth, authErr
+			}
+			return m.streamEmbeddedCodexWith401Rotation(requestCtx, requestModel, transcript, opts, &used)
+		}
+	}
 	return model, stream, nil
 }
 
