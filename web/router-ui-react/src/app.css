@@ -941,12 +941,6 @@ p:empty { display: none; }
 .timeline-item { display: contents; }
 .timeline-date { margin: 8px 0 0; color: var(--muted); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .timeline-live-region { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-/* This deliberately lives outside the scrolling conversation timeline: a
-   running managed child is current work, not historical activity. */
-.active-subagents { display: grid; gap: 8px; max-height: min(34dvh, 280px); overflow-y: auto; padding: 12px 24px; border-top: 1px solid var(--line); background: var(--surface); }
-.active-subagents h3 { color: var(--muted); font-size: 0.75rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
-.active-subagents-list { display: grid; gap: 8px; }
-.active-subagents .activity-entry { width: min(720px, 100%); }
 .empty-state {
   margin: auto;
   max-width: 420px;
@@ -965,7 +959,6 @@ p:empty { display: none; }
 .message-transport--received { color: var(--yellow); }
 .message-transport--sent { color: var(--primary); }
 .activity-entry { --activity-accent-rgb: 157,168,255; position: relative; align-self: stretch; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: min(720px, 100%); padding: 8px 10px; border: 1px solid rgba(157,168,255,0.30); border-left: 3px solid var(--primary); border-radius: 12px; background: var(--surface-raised); color: var(--text); }
-.activity-entry--active::after { content: ""; position: absolute; inset: 0; padding: 2px; border-radius: inherit; pointer-events: none; background: conic-gradient(from var(--agent-border-angle), rgba(var(--activity-accent-rgb),0) 0deg, rgba(var(--activity-accent-rgb),0.18) 6deg, rgba(var(--activity-accent-rgb),0.95) 22deg 98deg, rgba(var(--activity-accent-rgb),0.18) 114deg, rgba(var(--activity-accent-rgb),0) 120deg 360deg); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: agent-border-sweep 1s linear infinite; }
 .activity-entry-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 999px; background: rgba(157,168,255,0.14); color: var(--primary); font-size: 13px; }
 .activity-entry-content { min-width: 0; }
 .activity-entry-label { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text); font-size: 0.85rem; line-height: 1.2; }
@@ -986,9 +979,6 @@ p:empty { display: none; }
 .activity-entry--danger .activity-entry-icon { color: var(--danger); background: rgba(248,113,113,0.14); }
 .activity-entry--terminal-success { border-color: rgba(134,239,172,0.62); border-left-width: 1px; }
 .activity-entry--terminal-success .activity-entry-icon { border-radius: 7px; background: #22c55e; color: #062b17; font-size: 14px; font-weight: 900; }
-/* A terminal lifecycle result must stay visually settled even if an older
-   active class is briefly present during a streamed update. */
-.activity-entry--terminal-success::after, .activity-entry--terminal-danger::after { content: none; animation: none; }
 .activity-entry--terminal-danger { border-color: rgba(248,113,113,0.62); border-left-width: 1px; }
 .activity-entry--terminal-danger .activity-entry-icon { border-radius: 7px; background: #dc2626; color: #fff1f2; }
 .activity-entry-no-detail { display: block; margin-top: 4px; color: var(--muted); font-size: 0.75rem; }
