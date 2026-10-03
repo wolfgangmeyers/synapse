@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { unlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
 import type { SocketEvent, WebSocketFactory, WebSocketLike } from "../../src/transport/websocket-client";
@@ -370,21 +370,52 @@ describe("real managed router to React WebUI behavioral seam", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Functional Retry (functional-retry)" })).not.toBeInTheDocument());
   }, 90_000);
 
-  it("accepts Google model launch requests with rpc runtime (HTTP 202) while rejecting embedded runtime with HTTP 422", async () => {
+  it.each([
+    { provider: "google", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
+    { provider: "google-vertex", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Vertex)" },
+    { provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Antigravity)" },
+  ])("accepts $provider launch request via UI ManagedAgentDialog with rpc runtime (HTTP 202) and rejects embedded (HTTP 422)", async ({ provider, id, name }) => {
     router = await startManagedGoRouter();
-    // 1. Google model with embedded runtime must be rejected with 422 by Go embedded admission fence
-    const embeddedAttempt = await launchWithModel(router, "google-embedded-fail", { provider: "google", id: "gemini-2.5-flash" }, "embedded");
+    // 1. Embedded runtime direct attempt must be rejected with HTTP 422 by Go embedded admission fence
+    const embeddedAttempt = await launchWithModel(router, `${provider}-embedded-fail`, { provider, id }, "embedded");
     expect(embeddedAttempt.status).toBe(422);
 
-    // 2. Google model with rpc runtime must be accepted with 202
-    const rpcAttempt = await launchWithModel(router, "google-rpc-success", { provider: "google", id: "gemini-2.5-flash" }, "rpc");
-    expect(rpcAttempt.status).toBe(202);
-    expect(rpcAttempt.body).toMatchObject({
-      operation_id: expect.any(String),
-      agent: expect.objectContaining({
-        agent_id: "google-rpc-success",
-        runtime: "rpc",
-      }),
+    // 2. Real rendered App + ManagedAgentDialog -> RouterHttpClient -> real Go router POST:
+    // Select the model through the UI dialog and submit "Launch"
+    const user = userEvent.setup();
+    render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
+
+    // Open Managed actions -> Launch managed agent
+    const managedActionsBtn = await screen.findByRole("button", { name: "Managed actions" });
+    await user.click(managedActionsBtn);
+    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    const dialog = await screen.findByRole("dialog", { name: "Launch managed agent" });
+    expect(dialog).toBeInTheDocument();
+
+    // Select the Google model in the ModelPicker dropdown
+    await user.click(within(dialog).getByRole("button", { name: "Use router default" }));
+    const option = await screen.findByRole("option", { name: new RegExp(`\\(${provider}\\)`) });
+    await user.click(option);
+
+    // Fill in agent name and working directory
+    const agentName = `ui-${provider}-worker`;
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: agentName } });
+    fireEvent.change(within(dialog).getByLabelText("Working folder"), { target: { value: router.cwdRoot } });
+
+    // Click Launch in the dialog - ManagedAgentDialog routes Google to runtime: "rpc"
+    await user.click(within(dialog).getByRole("button", { name: "Launch" }));
+
+    // Assert that the real Go router admitted the launch via RPC and rendered the agent row
+    const rowButton = await screen.findByRole("button", { name: new RegExp(agentName) }, { timeout: 15_000 });
+    expect(rowButton).toBeInTheDocument();
+
+    // Verify the agent record returned from the real Go router
+    const { response, body } = await jsonRequest(router, `/v1/managed-agents/${agentName}`, { method: "GET", credentials: "omit" });
+    expect(response.status).toBe(200);
+    expect(record(body.agent)).toMatchObject({
+      agent_id: agentName,
+      runtime: "rpc",
+      model: { provider, id },
     });
-  }, 30_000);
+  }, 60_000);
 });
