@@ -142,7 +142,7 @@ func (s *Store) SavedEmbeddedSessionRole(ctx context.Context, b EmbeddedBinding)
 	return role, nil
 }
 
-// EnsureEmbeddedSession bootstraps only an absent launch row. An existing
+// EnsureEmbeddedSession bootstraps only an absent root launch row. An existing
 // binding is inspected read-only; authority is obtained exclusively by claim.
 func (s *Store) EnsureEmbeddedSession(ctx context.Context, b EmbeddedBinding) error {
 	if err := validateEmbedded(b); err != nil {
@@ -151,6 +151,17 @@ func (s *Store) EnsureEmbeddedSession(ctx context.Context, b EmbeddedBinding) er
 	return s.runImmediate(ctx, func() error {
 		if err := s.embeddedManagedFence(ctx, b); err != nil {
 			return err
+		}
+		if present, err := s.managedSubagentSchemaPresent(ctx); err != nil {
+			return err
+		} else if present {
+			var child bool
+			if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM managed_subagents WHERE agent_id=?)`, b.AgentID).Scan(&child); err != nil {
+				return err
+			}
+			if child {
+				return errors.New("subagent cannot bootstrap a root session")
+			}
 		}
 		var session, generation, role string
 		var epoch int64
@@ -272,7 +283,39 @@ func (s *Store) RenewEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner
 	})
 }
 
-func validEmbeddedRole(role string) bool { return role == "root" || role == "worker" }
+// ReleaseEmbeddedOwner expires only the live, exact owner claim. It preserves
+// the row and token so a later acquire increments the token and stale callers
+// cannot regain authority or release the replacement lease.
+func (s *Store) ReleaseEmbeddedOwner(ctx context.Context, b EmbeddedBinding, ownerID string) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	if ownerID == "" || len(ownerID) > 256 || b.OwnerToken <= 0 {
+		return errors.New("invalid embedded owner lease")
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := s.embeddedManagedFence(ctx, b); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id=? AND owner_token=? AND owner_expires_at>?`, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, ownerID, b.OwnerToken, now)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return errors.New("stale embedded owner")
+		}
+		return nil
+	})
+}
+
+func validEmbeddedRole(role string) bool {
+	return role == "root" || role == "worker" || role == "subagent"
+}
 
 // BindEmbeddedSession bootstraps the first unowned current row for the exact
 // managed runtime. After claim, even an exact retry needs the live owner token.
@@ -286,6 +329,17 @@ func (s *Store) BindEmbeddedSession(ctx context.Context, b EmbeddedBinding, role
 	return s.runImmediate(ctx, func() error {
 		if err := s.embeddedManagedFence(ctx, b); err != nil {
 			return err
+		}
+		var child bool
+		if present, err := s.managedSubagentSchemaPresent(ctx); err != nil {
+			return err
+		} else if present {
+			if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM managed_subagents WHERE agent_id=?)`, b.AgentID).Scan(&child); err != nil {
+				return err
+			}
+		}
+		if child != (role == "subagent") {
+			return errors.New("embedded role does not match managed identity")
 		}
 		var session, generation, savedRole string
 		var epoch int64
@@ -617,6 +671,13 @@ func (s *Store) ReopenEmbedded(ctx context.Context, b EmbeddedBinding) (Embedded
 	if err := s.embeddedFence(ctx, b); err != nil {
 		return out, err
 	}
+	return s.readEmbeddedSnapshotTx(ctx, b)
+}
+
+// Call only with s.mu held, after the caller has checked its own authority.
+// The same chain and checkpoint checks protect runtime reopen and parent reads.
+func (s *Store) readEmbeddedSnapshotTx(ctx context.Context, b EmbeddedBinding) (EmbeddedSnapshot, error) {
+	out := EmbeddedSnapshot{Entries: []EmbeddedEntry{}}
 	rows, err := s.db.QueryContext(ctx, `SELECT seq,parent_digest,kind,body,digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? ORDER BY seq`, b.AgentID, b.SessionID, b.Epoch)
 	if err != nil {
 		return out, err

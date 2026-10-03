@@ -25,7 +25,8 @@ func (r *Router) managedChildrenProjection(ctx context.Context, agentID string) 
 	}
 	for _, agent := range snapshot.Agents {
 		if agent.AgentID == agentID {
-			return managedChildrenProjectionForAgent(agent, snapshot.ReadinessSources[agentID]), nil
+			base := managedChildrenProjectionForAgent(agent, snapshot.ReadinessSources[agentID])
+			return mergeNativeSubagentsForAgent(ctx, r.store, agent, base)
 		}
 	}
 	return nil, sql.ErrNoRows
@@ -221,18 +222,7 @@ func managedChildrenSnapshot(ctx context.Context, durable *store.Store) (int64, 
 	if err != nil {
 		return 0, "", nil, err
 	}
-	return managedChildrenSnapshotFromStored(snapshot)
-}
-
-func managedChildrenSnapshotFromStored(snapshot store.ManagedAgentsSnapshot) (int64, string, []map[string]any, error) {
-	children := make([]map[string]any, 0, len(snapshot.Agents))
-	for _, agent := range snapshot.Agents {
-		children = append(children, managedChildrenProjectionForAgent(agent, snapshot.ReadinessSources[agent.AgentID]))
-	}
-	// ProjectionVersion is the only global, committed watermark shared by every
-	// parent. A max per-child source sequence can regress when another parent
-	// changes, which would make reconnect recovery ambiguous.
-	return snapshot.ProjectionVersion, snapshot.GeneratedAt.UTC().Format(time.RFC3339Nano), children, nil
+	return managedChildrenSnapshotFromStoredWithStore(ctx, durable, snapshot)
 }
 
 func managedChildStatus(value string) string {

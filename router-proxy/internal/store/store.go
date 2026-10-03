@@ -244,6 +244,13 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id='082_conversation_send_receipt_lifecycle')`).Scan(&store.receiptLifecycle); err != nil {
 		return closeOnError(err)
 	}
+	if present, err := store.managedSubagentSchemaPresent(ctx); err != nil {
+		return closeOnError(err)
+	} else if present {
+		if err := store.reconcileManagedSubagents(ctx); err != nil {
+			return closeOnError(err)
+		}
+	}
 	if err := store.backfillClosedManagedHistoryIncarnations(ctx); err != nil {
 		return closeOnError(err)
 	}
@@ -429,6 +436,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 		migration := migration
 		if migration.ID == "" {
 			return errors.New("migration ID is required")
+		}
+		if migration.ID == "085_embedded_subagent_role" {
+			if err := s.applyEmbeddedSubagentRoleMigration085(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
 		}
 		if migration.ID == "027_managed_control_requests" {
 			if err := s.applyManagedControlMigration027(ctx, migration); err != nil {
@@ -1125,6 +1138,14 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 		// intentionally not part of generic retention; a later terminate or
 		// restart must not make a failed name silently reusable.
 		result.ManagedAgents = 0
+		if present, err := s.managedSubagentSchemaPresent(ctx); err != nil {
+			return err
+		} else if present {
+			result.ManagedAgents, err = s.pruneManagedSubagentsTx(ctx, now, policy.LifecycleTerminalAge)
+			if err != nil {
+				return err
+			}
+		}
 		return s.pruneEmbeddedProcessGenerationsTx(ctx)
 	}); err != nil {
 		return SweepResult{}, err

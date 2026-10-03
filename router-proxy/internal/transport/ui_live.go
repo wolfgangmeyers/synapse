@@ -136,7 +136,7 @@ func (h *uiLiveHub) snapshot(ctx context.Context) (*uiLiveProjection, error) {
 	if err != nil {
 		return nil, err
 	}
-	childrenVersion, generatedAt, children, err := managedChildrenSnapshotFromStored(stored)
+	childrenVersion, generatedAt, children, err := managedChildrenSnapshotFromStoredWithStore(ctx, h.router.store, stored)
 	if err != nil {
 		return nil, err
 	}

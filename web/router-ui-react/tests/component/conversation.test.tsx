@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Conversation } from "../../src/components/Conversation";
 import { MessageList } from "../../src/components/MessageList";
@@ -164,5 +165,44 @@ describe("Conversation", () => {
     fireEvent.change(composer, { target: { value: "Hi" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(onSend).toHaveBeenCalledWith("Hi", []);
+  });
+
+  it("does not render an active-subagents aside widget when active subagent entries exist, preserving inline tool cards", () => {
+    const activeChild = {
+      id: "complete:child",
+      agent_id: "managed-worker",
+      at: "2030-01-01T10:00:00.000Z",
+      message: "Child started",
+      presentation: {
+        kind: "child" as const,
+        child_state: "running" as const,
+        outcome: "active" as const,
+        child_label: "Worker review",
+      },
+    };
+    const toolCall = {
+      id: "complete:tool",
+      agent_id: "managed-worker",
+      at: "2030-01-01T10:01:00.000Z",
+      message: "Spawned subagent",
+      presentation: {
+        kind: "tool" as const,
+        tool_name: "subagent",
+        outcome: "success" as const,
+      },
+    };
+
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "managed-worker", activity_state: "idle" }}
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[activeChild, toolCall]}
+      />
+    );
+
+    expect(screen.queryByLabelText("Active subagents")).not.toBeInTheDocument();
+    expect(container.querySelector(".active-subagents")).not.toBeInTheDocument();
+    expect(container.querySelector("#conversation-view-panel [data-activity-id='complete:tool']")).toBeInTheDocument();
   });
 });

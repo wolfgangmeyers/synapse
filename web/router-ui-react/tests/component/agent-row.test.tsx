@@ -169,7 +169,7 @@ describe("AgentRow", () => {
 
   it("uses the tmux subagent badge and inline child rows for RPC", () => {
     const child = { id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed" as const, cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running" as const, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 } };
-    const { container } = render(<><AgentRow agent={{ agent_id: "same-parent", activity_state: "idle", subagent_count: 1, subagents: [{ id: child.id, description: child.description }] }} expanded /><AgentRow agent={{ agent_id: "same-parent", source: "router-managed", activity_state: "idle", managed_children: [child] }} expanded /></>);
+    const { container } = render(<><AgentRow agent={{ agent_id: "same-parent", activity_state: "idle", subagent_count: 1, subagents: [{ id: child.id, description: child.description, status: child.status }] }} expanded /><AgentRow agent={{ agent_id: "same-parent", source: "router-managed", activity_state: "idle", managed_children: [child] }} expanded /></>);
 
     const [tmuxRow, rpcRow] = Array.from(container.querySelectorAll(".agent-row"));
     expect(tmuxRow).toBeDefined();

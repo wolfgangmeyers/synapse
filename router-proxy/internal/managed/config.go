@@ -18,12 +18,14 @@ const (
 	MaxManagedAgents           = 32
 	MaxInitialInstructionBytes = 32 * 1024
 	MaxRPCLineBytes            = 1 << 20
+	DefaultSubagentCapacity    = 4
 )
 
 type Limits struct {
 	MaxAgents                  int
 	MaxInitialInstructionBytes int
 	MaxRPCLineBytes            int
+	SubagentCapacity           int
 	GracefulStop               time.Duration
 	TermStop                   time.Duration
 }
@@ -65,7 +67,7 @@ type Config struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxAgents: MaxManagedAgents, MaxInitialInstructionBytes: MaxInitialInstructionBytes, MaxRPCLineBytes: MaxRPCLineBytes, GracefulStop: 5 * time.Second, TermStop: 5 * time.Second}
+	return Limits{MaxAgents: MaxManagedAgents, MaxInitialInstructionBytes: MaxInitialInstructionBytes, MaxRPCLineBytes: MaxRPCLineBytes, SubagentCapacity: DefaultSubagentCapacity, GracefulStop: 5 * time.Second, TermStop: 5 * time.Second}
 }
 
 func (c *Config) normalize() {
@@ -78,6 +80,9 @@ func (c *Config) normalize() {
 	}
 	if c.Limits.MaxRPCLineBytes == 0 {
 		c.Limits.MaxRPCLineBytes = defaults.MaxRPCLineBytes
+	}
+	if c.Limits.SubagentCapacity <= 0 {
+		c.Limits.SubagentCapacity = defaults.SubagentCapacity
 	}
 	if c.Limits.GracefulStop == 0 {
 		c.Limits.GracefulStop = defaults.GracefulStop
@@ -111,7 +116,7 @@ func ValidateManagedLaunchConfig(config Config) error {
 	if len(copy.AllowedWorkingDirectoryRoots) == 0 {
 		return errors.New("managed mode requires an allowed working-directory root")
 	}
-	if copy.Limits.MaxAgents < 1 || copy.Limits.MaxAgents > MaxManagedAgents || copy.Limits.MaxInitialInstructionBytes < 1 || copy.Limits.MaxInitialInstructionBytes > MaxInitialInstructionBytes || copy.Limits.MaxRPCLineBytes < 1024 || copy.Limits.MaxRPCLineBytes > MaxRPCLineBytes || copy.Limits.GracefulStop <= 0 || copy.Limits.TermStop <= 0 {
+	if copy.Limits.MaxAgents < 1 || copy.Limits.MaxAgents > MaxManagedAgents || copy.Limits.MaxInitialInstructionBytes < 1 || copy.Limits.MaxInitialInstructionBytes > MaxInitialInstructionBytes || copy.Limits.MaxRPCLineBytes < 1024 || copy.Limits.MaxRPCLineBytes > MaxRPCLineBytes || copy.Limits.SubagentCapacity < 1 || copy.Limits.GracefulStop <= 0 || copy.Limits.TermStop <= 0 {
 		return errors.New("managed limits are outside the first-slice bounds")
 	}
 	if err := ValidateManagedExecutable(copy.PiExecutable); err != nil {

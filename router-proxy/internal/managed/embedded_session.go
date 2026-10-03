@@ -908,6 +908,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return tool
 		}
 		tools = append(tools, wrapTool(readTool), wrapTool(editTool), wrapTool(writeTool))
+		tools = append(tools, m.EmbeddedSubagentPublicTools(binding)...)
 	}
 	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {
 		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted, func(id string) bool {

@@ -112,10 +112,10 @@ func TestMigration005BackfillsInSequenceBeforeAppliedAtClock(t *testing.T) {
 	require.NoError(t, second.db.QueryRow("SELECT applied_at FROM schema_migrations WHERE id = '005_message_incarnation'").Scan(&appliedAt))
 	require.Equal(t, "incarnation-a", incarnation)
 	require.Equal(t, formatTimestamp(start), appliedAt)
-	// Every pending migration records one applied_at timestamp. Opening a current
-	// schema also prunes retained managed archives once, so account for that
-	// separate startup-maintenance clock read.
-	require.Equal(t, len(DefaultMigrations())-4+1, len(clock.Calls()), "pending migrations and archive maintenance consume startup clock values")
+	// Every pending migration records one applied_at timestamp. Migration 082
+	// also reads the clock for receipt backfill, and startup prunes managed
+	// archives once. Reconciliation reads the clock only if children are active.
+	require.Equal(t, len(DefaultMigrations())-4+2, len(clock.Calls()), "pending migrations, receipt backfill and archive maintenance consume startup clock values")
 	require.Equal(t, []string{"incarnation-a"}, ids.Calls())
 }
 

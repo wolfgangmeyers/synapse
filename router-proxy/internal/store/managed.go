@@ -685,7 +685,7 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 }
 
 func (s *Store) ReserveManagedEmbeddedLaunch(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string) error {
-	if agent.Runtime != "embedded" || !validEmbeddedRole(role) {
+	if agent.Runtime != "embedded" || (role != "root" && role != "worker") {
 		return errors.New("invalid embedded launch role")
 	}
 	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, role, nil)
@@ -4477,7 +4477,7 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` ORDER BY name ASC`)
+	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) ORDER BY name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -4595,7 +4595,7 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if err := s.db.QueryRowContext(ctx, `SELECT projection_version FROM managed_settings WHERE singleton_id = 1`).Scan(&version); err != nil {
 		return rollback(err)
 	}
-	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` ORDER BY name ASC`)
+	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) ORDER BY name ASC`)
 	if err != nil {
 		return rollback(err)
 	}
@@ -4708,7 +4708,7 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 	if err := s.db.QueryRowContext(ctx, `SELECT projection_version FROM managed_settings WHERE singleton_id = 1`).Scan(&version); err != nil {
 		return rollback(err)
 	}
-	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, agentID), nil)
+	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ? AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id)`, agentID), nil)
 	if errors.Is(err, sql.ErrNoRows) {
 		_, _ = s.db.ExecContext(ctx, "COMMIT")
 		return ManagedAgentSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version}, nil
@@ -5341,7 +5341,7 @@ func (s *Store) reserveRecipientSourceTx(ctx context.Context, recipient, kind, o
 // records left by pre-026 launches without guessing a tmux owner.
 func (s *Store) ReconcileManagedRecipientSources(ctx context.Context) error {
 	return s.runImmediate(ctx, func() error {
-		rows, err := s.db.QueryContext(ctx, `SELECT name,agent_id,lifecycle_state FROM managed_agents ORDER BY name ASC`)
+		rows, err := s.db.QueryContext(ctx, `SELECT name,agent_id,lifecycle_state FROM managed_agents WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) ORDER BY name ASC`)
 		if err != nil {
 			return err
 		}
