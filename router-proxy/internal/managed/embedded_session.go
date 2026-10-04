@@ -1526,6 +1526,36 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		policy.AppliedRevision != receipt.GoalRevision || policy.ProjectionState != "applied" {
 		return nil
 	}
+	m.subagentsMu.Lock()
+	hasActiveSubagents := false
+	for _, task := range m.subagentsActive {
+		if task.parent.AgentID == binding.AgentID {
+			task.mu.Lock()
+			st := task.status
+			task.mu.Unlock()
+			if st == "queued" || st == "running" {
+				hasActiveSubagents = true
+				break
+			}
+		}
+	}
+	m.subagentsMu.Unlock()
+	if !hasActiveSubagents {
+		// Also check store for active subagents
+		subagents, err := m.store.ManagedSubagents(ctx, binding)
+		if err == nil {
+			for _, s := range subagents {
+				if s.Status == "queued" || s.Status == "running" {
+					hasActiveSubagents = true
+					break
+				}
+			}
+		}
+	}
+	if hasActiveSubagents {
+		// Do not evaluate goal while subagents are running. The parent is waiting on them.
+		return nil
+	}
 	snapshot, err := m.store.ReopenEmbedded(ctx, binding)
 	if err != nil {
 		return err

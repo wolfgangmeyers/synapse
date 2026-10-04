@@ -899,6 +899,10 @@ func (r *Router) runStartup(ctx context.Context) error {
 		return err
 	}
 	if r.managed != nil {
+		log.Printf("STARTUP: ReconcileInterruptedSubagents")
+		if err := r.managed.ReconcileInterruptedSubagents(ctx); err != nil {
+			return err
+		}
 		log.Printf("STARTUP: RecoverManagedDirectAttempts")
 		if err := r.managed.RecoverManagedDirectAttempts(ctx); err != nil {
 			return err

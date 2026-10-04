@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -34,6 +35,7 @@ type subagentTask struct {
 	childID      string
 	attempt      int
 	subagentType string
+	description  string
 	maxTurns     int
 	prompt       string
 
@@ -329,6 +331,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 			childID:         childID,
 			attempt:         resumedRecord.Attempt,
 			subagentType:    resumedRecord.SubagentType,
+			description:     resumedRecord.Description,
 			maxTurns:        resumedRecord.MaxTurns,
 			prompt:          req.Prompt,
 			status:          "queued",
@@ -403,6 +406,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 		childID:      childID,
 		attempt:      1,
 		subagentType: kind,
+		description:  req.Description,
 		maxTurns:     req.MaxTurns,
 		prompt:       req.Prompt,
 		status:       "queued",
@@ -509,6 +513,44 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 		DurationSeconds: task.durationSeconds,
 	})
 	m.releaseSubagentSlot(task)
+
+	desc := task.description
+	if desc == "" {
+		if rec, err := m.store.ManagedSubagent(ctx, task.parent, childID); err == nil && rec != nil {
+			desc = rec.Description
+		}
+	}
+	subject := "Subagent Terminated"
+	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped by user request. Partial progress and logs have been saved. You can fetch its latest state and output using get_subagent_result(agent_id=\"%s\").", childID, desc, childID)
+	source := protocol.MessageSource{Kind: "system"}
+	msgID := fmt.Sprintf("subagent-terminated-%s-%d", childID, task.attempt)
+	now := formatManagedTime(m.clock.Now())
+	envelope := protocol.Envelope{
+		ID:        msgID,
+		From:      "supervisor",
+		To:        task.parent.AgentID,
+		Subject:   &subject,
+		Body:      body,
+		CreatedAt: now,
+		Source:    &source,
+	}
+	result, err := m.store.Enqueue(ctx, envelope, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body:   &body,
+			Source: &source,
+		},
+	})
+	if err == nil && (result.Created || result.ConversationCreated) {
+		m.mu.Lock()
+		publish := m.embeddedMailPublisher
+		m.mu.Unlock()
+		if publish != nil {
+			publish(result)
+		} else {
+			_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
+		}
+	}
+	m.OfferDirect(task.parent.AgentID)
 	return nil
 }
 
@@ -891,3 +933,56 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	}
 	task.mu.Unlock()
 }
+
+// ReconcileInterruptedSubagents notifies parent workers of previously running subagents
+// that were interrupted by a router process restart.
+func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
+	if ctx == nil {
+		ctx = m.runCtx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	records, err := m.store.InterruptedSubagentsPendingNotification(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range records {
+		subject := "Subagent Interrupted"
+		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress was saved.", rec.AgentID, rec.Description)
+		source := protocol.MessageSource{Kind: "system"}
+		msgID := fmt.Sprintf("subagent-interrupted-%s", rec.AgentID)
+		now := formatManagedTime(m.clock.Now())
+		envelope := protocol.Envelope{
+			ID:        msgID,
+			From:      "supervisor",
+			To:        rec.ParentAgentID,
+			Subject:   &subject,
+			Body:      body,
+			CreatedAt: now,
+			Source:    &source,
+		}
+		result, err := m.store.Enqueue(ctx, envelope, store.EnqueueOptions{
+			Conversation: &store.ConversationOptions{
+				Body:   &body,
+				Source: &source,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if result.Created || result.ConversationCreated {
+			m.mu.Lock()
+			publish := m.embeddedMailPublisher
+			m.mu.Unlock()
+			if publish != nil {
+				publish(result)
+			} else {
+				_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
+				m.OfferDirect(rec.ParentAgentID)
+			}
+		}
+	}
+	return nil
+}
+

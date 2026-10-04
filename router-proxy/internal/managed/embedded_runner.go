@@ -297,6 +297,7 @@ func (m *Manager) dispatchEmbeddedStartupWake(ctx context.Context, saved store.M
 // RecoverEmbeddedRoots re-dispatches only saved embedded launch reservations.
 // A real runner must validate and reopen its own ordered SQLite session.
 func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
+	_ = m.ReconcileInterruptedSubagents(ctx)
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {
 		return err
