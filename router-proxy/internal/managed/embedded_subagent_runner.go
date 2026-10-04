@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -948,10 +951,11 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range records {
+		childID := rec.AgentID
 		subject := "Subagent Interrupted on Restart"
-		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").", rec.AgentID, rec.Description, rec.AgentID)
+		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").", childID, rec.Description, childID)
 		source := protocol.MessageSource{Kind: "system"}
-		msgID := fmt.Sprintf("subagent-interrupted-%s", rec.AgentID)
+		msgID := fmt.Sprintf("subagent-interrupted-%s-%s", childID, uuid.New().String()[:8])
 		now := formatManagedTime(m.clock.Now())
 		envelope := protocol.Envelope{
 			ID:        msgID,
@@ -969,11 +973,8 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 			},
 		})
 		if err != nil {
-			var conflict *store.IdempotencyConflictError
-			if errors.As(err, &conflict) {
-				continue
-			}
-			return err
+			log.Printf("STARTUP: subagent interrupt notification notice for %s skipped: %v", childID, err)
+			continue
 		}
 		if result.Created || result.ConversationCreated {
 			m.mu.Lock()

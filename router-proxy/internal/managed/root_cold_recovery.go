@@ -191,104 +191,111 @@ func (m *Manager) RecoverBootTimeGoalContinuations(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
-		if agent == nil || agent.DesiredState != "running" || agent.LifecycleState != "running" {
+		if agent == nil || agent.DesiredState != "running" {
 			continue
 		}
 		policy, err := m.store.ManagedGoalPolicyFor(ctx, agent.AgentID)
 		if err != nil || policy == nil || !policy.Config.Enabled {
 			continue
 		}
+		if agent.Runtime != "embedded" {
+			if agent.ActivityState == "idle" {
+				m.OfferDirect(agent.AgentID)
+			}
+			continue
+		}
+		m.MaybeResumeEmbeddedGoal(agent.AgentID)
+	}
+	return nil
+}
+
+// MaybeResumeEmbeddedGoal resumes an idle embedded agent's standing goal if enabled.
+func (m *Manager) MaybeResumeEmbeddedGoal(agentID string) {
+	m.startManagedTask(func() {
+		policy, err := m.store.ManagedGoalPolicyFor(m.runCtx, agentID)
+		if err != nil || policy == nil || !policy.Config.Enabled {
+			return
+		}
 		now := formatManagedTime(m.clock.Now())
 		if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
-			continue
+			return
 		}
-		saved := agent
-		if saved.Runtime != "embedded" {
-			if saved.ActivityState == "idle" {
-				m.OfferDirect(saved.AgentID)
+
+		var owner embeddedOwner
+		var ok bool
+		for i := 0; i < 60; i++ {
+			m.mu.Lock()
+			owner, ok = m.embeddedOwners[agentID]
+			m.mu.Unlock()
+			if ok {
+				break
 			}
-			continue
+			select {
+			case <-m.runCtx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
-		agentID := saved.AgentID
-		m.startManagedTask(func() {
-			var owner embeddedOwner
-			var ok bool
-			for i := 0; i < 60; i++ {
-				m.mu.Lock()
-				owner, ok = m.embeddedOwners[agentID]
-				m.mu.Unlock()
-				if ok {
-					break
-				}
-				select {
-				case <-m.runCtx.Done():
-					return
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
-			if !ok {
+		if !ok {
+			return
+		}
+
+		func() {
+			lane := m.laneFor(agentID)
+			lane.serial.Lock()
+			defer lane.serial.Unlock()
+
+			curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
+			if err != nil || curAgent.ActivityState != "idle" {
 				return
 			}
 
-			func() {
-				lane := m.laneFor(agentID)
-				lane.serial.Lock()
-				defer lane.serial.Unlock()
-
-				curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
-				if err != nil || curAgent.ActivityState != "idle" {
-					return
+			m.subagentsMu.Lock()
+			hasActiveSubagents := false
+			for _, task := range m.subagentsActive {
+				if task.parent.AgentID == agentID {
+					task.mu.Lock()
+					st := task.status
+					task.mu.Unlock()
+					if st == "queued" || st == "running" {
+						hasActiveSubagents = true
+						break
+					}
 				}
-
-				m.subagentsMu.Lock()
-				hasActiveSubagents := false
-				for _, task := range m.subagentsActive {
-					if task.parent.AgentID == agentID {
-						task.mu.Lock()
-						st := task.status
-						task.mu.Unlock()
-						if st == "queued" || st == "running" {
+			}
+			m.subagentsMu.Unlock()
+			if !hasActiveSubagents {
+				binding := store.EmbeddedBinding{
+					AgentID:    curAgent.AgentID,
+					SessionID:  curAgent.PiSessionID,
+					Epoch:      curAgent.SessionEpoch,
+					Generation: curAgent.RuntimeGeneration,
+				}
+				subagents, err := m.store.ManagedSubagents(m.runCtx, binding)
+				if err == nil {
+					for _, s := range subagents {
+						if s.Status == "queued" || s.Status == "running" {
 							hasActiveSubagents = true
 							break
 						}
 					}
 				}
-				m.subagentsMu.Unlock()
-				if !hasActiveSubagents {
-					binding := store.EmbeddedBinding{
-						AgentID:    curAgent.AgentID,
-						SessionID:  curAgent.PiSessionID,
-						Epoch:      curAgent.SessionEpoch,
-						Generation: curAgent.RuntimeGeneration,
-					}
-					subagents, err := m.store.ManagedSubagents(m.runCtx, binding)
-					if err == nil {
-						for _, s := range subagents {
-							if s.Status == "queued" || s.Status == "running" {
-								hasActiveSubagents = true
-								break
-							}
-						}
-					}
-				}
-				if hasActiveSubagents {
-					return
-				}
+			}
+			if hasActiveSubagents {
+				return
+			}
 
-				if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding); err == nil && found {
-					m.startManagedTask(func() {
-						m.startEmbeddedGoalContinuation(owner.binding, key)
-					})
-					return
-				}
+			if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding); err == nil && found {
+				m.startManagedTask(func() {
+					m.startEmbeddedGoalContinuation(owner.binding, key)
+				})
+				return
+			}
 
-				m.OfferDirect(saved.AgentID)
-				runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-				_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, "Continue working on the current goal.", nil)
-			}()
-		})
-	}
-	return nil
+			runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+			_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, "Continue working on the current goal.", nil)
+		}()
+	})
 }
 
 
