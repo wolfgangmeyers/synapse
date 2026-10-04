@@ -69,6 +69,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   const scopeRef = useRef(scope); scopeRef.current = scope;
   const providerAuthFrameRef = useRef(options.onProviderAuthFrame); providerAuthFrameRef.current = options.onProviderAuthFrame;
   const uiLiveErrorRef = useRef(options.onUILiveError); uiLiveErrorRef.current = options.onUILiveError;
+  const startManagedSurfaceRef = useRef<(() => void) | undefined>(undefined);
   const uiLive = useMemo(() => createUILiveClient({
     routerUrl: scope.routerUrl,
     ...(options.uiLiveWebSocketFactory === undefined ? {} : { webSocketFactory: options.uiLiveWebSocketFactory }),
@@ -86,12 +87,19 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       else if (frame.type === "history_entry") dispatch({ type: "managed/history", scope: currentScope, view: frame.view, entry: frame.entry });
       else if (frame.type === "provider_auth_prompt" || frame.type === "provider_auth_state") providerAuthFrameRef.current?.(frame);
     },
-    onRecovery: () => dispatch({ type: "managed/recover", scope: scopeRef.current }),
+    onRecovery: () => {
+      dispatch({ type: "managed/recover", scope: scopeRef.current });
+      startManagedSurfaceRef.current?.();
+    },
     onError: (error) => uiLiveErrorRef.current?.(error),
   }), [scope.routerUrl, options.uiLiveWebSocketFactory, transport]);
   useEffect(() => {
     let active = true;
     let managedSnapshotRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let startManagedSurfaceRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    startManagedSurfaceRef.current = () => {
+      if (active) void startManagedSurface();
+    };
     const scheduleManagedSnapshotRetry = (capabilities: Awaited<ReturnType<RouterTransport["http"]["capabilities"]>>): void => {
       if (!active || managedSnapshotRetryTimer !== undefined) return;
       managedSnapshotRetryTimer = setTimeout(() => {
@@ -137,7 +145,15 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         if (!enabled) return;
         await loadManagedSnapshot(capabilities);
       } catch {
-        if (active) dispatch({ type: "managed/enabled", scope, enabled: false });
+        if (active) {
+          dispatch({ type: "managed/enabled", scope, enabled: false });
+          // Retry starting managed surface after router recovers:
+          if (startManagedSurfaceRetryTimer !== undefined) clearTimeout(startManagedSurfaceRetryTimer);
+          startManagedSurfaceRetryTimer = setTimeout(() => {
+            startManagedSurfaceRetryTimer = undefined;
+            if (active) void startManagedSurface();
+          }, 2000);
+        }
       }
     };
     dispatch({ type: "scope/reset", scope });
@@ -146,7 +162,15 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       transport.connect();
       void startManagedSurface();
     }
-    return () => { active = false; if (managedSnapshotRetryTimer !== undefined) clearTimeout(managedSnapshotRetryTimer); unsubscribe(); transport.close(); uiLive.close(); };
+    return () => {
+      active = false;
+      startManagedSurfaceRef.current = undefined;
+      if (managedSnapshotRetryTimer !== undefined) clearTimeout(managedSnapshotRetryTimer);
+      if (startManagedSurfaceRetryTimer !== undefined) clearTimeout(startManagedSurfaceRetryTimer);
+      unsubscribe();
+      transport.close();
+      uiLive.close();
+    };
   }, [transport, uiLive, scope, options.connect, options.uiLiveWebSocketFactory]);
   // useReducer keeps its previous value while props change. Keep a confirmed peer
   // during an identity-only reset so the conversation hook does not briefly switch
@@ -156,5 +180,5 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     : state.routerUrl === scope.routerUrl && state.selectedPeer !== undefined
       ? { ...createInitialState(scope), selectedPeer: state.selectedPeer }
       : createInitialState(scope);
-  return { state: scopedState, transport, dispatch, uiLive, reconnect: () => { transport.connect(); if (canConnectUILive(options)) uiLive.connect(); }, disconnect: () => { transport.close(); uiLive.close(); } };
+  return { state: scopedState, transport, dispatch, uiLive, reconnect: () => { transport.connect(); if (canConnectUILive(options)) uiLive.connect(); startManagedSurfaceRef.current?.(); }, disconnect: () => { transport.close(); uiLive.close(); } };
 }

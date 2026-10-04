@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, useState, type ReactElement } from "react";
 import { AttachmentGallery } from "../../src/components/AttachmentGallery";
 import { createHistoryThumbnail } from "../../src/domain/images";
@@ -10,6 +10,7 @@ import { HistoryRepository, thumbnailCacheKey } from "../../src/persistence/hist
 import { createInitialState } from "../../src/state/app-state";
 import { reducer } from "../../src/state/reducer";
 import { createRouterTransport, type RouterTransport } from "../../src/transport/router-transport";
+import { useRouterSession, type RouterSession, type RouterSessionOptions } from "../../src/hooks/use-router-session";
 import { useConversation } from "../../src/hooks/use-conversation";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 
@@ -43,6 +44,12 @@ function ReminderProbe({ transport }: { transport: RouterTransport }): ReactElem
   const [reminders, setReminders] = useState<string[]>([]);
   useEffect(() => transport.subscribe((event) => { if (event.type === "reminders") setReminders(event.reminders.map((reminder) => reminder.id)); }), [transport]);
   return <output data-testid="reminder-ids">{reminders.join(",")}</output>;
+}
+
+function SessionProbe({ options, onSession }: { options: RouterSessionOptions; onSession: (session: RouterSession) => void }): ReactElement {
+  const session = useRouterSession(options);
+  useEffect(() => { onSession(session); }, [session.state, session, onSession]);
+  return <div data-testid="managed-status">{String(session.state.managedAvailable)}</div>;
 }
 
 function requiredFrame(socket: Socket, index = 0): Record<string, unknown> {
@@ -279,5 +286,148 @@ describe("validated post-E2E reliability repairs", () => {
 
   it("fails closed when thumbnail decoding is unavailable", async () => {
     await expect(createHistoryThumbnail("data:image/png;base64,abc", { createImageBitmap: vi.fn(async () => { throw new Error("decode failed"); }) })).rejects.toThrow("decode failed");
+  });
+
+  it("auto-recovers managed surface after router restart capabilities failure", async () => {
+    vi.useFakeTimers();
+    try {
+      let failCapabilities = true;
+      let capabilitiesCalls = 0;
+      const agentRecord = {
+        agent_id: "managed-alpha",
+        source: "router-managed" as const,
+        cwd: "/tmp/project",
+        model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+        desired_state: "running",
+        lifecycle_state: "running",
+        activity_state: "idle",
+        accepting_prompts: true,
+        manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+        created_at: "2030-01-01T00:00:00.123456Z",
+        started_at: "2030-01-01T00:00:00.123456789Z",
+        updated_at: "2030-01-01T00:00:00.123456789Z",
+        last_error: null,
+      };
+      const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/v1/capabilities")) {
+          capabilitiesCalls += 1;
+          if (failCapabilities) throw new Error("router down");
+          return new Response(JSON.stringify({ managed_v1: true }));
+        }
+        if (url.endsWith("/v1/managed-agents")) {
+          return new Response(JSON.stringify({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: 1, agents: [agentRecord] }));
+        }
+        if (url.includes("/children")) {
+          return new Response(JSON.stringify({ lifecycle_version: 1, recovery_state: "current", children: [] }));
+        }
+        if (url.endsWith("/v1/agents")) return new Response(JSON.stringify({ agents: [] }));
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const socket = new Socket();
+      const uiLiveSocket = new Socket();
+      let latestSession: RouterSession | undefined;
+      render(<SessionProbe options={{
+        routerUrl: "http://router.test:4000",
+        agentId: "web",
+        fetchImpl,
+        webSocketFactory: () => socket,
+        uiLiveWebSocketFactory: () => uiLiveSocket,
+        autoReconnect: false,
+      }} onSession={(s) => { latestSession = s; }} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      expect(capabilitiesCalls).toBe(1);
+      expect(latestSession?.state.managedAvailable).toBe(false);
+      expect(latestSession?.state.managedAgents).toEqual([]);
+
+      failCapabilities = false;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      for (let i = 0; i < 20 && (!latestSession?.state.managedAgents || latestSession.state.managedAgents.length === 0); i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10);
+        });
+      }
+      expect(capabilitiesCalls).toBe(2);
+      expect(latestSession?.state.managedAvailable).toBe(true);
+      expect(latestSession?.state.managedAgents).toHaveLength(1);
+      expect(latestSession?.state.managedAgents?.[0]?.agent_id).toBe("managed-alpha");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("auto-recovers managed surface when uiLive triggers onRecovery", async () => {
+    vi.useFakeTimers();
+    try {
+      let snapshotCalls = 0;
+      const agentRecord = {
+        agent_id: "managed-alpha",
+        source: "router-managed" as const,
+        cwd: "/tmp/project",
+        model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+        desired_state: "running",
+        lifecycle_state: "running",
+        activity_state: "idle",
+        accepting_prompts: true,
+        manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+        created_at: "2030-01-01T00:00:00.123456Z",
+        started_at: "2030-01-01T00:00:00.123456789Z",
+        updated_at: "2030-01-01T00:00:00.123456789Z",
+        last_error: null,
+      };
+      const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/v1/capabilities")) {
+          return new Response(JSON.stringify({ managed_v1: true }));
+        }
+        if (url.endsWith("/v1/managed-agents")) {
+          snapshotCalls += 1;
+          const agentId = snapshotCalls === 1 ? "managed-alpha" : "managed-beta";
+          return new Response(JSON.stringify({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: snapshotCalls, agents: [{ ...agentRecord, agent_id: agentId }] }));
+        }
+        if (url.includes("/children")) {
+          return new Response(JSON.stringify({ lifecycle_version: 1, recovery_state: "current", children: [] }));
+        }
+        if (url.endsWith("/v1/agents")) return new Response(JSON.stringify({ agents: [] }));
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const socket = new Socket();
+      const uiLiveSocket = new Socket();
+      let latestSession: RouterSession | undefined;
+      render(<SessionProbe options={{
+        routerUrl: "http://router.test:4000",
+        agentId: "web",
+        fetchImpl,
+        webSocketFactory: () => socket,
+        uiLiveWebSocketFactory: () => uiLiveSocket,
+        autoReconnect: false,
+      }} onSession={(s) => { latestSession = s; }} />);
+
+      for (let i = 0; i < 20 && snapshotCalls === 0; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10);
+        });
+      }
+      expect(snapshotCalls).toBe(1);
+      expect(latestSession?.state.managedAgents?.[0]?.agent_id).toBe("managed-alpha");
+
+      await act(async () => {
+        uiLiveSocket.close();
+      });
+      for (let i = 0; i < 20 && snapshotCalls === 1; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10);
+        });
+      }
+      expect(snapshotCalls).toBe(2);
+      expect(latestSession?.state.managedAgents?.[0]?.agent_id).toBe("managed-beta");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
