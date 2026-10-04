@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
 )
 
@@ -469,5 +470,250 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 	part3_2 := parts3[1].(map[string]any)
 	if part3_2["text"] != "Now tell me what it said" {
 		t.Errorf("turn 3 part 2 expected text, got %v", part3_2["text"])
+	}
+}
+
+func TestGoogleAuth_StreamUniqueToolCallIDsForDuplicateToolNames(t *testing.T) {
+	origURL := googleTokenURL
+	defer func() { googleTokenURL = origURL }()
+	origGenURL := googleGenerateContentURL
+	defer func() { googleGenerateContentURL = origGenURL }()
+
+	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "test-token",
+			"expires_in":   3600,
+			"token_type":   "Bearer",
+		})
+	}))
+	defer mockOAuth.Close()
+	googleTokenURL = mockOAuth.URL
+
+	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// SSE stream emitting multiple FunctionCall parts with the same tool name "read"
+		sseChunk := "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"file1.txt\"}}},{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"file2.txt\"}}}],\"role\":\"model\"}}]}}\n\n"
+		_, _ = w.Write([]byte(sseChunk))
+	}))
+	defer mockAntigravityAPI.Close()
+	googleGenerateContentURL = mockAntigravityAPI.URL
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	initialAuth := map[string]any{
+		"antigravity": map[string]any{
+			"access":    "test-access-token",
+			"refresh":   "test-refresh-token",
+			"expires":   time.Now().UnixMilli() + 3600*1000,
+			"projectId": "test-project-123",
+		},
+	}
+	data, _ := json.Marshal(initialAuth)
+	_ = os.WriteFile(authPath, data, 0600)
+
+	m := &Manager{
+		config: Config{PiAgentDir: tempDir},
+		ids:    managerIDs{},
+	}
+	transcript := ai.TranscriptContext{
+		Messages: []ai.Message{
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Read both files"},
+				},
+			},
+		},
+	}
+
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+
+	var toolCalls []ai.ToolCall
+	for event := range stream.Events() {
+		if event.Type == ai.EventError {
+			t.Fatalf("stream encountered error: %v", event.Error)
+		}
+		if event.Type == ai.EventDone && event.Message != nil {
+			for _, c := range event.Message.Content {
+				if tc, ok := c.(ai.ToolCall); ok {
+					toolCalls = append(toolCalls, tc)
+				}
+			}
+		}
+	}
+
+	if len(toolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d: %+v", len(toolCalls), toolCalls)
+	}
+
+	for i, tc := range toolCalls {
+		if tc.Name != "read" {
+			t.Errorf("tool call %d name expected 'read', got %q", i, tc.Name)
+		}
+		if tc.ID == "read" {
+			t.Errorf("tool call %d ID must not be equal to 'read', got %q", i, tc.ID)
+		}
+		if !strings.HasPrefix(tc.ID, "call_") {
+			t.Errorf("tool call %d ID expected prefix 'call_', got %q", i, tc.ID)
+		}
+	}
+
+	if toolCalls[0].ID == toolCalls[1].ID {
+		t.Fatalf("tool call IDs must be unique, both were %q", toolCalls[0].ID)
+	}
+}
+
+func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
+	origURL := googleTokenURL
+	defer func() { googleTokenURL = origURL }()
+	origGenURL := googleGenerateContentURL
+	defer func() { googleGenerateContentURL = origGenURL }()
+
+	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "test-token",
+			"expires_in":   3600,
+			"token_type":   "Bearer",
+		})
+	}))
+	defer mockOAuth.Close()
+	googleTokenURL = mockOAuth.URL
+
+	turn := 0
+	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		turn++
+		// Turn 1 calls read for a.txt, Turn 2 calls read for b.txt
+		path := "a.txt"
+		if turn > 1 {
+			path = "b.txt"
+		}
+		sseChunk := fmt.Sprintf("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":%q}}}],\"role\":\"model\"}}]}}\n\n", path)
+		_, _ = w.Write([]byte(sseChunk))
+	}))
+	defer mockAntigravityAPI.Close()
+	googleGenerateContentURL = mockAntigravityAPI.URL
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	initialAuth := map[string]any{
+		"antigravity": map[string]any{
+			"access":    "test-access-token",
+			"refresh":   "test-refresh-token",
+			"expires":   time.Now().UnixMilli() + 3600*1000,
+			"projectId": "test-project-123",
+		},
+	}
+	data, _ := json.Marshal(initialAuth)
+	_ = os.WriteFile(authPath, data, 0600)
+
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(tempDir, "router.db"), store.Options{})
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer db.Close()
+
+	agent := store.ManagedAgentRecord{
+		AgentID:           "test-agent",
+		Name:              "test-agent",
+		Cwd:               tempDir,
+		SelectedModel:     store.ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		Runtime:           "embedded",
+		PiSessionID:       "test-session",
+		SessionEpoch:      1,
+		RuntimeGeneration: "test-gen",
+		ManifestRevision:  1,
+		ManifestHash:      strings.Repeat("a", 64),
+	}
+	op := store.ManagedOperation{
+		OperationID:       "test-launch",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "test-launch",
+		CanonicalBodyHash: "hash",
+		ResponseStatus:    202,
+		ResponseBody:      []byte(`{}`),
+	}
+	if err := db.ReserveManagedLaunch(ctx, agent, op); err != nil {
+		t.Fatalf("failed to reserve managed launch: %v", err)
+	}
+
+	binding := store.EmbeddedBinding{
+		AgentID:    "test-agent",
+		SessionID:  "test-session",
+		Epoch:      1,
+		Generation: "test-gen",
+	}
+	if err := db.BindEmbeddedSession(ctx, binding, "worker"); err != nil {
+		t.Fatalf("failed to bind embedded session: %v", err)
+	}
+	token, err := db.AcquireEmbeddedOwner(ctx, binding, "test-owner", time.Minute)
+	if err != nil {
+		t.Fatalf("failed to acquire embedded owner: %v", err)
+	}
+	binding.OwnerToken = token
+
+	m := &Manager{
+		config: Config{PiAgentDir: tempDir},
+		ids:    managerIDs{},
+		store:  db,
+	}
+
+	// First turn stream
+	stream1 := m.streamEmbeddedGoogle(ctx, &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, ai.TranscriptContext{}, nil)
+	var call1 ai.ToolCall
+	for event := range stream1.Events() {
+		if event.Type == ai.EventDone && event.Message != nil {
+			for _, c := range event.Message.Content {
+				if tc, ok := c.(ai.ToolCall); ok {
+					call1 = tc
+				}
+			}
+		}
+	}
+	if call1.ID == "" || call1.ID == "read" {
+		t.Fatalf("invalid tool call 1 ID: %q", call1.ID)
+	}
+
+	// Second turn stream
+	stream2 := m.streamEmbeddedGoogle(ctx, &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, ai.TranscriptContext{}, nil)
+	var call2 ai.ToolCall
+	for event := range stream2.Events() {
+		if event.Type == ai.EventDone && event.Message != nil {
+			for _, c := range event.Message.Content {
+				if tc, ok := c.(ai.ToolCall); ok {
+					call2 = tc
+				}
+			}
+		}
+	}
+	if call2.ID == "" || call2.ID == "read" {
+		t.Fatalf("invalid tool call 2 ID: %q", call2.ID)
+	}
+
+	if call1.ID == call2.ID {
+		t.Fatalf("sequential tool calls must have different IDs, got %q for both", call1.ID)
+	}
+
+	// Test recording effect intents sequentially in embedded_effects table
+	intent1, err := json.Marshal(call1)
+	if err != nil {
+		t.Fatalf("failed to marshal call 1: %v", err)
+	}
+	if err := db.RecordEmbeddedEffectIntent(ctx, binding, call1.ID, intent1); err != nil {
+		t.Fatalf("failed to record effect 1 intent: %v", err)
+	}
+
+	intent2, err := json.Marshal(call2)
+	if err != nil {
+		t.Fatalf("failed to marshal call 2: %v", err)
+	}
+	// This would fail with "UNIQUE constraint failed: embedded_effects.effect_id" if both call IDs were "read"
+	if err := db.RecordEmbeddedEffectIntent(ctx, binding, call2.ID, intent2); err != nil {
+		t.Fatalf("failed to record effect 2 intent (UNIQUE constraint violation?): %v", err)
 	}
 }

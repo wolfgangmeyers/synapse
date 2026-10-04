@@ -573,8 +573,17 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 						})
 					}
 					if part.FunctionCall != nil {
+						callID := ""
+						if m != nil && m.ids != nil {
+							callID, _ = m.ids.Next()
+						}
+						if callID == "" {
+							callID = fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, time.Now().UnixNano())
+						} else {
+							callID = "call_" + callID
+						}
 						tc := ai.ToolCall{
-							ID:        part.FunctionCall.Name,
+							ID:        callID,
 							Name:      part.FunctionCall.Name,
 							Arguments: part.FunctionCall.Args,
 						}
