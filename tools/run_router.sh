@@ -48,6 +48,7 @@ else
 fi
 MANAGED_AUTH_HELPER="${MECHA_ROUTER_MANAGED_AUTH_HELPER:-$ROOT_DIR/auth-helper/index.mjs}"
 MANAGED_RUNTIME_ROOT="${MECHA_ROUTER_MANAGED_RUNTIME_ROOT:-$ROOT_DIR}"
+CODEX_CREDENTIAL_PATH="${MECHA_ROUTER_CODEX_CREDENTIAL_PATH:-${HOME}/.mecha-developer/codex-credentials.json}"
 # Managed agents normally work in Wolfgang's local projects, which live under
 # the home directory. An explicit configuration remains the only way to widen
 # or narrow this router's launch scope.
@@ -107,7 +108,8 @@ case "${1:-}" in
       "ROUTER_MANAGED_RUNTIME_ROOT=$MANAGED_RUNTIME_ROOT" \
       "ROUTER_MANAGED_CWD_ROOTS=$MANAGED_CWD_ROOTS" \
       "ROUTER_MANAGED_QUIET_RECIPIENT=$MANAGED_QUIET_RECIPIENT" \
-      "ROUTER_MANAGED_UI_DIST=$MANAGED_UI_DIST"
+      "ROUTER_MANAGED_UI_DIST=$MANAGED_UI_DIST" \
+      "ROUTER_CODEX_CREDENTIAL_PATH=$CODEX_CREDENTIAL_PATH"
     ;;
   *)
     printf '%s\n' "run_router.sh: unknown argument: $1" >&2

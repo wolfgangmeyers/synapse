@@ -1,5 +1,6 @@
 import { useEffect, type ReactElement } from "react";
 import { MarkdownBody } from "../domain/markdown";
+import { isRecord } from "../protocol/guards";
 import type { JsonValue, ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
 import { DialogShell } from "./DialogShell";
 import { completeTimelineVisual } from "./CompleteTimelineEntry";
@@ -82,7 +83,8 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
   if (entry === undefined) return null;
   const visual = completeTimelineVisual(entry);
   const presentation = entry.presentation;
-  const isMailboxSend = presentation?.tool_name === "mecha_mailbox_send" || (presentation?.tool_name === "mecha_worker" && typeof entry.tool_input === "object" && (entry.tool_input as Record<string, unknown>)?.action === "send");
+  const isWorkerSend = presentation?.tool_name === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send";
+  const isMailboxSend = presentation?.tool_name === "mecha_mailbox_send" || isWorkerSend;
   const mailboxDetails = isMailboxSend ? getMailboxSendDetails(entry.tool_input) : undefined;
   const isTool = !isMailboxSend && (presentation?.kind === "tool" || entry.tool_input !== undefined);
   const isOutbound = isMailboxSend || entry.message === "Message sent" || entry.message === "Reply sent" || (presentation?.from === entry.agent_id && presentation?.to !== undefined);
@@ -94,10 +96,11 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
   const summaryText = !isRedundantSummary(presentation?.summary) ? presentation?.summary : undefined;
   const hasOriginalMessage = !isTool && !isMailboxSend && entry.message_content !== undefined;
 
-  return <DialogShell open={open} title={visual.label} titleId="activity-detail-dialog-title" description={`${entry.agent_id} · ${displayTime(entry.at)}`} onClose={onClose} {...(onClosed === undefined ? {} : { onClosed })} closeLabel="Close activity details" {...(returnFocus === undefined ? {} : { returnFocus })} className="message-dialog activity-detail-dialog">
+  return <DialogShell open={open} title={visual.dialogTitle ?? visual.label} titleId="activity-detail-dialog-title" description={`${entry.agent_id} · ${displayTime(entry.at)}`} onClose={onClose} {...(onClosed === undefined ? {} : { onClosed })} closeLabel="Close activity details" {...(returnFocus === undefined ? {} : { returnFocus })} className="message-dialog activity-detail-dialog">
     <div className="activity-detail-body">
       {entry.sender_identity && !isOutbound ? <p className="activity-detail-sender">From <strong>{entry.sender_identity}</strong></p> : null}
       {recipientTarget ? <p className="activity-detail-sender">To <strong>{recipientTarget}</strong></p> : null}
+      {visual.subject ? <p className="activity-detail-sender">Subject: <strong>{visual.subject}</strong></p> : null}
       {isTool ? <>
         {command !== undefined ? <section><h3>Command</h3><pre className="activity-detail-payload">{command}</pre></section> : hasToolInput ? <section><h3>Parameters</h3><pre className="activity-detail-payload">{toolInputText(entry.tool_input ?? null)}</pre></section> : null}
         {hasToolOutput ? <section><h3>Output</h3><pre className="activity-detail-payload">{cleanOutput(entry.message_content)}</pre></section> : errorText ? <section><h3>Result</h3><pre className="activity-detail-payload">{errorText}</pre></section> : summaryText ? <section><h3>Result</h3><pre className="activity-detail-payload">{summaryText}</pre></section> : null}

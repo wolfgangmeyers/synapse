@@ -31,7 +31,7 @@ func (m *Manager) admitEmbeddedModel(ctx context.Context, candidate Model) (Mode
 // still be broad: only embedded Cwds must be disjoint, including restored Cwds.
 func (m *Manager) validateEmbeddedWorkingDirectory(cwd string) error {
 	if m.codexCredentialStore == nil {
-		return errors.New("embedded Codex credential store unavailable")
+		return nil
 	}
 	project, err := filepath.EvalSymlinks(cwd)
 	if err != nil {

@@ -543,6 +543,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return err
 	}
 	model := ai.GetModel(saved.SelectedModel.Provider, saved.SelectedModel.ID)
+	if model == nil && (saved.SelectedModel.Provider == "antigravity" || saved.SelectedModel.Provider == "google") {
+		model = ai.GetModel("google", saved.SelectedModel.ID)
+	}
+	if model == nil && saved.SelectedModel.Provider == "antigravity" {
+		model = &ai.Model{
+			ID:            saved.SelectedModel.ID,
+			Provider:      "antigravity",
+			Api:           "google-generative-ai",
+			ContextWindow: 1048576,
+			MaxTokens:     8192,
+		}
+	}
 	var injectedStreamModel *ai.Model
 	if m.embeddedModelResolver != nil {
 		resolved := m.embeddedModelResolver(saved)
@@ -950,6 +962,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	stream := func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 		fail := func(err error) *ai.AssistantMessageEventStream { return ai.ErrorStream(requestModel, err) }
 		if requestModel.Provider != "openai-codex" {
+			if requestModel.Provider == "antigravity" || requestModel.Provider == "google" {
+				return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
+			}
 			return ai.StreamSimple(requestCtx, requestModel, ai.Context{
 				Messages: transcript.Messages,
 			}, opts)

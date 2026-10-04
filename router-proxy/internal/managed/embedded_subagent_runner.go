@@ -234,6 +234,18 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 		record.SelectedModel.ID = "gemini-3.8-flash"
 	}
 	model := ai.GetModel(record.SelectedModel.Provider, record.SelectedModel.ID)
+	if model == nil && (record.SelectedModel.Provider == "antigravity" || record.SelectedModel.Provider == "google") {
+		model = ai.GetModel("google", record.SelectedModel.ID)
+	}
+	if model == nil && record.SelectedModel.Provider == "antigravity" {
+		model = &ai.Model{
+			ID:            record.SelectedModel.ID,
+			Provider:      "antigravity",
+			Api:           "google-generative-ai",
+			ContextWindow: 1048576,
+			MaxTokens:     8192,
+		}
+	}
 	var stream agent.StreamFn
 	if m.embeddedModelResolver != nil {
 		resolved := m.embeddedModelResolver(record)
