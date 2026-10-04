@@ -889,6 +889,10 @@ func (r *Router) runStartup(ctx context.Context) error {
 		if err := r.managed.RecoverManagedLifecycleControls(ctx); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: RecoverBootTimeGoalContinuations")
+		if err := r.managed.RecoverBootTimeGoalContinuations(ctx); err != nil {
+			return err
+		}
 	}
 	log.Printf("STARTUP: ReconcileManagedRecipientSources")
 	if err := r.store.ReconcileManagedRecipientSources(ctx); err != nil {

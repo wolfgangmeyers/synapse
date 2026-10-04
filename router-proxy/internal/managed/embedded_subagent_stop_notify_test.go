@@ -75,6 +75,6 @@ func TestStopSubagentNotifiesParentWorker(t *testing.T) {
 	require.Equal(t, parent.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
 	require.Equal(t, "Subagent Terminated", *msg.Subject)
-	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped by user request. Partial progress and logs have been saved. You can fetch its latest state and output using get_subagent_result(agent_id=\"" + childID + "\")."
+	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\")."
 	require.Equal(t, expectedBody, msg.Body)
 }

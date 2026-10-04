@@ -633,6 +633,59 @@ func TestManagedRestartHTTPContract(t *testing.T) {
 	assertError(request(valid, `{}`), http.StatusNotFound, "AGENT_NOT_FOUND", valid)
 }
 
+func TestManagedFailedAgentRestartReturnsOK(t *testing.T) {
+	server, durable := newManagedHTTPTestServer(t)
+	ctx := context.Background()
+	// Insert an agent in failed state
+	failedAgent := store.ManagedAgentRecord{
+		AgentID:          "failed-worker",
+		Name:             "failed-worker",
+		Cwd:              t.TempDir(),
+		SelectedModel:    store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
+		DesiredState:     "running",
+		LifecycleState:   "failed",
+		ActivityState:    "failed",
+		Runtime:          "embedded",
+		PiSessionID:      "test-session",
+		SessionEpoch:     1,
+		ManifestRevision: 1,
+		ManifestHash:     strings.Repeat("a", 64),
+		LastErrorCode:    "EMBEDDED_START_FAILED",
+		LastErrorMessage: "claimed restart wake requires reconciliation before rotation",
+	}
+	op := store.ManagedOperation{
+		OperationID:       "launch-op-1",
+		Method:            http.MethodPost,
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "123e4567-e89b-42d3-a456-426614174099",
+		CanonicalBodyHash: "hash",
+		ResponseStatus:    http.StatusAccepted,
+		ResponseBody:      []byte(`{}`),
+	}
+	require.NoError(t, durable.ReserveManagedLaunchWithLimit(ctx, failedAgent, op, 10))
+
+	// POST /v1/managed-agents/failed-worker/restart
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents/failed-worker/restart", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	require.Equal(t, true, payload["ok"])
+
+	// Verify agent state was reset to idle/running with error cleared
+	reloaded, err := durable.ManagedAgent(ctx, "failed-worker")
+	require.NoError(t, err)
+	require.Equal(t, "running", reloaded.LifecycleState)
+	require.Equal(t, "idle", reloaded.ActivityState)
+	require.Empty(t, reloaded.LastErrorCode)
+	require.Empty(t, reloaded.LastErrorMessage)
+}
+
 func TestManagedResetHTTPContract(t *testing.T) {
 	server, _ := newManagedHTTPTestServer(t)
 	request := func(id, body string) *http.Response {

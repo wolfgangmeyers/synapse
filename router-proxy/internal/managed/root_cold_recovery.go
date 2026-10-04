@@ -72,6 +72,7 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	if err := m.RecoverManagedRootRecoveryOperators(ctx); err != nil {
 		return err
 	}
+	_ = m.ReconcileInterruptedSubagents(ctx)
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {
 		return err
@@ -182,6 +183,115 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	return nil
 }
 
+// RecoverBootTimeGoalContinuations scans for agents where goal policy is enabled,
+// and if idle with no active subagents, resumes work automatically on router restart.
+func (m *Manager) RecoverBootTimeGoalContinuations(ctx context.Context) error {
+	agents, err := m.store.ManagedAgents(ctx)
+	if err != nil {
+		return err
+	}
+	for _, agent := range agents {
+		if agent == nil || agent.DesiredState != "running" || agent.LifecycleState != "running" {
+			continue
+		}
+		policy, err := m.store.ManagedGoalPolicyFor(ctx, agent.AgentID)
+		if err != nil || policy == nil || !policy.Config.Enabled {
+			continue
+		}
+		now := formatManagedTime(m.clock.Now())
+		if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
+			continue
+		}
+		saved := agent
+		if saved.Runtime != "embedded" {
+			if saved.ActivityState == "idle" {
+				m.OfferDirect(saved.AgentID)
+			}
+			continue
+		}
+		agentID := saved.AgentID
+		m.startManagedTask(func() {
+			var owner embeddedOwner
+			var ok bool
+			for i := 0; i < 60; i++ {
+				m.mu.Lock()
+				owner, ok = m.embeddedOwners[agentID]
+				m.mu.Unlock()
+				if ok {
+					break
+				}
+				select {
+				case <-m.runCtx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			if !ok {
+				return
+			}
+
+			func() {
+				lane := m.laneFor(agentID)
+				lane.serial.Lock()
+				defer lane.serial.Unlock()
+
+				curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
+				if err != nil || curAgent.ActivityState != "idle" {
+					return
+				}
+
+				m.subagentsMu.Lock()
+				hasActiveSubagents := false
+				for _, task := range m.subagentsActive {
+					if task.parent.AgentID == agentID {
+						task.mu.Lock()
+						st := task.status
+						task.mu.Unlock()
+						if st == "queued" || st == "running" {
+							hasActiveSubagents = true
+							break
+						}
+					}
+				}
+				m.subagentsMu.Unlock()
+				if !hasActiveSubagents {
+					binding := store.EmbeddedBinding{
+						AgentID:    curAgent.AgentID,
+						SessionID:  curAgent.PiSessionID,
+						Epoch:      curAgent.SessionEpoch,
+						Generation: curAgent.RuntimeGeneration,
+					}
+					subagents, err := m.store.ManagedSubagents(m.runCtx, binding)
+					if err == nil {
+						for _, s := range subagents {
+							if s.Status == "queued" || s.Status == "running" {
+								hasActiveSubagents = true
+								break
+							}
+						}
+					}
+				}
+				if hasActiveSubagents {
+					return
+				}
+
+				if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding); err == nil && found {
+					m.startManagedTask(func() {
+						m.startEmbeddedGoalContinuation(owner.binding, key)
+					})
+					return
+				}
+
+				m.OfferDirect(saved.AgentID)
+				runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+				_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, "Continue working on the current goal.", nil)
+			}()
+		})
+	}
+	return nil
+}
+
+
 const (
 	managedInitialReplayTranscriptPoll = 25 * time.Millisecond
 	// Stock Pi can emit delayed active after durable assistant persistence, so
@@ -255,6 +365,11 @@ func (m *Manager) finishManagedRootRecovery(ctx context.Context, binding *manage
 		return err
 	}
 	m.OfferDirect(binding.agentID)
+	if policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.agentID); err == nil && policy != nil && policy.Config.Enabled {
+		if saved, err := m.store.ManagedAgent(ctx, binding.agentID); err == nil && saved != nil && saved.ActivityState == "idle" {
+			m.OfferDirect(saved.AgentID)
+		}
+	}
 	return nil
 }
 
