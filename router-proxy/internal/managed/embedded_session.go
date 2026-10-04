@@ -536,6 +536,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	defer func() {
 		_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
 		m.publishProjection()
+		m.OfferDirect(binding.AgentID)
 	}()
 	// Restored selections are untrusted admission input too. Check the real
 	// SDK identity and private credential before any test substitution, tools,
@@ -960,7 +961,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, tool)
 	}
 	var appliedReceipt *store.EmbeddedGoalAppliedReceipt
-	var pollSteering func(context.Context)
 	// The SDK invokes StreamFn only when it has selected a provider request.
 	// MessageEnd persistence has already checked the initiating user and any
 	// goal tool result. Never mark a desired revision applied at goal set time.
@@ -1356,31 +1356,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				freshWorkerMu.Unlock()
 			}
 			return nil
-		}, AfterToolCall: func(callCtx context.Context, c agent.AfterToolCallContext) *agent.AfterToolCallResult {
-			if pollSteering != nil {
-				pollSteering(callCtx)
-			}
-			return nil
 		}})
-	pollSteering = func(pollCtx context.Context) {
-		msgs, err := m.store.PollAndAdmitEmbeddedPendingMessages(pollCtx, binding)
-		if err != nil || len(msgs) == 0 {
-			return
-		}
-		for _, msg := range msgs {
-			session.Agent.Steer(msg)
-		}
-	}
-	origPrepareNextTurn := session.Agent.PrepareNextTurn
-	session.Agent.PrepareNextTurn = func(turn agent.AgentTurnContext) *agent.AgentLoopTurnUpdate {
-		if pollSteering != nil {
-			pollSteering(ctx)
-		}
-		if origPrepareNextTurn != nil {
-			return origPrepareNextTurn(turn)
-		}
-		return nil
-	}
 	if err := p.restore(ctx, session); err != nil {
 		return err
 	}
