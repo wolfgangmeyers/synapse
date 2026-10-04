@@ -661,6 +661,26 @@ func (s *Store) CommitEmbeddedCheckpoint(ctx context.Context, b EmbeddedBinding,
 		return err
 	})
 }
+func (s *Store) ReopenLatestAgentEmbedded(ctx context.Context, agentID string) (EmbeddedSnapshot, error) {
+	out := EmbeddedSnapshot{Entries: []EmbeddedEntry{}}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return out, errors.New("store is closed")
+	}
+	var sessionID string
+	var epoch int64
+	err := s.db.QueryRowContext(ctx, `SELECT session_id, epoch FROM embedded_entries WHERE agent_id=? ORDER BY rowid DESC LIMIT 1`, agentID).Scan(&sessionID, &epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	b := EmbeddedBinding{AgentID: agentID, SessionID: sessionID, Epoch: epoch}
+	return s.readEmbeddedSnapshotTx(ctx, b)
+}
+
 func (s *Store) ReopenEmbedded(ctx context.Context, b EmbeddedBinding) (EmbeddedSnapshot, error) {
 	out := EmbeddedSnapshot{Entries: []EmbeddedEntry{}}
 	s.mu.Lock()

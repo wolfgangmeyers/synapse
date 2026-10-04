@@ -370,6 +370,9 @@ func (p *embeddedPersistence) CommitCheckpoint(ctx context.Context, checkpoint c
 }
 func (p *embeddedPersistence) restore(ctx context.Context, session *coding.Session) error {
 	snap, err := p.db.ReopenEmbedded(ctx, p.binding)
+	if err == nil && len(snap.Entries) == 0 {
+		snap, err = p.db.ReopenLatestAgentEmbedded(ctx, p.binding.AgentID)
+	}
 	if err != nil {
 		return err
 	}
