@@ -128,6 +128,12 @@ In `pi-extensions/mecha-messaging`, TypeScript code must preserve type safety. D
 
 Run `npm run lint:mecha-messaging` (or `npm --prefix pi-extensions/mecha-messaging run lint`) for the enforced checks. The package linter enables `@typescript-eslint/no-explicit-any` and `@typescript-eslint/no-unsafe-type-assertion`; this rule does not enable global TypeScript strict mode or change migration, runtime, settings, installer, or test behavior.
 
+## Single-User Workstation Assumption and Directory Permissions
+
+These are single-user developer workstations, not shared multi-user or hostile multi-tenant mainframes. Do not invent unrequested multi-user containment restrictions or hostile same-user permission gates.
+
+Specifically, user home directories and ancestor paths on macOS and Linux standard configurations often use 0750 or 0755 permissions by default. When verifying path safety for local state or credential stores, never require 0700 on ancestor directories. Only verify that ancestors are not group- or world-writable (mode & 0o022 == 0) and that the private leaf directory itself is owner-only (0700).
+
 ## Delegation and Review Discipline
 
 **MUST HAVE: Never request review from someone on a PR while CI is not green. Getting CI green is the highest priority for a PR.**

@@ -26,7 +26,7 @@ func pinEmbeddedReadRoot(cwd string) (int, error) {
 	if !path.IsAbs(cwd) {
 		return -1, errors.New("read root must be absolute")
 	}
-	fd, err := unix.Open(cwd, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := openRootDirectory(cwd)
 	if err != nil {
 		return -1, err
 	}
@@ -61,7 +61,7 @@ func readEmbeddedRootFile(ctx context.Context, rootFD int, p string, offsetVal, 
 	if !validEmbeddedReadPath(p) {
 		return "", errors.New("read path must be normalized and relative")
 	}
-	fd, err := unix.Openat2(rootFD, p, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
+	fd, err := openBeneath(rootFD, p)
 	if err != nil {
 		return "", fmt.Errorf("read denied: %w", err)
 	}

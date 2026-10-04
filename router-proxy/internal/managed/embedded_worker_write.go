@@ -177,7 +177,7 @@ func createEmbeddedWorkerFile(ctx context.Context, rootFD int, p string, content
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := unix.Renameat2(parent, tmp, parent, parts[len(parts)-1], unix.RENAME_NOREPLACE); err != nil {
+	if err := renameatNoReplace(parent, tmp, parent, parts[len(parts)-1]); err != nil {
 		return fmt.Errorf("write create-only conflict or denial: %w", err)
 	}
 	if embeddedAfterWriteRenameForTest != nil {
