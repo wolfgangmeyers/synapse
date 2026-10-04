@@ -7,13 +7,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sky-valley/pi/ai"
+)
+
+const (
+	googleClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	googleClientSecret = "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f"
+)
+
+var (
+	googleTokenURL           = "https://oauth2.googleapis.com/token"
+	googleGenerateContentURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+	googleAuthMu             sync.Mutex
 )
 
 type googleAuthJSON struct {
@@ -27,7 +41,111 @@ type googleAuthJSON struct {
 	} `json:"antigravity"`
 }
 
+func (m *Manager) refreshGoogleAntigravityToken(ctx context.Context, authPath string, allAuth map[string]any, antiMap map[string]any) error {
+	refreshToken, _ := antiMap["refresh"].(string)
+	if refreshToken == "" {
+		return errors.New("no refresh token available for google antigravity")
+	}
+
+	data := url.Values{}
+	data.Set("client_id", googleClientID)
+	data.Set("client_secret", googleClientSecret)
+	data.Set("refresh_token", refreshToken)
+	data.Set("grant_type", "refresh_token")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, googleTokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return fmt.Errorf("failed to create refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("google token refresh request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read refresh response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("google token refresh failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+	}
+	if err := json.Unmarshal(bodyBytes, &tokenResp); err != nil {
+		return fmt.Errorf("failed to parse google token response: %w", err)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return errors.New("google token refresh returned empty access_token")
+	}
+
+	antiMap["access"] = tokenResp.AccessToken
+	if tokenResp.RefreshToken != "" {
+		antiMap["refresh"] = tokenResp.RefreshToken
+	}
+
+	now := time.Now().UnixMilli()
+	expires := now + tokenResp.ExpiresIn*1000
+	if tokenResp.ExpiresIn > 300 {
+		expires -= 5 * 60 * 1000
+	}
+	antiMap["expires"] = expires
+	allAuth["antigravity"] = antiMap
+
+	out, err := json.MarshalIndent(allAuth, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated auth.json: %w", err)
+	}
+	out = append(out, '\n')
+
+	dir := filepath.Dir(authPath)
+	tmpFile, err := os.CreateTemp(dir, "auth.*.json.tmp")
+	if err != nil {
+		return os.WriteFile(authPath, out, 0600)
+	}
+	tmpName := tmpFile.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to chmod temp auth file: %w", err)
+	}
+	if _, err := tmpFile.Write(out); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write temp auth file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync temp auth file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp auth file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, authPath); err != nil {
+		return fmt.Errorf("failed to replace auth.json: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) embeddedGoogleAuth(ctx context.Context) (token, projectID string, err error) {
+	return m.embeddedGoogleAuthWithRefresh(ctx, false)
+}
+
+func (m *Manager) embeddedGoogleAuthWithRefresh(ctx context.Context, forceRefresh bool) (token, projectID string, err error) {
+	googleAuthMu.Lock()
+	defer googleAuthMu.Unlock()
+
 	userHome, _ := os.UserHomeDir()
 	paths := []string{
 		filepath.Join(m.config.PiAgentDir, "auth.json"),
@@ -36,30 +154,69 @@ func (m *Manager) embeddedGoogleAuth(ctx context.Context) (token, projectID stri
 		filepath.Join(os.Getenv("HOME"), ".pi", "agent", "auth.json"),
 	}
 	var data []byte
+	var targetPath string
 	for _, p := range paths {
 		if p == "" {
 			continue
 		}
 		data, err = os.ReadFile(p)
 		if err == nil && len(data) > 0 {
+			targetPath = p
 			break
 		}
 	}
-	if len(data) == 0 {
+	if len(data) == 0 || targetPath == "" {
 		return "", "", errors.New("google auth credentials not found in auth.json")
 	}
-	var authFile googleAuthJSON
-	if err := json.Unmarshal(data, &authFile); err != nil {
-		return "", "", err
+
+	allAuth := make(map[string]any)
+	if err := json.Unmarshal(data, &allAuth); err != nil {
+		return "", "", fmt.Errorf("failed to unmarshal auth.json: %w", err)
 	}
-	if authFile.Antigravity.Access == "" {
-		return "", "", errors.New("no google access token in auth.json")
+
+	antiRaw, ok := allAuth["antigravity"].(map[string]any)
+	if !ok || antiRaw == nil {
+		return "", "", errors.New("antigravity credentials not found in auth.json")
 	}
-	pID := authFile.Antigravity.ProjectID
+
+	access, _ := antiRaw["access"].(string)
+	refresh, _ := antiRaw["refresh"].(string)
+	pID, _ := antiRaw["projectId"].(string)
 	if pID == "" {
 		pID = "aicode-consumers"
 	}
-	return authFile.Antigravity.Access, pID, nil
+
+	var expires int64
+	switch v := antiRaw["expires"].(type) {
+	case float64:
+		expires = int64(v)
+	case int64:
+		expires = v
+	case int:
+		expires = int64(v)
+	case json.Number:
+		expires, _ = v.Int64()
+	}
+
+	needsRefresh := forceRefresh || access == "" || expires <= time.Now().UnixMilli()+60*1000
+	if needsRefresh && refresh != "" {
+		if err := m.refreshGoogleAntigravityToken(ctx, targetPath, allAuth, antiRaw); err != nil {
+			if access == "" || forceRefresh || expires <= time.Now().UnixMilli() {
+				return "", "", fmt.Errorf("failed to refresh google token: %w", err)
+			}
+		} else {
+			access, _ = antiRaw["access"].(string)
+			if updatedPID, _ := antiRaw["projectId"].(string); updatedPID != "" {
+				pID = updatedPID
+			}
+		}
+	}
+
+	if access == "" {
+		return "", "", errors.New("no google access token in auth.json")
+	}
+
+	return access, pID, nil
 }
 
 func antigravityWireModel(id string) string {
@@ -226,7 +383,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			return
 		}
 
-		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", bytes.NewReader(payloadBytes))
+		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, googleGenerateContentURL, bytes.NewReader(payloadBytes))
 		if err != nil {
 			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
 			return
@@ -241,6 +398,35 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		if err != nil {
 			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
 			return
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			_ = resp.Body.Close()
+			newToken, newProjectID, refreshErr := m.embeddedGoogleAuthWithRefresh(requestCtx, true)
+			if refreshErr == nil {
+				token = newToken
+				if newProjectID != "" {
+					projectID = newProjectID
+					envelope["project"] = projectID
+					if pb, err := json.Marshal(envelope); err == nil {
+						payloadBytes = pb
+					}
+				}
+				httpReq, err = http.NewRequestWithContext(requestCtx, http.MethodPost, googleGenerateContentURL, bytes.NewReader(payloadBytes))
+				if err != nil {
+					stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
+					return
+				}
+				httpReq.Header.Set("Authorization", "Bearer "+token)
+				httpReq.Header.Set("Content-Type", "application/json")
+				httpReq.Header.Set("User-Agent", "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
+
+				resp, err = client.Do(httpReq)
+				if err != nil {
+					stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
+					return
+				}
+			}
 		}
 		defer resp.Body.Close()
 

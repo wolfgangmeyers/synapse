@@ -10,7 +10,7 @@ export interface AgentReconciliation {
   error?: Error;
   refresh(): Promise<void>;
 }
-export function useAgentReconciliation(transport: RouterTransport, scope?: RouterScope, intervalMs = 60_000): AgentReconciliation {
+export function useAgentReconciliation(transport: RouterTransport, scope?: RouterScope, intervalMs = 3_000): AgentReconciliation {
   const scopeKey = scope === undefined ? transport.http.routerUrl : `${scope.routerUrl}\u001f${scope.agentId}`;
   const [agents, setAgents] = useState<Agent[]>([]); const [agentsScopeKey, setAgentsScopeKey] = useState(scopeKey); const [ready, setReady] = useState(false); const [loading, setLoading] = useState(false); const [error, setError] = useState<Error | undefined>(); const requestGeneration = useRef(0);
   const refresh = useCallback(async () => {

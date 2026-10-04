@@ -250,10 +250,10 @@ describe("legacy agent refresh orchestration", () => {
 
     await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
     expect(agentRequests).toBe(2);
-    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_RETRY_DELAY_MS * 2);
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_RETRY_DELAY_MS);
     expect(agentRequests).toBe(2);
 
-    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS - LEGACY_AGENT_REFRESH_RETRY_DELAY_MS * 3 - 1);
+    await vi.advanceTimersByTimeAsync(LEGACY_AGENT_REFRESH_INTERVAL_MS - LEGACY_AGENT_REFRESH_RETRY_DELAY_MS * 2 - 1);
     expect(agentRequests).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(agentRequests).toBe(3);
