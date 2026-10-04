@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -135,7 +136,33 @@ func NewEmbeddedSubagentReadTool(rootFD int) agent.AgentTool {
 			if err != nil {
 				return agent.AgentToolResult{}, err
 			}
-			if !st.Mode().IsRegular() || st.Size() > embeddedSubagentFileLimit {
+			if !st.Mode().IsRegular() {
+				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 64 KiB")
+			}
+
+			mimeType, isImage := imageMimeType(p)
+			if isImage {
+				if st.Size() > embeddedImageReadLimit {
+					return agent.AgentToolResult{}, errors.New("read requires regular file of at most 10 MiB")
+				}
+				data, err := io.ReadAll(io.LimitReader(f, embeddedImageReadLimit+1))
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				if int64(len(data)) > embeddedImageReadLimit {
+					return agent.AgentToolResult{}, errors.New("read exceeds 10 MiB limit")
+				}
+				return agent.AgentToolResult{
+					Content: ai.ContentList{
+						ai.ImageContent{
+							Data:     base64.StdEncoding.EncodeToString(data),
+							MimeType: mimeType,
+						},
+					},
+				}, nil
+			}
+
+			if st.Size() > embeddedSubagentFileLimit {
 				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 64 KiB")
 			}
 			data, err := io.ReadAll(io.LimitReader(f, embeddedSubagentFileLimit+1))

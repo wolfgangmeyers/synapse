@@ -16,6 +16,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGoogleAuth_ExpiredTokenAutoRefresh(t *testing.T) {
@@ -862,4 +863,173 @@ func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
 	if err := db.RecordEmbeddedEffectIntent(ctx, binding, call2.ID, intent2); err != nil {
 		t.Fatalf("failed to record effect 2 intent (UNIQUE constraint violation?): %v", err)
 	}
+}
+
+func TestGoogleAuth_ConvertMessagesToGoogleContents_UserImage(t *testing.T) {
+	fakeData := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Look at this image:"},
+				ai.ImageContent{
+					MimeType: "image/png",
+					Data:     fakeData,
+				},
+			},
+		},
+	}
+
+	contents := convertMessagesToGoogleContents(messages)
+	require.Len(t, contents, 1)
+	turn := contents[0]
+	require.Equal(t, "user", turn["role"])
+
+	parts, ok := turn["parts"].([]any)
+	require.True(t, ok)
+	require.Len(t, parts, 2)
+
+	textPart, ok := parts[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "Look at this image:", textPart["text"])
+
+	imgPart, ok := parts[1].(map[string]any)
+	require.True(t, ok)
+	inlineData, ok := imgPart["inlineData"].(map[string]any)
+	require.True(t, ok, "expected inlineData in image part")
+	require.Equal(t, "image/png", inlineData["mimeType"])
+	require.Equal(t, fakeData, inlineData["data"])
+}
+
+func TestGoogleAuth_ConvertMessagesToGoogleContents_ToolResultImage(t *testing.T) {
+	fakeData := "/9j/4AAQSkZJRgABAQEASABIAAD/2wBD..."
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Please capture screenshot"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.ToolCall{
+					ID:   "call-screen-1",
+					Name: "screenshot",
+					Arguments: map[string]any{},
+				},
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-screen-1",
+			ToolName:   "screenshot",
+			Content: []ai.Content{
+				ai.ImageContent{
+					MimeType: "image/jpeg",
+					Data:     fakeData,
+				},
+			},
+		},
+	}
+
+	contents := convertMessagesToGoogleContents(messages)
+	// Expecting 2 turns: user prompt -> user tool observation (since assistant only had toolCall, droppedToolCalls makes it observation)
+	// Or alternating turns
+	require.NotEmpty(t, contents)
+
+	// Verify that the tool result part contains inlineData with the image
+	foundImage := false
+	for _, turn := range contents {
+		if parts, ok := turn["parts"].([]any); ok {
+			for _, part := range parts {
+				if partMap, ok := part.(map[string]any); ok {
+					if inlineData, ok := partMap["inlineData"].(map[string]any); ok {
+						if inlineData["mimeType"] == "image/jpeg" && inlineData["data"] == fakeData {
+							foundImage = true
+						}
+					}
+				}
+			}
+		}
+	}
+	require.True(t, foundImage, "expected to find inlineData part with image/jpeg in contents")
+}
+
+func TestGoogleAuth_ConvertMessagesToGoogleContents_StandardFunctionResponseWithImage(t *testing.T) {
+	fakeData := "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+	messages := []ai.Message{
+		ai.ToolResultMessage{
+			ToolCallID: "call-read-img",
+			ToolName:   "read",
+			Content: []ai.Content{
+				ai.ImageContent{
+					MimeType: "image/gif",
+					Data:     fakeData,
+				},
+			},
+		},
+	}
+
+	// Not in droppedToolCalls, so it produces functionResponse + inlineData
+	contents := convertMessagesToGoogleContents(messages)
+	require.Len(t, contents, 1)
+	turn := contents[0]
+	require.Equal(t, "user", turn["role"])
+
+	parts := turn["parts"].([]any)
+	require.Len(t, parts, 2)
+
+	frPart := parts[0].(map[string]any)
+	fr, ok := frPart["functionResponse"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "read", fr["name"])
+
+	imgPart := parts[1].(map[string]any)
+	inlineData, ok := imgPart["inlineData"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "image/gif", inlineData["mimeType"])
+	require.Equal(t, fakeData, inlineData["data"])
+}
+
+func TestOpenAI_ImageConversion(t *testing.T) {
+	fakePNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	img := ai.ImageContent{
+		MimeType: "image/png",
+		Data:     fakePNG,
+	}
+
+	block := ConvertImageContentToOpenAI(img)
+	require.Equal(t, "image_url", block["type"])
+	imgURL, ok := block["image_url"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "data:image/png;base64,"+fakePNG, imgURL["url"])
+
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Inspect this:"},
+				img,
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-1",
+			ToolName:   "read",
+			Content: []ai.Content{
+				img,
+			},
+		},
+	}
+
+	openaiContents := ConvertMessagesToOpenAIContents(messages)
+	require.Len(t, openaiContents, 2)
+
+	// User message content parts
+	userContent := openaiContents[0]["content"].([]any)
+	require.Len(t, userContent, 2)
+	require.Equal(t, "text", userContent[0].(map[string]any)["type"])
+	require.Equal(t, "image_url", userContent[1].(map[string]any)["type"])
+	require.Equal(t, "data:image/png;base64,"+fakePNG, userContent[1].(map[string]any)["image_url"].(map[string]any)["url"])
+
+	// Tool message content parts
+	toolContent := openaiContents[1]["content"].([]any)
+	require.Len(t, toolContent, 1)
+	require.Equal(t, "image_url", toolContent[0].(map[string]any)["type"])
+	require.Equal(t, "data:image/png;base64,"+fakePNG, toolContent[0].(map[string]any)["image_url"].(map[string]any)["url"])
 }
