@@ -1214,6 +1214,127 @@ func EmbeddedMailUserMessage(a *EmbeddedMailAttempt, timestamp int64) (ai.UserMe
 	return message.(ai.UserMessage), nil
 }
 
+// PollAndAdmitEmbeddedPendingMessages checks if there are any unread queued
+// mailbox messages or user prompts in SQLite for b.AgentID. If any exist, it
+// marks them admitted/read and returns them as []ai.UserMessage.
+func (s *Store) PollAndAdmitEmbeddedPendingMessages(ctx context.Context, b EmbeddedBinding) ([]ai.UserMessage, error) {
+	var results []ai.UserMessage
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		nowMilli := s.clock.Now().UnixMilli()
+
+		// 1. Fetch and admit queued mailbox messages for b.AgentID
+		rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.message_incarnation_id, m.sender, m.body
+			FROM messages m
+			WHERE m.recipient = ? AND m.state = 'queued' AND m.expires_at > ?
+			ORDER BY m.enqueue_sequence`, b.AgentID, now)
+		if err != nil {
+			return err
+		}
+		type mailItem struct {
+			id, incarnation, sender, body string
+		}
+		var mailItems []mailItem
+		for rows.Next() {
+			var it mailItem
+			if scanErr := rows.Scan(&it.id, &it.incarnation, &it.sender, &it.body); scanErr != nil {
+				_ = rows.Close()
+				return scanErr
+			}
+			mailItems = append(mailItems, it)
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return closeErr
+		}
+
+		for _, item := range mailItems {
+			res, updateErr := s.db.ExecContext(ctx, `UPDATE messages SET state='acknowledged' WHERE id=? AND state='queued'`, item.id)
+			if updateErr != nil {
+				return updateErr
+			}
+			n, _ := res.RowsAffected()
+			if n == 0 {
+				continue
+			}
+			_ = s.completeLinkedReminder(ctx, item.id)
+
+			attemptID := ""
+			if s.ids != nil {
+				attemptID, _ = s.ids.Next()
+			}
+			if attemptID == "" {
+				attemptID = fmt.Sprintf("steer-%d-%s", nowMilli, item.id)
+			}
+			payload, _ := json.Marshal(struct {
+				Version       string `json:"Version"`
+				AttemptID     string `json:"AttemptID"`
+				MessageID     string `json:"MessageID"`
+				IncarnationID string `json:"IncarnationID"`
+				Sender        string `json:"Sender"`
+				Recipient     string `json:"Recipient"`
+				Body          string `json:"Body"`
+			}{
+				Version:       "embedded-mail/v1",
+				AttemptID:     attemptID,
+				MessageID:     item.id,
+				IncarnationID: item.incarnation,
+				Sender:        item.sender,
+				Recipient:     b.AgentID,
+				Body:          item.body,
+			})
+			results = append(results, ai.UserMessage{
+				Content:   ai.ContentList{ai.TextContent{Text: string(payload)}},
+				Timestamp: nowMilli,
+			})
+		}
+
+		// 2. Fetch and admit pending prompt requests for b.AgentID
+		pRows, err := s.db.QueryContext(ctx, `SELECT request_id, prompt
+			FROM embedded_prompt_requests
+			WHERE agent_id = ? AND session_id = ? AND epoch = ? AND generation = ? AND state = 'pending'
+			ORDER BY rowid ASC`, b.AgentID, b.SessionID, b.Epoch, b.Generation)
+		if err != nil {
+			return err
+		}
+		type promptItem struct {
+			reqID, prompt string
+		}
+		var promptItems []promptItem
+		for pRows.Next() {
+			var it promptItem
+			if scanErr := pRows.Scan(&it.reqID, &it.prompt); scanErr != nil {
+				_ = pRows.Close()
+				return scanErr
+			}
+			promptItems = append(promptItems, it)
+		}
+		if closeErr := pRows.Close(); closeErr != nil {
+			return closeErr
+		}
+
+		for _, item := range promptItems {
+			res, updateErr := s.db.ExecContext(ctx, `UPDATE embedded_prompt_requests SET state='complete' WHERE request_id=? AND state='pending'`, item.reqID)
+			if updateErr != nil {
+				return updateErr
+			}
+			n, _ := res.RowsAffected()
+			if n == 0 {
+				continue
+			}
+			results = append(results, ai.UserMessage{
+				Content:   ai.ContentList{ai.TextContent{Text: item.prompt}},
+				Timestamp: nowMilli,
+			})
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // NextEmbeddedMail selects the oldest queued, fixed managed target. Reservation
 // still checks every field atomically, so this read grants no authority.
 func (s *Store) NextEmbeddedMail(ctx context.Context, agentID string) (string, error) {

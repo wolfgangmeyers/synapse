@@ -416,22 +416,29 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 
 		currentTools := ai.GetCurrentTools(transcript.Messages)
 		var tools []any
-		if len(currentTools) > 0 {
-			var decls []any
-			for _, t := range currentTools {
-				decls = append(decls, map[string]any{
-					"name":        t.Name,
-					"description": t.Description,
-					"parameters":  t.Parameters,
-				})
+		if opts == nil || opts.ToolChoice != ai.ToolChoiceNone {
+			if len(currentTools) > 0 {
+				var decls []any
+				for _, t := range currentTools {
+					decls = append(decls, map[string]any{
+						"name":        t.Name,
+						"description": t.Description,
+						"parameters":  t.Parameters,
+					})
+				}
+				tools = append(tools, map[string]any{"functionDeclarations": decls})
 			}
-			tools = append(tools, map[string]any{"functionDeclarations": decls})
+		}
+
+		maxOutputTokens := 8192
+		if opts != nil && opts.MaxTokens != nil && *opts.MaxTokens > 0 {
+			maxOutputTokens = *opts.MaxTokens
 		}
 
 		reqBody := map[string]any{
 			"contents": contents,
 			"generationConfig": map[string]any{
-				"maxOutputTokens": 8192,
+				"maxOutputTokens": maxOutputTokens,
 			},
 		}
 		if len(systemParts) > 0 {

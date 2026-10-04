@@ -346,6 +346,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 		if message.MessageRole() == ai.RoleUser {
 			p.turnSeq, p.turnDigest = entry.Sequence, entry.Digest
+			p.mailAttempt = ""
 			if p.afterUserAppend != nil {
 				p.afterUserAppend(ctx)
 			}
@@ -956,25 +957,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, tool)
 	}
 	var appliedReceipt *store.EmbeddedGoalAppliedReceipt
+	var pollSteering func(context.Context)
 	// The SDK invokes StreamFn only when it has selected a provider request.
 	// MessageEnd persistence has already checked the initiating user and any
 	// goal tool result. Never mark a desired revision applied at goal set time.
 	stream := func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 		fail := func(err error) *ai.AssistantMessageEventStream { return ai.ErrorStream(requestModel, err) }
-		if requestModel.Provider != "openai-codex" {
-			if requestModel.Provider == "antigravity" || requestModel.Provider == "google" {
-				return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
-			}
-			return ai.StreamSimple(requestCtx, requestModel, ai.Context{
-				Messages: transcript.Messages,
-			}, opts)
-		}
-		if err := validateEmbeddedCodexModel(requestModel); err != nil {
-			return fail(err)
-		}
-		if m.codexCredentialStore == nil {
-			return fail(errors.New("embedded Codex credential store unavailable"))
-		}
 		if p.noticeStart {
 			if err := m.store.StartEmbeddedInterruptedNotice(requestCtx, binding, *p.notice); err != nil {
 				return fail(err)
@@ -1004,7 +992,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if !auxiliary {
 			appliedReceipt = nil // A newer pending/off revision cannot reuse prior evidence.
 		}
-		if !auxiliary && continuation == nil && wake == nil && p.notice == nil && err == nil && policy.DesiredRevision > 0 &&
+		if !auxiliary && wake == nil && p.notice == nil && err == nil && policy.DesiredRevision > 0 &&
 			(policy.DesiredRevision > policy.AppliedRevision || (policy.Config.Enabled && policy.DesiredRevision == policy.AppliedRevision && policy.ProjectionState == "applied")) {
 			if p.turnSeq == 0 || p.turnDigest == "" {
 				return fail(errors.New("embedded goal request has no checked user entry"))
@@ -1026,6 +1014,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			// Only the explicit in-memory test resolver can install this double.
 			// Production resolution has no generic-provider fallback.
 			return ai.StreamSimple(requestCtx, injectedStreamModel, ai.Context{Messages: transcript.Messages}, opts)
+		}
+		if requestModel.Provider == "antigravity" || requestModel.Provider == "google" {
+			return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
+		}
+		if requestModel.Provider != "openai-codex" {
+			return ai.StreamSimple(requestCtx, requestModel, ai.Context{Messages: transcript.Messages}, opts)
+		}
+		if err := validateEmbeddedCodexModel(requestModel); err != nil {
+			return fail(err)
+		}
+		if m.codexCredentialStore == nil {
+			return fail(errors.New("embedded Codex credential store unavailable"))
 		}
 		{
 			if opts == nil {
@@ -1353,7 +1353,31 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				freshWorkerMu.Unlock()
 			}
 			return nil
+		}, AfterToolCall: func(callCtx context.Context, c agent.AfterToolCallContext) *agent.AfterToolCallResult {
+			if pollSteering != nil {
+				pollSteering(callCtx)
+			}
+			return nil
 		}})
+	pollSteering = func(pollCtx context.Context) {
+		msgs, err := m.store.PollAndAdmitEmbeddedPendingMessages(pollCtx, binding)
+		if err != nil || len(msgs) == 0 {
+			return
+		}
+		for _, msg := range msgs {
+			session.Agent.Steer(msg)
+		}
+	}
+	origPrepareNextTurn := session.Agent.PrepareNextTurn
+	session.Agent.PrepareNextTurn = func(turn agent.AgentTurnContext) *agent.AgentLoopTurnUpdate {
+		if pollSteering != nil {
+			pollSteering(ctx)
+		}
+		if origPrepareNextTurn != nil {
+			return origPrepareNextTurn(turn)
+		}
+		return nil
+	}
 	if err := p.restore(ctx, session); err != nil {
 		return err
 	}
@@ -1438,12 +1462,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return nil
 	}
 	if continuation != nil {
-		// This is a router-owned non-mail turn. It carries no sender, public
-		// request ID or reply attempt, and never evaluates its own final.
 		_, err := session.RunMessages(ctx, []agent.AgentMessage{ai.UserMessage{
 			Content: ai.ContentList{ai.TextContent{Text: "Continue working on the current goal."}},
 		}})
-		return err
+		if err != nil {
+			return err
+		}
+		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
 	}
 	// A failed system declaration can leave only a system entry; the first
 	// user prompt is still due. Once a user is durable, never silently
