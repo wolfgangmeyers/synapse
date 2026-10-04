@@ -19,6 +19,7 @@ const (
 	MaxInitialInstructionBytes = 32 * 1024
 	MaxRPCLineBytes            = 1 << 20
 	DefaultSubagentCapacity    = 4
+	EmbeddedSystemInstruction  = "Never simulate, roleplay, or print bracketed tool observations or completion notifications in message text. Always invoke declared tools directly."
 )
 
 type Limits struct {
