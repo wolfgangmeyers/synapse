@@ -135,6 +135,32 @@ function hasSafeClassifiedReason(presentation: ManagedHistoryPresentation | unde
   return presentation?.kind === "tool" && presentation.tool_name === "mecha_context" && presentation.outcome === "warning" && presentation.error?.code === managedContextTooSmallErrorCode;
 }
 
+function getToolIcon(toolName: string | undefined): string {
+  switch (toolName) {
+    case "bash":
+      return "fa-solid fa-terminal";
+    case "read":
+      return "fa-solid fa-file-lines";
+    case "edit":
+      return "fa-solid fa-pen-to-square";
+    case "write":
+      return "fa-solid fa-file-circle-plus";
+    case "goal":
+      return "fa-solid fa-flag";
+    case "reminder":
+    case "reminders":
+    case "mecha_reminder":
+      return "fa-solid fa-clock";
+    case "subagent":
+    case "mecha_worker":
+      return "fa-solid fa-diagram-project";
+    case "mecha_context":
+      return "fa-solid fa-compress";
+    default:
+      return "fa-solid fa-wrench";
+  }
+}
+
 function toolVisual(presentation: ManagedHistoryPresentation, entry?: ManagedHistoryEntry): CompleteTimelineVisual {
   const toolName = normalizedToolName(presentation.tool_name);
   if (hasSafeClassifiedReason(presentation)) {
@@ -165,7 +191,7 @@ function toolVisual(presentation: ManagedHistoryPresentation, entry?: ManagedHis
   }
 
   const tone: CompleteTimelineTone = succeeded ? "green" : failed || interrupted ? "danger" : unknown ? "amber" : toolName === "bash" ? "teal" : toolName === "goal" ? "purple" : toolName === "reminder" ? "yellow" : "blue";
-  const icon = succeeded ? "fa-solid fa-check" : toolName === "bash" ? "fa-solid fa-terminal" : toolName === "goal" ? "fa-solid fa-flag" : toolName === "reminder" ? "fa-solid fa-clock" : "fa-solid fa-wrench";
+  const icon = getToolIcon(toolName);
 
   if (failed || interrupted) {
     const outcome = interrupted ? "interrupted" : "failed";
@@ -217,7 +243,7 @@ function childVisual(presentation: ManagedHistoryPresentation): CompleteTimeline
   const terminal = childTerminalOutcome(presentation);
   const detail = [terminal?.detail, presentation.child_label, presentation.summary].filter((value): value is string => value !== undefined && value !== "").join(" · ");
   const tone: CompleteTimelineTone = terminal === undefined ? recovery ? "teal" : "blue" : terminal.success ? "green" : "danger";
-  const icon = terminal?.success ? "fa-solid fa-check" : recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project";
+  const icon = terminal?.success ? "fa-solid fa-diagram-project" : recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project";
   return { icon, tone, label: "Subagent", ...(detail ? { detail: cleanOneLine(detail) } : {}), isHighValue: recovery || terminal !== undefined };
 }
 
@@ -240,7 +266,7 @@ function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTim
   };
   const outcome = presentation.outcome ?? "compacting";
   const terminalFailure = outcome === "failed" || outcome === "interrupted" || outcome === "aborted" || outcome === "reconciled_unknown";
-  const icon = outcome === "completed" ? "fa-solid fa-check" : "fa-solid fa-compress";
+  const icon = outcome === "completed" ? "fa-solid fa-compress" : "fa-solid fa-compress";
   return { icon, tone: terminalFailure ? "danger" : outcome === "completed" ? "green" : "purple", label: labels[outcome] ?? (child ? "Child compaction" : "Context compaction"), ...(presentation.summary ? { detail: cleanOneLine(presentation.summary) } : {}), isHighValue: outcome !== "compacting" };
 }
 
