@@ -57,6 +57,14 @@ MECHA_ROUTER_PROXY_READY listen=http://0.0.0.0:9876 upstream=http://127.0.0.1:87
 
 The proxy preserves upstream response headers and status codes, supports request bodies up to 6 MiB to match the router limit, and forwards WebSocket upgrades without injecting an `Origin` header. Pi extension clients still require a loopback hostname in `MECHA_ROUTER_URL`; use `127.0.0.1` when testing through a different local port. More detail and a parity test recipe live in `router-proxy/README.md`.
 
+## System 1 Decision Model Integration
+
+For high-speed, structured evaluation and classification (e.g. security checks, triage, policy verification), agents can leverage the System 1 decision model (Cloudflare Clef) hosted via Ollama. See `docs/system-one.md` for complete API schema, routing, and examples.
+
+Rules for System 1 integrations:
+- **Never hardcode hostnames or IPs**: Do not hardcode remote hostnames (e.g. "donuts") or specific Tailscale/LAN IPs. Call the local router proxy at `http://127.0.0.1:8765/v1/systemone` or dynamically discover the configured backend via `GET /v1/settings/systemone`.
+- **Mandatory graceful fallback**: System 1 is an optional accelerator, not a hard blocker. If the endpoint is unconfigured or disabled (HTTP 503), times out (HTTP 504), or encounters a backend failure (HTTP 502/connection error), agents must gracefully degrade to standard LLM reasoning or heuristic defaults without crashing or halting the workflow.
+
 ## Browser transport CORS
 
 The backend must accept browser calls from arbitrary frontend URLs. Cross-origin browser routes need permissive, non-credentialed CORS transport headers, including the request headers used for idempotency and diagnostics. This is compatibility, not access control: never parse, allowlist, log as identity, or authorize by `Origin` or CORS headers, and never enable credentialed CORS, cookies, or session-based browser authority. Browser clients must omit credentials for direct managed-control calls. Test both a direct cross-origin browser launch and an arbitrary `Origin`; same-origin proxies are useful but never the only supported route.

@@ -3,9 +3,11 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/systemone"
@@ -121,4 +123,101 @@ func (r *Router) handleSystemOneTestPOST(w http.ResponseWriter, req *http.Reques
 		"status":   "ok",
 		"response": resp,
 	})
+}
+
+func (r *Router) handleSystemOneGET(w http.ResponseWriter, req *http.Request) {
+	if r.store == nil {
+		r.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":     "system one is not configured or disabled",
+			"available": false,
+		})
+		return
+	}
+	cfg, err := r.store.GetSystemOneConfig(req.Context())
+	if err != nil || !cfg.Enabled || strings.TrimSpace(cfg.Host) == "" || cfg.Port <= 0 {
+		r.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":     "system one is not configured or disabled",
+			"available": false,
+		})
+		return
+	}
+	r.writeJSON(w, http.StatusOK, map[string]any{
+		"available": true,
+		"host":      cfg.Host,
+		"port":      cfg.Port,
+		"model":     "clef",
+	})
+}
+
+func (r *Router) handleSystemOnePOST(w http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(req.Body, 10*1024*1024))
+	if err != nil {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_request",
+			"message": "failed to read request body",
+		})
+		return
+	}
+	if len(body) == 0 {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_request",
+			"message": "request body must not be empty",
+		})
+		return
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_request",
+			"message": "request body must be valid JSON",
+		})
+		return
+	}
+
+	if _, ok := raw["state"]; !ok {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_request",
+			"message": "missing required field: state",
+		})
+		return
+	}
+	if _, ok := raw["questions"]; !ok {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_request",
+			"message": "missing required field: questions",
+		})
+		return
+	}
+
+	resp, err := r.InvokeSystemOne(req.Context(), body)
+	if err != nil {
+		if errors.Is(err, systemone.ErrDisabled) || errors.Is(err, systemone.ErrNotConfigured) {
+			r.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":     "system one is not configured or disabled",
+				"available": false,
+			})
+			return
+		}
+		if errors.Is(err, systemone.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
+			r.writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"error":     "system one request timed out",
+				"available": false,
+			})
+			return
+		}
+		r.writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":     fmt.Sprintf("system one backend call failed: %v", err),
+			"available": false,
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if len(resp.Raw) > 0 {
+		_, _ = w.Write(resp.Raw)
+	} else {
+		_ = json.NewEncoder(w).Encode(resp)
+	}
 }

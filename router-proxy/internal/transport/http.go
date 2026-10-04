@@ -207,6 +207,17 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodPost && path == "/v1/systemone/test":
 		r.handleSystemOneTestPOST(w, req)
 		return
+	case path == "/v1/systemone":
+		if req.Method == http.MethodGet {
+			r.handleSystemOneGET(w, req)
+			return
+		}
+		if req.Method == http.MethodPost {
+			r.handleSystemOnePOST(w, req)
+			return
+		}
+		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+		return
 	}
 	if id, _, ok := routeID(path, "/v1/reminders/"); ok {
 		r.handleReminderItem(w, req, id)

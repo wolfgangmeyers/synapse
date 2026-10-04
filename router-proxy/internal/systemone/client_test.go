@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +136,93 @@ func TestSystemOneClient_ServerError(t *testing.T) {
 
 	_, err = client.Invoke(ctx, cfg, Request{State: "foo", Questions: "bar"})
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrBackendFailed)
 	require.Contains(t, err.Error(), "status 400")
 	require.Contains(t, err.Error(), "model not found")
+}
+
+func TestSystemOneClient_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(u.Port())
+	require.NoError(t, err)
+
+	client := NewClient(&http.Client{Timeout: 10 * time.Millisecond})
+	ctx := context.Background()
+
+	cfg := Config{
+		Host:    u.Hostname(),
+		Port:    port,
+		Enabled: true,
+	}
+
+	_, err = client.Invoke(ctx, cfg, Request{State: "foo", Questions: "bar"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTimeout)
+}
+
+func TestSystemOneClient_ConnectionRefused(t *testing.T) {
+	// Use an unallocated/closed local port
+	client := NewClient(&http.Client{Timeout: 500 * time.Millisecond})
+	ctx := context.Background()
+
+	cfg := Config{
+		Host:    "127.0.0.1",
+		Port:    65534,
+		Enabled: true,
+	}
+
+	_, err := client.Invoke(ctx, cfg, Request{State: "foo", Questions: "bar"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrBackendFailed)
+}
+
+func TestSystemOneClient_WithImages(t *testing.T) {
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedBody))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "clef",
+			"answers": map[string]any{
+				"has_cat": map[string]any{"type": "noul", "noul": 0.99},
+			},
+		})
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(u.Port())
+	require.NoError(t, err)
+
+	client := NewClient(server.Client())
+	ctx := context.Background()
+
+	req := Request{
+		Model:     "clef",
+		State:     "Look at this picture",
+		Questions: map[string]any{"has_cat": map[string]any{"type": "noul"}},
+		Images:    []string{"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="},
+	}
+
+	cfg := Config{
+		Host:    u.Hostname(),
+		Port:    port,
+		Enabled: true,
+	}
+
+	resp, err := client.Invoke(ctx, cfg, req)
+	require.NoError(t, err)
+	require.Equal(t, "clef", resp.Model)
+	require.NotNil(t, receivedBody["images"])
+	imgs, ok := receivedBody["images"].([]any)
+	require.True(t, ok)
+	require.Len(t, imgs, 1)
 }
