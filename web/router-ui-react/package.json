@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
+    "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:transport": "vitest run tests/transport",
     "test:acceptance": "vitest run tests/acceptance",

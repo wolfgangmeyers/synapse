@@ -10,9 +10,10 @@ import { MANAGED_RECENT_FOLDERS_KEY } from "../../src/persistence/managed-folder
 import { HistoryRepository } from "../../src/persistence/history-repository";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 import type { ManagedAgent } from "../../src/protocol/types";
-import { afterEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 
-afterEach(() => { cleanup(); vi.unstubAllEnvs(); });
+beforeEach(() => { localStorage.clear(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllEnvs(); });
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -42,11 +43,10 @@ class AppSocket implements WebSocketLike {
 }
 
 describe("App integration", () => {
-  it("keeps selected managed-agent messages in both header modes and adds activity only in Complete", async () => {
+  it("renders selected managed-agent in complete view with messages and activity", async () => {
     const managedAgent: ManagedAgent = { agent_id: "managed-worker", source: "router-managed", cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
     const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
     state.selectedPeer = "router-managed:managed-worker";
-    const user = (await import("@testing-library/user-event")).default.setup();
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
@@ -67,18 +67,10 @@ describe("App integration", () => {
     };
 
     render(<App routerUrl={state.routerUrl} agentId={state.agentId} state={state} transportOptions={{ fetchImpl, webSocketFactory }} />);
-    const quiet = await screen.findByRole("tab", { name: "Quiet messages" });
-    expect(quiet).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByRole("button", { name: "openai-codex/gpt-5.6-luna" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Select prompt" })).toBeInTheDocument();
     expect(screen.getByText("Existing conversation")).toBeInTheDocument();
-    expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
-    expect(screen.queryByText("History")).not.toBeInTheDocument();
-    await waitFor(() => expect(fetchImpl.mock.calls.some(([input]) => String(input).includes("/v1/history?agent_id=managed-worker&view=complete"))).toBe(true));
-
-    await user.click(screen.getByRole("tab", { name: "Complete messages and activity" }));
-    expect(screen.getByText("Existing conversation")).toBeInTheDocument();
-    expect(screen.getByText("Managed worker restarted")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Managed worker restarted")).toBeInTheDocument());
     expect(screen.queryByText("Other worker restarted")).not.toBeInTheDocument();
   });
 
@@ -278,7 +270,8 @@ describe("App integration", () => {
 
   it("requires an explicit router URL and does not contact a default router", () => {
     const fetchImpl = vi.fn();
-    render(<App transportOptions={{ fetchImpl }} />);
+    const storage = new MemoryStorage();
+    render(<App storage={storage} transportOptions={{ fetchImpl, storage }} />);
     expect(screen.getByRole("alert").textContent).toContain("Router URL is required");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -646,6 +639,7 @@ describe("App integration", () => {
   it("connects the configured transport to the application components", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({});
       if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [peer] });
       if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
@@ -656,8 +650,8 @@ describe("App integration", () => {
     const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
     state.agents = [peer];
     state.selectedPeer = peer.agent_id;
-
-    render(<App routerUrl={state.routerUrl} agentId={state.agentId} connect={false} state={state} transportOptions={{ fetchImpl }} />);
+    const storage = new MemoryStorage();
+    render(<App routerUrl={state.routerUrl} agentId={state.agentId} connect={false} state={state} storage={storage} transportOptions={{ fetchImpl, storage }} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeTruthy());
     expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeTruthy();

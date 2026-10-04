@@ -471,46 +471,44 @@ func (m *Manager) SteerSubagent(ctx context.Context, parent store.EmbeddedBindin
 	return errors.New("cannot steer terminal subagent")
 }
 
-func (m *Manager) StopSubagent(ctx context.Context, parent store.EmbeddedBinding, childID string) error {
-	if ctx == nil {
-		return errors.New("context is required")
-	}
-	record, err := m.store.ManagedSubagent(ctx, parent, childID)
-	if err != nil {
-		return err
-	}
-	if IsTerminalSubagentStatus(record.Status) {
-		return errors.New("subagent is already terminal")
-	}
-
+func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID string) error {
 	m.subagentsMu.Lock()
-	task := m.subagentsRegistry[childID]
-	if task != nil {
-		task.mu.Lock()
-		if task.status == "queued" {
-			task.status = "stopped"
-			task.stopped = true
-			task.mu.Unlock()
-			m.removeFromQueueLocked(childID)
-			m.subagentsMu.Unlock()
-			m.finalizeQueuedTask(task, "stopped", "Subagent stopped while queued.")
-			return nil
-		}
-		if task.status == "running" {
-			task.stopped = true
-			if task.cancel != nil {
-				task.cancel()
-			}
-			if task.activeSession != nil {
-				task.activeSession.Abort()
-			}
-			task.mu.Unlock()
-			m.subagentsMu.Unlock()
-			return nil
-		}
-		task.mu.Unlock()
+	task := m.subagentsActive[childID]
+	if task == nil {
+		task = m.subagentsRegistry[childID]
 	}
 	m.subagentsMu.Unlock()
+	if task == nil {
+		return errors.New("subagent not found")
+	}
+	task.mu.Lock()
+	task.stopped = true
+	if task.cancel != nil {
+		task.cancel()
+	}
+	if task.activeSession != nil {
+		task.activeSession.Abort()
+	}
+	taskStatus := task.status
+	task.mu.Unlock()
+	m.subagentsMu.Lock()
+	m.removeFromQueueLocked(childID)
+	m.subagentsMu.Unlock()
+	_ = m.store.UpdateManagedSubagentAttempt(ctx, task.parent, childID, task.attempt, taskStatus, store.ManagedSubagentResult{
+		Status:          "cancelled",
+		TurnCount:       task.turnCount,
+		ToolUseCount:    task.toolUseCount,
+		TotalTokens:     task.totalTokens,
+		DurationSeconds: task.durationSeconds,
+	})
+	_ = m.store.UpdateManagedSubagentAttempt(ctx, task.parent, childID, task.attempt, taskStatus, store.ManagedSubagentResult{
+		Status:          "stopped",
+		TurnCount:       task.turnCount,
+		ToolUseCount:    task.toolUseCount,
+		TotalTokens:     task.totalTokens,
+		DurationSeconds: task.durationSeconds,
+	})
+	m.releaseSubagentSlot(task)
 	return nil
 }
 

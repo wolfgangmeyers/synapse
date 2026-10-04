@@ -58,6 +58,7 @@ describe("AppShell", () => {
     expect(Array.from(heading.children).map((child) => child.className)).toEqual([
       "peer-name-label",
       "working-indicator inline",
+      "interrupt-worker-button",
       "goal-header-button ",
       "reminder-indicator empty",
       "inline-tool-settings-button",

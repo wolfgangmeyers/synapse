@@ -130,6 +130,13 @@ function titleCase(value: string): string {
 }
 
 const managedContextTooSmallErrorCode = "CONTEXT_TOO_SMALL";
+const ROUTINE_TOOLS = new Set(["bash", "read", "edit", "write"]);
+
+function isRoutineTool(toolName: string | undefined): boolean {
+  if (!toolName) return false;
+  const normalized = normalizedToolName(toolName);
+  return normalized !== undefined && ROUTINE_TOOLS.has(normalized);
+}
 
 function hasSafeClassifiedReason(presentation: ManagedHistoryPresentation | undefined): boolean {
   return presentation?.kind === "tool" && presentation.tool_name === "mecha_context" && presentation.outcome === "warning" && presentation.error?.code === managedContextTooSmallErrorCode;
@@ -388,6 +395,10 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const active = isActivePresentation(presentation);
   const terminalSuccess = isTerminalSuccessPresentation(presentation);
   const terminalDanger = isTerminalDangerPresentation(presentation);
+  const isFailure = entry.level === "error" || presentation?.outcome === "error" || presentation?.outcome === "failed" || presentation?.outcome === "interrupted" || terminalDanger;
+  const isSuccess = !isFailure && !active && (terminalSuccess || presentation?.outcome === "success" || presentation?.outcome === "completed" || presentation?.kind === "state");
+  const isRoutine = isTool && isRoutineTool(presentation?.tool_name);
+  const isCompactRoutine = isRoutine && !isFailure;
   const openDetails = (target: HTMLElement): void => {
     detailTrigger.current = target;
     setDetailMounted(true);
@@ -402,17 +413,23 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
   const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
   return <Fragment>
-    <article className={`activity-entry activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active" : ""}${terminalSuccess ? " activity-entry--terminal-success" : ""}${terminalDanger ? " activity-entry--terminal-danger" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
+    <article className={`activity-entry${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
-      <div className="activity-entry-content">
+      {isCompactRoutine ? <div className="activity-entry-content activity-entry-content--compact">
+        <div className="activity-entry-compact-row">
+          <span className="activity-entry-preview" title={visual.detail}>{visual.detail}</span>
+          {time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}
+        </div>
+        {error?.detail_available === false && !safeClassifiedReason && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}
+      </div> : <div className="activity-entry-content">
         <div className="activity-entry-label">
           <strong>{visual.label}</strong>
-          {visual.subject ? <span className="activity-entry-subject" title={visual.subject}>· {visual.subject}</span> : null}
+          {visual.subject ? <span className="activity-entry-subject" title={visual.subject}>{` • ${visual.subject}`}</span> : null}
           {time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}
         </div>
         {visual.detail ? <p className="activity-entry-preview" title={visual.detail}>{visual.detail}</p> : null}
         {error?.detail_available === false && !safeClassifiedReason && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}
-      </div>
+      </div>}
     </article>
     {detailMounted ? <ActivityDetailDialog entry={entry} open={detailOpen} returnFocus={detailTrigger.current} onClose={() => setDetailOpen(false)} onClosed={() => setDetailMounted(false)} /> : null}
   </Fragment>;

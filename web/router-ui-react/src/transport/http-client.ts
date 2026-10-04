@@ -403,6 +403,9 @@ export interface RouterHttpClient {
   testSystemOne(payload?: SystemOneTestRequest): Promise<SystemOneTestResponse>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
+  readonly baseUrl?: string;
+  interruptManagedAgent(agentId: string): Promise<void>;
+  stopManagedSubagent(agentId: string, childId: string): Promise<void>;
 }
 
 export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): RouterHttpClient {
@@ -425,6 +428,15 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
   };
   return {
     routerUrl: base,
+    baseUrl: base,
+    async interruptManagedAgent(agentId: string): Promise<void> {
+      const doFetch = fetchImpl ?? fetch;
+      await doFetch(`${this.baseUrl ?? base}/v1/managed-agents/${encodeURIComponent(agentId)}/interrupt`, { method: "POST" });
+    },
+    async stopManagedSubagent(agentId: string, childId: string): Promise<void> {
+      const doFetch = fetchImpl ?? fetch;
+      await doFetch(`${this.baseUrl ?? base}/v1/managed-agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(childId)}/stop`, { method: "POST" });
+    },
     request,
     health: async () => {
       const body = recordValue(await request("/v1/health"));

@@ -957,3 +957,32 @@ func sortedJSONKeys(values map[string]json.RawMessage) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+func TestManagedAgentInterruptAndSubagentStopHTTP(t *testing.T) {
+	server, _ := newManagedHTTPTestServer(t)
+
+	// POST /managed-agents/agent-1/interrupt and /v1/managed-agents/agent-1/interrupt
+	for _, path := range []string{"/managed-agents/agent-1/interrupt", "/v1/managed-agents/agent-1/interrupt"} {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, nil)
+		require.NoError(t, err)
+		res, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer res.Body.Close()
+		require.Equal(t, http.StatusOK, res.StatusCode)
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(res.Body).Decode(&body))
+		require.Equal(t, true, body["ok"])
+	}
+
+	// POST /managed-agents/agent-1/subagents/sub-1/stop and /v1/managed-agents/agent-1/subagents/sub-1/stop
+	// When subagent not found, returns 500 error
+	for _, path := range []string{"/managed-agents/agent-1/subagents/sub-1/stop", "/v1/managed-agents/agent-1/subagents/sub-1/stop"} {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, nil)
+		require.NoError(t, err)
+		res, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer res.Body.Close()
+		require.Equal(t, http.StatusInternalServerError, res.StatusCode)
+	}
+}
+

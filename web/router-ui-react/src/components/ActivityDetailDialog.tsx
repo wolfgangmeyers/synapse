@@ -22,8 +22,54 @@ function toolInputText(input: JsonValue): string {
   return JSON.stringify(input, null, 2);
 }
 
+function parseToolInputObject(input: JsonValue | undefined): Record<string, unknown> | null {
+  if (input === undefined || input === null) return null;
+  if (typeof input === "object" && !Array.isArray(input)) {
+    return input as Record<string, unknown>;
+  }
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function renderToolParameters(input: JsonValue | undefined): ReactElement {
+  const parsed = parseToolInputObject(input);
+  if (parsed !== null && Object.keys(parsed).length > 0) {
+    return (
+      <div className="activity-param-list">
+        {Object.entries(parsed).map(([key, val]) => (
+          <div className="activity-param-section" key={key}>
+            <div className="activity-param-label">{key}</div>
+            <pre className="activity-param-value">{typeof val === "string" ? val : JSON.stringify(val, null, 2)}</pre>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return <pre className="activity-detail-payload">{typeof input === "string" ? input : toolInputText(input ?? null)}</pre>;
+}
+
 function getToolCommand(input: JsonValue | undefined): string | undefined {
-  if (typeof input === "string") return input;
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const record = parsed as Record<string, unknown>;
+        if (typeof record.command === "string") return record.command;
+        return undefined;
+      }
+    } catch {
+      return input;
+    }
+  }
   if (typeof input === "object" && input !== null && !Array.isArray(input)) {
     const record = input as Record<string, unknown>;
     if (typeof record.command === "string") return record.command;
@@ -102,7 +148,7 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
       {recipientTarget ? <p className="activity-detail-sender">To <strong>{recipientTarget}</strong></p> : null}
       {visual.subject ? <p className="activity-detail-sender">Subject: <strong>{visual.subject}</strong></p> : null}
       {isTool ? <>
-        {command !== undefined ? <section><h3>Command</h3><pre className="activity-detail-payload">{command}</pre></section> : hasToolInput ? <section><h3>Parameters</h3><pre className="activity-detail-payload">{toolInputText(entry.tool_input ?? null)}</pre></section> : null}
+        {command !== undefined ? <section><h3>Command</h3><pre className="activity-detail-payload">{command}</pre></section> : hasToolInput ? <section><h3>Parameters</h3>{renderToolParameters(entry.tool_input)}</section> : null}
         {hasToolOutput ? <section><h3>Output</h3><pre className="activity-detail-payload">{cleanOutput(entry.message_content)}</pre></section> : errorText ? <section><h3>Result</h3><pre className="activity-detail-payload">{errorText}</pre></section> : summaryText ? <section><h3>Result</h3><pre className="activity-detail-payload">{summaryText}</pre></section> : null}
         {!hasToolInput && !hasToolOutput && !errorText && !summaryText && presentation?.error?.detail_available === false ? <p className="activity-detail-safe-note">No additional details were recorded for this older activity.</p> : null}
       </> : isMailboxSend ? <>

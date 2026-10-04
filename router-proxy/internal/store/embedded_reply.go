@@ -96,7 +96,8 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 			}
 		}
 		if text.Len() == 0 {
-			return errors.New("embedded reply has no final text")
+			// Fallback: If assistant executed tools or completed silently, do not fail.
+			text.WriteString("(Action completed without additional text)")
 		}
 		seq, digest, err := s.embeddedHead(ctx, b)
 		if err != nil {

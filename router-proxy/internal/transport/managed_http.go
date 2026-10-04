@@ -32,7 +32,7 @@ type managedHTTPError struct {
 func (e *managedHTTPError) Error() string { return e.code }
 
 func managedPath(path string) bool {
-	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/") || path == "/v1/models" || path == "/v1/settings/default-model" || path == "/v1/provider-auth" || strings.HasPrefix(path, "/v1/provider-auth/")
+	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/") || path == "/v1/models" || path == "/v1/settings/default-model" || path == "/v1/provider-auth" || strings.HasPrefix(path, "/v1/provider-auth/") || path == "/managed-agents" || strings.HasPrefix(path, "/managed-agents/")
 }
 
 // handleManagedHTTP exposes direct local worker controls. Reachability is the
@@ -120,6 +120,12 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return true
 	case req.Method == http.MethodGet && managedChildrenPath(req.URL.Path) != "":
 		r.handleManagedChildrenGET(w, req, managedChildrenPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodPost && managedInterruptPath(req.URL.Path) != "":
+		r.handleManagedAgentInterrupt(w, req)
+		return true
+	case req.Method == http.MethodPost && managedSubagentStopPathMatched(req.URL.Path):
+		r.handleManagedSubagentStop(w, req)
 		return true
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/managed-agents/"):
 		r.handleManagedAgentGET(w, req)
@@ -1536,6 +1542,96 @@ func (r *Router) writeManagedError(w http.ResponseWriter, req *http.Request, err
 	}
 	r.writeManagedJSON(w, req, candidate.status, r.managedErrorPayload(req, candidate), headers)
 }
+func managedInterruptPath(path string) string {
+	trimmed := path
+	if strings.HasPrefix(trimmed, "/v1/") {
+		trimmed = trimmed[3:]
+	}
+	const prefix = "/managed-agents/"
+	const suffix = "/interrupt"
+	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, suffix) {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), suffix)
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func managedSubagentStopPath(path string) (string, string) {
+	trimmed := path
+	if strings.HasPrefix(trimmed, "/v1/") {
+		trimmed = trimmed[3:]
+	}
+	const prefix = "/managed-agents/"
+	const suffix = "/stop"
+	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, suffix) {
+		return "", ""
+	}
+	middle := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), suffix)
+	parts := strings.Split(middle, "/subagents/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[0], "/") || strings.Contains(parts[1], "/") {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
+func managedSubagentStopPathMatched(path string) bool {
+	id, childID := managedSubagentStopPath(path)
+	return id != "" && childID != ""
+}
+
+func (r *Router) handleManagedAgentInterrupt(w http.ResponseWriter, req *http.Request) {
+	id := managedInterruptPath(req.URL.Path)
+	if err := r.managed.InterruptAgent(req.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (r *Router) handleManagedSubagentStop(w http.ResponseWriter, req *http.Request) {
+	id, childID := managedSubagentStopPath(req.URL.Path)
+	if err := r.managed.StopSubagent(req.Context(), id, childID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+type Handler struct {
+	manager *managed.Manager
+}
+
+func NewHandler(manager *managed.Manager) *Handler {
+	return &Handler{manager: manager}
+}
+
+func (h *Handler) handleManagedAgentInterrupt(w http.ResponseWriter, r *http.Request) {
+	id := managedInterruptPath(r.URL.Path)
+	if err := h.manager.InterruptAgent(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Handler) handleManagedSubagentStop(w http.ResponseWriter, r *http.Request) {
+	id, childID := managedSubagentStopPath(r.URL.Path)
+	if err := h.manager.StopSubagent(r.Context(), id, childID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
 func requestIDFromRequest(req *http.Request) any {
 	value := req.Header.Get("X-Request-ID")
 	if canonicalUUID(value) {
