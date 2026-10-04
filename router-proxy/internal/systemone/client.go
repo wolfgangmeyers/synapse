@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +16,8 @@ import (
 var (
 	ErrNotConfigured = errors.New("system one is not configured")
 	ErrDisabled      = errors.New("system one is disabled")
+	ErrTimeout       = errors.New("system one request timed out")
+	ErrBackendFailed = errors.New("system one backend call failed")
 )
 
 // Config describes the connection settings for System 1.
@@ -41,9 +44,10 @@ func (c Config) EndpointURL() string {
 
 // Request is a structured payload for System 1 decision invocations.
 type Request struct {
-	Model     string `json:"model,omitempty"`
-	State     any    `json:"state"`
-	Questions any    `json:"questions"`
+	Model     string   `json:"model,omitempty"`
+	State     any      `json:"state"`
+	Questions any      `json:"questions"`
+	Images    []string `json:"images,omitempty"`
 }
 
 // Response wraps the decision response with typed accessors and the raw payload.
@@ -185,7 +189,11 @@ func (c *Client) Invoke(ctx context.Context, cfg Config, payload any) (*Response
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("system one connection failed: %w", err)
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			return nil, fmt.Errorf("%w: %v", ErrTimeout, err)
+		}
+		return nil, fmt.Errorf("%w: system one connection failed: %v", ErrBackendFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -194,8 +202,11 @@ func (c *Client) Invoke(ctx context.Context, cfg Config, payload any) (*Response
 		return nil, fmt.Errorf("read system one response: %w", err)
 	}
 
+	if resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode == http.StatusRequestTimeout {
+		return nil, fmt.Errorf("%w: system one returned status %d: %s", ErrTimeout, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("system one returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, fmt.Errorf("%w: system one returned status %d: %s", ErrBackendFailed, resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	var parsed Response
