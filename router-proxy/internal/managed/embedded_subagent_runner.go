@@ -272,7 +272,11 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 	if model == nil {
 		return nil, nil, errors.New("embedded model is unavailable")
 	}
-	if model.Provider == "openai-codex" || record.SelectedModel.Provider == "openai-codex" {
+	if model.Provider == "antigravity" || model.Provider == "google" || record.SelectedModel.Provider == "antigravity" || record.SelectedModel.Provider == "google" {
+		stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
+			return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
+		}
+	} else if model.Provider == "openai-codex" || record.SelectedModel.Provider == "openai-codex" {
 		var used string
 		stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 			if opts == nil {
