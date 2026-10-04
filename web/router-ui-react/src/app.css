@@ -704,7 +704,9 @@ p:empty { display: none; }
 .peer-heading h2 .reminder-indicator,
 .peer-heading h2 .inline-tool-settings-button,
 .peer-heading h2 .logs-header-button,
-.peer-heading h2 .managed-agent-header-button { flex: 0 0 24px; }
+.peer-heading h2 .managed-agent-header-button,
+.peer-heading h2 .scroll-lock-button,
+.peer-heading h2 .chat-only-button { flex: 0 0 24px; }
 .logs-header-button {
   display: inline-flex;
   align-items: center;
@@ -758,6 +760,47 @@ p:empty { display: none; }
   color: var(--muted);
   font-size: 11px;
   line-height: 1;
+}
+.scroll-lock-button,
+.chat-only-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(181,188,208,0.34);
+  border-radius: 999px;
+  background: rgba(181,188,208,0.12);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+}
+.scroll-lock-button i,
+.chat-only-button i { font-size: 11px; }
+.scroll-lock-button:disabled,
+.chat-only-button:disabled { opacity: 0.55; cursor: default; }
+.scroll-lock-button:not(:disabled):hover,
+.chat-only-button:not(:disabled):hover { background: rgba(181,188,208,0.22); }
+.scroll-lock-button:focus-visible,
+.chat-only-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.scroll-lock-button.active,
+.chat-only-button.active {
+  border-color: rgba(45, 212, 191, 0.7);
+  background: rgba(13, 148, 136, 0.3);
+  color: #2dd4bf;
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.4);
+}
+.scroll-lock-button.active i,
+.chat-only-button.active i {
+  color: #2dd4bf;
+}
+.scroll-lock-button.active:not(:disabled):hover,
+.chat-only-button.active:not(:disabled):hover {
+  background: rgba(13, 148, 136, 0.45);
 }
 .inline-tool-settings-button:hover,
 .managed-agent-header-button:hover { background: rgba(181,188,208,0.22); }
