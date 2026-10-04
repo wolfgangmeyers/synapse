@@ -21,7 +21,7 @@ import (
 
 const (
 	googleClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	googleClientSecret = "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f"
+	googleClientSecret = "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"
 )
 
 var (
