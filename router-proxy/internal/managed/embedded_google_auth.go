@@ -311,23 +311,18 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 					rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
 				}
 			} else if tm, ok := asToolResultMsg(msg); ok {
-				outText := ai.ContentText(tm.Content)
-				toolName, isDropped := droppedToolCalls[tm.ToolCallID]
-				if !isDropped && tm.ToolName != "" {
-					toolName, isDropped = droppedToolCalls[tm.ToolName]
+				callID := tm.ToolCallID
+				label, dropped := droppedToolCalls[callID]
+				if !dropped {
+					label, dropped = droppedToolCalls[tm.ToolName]
 				}
-				if isDropped {
-					if toolName == "" {
-						toolName = tm.ToolName
-					}
-					if toolName == "" {
-						toolName = tm.ToolCallID
-					}
+				outText := ai.ContentText(tm.Content)
+				if dropped {
 					rawContents = append(rawContents, map[string]any{
 						"role": "user",
 						"parts": []any{
 							map[string]any{
-								"text": fmt.Sprintf("[Observation from %s:\n%s]", toolName, outText),
+								"text": fmt.Sprintf("[Observation from %s:\n%s]", label, outText),
 							},
 						},
 					})
@@ -337,7 +332,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 						"parts": []any{
 							map[string]any{
 								"functionResponse": map[string]any{
-									"name": tm.ToolCallID,
+									"name": tm.ToolName,
 									"response": map[string]any{
 										"output": outText,
 									},
@@ -354,21 +349,29 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
 						parts = append(parts, map[string]any{"text": tc.Text})
 					} else if call, ok := c.(ai.ToolCall); ok {
-						if call.ID != "" {
-							droppedToolCalls[call.ID] = call.Name
+						callID := call.ID
+						if callID == "" {
+							callID = call.Name
 						}
-						if call.Name != "" {
-							droppedToolCalls[call.Name] = call.Name
+						argsJSON, _ := json.Marshal(call.Arguments)
+						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+							label = fmt.Sprintf("`%s`", call.Name)
 						}
-						parts = append(parts, map[string]any{"text": fmt.Sprintf("[Invoked %s]", call.Name)})
+						droppedToolCalls[callID] = label
+						droppedToolCalls[call.Name] = label
 					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
-						if call.ID != "" {
-							droppedToolCalls[call.ID] = call.Name
+						callID := call.ID
+						if callID == "" {
+							callID = call.Name
 						}
-						if call.Name != "" {
-							droppedToolCalls[call.Name] = call.Name
+						argsJSON, _ := json.Marshal(call.Arguments)
+						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+							label = fmt.Sprintf("`%s`", call.Name)
 						}
-						parts = append(parts, map[string]any{"text": fmt.Sprintf("[Invoked %s]", call.Name)})
+						droppedToolCalls[callID] = label
+						droppedToolCalls[call.Name] = label
 					}
 				}
 				if len(parts) > 0 {
