@@ -85,8 +85,9 @@ func TestReconcileInterruptedSubagentsNotifiesParent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify notification message in store
-	expectedMsgID := "subagent-interrupted-" + childID
-	msg, err := reopenedDB.MessageFor(ctx, expectedMsgID)
+	var msgID string
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT id FROM messages WHERE id LIKE ?`, "subagent-interrupted-"+childID+"-%").Scan(&msgID))
+	msg, err := reopenedDB.MessageFor(ctx, msgID)
 	require.NoError(t, err)
 	require.NotNil(t, msg, "mailbox message must be enqueued for interrupted subagent")
 	require.Equal(t, "supervisor", msg.From)
@@ -101,6 +102,6 @@ func TestReconcileInterruptedSubagentsNotifiesParent(t *testing.T) {
 	require.NoError(t, err)
 
 	var count int
-	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id=?`, expectedMsgID).Scan(&count))
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id LIKE ?`, "subagent-interrupted-"+childID+"-%").Scan(&count))
 	require.Equal(t, 1, count, "exactly one notification message must exist")
 }

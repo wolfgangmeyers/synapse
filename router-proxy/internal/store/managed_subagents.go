@@ -390,8 +390,8 @@ func (s *Store) InterruptedSubagentsPendingNotification(ctx context.Context) ([]
 		return nil, errors.New("store is closed")
 	}
 	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status='interrupted'
-		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = 'subagent-interrupted-' || agent_id)
-		AND NOT EXISTS (SELECT 1 FROM conversation_messages c WHERE c.message_id = 'subagent-interrupted-' || agent_id)
+		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id LIKE 'subagent-interrupted-' || agent_id || '%')
+		AND NOT EXISTS (SELECT 1 FROM conversation_messages c WHERE c.message_id LIKE 'subagent-interrupted-' || agent_id || '%')
 		ORDER BY agent_id`)
 	if err != nil {
 		return nil, err

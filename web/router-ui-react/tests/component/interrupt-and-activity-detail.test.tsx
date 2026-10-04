@@ -98,6 +98,21 @@ describe("ConversationHeader interrupt control", () => {
     const reminderBtn = screen.getByRole("button", { name: "Add reminder" });
     expect(reminderBtn).not.toHaveClass("empty");
   });
+
+  it("shows Restart Worker button when agent is failed and calls onRestart", () => {
+    const failedAgent: Agent = {
+      agent_id: "worker-failed",
+      source: "router-managed",
+      activity_state: "failed",
+    };
+    const onRestart = vi.fn();
+
+    render(<ConversationHeader agent={failedAgent} onRestart={onRestart} />);
+    const restartBtn = screen.getByRole("button", { name: "Restart failed worker" });
+    expect(restartBtn).toBeInTheDocument();
+    restartBtn.click();
+    expect(onRestart).toHaveBeenCalledWith("worker-failed");
+  });
 });
 
 describe("SubagentBadge stop control", () => {

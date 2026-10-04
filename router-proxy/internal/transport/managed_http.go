@@ -762,6 +762,7 @@ func (r *Router) handleManagedRestart(w http.ResponseWriter, req *http.Request, 
 		}
 		if agent.Runtime == "embedded" {
 			r.managed.EnsureEmbeddedRootRunning(agentID)
+			r.managed.MaybeResumeEmbeddedGoal(agentID)
 		}
 		r.managed.OfferDirect(agentID)
 		r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
