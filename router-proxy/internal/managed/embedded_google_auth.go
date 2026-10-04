@@ -276,6 +276,171 @@ func asToolResultMsg(m ai.Message) (ai.ToolResultMessage, bool) {
 	return ai.ToolResultMessage{}, false
 }
 
+func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[string]string) []map[string]any {
+	droppedToolCalls := make(map[string]string)
+	if len(dropped) > 0 && dropped[0] != nil {
+		for k, v := range dropped[0] {
+			droppedToolCalls[k] = v
+		}
+	}
+
+	var rawContents []map[string]any
+
+	for _, msg := range messages {
+		if _, ok := asSystemMsg(msg); ok {
+			continue
+		} else if um, ok := asUserMsg(msg); ok {
+			var parts []any
+			for _, part := range um.Content {
+				if tc, ok := part.(ai.TextContent); ok && tc.Text != "" {
+					parts = append(parts, map[string]any{"text": tc.Text})
+					continue
+				} else if tc, ok := part.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+					parts = append(parts, map[string]any{"text": tc.Text})
+					continue
+				}
+				if img, ok := part.(ai.ImageContent); ok {
+					parts = append(parts, map[string]any{
+						"inlineData": map[string]any{
+							"mimeType": img.MimeType,
+							"data":     img.Data,
+						},
+					})
+					continue
+				} else if img, ok := part.(*ai.ImageContent); ok && img != nil {
+					parts = append(parts, map[string]any{
+						"inlineData": map[string]any{
+							"mimeType": img.MimeType,
+							"data":     img.Data,
+						},
+					})
+					continue
+				}
+			}
+			if len(parts) > 0 {
+				rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
+			}
+		} else if tm, ok := asToolResultMsg(msg); ok {
+			callID := tm.ToolCallID
+			label, dropped := droppedToolCalls[callID]
+			if !dropped {
+				label, dropped = droppedToolCalls[tm.ToolName]
+			}
+			outText := ai.ContentText(tm.Content)
+
+			var parts []any
+			if dropped {
+				parts = append(parts, map[string]any{
+					"text": fmt.Sprintf("[Observation from %s:\n%s]", label, outText),
+				})
+			} else {
+				parts = append(parts, map[string]any{
+					"functionResponse": map[string]any{
+						"name": tm.ToolName,
+						"response": map[string]any{
+							"output": outText,
+						},
+					},
+				})
+			}
+			for _, part := range tm.Content {
+				if img, ok := part.(ai.ImageContent); ok {
+					parts = append(parts, map[string]any{
+						"inlineData": map[string]any{
+							"mimeType": img.MimeType,
+							"data":     img.Data,
+						},
+					})
+					continue
+				} else if img, ok := part.(*ai.ImageContent); ok && img != nil {
+					parts = append(parts, map[string]any{
+						"inlineData": map[string]any{
+							"mimeType": img.MimeType,
+							"data":     img.Data,
+						},
+					})
+					continue
+				}
+			}
+			if len(parts) > 0 {
+				rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
+			}
+		} else if am, ok := asAssistantMsg(msg); ok {
+			var parts []any
+			for _, c := range am.Content {
+				if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
+					parts = append(parts, map[string]any{"text": tc.Text})
+				} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+					parts = append(parts, map[string]any{"text": tc.Text})
+				} else if call, ok := c.(ai.ToolCall); ok {
+					callID := call.ID
+					if callID == "" {
+						callID = call.Name
+					}
+					argsJSON, _ := json.Marshal(call.Arguments)
+					label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+					if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+						label = fmt.Sprintf("`%s`", call.Name)
+					}
+					droppedToolCalls[callID] = label
+					droppedToolCalls[call.Name] = label
+				} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
+					callID := call.ID
+					if callID == "" {
+						callID = call.Name
+					}
+					argsJSON, _ := json.Marshal(call.Arguments)
+					label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
+					if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
+						label = fmt.Sprintf("`%s`", call.Name)
+					}
+					droppedToolCalls[callID] = label
+					droppedToolCalls[call.Name] = label
+				}
+			}
+			if len(parts) > 0 {
+				rawContents = append(rawContents, map[string]any{"role": "model", "parts": parts})
+			}
+		}
+	}
+
+	var contents []map[string]any
+	for _, item := range rawContents {
+		role, _ := item["role"].(string)
+		parts, _ := item["parts"].([]any)
+		if len(parts) == 0 {
+			continue
+		}
+		if len(contents) > 0 {
+			lastTurn := contents[len(contents)-1]
+			if lastTurn["role"] == role {
+				if lastParts, ok := lastTurn["parts"].([]any); ok {
+					lastTurn["parts"] = append(lastParts, parts...)
+					continue
+				}
+			}
+		}
+		contents = append(contents, map[string]any{
+			"role":  role,
+			"parts": parts,
+		})
+	}
+
+	if len(contents) > 0 {
+		firstTurn := contents[0]
+		if firstTurn["role"] == "model" {
+			contents = append([]map[string]any{
+				{
+					"role":  "user",
+					"parts": []any{map[string]any{"text": "Start"}},
+				},
+			}, contents...)
+		}
+	}
+
+	return contents
+}
+
 func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 	stream := ai.NewAssistantMessageEventStream()
 	go func() {
@@ -290,129 +455,15 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		wireModel := antigravityWireModel(requestModel.ID)
 
 		var systemParts []any
-		var rawContents []map[string]any
-		droppedToolCalls := make(map[string]string)
-
 		for _, msg := range transcript.Messages {
 			if sm, ok := asSystemMsg(msg); ok {
 				if text := strings.TrimSpace(ai.GetSystemMessageText(sm)); text != "" {
 					systemParts = append(systemParts, map[string]any{"text": text})
 				}
-			} else if um, ok := asUserMsg(msg); ok {
-				var parts []any
-				for _, c := range um.Content {
-					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
-						parts = append(parts, map[string]any{"text": tc.Text})
-					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
-						parts = append(parts, map[string]any{"text": tc.Text})
-					}
-				}
-				if len(parts) > 0 {
-					rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
-				}
-			} else if tm, ok := asToolResultMsg(msg); ok {
-				callID := tm.ToolCallID
-				label, dropped := droppedToolCalls[callID]
-				if !dropped {
-					label, dropped = droppedToolCalls[tm.ToolName]
-				}
-				outText := ai.ContentText(tm.Content)
-				if dropped {
-					rawContents = append(rawContents, map[string]any{
-						"role": "user",
-						"parts": []any{
-							map[string]any{
-								"text": fmt.Sprintf("[Observation from %s:\n%s]", label, outText),
-							},
-						},
-					})
-				} else {
-					rawContents = append(rawContents, map[string]any{
-						"role": "user",
-						"parts": []any{
-							map[string]any{
-								"functionResponse": map[string]any{
-									"name": tm.ToolName,
-									"response": map[string]any{
-										"output": outText,
-									},
-								},
-							},
-						},
-					})
-				}
-			} else if am, ok := asAssistantMsg(msg); ok {
-				var parts []any
-				for _, c := range am.Content {
-					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
-						parts = append(parts, map[string]any{"text": tc.Text})
-					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
-						parts = append(parts, map[string]any{"text": tc.Text})
-					} else if call, ok := c.(ai.ToolCall); ok {
-						callID := call.ID
-						if callID == "" {
-							callID = call.Name
-						}
-						argsJSON, _ := json.Marshal(call.Arguments)
-						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
-						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
-							label = fmt.Sprintf("`%s`", call.Name)
-						}
-						droppedToolCalls[callID] = label
-						droppedToolCalls[call.Name] = label
-					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
-						callID := call.ID
-						if callID == "" {
-							callID = call.Name
-						}
-						argsJSON, _ := json.Marshal(call.Arguments)
-						label := fmt.Sprintf("`%s` (%s)", call.Name, string(argsJSON))
-						if string(argsJSON) == "{}" || string(argsJSON) == "null" || len(call.Arguments) == 0 {
-							label = fmt.Sprintf("`%s`", call.Name)
-						}
-						droppedToolCalls[callID] = label
-						droppedToolCalls[call.Name] = label
-					}
-				}
-				if len(parts) > 0 {
-					rawContents = append(rawContents, map[string]any{"role": "model", "parts": parts})
-				}
 			}
 		}
 
-		var contents []any
-		for _, item := range rawContents {
-			role, _ := item["role"].(string)
-			parts, _ := item["parts"].([]any)
-			if len(parts) == 0 {
-				continue
-			}
-			if len(contents) > 0 {
-				lastTurn, ok := contents[len(contents)-1].(map[string]any)
-				if ok && lastTurn["role"] == role {
-					if lastParts, ok := lastTurn["parts"].([]any); ok {
-						lastTurn["parts"] = append(lastParts, parts...)
-						continue
-					}
-				}
-			}
-			contents = append(contents, map[string]any{
-				"role":  role,
-				"parts": parts,
-			})
-		}
-
-		if len(contents) > 0 {
-			firstTurn, _ := contents[0].(map[string]any)
-			if firstTurn != nil && firstTurn["role"] == "model" {
-				contents = append([]any{
-					map[string]any{
-						"role":  "user",
-						"parts": []any{map[string]any{"text": "Start"}},
-					},
-				}, contents...)
-			}
-		}
+		contents := convertMessagesToGoogleContents(transcript.Messages)
 
 		currentTools := ai.GetCurrentTools(transcript.Messages)
 		var tools []any

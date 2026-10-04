@@ -3,6 +3,7 @@ package managed
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,25 @@ import (
 )
 
 const embeddedReadLimit = 64 * 1024
+const embeddedImageReadLimit = 10 * 1024 * 1024 // 10 MiB
+
+func imageMimeType(p string) (string, bool) {
+	ext := strings.ToLower(path.Ext(p))
+	switch ext {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".webp":
+		return "image/webp", true
+	case ".gif":
+		return "image/gif", true
+	case ".bmp":
+		return "image/bmp", true
+	default:
+		return "", false
+	}
+}
 
 // The saved root or worker launch Cwd is a trusted project root.
 // Its descriptor is pinned for this session; a sticky 1777 parent is fine.
@@ -54,36 +74,62 @@ func validEmbeddedReadPath(p string) bool {
 	return true
 }
 
-func readEmbeddedRootFile(ctx context.Context, rootFD int, p string, offsetVal, limitVal any) (string, error) {
+func readEmbeddedRootFile(ctx context.Context, rootFD int, p string, offsetVal, limitVal any) (agent.AgentToolResult, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return agent.AgentToolResult{}, err
 	}
 	if !validEmbeddedReadPath(p) {
-		return "", errors.New("read path must be normalized and relative")
+		return agent.AgentToolResult{}, errors.New("read path must be normalized and relative")
 	}
 	fd, err := openBeneath(rootFD, p)
 	if err != nil {
-		return "", fmt.Errorf("read denied: %w", err)
+		return agent.AgentToolResult{}, fmt.Errorf("read denied: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), "embedded-read")
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return "", err
+		return agent.AgentToolResult{}, err
 	}
-	if !st.Mode().IsRegular() || st.Size() > embeddedReadLimit {
-		return "", errors.New("read requires a regular file of at most 64 KiB")
+	if !st.Mode().IsRegular() {
+		return agent.AgentToolResult{}, errors.New("read requires a regular file of at most 64 KiB")
+	}
+
+	mimeType, isImage := imageMimeType(p)
+	if isImage {
+		if st.Size() > embeddedImageReadLimit {
+			return agent.AgentToolResult{}, errors.New("read requires a regular file of at most 10 MiB")
+		}
+		data, err := io.ReadAll(io.LimitReader(f, embeddedImageReadLimit+1))
+		if err != nil {
+			return agent.AgentToolResult{}, err
+		}
+		if int64(len(data)) > embeddedImageReadLimit {
+			return agent.AgentToolResult{}, errors.New("read exceeds 10 MiB limit")
+		}
+		return agent.AgentToolResult{
+			Content: ai.ContentList{
+				ai.ImageContent{
+					Data:     base64.StdEncoding.EncodeToString(data),
+					MimeType: mimeType,
+				},
+			},
+		}, nil
+	}
+
+	if st.Size() > embeddedReadLimit {
+		return agent.AgentToolResult{}, errors.New("read requires a regular file of at most 64 KiB")
 	}
 	var result bytes.Buffer
 	buf := make([]byte, 4096)
 	for {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return agent.AgentToolResult{}, err
 		}
 		n, readErr := f.Read(buf)
 		if n > 0 {
 			if result.Len()+n > embeddedReadLimit {
-				return "", errors.New("read exceeds 64 KiB")
+				return agent.AgentToolResult{}, errors.New("read exceeds 64 KiB")
 			}
 			result.Write(buf[:n])
 		}
@@ -91,11 +137,11 @@ func readEmbeddedRootFile(ctx context.Context, rootFD int, p string, offsetVal, 
 			break
 		}
 		if readErr != nil {
-			return "", readErr
+			return agent.AgentToolResult{}, readErr
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return agent.AgentToolResult{}, err
 	}
 	data := result.Bytes()
 	var offset, limit int
@@ -120,23 +166,23 @@ func readEmbeddedRootFile(ctx context.Context, rootFD int, p string, offsetVal, 
 		}
 	}
 	if offset < 0 {
-		return "", errors.New("offset must be non-negative")
+		return agent.AgentToolResult{}, errors.New("offset must be non-negative")
 	}
 	if limit < 0 {
-		return "", errors.New("limit must be non-negative")
+		return agent.AgentToolResult{}, errors.New("limit must be non-negative")
 	}
 	lines := strings.Split(string(data), "\n")
 	if offset > 0 {
 		start := offset - 1
 		if start >= len(lines) {
-			return "", nil
+			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: ""}}}, nil
 		}
 		lines = lines[start:]
 	}
 	if limit > 0 && limit < len(lines) {
 		lines = lines[:limit]
 	}
-	return strings.Join(lines, "\n"), nil
+	return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: strings.Join(lines, "\n")}}}, nil
 }
 
 func embeddedReadSchema() *ai.Schema {
@@ -188,10 +234,6 @@ func (m *Manager) embeddedRootReadTool(owner embeddedOwner, rootFD int) agent.Ag
 		}
 		offsetVal := args["offset"]
 		limitVal := args["limit"]
-		text, err := readEmbeddedRootFile(ctx, rootFD, p, offsetVal, limitVal)
-		if err != nil {
-			return agent.AgentToolResult{}, err
-		}
-		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: text}}}, nil
+		return readEmbeddedRootFile(ctx, rootFD, p, offsetVal, limitVal)
 	}}
 }
