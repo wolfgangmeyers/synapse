@@ -381,6 +381,7 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 			},
 			ai.AssistantMessage{
 				Content: []ai.Content{
+					ai.TextContent{Text: "I will check the file."},
 					ai.ToolCall{
 						ID:   "call-read-1",
 						Name: "read",
@@ -424,8 +425,8 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 
 	// Because:
 	// Turn 1: user "Please read hello.txt"
-	// Turn 2: model "[Invoked read]"
-	// Turn 3: user "[Observation from read:\nworld content]" merged with user "Now tell me what it said"
+	// Turn 2: model "I will check the file." (no [Invoked read]!)
+	// Turn 3: user "[Observation from `read` ({"path":"hello.txt"}):\nworld content]" merged with user "Now tell me what it said"
 	// There should be exactly 3 turns alternating user -> model -> user!
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 turns after merging consecutive user turns, got %d: %+v", len(contents), contents)
@@ -445,8 +446,11 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 		t.Fatalf("turn 2 expected 1 part, got %d", len(parts2))
 	}
 	part2Map := parts2[0].(map[string]any)
-	if part2Map["text"] != "[Invoked read]" {
-		t.Errorf("turn 2 expected text [Invoked read], got %v", part2Map["text"])
+	if part2Map["text"] != "I will check the file." {
+		t.Errorf("turn 2 expected text 'I will check the file.', got %v", part2Map["text"])
+	}
+	if strings.Contains(part2Map["text"].(string), "[Invoked") {
+		t.Errorf("turn 2 must NOT contain [Invoked], got %v", part2Map["text"])
 	}
 	if _, hasFC := part2Map["functionCall"]; hasFC {
 		t.Errorf("turn 2 should NOT contain functionCall, got %+v", part2Map)
@@ -461,8 +465,12 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 		t.Fatalf("turn 3 expected 2 merged parts, got %d: %+v", len(parts3), parts3)
 	}
 	part3_1 := parts3[0].(map[string]any)
-	if !strings.Contains(part3_1["text"].(string), "[Observation from read:\nworld content]") {
-		t.Errorf("turn 3 part 1 expected observation text, got %v", part3_1["text"])
+	expectedObs := "[Observation from `read` ({\"path\":\"hello.txt\"}):\nworld content]"
+	if !strings.Contains(part3_1["text"].(string), expectedObs) {
+		t.Errorf("turn 3 part 1 expected observation text containing %q, got %v", expectedObs, part3_1["text"])
+	}
+	if strings.Contains(part3_1["text"].(string), "[Invoked") {
+		t.Errorf("turn 3 part 1 must NOT contain [Invoked], got %v", part3_1["text"])
 	}
 	if _, hasFR := part3_1["functionResponse"]; hasFR {
 		t.Errorf("turn 3 part 1 should NOT contain functionResponse, got %+v", part3_1)
@@ -470,6 +478,144 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 	part3_2 := parts3[1].(map[string]any)
 	if part3_2["text"] != "Now tell me what it said" {
 		t.Errorf("turn 3 part 2 expected text, got %v", part3_2["text"])
+	}
+
+	// Verify model parts never contain [Invoked ...] across any turn
+	for i, turnAny := range contents {
+		turnMap := turnAny.(map[string]any)
+		if turnMap["role"] == "model" {
+			for j, pAny := range turnMap["parts"].([]any) {
+				pMap := pAny.(map[string]any)
+				if txt, ok := pMap["text"].(string); ok && strings.Contains(txt, "[Invoked") {
+					t.Errorf("model turn %d part %d must NOT contain [Invoked], got: %s", i, j, txt)
+				}
+			}
+		}
+	}
+}
+
+func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
+	origTokenURL := googleTokenURL
+	origContentURL := googleGenerateContentURL
+	defer func() {
+		googleTokenURL = origTokenURL
+		googleGenerateContentURL = origContentURL
+	}()
+
+	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token-test",
+			"expires_in":   3600,
+		})
+	}))
+	defer mockOAuth.Close()
+	googleTokenURL = mockOAuth.URL
+
+	var capturedReqBody map[string]any
+	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var envelope map[string]any
+		_ = json.Unmarshal(bodyBytes, &envelope)
+		if req, ok := envelope["request"].(map[string]any); ok {
+			capturedReqBody = req
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Final answer\"}],\"role\":\"model\"}}]}}\n\n"))
+	}))
+	defer mockAntigravityAPI.Close()
+	googleGenerateContentURL = mockAntigravityAPI.URL
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	initialAuth := map[string]any{
+		"antigravity": map[string]any{
+			"access":    "test-access-token",
+			"refresh":   "test-refresh-token",
+			"expires":   time.Now().UnixMilli() + 3600*1000,
+			"projectId": "test-project-123",
+		},
+	}
+	data, _ := json.Marshal(initialAuth)
+	_ = os.WriteFile(authPath, data, 0600)
+
+	m := &Manager{config: Config{PiAgentDir: tempDir}}
+	// Assistant message has ONLY a ToolCall, NO TextContent at all
+	transcript := ai.TranscriptContext{
+		Messages: []ai.Message{
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Please read hello.txt"},
+				},
+			},
+			ai.AssistantMessage{
+				Content: []ai.Content{
+					ai.ToolCall{
+						ID:   "call-read-1",
+						Name: "read",
+						Arguments: map[string]any{
+							"path": "hello.txt",
+						},
+					},
+				},
+			},
+			ai.ToolResultMessage{
+				ToolCallID: "call-read-1",
+				ToolName:   "read",
+				Content: []ai.Content{
+					ai.TextContent{Text: "world content"},
+				},
+			},
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Now tell me what it said"},
+				},
+			},
+		},
+	}
+
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+
+	for event := range stream.Events() {
+		if event.Type == ai.EventError {
+			t.Fatalf("stream encountered error: %v", event.Error)
+		}
+	}
+
+	if capturedReqBody == nil {
+		t.Fatal("expected capturedReqBody, got nil")
+	}
+
+	contents, ok := capturedReqBody["contents"].([]any)
+	if !ok {
+		t.Fatalf("expected contents slice, got %T", capturedReqBody["contents"])
+	}
+
+	// Assistant turn had NO text, so no model turn is produced.
+	// Consecutive user turns (original user message + observation + follow-up user message) merge into 1 user turn.
+	for i, turnAny := range contents {
+		turnMap := turnAny.(map[string]any)
+		if turnMap["role"] == "model" {
+			for j, pAny := range turnMap["parts"].([]any) {
+				pMap := pAny.(map[string]any)
+				if txt, ok := pMap["text"].(string); ok && strings.Contains(txt, "[Invoked") {
+					t.Errorf("model turn %d part %d must NOT contain [Invoked], got: %s", i, j, txt)
+				}
+			}
+		}
+	}
+
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 merged user turn, got %d: %+v", len(contents), contents)
+	}
+	userTurn := contents[0].(map[string]any)
+	if userTurn["role"] != "user" {
+		t.Fatalf("expected role 'user', got %v", userTurn["role"])
+	}
+	parts := userTurn["parts"].([]any)
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 merged parts in user turn, got %d: %+v", len(parts), parts)
 	}
 }
 

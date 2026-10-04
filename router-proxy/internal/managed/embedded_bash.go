@@ -50,7 +50,7 @@ func parseEmbeddedBash(args map[string]any) (embeddedBashCommand, error) {
 		}
 		c.timeout = time.Duration(secs * float64(time.Second))
 	} else {
-		c.timeout = 30 * time.Second
+		c.timeout = 120 * time.Second
 	}
 	return c, nil
 }
