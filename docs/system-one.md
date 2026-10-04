@@ -30,7 +30,7 @@ Always access System 1 through the local Mailbox router:
 
 ### WARNING: Do Not Hardcode Hostnames or IPs
 
-**Never hardcode machine hostnames (e.g. `donuts`) or specific LAN/Tailscale IP addresses.**
+**Never hardcode machine hostnames or specific LAN/Tailscale IP addresses.**
 
 The Ollama backend may run locally or on a remote machine. The router dynamically tracks and proxies the configured backend. Clients should either:
 1. Call the local router directly at `http://127.0.0.1:8765/v1/systemone` (recommended), or
