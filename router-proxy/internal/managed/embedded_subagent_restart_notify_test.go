@@ -92,8 +92,8 @@ func TestReconcileInterruptedSubagentsNotifiesParent(t *testing.T) {
 	require.Equal(t, "supervisor", msg.From)
 	require.Equal(t, parentBinding.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
-	require.Equal(t, "Subagent Interrupted", *msg.Subject)
-	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was interrupted due to a router process restart. Partial progress was saved."
+	require.Equal(t, "Subagent Interrupted on Restart", *msg.Subject)
+	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"" + childID + "\")."
 	require.Equal(t, expectedBody, msg.Body)
 
 	// Running ReconcileInterruptedSubagents again must be idempotent

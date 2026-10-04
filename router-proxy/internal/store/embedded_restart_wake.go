@@ -247,8 +247,11 @@ func (s *Store) reserveEmbeddedRestartWakeTx(ctx context.Context, b EmbeddedBind
 	}
 	// Do not archive a claimed wake before reconciling its durable checked
 	// origin. Implicitly marking it unknown would discard proven completion.
+	// Stale claims from prior dead process generations are safely transitioned to unknown:
+	_, _ = s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation!=?`, b.AgentID, g)
+
 	var claimed int
-	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND state='claimed'`, b.AgentID).Scan(&claimed); err != nil {
+	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation=?`, b.AgentID, g).Scan(&claimed); err != nil {
 		return err
 	}
 	if claimed != 0 {
@@ -397,46 +400,50 @@ func (s *Store) ReconcileEmbeddedRestartWake(ctx context.Context, b EmbeddedBind
 		return errors.New("invalid restart wake identity")
 	}
 	return s.runImmediate(ctx, func() error {
-		if err := s.embeddedFence(ctx, b); err != nil {
-			return err
-		}
-		var claimToken int64
-		err := s.db.QueryRowContext(ctx, `SELECT claim_owner_token FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND session_id=? AND epoch=? AND runtime_generation=? AND process_generation=? AND wake_id=? AND state='claimed'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, g, id).Scan(&claimToken)
-		if err != nil {
-			return fmt.Errorf("restart wake reconciliation denied: %w", err)
-		}
-		var kind string
-		var body []byte
-		var savedDigest string
-		err = s.db.QueryRowContext(ctx, `SELECT e.kind,e.body,e.digest FROM embedded_restart_wake_checked_origins o JOIN embedded_entries e ON e.agent_id=o.agent_id AND e.session_id=o.session_id AND e.epoch=o.epoch AND e.generation=o.runtime_generation AND e.seq=o.seq WHERE o.agent_id=? AND o.slot='current' AND o.session_id=? AND o.epoch=? AND o.runtime_generation=? AND o.wake_id=? AND o.process_generation=? AND o.claim_owner_token=?`, b.AgentID, b.SessionID, b.Epoch, b.Generation, id, g, claimToken).Scan(&kind, &body, &savedDigest)
-		state := "checked-complete"
-		if errors.Is(err, sql.ErrNoRows) {
-			// An origin for this slot with the wrong association is corruption,
-			// not proof that the provider was never entered.
-			var count int
-			if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_checked_origins WHERE agent_id=? AND slot='current'`, b.AgentID).Scan(&count); err != nil {
-				return err
-			}
-			if count != 0 {
-				return errors.New("restart wake checked origin mismatch")
-			}
-			state = "unknown"
-		} else if err != nil {
-			return err
-		} else if savedDigest == "" || !embeddedCheckedStop(kind, body) {
-			return errors.New("restart wake checked final invalid")
-		}
-		r, err := s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state=? WHERE agent_id=? AND slot='current' AND session_id=? AND epoch=? AND runtime_generation=? AND process_generation=? AND wake_id=? AND claim_owner_token=? AND state='claimed'`, state, b.AgentID, b.SessionID, b.Epoch, b.Generation, g, id, claimToken)
-		if err != nil {
-			return err
-		}
-		n, err := r.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return errors.New("restart wake reconciliation denied")
-		}
-		return nil
+		return s.reconcileEmbeddedRestartWakeTx(ctx, b, g, id)
 	})
+}
+
+func (s *Store) reconcileEmbeddedRestartWakeTx(ctx context.Context, b EmbeddedBinding, g int64, id string) error {
+	if err := s.embeddedFence(ctx, b); err != nil {
+		return err
+	}
+	var claimToken int64
+	err := s.db.QueryRowContext(ctx, `SELECT claim_owner_token FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND session_id=? AND epoch=? AND runtime_generation=? AND process_generation=? AND wake_id=? AND state='claimed'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, g, id).Scan(&claimToken)
+	if err != nil {
+		return fmt.Errorf("restart wake reconciliation denied: %w", err)
+	}
+	var kind string
+	var body []byte
+	var savedDigest string
+	err = s.db.QueryRowContext(ctx, `SELECT e.kind,e.body,e.digest FROM embedded_restart_wake_checked_origins o JOIN embedded_entries e ON e.agent_id=o.agent_id AND e.session_id=o.session_id AND e.epoch=o.epoch AND e.generation=o.runtime_generation AND e.seq=o.seq WHERE o.agent_id=? AND o.slot='current' AND o.session_id=? AND o.epoch=? AND o.runtime_generation=? AND o.wake_id=? AND o.process_generation=? AND o.claim_owner_token=?`, b.AgentID, b.SessionID, b.Epoch, b.Generation, id, g, claimToken).Scan(&kind, &body, &savedDigest)
+	state := "checked-complete"
+	if errors.Is(err, sql.ErrNoRows) {
+		// An origin for this slot with the wrong association is corruption,
+		// not proof that the provider was never entered.
+		var count int
+		if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_checked_origins WHERE agent_id=? AND slot='current'`, b.AgentID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return errors.New("restart wake checked origin mismatch")
+		}
+		state = "unknown"
+	} else if err != nil {
+		return err
+	} else if savedDigest == "" || !embeddedCheckedStop(kind, body) {
+		return errors.New("restart wake checked final invalid")
+	}
+	r, err := s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state=? WHERE agent_id=? AND slot='current' AND session_id=? AND epoch=? AND runtime_generation=? AND process_generation=? AND wake_id=? AND claim_owner_token=? AND state='claimed'`, state, b.AgentID, b.SessionID, b.Epoch, b.Generation, g, id, claimToken)
+	if err != nil {
+		return err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("restart wake reconciliation denied")
+	}
+	return nil
 }

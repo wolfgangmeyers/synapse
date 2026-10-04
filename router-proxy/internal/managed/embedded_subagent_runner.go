@@ -521,7 +521,7 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 		}
 	}
 	subject := "Subagent Terminated"
-	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped by user request. Partial progress and logs have been saved. You can fetch its latest state and output using get_subagent_result(agent_id=\"%s\").", childID, desc, childID)
+	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").", childID, desc, childID)
 	source := protocol.MessageSource{Kind: "system"}
 	msgID := fmt.Sprintf("subagent-terminated-%s-%d", childID, task.attempt)
 	now := formatManagedTime(m.clock.Now())
@@ -948,8 +948,8 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range records {
-		subject := "Subagent Interrupted"
-		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress was saved.", rec.AgentID, rec.Description)
+		subject := "Subagent Interrupted on Restart"
+		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").", rec.AgentID, rec.Description, rec.AgentID)
 		source := protocol.MessageSource{Kind: "system"}
 		msgID := fmt.Sprintf("subagent-interrupted-%s", rec.AgentID)
 		now := formatManagedTime(m.clock.Now())
@@ -969,6 +969,10 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 			},
 		})
 		if err != nil {
+			var conflict *store.IdempotencyConflictError
+			if errors.As(err, &conflict) {
+				continue
+			}
 			return err
 		}
 		if result.Created || result.ConversationCreated {
@@ -979,8 +983,8 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 				publish(result)
 			} else {
 				_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
-				m.OfferDirect(rec.ParentAgentID)
 			}
+			m.OfferDirect(rec.ParentAgentID)
 		}
 	}
 	return nil

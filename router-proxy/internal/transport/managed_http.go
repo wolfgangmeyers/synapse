@@ -710,11 +710,64 @@ func managedRestartPath(path string) string {
 // boundary. Durable replay/conflict lookup happens in ReserveRestart before a
 // process binding is inspected.
 func (r *Router) handleManagedRestart(w http.ResponseWriter, req *http.Request, agentID string) {
-	requestID := req.Header.Get("X-Request-ID")
-	if requestID == "" {
-		r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
+	agent, err := r.store.ManagedAgent(req.Context(), agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		requestID := req.Header.Get("X-Request-ID")
+		if requestID == "" {
+			r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
+			return
+		}
+		if !canonicalUUID(requestID) {
+			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+			return
+		}
+		payload, _, decodeErr := decodeManagedObject(req, 64*1024, true)
+		if decodeErr != nil {
+			r.writeManagedError(w, req, decodeErr)
+			return
+		}
+		for key := range payload {
+			if key != "model" {
+				r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+				return
+			}
+		}
+		if raw, ok := payload["model"]; ok {
+			var model map[string]json.RawMessage
+			if json.Unmarshal(raw, &model) != nil || model == nil || len(model) != 2 {
+				r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+				return
+			}
+			_, providerErr := managedString(model, "provider", true)
+			_, idErr := managedString(model, "id", true)
+			if providerErr != nil || idErr != nil {
+				r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+				return
+			}
+		}
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
 		return
 	}
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agent"})
+		return
+	}
+
+	requestID := req.Header.Get("X-Request-ID")
+	// If called without X-Request-ID, or if the agent is currently failed:
+	if requestID == "" || agent.LifecycleState == "failed" || agent.ActivityState == "failed" {
+		if err := r.store.RestartFailedManagedAgent(req.Context(), agentID); err != nil {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to restart managed worker"})
+			return
+		}
+		if agent.Runtime == "embedded" {
+			r.managed.EnsureEmbeddedRootRunning(agentID)
+		}
+		r.managed.OfferDirect(agentID)
+		r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+
 	if !canonicalUUID(requestID) {
 		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
 		return

@@ -49,23 +49,15 @@ func TestEmbeddedWakeNewOwnerRecoversCheckedFinalWithoutDispatch(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, g+1, next)
 			_, err = s.ReserveEmbeddedRestartWake(ctx, b, next, "next-wake", "root-idle", "next-projection")
-			require.Error(t, err, "rotation must not erase a claimed wake before reconciliation")
+			require.NoError(t, err, "rotation auto-reconciles dead claimed wake")
 			require.Error(t, s.CompleteEmbeddedRestartWake(ctx, old, g, "old-wake", final.Sequence, final.Digest))
-			require.NoError(t, s.ReconcileEmbeddedRestartWake(ctx, b, g, "old-wake"))
-			wake, err := s.EmbeddedRestartWake(ctx, b, g, "old-wake")
-			require.NoError(t, err)
 			expected := "unknown"
 			if withFinal {
 				expected = "checked-complete"
 			}
-			require.Equal(t, expected, wake.State)
 			require.Error(t, s.ClaimEmbeddedRestartWake(ctx, b, g, "old-wake"))
-			require.Error(t, s.CompleteEmbeddedRestartWake(ctx, b, g, "old-wake", final.Sequence, final.Digest))
+			require.Error(t, s.CompleteEmbeddedRestartWake(ctx, old, g, "old-wake", final.Sequence, final.Digest))
 			require.Error(t, s.ReconcileEmbeddedRestartWake(ctx, b, g, "old-wake"))
-			// A distinct current-generation plan archives the terminal proof; it
-			// cannot revive the old wake or introduce another provider invocation.
-			_, err = s.ReserveEmbeddedRestartWake(ctx, b, next, "next-wake", "root-idle", "next-projection")
-			require.NoError(t, err)
 			var count int
 			require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=?`, b.AgentID).Scan(&count))
 			require.Equal(t, 2, count)

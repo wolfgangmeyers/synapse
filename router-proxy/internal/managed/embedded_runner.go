@@ -314,3 +314,17 @@ func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
 	}
 	return nil
 }
+
+// EnsureEmbeddedRootRunning ensures an embedded root is running if it has no active owner.
+func (m *Manager) EnsureEmbeddedRootRunning(agentID string) {
+	m.mu.Lock()
+	_, hasOwner := m.embeddedOwners[agentID]
+	m.mu.Unlock()
+	if !hasOwner {
+		agent, err := m.store.ManagedAgent(m.runCtx, agentID)
+		if err == nil && agent.Runtime == "embedded" && agent.DesiredState == "running" && agent.LifecycleState == "running" {
+			m.startEmbeddedRoot(*agent, agent.LaunchOperationID, true)
+		}
+	}
+}
+

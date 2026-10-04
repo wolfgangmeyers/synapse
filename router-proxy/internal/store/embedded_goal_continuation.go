@@ -37,7 +37,49 @@ func (s *Store) EmbeddedGoalContinuationFor(ctx context.Context, b EmbeddedBindi
 	return s.embeddedGoalContinuationRow(ctx, b, k)
 }
 
-// ReservedEmbeddedGoalSnoozes reads only not-yet-started, due-dated
+// LatestReservedEmbeddedGoalContinuation reads the newest not-yet-started continuation
+// for the given binding.
+func (s *Store) LatestReservedEmbeddedGoalContinuation(ctx context.Context, b EmbeddedBinding) (EmbeddedGoalEvaluationKey, bool, error) {
+	if ctx == nil {
+		return EmbeddedGoalEvaluationKey{}, false, errors.New("nil context")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return EmbeddedGoalEvaluationKey{}, false, errors.New("store is closed")
+	}
+	var k EmbeddedGoalEvaluationKey
+	var finalSeq sql.NullInt64
+	var finalDigest sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT user_seq, user_digest, goal_revision, final_seq, final_digest FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND state='reserved' ORDER BY user_seq DESC LIMIT 1`, b.AgentID, b.SessionID, b.Epoch).Scan(&k.UserSeq, &k.UserDigest, &k.GoalRevision, &finalSeq, &finalDigest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return k, false, nil
+	}
+	if err != nil {
+		return k, false, err
+	}
+	if finalSeq.Valid {
+		k.FinalSeq = finalSeq.Int64
+	}
+	if finalDigest.Valid {
+		k.FinalDigest = finalDigest.String
+	}
+	return k, true, nil
+}
+
+// RestartFailedManagedAgent reconciles stale claimed wake slots to unknown and
+// resets a failed managed agent to running/idle with cleared errors.
+func (s *Store) RestartFailedManagedAgent(ctx context.Context, agentID string) error {
+	return s.runImmediate(ctx, func() error {
+		if _, err := s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE state='claimed' AND (agent_id=? OR ?='')`, agentID, agentID); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		_, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state='idle', lifecycle_state='running', last_error_code=NULL, last_error_message=NULL, last_error_at=NULL, updated_at=? WHERE agent_id=?`, now, agentID)
+		return err
+	})
+}
+
 // continuations for the exact recovered session. Evaluator claims and started
 // UNKNOWN rows are never recovery work.
 func (s *Store) ReservedEmbeddedGoalSnoozes(ctx context.Context, b EmbeddedBinding) ([]EmbeddedGoalContinuation, error) {
