@@ -19,7 +19,13 @@ func TestSelectModelUsesExplicitSavedThenSolFallback(t *testing.T) {
 	selected, err = SelectModel(nil, &store.ManagedModel{Provider: "saved", ID: "model"}, current)
 	require.NoError(t, err)
 	require.Equal(t, "saved", selected.Provider)
+	require.True(t, selected.Available)
 	selected, err = SelectModel(nil, &store.ManagedModel{Provider: "missing", ID: "model"}, current)
+	require.NoError(t, err)
+	require.Equal(t, "missing", selected.Provider)
+	require.Equal(t, "model", selected.ID)
+	require.False(t, selected.Available)
+	selected, err = SelectModel(nil, nil, current)
 	require.NoError(t, err)
 	require.Equal(t, "gpt-5.6-sol", selected.ID)
 }
@@ -36,12 +42,11 @@ func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
 	)}
 	selected, err := source.Select(ctx, nil)
 	require.NoError(t, err)
-	require.Equal(t, Model{Provider: "saved", ID: "persisted"}, selected)
+	require.Equal(t, Model{Provider: "saved", ID: "persisted", Available: true}, selected)
 	require.NoError(t, durable.SetDefaultModel(ctx, &store.ManagedModel{Provider: "missing", ID: "persisted"}))
 	selected, err = source.Select(ctx, nil)
 	require.NoError(t, err)
-	require.Equal(t, "openai-codex", selected.Provider)
-	require.Equal(t, "gpt-5.6-sol", selected.ID)
+	require.Equal(t, Model{Provider: "missing", ID: "persisted", Name: "persisted", Available: false}, selected)
 }
 
 func TestSelectModelRejectsUnavailableExplicitButUsesServerFallbackWhenOmitted(t *testing.T) {

@@ -47,8 +47,11 @@ type managedRootControlFence struct {
 }
 
 type managedRootControlRunnerResult struct {
-	Status, Content, ErrorCode, ErrorMessage string
-	Details                                  map[string]any
+	Status       string         `json:"status"`
+	Content      string         `json:"content"`
+	ErrorCode    string         `json:"error_code"`
+	ErrorMessage string         `json:"error_message"`
+	Details      map[string]any `json:"details"`
 }
 
 func newMailboxRouterRootControlExecutor(config managed.Config) (mailboxRouterRootControlExecutor, error) {
