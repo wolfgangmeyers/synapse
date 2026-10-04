@@ -17,6 +17,7 @@ export interface MessageListProps {
   loading?: boolean | undefined;
   error?: string | undefined;
   onNearBottomChange?: ((nearBottom: boolean) => void) | undefined;
+  scrollLocked?: boolean | undefined;
 }
 
 type FeedItem = { type: "message"; id: string; timestamp: number; sequence: number; message: HistoryMessage } | { type: "activity"; id: string; timestamp: number; sequence: number; entry: ManagedHistoryEntry };
@@ -54,7 +55,7 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
   return messages.some((m) => m.body === entry.message_content && (m.from === entry.sender_identity || (entry.presentation?.from !== undefined && m.from === entry.presentation.from) || (entry.presentation?.to !== undefined && m.to === entry.presentation.to)));
 }
 
-export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange }: MessageListProps): ReactElement {
+export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked }: MessageListProps): ReactElement {
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
   const [announcement, setAnnouncement] = useState("");
@@ -67,12 +68,13 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   const latestItem = items.at(-1);
   const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;
   useLayoutEffect(() => {
+    if (scrollLocked) return;
     const element = ref.current;
     if (!element) return;
     element.scrollTop = element.scrollHeight;
     const frame = requestAnimationFrame(() => { element.scrollTop = element.scrollHeight; });
     return () => cancelAnimationFrame(frame);
-  }, [conversationKey, latestItemKey]);
+  }, [conversationKey, latestItemKey, scrollLocked]);
   // Retained history belongs to the newly selected agent; it is not a live
   // announcement just because this component was already mounted for another.
   useEffect(() => {
