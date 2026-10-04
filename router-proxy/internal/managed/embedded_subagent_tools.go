@@ -51,7 +51,7 @@ func pinEmbeddedChildWorkspace(cwd string) (int, string, error) {
 	if err != nil {
 		return -1, "", fmt.Errorf("failed to evaluate workspace symlinks: %w", err)
 	}
-	fd, err := unix.Open(canonical, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := openRootDirectory(canonical)
 	if err != nil {
 		return -1, "", fmt.Errorf("failed to pin child workspace: %w", err)
 	}
@@ -124,10 +124,7 @@ func NewEmbeddedSubagentReadTool(rootFD int) agent.AgentTool {
 			if !ok || len(p) > 4096 || !validEmbeddedSubagentPath(p) {
 				return agent.AgentToolResult{}, errors.New("invalid or denied read path")
 			}
-			fd, err := unix.Openat2(rootFD, p, &unix.OpenHow{
-				Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK,
-				Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
-			})
+			fd, err := openBeneath(rootFD, p)
 			if err != nil {
 				return agent.AgentToolResult{}, fmt.Errorf("read denied: %w", err)
 			}
@@ -276,7 +273,7 @@ func writeEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, conten
 		}
 		if st.Mode&unix.S_IFMT == unix.S_IFREG {
 			// Preserve existing regular destination permission bits safely (ordinary 0777, stripping setuid/setgid)
-			targetMode = st.Mode & 0777
+			targetMode = uint32(st.Mode & 0777)
 		}
 	}
 
@@ -497,7 +494,7 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 	defer unix.Unlinkat(parent, tmp, 0)
 
 	temp := os.NewFile(uintptr(tempFD), "subagent-edit-temp")
-	if err := unix.Fchmod(tempFD, initial.Mode&0777); err != nil {
+	if err := unix.Fchmod(tempFD, uint32(initial.Mode&0777)); err != nil {
 		_ = temp.Close()
 		return err
 	}

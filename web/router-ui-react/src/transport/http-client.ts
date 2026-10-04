@@ -36,6 +36,17 @@ export type RouterLogDiagnosticCategory = "source_unavailable" | "generation_unr
 export interface RouterLogDiagnostic { category: RouterLogDiagnosticCategory; count: number }
 export interface RouterLogResponse { status: RouterLogStatus; lines: RouterLogLine[]; next_cursor: string | null; diagnostics: RouterLogDiagnostic[] }
 export interface DefaultModelResponse { operation_id: string; default_model: { provider: string; id: string; name?: string } | null; effective_fallback: ProviderModel }
+export interface SystemOneConfig { host: string; port: number; enabled: boolean }
+export interface SystemOneTestRequest { model?: string | undefined; state: unknown; questions: Record<string, unknown> }
+export interface SystemOneTestResponse {
+  status: "ok" | "error";
+  response?: {
+    model: string;
+    answers?: Record<string, unknown> | undefined;
+    usage?: { input_tokens?: number | undefined; output_tokens?: number | undefined } | undefined;
+  } | undefined;
+  error?: string | undefined;
+}
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 // Managed routes expose only stable, non-secret troubleshooting facts. Unknown
@@ -387,6 +398,9 @@ export interface RouterHttpClient {
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
   cancelProviderAuth(operationId: string): Promise<{ operation_id: string; status: string }>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
+  systemOneConfig(): Promise<SystemOneConfig>;
+  saveSystemOneConfig(config: SystemOneConfig): Promise<SystemOneConfig>;
+  testSystemOne(payload?: SystemOneTestRequest): Promise<SystemOneTestResponse>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
 }
@@ -472,6 +486,33 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       return { operation_id: body.operation_id, status: body.status };
     },
     setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
+    systemOneConfig: async () => {
+      const body = await request("/v1/settings/systemone");
+      const rec = recordValue(body);
+      return {
+        host: typeof rec?.host === "string" ? rec.host : "",
+        port: typeof rec?.port === "number" ? rec.port : 0,
+        enabled: Boolean(rec?.enabled),
+      };
+    },
+    saveSystemOneConfig: async (config) => {
+      const body = await jsonRequest("/v1/settings/systemone", "PUT", config);
+      const rec = recordValue(body);
+      return {
+        host: typeof rec?.host === "string" ? rec.host : "",
+        port: typeof rec?.port === "number" ? rec.port : 0,
+        enabled: Boolean(rec?.enabled),
+      };
+    },
+    testSystemOne: async (payload) => {
+      const body = await jsonRequest("/v1/systemone/test", "POST", payload ?? {});
+      const rec = recordValue(body);
+      return {
+        status: rec?.status === "ok" ? "ok" : "error",
+        ...(rec?.response ? { response: rec.response as SystemOneTestResponse["response"] } : {}),
+        ...(rec?.error ? { error: String(rec.error) } : {}),
+      };
+    },
     routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
     routerLogForAgent: async (agentId, query) => { if (!isAgentId(agentId) || !routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
   };

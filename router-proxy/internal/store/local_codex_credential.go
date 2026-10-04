@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -92,18 +94,19 @@ func (s *LocalCodexCredentialStore) openDir(create bool) (int, string, error) {
 		return -1, "", errors.New("credential root unavailable")
 	}
 	private := false
-	if err = checkDir(fd, &private); err != nil {
+	ancestors := parts[:len(parts)-1]
+	if err = checkDir(fd, &private, len(ancestors) == 0); err != nil {
 		syscall.Close(fd)
 		return -1, "", err
 	}
-	for _, part := range parts[:len(parts)-1] {
+	for i, part := range ancestors {
 		if part == "" || part == "." || part == ".." {
 			syscall.Close(fd)
 			return -1, "", errors.New("invalid credential directory")
 		}
-		next, e := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+		next, e := unix.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 		if e == syscall.ENOENT && create {
-			if e = syscall.Mkdirat(fd, part, 0o700); e != nil && e != syscall.EEXIST {
+			if e = unix.Mkdirat(fd, part, 0o700); e != nil && e != syscall.EEXIST {
 				syscall.Close(fd)
 				return -1, "", fmt.Errorf("create credential directory: %w", e)
 			}
@@ -111,14 +114,15 @@ func (s *LocalCodexCredentialStore) openDir(create bool) (int, string, error) {
 				syscall.Close(fd)
 				return -1, "", errors.New("sync credential parent directory failed")
 			}
-			next, e = syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+			next, e = unix.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 		}
 		syscall.Close(fd)
 		if e != nil {
 			return -1, "", fmt.Errorf("open credential directory: %w", e)
 		}
 		fd = next
-		if e = checkDir(fd, &private); e != nil {
+		isDest := (i == len(ancestors)-1)
+		if e = checkDir(fd, &private, isDest); e != nil {
 			syscall.Close(fd)
 			return -1, "", e
 		}
@@ -130,7 +134,11 @@ func (s *LocalCodexCredentialStore) openDir(create bool) (int, string, error) {
 	return fd, name, nil
 }
 
-func checkDir(fd int, private *bool) error {
+// Single-user developer workstation requirement: DO NOT revert or tighten ancestor permission checks to require 0700.
+// On developer workstations (such as macOS home directories), user-owned ancestors frequently have standard 0750 or 0755 permissions.
+// These are single-user machines, not multi-user shared hosts. Ancestors owned by the user are safe as long as group and others lack write
+// bits (mode&0o022 == 0). Only the private leaf directory destination (e.g. .mecha-developer) must be strictly 0700.
+func checkDir(fd int, private *bool, isDest bool) error {
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return err
@@ -139,11 +147,19 @@ func checkDir(fd int, private *bool) error {
 		return errors.New("credential parent is not a directory")
 	}
 	mode := st.Mode & 0o7777
-	if st.Uid == uint32(os.Geteuid()) && os.Geteuid() != 0 {
-		if mode != 0o700 {
-			return errors.New("credential parent is not owner-only")
+	if isDest {
+		if st.Uid != uint32(os.Geteuid()) || mode != 0o700 {
+			return errors.New("credential destination must be owner-only")
 		}
 		*private = true
+		return nil
+	}
+	if st.Uid == uint32(os.Geteuid()) && os.Geteuid() != 0 {
+		if mode == 0o700 {
+			*private = true
+		} else if mode&0o022 != 0 {
+			return errors.New("credential ancestor is writable")
+		}
 	} else if st.Uid == 0 && !*private {
 		// Root-owned sticky temporary directories are safe against replacement by
 		// other users and allow private t.TempDir() trees under /tmp.
@@ -170,7 +186,7 @@ func checkFile(fd int) error {
 }
 
 func openLeaf(dir int, name string) (int, error) {
-	fd, err := syscall.Openat(dir, name, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	fd, err := unix.Openat(dir, name, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -193,9 +209,9 @@ func checkLeafIfExists(dir int, name string) error {
 }
 
 func lockLeaf(dir int, name string, ctx context.Context) (int, error) {
-	fd, err := syscall.Openat(dir, name, syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CREAT|syscall.O_EXCL, 0o600)
+	fd, err := unix.Openat(dir, name, syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CREAT|syscall.O_EXCL, 0o600)
 	if errors.Is(err, syscall.EEXIST) {
-		fd, err = syscall.Openat(dir, name, syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		fd, err = unix.Openat(dir, name, syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	}
 	if err != nil {
 		return -1, fmt.Errorf("open credential lock: %w", err)
@@ -415,7 +431,7 @@ func (s *LocalCodexCredentialStore) Delete(ctx context.Context) error {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if err = syscall.Unlinkat(dir, name); err != nil && !errors.Is(err, syscall.ENOENT) {
+	if err = unix.Unlinkat(dir, name, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
 		return errors.New("remove credential failed")
 	}
 	if err = syscall.Fsync(dir); err != nil {
@@ -482,12 +498,12 @@ func replaceCredential(ctx context.Context, dir int, name string, c CodexCredent
 		return errors.New("credential temporary name failed")
 	}
 	temp := name + ".tmp-" + hex.EncodeToString(nonce[:])
-	fd, err := syscall.Openat(dir, temp, syscall.O_WRONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_EXCL|syscall.O_CREAT, 0o600)
+	fd, err := unix.Openat(dir, temp, syscall.O_WRONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_EXCL|syscall.O_CREAT, 0o600)
 	if err != nil {
 		return errors.New("create credential temporary file failed")
 	}
 	defer func() {
-		if syscall.Unlinkat(dir, temp) == nil {
+		if unix.Unlinkat(dir, temp, 0) == nil {
 			_ = syscall.Fsync(dir) // Best effort on a failed write; never report success.
 		}
 	}()
@@ -512,7 +528,7 @@ func replaceCredential(ctx context.Context, dir int, name string, c CodexCredent
 	if err = checkLeafIfExists(dir, name); err != nil {
 		return err
 	}
-	if err = syscall.Renameat(dir, temp, dir, name); err != nil {
+	if err = unix.Renameat(dir, temp, dir, name); err != nil {
 		return errors.New("replace credential failed")
 	}
 	if err = syscall.Fsync(dir); err != nil {
@@ -583,7 +599,7 @@ func cleanupTemps(dir int, name string) error {
 		return nil
 	}
 	for _, entry := range temps {
-		if err = syscall.Unlinkat(dir, entry); err != nil {
+		if err = unix.Unlinkat(dir, entry, 0); err != nil {
 			return errors.New("remove credential temporary file failed")
 		}
 	}

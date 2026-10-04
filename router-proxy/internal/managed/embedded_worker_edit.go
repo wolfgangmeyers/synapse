@@ -160,7 +160,7 @@ func editEmbeddedWorkerFile(ctx context.Context, rootFD int, p, old, replacement
 	}
 	defer unix.Unlinkat(parent, tmp, 0)
 	temp := os.NewFile(uintptr(tempFD), "embedded-edit-temp")
-	if err := unix.Fchmod(tempFD, initial.Mode&0777); err != nil {
+	if err := unix.Fchmod(tempFD, uint32(initial.Mode&0777)); err != nil {
 		temp.Close()
 		return err
 	}

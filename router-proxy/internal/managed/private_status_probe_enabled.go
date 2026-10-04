@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // EnablePrivateStatusProbe is intentionally absent from ordinary builds. Call
@@ -43,7 +45,7 @@ func EnablePrivateStatusProbe(m *Manager, path string) error {
 	if err := syscall.Fstat(dirfd, &dirStat); err != nil || int(dirStat.Uid) != os.Geteuid() || dirStat.Mode&0777 != 0700 {
 		return errors.New("private probe directory changed")
 	}
-	fd, err := syscall.Openat(dirfd, filepath.Base(path), syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
+	fd, err := unix.Openat(dirfd, filepath.Base(path), syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
 	if err != nil {
 		return errors.New("cannot create private probe file")
 	}

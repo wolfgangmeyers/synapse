@@ -198,6 +198,15 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/prompt-templates":
 		r.handlePromptCollection(w, req)
 		return
+	case req.Method == http.MethodGet && path == "/v1/settings/systemone":
+		r.handleSystemOneConfigGET(w, req)
+		return
+	case req.Method == http.MethodPut && path == "/v1/settings/systemone":
+		r.handleSystemOneConfigPUT(w, req)
+		return
+	case req.Method == http.MethodPost && path == "/v1/systemone/test":
+		r.handleSystemOneTestPOST(w, req)
+		return
 	}
 	if id, _, ok := routeID(path, "/v1/reminders/"); ok {
 		r.handleReminderItem(w, req, id)
