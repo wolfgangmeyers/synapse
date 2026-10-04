@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -598,6 +599,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 	}
 	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, Runtime: runtime, InitialInstruction: instruction, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
 	if launchErr != nil {
+		log.Printf("MANAGED_LAUNCH_ERR: %v", launchErr)
 		var idempotencyConflict *store.ManagedIdempotencyConflictError
 		if errors.As(launchErr, &idempotencyConflict) {
 			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
@@ -995,6 +997,7 @@ func managedLaunchError(err error) error {
 	if strings.Contains(err.Error(), "working directory") || strings.Contains(err.Error(), "outside allowed") {
 		return &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"}
 	}
+	log.Printf("MANAGED_LAUNCH_ERROR_DETAIL: %v", err)
 	return &managedHTTPError{422, "VALIDATION_FAILED", "Launch request is invalid"}
 }
 func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Request) {

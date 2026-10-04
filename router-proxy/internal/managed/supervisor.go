@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -473,7 +474,14 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 		selected, err = m.admitEmbeddedModel(ctx, candidate)
 		if err == nil && unavailable {
 			sdk := ai.GetModel(selected.Provider, selected.ID)
-			selected = Model{Provider: sdk.Provider, ID: sdk.ID, Name: sdk.Name, Available: true}
+			if sdk == nil && (selected.Provider == "antigravity" || selected.Provider == "google") {
+				sdk = ai.GetModel("google", selected.ID)
+			}
+			if sdk == nil {
+				selected = Model{Provider: selected.Provider, ID: selected.ID, Name: selected.ID, Available: true}
+			} else {
+				selected = Model{Provider: selected.Provider, ID: sdk.ID, Name: sdk.Name, Available: true}
+			}
 		}
 	}
 	if err != nil {
@@ -3084,10 +3092,13 @@ func (m *Manager) RecoverManagedDirectAttempts(ctx context.Context) error {
 		ids = append(ids, id)
 	}
 	m.mu.Unlock()
+	log.Printf("STARTUP: RecoverManagedDirectAttempts total bindings=%d", len(ids))
 	for _, id := range ids {
+		log.Printf("STARTUP: recoverManagedDirectAttemptsForAgent starting for %s", id)
 		if err := m.recoverManagedDirectAttemptsForAgent(ctx, id); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: recoverManagedDirectAttemptsForAgent done for %s", id)
 	}
 	return nil
 }

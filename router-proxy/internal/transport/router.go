@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
@@ -843,6 +844,7 @@ func (r *Router) initEmbeddedProcessGeneration(ctx context.Context) error {
 }
 
 func (r *Router) runStartup(ctx context.Context) error {
+	log.Printf("STARTUP: enter runStartup")
 	if r.managed != nil {
 		r.mu.RLock()
 		listener := r.listener
@@ -857,43 +859,54 @@ func (r *Router) runStartup(ctx context.Context) error {
 		if err := r.managed.SetRouterURL(routerURL); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: RecoverManagedRootColdStarts")
 		if err := r.managed.RecoverManagedRootColdStarts(ctx); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: RecoverPendingManagedLaunches")
 		if err := r.managed.RecoverPendingManagedLaunches(ctx); err != nil {
 			return err
 		}
 		// Saved embedded roles are durable. Recover them even when this command
 		// has no bootstrap configured; no request body can grant root authority.
+		log.Printf("STARTUP: SetEmbeddedStartupGeneration")
 		if err := r.managed.SetEmbeddedStartupGeneration(r.embeddedProcessGeneration); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: RecoverEmbeddedRoots")
 		if err := r.managed.RecoverEmbeddedRoots(ctx); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: RecoverManagedRestartTransitions")
 		if err := r.managed.RecoverManagedRestartTransitions(ctx); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: RecoverManagedLifecycleControls")
 		if err := r.managed.RecoverManagedLifecycleControls(ctx); err != nil {
 			return err
 		}
 	}
+	log.Printf("STARTUP: ReconcileManagedRecipientSources")
 	if err := r.store.ReconcileManagedRecipientSources(ctx); err != nil {
 		return err
 	}
+	log.Printf("STARTUP: ReconcileMessageTargets")
 	if err := r.store.ReconcileMessageTargets(ctx); err != nil {
 		return err
 	}
 	if r.managed != nil {
+		log.Printf("STARTUP: RecoverManagedDirectAttempts")
 		if err := r.managed.RecoverManagedDirectAttempts(ctx); err != nil {
 			return err
 		}
 		if r.startupManaged != nil {
+			log.Printf("STARTUP: startupManaged")
 			if err := r.startupManaged(ctx, r.managed); err != nil {
 				return err
 			}
 		}
 	}
+	log.Printf("STARTUP: runSweep")
 	return r.runSweep(ctx)
 }
 

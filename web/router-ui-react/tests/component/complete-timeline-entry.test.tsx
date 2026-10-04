@@ -90,7 +90,8 @@ describe("Complete timeline entry", () => {
 
     const card = screen.getByRole("button", { name: /Message received.*From ops-sender.*View details/i });
     expect(card).toHaveAttribute("aria-haspopup", "dialog");
-    expect(card).toHaveTextContent("Message received");
+    expect(card).toHaveTextContent("From ops-sender");
+    expect(card).toHaveTextContent("Please inspect **the original report**.");
     expect(screen.queryByText(/acknowledged/i)).not.toBeInTheDocument();
     fireEvent.click(card);
 
@@ -335,5 +336,74 @@ describe("Complete timeline entry", () => {
     expect(within(dialog).queryByText("Event type")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("Outcome")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("Completed successfully")).not.toBeInTheDocument();
+  });
+
+  it("renders inbound message with subject on top line and cleaned preview on second line", () => {
+    const rawBody = `From: pi-go\nSubject: Fix memory leak\n\nIdentified leak in event listener.\nClosing socket properly resolves it.\n[Reply via mailbox to pi-go.]`;
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:msg-subject", agent_id: "managed-worker", at, message: "Message received",
+      message_content: rawBody, sender_identity: "pi-go",
+      presentation: { kind: "message", outcome: "success" },
+    }} />);
+
+    const label = container.querySelector(".activity-entry-label");
+    expect(label?.querySelector("strong")).toHaveTextContent("From pi-go");
+    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("· Fix memory leak");
+    const preview = container.querySelector(".activity-entry-preview");
+    expect(preview).toHaveTextContent("Identified leak in event listener. Closing socket properly resolves it.");
+  });
+
+  it("renders outbound message with recipient and subject on top line and preview on second line", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:sent-subject", agent_id: "managed-worker", at, message: "Ran mecha_mailbox_send",
+      tool_input: { recipient: "pi-go", subject: "Review diff", body: "Please check line 42 for\nnull pointer possibility." },
+      presentation: { kind: "tool", tool_name: "mecha_mailbox_send", outcome: "success", to: "pi-go" },
+    }} />);
+
+    const label = container.querySelector(".activity-entry-label");
+    expect(label?.querySelector("strong")).toHaveTextContent("To pi-go");
+    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("· Review diff");
+    const preview = container.querySelector(".activity-entry-preview");
+    expect(preview).toHaveTextContent("Please check line 42 for null pointer possibility.");
+  });
+
+  it("renders reminder card with subject on top line and body on second line", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:reminder-card", agent_id: "managed-worker", at, message: "Reminder set",
+      message_content: "Follow up with user regarding pull request approval.",
+      presentation: { kind: "reminder", outcome: "success", from: "cron" } as ManagedHistoryPresentation,
+      tool_input: { subject: "PR follow-up" },
+    }} />);
+
+    const label = container.querySelector(".activity-entry-label");
+    expect(label?.querySelector("strong")).toHaveTextContent("From cron");
+    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("· PR follow-up");
+    const preview = container.querySelector(".activity-entry-preview");
+    expect(preview).toHaveTextContent("Follow up with user regarding pull request approval.");
+  });
+
+  it("renders state transition as from -> to on second line", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:state-trans", agent_id: "managed-worker", at, message: "State changed",
+      presentation: { kind: "state", from: "idle", to: "active", outcome: "success" },
+    }} />);
+
+    const label = container.querySelector(".activity-entry-label strong");
+    expect(label).toHaveTextContent("State changed");
+    const preview = container.querySelector(".activity-entry-preview");
+    expect(preview).toHaveTextContent("idle → active");
+  });
+
+  it("renders tool card with command preview on second line", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:bash-cmd", agent_id: "managed-worker", at, message: "Ran bash",
+      tool_input: { command: "cargo test --all" },
+      presentation: { kind: "tool", tool_name: "bash", outcome: "success" },
+    }} />);
+
+    const label = container.querySelector(".activity-entry-label strong");
+    expect(label).toHaveTextContent("Ran bash");
+    const preview = container.querySelector(".activity-entry-preview");
+    expect(preview).toHaveTextContent("cargo test --all");
   });
 });
