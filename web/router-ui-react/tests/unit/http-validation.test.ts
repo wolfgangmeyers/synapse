@@ -62,6 +62,20 @@ describe("strict external HTTP endpoint validation", () => {
     await expect(unavailable.capabilities()).rejects.toThrow("offline");
   });
 
+  it("accepts default model response when effective_fallback name is missing, defaulting name to id", async () => {
+    const responseBody = {
+      operation_id: "op-1",
+      default_model: { provider: "antigravity", id: "gemini-3.8-flash" },
+      effective_fallback: { provider: "antigravity", id: "gemini-3.8-flash", available: false },
+    };
+    const client = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify(responseBody), { status: 200 })));
+    const result = await client.setDefaultModel({ provider: "antigravity", id: "gemini-3.8-flash" });
+    expect(result.operation_id).toBe("op-1");
+    expect(result.effective_fallback.name).toBe("gemini-3.8-flash");
+    expect(result.effective_fallback.id).toBe("gemini-3.8-flash");
+    expect(result.effective_fallback.available).toBe(false);
+  });
+
   it("rejects absolute or protocol-relative request endpoints", async () => {
     const fetchImpl = vi.fn();
     const client = createHttpClient("http://router.test:4000/base", fetchImpl);
