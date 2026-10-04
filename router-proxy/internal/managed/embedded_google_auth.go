@@ -290,7 +290,8 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		wireModel := antigravityWireModel(requestModel.ID)
 
 		var systemParts []any
-		var contents []any
+		var rawContents []map[string]any
+		droppedToolCalls := make(map[string]string)
 
 		for _, msg := range transcript.Messages {
 			if sm, ok := asSystemMsg(msg); ok {
@@ -302,42 +303,111 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 				for _, c := range um.Content {
 					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
 						parts = append(parts, map[string]any{"text": tc.Text})
+					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+						parts = append(parts, map[string]any{"text": tc.Text})
 					}
 				}
 				if len(parts) > 0 {
-					contents = append(contents, map[string]any{"role": "user", "parts": parts})
+					rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
 				}
 			} else if tm, ok := asToolResultMsg(msg); ok {
-				contents = append(contents, map[string]any{
-					"role": "user",
-					"parts": []any{
-						map[string]any{
-							"functionResponse": map[string]any{
-								"name": tm.ToolCallID,
-								"response": map[string]any{
-									"output": ai.ContentText(tm.Content),
+				outText := ai.ContentText(tm.Content)
+				toolName, isDropped := droppedToolCalls[tm.ToolCallID]
+				if !isDropped && tm.ToolName != "" {
+					toolName, isDropped = droppedToolCalls[tm.ToolName]
+				}
+				if isDropped {
+					if toolName == "" {
+						toolName = tm.ToolName
+					}
+					if toolName == "" {
+						toolName = tm.ToolCallID
+					}
+					rawContents = append(rawContents, map[string]any{
+						"role": "user",
+						"parts": []any{
+							map[string]any{
+								"text": fmt.Sprintf("[Observation from %s:\n%s]", toolName, outText),
+							},
+						},
+					})
+				} else {
+					rawContents = append(rawContents, map[string]any{
+						"role": "user",
+						"parts": []any{
+							map[string]any{
+								"functionResponse": map[string]any{
+									"name": tm.ToolCallID,
+									"response": map[string]any{
+										"output": outText,
+									},
 								},
 							},
 						},
-					},
-				})
+					})
+				}
 			} else if am, ok := asAssistantMsg(msg); ok {
 				var parts []any
 				for _, c := range am.Content {
 					if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
 						parts = append(parts, map[string]any{"text": tc.Text})
+					} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+						parts = append(parts, map[string]any{"text": tc.Text})
 					} else if call, ok := c.(ai.ToolCall); ok {
-						parts = append(parts, map[string]any{
-							"functionCall": map[string]any{
-								"name": call.Name,
-								"args": call.Arguments,
-							},
-						})
+						if call.ID != "" {
+							droppedToolCalls[call.ID] = call.Name
+						}
+						if call.Name != "" {
+							droppedToolCalls[call.Name] = call.Name
+						}
+						parts = append(parts, map[string]any{"text": fmt.Sprintf("[Invoked %s]", call.Name)})
+					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
+						if call.ID != "" {
+							droppedToolCalls[call.ID] = call.Name
+						}
+						if call.Name != "" {
+							droppedToolCalls[call.Name] = call.Name
+						}
+						parts = append(parts, map[string]any{"text": fmt.Sprintf("[Invoked %s]", call.Name)})
 					}
 				}
 				if len(parts) > 0 {
-					contents = append(contents, map[string]any{"role": "model", "parts": parts})
+					rawContents = append(rawContents, map[string]any{"role": "model", "parts": parts})
 				}
+			}
+		}
+
+		var contents []any
+		for _, item := range rawContents {
+			role, _ := item["role"].(string)
+			parts, _ := item["parts"].([]any)
+			if len(parts) == 0 {
+				continue
+			}
+			if len(contents) > 0 {
+				lastTurn, ok := contents[len(contents)-1].(map[string]any)
+				if ok && lastTurn["role"] == role {
+					if lastParts, ok := lastTurn["parts"].([]any); ok {
+						lastTurn["parts"] = append(lastParts, parts...)
+						continue
+					}
+				}
+			}
+			contents = append(contents, map[string]any{
+				"role":  role,
+				"parts": parts,
+			})
+		}
+
+		if len(contents) > 0 {
+			firstTurn, _ := contents[0].(map[string]any)
+			if firstTurn != nil && firstTurn["role"] == "model" {
+				contents = append([]any{
+					map[string]any{
+						"role":  "user",
+						"parts": []any{map[string]any{"text": "Start"}},
+					},
+				}, contents...)
 			}
 		}
 
