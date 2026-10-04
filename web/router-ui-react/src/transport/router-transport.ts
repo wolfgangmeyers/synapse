@@ -258,8 +258,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       return;
     }
     if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); return; }
-    if (frame.type === "agent_activity") { scheduleAgentRefresh("agent_projection_frame"); return; }
-    if (frame.type === "agent_model_catalog" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") return;
+    if (frame.type === "agent_activity" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
+    if (frame.type === "agent_model_catalog") return;
     if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); return; }
     if (frame.type === "reminders_changed") {
       void refreshReminders();

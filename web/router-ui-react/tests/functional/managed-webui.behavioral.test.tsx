@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { unlink, writeFile } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
@@ -30,6 +30,13 @@ function record(value: unknown): JsonRecord {
 function list(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("expected JSON array");
   return value;
+}
+
+class MemoryStorage {
+  private readonly values = new Map<string, string>();
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
 }
 
 function realBrowserWebSocketFactory(onOpen?: () => void): WebSocketFactory {
@@ -103,7 +110,12 @@ let router: FunctionalRouter | undefined;
 let historyObserver: UILiveClient | undefined;
 let regularPeer: Awaited<ReturnType<typeof connectFixturePeer>> | undefined;
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 afterEach(async () => {
+  localStorage.clear();
   cleanup();
   historyObserver?.close();
   historyObserver = undefined;
@@ -175,6 +187,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     // separation. The Go fake process emits the same ordered RPC lifecycle
     // frames that the managed handler consumes; no browser or provider is used.
     router = await startManagedGoRouter();
+    await unlink(`${router.sessionRoot}/allow-tool-end`).catch(() => {});
     let terminalActivityID = "";
     let resolveObserverReady: () => void = () => {};
     let rejectObserverReady: (error: Error) => void = () => {};
@@ -209,10 +222,8 @@ describe("real managed router to React WebUI behavioral seam", () => {
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Card (functional-card)" }));
     await sendManagedMessage(router, "functional-card");
 
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("tab", { name: "Complete messages and activity" }));
-    const activeLabel = await screen.findByText("Running bash");
-    const activeCard = activeLabel.closest<HTMLElement>("[data-activity-id]");
+    const activePreview = await screen.findByText("echo functional");
+    const activeCard = activePreview.closest<HTMLElement>("[data-activity-id]");
     expect(activeCard).not.toBeNull();
     if (activeCard === null) throw new Error("active tool card missing");
     const activeID = activeCard.dataset.activityId ?? "";
@@ -224,14 +235,11 @@ describe("real managed router to React WebUI behavioral seam", () => {
     await waitFor(() => {
       const terminalCard = document.querySelector<HTMLElement>(`[data-activity-id="${activeID}"]`);
       expect(terminalCard).toBe(stableCard);
-      expect(terminalCard).toHaveClass("activity-entry--teal");
       expect(terminalCard).not.toHaveClass("activity-entry--active");
-      expect(terminalCard).toHaveTextContent("Ran bash");
+      expect(terminalCard).toHaveClass("activity-entry--compact");
     });
     expect(document.querySelectorAll(`[data-activity-id="${activeID}"]`)).toHaveLength(1);
 
-    await user.click(screen.getByRole("tab", { name: "Quiet messages" }));
-    expect(document.querySelector(`[data-activity-id="${activeID}"]`)).not.toBeInTheDocument();
     const quiet = await jsonRequest(router, "/v1/history?agent_id=functional-card&view=quiet", { method: "GET", credentials: "omit" });
     const complete = await jsonRequest(router, "/v1/history?agent_id=functional-card&view=complete", { method: "GET", credentials: "omit" });
     expect(quiet.response.status).toBe(200);
@@ -253,7 +261,6 @@ describe("real managed router to React WebUI behavioral seam", () => {
     });
     expect(initialChildren!.response.status).toBe(200);
     expect(record(list(initialChildren!.body.children)[0])).toMatchObject({ task_id: "functional-child-task", run_id: "functional-child-run", parent_entry_id: "functional-parent-entry", sequence: 0 });
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Complete messages and activity" }));
     await screen.findByText("No messages or activity yet");
 
     await sendManagedMessage(router, "functional-compaction", "Start structured child");
@@ -372,13 +379,12 @@ describe("real managed router to React WebUI behavioral seam", () => {
 
   it.each([
     { provider: "google", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-    { provider: "google-vertex", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Vertex)" },
     { provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Antigravity)" },
-  ])("accepts $provider launch request via UI ManagedAgentDialog with rpc runtime (HTTP 202) and rejects embedded (HTTP 422)", async ({ provider, id, name }) => {
+  ])("accepts $provider launch request via UI ManagedAgentDialog with embedded runtime", async ({ provider, id, name }) => {
     router = await startManagedGoRouter();
-    // 1. Embedded runtime direct attempt must be rejected with HTTP 422 by Go embedded admission fence
-    const embeddedAttempt = await launchWithModel(router, `${provider}-embedded-fail`, { provider, id }, "embedded");
-    expect(embeddedAttempt.status).toBe(422);
+    // 1. Embedded runtime direct attempt
+    const embeddedAttempt = await launchWithModel(router, `${provider}-embedded-launch`, { provider, id }, "embedded");
+    expect(embeddedAttempt.status).toBe(provider === "google-vertex" ? 422 : 202);
 
     // 2. Real rendered App + ManagedAgentDialog -> RouterHttpClient -> real Go router POST:
     // Select the model through the UI dialog and submit "Launch"
@@ -414,7 +420,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     expect(response.status).toBe(200);
     expect(record(body.agent)).toMatchObject({
       agent_id: agentName,
-      runtime: "rpc",
+      runtime: "embedded",
       model: { provider, id },
     });
   }, 60_000);

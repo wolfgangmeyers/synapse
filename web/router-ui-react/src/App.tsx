@@ -583,7 +583,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const pendingManagedModelChange = selectedAgent?.source === "router-managed" && managedPending;
   const pendingGoalControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "goal" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);
   const pendingInlineToolControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "inline-tool" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);
-  const selectedAgentActiveReminderCount = selectedLegacyPeer === undefined ? 0 : activeRemindersForPeer(session.state.reminders, selectedLegacyPeer).length;
+  const selectedAgentActiveReminderCount = !selectedAgent ? 0 : activeRemindersForPeer(session.state.reminders, selectedAgent.agent_id).length;
   const pendingReminderIds = new Set([...session.state.pendingControls.values()].flatMap((pending) => pending.action === "reminder-lock" && pending.peer === selectedLegacyPeer && pending.reminderId !== undefined ? [pending.reminderId] : []));
   const arrivalForDialog = arrivalAgent ? session.state.arrivals.get(arrivalAgent) : undefined;
   const refreshManagedGoalStates = (agents: Parameters<typeof loadManagedGoalProjection>[1]): void => {

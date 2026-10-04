@@ -204,7 +204,7 @@ function toolVisual(presentation: ManagedHistoryPresentation, entry?: ManagedHis
     const outcome = interrupted ? "interrupted" : "failed";
     const label = toolName === undefined ? `Tool ${outcome}` : `${titleCase(toolName)} ${outcome}`;
     const paramPreview = toolParamPreview(entry?.tool_input);
-    const detail = cleanOneLine(presentation.summary) ?? paramPreview ?? "The operation could not be completed.";
+    const detail = paramPreview ?? cleanOneLine(presentation.summary) ?? "The operation could not be completed.";
     return { icon, tone, label, detail, isHighValue: true };
   }
   if (active) {
@@ -398,7 +398,7 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const isFailure = entry.level === "error" || presentation?.outcome === "error" || presentation?.outcome === "failed" || presentation?.outcome === "interrupted" || terminalDanger;
   const isSuccess = !isFailure && !active && (terminalSuccess || presentation?.outcome === "success" || presentation?.outcome === "completed" || presentation?.kind === "state");
   const isRoutine = isTool && isRoutineTool(presentation?.tool_name);
-  const isCompactRoutine = isRoutine && !isFailure;
+  const isCompactRoutine = isRoutine;
   const openDetails = (target: HTMLElement): void => {
     detailTrigger.current = target;
     setDetailMounted(true);
@@ -413,7 +413,7 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
   const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
   return <Fragment>
-    <article className={`activity-entry${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
+    <article className={`activity-entry${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
       {isCompactRoutine ? <div className="activity-entry-content activity-entry-content--compact">
         <div className="activity-entry-compact-row">

@@ -639,19 +639,18 @@ describe("App integration", () => {
   it("connects the configured transport to the application components", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/v1/capabilities")) return jsonResponse({});
       if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [peer] });
-      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "wolfgang", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
       if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
-      if (url.endsWith("/v1/messages")) return jsonResponse({ message: { enqueue_sequence: 1, id: "message-1", from: "web-ui", to: "worker-one", body: "hello", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } } }, 201);
+      if (url.endsWith("/v1/messages")) return jsonResponse({ message: { enqueue_sequence: 1, id: "message-1", from: "wolfgang", to: "worker-one", body: "hello", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } } }, 201);
       throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
     });
-    const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
+    const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "wolfgang" });
     state.agents = [peer];
     state.selectedPeer = peer.agent_id;
-    const storage = new MemoryStorage();
-    render(<App routerUrl={state.routerUrl} agentId={state.agentId} connect={false} state={state} storage={storage} transportOptions={{ fetchImpl, storage }} />);
+
+    render(<App routerUrl={state.routerUrl} agentId={state.agentId} connect={false} state={state} transportOptions={{ fetchImpl }} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeTruthy());
     expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeTruthy();

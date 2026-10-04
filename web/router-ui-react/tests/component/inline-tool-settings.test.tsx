@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
@@ -9,7 +9,8 @@ import { ConversationHeader } from "../../src/components/ConversationHeader";
 import { isRecord } from "../../src/protocol/guards";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 
-afterEach(cleanup);
+beforeEach(() => { localStorage.clear(); });
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
