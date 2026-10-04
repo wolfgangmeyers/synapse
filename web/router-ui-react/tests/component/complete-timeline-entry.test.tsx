@@ -29,8 +29,8 @@ describe("Complete timeline entry", () => {
     [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-clock", "activity-entry--green", false, false],
     [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-wrench", "activity-entry--green", false, false],
     [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-wrench", "activity-entry--green", false, false],
-    [{ kind: "tool" as const, tool_name: "read", outcome: "failed" as const, error: { code: "FAILED", retryable: false, detail_available: false } }, "Read failed", "fa-file-lines", "activity-entry--danger", false, false],
-    [{ kind: "tool" as const, tool_name: "bash", outcome: "interrupted" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } }, "Bash interrupted", "fa-terminal", "activity-entry--danger", false, false],
+    [{ kind: "tool" as const, tool_name: "read", outcome: "failed" as const, error: { code: "FAILED", retryable: false, detail_available: false } }, "Read failed", "fa-file-lines", "activity-entry--danger", false, true],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "interrupted" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } }, "Bash interrupted", "fa-terminal", "activity-entry--danger", false, true],
   ] as const)("renders %s with the canonical visual mapping", (presentation, label, icon, tone, active, isRoutine) => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: `complete:${label}`, agent_id: "managed-worker", at, message: "ignored presentation text", presentation }} />);
     if (isRoutine) {
@@ -76,7 +76,8 @@ describe("Complete timeline entry", () => {
 
   it("keeps error failures recognizable and exposes no unsafe detail affordance", () => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: "complete:failed", agent_id: "managed-worker", at, message: "Bash failed", presentation: { kind: "tool", tool_name: "bash", outcome: "error", error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } } }} />);
-    expect(screen.getByText("Bash failed")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--compact")).toBeInTheDocument();
+    expect(screen.queryByText("Bash failed", { selector: "strong" })).not.toBeInTheDocument();
     expect(screen.getByText("The operation could not be completed.")).toBeInTheDocument();
     expect(screen.getByText("No additional safe details available.")).toBeInTheDocument();
     expect(container.querySelector(".fa-terminal")).toBeInTheDocument();
@@ -224,12 +225,8 @@ describe("Complete timeline entry", () => {
     expect(terminalArticle).toHaveClass(terminalClass);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
     expect(terminalArticle.querySelector(`.${icon}`)).toBeInTheDocument();
-    if (outcome === "success") {
-      expect(screen.queryByText(label, { selector: "strong" })).not.toBeInTheDocument();
-      expect(terminalArticle).toHaveClass("activity-entry--compact");
-    } else {
-      expect(screen.getByText(label)).toBeInTheDocument();
-    }
+    expect(terminalArticle).toHaveClass("activity-entry--compact");
+    expect(screen.queryByText(label, { selector: "strong" })).not.toBeInTheDocument();
     expect(screen.getByText(detail)).toBeInTheDocument();
   });
 
@@ -307,7 +304,8 @@ describe("Complete timeline entry", () => {
     rerender(<CompleteTimelineEntry entry={{ ...entry, presentation: { kind: "tool", tool_name: "read", outcome: "interrupted" } }} />);
     expect(container.querySelectorAll("article")).toHaveLength(1);
     expect(container.querySelector("[data-activity-id='complete:replace']")).toBeInTheDocument();
-    expect(screen.getByText("Read interrupted")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--compact")).toBeInTheDocument();
+    expect(screen.queryByText("Read interrupted", { selector: "strong" })).not.toBeInTheDocument();
     expect(container.querySelector(".activity-entry--danger")).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--active")).not.toBeInTheDocument();
   });

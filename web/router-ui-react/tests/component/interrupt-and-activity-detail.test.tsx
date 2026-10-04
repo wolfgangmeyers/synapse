@@ -86,6 +86,18 @@ describe("ConversationHeader interrupt control", () => {
     render(<ConversationHeader agent={idleAgent} />);
     expect(screen.queryByRole("button", { name: "Interrupt worker" })).not.toBeInTheDocument();
   });
+
+  it("lights up reminder button when activeReminderCount > 0 for a managed agent", () => {
+    const managedAgent: Agent = {
+      agent_id: "worker-1",
+      source: "router-managed",
+      activity_state: "idle",
+    };
+
+    render(<ConversationHeader agent={managedAgent} activeReminderCount={2} />);
+    const reminderBtn = screen.getByRole("button", { name: "Add reminder" });
+    expect(reminderBtn).not.toHaveClass("empty");
+  });
 });
 
 describe("SubagentBadge stop control", () => {

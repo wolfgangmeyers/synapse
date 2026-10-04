@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
@@ -10,6 +10,9 @@ import { DEFAULT_GOAL_STATE, type GoalState } from "../../src/domain/goals";
 import type { ManagedAgent } from "../../src/protocol/types";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 import type { FetchLike } from "../../src/transport/http-client";
+
+beforeEach(() => { localStorage.clear(); });
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -38,6 +41,13 @@ class ControlledSocket implements WebSocketLike {
   frame(type: string): Record<string, unknown> | undefined { return this.sent.find((frame) => frame.type === type); }
 }
 
+class MemoryStorage {
+  private readonly values = new Map<string, string>();
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
+}
+
 function renderLegacy(overrides: { agent?: Record<string, unknown>; fetchImpl?: FetchLike } = {}) {
   let currentAgent = legacyAgent(overrides.agent);
   let agentRefreshCount = 0;
@@ -61,7 +71,8 @@ function renderLegacy(overrides: { agent?: Record<string, unknown>; fetchImpl?: 
     if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
     throw new Error(`Unexpected request: ${url}`);
   });
-  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory, autoReconnect: false }} />);
+  const storage = new MemoryStorage();
+  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory, autoReconnect: false, storage }} />);
   return { socket, setAgent: (agent: Record<string, unknown>) => { currentAgent = { ...currentAgent, ...agent }; }, agentRefreshCount: () => agentRefreshCount, holdAgentRefresh: () => { holdAgentRefresh = true; } };
 }
 
@@ -86,10 +97,10 @@ function renderManaged(actionResponse: Response | undefined = undefined, options
     if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
     if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [{ ...modelOne, available: true }, { ...modelTwo, available: true }], default_model: null });
     if (url.endsWith("/v1/managed-agents/managed-alpha/goal")) return jsonResponse({ goal_state: DEFAULT_GOAL_STATE });
-    if (url.endsWith("/v1/managed-agents/managed-alpha/model") && init?.method === "PUT") {
+    if (url.endsWith("/v1/managed-agents/managed-alpha/restart") && init?.method === "POST" && init?.body && String(init.body).includes("gemini-2.5-pro")) {
       snapshot = managedAgent({ model: { provider: modelTwo.provider, id: modelTwo.id } });
       projectionVersion += 1;
-      return jsonResponse({ operation_id: "model-operation-1" });
+      return jsonResponse({ operation_id: "restart-operation-1" }, 202);
     }
     if (init?.method === "POST" || init?.method === "DELETE") {
       if (actionResponse !== undefined) return actionResponse;
@@ -101,12 +112,13 @@ function renderManaged(actionResponse: Response | undefined = undefined, options
     throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
   });
   const socket = new ControlledSocket();
-  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory: () => socket, autoReconnect: false }} />);
+  const storage = new MemoryStorage();
+  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory: () => socket, autoReconnect: false, storage }} />);
   queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
   return { fetchImpl, socket, resolveAction };
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe("App control fencing and managed lifecycle projections", () => {
   it("ignores a goal result for the old instance while the replacement remains active", async () => {
@@ -189,15 +201,13 @@ describe("App control fencing and managed lifecycle projections", () => {
     });
   });
 
-  it("changes a managed model through PUT without calling restart", async () => {
+  it("restarts a managed agent with an explicitly selected model", async () => {
     const user = userEvent.setup();
     const { fetchImpl } = renderManaged();
     await user.click(await screen.findByRole("button", { name: "Managed Alpha (managed-alpha)" }));
     await user.click(screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" }));
     await user.click(screen.getByRole("option", { name: /Gemini 2.5 Pro/ }));
-    await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/model") && init?.method === "PUT")).toBe(true));
-    expect(fetchImpl.mock.calls.some(([input]) => String(input).endsWith("/restart"))).toBe(false);
-    await waitFor(() => expect(screen.getByRole("button", { name: "google/gemini-2.5-pro" })).toBeInTheDocument());
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/restart") && init?.method === "POST")).toBe(true));
   });
 
   it("projects a successful managed restart and disables actions while it is pending", async () => {
@@ -207,7 +217,7 @@ describe("App control fencing and managed lifecycle projections", () => {
     await user.click(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" }));
     await user.click(screen.getByRole("button", { name: "Manage worker" }));
     await user.click(screen.getByRole("button", { name: "Restart" }));
-    expect(screen.getByRole("button", { name: "Restart" })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Restart" })).toBeDisabled());
     expect(screen.getByRole("button", { name: "Reset" })).toBeDisabled();
     resolveAction?.();
     await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/restart") && init?.method === "POST")).toBe(true));

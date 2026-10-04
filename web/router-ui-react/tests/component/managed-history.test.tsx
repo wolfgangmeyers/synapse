@@ -130,11 +130,7 @@ describe("Selected-agent conversation modes", () => {
     expect([...container.querySelectorAll<HTMLElement>("[data-activity-id]")].map((item) => item.dataset.activityId)).toEqual(["complete:1", "complete:2", "complete:3"]);
     expect(terminalArticle).toHaveClass(`activity-entry--${tone}`);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
-    if (outcome === "success") {
-      expect(terminalArticle).toHaveClass("activity-entry--compact");
-    } else {
-      expect(terminalArticle).toHaveTextContent(label);
-    }
+    expect(terminalArticle).toHaveClass("activity-entry--compact");
     expect(terminalArticle).toHaveTextContent(detail);
   });
 
