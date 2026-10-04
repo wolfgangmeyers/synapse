@@ -204,10 +204,10 @@ describe("ProviderAuthDialog", () => {
     expect(optionValues).toContain("antigravity");
   });
 
-  it("initializes auth method to first authenticated provider in priority order: google -> google-vertex -> antigravity", async () => {
+  it("initializes auth method to first authenticated provider in priority order: google -> google-vertex -> antigravity, hiding dropdown when connected", async () => {
     const client = clientFixture();
 
-    // Case 1: google authenticated, others also authenticated -> priority 1 is api_key
+    // Case 1: google authenticated, others also authenticated -> priority 1 is api_key, dropdown hidden
     client.providerAuthMock.mockResolvedValue({
       auth_revision: 5,
       providers: [
@@ -219,10 +219,12 @@ describe("ProviderAuthDialog", () => {
       ],
     });
     const { unmount } = render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    expect(await screen.findByLabelText(/google authentication method/i)).toHaveValue("api_key");
+    expect(await screen.findByText("ChatGPT")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/google authentication method/i)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Sign out" })).toHaveLength(2);
     unmount();
 
-    // Case 2: google signed_out, google-vertex authenticated -> priority 2 is vertex_adc
+    // Case 2: google signed_out, google-vertex authenticated -> priority 2 is vertex_adc, dropdown hidden
     client.providerAuthMock.mockResolvedValue({
       auth_revision: 5,
       providers: [
@@ -234,10 +236,11 @@ describe("ProviderAuthDialog", () => {
       ],
     });
     const render2 = render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    expect(await render2.findByLabelText(/google authentication method/i)).toHaveValue("vertex_adc");
+    expect(await render2.findByText(/project: proj-1/i)).toBeInTheDocument();
+    expect(render2.queryByLabelText(/google authentication method/i)).not.toBeInTheDocument();
     render2.unmount();
 
-    // Case 3: google and vertex signed_out, antigravity authenticated -> priority 3 is antigravity
+    // Case 3: google and vertex signed_out, antigravity authenticated -> priority 3 is antigravity, dropdown hidden
     client.providerAuthMock.mockResolvedValue({
       auth_revision: 5,
       providers: [
@@ -249,11 +252,27 @@ describe("ProviderAuthDialog", () => {
       ],
     });
     const render3 = render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    expect(await render3.findByLabelText(/google authentication method/i)).toHaveValue("antigravity");
+    expect(await render3.findByText(/user@test\.com/i)).toBeInTheDocument();
+    expect(render3.queryByLabelText(/google authentication method/i)).not.toBeInTheDocument();
     render3.unmount();
+
+    // Case 4: all disconnected -> dropdown visible, defaults to api_key
+    client.providerAuthMock.mockResolvedValue({
+      auth_revision: 5,
+      providers: [
+        { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
+        { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
+      ],
+    });
+    const render4 = render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    expect(await render4.findByLabelText(/google authentication method/i)).toHaveValue("api_key");
+    render4.unmount();
   });
 
-  it("changing dropdown selection does not mutate credentials and updates displayed status and native account label without secrets", async () => {
+  it("changing dropdown selection does not mutate credentials and updates guidance when disconnected", async () => {
     const user = userEvent.setup();
     const client = clientFixture();
     client.providerAuthMock.mockResolvedValue({
@@ -261,8 +280,8 @@ describe("ProviderAuthDialog", () => {
       providers: [
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "google-vertex", label: "Google Vertex AI", authenticated: true, status: "authenticated", account_label: "gcp-production-project", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: true, status: "authenticated", account_label: "user@domain.com", updated_at: timestamp },
+        { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", account_label: "gcp-production-project", updated_at: timestamp },
+        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", account_label: "user@domain.com", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -270,22 +289,21 @@ describe("ProviderAuthDialog", () => {
     render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
     const methodSelect = await screen.findByLabelText(/google authentication method/i);
 
-    // Initial is vertex_adc (first authenticated since google is signed_out)
+    // Initial is api_key
+    expect(methodSelect).toHaveValue("api_key");
+    expect(screen.queryByText(/gcloud auth application-default login/i)).not.toBeInTheDocument();
+
+    // Switch to Vertex ADC: MUST NOT call client.startProviderAuth or mutate credentials
+    await user.selectOptions(methodSelect, "vertex_adc");
+    expect(client.startProviderAuth).not.toHaveBeenCalled();
     expect(methodSelect).toHaveValue("vertex_adc");
-    expect(screen.getByText(/project: gcp-production-project/i)).toBeInTheDocument();
     expect(screen.getByText(/gcloud auth application-default login/i)).toBeInTheDocument();
 
-    // Switch to API key: MUST NOT call client.startProviderAuth or mutate credentials
-    await user.selectOptions(methodSelect, "api_key");
-    expect(client.startProviderAuth).not.toHaveBeenCalled();
-    expect(methodSelect).toHaveValue("api_key");
-    expect(screen.queryByText(/project: gcp-production-project/i)).not.toBeInTheDocument();
-
-    // Switch to Antigravity: displays user email label without secrets
+    // Switch to Antigravity: MUST NOT call client.startProviderAuth or mutate credentials
     await user.selectOptions(methodSelect, "antigravity");
     expect(client.startProviderAuth).not.toHaveBeenCalled();
     expect(methodSelect).toHaveValue("antigravity");
-    expect(screen.getByText(/user@domain\.com/i)).toBeInTheDocument();
+    expect(screen.queryByText(/gcloud auth application-default login/i)).not.toBeInTheDocument();
   });
 
   it("independent logout only signs out the selected Google provider without affecting others", async () => {
@@ -295,7 +313,7 @@ describe("ProviderAuthDialog", () => {
       auth_revision: 5,
       providers: [
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
-        { provider: "google", label: "Google", authenticated: true, status: "authenticated", updated_at: timestamp },
+        { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: true, status: "authenticated", account_label: "my-gcp-project", updated_at: timestamp },
         { provider: "antigravity", label: "Google Antigravity", authenticated: true, status: "authenticated", account_label: "wolfgang@google.com", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
@@ -303,11 +321,11 @@ describe("ProviderAuthDialog", () => {
     });
 
     render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    const methodSelect = await screen.findByLabelText(/google authentication method/i);
+    await screen.findByText("ChatGPT");
 
-    // Switch to vertex_adc
-    await user.selectOptions(methodSelect, "vertex_adc");
-    expect(methodSelect).toHaveValue("vertex_adc");
+    // Vertex is the active Google provider (first authenticated)
+    expect(screen.getByText(/project: my-gcp-project/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/google authentication method/i)).not.toBeInTheDocument();
 
     // Click Sign out for Vertex
     const signOutButtons = screen.getAllByRole("button", { name: "Sign out" });

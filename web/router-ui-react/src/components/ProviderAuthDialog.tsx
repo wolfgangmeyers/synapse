@@ -365,81 +365,83 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
             <div className="provider-auth-row provider-auth-row-google" key="google-unified">
               <div className="provider-auth-provider">
                 <strong>Google</strong>
-                <div ref={googlePickerRef} className="model-picker provider-dropdown">
-                  <button
-                    type="button"
-                    className="model-current"
-                    aria-haspopup="listbox"
-                    aria-expanded={googleMenuOpen}
-                    onClick={() => setGoogleMenuOpen((v) => !v)}
-                  >
-                    <span>{googleMethodLabels[selectedGoogleMethod]}</span>
-                    <i className="fa-solid fa-chevron-down" aria-hidden="true" />
-                  </button>
-                  {googleMenuOpen && (
-                    <div className="model-menu provider-dropdown-menu" role="listbox" aria-label="Google authentication method">
-                      <div className="model-options">
-                        <button
-                          type="button"
-                          className="model-option"
-                          role="option"
-                          aria-selected={selectedGoogleMethod === "api_key"}
-                          onClick={() => {
-                            setUserSelectedGoogleMethod("api_key");
-                            setGoogleMenuOpen(false);
-                          }}
-                        >
-                          <strong>API key</strong>
-                        </button>
-                        <button
-                          type="button"
-                          className="model-option"
-                          role="option"
-                          aria-selected={selectedGoogleMethod === "vertex_adc"}
-                          onClick={() => {
-                            setUserSelectedGoogleMethod("vertex_adc");
-                            setGoogleMenuOpen(false);
-                          }}
-                        >
-                          <strong>Vertex AI ADC</strong>
-                        </button>
-                        <button
-                          type="button"
-                          className="model-option"
-                          role="option"
-                          aria-selected={selectedGoogleMethod === "antigravity"}
-                          onClick={() => {
-                            setUserSelectedGoogleMethod("antigravity");
-                            setGoogleMenuOpen(false);
-                          }}
-                        >
-                          <strong>Google Antigravity</strong>
-                        </button>
+                {!isGoogleConnected && (
+                  <div ref={googlePickerRef} className="model-picker provider-dropdown">
+                    <button
+                      type="button"
+                      className="model-current"
+                      aria-haspopup="listbox"
+                      aria-expanded={googleMenuOpen}
+                      onClick={() => setGoogleMenuOpen((v) => !v)}
+                    >
+                      <span>{googleMethodLabels[selectedGoogleMethod]}</span>
+                      <i className="fa-solid fa-chevron-down" aria-hidden="true" />
+                    </button>
+                    {googleMenuOpen && (
+                      <div className="model-menu provider-dropdown-menu" role="listbox" aria-label="Google authentication method">
+                        <div className="model-options">
+                          <button
+                            type="button"
+                            className="model-option"
+                            role="option"
+                            aria-selected={selectedGoogleMethod === "api_key"}
+                            onClick={() => {
+                              setUserSelectedGoogleMethod("api_key");
+                              setGoogleMenuOpen(false);
+                            }}
+                          >
+                            <strong>API key</strong>
+                          </button>
+                          <button
+                            type="button"
+                            className="model-option"
+                            role="option"
+                            aria-selected={selectedGoogleMethod === "vertex_adc"}
+                            onClick={() => {
+                              setUserSelectedGoogleMethod("vertex_adc");
+                              setGoogleMenuOpen(false);
+                            }}
+                          >
+                            <strong>Vertex AI ADC</strong>
+                          </button>
+                          <button
+                            type="button"
+                            className="model-option"
+                            role="option"
+                            aria-selected={selectedGoogleMethod === "antigravity"}
+                            onClick={() => {
+                              setUserSelectedGoogleMethod("antigravity");
+                              setGoogleMenuOpen(false);
+                            }}
+                          >
+                            <strong>Google Antigravity</strong>
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                  <select
-                    className="visually-hidden"
-                    tabIndex={-1}
-                    aria-label="Google authentication method"
-                    value={selectedGoogleMethod}
-                    onChange={(event) => {
-                      const next = event.currentTarget.value;
-                      if (isGoogleAuthMethod(next)) {
-                        setUserSelectedGoogleMethod(next);
-                      }
-                    }}
-                  >
-                    <option value="api_key">API key</option>
-                    <option value="vertex_adc">Vertex AI ADC</option>
-                    <option value="antigravity">Google Antigravity</option>
-                  </select>
-                </div>
+                    )}
+                    <select
+                      className="visually-hidden"
+                      tabIndex={-1}
+                      aria-label="Google authentication method"
+                      value={selectedGoogleMethod}
+                      onChange={(event) => {
+                        const next = event.currentTarget.value;
+                        if (isGoogleAuthMethod(next)) {
+                          setUserSelectedGoogleMethod(next);
+                        }
+                      }}
+                    >
+                      <option value="api_key">API key</option>
+                      <option value="vertex_adc">Vertex AI ADC</option>
+                      <option value="antigravity">Google Antigravity</option>
+                    </select>
+                  </div>
+                )}
                 <p className="provider-auth-connection">
                   <span className={`status-dot${isGoogleConnected ? " connected" : ""}`} aria-hidden="true" />
                   {googleStatusText}
                 </p>
-                {selectedGoogleMethod === "vertex_adc" && (
+                {!isGoogleConnected && selectedGoogleMethod === "vertex_adc" && (
                   <p className="provider-auth-guidance">
                     <small>Requires host credentials. Run <code>gcloud auth application-default login</code> on the host.</small>
                   </p>
