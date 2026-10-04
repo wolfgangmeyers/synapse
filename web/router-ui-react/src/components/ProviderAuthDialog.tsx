@@ -25,6 +25,12 @@ const googleMethodToProvider: Record<GoogleAuthMethod, ManagedProvider> = {
   antigravity: "antigravity",
 };
 
+const googleMethodLabels: Record<GoogleAuthMethod, string> = {
+  api_key: "API key",
+  vertex_adc: "Vertex AI ADC",
+  antigravity: "Google Antigravity",
+};
+
 const providerLabels: Record<ManagedProvider, string> = {
   "openai-codex": "ChatGPT",
   google: "Google",
@@ -55,6 +61,17 @@ function getInitialPromptValue(prompt?: ProviderAuthPromptFrame): string {
   return "";
 }
 
+function requiresPromptInput(prompt: ProviderAuthPromptFrame): boolean {
+  if (prompt.prompt.kind === "manual_code") return false;
+  if (prompt.prompt.url) {
+    const msg = (prompt.prompt.message || "").toLowerCase();
+    const isExplicitPaste = msg.includes("paste") || msg.includes("callback") || msg.includes("authorization code");
+    const isGenericAutomated = msg.includes("requested sign-in value") || msg === "response" || msg === "";
+    return isExplicitPaste && !isGenericAutomated;
+  }
+  return true;
+}
+
 export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClose, onPromptHandled }: ProviderAuthDialogProps) {
   const [auth, setAuth] = useState<ProviderAuthResponse>();
   const [catalog, setCatalog] = useState<ModelsResponse>();
@@ -62,8 +79,14 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   const [value, setValue] = useState(() => getInitialPromptValue(prompt));
   const [codeCopied, setCodeCopied] = useState(false);
   const [userSelectedGoogleMethod, setUserSelectedGoogleMethod] = useState<GoogleAuthMethod | null>(null);
+  const [pendingProvider, setPendingProvider] = useState<ManagedProvider | null>(null);
+  const [googleMenuOpen, setGoogleMenuOpen] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+
   const promptInputRef = useRef<HTMLInputElement>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const googlePickerRef = useRef<HTMLDivElement>(null);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
 
   const selectedGoogleMethod: GoogleAuthMethod =
     userSelectedGoogleMethod ?? computeInitialGoogleMethod(auth?.providers);
@@ -82,41 +105,63 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       ? `Connected (${activeGoogleStatus.account_label})`
       : "Connected";
   }, [isGoogleConnected, selectedGoogleMethod, activeGoogleStatus?.account_label]);
-  // Tracks whether we have observed the prompt's provider as not-authenticated at
-  // least once since the prompt arrived. Prevents auto-dismissing when the dialog
-  // mounts into an already-authenticated state (e.g. test fixtures, stale prompt).
+
+  const defaultModelLabel = useMemo(() => {
+    if (!catalog?.default_model) return "Use ChatGPT default";
+    const matched = (catalog.models ?? []).find(
+      (m) => m.provider === catalog.default_model?.provider && m.id === catalog.default_model?.id
+    );
+    return matched ? matched.name : `${catalog.default_model.provider}:${catalog.default_model.id}`;
+  }, [catalog]);
+
   const seenUnauthenticated = useRef(false);
+
   const refresh = async (): Promise<void> => {
-    // Auth status remains useful even while a separate model catalog refresh is
-    // temporarily unavailable. Do not hide the only way to repair sign-in.
     const nextAuth = await client.providerAuth();
     setAuth(nextAuth);
     try { setCatalog(await client.models()); } catch { setCatalog(undefined); }
   };
+
   useEffect(() => {
-    if (!open) { setValue(""); setStatus(""); return; }
+    if (!open) {
+      setValue("");
+      setStatus("");
+      setPendingProvider(null);
+      setGoogleMenuOpen(false);
+      setModelMenuOpen(false);
+      return;
+    }
     void refresh().catch(() => setStatus("Provider settings are unavailable."));
   }, [open, client, refreshKey]);
+
   useEffect(() => {
-    // A newly issued prompt must never inherit input from an earlier prompt.
-    // However, when a Vertex AI ADC Region prompt arrives with default placeholder "us-central1",
-    // initialize value to "us-central1" so the user can submit the approved default without typing.
-    // Example project placeholders (e.g. "my-project-id") and secrets/passwords remain blank.
     setValue(getInitialPromptValue(prompt));
     seenUnauthenticated.current = false;
   }, [prompt?.operation_id, prompt?.prompt.id, prompt?.provider, prompt?.prompt.placeholder]);
+
   useEffect(() => {
     if (!open || !prompt) return;
-    // manual_code prompts have no response input — nothing to focus.
-    if (prompt.prompt.kind === "manual_code") return;
+    if (!requiresPromptInput(prompt)) return;
     const frame = requestAnimationFrame(() => promptInputRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [open, prompt?.operation_id, prompt?.prompt.id]);
-  // Bug fix: when the provider transitions to authenticated while a prompt is
-  // active (device auth completes automatically), dismiss the prompt section.
-  // We only dismiss after we have first observed the provider as not-authenticated
-  // to avoid a false positive when the dialog mounts with a stale or already-
-  // satisfied prompt.
+  }, [open, prompt?.operation_id, prompt?.prompt.id, prompt]);
+
+  useEffect(() => {
+    if (!googleMenuOpen && !modelMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (!target) return;
+      if (googleMenuOpen && googlePickerRef.current && !googlePickerRef.current.contains(target)) {
+        setGoogleMenuOpen(false);
+      }
+      if (modelMenuOpen && modelPickerRef.current && !modelPickerRef.current.contains(target)) {
+        setModelMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [googleMenuOpen, modelMenuOpen]);
+
   useEffect(() => {
     if (!prompt || !auth) return;
     const providerStatus = auth.providers.find((p) => p.provider === prompt.provider);
@@ -128,11 +173,21 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       onPromptHandled?.();
     }
   }, [auth, prompt, onPromptHandled]);
+
   const begin = async (provider: ManagedProvider, action: "login" | "logout"): Promise<void> => {
+    setPendingProvider(provider);
     setStatus(action === "login" ? `Starting ${providerLabels[provider]} sign-in…` : `Signing out of ${providerLabels[provider]}…`);
-    try { await client.startProviderAuth(provider, action); await refresh(); setStatus("Waiting for provider sign-in to finish."); }
-    catch { setStatus("Provider request could not be started."); }
+    try {
+      await client.startProviderAuth(provider, action);
+      await refresh();
+      setStatus("Waiting for provider sign-in to finish.");
+    } catch {
+      setStatus("Provider request could not be started.");
+    } finally {
+      setPendingProvider(null);
+    }
   };
+
   const handleCopyCode = useCallback((code: string): void => {
     void navigator.clipboard.writeText(code).then(() => {
       setCodeCopied(true);
@@ -140,30 +195,37 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       copyTimeoutRef.current = setTimeout(() => { setCodeCopied(false); copyTimeoutRef.current = null; }, 2000);
     });
   }, []);
+
   const handleCancelPrompt = (): void => {
     if (prompt) {
-      void client.cancelProviderAuth(prompt.operation_id).catch(() => {
-        // Best-effort: backend cancel may fail if the operation already settled.
-        // UI dismissal proceeds regardless so the user is never blocked.
-      });
+      void client.cancelProviderAuth(prompt.operation_id).catch(() => {});
     }
     setValue("");
     onPromptHandled?.();
   };
+
   const submitPrompt = async (): Promise<void> => {
     if (!prompt || value === "") return;
     try {
       await client.respondProviderAuth(prompt.operation_id, prompt.prompt.id, value);
-      setValue(""); // Sensitive input is consumed once and not retained in UI state.
-      onPromptHandled(); setStatus("Provider sign-in is continuing.");
-    } catch { setValue(""); onPromptHandled(); setStatus("That sign-in prompt is no longer available."); }
+      setValue("");
+      onPromptHandled();
+      setStatus("Provider sign-in is continuing.");
+    } catch {
+      setValue("");
+      onPromptHandled();
+      setStatus("That sign-in prompt is no longer available.");
+    }
   };
+
   const setDefault = async (model: { provider: string; id: string } | null): Promise<void> => {
     try {
       const result: DefaultModelResponse = await client.setDefaultModel(model);
       setStatus(`New sessions will use ${result.effective_fallback.name}.`);
       await refresh();
-    } catch { setStatus("Default model could not be saved."); }
+    } catch {
+      setStatus("Default model could not be saved.");
+    }
   };
 
   return <DialogShell open={open} title="Provider settings" titleId="provider-settings-title" description="These settings apply to every managed agent." onClose={onClose} closeLabel="Close provider settings" className="message-dialog provider-auth-dialog">
@@ -196,9 +258,13 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
             {after ? <p>{after.trim()}</p> : null}
           </>
         );
-      })() : <p>{prompt.prompt.message}</p>}
+      })() : (
+        prompt.prompt.message && !prompt.prompt.message.toLowerCase().includes("requested sign-in value") ? (
+          <p>{prompt.prompt.message}</p>
+        ) : null
+      )}
       {prompt.prompt.url ? <a href={prompt.prompt.url} target="_blank" rel="noopener noreferrer">Open {providerLabels[prompt.provider]} sign-in page</a> : null}
-      {prompt.prompt.kind !== "manual_code" && (() => {
+      {requiresPromptInput(prompt) ? (() => {
         const isSecret = prompt.provider === "google" || prompt.prompt.kind === "secret";
         const promptLabel = prompt.provider === "google"
           ? "Google API key"
@@ -220,14 +286,39 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
             />
           </label>
         );
-      })()}
-      <div className="provider-auth-actions"><button type="button" className="ghost" onClick={handleCancelPrompt}>Cancel</button>{prompt.prompt.kind !== "manual_code" && <button type="button" onClick={() => void submitPrompt()}>Continue</button>}</div>
+      })() : (
+        <div className="provider-auth-waiting">
+          <span className="provider-auth-spinner small" aria-hidden="true" />
+          <span>Waiting for sign-in to complete…</span>
+        </div>
+      )}
+      <div className="provider-auth-actions">
+        <button type="button" className="ghost" onClick={handleCancelPrompt}>Cancel</button>
+        {requiresPromptInput(prompt) && (
+          <button type="button" onClick={() => void submitPrompt()}>Continue</button>
+        )}
+      </div>
     </section> : null}
     <section className="provider-auth-section" aria-labelledby="provider-auth-providers-title">
-      <div className="provider-auth-section-heading"><h3 id="provider-auth-providers-title">Providers</h3><p>Connect the providers managed agents can use.</p></div>
-      {(() => {
-        const codex = auth?.providers.find((p) => p.provider === "openai-codex");
-        const cursor = auth?.providers.find((p) => p.provider === "cursor");
+      <div className="provider-auth-section-heading">
+        <h3 id="provider-auth-providers-title">Providers</h3>
+        <p>Connect the providers managed agents can use.</p>
+      </div>
+      {auth === undefined ? (
+        <div className="provider-auth-loading" role="status" aria-label="Loading provider settings…">
+          <div className="provider-auth-loading-header">
+            <span className="provider-auth-spinner" aria-hidden="true" />
+            <span>Loading provider settings…</span>
+          </div>
+          <div className="provider-auth-skeleton-list" aria-hidden="true">
+            <div className="provider-auth-skeleton-row" />
+            <div className="provider-auth-skeleton-row" />
+            <div className="provider-auth-skeleton-row" />
+          </div>
+        </div>
+      ) : (() => {
+        const codex = auth.providers.find((p) => p.provider === "openai-codex");
+        const cursor = auth.providers.find((p) => p.provider === "cursor");
         return (
           <>
             {codex && (
@@ -239,31 +330,98 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                     {codex.authenticated ? "Connected" : "Not connected"}
                   </p>
                 </div>
-                <button type="button" className="secondary" onClick={() => void begin("openai-codex", codex.authenticated ? "logout" : "login")}>
-                  {codex.authenticated ? "Sign out" : "Connect"}
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={pendingProvider !== null}
+                  onClick={() => void begin("openai-codex", codex.authenticated ? "logout" : "login")}
+                >
+                  {pendingProvider === "openai-codex" ? (
+                    <span className="provider-button-busy">
+                      <span className="provider-auth-spinner small" aria-hidden="true" />
+                      <span>{codex.authenticated ? "Signing out…" : "Connecting…"}</span>
+                    </span>
+                  ) : (
+                    codex.authenticated ? "Sign out" : "Connect"
+                  )}
                 </button>
               </div>
             )}
             <div className="provider-auth-row provider-auth-row-google" key="google-unified">
               <div className="provider-auth-provider">
                 <strong>Google</strong>
-                <label className="provider-auth-method-label">
-                  <span className="visually-hidden">Google authentication method</span>
-                  <select
-                    aria-label="Google authentication method"
-                    value={selectedGoogleMethod}
-                    onChange={(event) => {
-                      const next = event.currentTarget.value;
-                      if (isGoogleAuthMethod(next)) {
-                        setUserSelectedGoogleMethod(next);
-                      }
-                    }}
+                <div ref={googlePickerRef} className="model-picker provider-dropdown">
+                  <button
+                    type="button"
+                    className="model-current"
+                    aria-haspopup="listbox"
+                    aria-expanded={googleMenuOpen}
+                    onClick={() => setGoogleMenuOpen((v) => !v)}
                   >
-                    <option value="api_key">API key</option>
-                    <option value="vertex_adc">Vertex AI ADC</option>
-                    <option value="antigravity">Google Antigravity</option>
-                  </select>
-                </label>
+                    <span>{googleMethodLabels[selectedGoogleMethod]}</span>
+                    <i className="fa-solid fa-chevron-down" aria-hidden="true" />
+                  </button>
+                  {googleMenuOpen && (
+                    <div className="model-menu provider-dropdown-menu" role="listbox" aria-label="Google authentication method">
+                      <div className="model-options">
+                        <button
+                          type="button"
+                          className="model-option"
+                          role="option"
+                          aria-selected={selectedGoogleMethod === "api_key"}
+                          onClick={() => {
+                            setUserSelectedGoogleMethod("api_key");
+                            setGoogleMenuOpen(false);
+                          }}
+                        >
+                          <strong>API key</strong>
+                        </button>
+                        <button
+                          type="button"
+                          className="model-option"
+                          role="option"
+                          aria-selected={selectedGoogleMethod === "vertex_adc"}
+                          onClick={() => {
+                            setUserSelectedGoogleMethod("vertex_adc");
+                            setGoogleMenuOpen(false);
+                          }}
+                        >
+                          <strong>Vertex AI ADC</strong>
+                        </button>
+                        <button
+                          type="button"
+                          className="model-option"
+                          role="option"
+                          aria-selected={selectedGoogleMethod === "antigravity"}
+                          onClick={() => {
+                            setUserSelectedGoogleMethod("antigravity");
+                            setGoogleMenuOpen(false);
+                          }}
+                        >
+                          <strong>Google Antigravity</strong>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <label className="provider-auth-method-label">
+                    <span className="visually-hidden">Google authentication method</span>
+                    <select
+                      className="visually-hidden"
+                      aria-label="Google authentication method"
+                      value={selectedGoogleMethod}
+                      onChange={(event) => {
+                        const next = event.currentTarget.value;
+                        if (isGoogleAuthMethod(next)) {
+                          setUserSelectedGoogleMethod(next);
+                        }
+                      }}
+                    >
+                      <option value="api_key">API key</option>
+                      <option value="vertex_adc">Vertex AI ADC</option>
+                      <option value="antigravity">Google Antigravity</option>
+                    </select>
+                  </label>
+                </div>
                 <p className="provider-auth-connection">
                   <span className={`status-dot${isGoogleConnected ? " connected" : ""}`} aria-hidden="true" />
                   {googleStatusText}
@@ -277,9 +435,17 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
               <button
                 type="button"
                 className="secondary"
+                disabled={pendingProvider !== null}
                 onClick={() => void begin(activeGoogleProvider, isGoogleConnected ? "logout" : "login")}
               >
-                {isGoogleConnected ? "Sign out" : "Connect"}
+                {pendingProvider === activeGoogleProvider ? (
+                  <span className="provider-button-busy">
+                    <span className="provider-auth-spinner small" aria-hidden="true" />
+                    <span>{isGoogleConnected ? "Signing out…" : "Connecting…"}</span>
+                  </span>
+                ) : (
+                  isGoogleConnected ? "Sign out" : "Connect"
+                )}
               </button>
             </div>
             {cursor && (
@@ -291,8 +457,20 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                     {cursor.authenticated ? "Connected" : "Not connected"}
                   </p>
                 </div>
-                <button type="button" className="secondary" onClick={() => void begin("cursor", cursor.authenticated ? "logout" : "login")}>
-                  {cursor.authenticated ? "Sign out" : "Connect"}
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={pendingProvider !== null}
+                  onClick={() => void begin("cursor", cursor.authenticated ? "logout" : "login")}
+                >
+                  {pendingProvider === "cursor" ? (
+                    <span className="provider-button-busy">
+                      <span className="provider-auth-spinner small" aria-hidden="true" />
+                      <span>{cursor.authenticated ? "Signing out…" : "Connecting…"}</span>
+                    </span>
+                  ) : (
+                    cursor.authenticated ? "Sign out" : "Connect"
+                  )}
                 </button>
               </div>
             )}
@@ -300,10 +478,78 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         );
       })()}
     </section>
-    <section className="provider-auth-section" aria-labelledby="provider-default-model-title"><div className="provider-auth-section-heading"><h3 id="provider-default-model-title">Default model</h3><p>New managed agents use this model when you do not choose one.</p></div><select aria-label="Default model" value={catalog?.default_model ? `${catalog.default_model.provider}:${catalog.default_model.id}` : ""} onChange={(event) => { const selected = event.currentTarget.value; if (selected === "") { void setDefault(null); return; } const [provider, ...id] = selected.split(":"); if (provider !== undefined) void setDefault({ provider, id: id.join(":") }); }}>
-      <option value="">Use ChatGPT default</option>
-      {(catalog?.models ?? []).filter((model) => model.available).map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}:${model.id}`}>{model.name}</option>)}
-    </select></section>
+    {auth !== undefined && (
+      <section className="provider-auth-section" aria-labelledby="provider-default-model-title">
+        <div className="provider-auth-section-heading">
+          <h3 id="provider-default-model-title">Default model</h3>
+          <p>New managed agents use this model when you do not choose one.</p>
+        </div>
+        <div ref={modelPickerRef} className="model-picker provider-dropdown default-model-picker">
+          <button
+            type="button"
+            className="model-current"
+            aria-haspopup="listbox"
+            aria-expanded={modelMenuOpen}
+            onClick={() => setModelMenuOpen((v) => !v)}
+          >
+            <span>{defaultModelLabel}</span>
+            <i className="fa-solid fa-chevron-down" aria-hidden="true" />
+          </button>
+          {modelMenuOpen && (
+            <div className="model-menu provider-dropdown-menu" role="listbox" aria-label="Default model options">
+              <div className="model-options">
+                <button
+                  type="button"
+                  className="model-option"
+                  role="option"
+                  aria-selected={!catalog?.default_model}
+                  onClick={() => {
+                    void setDefault(null);
+                    setModelMenuOpen(false);
+                  }}
+                >
+                  <strong>Use ChatGPT default</strong>
+                </button>
+                {(catalog?.models ?? []).filter((model) => model.available).map((model) => (
+                  <button
+                    key={`${model.provider}:${model.id}`}
+                    type="button"
+                    className="model-option"
+                    role="option"
+                    aria-selected={catalog?.default_model ? `${catalog.default_model.provider}:${catalog.default_model.id}` === `${model.provider}:${model.id}` : false}
+                    onClick={() => {
+                      void setDefault({ provider: model.provider, id: model.id });
+                      setModelMenuOpen(false);
+                    }}
+                  >
+                    <strong>{model.name}</strong>
+                    <small>{model.provider}:{model.id}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <select
+            className="visually-hidden"
+            aria-label="Default model"
+            value={catalog?.default_model ? `${catalog.default_model.provider}:${catalog.default_model.id}` : ""}
+            onChange={(event) => {
+              const selected = event.currentTarget.value;
+              if (selected === "") { void setDefault(null); return; }
+              const [provider, ...id] = selected.split(":");
+              if (provider !== undefined) void setDefault({ provider, id: id.join(":") });
+            }}
+          >
+            <option value="">Use ChatGPT default</option>
+            {(catalog?.models ?? []).filter((model) => model.available).map((model) => (
+              <option key={`${model.provider}:${model.id}`} value={`${model.provider}:${model.id}`}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+    )}
     {status ? <p className="provider-auth-status" role="status">{status}</p> : null}
   </DialogShell>;
 }
