@@ -209,4 +209,26 @@ describe("direct HTTP transport", () => {
     const fetchImpl = vi.fn(async () => response(null));
     await expect(createHttpClient("http://router.test", fetchImpl).capabilities()).rejects.toBeInstanceOf(HttpRequestError);
   });
+
+  it("sends interrupt request to managed agent interrupt route", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://router.test/v1/managed-agents/test-agent/interrupt");
+      expect(init?.method).toBe("POST");
+      return response({ status: "interrupted" });
+    });
+    const client = createHttpClient("http://router.test", fetchImpl);
+    await client.interruptManagedAgent("test-agent");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends stop request to managed subagent stop route", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://router.test/v1/managed-agents/test-agent/subagents/child-42/stop");
+      expect(init?.method).toBe("POST");
+      return response({ status: "stopped" });
+    });
+    const client = createHttpClient("http://router.test", fetchImpl);
+    await client.stopManagedSubagent("test-agent", "child-42");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });

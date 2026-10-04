@@ -524,12 +524,12 @@ func TestSubagentRunnerStopQueuedAndRunning(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "queued", res2.Status)
 
-	require.NoError(t, mgr.StopSubagent(ctx, parent, "subagent-parent-stop-2"))
+	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, "subagent-parent-stop-2"))
 	rec2, err := db.ManagedSubagent(ctx, parent, "subagent-parent-stop-2")
 	require.NoError(t, err)
 	require.Equal(t, "stopped", rec2.Status)
 
-	require.NoError(t, mgr.StopSubagent(ctx, parent, "subagent-parent-stop-1"))
+	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, "subagent-parent-stop-1"))
 	require.Eventually(t, func() bool {
 		rec1, err := db.ManagedSubagent(ctx, parent, "subagent-parent-stop-1")
 		if err != nil {

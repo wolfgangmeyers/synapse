@@ -20,20 +20,25 @@ afterEach(cleanup);
 
 describe("Complete timeline entry", () => {
   it.each([
-    [{ kind: "tool" as const, tool_name: "read", outcome: "active" as const }, "Running read", "fa-file-lines", "activity-entry--blue", true],
-    [{ kind: "tool" as const, tool_name: "bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true],
-    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true],
-    [{ kind: "tool" as const, tool_name: "bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--green", false],
-    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--green", false],
-    [{ kind: "tool" as const, tool_name: "goal", outcome: "success" as const }, "Updated goal", "fa-flag", "activity-entry--green", false],
-    [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-clock", "activity-entry--green", false],
-    [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-wrench", "activity-entry--green", false],
-    [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-wrench", "activity-entry--green", false],
-    [{ kind: "tool" as const, tool_name: "read", outcome: "failed" as const, error: { code: "FAILED", retryable: false, detail_available: false } }, "Read failed", "fa-file-lines", "activity-entry--danger", false],
-    [{ kind: "tool" as const, tool_name: "bash", outcome: "interrupted" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } }, "Bash interrupted", "fa-terminal", "activity-entry--danger", false],
-  ] as const)("renders %s with the canonical visual mapping", (presentation, label, icon, tone, active) => {
+    [{ kind: "tool" as const, tool_name: "read", outcome: "active" as const }, "Running read", "fa-file-lines", "activity-entry--blue", true, true],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true, true],
+    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "active" as const }, "Running bash", "fa-terminal", "activity-entry--teal", true, true],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--green", false, true],
+    [{ kind: "tool" as const, tool_name: "functions.bash", outcome: "success" as const }, "Ran bash", "fa-terminal", "activity-entry--green", false, true],
+    [{ kind: "tool" as const, tool_name: "goal", outcome: "success" as const }, "Updated goal", "fa-flag", "activity-entry--green", false, false],
+    [{ kind: "tool" as const, tool_name: "reminder", outcome: "success" as const }, "Scheduled reminder", "fa-clock", "activity-entry--green", false, false],
+    [{ kind: "tool" as const, tool_name: "mecha_state", outcome: "success" as const }, "Ran mecha_state", "fa-wrench", "activity-entry--green", false, false],
+    [{ kind: "tool" as const, outcome: "success" as const }, "Ran tool", "fa-wrench", "activity-entry--green", false, false],
+    [{ kind: "tool" as const, tool_name: "read", outcome: "failed" as const, error: { code: "FAILED", retryable: false, detail_available: false } }, "Read failed", "fa-file-lines", "activity-entry--danger", false, false],
+    [{ kind: "tool" as const, tool_name: "bash", outcome: "interrupted" as const, error: { code: "INTERRUPTED", retryable: false, detail_available: false } }, "Bash interrupted", "fa-terminal", "activity-entry--danger", false, false],
+  ] as const)("renders %s with the canonical visual mapping", (presentation, label, icon, tone, active, isRoutine) => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: `complete:${label}`, agent_id: "managed-worker", at, message: "ignored presentation text", presentation }} />);
-    expect(screen.getByText(label)).toBeInTheDocument();
+    if (isRoutine) {
+      expect(screen.queryByText(label, { selector: "strong" })).not.toBeInTheDocument();
+      expect(container.querySelector(".activity-entry--compact")).toBeInTheDocument();
+    } else {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
     expect(container.querySelector(`.${icon}`)).toBeInTheDocument();
     expect(container.querySelector(`.${tone}`)).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--active")).toBe(active ? container.querySelector("article") : null);
@@ -147,11 +152,15 @@ describe("Complete timeline entry", () => {
     fireEvent.keyDown(card, { key: "Enter" });
 
     const dialog = screen.getByRole("dialog", { name: "Ran read" });
-    const parameters = within(dialog).getByText(/"path": "\/workspace\/report\.md"/);
     expect(within(dialog).getByRole("heading", { name: "Parameters" })).toBeInTheDocument();
-    expect(parameters).toHaveTextContent('"offset": 12');
-    expect(parameters).toHaveTextContent('"hidden": false');
-    expect(parameters).toHaveTextContent('"secret": "[REDACTED]"');
+    expect(within(dialog).getByText("path")).toBeInTheDocument();
+    expect(within(dialog).getByText("/workspace/report.md")).toBeInTheDocument();
+    expect(within(dialog).getByText("offset")).toBeInTheDocument();
+    expect(within(dialog).getByText("12")).toBeInTheDocument();
+    expect(within(dialog).getByText("options")).toBeInTheDocument();
+    expect(within(dialog).getByText(/"hidden": false/)).toBeInTheDocument();
+    expect(within(dialog).getByText("secret")).toBeInTheDocument();
+    expect(within(dialog).getByText("[REDACTED]")).toBeInTheDocument();
   });
 
   it("opens tool call detail inspection with pointer button on click", () => {
@@ -215,7 +224,12 @@ describe("Complete timeline entry", () => {
     expect(terminalArticle).toHaveClass(terminalClass);
     expect(terminalArticle).not.toHaveClass("activity-entry--active");
     expect(terminalArticle.querySelector(`.${icon}`)).toBeInTheDocument();
-    expect(screen.getByText(label)).toBeInTheDocument();
+    if (outcome === "success") {
+      expect(screen.queryByText(label, { selector: "strong" })).not.toBeInTheDocument();
+      expect(terminalArticle).toHaveClass("activity-entry--compact");
+    } else {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
     expect(screen.getByText(detail)).toBeInTheDocument();
   });
 
@@ -348,7 +362,7 @@ describe("Complete timeline entry", () => {
 
     const label = container.querySelector(".activity-entry-label");
     expect(label?.querySelector("strong")).toHaveTextContent("From pi-go");
-    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("· Fix memory leak");
+    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("• Fix memory leak");
     const preview = container.querySelector(".activity-entry-preview");
     expect(preview).toHaveTextContent("Identified leak in event listener. Closing socket properly resolves it.");
   });
@@ -362,7 +376,7 @@ describe("Complete timeline entry", () => {
 
     const label = container.querySelector(".activity-entry-label");
     expect(label?.querySelector("strong")).toHaveTextContent("To pi-go");
-    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("· Review diff");
+    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("• Review diff");
     const preview = container.querySelector(".activity-entry-preview");
     expect(preview).toHaveTextContent("Please check line 42 for null pointer possibility.");
   });
@@ -377,7 +391,7 @@ describe("Complete timeline entry", () => {
 
     const label = container.querySelector(".activity-entry-label");
     expect(label?.querySelector("strong")).toHaveTextContent("From cron");
-    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("· PR follow-up");
+    expect(label?.querySelector(".activity-entry-subject")).toHaveTextContent("• PR follow-up");
     const preview = container.querySelector(".activity-entry-preview");
     expect(preview).toHaveTextContent("Follow up with user regarding pull request approval.");
   });
@@ -394,15 +408,15 @@ describe("Complete timeline entry", () => {
     expect(preview).toHaveTextContent("idle → active");
   });
 
-  it("renders tool card with command preview on second line", () => {
+  it("renders routine tool card as a compact row with command preview and no header", () => {
     const { container } = render(<CompleteTimelineEntry entry={{
       id: "complete:bash-cmd", agent_id: "managed-worker", at, message: "Ran bash",
       tool_input: { command: "cargo test --all" },
       presentation: { kind: "tool", tool_name: "bash", outcome: "success" },
     }} />);
 
-    const label = container.querySelector(".activity-entry-label strong");
-    expect(label).toHaveTextContent("Ran bash");
+    expect(container.querySelector(".activity-entry--compact")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry-label strong")).not.toBeInTheDocument();
     const preview = container.querySelector(".activity-entry-preview");
     expect(preview).toHaveTextContent("cargo test --all");
   });

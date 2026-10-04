@@ -344,6 +344,14 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				return observeErr
 			}
 		}
+		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" {
+			if result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" {
+				body, err := json.Marshal(result)
+				if err == nil {
+					_ = p.db.ObserveEmbeddedEffect(ctx, p.binding, result.ToolCallID, body)
+				}
+			}
+		}
 		if message.MessageRole() == ai.RoleUser {
 			p.turnSeq, p.turnDigest = entry.Sequence, entry.Digest
 			p.mailAttempt = ""
@@ -1357,6 +1365,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			return nil
 		}})
+	m.activeSessionsMu.Lock()
+	m.activeEmbeddedSessions[saved.AgentID] = session
+	m.activeSessionsMu.Unlock()
+	defer func() {
+		m.activeSessionsMu.Lock()
+		if m.activeEmbeddedSessions[saved.AgentID] == session {
+			delete(m.activeEmbeddedSessions, saved.AgentID)
+		}
+		m.activeSessionsMu.Unlock()
+	}()
 	if err := p.restore(ctx, session); err != nil {
 		return err
 	}

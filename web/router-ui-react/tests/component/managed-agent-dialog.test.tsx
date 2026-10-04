@@ -112,7 +112,7 @@ describe("ManagedAgentDialog", () => {
     expect(onLaunch).toHaveBeenCalledWith({
       name: "agent-google",
       cwd: "/allowed/project",
-      runtime: "rpc",
+      runtime: "embedded",
       model: { provider, id },
     });
   });
@@ -135,7 +135,7 @@ describe("ManagedAgentDialog", () => {
     expect(onLaunch).toHaveBeenCalledWith({
       name: "default-google-agent",
       cwd: "/allowed/project",
-      runtime: "rpc",
+      runtime: "embedded",
     });
   });
 
@@ -162,7 +162,7 @@ describe("ManagedAgentDialog", () => {
     expect(onLaunch).toHaveBeenCalledWith({
       name: "pending-agent",
       cwd: "/allowed/project",
-      runtime: "rpc",
+      runtime: "embedded",
     });
   });
 

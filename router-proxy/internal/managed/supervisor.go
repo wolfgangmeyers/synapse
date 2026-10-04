@@ -26,6 +26,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
+	"github.com/sky-valley/pi/coding"
 )
 
 type LaunchRequest struct {
@@ -284,6 +285,8 @@ type Manager struct {
 	subagentsRegistry                          map[string]*subagentTask
 	subagentThrottleInstance                   *SubagentThrottle
 	beforeSubagentWakeReservation              func(parent store.EmbeddedBinding)
+	activeEmbeddedSessions                     map[string]*coding.Session
+	activeSessionsMu                           sync.Mutex
 	projectionPublisher                        func()
 	completeHistoryPublisher                   CompleteHistoryPublisher
 	directReplyPublisher                       DirectReplyPublisher
@@ -381,7 +384,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
 	// every surviving active builtin row before any manager can expose history.
@@ -405,6 +408,16 @@ func (managerIDs) Next() (string, error) {
 	value[6] = (value[6] & 15) | 64
 	value[8] = (value[8] & 63) | 128
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:]), nil
+}
+
+func (m *Manager) InterruptAgent(ctx context.Context, agentID string) error {
+	m.activeSessionsMu.Lock()
+	s := m.activeEmbeddedSessions[agentID]
+	m.activeSessionsMu.Unlock()
+	if s != nil && s.Agent != nil {
+		s.Agent.Abort()
+	}
+	return nil
 }
 
 func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResult, error) {
