@@ -62,7 +62,7 @@ The proxy preserves upstream response headers and status codes, supports request
 For high-speed, structured evaluation and classification (e.g. security checks, triage, policy verification), agents can leverage the System 1 decision model (Cloudflare Clef) hosted via Ollama. See `docs/system-one.md` for complete API schema, routing, and examples.
 
 Rules for System 1 integrations:
-- **Never hardcode hostnames or IPs**: Do not hardcode remote hostnames (e.g. "donuts") or specific Tailscale/LAN IPs. Call the local router proxy at `http://127.0.0.1:8765/v1/systemone` or dynamically discover the configured backend via `GET /v1/settings/systemone`.
+- **Never hardcode hostnames or IPs**: Do not hardcode remote hostnames or specific Tailscale/LAN IPs. Call the local router proxy at `http://127.0.0.1:8765/v1/systemone` or dynamically discover the configured backend via `GET /v1/settings/systemone`.
 - **Mandatory graceful fallback**: System 1 is an optional accelerator, not a hard blocker. If the endpoint is unconfigured or disabled (HTTP 503), times out (HTTP 504), or encounters a backend failure (HTTP 502/connection error), agents must gracefully degrade to standard LLM reasoning or heuristic defaults without crashing or halting the workflow.
 
 ## Browser transport CORS
