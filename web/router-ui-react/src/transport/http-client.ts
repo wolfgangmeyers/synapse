@@ -260,7 +260,8 @@ function providerName(value: unknown): value is ProviderModel["provider"] {
 }
 function providerModel(value: unknown): value is ProviderModel {
   const item = recordValue(value);
-  return !!item && providerName(item.provider) && nonEmptyString(item.id) && nonEmptyString(item.name) && typeof item.available === "boolean";
+  const nameValid = typeof item?.name === "string" ? nonEmptyString(item.name) : true;
+  return !!item && providerName(item.provider) && nonEmptyString(item.id) && nameValid;
 }
 function providerStatus(value: unknown): value is ProviderStatus {
   const item = recordValue(value);
@@ -293,7 +294,13 @@ function models(value: unknown): ModelsResponse {
 function defaultModel(value: unknown): DefaultModelResponse {
   const root = recordValue(value); const saved = savedModel(root?.default_model);
   if (!root || !nonEmptyString(root.operation_id) || saved === undefined || !providerModel(root.effective_fallback)) throw invalidResponse("Router returned invalid default model", value);
-  return { operation_id: root.operation_id, default_model: saved, effective_fallback: root.effective_fallback };
+  const fallback = root.effective_fallback;
+  const effectiveFallback: ProviderModel = {
+    ...fallback,
+    name: typeof fallback.name === "string" && nonEmptyString(fallback.name) ? fallback.name : fallback.id,
+    available: typeof fallback.available === "boolean" ? fallback.available : false,
+  };
+  return { operation_id: root.operation_id, default_model: saved, effective_fallback: effectiveFallback };
 }
 const routerLogDiagnosticCategories: readonly RouterLogDiagnosticCategory[] = ["source_unavailable", "generation_unreadable", "generation_disappeared", "snapshot_changed", "tail_unterminated", "cursor_invalidated"];
 function isRouterLogDiagnosticCategory(value: unknown): value is RouterLogDiagnosticCategory { return value === "source_unavailable" || value === "generation_unreadable" || value === "generation_disappeared" || value === "snapshot_changed" || value === "tail_unterminated" || value === "cursor_invalidated"; }

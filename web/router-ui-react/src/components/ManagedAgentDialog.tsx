@@ -44,7 +44,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     const effectiveProvider = selectedModel?.provider ?? catalog?.default_model?.provider;
-    const runtime: "rpc" | "embedded" = isGoogleProvider(effectiveProvider) ? "rpc" : "embedded";
+    const runtime: "rpc" | "embedded" = "embedded";
     void onLaunch({ name: normalizeManagedAgentName(name), cwd: cwd.trim(), runtime, ...(selectedModel ? { model: { provider: selectedModel.provider, id: selectedModel.id } } : {}), ...(instruction.trim() ? { initial_instruction: instruction } : {}) });
   };
   const availableModels = (catalog?.models ?? []).filter((model) => model.available);
