@@ -133,7 +133,7 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string, fresh func(s
 			cmd.ExtraFiles = []*os.File{gateRead}
 		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		out := &limitedBashWriter{limit: 65536, overflow: make(chan struct{})}
+		out := &limitedBashWriter{limit: 524288, overflow: make(chan struct{})}
 		cmd.Stdout = out
 		cmd.Stderr = out
 		cmd.WaitDelay = time.Second
@@ -146,8 +146,10 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string, fresh func(s
 			m.embeddedBashAfterStart(cmd.Process.Pid, gateWrite)
 		}
 		truncated := func() (agent.AgentToolResult, error) {
-			failed(id, embeddedBashOutputTruncated)
-			return agent.AgentToolResult{}, errors.New("bash output truncated: 65536 byte limit exceeded")
+			result := fmt.Sprintf("exit=0\n%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", out.text(), out.limit)
+			content := ai.ContentList{ai.TextContent{Text: result}}
+			produced(id, ai.ToolResultMessage{ToolCallID: id, ToolName: "bash", Content: content, IsError: false}, false)
+			return agent.AgentToolResult{Content: content}, nil
 		}
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
@@ -169,7 +171,10 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string, fresh func(s
 			if out.truncated() {
 				return truncated()
 			}
-			return agent.AgentToolResult{}, errors.New("bash outcome UNKNOWN after spawn")
+			result := fmt.Sprintf("exit=124\n[Command timed out after %s]\n%s", spec.timeout, out.text())
+			content := ai.ContentList{ai.TextContent{Text: result}}
+			produced(id, ai.ToolResultMessage{ToolCallID: id, ToolName: "bash", Content: content, IsError: false}, false)
+			return agent.AgentToolResult{Content: content}, nil
 		}
 		if out.truncated() {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
