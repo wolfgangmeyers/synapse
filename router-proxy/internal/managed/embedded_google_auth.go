@@ -321,28 +321,17 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 				rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
 			}
 		} else if tm, ok := asToolResultMsg(msg); ok {
-			callID := tm.ToolCallID
-			label, dropped := droppedToolCalls[callID]
-			if !dropped {
-				label, dropped = droppedToolCalls[tm.ToolName]
-			}
 			outText := ai.ContentText(tm.Content)
 
 			var parts []any
-			if dropped {
-				parts = append(parts, map[string]any{
-					"text": fmt.Sprintf("[Observation from %s:\n%s]", label, outText),
-				})
-			} else {
-				parts = append(parts, map[string]any{
-					"functionResponse": map[string]any{
-						"name": tm.ToolName,
-						"response": map[string]any{
-							"output": outText,
-						},
+			parts = append(parts, map[string]any{
+				"functionResponse": map[string]any{
+					"name": tm.ToolName,
+					"response": map[string]any{
+						"output": outText,
 					},
-				})
-			}
+				},
+			})
 			for _, part := range tm.Content {
 				if img, ok := part.(ai.ImageContent); ok {
 					parts = append(parts, map[string]any{
@@ -455,12 +444,19 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		wireModel := antigravityWireModel(requestModel.ID)
 
 		var systemParts []any
+		hasToolInstruction := false
 		for _, msg := range transcript.Messages {
 			if sm, ok := asSystemMsg(msg); ok {
 				if text := strings.TrimSpace(ai.GetSystemMessageText(sm)); text != "" {
+					if strings.Contains(text, "Never simulate, roleplay, or print bracketed tool observations") {
+						hasToolInstruction = true
+					}
 					systemParts = append(systemParts, map[string]any{"text": text})
 				}
 			}
+		}
+		if !hasToolInstruction {
+			systemParts = append(systemParts, map[string]any{"text": EmbeddedSystemInstruction})
 		}
 
 		contents := convertMessagesToGoogleContents(transcript.Messages)

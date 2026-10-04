@@ -95,6 +95,7 @@ You are STRICTLY PROHIBITED from:
 # Tool Usage
 - Use the read tool for reading files
 - Use Bash ONLY for read-only operations
+- Never simulate, roleplay, or print bracketed tool observations or completion notifications in message text. Always invoke declared tools directly.
 
 # Output Format
 - Use absolute file paths

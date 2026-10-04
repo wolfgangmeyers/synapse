@@ -427,7 +427,7 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 	// Because:
 	// Turn 1: user "Please read hello.txt"
 	// Turn 2: model "I will check the file." (no [Invoked read]!)
-	// Turn 3: user "[Observation from `read` ({"path":"hello.txt"}):\nworld content]" merged with user "Now tell me what it said"
+	// Turn 3: user tool response with functionResponse merged with user "Now tell me what it said"
 	// There should be exactly 3 turns alternating user -> model -> user!
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 turns after merging consecutive user turns, got %d: %+v", len(contents), contents)
@@ -466,15 +466,21 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 		t.Fatalf("turn 3 expected 2 merged parts, got %d: %+v", len(parts3), parts3)
 	}
 	part3_1 := parts3[0].(map[string]any)
-	expectedObs := "[Observation from `read` ({\"path\":\"hello.txt\"}):\nworld content]"
-	if !strings.Contains(part3_1["text"].(string), expectedObs) {
-		t.Errorf("turn 3 part 1 expected observation text containing %q, got %v", expectedObs, part3_1["text"])
+	fr, ok := part3_1["functionResponse"].(map[string]any)
+	if !ok {
+		t.Fatalf("turn 3 part 1 expected functionResponse, got %+v", part3_1)
 	}
-	if strings.Contains(part3_1["text"].(string), "[Invoked") {
-		t.Errorf("turn 3 part 1 must NOT contain [Invoked], got %v", part3_1["text"])
+	if fr["name"] != "read" {
+		t.Errorf("expected functionResponse name 'read', got %v", fr["name"])
 	}
-	if _, hasFR := part3_1["functionResponse"]; hasFR {
-		t.Errorf("turn 3 part 1 should NOT contain functionResponse, got %+v", part3_1)
+	if resp, ok := fr["response"].(map[string]any); !ok || resp["output"] != "world content" {
+		t.Errorf("expected output 'world content', got %v", fr["response"])
+	}
+	if strings.Contains(fmt.Sprintf("%v", part3_1), "[Observation from") {
+		t.Errorf("turn 3 part 1 must NOT contain [Observation from], got %v", part3_1)
+	}
+	if strings.Contains(fmt.Sprintf("%v", part3_1), "[Invoked") {
+		t.Errorf("turn 3 part 1 must NOT contain [Invoked], got %v", part3_1)
 	}
 	part3_2 := parts3[1].(map[string]any)
 	if part3_2["text"] != "Now tell me what it said" {
