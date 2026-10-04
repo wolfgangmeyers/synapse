@@ -158,8 +158,23 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         setModelMenuOpen(false);
       }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (googleMenuOpen) {
+          event.stopPropagation();
+          setGoogleMenuOpen(false);
+        } else if (modelMenuOpen) {
+          event.stopPropagation();
+          setModelMenuOpen(false);
+        }
+      }
+    };
     window.addEventListener("pointerdown", handlePointerDown);
-    return () => window.removeEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, [googleMenuOpen, modelMenuOpen]);
 
   useEffect(() => {
@@ -403,24 +418,22 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                       </div>
                     </div>
                   )}
-                  <label className="provider-auth-method-label">
-                    <span className="visually-hidden">Google authentication method</span>
-                    <select
-                      className="visually-hidden"
-                      aria-label="Google authentication method"
-                      value={selectedGoogleMethod}
-                      onChange={(event) => {
-                        const next = event.currentTarget.value;
-                        if (isGoogleAuthMethod(next)) {
-                          setUserSelectedGoogleMethod(next);
-                        }
-                      }}
-                    >
-                      <option value="api_key">API key</option>
-                      <option value="vertex_adc">Vertex AI ADC</option>
-                      <option value="antigravity">Google Antigravity</option>
-                    </select>
-                  </label>
+                  <select
+                    className="visually-hidden"
+                    tabIndex={-1}
+                    aria-label="Google authentication method"
+                    value={selectedGoogleMethod}
+                    onChange={(event) => {
+                      const next = event.currentTarget.value;
+                      if (isGoogleAuthMethod(next)) {
+                        setUserSelectedGoogleMethod(next);
+                      }
+                    }}
+                  >
+                    <option value="api_key">API key</option>
+                    <option value="vertex_adc">Vertex AI ADC</option>
+                    <option value="antigravity">Google Antigravity</option>
+                  </select>
                 </div>
                 <p className="provider-auth-connection">
                   <span className={`status-dot${isGoogleConnected ? " connected" : ""}`} aria-hidden="true" />
@@ -531,6 +544,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
           )}
           <select
             className="visually-hidden"
+            tabIndex={-1}
             aria-label="Default model"
             value={catalog?.default_model ? `${catalog.default_model.provider}:${catalog.default_model.id}` : ""}
             onChange={(event) => {
