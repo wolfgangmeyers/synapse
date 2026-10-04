@@ -733,6 +733,9 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 	if result.ConversationCreated && result.ConversationMessage != nil {
 		r.broadcastConversation(*result.ConversationMessage)
 	}
+	if r.managed != nil {
+		r.managed.OfferDirect(result.Message.To)
+	}
 	// Source selection belongs to the router-owned durable directory. The
 	// caller's HTTP/reminder/policy origin never chooses a transport.
 	target, err := r.store.ResolveMessageTarget(context.Background(), result.Message.ID)
@@ -743,6 +746,9 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 		// A Web UI delivery client may be the only live receiver. It owns no
 		// recipient source, so source resolution intentionally leaves this row
 		// unclaimed until the router selects its in-memory delivery lease.
+		if r.managed != nil {
+			r.managed.OfferDirect(result.Message.To)
+		}
 		r.offerAgent(result.Message.To)
 		return
 	}
@@ -751,6 +757,9 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 			r.managed.OfferDirect(target.OwnerIdentity)
 		}
 		return
+	}
+	if r.managed != nil {
+		r.managed.OfferDirect(result.Message.To)
 	}
 	r.offerAgent(result.Message.To)
 }

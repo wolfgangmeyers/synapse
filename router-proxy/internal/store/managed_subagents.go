@@ -378,6 +378,36 @@ func (s *Store) reconcileManagedSubagents(ctx context.Context) error {
 	})
 }
 
+// InterruptedSubagentsPendingNotification returns all interrupted subagents that
+// have not yet had an interrupted notification message enqueued to their parent.
+func (s *Store) InterruptedSubagentsPendingNotification(ctx context.Context) ([]*ManagedSubagentRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status='interrupted'
+		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = 'subagent-interrupted-' || agent_id)
+		AND NOT EXISTS (SELECT 1 FROM conversation_messages c WHERE c.message_id = 'subagent-interrupted-' || agent_id)
+		ORDER BY agent_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]*ManagedSubagentRecord, 0)
+	for rows.Next() {
+		r, err := scanManagedSubagent(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 // The existing lifecycle sweep owns this 24-hour default bound. Deleting the
 // managed identity cascades child state and any later embedded transcript.
 func (s *Store) pruneManagedSubagentsTx(ctx context.Context, now time.Time, age time.Duration) (int, error) {
