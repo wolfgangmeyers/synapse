@@ -123,7 +123,7 @@ function controlFor(kind: ControlKind, id: string, targetAgentId: string, target
 
 type RefreshRepairReason = "registered" | "message_arrival" | "agent_projection_frame" | "conversation_message";
 const MAX_DIAGNOSTIC_COUNT = 10_000;
-export const LEGACY_AGENT_REFRESH_INTERVAL_MS = 60_000;
+export const LEGACY_AGENT_REFRESH_INTERVAL_MS = 3_000;
 export const LEGACY_AGENT_REFRESH_RETRY_DELAY_MS = 1_000;
 function boundedCount(value: number): number { return Number.isSafeInteger(value) && value >= 0 ? Math.min(value, MAX_DIAGNOSTIC_COUNT) : 0; }
 function defaultDiagnosticSink(diagnostic: RouterDiagnostic): void {
