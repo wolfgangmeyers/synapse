@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { ProviderAuthDialog } from "../../src/components/ProviderAuthDialog";
@@ -495,5 +495,100 @@ describe("ProviderAuthDialog", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(client.respondProviderAuth).toHaveBeenCalledWith("op-v-reg", "p-reg", "us-central1");
     expect(onPromptHandled).toHaveBeenCalledOnce();
+  });
+
+  it("shows initial loading skeleton while auth settings are loading without partial rows", () => {
+    const client = clientFixture();
+    // Return a promise that does not resolve immediately
+    client.providerAuthMock.mockReturnValue(new Promise(() => {}));
+
+    render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    expect(screen.getByRole("status", { name: "Loading provider settings…" })).toBeInTheDocument();
+    expect(screen.getByText("Loading provider settings…")).toBeInTheDocument();
+    // Should NOT render partial provider rows while loading
+    expect(screen.queryByText("ChatGPT")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cursor")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+
+  it("shows clean waiting state without confusing input for automated browser sign-in", async () => {
+    const client = clientFixture();
+    const prompt: ProviderAuthPromptFrame = {
+      type: "provider_auth_prompt",
+      protocol: "mecha.web/v1",
+      projection_version: 1,
+      operation_id: "op-auto-1",
+      provider: "antigravity",
+      prompt: {
+        id: "ag-auto",
+        kind: "text",
+        message: "Enter the requested sign-in value.",
+        url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=ag-client",
+      },
+    };
+
+    render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    expect(await screen.findByRole("link", { name: /open.*sign-in page/i })).toBeInTheDocument();
+    // Should show waiting state
+    expect(screen.getByText("Waiting for sign-in to complete…")).toBeInTheDocument();
+    // Should NOT show confusing input or generic message asking for sign-in value
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByText("Enter the requested sign-in value.")).not.toBeInTheDocument();
+    // Should NOT have Continue button, only Cancel button
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
+  it("opens custom dropdowns and allows selecting methods and models", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+
+    render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    await screen.findByText("ChatGPT");
+
+    // Click custom Google method dropdown trigger
+    const googleTrigger = screen.getByRole("button", { name: /API key/i });
+    expect(googleTrigger).toHaveAttribute("aria-expanded", "false");
+    await user.click(googleTrigger);
+    expect(googleTrigger).toHaveAttribute("aria-expanded", "true");
+
+    // Choose Vertex AI ADC option in the custom menu
+    const googleListbox = screen.getByRole("listbox", { name: "Google authentication method" });
+    const vertexOption = within(googleListbox).getByRole("option", { name: "Vertex AI ADC" });
+    await user.click(vertexOption);
+    expect(googleTrigger).toHaveTextContent("Vertex AI ADC");
+
+    // Click custom Default model dropdown trigger
+    const modelTrigger = screen.getByRole("button", { name: /Use ChatGPT default/i });
+    await user.click(modelTrigger);
+    const modelListbox = screen.getByRole("listbox", { name: "Default model options" });
+    const modelOption = within(modelListbox).getByRole("option", { name: /GPT-5.6 Terra/i });
+    await user.click(modelOption);
+    expect(client.setDefaultModel).toHaveBeenCalledWith({ provider: "openai-codex", id: "gpt-5.6-terra" });
+  });
+
+  it("shows busy state on provider button while sign-in request is starting", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+    let resolveAuth: (value: { operation_id: string }) => void = () => {};
+    client.startProviderAuthMock.mockReturnValue(new Promise((resolve) => {
+      resolveAuth = resolve;
+    }));
+
+    render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    await screen.findByText("ChatGPT");
+
+    // Cursor is not authenticated
+    const connectButtons = screen.getAllByRole("button", { name: "Connect" });
+    const cursorConnect = connectButtons[1]!; // Cursor is second Connect button
+    await user.click(cursorConnect);
+
+    // Button should now show Connecting... and be disabled
+    expect(cursorConnect).toHaveTextContent("Connecting…");
+    expect(cursorConnect).toBeDisabled();
+
+    // Resolve the promise
+    resolveAuth({ operation_id: "cursor-1" });
+    await waitFor(() => expect(cursorConnect).not.toBeDisabled());
   });
 });
