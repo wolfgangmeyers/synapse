@@ -276,6 +276,86 @@ func asToolResultMsg(m ai.Message) (ai.ToolResultMessage, bool) {
 	return ai.ToolResultMessage{}, false
 }
 
+// stripSimulatedObservations filters or strips lines containing simulated tool observations
+// (such as "Observation: subagent", lines starting with "Observation:", or fake background launch notices)
+// from assistant message text so Gemini never sees simulated observations in its input context.
+func stripSimulatedObservations(text string) string {
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	var filtered []string
+	inObsCall := false
+	inObsNotice := false
+	parenDepth := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		cleaned := strings.TrimLeft(trimmed, "[]")
+		cleaned = strings.TrimSpace(cleaned)
+
+		isObsStart := strings.HasPrefix(cleaned, "Observation:") ||
+			strings.Contains(trimmed, "Observation: subagent") ||
+			strings.Contains(trimmed, "Observation: `subagent`") ||
+			strings.Contains(trimmed, "Observation: bash") ||
+			strings.Contains(trimmed, "Observation: `bash`")
+
+		if isObsStart {
+			inObsCall = true
+			inObsNotice = false
+			parenDepth = strings.Count(line, "(") - strings.Count(line, ")")
+			if parenDepth <= 0 {
+				inObsCall = false
+				inObsNotice = true
+			}
+			continue
+		}
+
+		if inObsCall {
+			parenDepth += strings.Count(line, "(") - strings.Count(line, ")")
+			if parenDepth <= 0 {
+				inObsCall = false
+				inObsNotice = true
+			}
+			continue
+		}
+
+		if inObsNotice {
+			isNotice := strings.HasPrefix(cleaned, "Agent started in background") ||
+				strings.HasPrefix(cleaned, "Agent ID: subagent-") ||
+				strings.HasPrefix(cleaned, "Type: ") ||
+				strings.HasPrefix(cleaned, "Description: ") ||
+				strings.HasPrefix(cleaned, "You will be notified") ||
+				strings.HasPrefix(cleaned, "Use get_subagent_result") ||
+				strings.HasPrefix(cleaned, "Do not duplicate") ||
+				strings.HasPrefix(cleaned, "exit=") ||
+				cleaned == "]" ||
+				cleaned == ""
+			if isNotice {
+				continue
+			}
+			inObsNotice = false
+		}
+
+		if strings.HasPrefix(cleaned, "Observation:") ||
+			strings.Contains(trimmed, "Observation: subagent") ||
+			strings.Contains(trimmed, "Observation: `subagent`") ||
+			strings.HasPrefix(cleaned, "Agent started in background") ||
+			strings.HasPrefix(cleaned, "Agent ID: subagent-") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "]") && !strings.Contains(line, "[") {
+			line = strings.TrimPrefix(line, "]")
+			line = strings.TrimLeft(line, " \t")
+		}
+
+		filtered = append(filtered, line)
+	}
+
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
 func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[string]string) []map[string]any {
 	droppedToolCalls := make(map[string]string)
 	if len(dropped) > 0 && dropped[0] != nil {
@@ -358,9 +438,15 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 			var parts []any
 			for _, c := range am.Content {
 				if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
-					parts = append(parts, map[string]any{"text": tc.Text})
+					cleaned := stripSimulatedObservations(tc.Text)
+					if cleaned != "" {
+						parts = append(parts, map[string]any{"text": cleaned})
+					}
 				} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
-					parts = append(parts, map[string]any{"text": tc.Text})
+					cleaned := stripSimulatedObservations(tc.Text)
+					if cleaned != "" {
+						parts = append(parts, map[string]any{"text": cleaned})
+					}
 				} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
 					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
 				} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {

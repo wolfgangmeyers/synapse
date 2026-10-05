@@ -994,6 +994,52 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_StandardFunctionResponseWith
 	require.Equal(t, fakeData, inlineData["data"])
 }
 
+func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(t *testing.T) {
+	simulatedSubagentText := "Observation: `subagent` ({\n\"description\": \"Design workflow states\",\n\"prompt\": \"Write files\"\n}):\nAgent started in background.\nAgent ID: subagent-workflows-123\nType: general-purpose\nDescription: Design workflow states\nYou will be notified when this agent completes.\nUse get_subagent_result to retrieve full results, or steer_subagent to send it messages.\nDo not duplicate this agent's work."
+
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Please start the task."},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: simulatedSubagentText},
+			},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "How is it going?"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Observation: subagent (launching workflow states agent)\nI am actively working on the task now."},
+			},
+		},
+	}
+
+	contents := convertMessagesToGoogleContents(messages)
+
+	// The first assistant message was entirely simulated subagent observation,
+	// so its text is stripped completely and the assistant turn is removed.
+	// The two user messages are merged into a single user turn.
+	// The second assistant message has the observation lines stripped, leaving only the real response.
+	require.Len(t, contents, 2)
+
+	require.Equal(t, "user", contents[0]["role"])
+	require.Equal(t, "model", contents[1]["role"])
+
+	modelParts := contents[1]["parts"].([]any)
+	require.Len(t, modelParts, 1)
+	textPart := modelParts[0].(map[string]any)
+	require.Equal(t, "I am actively working on the task now.", textPart["text"])
+	require.NotContains(t, textPart["text"], "Observation:")
+	require.NotContains(t, textPart["text"], "exit=0")
+}
+
+
 func TestOpenAI_ImageConversion(t *testing.T) {
 	fakePNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 	img := ai.ImageContent{

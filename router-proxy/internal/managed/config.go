@@ -19,7 +19,7 @@ const (
 	MaxInitialInstructionBytes = 32 * 1024
 	MaxRPCLineBytes            = 1 << 20
 	DefaultSubagentCapacity    = 4
-	EmbeddedSystemInstruction  = "Never simulate, roleplay, or print bracketed tool observations or completion notifications in message text. Always invoke declared tools directly. When answering user inquiries or instructions, always provide a clear, direct conversational response to the user after executing any required tools. Never finish silently without addressing the user's inquiry."
+	EmbeddedSystemInstruction  = "CRITICAL: To execute any action or launch a subagent, you MUST emit an actual structured tool call (e.g. `subagent`, `bash`). NEVER simulate or type tool observations or background launch notices (such as 'Observation: subagent...' or 'Agent started in background') in message text. Actions only take effect when invoked as real tool calls. Never simulate, roleplay, or print bracketed tool observations or completion notifications in message text. Always invoke declared tools directly. When answering user inquiries or instructions, always provide a clear, direct conversational response to the user after executing any required tools. Never finish silently without addressing the user's inquiry."
 )
 
 type Limits struct {
