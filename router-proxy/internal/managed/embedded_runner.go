@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/sky-valley/pi/agent"
@@ -197,7 +198,7 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 			runErr = runner(runCtx, agent)
 		}
 		if err := runErr; err != nil {
-			if runCtx.Err() == nil {
+			if runCtx.Err() == nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "context canceled") {
 				m.failEmbeddedOwner(binding, operationID, "EMBEDDED_START_FAILED", err)
 			}
 			return
@@ -327,4 +328,3 @@ func (m *Manager) EnsureEmbeddedRootRunning(agentID string) {
 		}
 	}
 }
-

@@ -140,21 +140,29 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
   const hasToolOutput = isTool && entry.message_content !== undefined;
   const errorText = formatError(presentation?.error);
   const summaryText = !isRedundantSummary(presentation?.summary) ? presentation?.summary : undefined;
-  const hasOriginalMessage = !isTool && !isMailboxSend && entry.message_content !== undefined;
+  const thinkingText = entry.thinking ?? presentation?.thinking;
+  const isThinking = presentation?.kind === "thinking";
+  const hasOriginalMessage = !isTool && !isMailboxSend && !isThinking && entry.message_content !== undefined;
 
   return <DialogShell open={open} title={visual.dialogTitle ?? visual.label} titleId="activity-detail-dialog-title" description={`${entry.agent_id} · ${displayTime(entry.at)}`} onClose={onClose} {...(onClosed === undefined ? {} : { onClosed })} closeLabel="Close activity details" {...(returnFocus === undefined ? {} : { returnFocus })} className="message-dialog activity-detail-dialog">
     <div className="activity-detail-body">
-      {entry.sender_identity && !isOutbound ? <p className="activity-detail-sender">From <strong>{entry.sender_identity}</strong></p> : null}
+      {entry.sender_identity && !isOutbound && !isThinking ? <p className="activity-detail-sender">From <strong>{entry.sender_identity}</strong></p> : null}
       {recipientTarget ? <p className="activity-detail-sender">To <strong>{recipientTarget}</strong></p> : null}
       {visual.subject ? <p className="activity-detail-sender">Subject: <strong>{visual.subject}</strong></p> : null}
-      {isTool ? <>
+      {isThinking ? <>
+        <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText ?? entry.message_content ?? presentation?.summary ?? ""} /></div></section>
+        {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
+      </> : isTool ? <>
+        {thinkingText ? <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText} /></div></section> : null}
         {command !== undefined ? <section><h3>Command</h3><pre className="activity-detail-payload">{command}</pre></section> : hasToolInput ? <section><h3>Parameters</h3>{renderToolParameters(entry.tool_input)}</section> : null}
         {hasToolOutput ? <section><h3>Output</h3><pre className="activity-detail-payload">{cleanOutput(entry.message_content)}</pre></section> : errorText ? <section><h3>Result</h3><pre className="activity-detail-payload">{errorText}</pre></section> : summaryText ? <section><h3>Result</h3><pre className="activity-detail-payload">{summaryText}</pre></section> : null}
         {!hasToolInput && !hasToolOutput && !errorText && !summaryText && presentation?.error?.detail_available === false ? <p className="activity-detail-safe-note">No additional details were recorded for this older activity.</p> : null}
       </> : isMailboxSend ? <>
+        {thinkingText ? <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText} /></div></section> : null}
         {mailboxDetails?.body ? <section><h3>Message</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={mailboxDetails.body} /></div></section> : null}
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
       </> : <>
+        {thinkingText ? <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText} /></div></section> : null}
         {hasOriginalMessage ? <section><h3>{isOutbound ? "Message" : "Original message"}</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? ""} /></div></section> : null}
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
         {!hasOriginalMessage && !errorText && entry.message && entry.message !== visual.label ? <section><p className="activity-detail-payload">{entry.message}</p></section> : null}

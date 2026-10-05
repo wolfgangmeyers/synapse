@@ -429,6 +429,34 @@ func (s *Store) SetEmbeddedActivityState(ctx context.Context, b EmbeddedBinding,
 	})
 }
 
+// ResetEmbeddedAgentInterrupt resets an embedded agent to running and idle after
+// a clean intentional interrupt (context cancellation), ensuring accepting_prompts=1
+// and slot_held=1.
+func (s *Store) ResetEmbeddedAgentInterrupt(ctx context.Context, agentID string) error {
+	if agentID == "" {
+		return errors.New("empty agent id")
+	}
+	return s.runImmediate(ctx, func() error {
+		if _, err := s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE state='claimed' AND agent_id=?`, agentID); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state='idle', lifecycle_state='running', accepting_prompts=1, slot_held=1, last_error_code=NULL, last_error_message=NULL, last_error_at=NULL, updated_at=? WHERE agent_id=? AND runtime='embedded' AND desired_state='running'`, now, agentID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			_, err = s.bumpManagedProjectionVersion(ctx)
+			return err
+		}
+		return nil
+	})
+}
+
 // ResetEmbeddedSession accepts only the managed row's replacement epoch. The
 // old row remains historical, but loses its current bit atomically with insert.
 func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBinding, role string) error {

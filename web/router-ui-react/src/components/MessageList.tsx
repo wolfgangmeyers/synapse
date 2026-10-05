@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type R
 import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
 import type { ManagedHistoryEntry } from "../protocol/types";
 import { shouldFollowToBottom } from "../state/conversation-projection";
-import { CompleteTimelineEntry, completeTimelineVisual, isActiveManagedSubagentLifecycle } from "./CompleteTimelineEntry";
+import { CompleteTimelineEntry, completeTimelineVisual, getMailboxSendDetails, getThinkingContent, isActiveManagedSubagentLifecycle, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
 
@@ -51,20 +51,90 @@ function dateLabel(timestamp: number): string | undefined {
 }
 
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
-  if (!entry.message_content) return false;
-  return messages.some((m) => m.body === entry.message_content && (m.from === entry.sender_identity || (entry.presentation?.from !== undefined && m.from === entry.presentation.from) || (entry.presentation?.to !== undefined && m.to === entry.presentation.to)));
+  const mailboxDetails = getMailboxSendDetails(entry.tool_input);
+  const content = mailboxDetails?.body ?? entry.message_content;
+  if (!content) return false;
+  const to = mailboxDetails?.recipient ?? entry.presentation?.to;
+  const from = entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id;
+  return messages.some((m) => m.body === content && (m.from === from || m.to === to || m.from === entry.sender_identity));
 }
 
 export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked }: MessageListProps): ReactElement {
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
+  const currentUser = ownerId ?? "wolfgang";
   const [announcement, setAnnouncement] = useState("");
   const announcedActivity = useRef(new Set<string>());
   const activityLiveInitialized = useRef(false);
-  const items = useMemo<FeedItem[]>(() => [
-    ...messages.map((message) => ({ type: "message" as const, id: messageKey(message), timestamp: messageTime(message, Number.MAX_SAFE_INTEGER), sequence: message.sequence ?? Number.MAX_SAFE_INTEGER, message })),
-    ...(activityEntries ?? []).filter((entry) => isMeaningfulCompleteActivity(entry) && !isAlreadyInMessages(entry, messages)).map((entry) => ({ type: "activity" as const, id: entry.id, timestamp: activityTime(entry), sequence: activitySequence(entry), entry })),
-  ].sort((left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence || left.id.localeCompare(right.id)), [activityEntries, messages]);
+  const items = useMemo<FeedItem[]>(() => {
+    const rawItems: FeedItem[] = [
+      ...messages.map((message) => ({
+        type: "message" as const,
+        id: messageKey(message),
+        timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
+        sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
+        message,
+      })),
+    ];
+    for (const entry of activityEntries ?? []) {
+      if (!isMeaningfulCompleteActivity(entry) || isAlreadyInMessages(entry, messages)) {
+        continue;
+      }
+      const userMail = isMailboxSendToUser(entry, currentUser);
+      if (userMail !== undefined) {
+        const thinkingText = getThinkingContent(entry);
+        if (thinkingText) {
+          rawItems.push({
+            type: "activity" as const,
+            id: `${entry.id}:thinking`,
+            timestamp: activityTime(entry) - 1,
+            sequence: activitySequence(entry),
+            entry: {
+              id: `${entry.id}:thinking`,
+              agent_id: entry.agent_id,
+              ...(entry.at !== undefined ? { at: entry.at } : {}),
+              presentation: {
+                kind: "thinking",
+                outcome: "success",
+                thinking: thinkingText,
+              },
+              thinking: thinkingText,
+            },
+          });
+        }
+        rawItems.push({
+          type: "message" as const,
+          id: entry.id,
+          timestamp: activityTime(entry),
+          sequence: activitySequence(entry),
+          message: {
+            id: entry.id,
+            from: userMail.from,
+            to: userMail.recipient,
+            body: userMail.body,
+            direction: "incoming",
+            ...(entry.at !== undefined ? { recorded_at: entry.at, created_at: entry.at } : {}),
+            ...(entry.presentation?.outcome === "failed" || entry.presentation?.outcome === "error" ? { failed: true } : {}),
+            ...(entry.presentation?.outcome === "active" ? { pending: true } : {}),
+          },
+        });
+      } else {
+        rawItems.push({
+          type: "activity" as const,
+          id: entry.id,
+          timestamp: activityTime(entry),
+          sequence: activitySequence(entry),
+          entry,
+        });
+      }
+    }
+    return rawItems.sort(
+      (left, right) =>
+        left.timestamp - right.timestamp ||
+        left.sequence - right.sequence ||
+        left.id.localeCompare(right.id)
+    );
+  }, [activityEntries, currentUser, messages]);
   const latestItem = items.at(-1);
   const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;
   useLayoutEffect(() => {

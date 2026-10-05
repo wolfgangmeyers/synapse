@@ -94,7 +94,7 @@ func rawManagedHistoryJSON(value string) json.RawMessage {
 }
 
 func managedHistoryEntry(sequence int64, agentID, at, level, message string, presentation *ManagedHistoryPresentation, details managedHistoryDetails) ManagedHistoryEntry {
-	return ManagedHistoryEntry{
+	entry := ManagedHistoryEntry{
 		ID:             "complete:" + strconv.FormatInt(sequence, 10),
 		AgentID:        agentID,
 		At:             at,
@@ -105,6 +105,10 @@ func managedHistoryEntry(sequence int64, agentID, at, level, message string, pre
 		SenderIdentity: details.SenderIdentity,
 		ToolInput:      rawManagedHistoryJSON(details.ToolInputJSON),
 	}
+	if presentation != nil && presentation.Thinking != "" {
+		entry.Thinking = presentation.Thinking
+	}
+	return entry
 }
 
 // managedHistoryToolInputJSON preserves the decoded tool input while replacing

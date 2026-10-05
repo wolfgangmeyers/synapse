@@ -316,4 +316,111 @@ describe("Selected-agent conversation modes", () => {
     expect(screen.getByText("Tmux message")).toBeInTheDocument();
     expect(screen.getByText("Tmux activity")).toBeInTheDocument();
   });
+
+  it("renders mailbox messages addressed to currentUser as chat message bubbles in conversation history", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-mail-to-user",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:02:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "mecha_mailbox_send",
+              outcome: "success",
+              to: "wolfgang",
+            },
+            tool_input: {
+              recipient: "wolfgang",
+              body: "Hello Wolfgang, I have finished implementing the task.",
+            },
+          },
+        ]}
+      />
+    );
+
+    // Rendered as a standard message bubble
+    const bubble = container.querySelector(".bubble-wrap.incoming");
+    expect(bubble).toBeInTheDocument();
+    expect(within(bubble!).getByText("Hello Wolfgang, I have finished implementing the task.")).toBeInTheDocument();
+    // Not rendered as an activity card
+    expect(container.querySelector("[data-activity-id='act-mail-to-user']")).not.toBeInTheDocument();
+  });
+
+  it("renders mailbox messages addressed to other agents as compact outgoing activity cards", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-mail-to-supervisor",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:02:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "mecha_mailbox_send",
+              outcome: "success",
+              to: "supervisor",
+            },
+            tool_input: {
+              recipient: "supervisor",
+              body: "Reporting progress to supervisor.",
+            },
+          },
+        ]}
+      />
+    );
+
+    // Kept as outgoing activity card "To supervisor"
+    expect(screen.getByText("To supervisor")).toBeInTheDocument();
+    expect(screen.getByText("Reporting progress to supervisor.")).toBeInTheDocument();
+    expect(container.querySelector(".bubble-wrap")).not.toBeInTheDocument();
+  });
+
+  it("renders thinking trace card before the assistant message when thinking content is present on mailbox send", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-mail-with-thought",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:02:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "mecha_mailbox_send",
+              outcome: "success",
+              to: "wolfgang",
+            },
+            tool_input: {
+              recipient: "wolfgang",
+              body: "Finished the task.",
+            },
+            thinking: "I should let Wolfgang know that everything passed.",
+          },
+        ]}
+      />
+    );
+
+    // Thinking trace card rendered with brain icon and preview
+    expect(container.querySelector(".thinking-trace-card")).toBeInTheDocument();
+    expect(container.querySelector(".fa-brain")).toBeInTheDocument();
+    expect(screen.getByText("I should let Wolfgang know that everything passed.")).toBeInTheDocument();
+
+    // Assistant message bubble also rendered with full body
+    const bubble = container.querySelector(".bubble-wrap.incoming");
+    expect(bubble).toBeInTheDocument();
+    expect(within(bubble!).getByText("Finished the task.")).toBeInTheDocument();
+  });
 });

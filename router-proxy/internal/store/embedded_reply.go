@@ -90,9 +90,16 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 			return errors.New("embedded reply requires completed assistant")
 		}
 		var text strings.Builder
+		var thinking strings.Builder
 		for _, c := range assistant.Content {
 			if t, ok := c.(ai.TextContent); ok {
 				text.WriteString(t.Text)
+			} else if t, ok := c.(*ai.TextContent); ok && t != nil {
+				text.WriteString(t.Text)
+			} else if th, ok := c.(ai.ThinkingContent); ok {
+				thinking.WriteString(th.Thinking)
+			} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil {
+				thinking.WriteString(th.Thinking)
 			}
 		}
 		if text.Len() == 0 {
@@ -193,7 +200,7 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		replyBody := text.String()
 		category := "managed_message"
 		messageText := "Message sent"
-		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: a.Sender}
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: a.Sender, Thinking: thinking.String()}
 		presentationJSON, err := managedHistoryPresentationJSON(presentation)
 		if err != nil {
 			return err

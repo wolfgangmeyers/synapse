@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -60,6 +61,12 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 			if errors.As(err, &rolledBack) {
 				// Keep the unstarted reservation and live owner available for a
 				// later explicit offer or cold recovery. Do not spin on the fault.
+				return
+			}
+			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), agentID)
+				m.publishProjection()
+				m.OfferDirect(agentID)
 				return
 			}
 			if ctx.Err() == nil {

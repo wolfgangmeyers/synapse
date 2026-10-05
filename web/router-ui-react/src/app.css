@@ -1101,6 +1101,32 @@ p:empty { display: none; }
 .activity-entry-preview { margin: 3px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.82rem; line-height: 1.35; }
 .activity-entry--green { --activity-accent-rgb: 134,239,172; }
 .activity-entry--purple { --activity-accent-rgb: 192,132,252; }
+.thinking-trace-card {
+  --activity-accent-rgb: 192, 132, 252;
+  border-color: rgba(192, 132, 252, 0.25);
+  background: rgba(192, 132, 252, 0.04);
+}
+.thinking-trace-card:hover {
+  background: rgba(192, 132, 252, 0.08);
+  border-color: rgba(192, 132, 252, 0.4);
+}
+.thinking-trace-card .activity-entry-icon {
+  background: rgba(192, 132, 252, 0.12);
+  color: rgb(192, 132, 252);
+}
+.activity-detail-thinking {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: rgba(192, 132, 252, 0.04);
+  border: 1px solid rgba(192, 132, 252, 0.15);
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 420px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
 .activity-entry--teal { --activity-accent-rgb: 120,224,205; }
 .activity-entry--yellow { --activity-accent-rgb: 255,209,102; }
 .activity-entry--amber { --activity-accent-rgb: 251,191,36; }

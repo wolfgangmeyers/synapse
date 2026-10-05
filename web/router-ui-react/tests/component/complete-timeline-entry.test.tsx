@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { CompleteTimelineEntry } from "../../src/components/CompleteTimelineEntry";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation } from "../../src/protocol/types";
@@ -417,5 +418,45 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(".activity-entry-label strong")).not.toBeInTheDocument();
     const preview = container.querySelector(".activity-entry-preview");
     expect(preview).toHaveTextContent("cargo test --all");
+  });
+
+  it("renders thinking trace card with brain icon, purple styling, preview, and opens detail dialog on click", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:thinking-trace", agent_id: "managed-worker", at,
+      presentation: { kind: "thinking", outcome: "success", thinking: "Analyzing the AST to find all call expressions." },
+      thinking: "Analyzing the AST to find all call expressions.",
+    }} />);
+
+    const card = container.querySelector(".thinking-trace-card");
+    expect(card).toBeInTheDocument();
+    expect(container.querySelector(".fa-brain")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--purple")).toBeInTheDocument();
+    expect(screen.getByText("Analyzing the AST to find all call expressions.")).toBeInTheDocument();
+
+    // Click opens the reasoning trace dialog
+    await user.click(card!);
+    expect(screen.getByRole("heading", { level: 2, name: "Reasoning Trace" })).toBeInTheDocument();
+    expect(screen.getAllByText("Analyzing the AST to find all call expressions.")).toHaveLength(2);
+  });
+
+  it("renders thinking trace card alongside assistant message when thinking content is present", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:assistant-with-thought", agent_id: "managed-worker", at, message: "Message sent",
+      message_content: "Here is the result of the analysis.",
+      presentation: { kind: "message", outcome: "success", from: "managed-worker", to: "supervisor" },
+      thinking: "Step 1: Check inputs. Step 2: Validate. Step 3: Conclude.",
+    }} />);
+
+    // Both the thinking trace card and the message card are rendered
+    expect(container.querySelector(".thinking-trace-card")).toBeInTheDocument();
+    expect(container.querySelector(".fa-brain")).toBeInTheDocument();
+    expect(screen.getByText("Step 1: Check inputs. Step 2: Validate. Step 3: Conclude.")).toBeInTheDocument();
+    expect(screen.getByText("To supervisor")).toBeInTheDocument();
+
+    // Clicking the thinking trace card opens the detail dialog
+    await user.click(container.querySelector(".thinking-trace-card")!);
+    expect(screen.getByRole("heading", { level: 2, name: "Reasoning Trace" })).toBeInTheDocument();
   });
 });

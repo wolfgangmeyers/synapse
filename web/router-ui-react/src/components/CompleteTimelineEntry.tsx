@@ -1,7 +1,9 @@
 import { Fragment, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement } from "react";
+import { MarkdownBody } from "../domain/markdown";
 import { isRecord } from "../protocol/guards";
 import type { JsonValue, ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
 import { ActivityDetailDialog } from "./ActivityDetailDialog";
+import { DialogShell } from "./DialogShell";
 
 export type CompleteTimelineTone = "blue" | "green" | "purple" | "teal" | "yellow" | "amber" | "danger";
 
@@ -41,6 +43,49 @@ export function getMailboxSendDetails(input: JsonValue | undefined): { recipient
     if (recipient !== undefined || body !== undefined || subject !== undefined) {
       return { recipient, body, subject };
     }
+  }
+  return undefined;
+}
+
+export function isMailboxSendToUser(entry: ManagedHistoryEntry, currentUserId?: string): { recipient: string; body: string; from: string } | undefined {
+  const toolName = normalizedToolName(entry.presentation?.tool_name);
+  const isWorkerSend = toolName === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send";
+  const isMailboxTool = toolName === "mecha_mailbox_send" || isWorkerSend;
+  const isOutboundMessage = entry.presentation?.kind === "message" && (
+    entry.message === "Message sent" || entry.message === "Reply sent" ||
+    (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
+  );
+
+  if (!isMailboxTool && !isOutboundMessage) return undefined;
+
+  const mailboxDetails = getMailboxSendDetails(entry.tool_input);
+  const recipient = mailboxDetails?.recipient ?? entry.presentation?.to;
+  const body = mailboxDetails?.body ?? entry.message_content;
+
+  if (!recipient || !body) return undefined;
+
+  const normalizedRecipient = recipient.trim().toLowerCase();
+  const normalizedUser = (currentUserId || "wolfgang").trim().toLowerCase();
+
+  if (normalizedRecipient === normalizedUser) {
+    const from = entry.presentation?.from ?? entry.sender_identity ?? entry.agent_id;
+    return { recipient, body, from };
+  }
+
+  return undefined;
+}
+
+export function getThinkingContent(entry: ManagedHistoryEntry): string | undefined {
+  if (typeof entry.thinking === "string" && entry.thinking.trim() !== "") {
+    return entry.thinking.trim();
+  }
+  if (typeof entry.presentation?.thinking === "string" && entry.presentation.thinking.trim() !== "") {
+    return entry.presentation.thinking.trim();
+  }
+  if (entry.presentation?.kind === "thinking") {
+    const fromContent = typeof entry.message_content === "string" ? entry.message_content.trim() : undefined;
+    const fromSummary = typeof entry.presentation.summary === "string" ? entry.presentation.summary.trim() : undefined;
+    return fromContent || fromSummary || undefined;
   }
   return undefined;
 }
@@ -333,6 +378,18 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   }
   if (presentation.kind === "model") return { icon: "fa-solid fa-microchip", tone: presentation.outcome === "error" ? "danger" : "blue", label: entry.message || "Model changed", detail: cleanOneLine(presentation.summary), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "auth") return { icon: "fa-solid fa-key", tone: presentation.outcome === "error" ? "danger" : "yellow", label: entry.message || "Authentication required", detail: cleanOneLine(presentation.summary), isHighValue: presentation.outcome === "error" };
+  if (presentation.kind === "thinking") {
+    const thinking = getThinkingContent(entry);
+    const detail = cleanOneLine(thinking) ?? cleanOneLine(presentation.summary) ?? "Thinking process...";
+    return {
+      icon: "fa-solid fa-brain",
+      tone: "purple",
+      label: "Thinking Process",
+      dialogTitle: "Reasoning Trace",
+      detail,
+      isHighValue: false,
+    };
+  }
   return { icon: "fa-solid fa-circle-play", tone: "blue", label: entry.message || "Agent activity", detail: cleanOneLine(presentation.summary), isHighValue: false };
 }
 
@@ -373,6 +430,83 @@ function formattedTime(entry: ManagedHistoryEntry): { dateTime?: string; label?:
   return { dateTime: entry.at, label: date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), title: date.toLocaleString() };
 }
 
+export function ThinkingTraceCard({
+  thinking,
+  time,
+  agentId,
+}: {
+  thinking: string;
+  time?: { dateTime?: string; label?: string; title?: string };
+  agentId?: string;
+}): ReactElement {
+  const [detailMounted, setDetailMounted] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const preview = cleanOneLine(thinking) ?? "Thinking process...";
+
+  const openDetails = (target: HTMLElement): void => {
+    triggerRef.current = target;
+    setDetailMounted(true);
+    setDetailOpen(true);
+  };
+
+  return (
+    <Fragment>
+      <article
+        className="activity-entry activity-entry--purple thinking-trace-card"
+        role="button"
+        tabIndex={0}
+        aria-haspopup="dialog"
+        aria-label={`Thinking process: ${preview}. Click to view full reasoning trace.`}
+        onClick={(e) => openDetails(e.currentTarget)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            openDetails(e.currentTarget);
+          }
+        }}
+      >
+        <i className="activity-entry-icon fa-solid fa-brain" aria-hidden="true" />
+        <div className="activity-entry-content">
+          <div className="activity-entry-label">
+            <strong>Thinking Process</strong>
+            {time?.dateTime && time?.label ? (
+              <time dateTime={time.dateTime} title={time.title}>
+                {time.label}
+              </time>
+            ) : null}
+          </div>
+          <p className="activity-entry-preview" title={preview}>
+            {preview}
+          </p>
+        </div>
+      </article>
+      {detailMounted ? (
+        <DialogShell
+          open={detailOpen}
+          title="Reasoning Trace"
+          titleId="thinking-detail-dialog-title"
+          description={`${agentId ?? "Assistant"}${time?.dateTime ? ` · ${new Date(time.dateTime).toLocaleString()}` : ""}`}
+          onClose={() => setDetailOpen(false)}
+          onClosed={() => setDetailMounted(false)}
+          closeLabel="Close reasoning trace"
+          returnFocus={triggerRef.current}
+          className="message-dialog activity-detail-dialog"
+        >
+          <div className="activity-detail-body">
+            <section>
+              <h3>Reasoning Trace</h3>
+              <div className="message-dialog-body activity-detail-message activity-detail-thinking">
+                <MarkdownBody body={thinking} />
+              </div>
+            </section>
+          </div>
+        </DialogShell>
+      ) : null}
+    </Fragment>
+  );
+}
+
 export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry }): ReactElement {
   const [detailMounted, setDetailMounted] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -382,7 +516,9 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const error = entry.presentation?.error;
   const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
   const isTool = entry.presentation?.kind === "tool";
-  const hasDetails = entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
+  const isThinkingKind = entry.presentation?.kind === "thinking";
+  const thinkingText = getThinkingContent(entry);
+  const hasDetails = isThinkingKind || thinkingText !== undefined || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
   const accessibleName = [
     visual.dialogTitle && visual.dialogTitle !== visual.label ? visual.dialogTitle : undefined,
     visual.label,
@@ -413,7 +549,8 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
   const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
   return <Fragment>
-    <article className={`activity-entry${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
+    {thinkingText && !isThinkingKind ? <ThinkingTraceCard thinking={thinkingText} time={time} agentId={entry.agent_id} /> : null}
+    <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
       {isCompactRoutine ? <div className="activity-entry-content activity-entry-content--compact">
         <div className="activity-entry-compact-row">
