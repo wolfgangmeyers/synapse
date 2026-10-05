@@ -19,3 +19,57 @@ export function parsePromptTemplateTokens(body: unknown): string[] { const names
 export function renderPromptTemplate(body: unknown, values: Record<string, unknown> = {}): string { return String(body ?? "").replace(TOKEN, (token, name: string) => Object.hasOwn(values, name) ? String(values[name] ?? "") : token); }
 export interface ImportProgress { completed: number; total: number; interrupted: boolean; message: string }
 export function promptTemplateImportProgress(completed: number, total: number, interrupted = false): ImportProgress { return { completed, total, interrupted, message: interrupted ? `Import stopped after ${completed} of ${total} templates.` : `Imported ${completed} of ${total} templates.` }; }
+
+export const PROMPT_TEMPLATE_USAGE_STORAGE_KEY = "mecha.prompt_template_usage";
+
+export function promptTemplateKey(template: PromptTemplate): string {
+  return template.id ?? template.name;
+}
+
+export function loadPromptTemplateUsage(storage?: { getItem(key: string): string | null }): Record<string, number> {
+  try {
+    const raw = storage?.getItem(PROMPT_TEMPLATE_USAGE_STORAGE_KEY) ?? (typeof localStorage !== "undefined" ? localStorage.getItem(PROMPT_TEMPLATE_USAGE_STORAGE_KEY) : null);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1])));
+    }
+  } catch {
+    // Ignore storage parse errors
+  }
+  return {};
+}
+
+export function recordPromptTemplateUsage(
+  template: PromptTemplate,
+  usage: Record<string, number>,
+  nowOrStorage?: number | { setItem(key: string, value: string): void },
+  storage?: { setItem(key: string, value: string): void },
+): Record<string, number> {
+  const now = typeof nowOrStorage === "number" ? nowOrStorage : Date.now();
+  const effectiveStorage = typeof nowOrStorage === "object" && nowOrStorage !== null ? nowOrStorage : storage;
+  const key = promptTemplateKey(template);
+  const next = { ...usage, [key]: now };
+  if (template.id && template.name && key !== template.name) {
+    next[template.name] = now;
+  }
+  try {
+    const serialized = JSON.stringify(next);
+    if (effectiveStorage) effectiveStorage.setItem(PROMPT_TEMPLATE_USAGE_STORAGE_KEY, serialized);
+    else if (typeof localStorage !== "undefined") localStorage.setItem(PROMPT_TEMPLATE_USAGE_STORAGE_KEY, serialized);
+  } catch {
+    // Ignore storage quota/security errors
+  }
+  return next;
+}
+
+export function sortPromptTemplatesByMRU(templates: PromptTemplate[], usage?: Record<string, number>): PromptTemplate[] {
+  const safeUsage = usage ?? {};
+  return [...templates].sort((a, b) => {
+    const usageA = Math.max(safeUsage[a.id ?? ""] ?? 0, safeUsage[a.name] ?? 0);
+    const usageB = Math.max(safeUsage[b.id ?? ""] ?? 0, safeUsage[b.name] ?? 0);
+    if (usageA !== usageB) return usageB - usageA;
+    return a.name.localeCompare(b.name);
+  });
+}
+

@@ -255,9 +255,9 @@ function isManagedHistoryError(value: unknown): boolean {
     && isPatternString(value.code, /^[A-Za-z][A-Za-z0-9_]*$/, 1, 128) && typeof value.retryable === "boolean" && typeof value.detail_available === "boolean";
 }
 function isManagedHistoryPresentation(value: unknown): boolean {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "tool_name", "outcome", "from", "to", "child_label", "child_state", "summary", "error", "thinking"]) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth", "thinking"].includes(value.kind)) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "tool_name", "outcome", "from", "to", "child_label", "child_state", "summary", "error", "thinking"]) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth", "thinking", "goal_evaluation"].includes(value.kind)) return false;
   if (value.tool_name !== undefined && !isPatternString(value.tool_name, /^[A-Za-z][A-Za-z0-9_.-]*$/, 1, 128)) return false;
-  if (value.outcome !== undefined && (typeof value.outcome !== "string" || !["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown"].includes(value.outcome))) return false;
+  if (value.outcome !== undefined && (typeof value.outcome !== "string" || !["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown", "done", "not_done"].includes(value.outcome))) return false;
   if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 48)) return false;
   if (value.to !== undefined && !isSafeManagedHistoryString(value.to, 1, 48)) return false;
   if (value.child_label !== undefined && !isSafeManagedHistoryString(value.child_label, 1, 160)) return false;

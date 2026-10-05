@@ -41,6 +41,47 @@ describe("PromptTemplateDialog", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Templates exported.");
   });
 
-  it("creates, exports, and confirms an import conflict", async () => { const user = userEvent.setup(); const onExport = vi.fn(); const onImport = vi.fn(); vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:prompt-templates"), revokeObjectURL: vi.fn() }); vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined); render(<PromptTemplateDialog {...base} onExport={onExport} onImport={onImport} />); await user.click(screen.getByTestId("prompt-export")); expect(onExport).toHaveBeenCalledWith(expect.objectContaining({ format: "mecha-prompt-templates", version: 1 })); const input = document.querySelector("input[type='file']"); expect(input).not.toBeNull(); if (!(input instanceof HTMLInputElement)) throw new Error("Import input is missing"); const file = new File([JSON.stringify({ format: "mecha-prompt-templates", version: 1, templates: [{ id: "t1", name: "Review", body: "New body", updated_at: "2026-08-25T12:34:56.789Z" }] })], "templates.json", { type: "application/json" }); fireEvent.change(input, { target: { files: [file] } }); expect(await screen.findByText(/overwritten/)).toBeInTheDocument(); await user.click(screen.getByRole("button", { name: "Import and overwrite" })); expect(onImport).toHaveBeenCalledWith([{ id: "t1", name: "Review", body: "New body", updated_at: "2026-08-25T12:34:56.789Z" }], true); });
+  it("imports immediately and overwrites existing templates with matching names without a conflict confirmation prompt", async () => {
+    const user = userEvent.setup();
+    const onExport = vi.fn();
+    const onImport = vi.fn().mockResolvedValue({ imported: 1, skipped: 0 });
+    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:prompt-templates"), revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    render(<PromptTemplateDialog {...base} onExport={onExport} onImport={onImport} />);
+
+    const input = document.querySelector("input[type='file']");
+    expect(input).not.toBeNull();
+    if (!(input instanceof HTMLInputElement)) throw new Error("Import input is missing");
+    const file = new File([JSON.stringify({ format: "mecha-prompt-templates", version: 1, templates: [{ name: "Review", body: "New body" }] })], "templates.json", { type: "application/json" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    // Directly invokes onImport with overwrite=true and no "Import and overwrite" conflict dialog
+    expect(screen.queryByText(/overwritten/)).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(onImport).toHaveBeenCalledWith([{ name: "Review", body: "New body" }], true));
+    expect(await screen.findByText(/Imported 1, skipped 0/)).toBeInTheDocument();
+  });
+
+  it("filters templates in list mode using the search input", async () => {
+    const templates = [
+      { id: "t1", name: "PR Review", body: "Review the PR at ${URL}" },
+      { id: "t2", name: "Set Goal", body: "Set a goal for requirements" },
+      { id: "t3", name: "Worker Anxiety", body: "Create recurring reminder" },
+    ];
+    render(<PromptTemplateDialog {...base} templates={templates} />);
+
+    expect(screen.getByText("PR Review")).toBeInTheDocument();
+    expect(screen.getByText("Set Goal")).toBeInTheDocument();
+    expect(screen.getByText("Worker Anxiety")).toBeInTheDocument();
+
+    const searchInput = screen.getByRole("searchbox", { name: "Search prompt templates" });
+    fireEvent.change(searchInput, { target: { value: "goal" } });
+
+    expect(screen.queryByText("PR Review")).not.toBeInTheDocument();
+    expect(screen.getByText("Set Goal")).toBeInTheDocument();
+    expect(screen.queryByText("Worker Anxiety")).not.toBeInTheDocument();
+
+    fireEvent.change(searchInput, { target: { value: "nomatch" } });
+    expect(screen.getByText("No matching prompt templates")).toBeInTheDocument();
+  });
   it("previews tokens and inserts at the captured selection", async () => { const user = userEvent.setup(); const onInsert = vi.fn(); render(<PromptTemplateDialog {...base} templateToUse={template} selection={{ start: 2, end: 2 }} onInsert={onInsert} />); fireEvent.change(screen.getByRole("textbox", { name: "file" }), { target: { value: "app.ts" } }); expect(screen.getByText("Review app.ts")).toBeInTheDocument(); await user.click(screen.getByRole("button", { name: "Paste" })); expect(onInsert).toHaveBeenCalledWith("Review app.ts", { start: 2, end: 2 }); });
 });

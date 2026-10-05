@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -70,3 +71,26 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 	}
 	return verdict, "", nil
 }
+
+func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, outcome, reason string) {
+	preview := reason
+	if preview == "" {
+		if outcome == store.EmbeddedGoalEvaluationNotDone {
+			preview = "Continue working on the current goal."
+		} else {
+			preview = "DONE"
+		}
+	}
+	eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", binding.AgentID, key.UserSeq, key.FinalSeq, outcome)
+	pres := &store.ManagedHistoryPresentation{
+		Kind:    "goal_evaluation",
+		Outcome: strings.ToLower(outcome),
+		Summary: preview,
+	}
+	msg := "Goal Evaluation • " + outcome
+	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(m.runCtx, binding.AgentID, "managed_goal_evaluation", "info", msg, eventKey, pres, nil, &preview)
+	if err == nil {
+		m.publishCompleteHistory(entry)
+	}
+}
+

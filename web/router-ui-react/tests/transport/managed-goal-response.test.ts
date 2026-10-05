@@ -14,6 +14,18 @@ describe("standalone managed goal response", () => {
   it.each([DEFAULT_GOAL_STATE, { ...DEFAULT_GOAL_STATE, revision: 0 }, { ...DEFAULT_GOAL_STATE, revision: 2 }, embedded])("accepts legacy and typed revision metadata: %j", async (state) => {
     expect(await consume(state)).toEqual({ goal_state: state });
   });
+  it("accepts last_evaluation metadata", async () => {
+    const state = {
+      ...embedded,
+      last_evaluation: {
+        verdict: "DONE",
+        reason: "Goal achieved",
+        completed_at: "2026-10-04T12:00:00.000Z",
+        goal_revision: 1,
+      },
+    };
+    expect(await consume(state)).toEqual({ goal_state: state });
+  });
   it.each([
     ...[null, "2", true, -1, 1.5, Number.MAX_SAFE_INTEGER + 1].map((revision) => ({ ...embedded, revision })),
     { ...embedded, unknown: 1 },

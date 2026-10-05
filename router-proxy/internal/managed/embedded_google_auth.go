@@ -490,6 +490,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			"contents": contents,
 			"generationConfig": map[string]any{
 				"maxOutputTokens": maxOutputTokens,
+				"thinkingConfig":  map[string]any{"includeThoughts": true},
 			},
 		}
 		if len(systemParts) > 0 {

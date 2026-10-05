@@ -382,6 +382,9 @@ p:empty { display: none; }
 .goal-number-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 150px); align-items: center; gap: 12px; }
 .goal-number-field input { padding: 8px 10px; }
 .goal-outcome-counts { padding: 10px 12px; border-radius: 12px; background: var(--canvas); font-size: 13px; }
+.goal-last-evaluation { padding: 10px 12px; border-radius: 12px; background: var(--canvas); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.goal-evaluation-verdict { font-size: 13px; margin: 0; }
+.goal-evaluation-reason { color: var(--muted); font-size: 12px; margin: 0; }
 .goal-editor-status { min-height: 1.4em; color: var(--muted); font-size: 13px; }
 .goal-editor-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .goal-editor-actions .secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }

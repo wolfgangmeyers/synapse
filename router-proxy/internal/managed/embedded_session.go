@@ -53,6 +53,7 @@ type embeddedPersistence struct {
 	afterUserAppend   func(context.Context)
 	publishComplete   func(store.ManagedHistoryEntry)
 	toolInputs        map[string]any
+	currentThinking   string
 }
 
 func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
@@ -74,6 +75,9 @@ func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
 }
 
 func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) error {
+	if message.MessageRole() == ai.RoleUser {
+		p.currentThinking = ""
+	}
 	var assistantContent ai.ContentList
 	switch assistant := message.(type) {
 	case ai.AssistantMessage:
@@ -84,6 +88,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 	}
 	for _, part := range assistantContent {
+		if th, ok := part.(ai.ThinkingContent); ok && th.Thinking != "" {
+			p.currentThinking += th.Thinking
+		} else if th, ok := part.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
+			p.currentThinking += th.Thinking
+		}
 		if call, ok := part.(ai.ToolCall); ok && call.ID != "" {
 			if p.toolInputs == nil {
 				p.toolInputs = make(map[string]any)
@@ -94,6 +103,34 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				p.toolInputs = make(map[string]any)
 			}
 			p.toolInputs[call.ID] = call.Arguments
+		}
+	}
+	if assistantContent != nil {
+		hasToolCalls := false
+		for _, part := range assistantContent {
+			if _, ok := part.(ai.ToolCall); ok {
+				hasToolCalls = true
+				break
+			}
+			if _, ok := part.(*ai.ToolCall); ok {
+				hasToolCalls = true
+				break
+			}
+		}
+		if !hasToolCalls && p.currentThinking != "" {
+			thinkingKey := fmt.Sprintf("thinking:%s:%x", p.binding.AgentID, sha256.Sum256([]byte(p.currentThinking)))
+			pres := &store.ManagedHistoryPresentation{
+				Kind:     "thinking",
+				Outcome:  "success",
+				Summary:  p.currentThinking,
+				Thinking: p.currentThinking,
+			}
+			thinkingCopy := p.currentThinking
+			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_thinking", "info", "Thinking Process", thinkingKey, pres, nil, &thinkingCopy)
+			if err == nil && p.publishComplete != nil {
+				p.publishComplete(entry)
+			}
+			p.currentThinking = ""
 		}
 	}
 	if result, ok := message.(ai.ToolResultMessage); ok {
@@ -141,6 +178,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				ToolName: toolName,
 				Outcome:  "success",
 				Summary:  "Completed successfully",
+				Thinking: p.currentThinking,
 			}
 			if isFailed {
 				level = "error"
@@ -155,6 +193,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					Outcome:  "failed",
 					Summary:  "The operation could not be completed.",
 					Error:    &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false},
+					Thinking: p.currentThinking,
 				}
 			}
 			if toolName == "mecha_mailbox_send" {
@@ -1618,6 +1657,9 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		changed := false
 		if evalErr == nil && m.runCtx.Err() == nil {
 			_, changed, evalErr = m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
+		}
+		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationNotDone) {
+			m.recordGoalEvaluationActivity(binding, key, outcome, reason)
 		}
 		lane.serial.Unlock()
 		if evalErr != nil || !changed || outcome != store.EmbeddedGoalEvaluationNotDone {

@@ -163,7 +163,7 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
       </> : <>
         {thinkingText ? <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText} /></div></section> : null}
-        {hasOriginalMessage ? <section><h3>{isOutbound ? "Message" : "Original message"}</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? ""} /></div></section> : null}
+        {hasOriginalMessage ? <section><h3>{presentation?.kind === "goal_evaluation" ? "Goal Evaluation" : isOutbound ? "Message" : "Original message"}</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? ""} /></div></section> : null}
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
         {!hasOriginalMessage && !errorText && entry.message && entry.message !== visual.label ? <section><p className="activity-detail-payload">{entry.message}</p></section> : null}
         {!hasOriginalMessage && !errorText && summaryText && summaryText !== entry.message ? <section><p className="activity-detail-payload">{summaryText}</p></section> : null}
