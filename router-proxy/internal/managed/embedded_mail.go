@@ -3,7 +3,6 @@ package managed
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -63,22 +62,14 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 				// later explicit offer or cold recovery. Do not spin on the fault.
 				return
 			}
-			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
-				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), agentID)
+			// Do not fail the worker on turn errors. Transition cleanly back to idle:
+			if fenceErr := m.store.RenewEmbeddedOwner(context.Background(), owner.binding, owner.identity, embeddedOwnerTTL); fenceErr == nil {
+				_ = m.store.SetEmbeddedActivityState(context.Background(), owner.binding, "idle")
+				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), owner.binding.AgentID) // or ensure running, accepting_prompts=1, slot_held=1
 				m.publishProjection()
-				m.OfferDirect(agentID)
-				return
 			}
-			if ctx.Err() == nil {
-				// Checked final persistence can reject the SDK's append; its
-				// synthetic error then exists only in this local session. Keep
-				// a bounded current cause without undoing ACK or replaying work.
-				cause := store.RedactedManagedDiagnostic(fmt.Sprintf("mail attempt %s: %s", attempt.AttemptID, sanitizeError(err)))
-				if recordErr := m.store.MarkEmbeddedOwnerFailed(context.Background(), owner.binding, saved.LaunchOperationID, "EMBEDDED_MAIL_FAILED", cause); recordErr != nil {
-					m.emitEvent(Event{Kind: EventManagedRecovery, AgentID: agentID, Operation: "embedded_mail", MessageID: attempt.MessageID,
-						Status: "failure_not_recorded", ErrorCode: "EMBEDDED_MAIL_FAILURE_RECORD_FAILED",
-						ErrorText: store.RedactedManagedDiagnostic(fmt.Sprintf("mail failure recording: %s; %s", sanitizeError(recordErr), cause))})
-				}
+			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+				m.OfferDirect(agentID)
 			}
 			return // no retry of an ambiguous started SDK turn
 		}
