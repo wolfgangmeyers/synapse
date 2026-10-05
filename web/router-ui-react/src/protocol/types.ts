@@ -905,8 +905,8 @@ export interface ManagedChildrenProjection {
   recovery_state: "current" | "reconstructing";
   children: ManagedChild[];
 }
-export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking";
-export type ManagedHistoryOutcome = "active" | "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "interrupted" | "aborted" | "reconciled_unknown";
+export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking" | "goal_evaluation";
+export type ManagedHistoryOutcome = "active" | "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "interrupted" | "aborted" | "reconciled_unknown" | "done" | "not_done";
 export interface ManagedHistoryError {
   code: string;
   retryable: boolean;

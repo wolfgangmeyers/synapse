@@ -91,7 +91,7 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if value == nil {
 		return true
 	}
-	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true}[value.Kind] {
+	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true}[value.Kind] {
 		return false
 	}
 	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || !managedHistoryText(value.Summary, 512, true) {
@@ -100,7 +100,7 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if value.ToolName != "" && strings.ContainsAny(value.ToolName, " \t\r\n\x00") {
 		return false
 	}
-	if value.Outcome != "" && !map[string]bool{"active": true, "success": true, "warning": true, "error": true, "unknown": true, "compacting": true, "completed": true, "failed": true, "interrupted": true, "aborted": true, "reconciled_unknown": true}[value.Outcome] {
+	if value.Outcome != "" && !map[string]bool{"active": true, "success": true, "warning": true, "error": true, "unknown": true, "compacting": true, "completed": true, "failed": true, "interrupted": true, "aborted": true, "reconciled_unknown": true, "done": true, "not_done": true}[value.Outcome] {
 		return false
 	}
 	if value.ChildState != "" && !map[string]bool{"queued": true, "running": true, "completed": true, "steered": true, "aborted": true, "stopped": true, "error": true, "confirmed": true, "interrupted_unknown": true}[value.ChildState] {

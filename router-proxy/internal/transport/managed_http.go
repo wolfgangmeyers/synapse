@@ -1395,6 +1395,21 @@ func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, 
 		state["desired_revision"] = policy.DesiredRevision
 		state["applied_revision"] = policy.AppliedRevision
 		state["projection_state"] = policy.ProjectionState
+		counts, lastEval, diagErr := r.store.EmbeddedGoalDiagnostics(req.Context(), agent.AgentID)
+		if diagErr == nil {
+			state["outcome_counts"] = map[string]any{
+				"COMPLETED": counts["COMPLETED"],
+				"NOT_DONE":  counts["NOT_DONE"],
+			}
+			if lastEval != nil {
+				state["last_evaluation"] = map[string]any{
+					"verdict":       lastEval.Verdict,
+					"reason":        lastEval.Reason,
+					"completed_at":  lastEval.CompletedAt,
+					"goal_revision": lastEval.GoalRevision,
+				}
+			}
+		}
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"goal_state": state}, nil)
 		return
 	}

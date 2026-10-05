@@ -378,6 +378,20 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   }
   if (presentation.kind === "model") return { icon: "fa-solid fa-microchip", tone: presentation.outcome === "error" ? "danger" : "blue", label: entry.message || "Model changed", detail: cleanOneLine(presentation.summary), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "auth") return { icon: "fa-solid fa-key", tone: presentation.outcome === "error" ? "danger" : "yellow", label: entry.message || "Authentication required", detail: cleanOneLine(presentation.summary), isHighValue: presentation.outcome === "error" };
+  if (presentation.kind === "goal_evaluation") {
+    const isDone = presentation.outcome === "done" || presentation.outcome === "success" || (entry.message !== undefined && entry.message.includes("DONE") && !entry.message.includes("NOT_DONE"));
+    const verdict = isDone ? "DONE" : "NOT_DONE";
+    const label = `Goal Evaluation • ${verdict}`;
+    const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary) ?? (isDone ? "DONE" : "Continue working on the current goal.");
+    return {
+      icon: "fa-solid fa-flag",
+      tone: isDone ? "green" : "blue",
+      label,
+      dialogTitle: label,
+      detail,
+      isHighValue: true,
+    };
+  }
   if (presentation.kind === "thinking") {
     const thinking = getThinkingContent(entry);
     const detail = cleanOneLine(thinking) ?? cleanOneLine(presentation.summary) ?? "Thinking process...";
@@ -411,6 +425,7 @@ export function isActiveManagedSubagentLifecycle(entry: Pick<ManagedHistoryEntry
 function isTerminalSuccessPresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
   if (presentation?.kind === "compaction") return presentation.outcome === "completed";
   if (presentation?.kind === "tool") return presentation.outcome === "success";
+  if (presentation?.kind === "goal_evaluation") return presentation.outcome === "done" || presentation.outcome === "success";
   const terminal = isChildOrRecoveryPresentation(presentation) ? childTerminalOutcome(presentation) : undefined;
   return terminal?.success === true;
 }
@@ -434,10 +449,12 @@ export function ThinkingTraceCard({
   thinking,
   time,
   agentId,
+  entry,
 }: {
   thinking: string;
   time?: { dateTime?: string; label?: string; title?: string };
   agentId?: string;
+  entry?: ManagedHistoryEntry;
 }): ReactElement {
   const [detailMounted, setDetailMounted] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -448,6 +465,30 @@ export function ThinkingTraceCard({
     triggerRef.current = target;
     setDetailMounted(true);
     setDetailOpen(true);
+  };
+
+  const syntheticEntry: ManagedHistoryEntry = entry ? {
+    ...entry,
+    id: `${entry.id}:thinking`,
+    message: "Thinking Process",
+    presentation: {
+      kind: "thinking",
+      summary: thinking,
+      thinking,
+    },
+    thinking,
+  } : {
+    id: "thinking",
+    agent_id: agentId ?? "agent",
+    at: time?.dateTime ?? new Date().toISOString(),
+    level: "info",
+    message: "Thinking Process",
+    presentation: {
+      kind: "thinking",
+      summary: thinking,
+      thinking,
+    },
+    thinking,
   };
 
   return (
@@ -482,26 +523,13 @@ export function ThinkingTraceCard({
         </div>
       </article>
       {detailMounted ? (
-        <DialogShell
+        <ActivityDetailDialog
+          entry={syntheticEntry}
           open={detailOpen}
-          title="Reasoning Trace"
-          titleId="thinking-detail-dialog-title"
-          description={`${agentId ?? "Assistant"}${time?.dateTime ? ` · ${new Date(time.dateTime).toLocaleString()}` : ""}`}
+          returnFocus={triggerRef.current ?? undefined}
           onClose={() => setDetailOpen(false)}
           onClosed={() => setDetailMounted(false)}
-          closeLabel="Close reasoning trace"
-          returnFocus={triggerRef.current}
-          className="message-dialog activity-detail-dialog"
-        >
-          <div className="activity-detail-body">
-            <section>
-              <h3>Reasoning Trace</h3>
-              <div className="message-dialog-body activity-detail-message activity-detail-thinking">
-                <MarkdownBody body={thinking} />
-              </div>
-            </section>
-          </div>
-        </DialogShell>
+        />
       ) : null}
     </Fragment>
   );
@@ -517,8 +545,9 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
   const isTool = entry.presentation?.kind === "tool";
   const isThinkingKind = entry.presentation?.kind === "thinking";
+  const isGoalEval = entry.presentation?.kind === "goal_evaluation";
   const thinkingText = getThinkingContent(entry);
-  const hasDetails = isThinkingKind || thinkingText !== undefined || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
+  const hasDetails = isThinkingKind || thinkingText !== undefined || isGoalEval || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
   const accessibleName = [
     visual.dialogTitle && visual.dialogTitle !== visual.label ? visual.dialogTitle : undefined,
     visual.label,
@@ -549,7 +578,7 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
   const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
   return <Fragment>
-    {thinkingText && !isThinkingKind ? <ThinkingTraceCard thinking={thinkingText} time={time} agentId={entry.agent_id} /> : null}
+    {thinkingText && !isThinkingKind ? <ThinkingTraceCard thinking={thinkingText} time={time} agentId={entry.agent_id} entry={entry} /> : null}
     <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
       {isCompactRoutine ? <div className="activity-entry-content activity-entry-content--compact">

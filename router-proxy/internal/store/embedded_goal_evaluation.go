@@ -214,3 +214,38 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 	}
 	return e, changed, nil
 }
+
+type EmbeddedGoalEvaluationSummary struct {
+	Verdict      string `json:"verdict"`
+	Reason       string `json:"reason,omitempty"`
+	CompletedAt  string `json:"completed_at"`
+	GoalRevision int64  `json:"goal_revision"`
+}
+
+func (s *Store) EmbeddedGoalDiagnostics(ctx context.Context, agentID string) (map[string]int64, *EmbeddedGoalEvaluationSummary, error) {
+	counts := map[string]int64{"COMPLETED": 0, "NOT_DONE": 0}
+	var doneCount, notDoneCount int64
+	row := s.db.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN state='DONE' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN state='NOT_DONE' THEN 1 ELSE 0 END), 0)
+		FROM embedded_goal_evaluations WHERE agent_id=? AND completed_at IS NOT NULL`, agentID)
+	if err := row.Scan(&doneCount, &notDoneCount); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return counts, nil, err
+	}
+	counts["COMPLETED"] = doneCount
+	counts["NOT_DONE"] = notDoneCount
+
+	var last EmbeddedGoalEvaluationSummary
+	lastRow := s.db.QueryRowContext(ctx, `SELECT state, reason, completed_at, goal_revision
+		FROM embedded_goal_evaluations
+		WHERE agent_id=? AND completed_at IS NOT NULL
+		ORDER BY completed_at DESC, rowid DESC LIMIT 1`, agentID)
+	if err := lastRow.Scan(&last.Verdict, &last.Reason, &last.CompletedAt, &last.GoalRevision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return counts, nil, nil
+		}
+		return counts, nil, err
+	}
+	return counts, &last, nil
+}
+

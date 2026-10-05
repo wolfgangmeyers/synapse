@@ -65,6 +65,10 @@ export function GoalEditorDialog({ open, peer, goalState, value, capabilityAvail
         <NumberField label="Snooze refill time (seconds)" value={draft.snooze_refill_elapsed_seconds} min={1} onChange={(next) => { if (next !== "") set("snooze_refill_elapsed_seconds", next); }} />
       </fieldset>
       <p className="goal-outcome-counts">Outcomes: completed {source?.outcome_counts.COMPLETED ?? 0}, not done {source?.outcome_counts.NOT_DONE ?? 0}</p>
+      {source?.last_evaluation ? <div className="goal-last-evaluation">
+        <p className="goal-evaluation-verdict">Latest evaluation: <strong>{source.last_evaluation.verdict}</strong>{source.last_evaluation.completed_at ? ` · ${new Date(source.last_evaluation.completed_at).toLocaleString()}` : ""}</p>
+        {source.last_evaluation.reason ? <p className="goal-evaluation-reason">{source.last_evaluation.reason}</p> : null}
+      </div> : null}
       {goalError ? <p className="goal-editor-status error" role="alert">{goalError}</p> : null}
       <div className="goal-editor-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" disabled={pending || !capabilityAvailable} onClick={save}>{pending ? "Saving…" : "Save"}</button></div>
     </div>}

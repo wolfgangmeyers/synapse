@@ -459,4 +459,35 @@ describe("Complete timeline entry", () => {
     await user.click(container.querySelector(".thinking-trace-card")!);
     expect(screen.getByRole("heading", { level: 2, name: "Reasoning Trace" })).toBeInTheDocument();
   });
+
+  it("renders goal evaluation card with flag icon for NOT_DONE", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:goal-eval-not-done", agent_id: "managed-worker", at,
+      message: "Goal Evaluation • NOT_DONE",
+      message_content: "Continue working on the current goal.",
+      presentation: { kind: "goal_evaluation", outcome: "not_done", summary: "Continue working on the current goal." },
+    }} />);
+
+    expect(container.querySelector(".fa-flag")).toBeInTheDocument();
+    expect(screen.getByText("Goal Evaluation • NOT_DONE")).toBeInTheDocument();
+    expect(screen.getByText("Continue working on the current goal.")).toBeInTheDocument();
+
+    await user.click(container.querySelector(".activity-entry")!);
+    expect(screen.getByRole("heading", { level: 2, name: "Goal Evaluation • NOT_DONE" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Goal Evaluation" })).toBeInTheDocument();
+  });
+
+  it("renders goal evaluation card with flag icon for DONE", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:goal-eval-done", agent_id: "managed-worker", at,
+      message: "Goal Evaluation • DONE",
+      message_content: "DONE",
+      presentation: { kind: "goal_evaluation", outcome: "done", summary: "DONE" },
+    }} />);
+
+    expect(container.querySelector(".fa-flag")).toBeInTheDocument();
+    expect(screen.getByText("Goal Evaluation • DONE")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--green")).toBeInTheDocument();
+  });
 });

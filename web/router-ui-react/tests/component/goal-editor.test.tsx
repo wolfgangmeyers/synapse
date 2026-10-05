@@ -46,4 +46,18 @@ describe("GoalEditorDialog", () => {
   });
   it("reinitializes the draft when the peer changes", async () => { const user = userEvent.setup(); const first = { ...DEFAULT_GOAL_STATE, goal: "First goal", enabled: true }; const second = { ...first }; const { rerender } = render(<GoalEditorDialog open peer="agent-one" goalState={first} onClose={vi.fn()} onSave={vi.fn()} />); const goal = screen.getByRole("textbox", { name: "What should this agent work toward?" }); await user.clear(goal); await user.type(goal, "Edited first goal"); rerender(<GoalEditorDialog open peer="agent-two" goalState={second} onClose={vi.fn()} onSave={vi.fn()} />); expect(screen.getByRole("textbox", { name: "What should this agent work toward?" })).toHaveValue("First goal"); });
   it("gates controls when the router does not advertise goal support", () => { render(<GoalEditorDialog open peer="agent-one" goalState={{ ...DEFAULT_GOAL_STATE }} capabilityAvailable={false} onClose={vi.fn()} onSave={vi.fn()} />); expect(screen.getByRole("alert")).toHaveTextContent("not available"); });
+  it("renders diagnostic section with latest evaluation verdict, timestamp, and reason", () => {
+    const state = {
+      ...DEFAULT_GOAL_STATE,
+      last_evaluation: {
+        verdict: "NOT_DONE" as const,
+        reason: "Need to implement remaining tests",
+        completed_at: "2026-10-04T12:00:00.000Z",
+        goal_revision: 1,
+      },
+    };
+    render(<GoalEditorDialog open peer="agent-one" goalState={state} onClose={vi.fn()} onSave={vi.fn()} />);
+    expect(screen.getByText("NOT_DONE")).toBeInTheDocument();
+    expect(screen.getByText("Need to implement remaining tests")).toBeInTheDocument();
+  });
 });

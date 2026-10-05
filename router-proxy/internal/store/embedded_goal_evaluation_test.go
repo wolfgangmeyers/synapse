@@ -132,3 +132,36 @@ func TestEmbeddedEvaluationRequiresCheckedCurrentFinal(t *testing.T) {
 	_, _, err = s.ClaimEmbeddedGoalEvaluation(ctx, b, k)
 	require.Error(t, err, "old final is not current head")
 }
+
+func TestEmbeddedGoalDiagnostics(t *testing.T) {
+	s, b, k := evaluationFixture(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	// Initial empty diagnostics
+	counts, last, err := s.EmbeddedGoalDiagnostics(ctx, b.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), counts["COMPLETED"])
+	require.Equal(t, int64(0), counts["NOT_DONE"])
+	require.Nil(t, last)
+
+	// Claim and complete NOT_DONE
+	receiptForEvaluation(t, s, b, &k)
+	_, claimed, err := s.ClaimEmbeddedGoalEvaluation(ctx, b, k)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	_, changed, err := s.CompleteEmbeddedGoalEvaluation(ctx, b, k, EmbeddedGoalEvaluationNotDone, "need more progress")
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	counts, last, err = s.EmbeddedGoalDiagnostics(ctx, b.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), counts["COMPLETED"])
+	require.Equal(t, int64(1), counts["NOT_DONE"])
+	require.NotNil(t, last)
+	require.Equal(t, "NOT_DONE", last.Verdict)
+	require.Equal(t, "need more progress", last.Reason)
+	require.NotEmpty(t, last.CompletedAt)
+	require.Equal(t, k.GoalRevision, last.GoalRevision)
+}
+
