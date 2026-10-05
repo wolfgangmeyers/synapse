@@ -54,6 +54,7 @@ could affect files, external communication, or destructive operations.
 | `remote-cloud-desktop` | Provision a generic Ubuntu KDE Plasma X11 desktop over xrdp with access restricted to a private overlay network. |
 | `roger-advanced-report-implementation` | Implement RogerEMR advanced/self-serve reports on the governed dataset, Parquet, DuckDB-WASM, and Report Builder architecture, distinct from fixed server-side reports. |
 | `roger-report-implementation` | Create RogerEMR fixed reports with evidence-backed source parity, Terra planning, correct permissions/stacking, screen-export agreement, isolated synthetic demos, and report-specific review gates. |
+| `slice-avatar-grid` | Slice AI-generated avatar grid sheets (like 4x4 robot helmet galleries) into individually centered, transparent PNG avatars for web/router-ui-react/avatars. Handles AI grid jitter, circle center detection, and antialiased circular background removal. |
 | `subagent-orchestration` | Delegate bounded work with explicit contracts, evidence gates, context limits, safe handoffs, and stop rules while the parent keeps orchestration and final validation. |
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
 | `supervisor-review` | Supervisor readiness interrogation and quality gate before accepting worker done, blocked, parked, commit/push, draft PR, or review-ready state transitions. |
