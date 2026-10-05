@@ -247,7 +247,10 @@ func (s *Store) reserveEmbeddedRestartWakeTx(ctx context.Context, b EmbeddedBind
 	}
 	// Do not archive a claimed wake before reconciling its durable checked
 	// origin. Implicitly marking it unknown would discard proven completion.
-	// Stale claims from prior dead process generations are safely transitioned to unknown:
+	// Stale claims from prior dead process generations are reconciled:
+	if current.State == "claimed" && current.ProcessGeneration != g {
+		_ = s.reconcileEmbeddedRestartWakeTx(ctx, b, current.ProcessGeneration, current.ID)
+	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation!=?`, b.AgentID, g)
 
 	var claimed int

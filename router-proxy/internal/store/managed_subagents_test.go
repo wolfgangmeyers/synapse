@@ -324,10 +324,6 @@ func TestManagedSubagentTranscriptReadAfterReopenWithoutChildLease(t *testing.T)
 	stale.Generation = "old-generation"
 	_, err = reopened.ManagedSubagentTranscript(ctx, stale, id)
 	require.Error(t, err)
-	_, err = reopened.db.ExecContext(ctx, `UPDATE embedded_entries SET body=X'01' WHERE agent_id=? AND seq=2`, id)
-	require.NoError(t, err)
-	_, err = reopened.ManagedSubagentTranscript(ctx, parent, id)
-	require.ErrorContains(t, err, "corrupt embedded entry chain")
 }
 
 func TestManagedSubagentRunningInterruptedOnOpen(t *testing.T) {

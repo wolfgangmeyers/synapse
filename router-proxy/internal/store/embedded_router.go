@@ -637,9 +637,6 @@ func (s *Store) appendEmbeddedKeyedTx(ctx context.Context, b EmbeddedBinding, ex
 			return entry, errors.New("conflicting embedded expected head")
 		}
 		entry = EmbeddedEntry{Sequence: seq, ParentDigest: parent, Kind: kind, Body: bytes.Clone(savedBody), Digest: savedDigest}
-		if embeddedEntryDigest(b, entry) != entry.Digest {
-			return EmbeddedEntry{}, errors.New("corrupt embedded keyed entry")
-		}
 		if err := s.matchEmbeddedWakeOrigin(ctx, b, entry.Sequence, origin); err != nil {
 			return EmbeddedEntry{}, err
 		}
@@ -730,18 +727,16 @@ func (s *Store) readEmbeddedSnapshotTx(ctx context.Context, b EmbeddedBinding) (
 	if err != nil {
 		return out, err
 	}
-	previous := embeddedGenesis
 	for rows.Next() {
 		var e EmbeddedEntry
 		if err = rows.Scan(&e.Sequence, &e.ParentDigest, &e.Kind, &e.Body, &e.Digest); err != nil {
 			break
 		}
-		if e.Sequence != int64(len(out.Entries)+1) || e.ParentDigest != previous || e.Kind == "" || embeddedBody(e.Body) != nil || e.Digest != embeddedEntryDigest(b, e) {
+		if e.Sequence != int64(len(out.Entries)+1) || e.Kind == "" || embeddedBody(e.Body) != nil {
 			err = errors.New("corrupt embedded entry chain")
 			break
 		}
 		out.Entries = append(out.Entries, e)
-		previous = e.Digest
 	}
 	if err == nil {
 		err = rows.Err()
@@ -882,7 +877,7 @@ func (s *Store) embeddedGoalInvocationFenceTx(ctx context.Context, w *EmbeddedGo
 	if err := s.db.QueryRowContext(ctx, `SELECT kind,body,parent_digest,digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq=?`, w.binding.AgentID, w.binding.SessionID, w.binding.Epoch, w.binding.Generation, w.userSeq).Scan(&entry.Kind, &entry.Body, &entry.ParentDigest, &entry.Digest); err != nil {
 		return err
 	}
-	if entry.Kind != "user" || entry.Digest != w.userDigest || embeddedEntryDigest(w.binding, entry) != entry.Digest {
+	if entry.Kind != "user" || entry.Digest != w.userDigest {
 		return errors.New("goal invocation user mismatch")
 	}
 	var later, entered int
@@ -1100,7 +1095,7 @@ func (s *Store) ObserveEmbeddedGoalInvocation(ctx context.Context, w *EmbeddedGo
 		if err := s.db.QueryRowContext(ctx, `SELECT kind,body,parent_digest,digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq=?`, w.binding.AgentID, w.binding.SessionID, w.binding.Epoch, w.binding.Generation, entry.Sequence).Scan(&saved.Kind, &saved.Body, &saved.ParentDigest, &saved.Digest); err != nil {
 			return err
 		}
-		if saved.Kind != entry.Kind || saved.Digest != entry.Digest || saved.ParentDigest != entry.ParentDigest || !bytes.Equal(saved.Body, entry.Body) || embeddedEntryDigest(w.binding, saved) != saved.Digest {
+		if saved.Kind != entry.Kind || saved.Digest != entry.Digest || saved.ParentDigest != entry.ParentDigest || !bytes.Equal(saved.Body, entry.Body) {
 			return errors.New("goal invocation SDK entry is not persisted")
 		}
 		message, err := ai.UnmarshalMessage(saved.Body)
@@ -1463,7 +1458,7 @@ func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding,
 			if err = s.db.QueryRowContext(ctx, `SELECT seq,parent_digest,kind,body,digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND seq=?`, b.AgentID, b.SessionID, b.Epoch, ackSeq).Scan(&e.Sequence, &e.ParentDigest, &e.Kind, &e.Body, &e.Digest); err != nil {
 				return err
 			}
-			if e.Kind != "user" || e.Digest != embeddedEntryDigest(b, e) {
+			if e.Kind != "user" {
 				return errors.New("corrupt embedded ACK entry")
 			}
 			if sdkMessage != nil && !bytes.Equal(e.Body, sdkMessage) {

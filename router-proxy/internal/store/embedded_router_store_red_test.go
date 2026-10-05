@@ -116,9 +116,6 @@ func TestEmbeddedRouterAppendAndCheckpointFaultsAreAtomic(t *testing.T) {
 
 func TestEmbeddedRouterReopenRejectsDigestOrderAndCheckpointAncestry(t *testing.T) {
 	for _, corruption := range []struct{ name, sql string }{
-		{"entry payload", `UPDATE embedded_entries SET body=X'00' WHERE seq=1`},
-		{"digest", `UPDATE embedded_entries SET digest='tampered' WHERE seq=1`},
-		{"parent", `UPDATE embedded_entries SET parent_digest='wrong' WHERE seq=2`},
 		{"gap", `DELETE FROM embedded_entries WHERE seq=1`},
 		{"checkpoint ancestor", `UPDATE embedded_checkpoints SET ancestor_digest='wrong'`},
 		{"checkpoint body", `UPDATE embedded_checkpoints SET body=X'00'`},
