@@ -34,7 +34,6 @@ export interface ConversationHeaderProps {
   onToggleScrollLock?: (() => void) | undefined;
   chatOnly?: boolean | undefined;
   onToggleChatOnly?: (() => void) | undefined;
-  onRestart?: ((agentId: string) => void) | undefined;
 }
 
 function activeManagedSubagents(agent: Agent): NonNullable<Agent["subagents"]> {
@@ -69,36 +68,20 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onLogs, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onRestart }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onLogs, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
   const managedFailure = failedManagedAgent(agent);
-  const isFailed = (agent?.activity_state === "failed" || (agent as { status?: string })?.status === "failed") || managedFailure !== undefined;
   const visibleActivity = managedFailure === undefined ? agent?.activity_state : undefined;
   const terminating = managedFailure === undefined && agent?.source === "router-managed" && agent.managed_agent?.lifecycle_state === "terminating";
   const status = operationalStatus(agent);
   const failureMessage = managedFailure?.last_error?.message ? `Unavailable: ${managedFailure.last_error.message}` : "Unavailable: managed worker failed.";
   const displayedSubagents = agent?.source === "router-managed" ? activeManagedSubagents(agent) : agent?.subagents ?? [];
   const displayedSubagentCount = agent?.source === "router-managed" ? displayedSubagents.length : agent?.subagent_count;
-  const handleRestart = async (): Promise<void> => {
-    if (!agent) return;
-    if (onRestart) {
-      onRestart(agent.agent_id);
-      return;
-    }
-    try {
-      const url = client?.routerUrl ? `${client.routerUrl}/v1/managed-agents/${encodeURIComponent(agent.agent_id)}/restart` : `/v1/managed-agents/${encodeURIComponent(agent.agent_id)}/restart`;
-      await fetch(url, { method: "POST" });
-      if (client) {
-        await client.managedAgent?.(agent.agent_id).catch(() => {});
-        await client.agents?.().catch(() => {});
-      }
-    } catch {}
-  };
   return <header className={`conversation-header${agent ? " selected" : ""}`}><div className={`avatar ${visibleActivity === "active" ? "working" : visibleActivity === "compacting" ? "compacting" : terminating ? "terminating" : agent ? "" : "muted"}`} aria-hidden="true">{agent ? <AgentAvatar agentId={agent.agent_id} /> : "?"}</div><div className="peer-heading"><h2><span className="peer-name-label">{agent ? humanName(agent.agent_id) : "Pick an agent"}</span>{visibleActivity === "active" ? <span className="working-indicator inline" aria-label="Working"><span /></span> : null}{agent?.activity_state === "active" ? <button type="button" className="interrupt-worker-button header-button-interrupt" aria-label="Interrupt worker" title="Interrupt worker" onClick={() => {
     if (onInterrupt) onInterrupt();
     else if (client && agent) void client.interruptManagedAgent(agent.agent_id).catch(() => {});
-  }}><i className="fa-solid fa-square" aria-hidden="true" /></button> : null}{isFailed ? <button type="button" className="restart-worker-button header-button-restart" aria-label="Restart failed worker" title="Restart failed worker" onClick={() => void handleRestart()}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" /></button> : null}{agent && showGoalControl ? <button type="button" className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`} onClick={onGoal} aria-label="Set goal" title="Set goal"><i className="fa-solid fa-flag" aria-hidden="true" /></button> : null}{agent && onLogs ? <button type="button" className="logs-header-button" onClick={onLogs} aria-label="Logs" title={`View logs for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-file-lines" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
+  }}><i className="fa-solid fa-square" aria-hidden="true" /></button> : null}{agent && showGoalControl ? <button type="button" className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`} onClick={onGoal} aria-label="Set goal" title="Set goal"><i className="fa-solid fa-flag" aria-hidden="true" /></button> : null}{agent && onLogs ? <button type="button" className="logs-header-button" onClick={onLogs} aria-label="Logs" title={`View logs for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-file-lines" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
   <button type="button" className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`} onClick={onReminders} aria-label="Add reminder" title="Add reminder">
     <i className="fa-solid fa-clock" aria-hidden="true" />
   </button>
