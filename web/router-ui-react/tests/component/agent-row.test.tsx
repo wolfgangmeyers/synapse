@@ -38,18 +38,7 @@ describe("AgentRow", () => {
     expect(listitem).toHaveClass("failed", "active");
     expect(screen.getByRole("alert", { name: "Managed worker failed" })).toHaveTextContent("Failed");
     expect(screen.getByRole("button", { name: "Managed Failed (managed-failed), failed" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restart failed worker" })).toBeInTheDocument();
-  });
-
-  it("calls onRestart when Restart Worker button is clicked on a failed worker", () => {
-    const managedAgent: ManagedAgent = { agent_id: "managed-failed", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "failed", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed process exited", at: "2030-01-01T00:01:00.000Z" } };
-    const [row] = mergeAgentSources([], [managedAgent]);
-    const onRestart = vi.fn();
-
-    render(<AgentRow agent={row!} onRestart={onRestart} />);
-    const restartBtn = screen.getByRole("button", { name: "Restart failed worker" });
-    restartBtn.click();
-    expect(onRestart).toHaveBeenCalledWith("managed-failed");
+    expect(screen.queryByRole("button", { name: "Restart failed worker" })).not.toBeInTheDocument();
   });
 
   it("keeps private managed runtime identity out of DOM output", () => {

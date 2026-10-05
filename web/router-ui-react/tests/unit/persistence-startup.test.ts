@@ -10,7 +10,7 @@ import {
   type IndexedDbFactory,
 } from "../../src/persistence/indexed-db";
 import { initializePersistence } from "../../src/persistence/history-repository";
-import { AGENT_IDS_KEY, LEGACY_AGENT_ID_KEY, ROUTERS_KEY, createSettingsRepository, migrateBootstrapRouter, setActiveRouter } from "../../src/persistence/settings-repository";
+import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, DEFAULT_ROUTER_URL, LEGACY_AGENT_ID_KEY, ROUTERS_KEY, createSettingsRepository, migrateBootstrapRouter, setActiveRouter } from "../../src/persistence/settings-repository";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -90,6 +90,19 @@ describe("settings identity persistence", () => {
     settings = setActiveRouter(repository.load(), firstRouter);
     expect(repository.agentId(settings, firstRouter, "wolfgang")).toBe("wolfgang");
     expect(JSON.parse(storage.getItem(AGENT_IDS_KEY) ?? "{}")).toEqual({ [secondRouter]: "backup-web" });
+  });
+
+  it("blocks port 8787 from known and active routers and resets activeRouter", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(ROUTERS_KEY, JSON.stringify(["http://127.0.0.1:8787", "http://router.test:8765"]));
+    storage.setItem(ACTIVE_ROUTER_KEY, "http://127.0.0.1:8787");
+
+    const repository = createSettingsRepository(storage);
+    const settings = repository.load();
+
+    expect(settings.routers).not.toContain("http://127.0.0.1:8787");
+    expect(settings.activeRouter).toBe(DEFAULT_ROUTER_URL);
+    expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(DEFAULT_ROUTER_URL);
   });
 });
 

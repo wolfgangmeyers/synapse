@@ -94,4 +94,18 @@ describe("agent projections", () => { it("uses connected agents as authority and
     expect(reducer(state, { type: "managed/removed", scope, version: 9, baseVersion: 8, agentId: "missing" })).toBe(state);
     expect(reducer(state, { type: "managed/removed", scope, version: 6, baseVersion: 5, agentId: "alpha" })).toBe(state);
   });
+  it("filters out any subagents by prefix or parent_agent_id in mergeAgentSources", () => {
+    const tmuxAgents: Agent[] = [
+      { agent_id: "worker-1" },
+      { agent_id: "subagent-child-1" },
+      { agent_id: "child-with-parent", parent_agent_id: "worker-1" },
+    ];
+    const managedAgents: ManagedAgent[] = [
+      managed("managed-1"),
+      managed("subagent-managed-child"),
+    ];
+    const result = mergeAgentSources(tmuxAgents, managedAgents);
+    const ids = result.map((r) => r.agent_id);
+    expect(ids).toEqual(["managed-1", "worker-1"]);
+  });
 });

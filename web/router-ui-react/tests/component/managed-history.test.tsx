@@ -345,7 +345,7 @@ describe("Selected-agent conversation modes", () => {
     );
 
     // Rendered as a standard message bubble
-    const bubble = container.querySelector(".bubble-wrap.incoming");
+    const bubble = container.querySelector<HTMLElement>(".bubble-wrap.incoming");
     expect(bubble).toBeInTheDocument();
     expect(within(bubble!).getByText("Hello Wolfgang, I have finished implementing the task.")).toBeInTheDocument();
     // Not rendered as an activity card
@@ -419,7 +419,7 @@ describe("Selected-agent conversation modes", () => {
     expect(screen.getByText("I should let Wolfgang know that everything passed.")).toBeInTheDocument();
 
     // Assistant message bubble also rendered with full body
-    const bubble = container.querySelector(".bubble-wrap.incoming");
+    const bubble = container.querySelector<HTMLElement>(".bubble-wrap.incoming");
     expect(bubble).toBeInTheDocument();
     expect(within(bubble!).getByText("Finished the task.")).toBeInTheDocument();
   });

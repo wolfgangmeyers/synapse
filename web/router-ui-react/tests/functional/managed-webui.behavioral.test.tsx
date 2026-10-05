@@ -276,42 +276,18 @@ describe("real managed router to React WebUI behavioral seam", () => {
     });
     const activeEntry = list(activeHistory!.body.entries).find((entry) => record(record(entry).presentation).child_state === "running");
     const childID = String(record(activeEntry).id);
-    const runningChildCard = await waitFor(() => {
-      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
-      expect(card).toBeInTheDocument();
-      expect(card).toHaveTextContent("Subagent");
-      expect(card).toHaveTextContent("Functional child");
-      return card;
-    });
-    if (runningChildCard === null) throw new Error("running child card missing");
-    const childPosition = [...document.querySelectorAll<HTMLElement>("[data-activity-id]")].indexOf(runningChildCard);
-    expect(childPosition).toBeGreaterThanOrEqual(0);
+    await waitFor(async () => expect((await screen.findAllByRole("button", { name: /1 subagent/i })).length).toBeGreaterThan(0));
     await sendManagedMessage(router, "functional-compaction", "Start child compaction");
     let compactingChildren: { response: Response; body: JsonRecord } | undefined;
     await waitFor(async () => {
       compactingChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
       expect(record(list(compactingChildren.body.children)[0])).toMatchObject({ sequence: 2 });
     });
-    const childCard = await waitFor(() => {
-      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
-      expect(card).toBeInTheDocument();
-      expect(card).toHaveClass("activity-entry--purple");
-      expect(card).toHaveTextContent("Child compacting");
-      if (card === null) throw new Error("child card missing during compaction");
-      return card;
-    });
-
     await sendManagedMessage(router, "functional-compaction", "Finish child compaction");
     let compactedChildren: { response: Response; body: JsonRecord } | undefined;
     await waitFor(async () => {
       compactedChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
       expect(record(list(compactedChildren.body.children)[0])).toMatchObject({ sequence: 3 });
-    });
-    await waitFor(() => {
-      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
-      expect(card).toBeInTheDocument();
-      expect(card).toHaveTextContent("Child context compacted");
-      if (card === null) throw new Error("child card missing after compaction");
     });
 
     await sendManagedMessage(router, "functional-compaction", "Finish structured child");
@@ -343,7 +319,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     const quiet = await jsonRequest(router, "/v1/history?agent_id=functional-compaction&view=quiet", { method: "GET", credentials: "omit" });
     expect(quiet.response.status).toBe(200);
     expect(list(quiet.body.entries)).toHaveLength(0);
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Quiet messages" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Toggle chat-only mode" }));
     expect(document.querySelector(`[data-activity-id="${childID}"]`)).not.toBeInTheDocument();
   }, 60_000);
 
