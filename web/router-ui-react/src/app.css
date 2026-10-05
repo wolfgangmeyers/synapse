@@ -746,9 +746,13 @@ p:empty { display: none; }
 }
 .conversation-header {
   gap: 12px;
-  padding: 18px 22px;
+  padding: 9px 11px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
+}
+.conversation-header .avatar {
+  width: 99px;
+  height: 99px;
 }
 .conversation-header .prompt-controls,
 .conversation-header .model-controls { flex: 0 1 auto; }
@@ -1264,7 +1268,7 @@ p:empty { display: none; }
   .goal-editor-form textarea { min-height: 200px; max-height: 50vh; }
   .conversation-header.selected {
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-columns: 99px minmax(0, 1fr);
     grid-template-areas: "avatar heading" "avatar heading" "views views" "prompt prompt" "model model";
     align-items: center;
   }
