@@ -168,6 +168,35 @@ func (m *Manager) closeSubagents() {
 	}
 }
 
+// TimeoutExpiredSubagents stops and hard-aborts any running subagent whose execution has exceeded maxDuration.
+func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
+	if maxDuration <= 0 {
+		maxDuration = 1 * time.Hour
+	}
+	now := time.Now()
+	m.subagentsMu.Lock()
+	var toAbort []*subagentTask
+	for _, task := range m.subagentsActive {
+		if task != nil && !task.startTime.IsZero() && now.Sub(task.startTime) > maxDuration {
+			toAbort = append(toAbort, task)
+		}
+	}
+	m.subagentsMu.Unlock()
+
+	for _, task := range toAbort {
+		task.mu.Lock()
+		task.stopped = true
+		task.hardAborted = true
+		if task.cancel != nil {
+			task.cancel()
+		}
+		if task.activeSession != nil {
+			task.activeSession.Abort()
+		}
+		task.mu.Unlock()
+	}
+}
+
 func (m *Manager) removeFromQueueLocked(childID string) {
 	filtered := m.subagentsQueue[:0]
 	for _, task := range m.subagentsQueue {
@@ -991,4 +1020,3 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 	}
 	return nil
 }
-

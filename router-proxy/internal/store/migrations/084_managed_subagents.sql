@@ -10,7 +10,7 @@ CREATE TABLE managed_subagents (
   parent_generation TEXT NOT NULL,
   description TEXT NOT NULL,
   subagent_type TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','steered','aborted','stopped','error','interrupted')),
+  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','steered','aborted','stopped','error','interrupted','cancelled')),
   max_turns INTEGER NOT NULL CHECK(max_turns >= 0),
   turn_count INTEGER NOT NULL DEFAULT 0 CHECK(turn_count >= 0),
   tool_use_count INTEGER NOT NULL DEFAULT 0 CHECK(tool_use_count >= 0),
@@ -22,7 +22,7 @@ CREATE TABLE managed_subagents (
   terminal_at TEXT,
   CHECK(agent_id <> parent_agent_id),
   CHECK((status IN ('queued','running') AND terminal_at IS NULL) OR
-        (status NOT IN ('queued','running') AND terminal_at IS NOT NULL))
+        (status NOT IN ('queued','running')))
 );
 CREATE INDEX managed_subagents_parent_idx ON managed_subagents(parent_agent_id, agent_id);
 CREATE INDEX managed_subagents_retention_idx ON managed_subagents(terminal_at) WHERE terminal_at IS NOT NULL;

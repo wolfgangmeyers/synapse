@@ -57,7 +57,7 @@ func SubagentThrottleKeyForBinding(parent store.EmbeddedBinding, childID string)
 // IsTerminalSubagentStatus returns true if status is one of the settled terminal states.
 func IsTerminalSubagentStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "steered", "aborted", "stopped", "error", "interrupted":
+	case "completed", "steered", "aborted", "stopped", "error", "interrupted", "cancelled":
 		return true
 	default:
 		return false
@@ -303,8 +303,6 @@ func (t *SubagentThrottle) Allow(key SubagentThrottleKey, status string) error {
 	return nil
 }
 
-
-
 // cleanupLocked prunes expired timestamps and evicts oldest keys when over maxKeys.
 func (t *SubagentThrottle) cleanupLocked(now time.Time, cutoff time.Time) {
 	for k, ts := range t.pulls {
@@ -351,8 +349,6 @@ func (t *SubagentThrottle) Prune(now time.Time) {
 	cutoff := now.Add(-t.window)
 	t.cleanupLocked(now, cutoff)
 }
-
-
 
 // Len returns the current number of tracked keys in the throttle map.
 func (t *SubagentThrottle) Len() int {

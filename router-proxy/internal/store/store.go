@@ -437,6 +437,25 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 		if migration.ID == "" {
 			return errors.New("migration ID is required")
 		}
+		if migration.ID == "088_subagent_cascade" {
+			pending, err := s.migrationPending(ctx, migration.ID)
+			if err != nil {
+				return fmt.Errorf("migration %s preflight check failed: %w", migration.ID, err)
+			}
+			if !pending {
+				continue
+			}
+			hasParent, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+			if err == nil && hasParent {
+				if err := s.runImmediate(ctx, func() error {
+					_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?, ?)`, migration.ID, formatTimestamp(s.clock.Now()))
+					return err
+				}); err != nil {
+					return fmt.Errorf("migration %s mark applied failed: %w", migration.ID, err)
+				}
+				continue
+			}
+		}
 		if migration.ID == "085_embedded_subagent_role" {
 			if err := s.applyEmbeddedSubagentRoleMigration085(ctx, migration); err != nil {
 				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
@@ -876,7 +895,7 @@ const managedAgents027DDL = `CREATE TABLE managed_agents_027_new (
   selected_model_provider TEXT NOT NULL,
   selected_model_id TEXT NOT NULL,
   desired_state TEXT NOT NULL CHECK (desired_state IN ('running','terminated')),
-  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('starting','running','restarting','resetting','terminating','failed')),
+  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('starting','running','restarting','resetting','terminating','failed','terminated')),
   activity_state TEXT NOT NULL CHECK (activity_state IN ('starting','waiting','active','idle','compacting','stopped','failed')),
   accepting_prompts INTEGER NOT NULL DEFAULT 0 CHECK (accepting_prompts IN (0,1)),
   pi_session_id TEXT,

@@ -510,7 +510,10 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 		if err := r.managed.RecoverManagedRootColdStarts(ctx); err != nil {
 			return store.SweepResult{}, err
 		}
+		r.managed.TimeoutExpiredSubagents(1 * time.Hour)
 	}
+	_, _ = r.store.TimeoutRunningSubagents(ctx, 1*time.Hour)
+	_ = r.store.PruneExpiredSubagents(ctx, 1*time.Hour)
 	// Repair active projections left by older router versions before publishing
 	// the sweep snapshot. The store keeps this bounded and fence-scoped.
 	if _, err := r.store.ReconcileManagedParentActivity(ctx); err != nil {

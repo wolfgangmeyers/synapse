@@ -227,7 +227,7 @@ func managedChildrenSnapshot(ctx context.Context, durable *store.Store) (int64, 
 
 func managedChildStatus(value string) string {
 	switch value {
-	case "queued", "running", "completed", "steered", "aborted", "stopped", "error":
+	case "queued", "running", "completed", "steered", "aborted", "stopped", "error", "cancelled":
 		return value
 	default:
 		return "unknown"

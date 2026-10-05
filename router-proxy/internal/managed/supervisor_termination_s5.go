@@ -32,6 +32,10 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	return m.terminateWithEmbeddedProducer(ctx, request, nil)
 }
 
+func (m *Manager) TerminateManagedAgent(ctx context.Context, request TerminateRequest) (TerminateResult, error) {
+	return m.Terminate(ctx, request)
+}
+
 func (m *Manager) terminateWithEmbeddedProducer(ctx context.Context, request TerminateRequest, producer *store.EmbeddedToolInvocation) (TerminateResult, error) {
 	if request.AgentID == "" || request.Method == "" || request.CanonicalPath == "" || request.RequestID == "" || request.CanonicalBodyHash == "" {
 		return TerminateResult{}, errors.New("managed termination request is incomplete")
@@ -130,6 +134,8 @@ func (m *Manager) terminateWithEmbeddedProducer(ctx context.Context, request Ter
 	if admission.Replayed {
 		return TerminateResult{Operation: admission.Operation, Replayed: true}, nil
 	}
+	m.cascadeAbortSubagents(request.AgentID)
+	_ = m.store.CascadeTerminateSubagents(ctx, request.AgentID)
 	// Admission is the durable point at which the selected worker becomes
 	// non-interactive. Wake UI-live now so the browser shows that in-progress
 	// state instead of presenting a running worker until cleanup finishes.
@@ -178,6 +184,8 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 	if err != nil || action.Kind != "terminate" || lifecycleTerminal(action) {
 		return
 	}
+	m.cascadeAbortSubagents(action.AgentID)
+	_ = m.store.CascadeTerminateSubagents(context.Background(), action.AgentID)
 	agent, err := m.store.ManagedAgent(context.Background(), action.AgentID)
 	if err != nil || agent.DesiredState != "terminated" {
 		return
@@ -385,4 +393,58 @@ func (m *Manager) recoverManagedTerminationActionInLane(action *store.ManagedLif
 	// executeTerminationInLane uses only the persisted fence to prove absence or
 	// reap the exact group, then resumes the durable cleanup stage.
 	m.executeTerminationInLane(action.ActionID, nil)
+}
+
+func (m *Manager) cascadeAbortSubagents(parentAgentID string) {
+	if parentAgentID == "" {
+		return
+	}
+	m.subagentsMu.Lock()
+	var toAbort []*subagentTask
+	seen := make(map[*subagentTask]bool)
+	matches := func(t *subagentTask) bool {
+		if t == nil {
+			return false
+		}
+		return t.parent.AgentID == parentAgentID || strings.HasPrefix(t.childID, "subagent-"+parentAgentID+"-")
+	}
+	for _, task := range m.subagentsActive {
+		if matches(task) && !seen[task] {
+			seen[task] = true
+			toAbort = append(toAbort, task)
+		}
+	}
+	for _, task := range m.subagentsRegistry {
+		if matches(task) && !seen[task] {
+			seen[task] = true
+			toAbort = append(toAbort, task)
+		}
+	}
+	filtered := m.subagentsQueue[:0]
+	for _, task := range m.subagentsQueue {
+		if matches(task) {
+			task.mu.Lock()
+			task.stopped = true
+			if task.cancel != nil {
+				task.cancel()
+			}
+			task.mu.Unlock()
+		} else {
+			filtered = append(filtered, task)
+		}
+	}
+	m.subagentsQueue = filtered
+	m.subagentsMu.Unlock()
+
+	for _, task := range toAbort {
+		task.mu.Lock()
+		task.stopped = true
+		if task.cancel != nil {
+			task.cancel()
+		}
+		if task.activeSession != nil {
+			task.activeSession.Abort()
+		}
+		task.mu.Unlock()
+	}
 }
