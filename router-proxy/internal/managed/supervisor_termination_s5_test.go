@@ -28,8 +28,7 @@ func TestTerminateFencesAbortButReapsAndDeletesArtifactsAfterEOF(t *testing.T) {
 	root := t.TempDir()
 	sessionRoot := filepath.Join(root, "sessions")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
-	sessionFile := filepath.Join(sessionRoot, "termination.json")
-	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0o600))
+	sessionFile := filepath.Join(sessionRoot, hashString("123e4567-e89b-42d3-a456-426614174203")+".jsonl")
 	process := &launchProcess{identity: ProcessIdentity{PID: 701, StartMarker: "123e4567-e89b-42d3-a456-426614174201", Incarnation: "termination-incarnation"}, stopped: make(chan struct{})}
 	rpc := &resetRPC{launchRPC: &launchRPC{abortErr: io.EOF}, file: sessionFile}
 	factory := &resetProcessFactory{processes: []*launchProcess{process}}
@@ -123,8 +122,8 @@ func TestTerminateRecordsEveryAbortOutcomeAndStillReapsTheOwnedGroup(t *testing.
 			sessionRoot := filepath.Join(root, "sessions")
 			require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
 			sessionID := fmt.Sprintf("123e4567-e89b-42d3-a456-4266141742%02d", index+30)
-			sessionFile := filepath.Join(sessionRoot, "abort-"+testCase.diagnostic+".json")
-			require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0o600))
+			launchID := fmt.Sprintf("123e4567-e89b-42d3-a456-4266141742%02d", index+50)
+			sessionFile := filepath.Join(sessionRoot, hashString(launchID)+".jsonl")
 			process := &launchProcess{identity: ProcessIdentity{PID: 720 + index, StartMarker: sessionID, Incarnation: "abort-outcome" + testCase.diagnostic}, stopped: make(chan struct{})}
 			rpc := &resetRPC{launchRPC: &launchRPC{abortErr: testCase.abortErr}, file: sessionFile}
 			factory := &resetProcessFactory{processes: []*launchProcess{process}}
@@ -139,7 +138,7 @@ func TestTerminateRecordsEveryAbortOutcomeAndStillReapsTheOwnedGroup(t *testing.
 			t.Cleanup(func() { _ = manager.Close(context.Background()) })
 			t.Cleanup(func() { process.Reap() })
 			agentID := fmt.Sprintf("abort-outcome-%d", index)
-			_, err = manager.Launch(ctx, LaunchRequest{Name: agentID, Cwd: root, RequestID: fmt.Sprintf("123e4567-e89b-42d3-a456-4266141742%02d", index+50)})
+			_, err = manager.Launch(ctx, LaunchRequest{Name: agentID, Cwd: root, RequestID: launchID})
 			require.NoError(t, err)
 			require.Eventually(t, func() bool {
 				agent, readErr := durable.ManagedAgent(ctx, agentID)

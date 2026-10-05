@@ -132,6 +132,8 @@ type ManagedAgentRecord struct {
 	LaunchOperationID string
 	// LaunchRecipe is private durable input for router cold recovery.
 	LaunchRecipe *ManagedLaunchRecipe
+	// ParentAgentID records the parent agent ID if this agent is a subagent.
+	ParentAgentID string
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -4489,7 +4491,17 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) ORDER BY name ASC`)
+	hasParent, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+	if err != nil {
+		return nil, err
+	}
+	var whereClause string
+	if hasParent {
+		whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%' `
+	} else {
+		whereClause = ` WHERE agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
+	}
+	rows, err := s.db.QueryContext(ctx, managedAgentSelect+whereClause+`ORDER BY name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -4507,6 +4519,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 	}
 	for _, item := range result {
 		if err := loadManagedRuntimeTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedParentAgentIDTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -4551,6 +4566,19 @@ func loadManagedRuntimeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRe
 		return err
 	}
 	return db.QueryRowContext(ctx, `SELECT runtime FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&agent.Runtime)
+}
+
+func loadManagedParentAgentIDTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	hasParent, err := managedAgentColumnTx(ctx, db, "parent_agent_id")
+	if err != nil || !hasParent || agent == nil {
+		return err
+	}
+	var parentID sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT parent_agent_id FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&parentID); err != nil {
+		return err
+	}
+	agent.ParentAgentID = parentID.String
+	return nil
 }
 
 // loadManagedLaunchRecipeTx attaches the durable launch recipe to an agent
@@ -4622,7 +4650,17 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if err := s.db.QueryRowContext(ctx, `SELECT projection_version FROM managed_settings WHERE singleton_id = 1`).Scan(&version); err != nil {
 		return rollback(err)
 	}
-	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) ORDER BY name ASC`)
+	hasParent, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+	if err != nil {
+		return rollback(err)
+	}
+	var whereClause string
+	if hasParent {
+		whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%' `
+	} else {
+		whereClause = ` WHERE agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
+	}
+	rows, err := s.db.QueryContext(ctx, managedAgentSelect+whereClause+`ORDER BY name ASC`)
 	if err != nil {
 		return rollback(err)
 	}
@@ -4641,6 +4679,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	goalPolicies := make(map[string]*ManagedGoalPolicy)
 	for _, agent := range agents {
 		if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
+		if err := loadManagedParentAgentIDTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
 		if agent.Runtime == "embedded" {
@@ -4735,7 +4776,17 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 	if err := s.db.QueryRowContext(ctx, `SELECT projection_version FROM managed_settings WHERE singleton_id = 1`).Scan(&version); err != nil {
 		return rollback(err)
 	}
-	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ? AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id)`, agentID), nil)
+	hasParent, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+	if err != nil {
+		return rollback(err)
+	}
+	var whereClause string
+	if hasParent {
+		whereClause = ` WHERE agent_id = ? AND (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%'`
+	} else {
+		whereClause = ` WHERE agent_id = ? AND agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id)`
+	}
+	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+whereClause, agentID), nil)
 	if errors.Is(err, sql.ErrNoRows) {
 		_, _ = s.db.ExecContext(ctx, "COMMIT")
 		return ManagedAgentSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version}, nil
@@ -4744,6 +4795,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedParentAgentIDTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy
@@ -5368,7 +5422,17 @@ func (s *Store) reserveRecipientSourceTx(ctx context.Context, recipient, kind, o
 // records left by pre-026 launches without guessing a tmux owner.
 func (s *Store) ReconcileManagedRecipientSources(ctx context.Context) error {
 	return s.runImmediate(ctx, func() error {
-		rows, err := s.db.QueryContext(ctx, `SELECT name,agent_id,lifecycle_state FROM managed_agents WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) ORDER BY name ASC`)
+		hasParent, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+		if err != nil {
+			return err
+		}
+		var whereClause string
+		if hasParent {
+			whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%' `
+		} else {
+			whereClause = ` WHERE agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT name,agent_id,lifecycle_state FROM managed_agents`+whereClause+`ORDER BY name ASC`)
 		if err != nil {
 			return err
 		}
@@ -5412,6 +5476,39 @@ func (s *Store) ReconcileManagedRecipientSources(ctx context.Context) error {
 			}
 		}
 		return nil
+	})
+}
+
+// CascadeTerminateSubagents cancels and terminates all active/queued subagents for a parent agent.
+func (s *Store) CascadeTerminateSubagents(ctx context.Context, parentAgentID string) error {
+	if parentAgentID == "" {
+		return nil
+	}
+	return s.runImmediate(ctx, func() error {
+		hasParent, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+		if err != nil {
+			return err
+		}
+		if hasParent {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', accepting_prompts=0 WHERE parent_agent_id=? OR agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID, parentAgentID); err != nil {
+				if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', accepting_prompts=0 WHERE parent_agent_id=? OR agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID, parentAgentID); err2 != nil {
+					return err
+				}
+			}
+		} else {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', accepting_prompts=0 WHERE agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID); err != nil {
+				if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', accepting_prompts=0 WHERE agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID); err2 != nil {
+					return err
+				}
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='cancelled' WHERE parent_agent_id=? AND status IN ('queued', 'running')`, parentAgentID); err != nil {
+			if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='stopped' WHERE parent_agent_id=? AND status IN ('queued', 'running')`, parentAgentID); err2 != nil {
+				return err
+			}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
 	})
 }
 

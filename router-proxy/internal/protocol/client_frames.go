@@ -413,7 +413,7 @@ func subagentChildValue(raw json.RawMessage) bool {
 	if !optionalString(value, "type", 1, 64) || !optionalString(value, "description", 1, 512) {
 		return false
 	}
-	return !has(value, "status") || enumValue(value["status"], "queued", "running", "completed", "steered", "aborted", "stopped", "error")
+	return !has(value, "status") || enumValue(value["status"], "queued", "running", "completed", "steered", "aborted", "stopped", "error", "cancelled")
 }
 func lifecycleChildValue(raw json.RawMessage) bool {
 	value, ok := objectValue(raw)
@@ -426,7 +426,7 @@ func lifecycleChildValue(raw json.RawMessage) bool {
 	if has(value, "description") && (!stringRange(value["description"], 1, 512) || strings.TrimSpace(stringValue(value["description"])) == "") {
 		return false
 	}
-	return !has(value, "status") || enumValue(value["status"], "queued", "running", "completed", "steered", "aborted", "stopped", "error")
+	return !has(value, "status") || enumValue(value["status"], "queued", "running", "completed", "steered", "aborted", "stopped", "error", "cancelled")
 }
 func subagentsValue(raw json.RawMessage, max int) bool {
 	values, ok := arrayValue(raw)

@@ -53,7 +53,7 @@ func validSubagentDuration(value float64) bool {
 
 func subagentTerminal(status string) bool {
 	switch status {
-	case "completed", "steered", "aborted", "stopped", "error", "interrupted":
+	case "completed", "steered", "aborted", "stopped", "error", "interrupted", "cancelled":
 		return true
 	default:
 		return false
@@ -63,7 +63,7 @@ func subagentTerminal(status string) bool {
 func subagentTransition(old, next string) bool {
 	switch old {
 	case "queued":
-		return next == "running" || next == "stopped" || next == "interrupted"
+		return next == "running" || next == "stopped" || next == "interrupted" || next == "cancelled" || next == "aborted"
 	case "running":
 		return subagentTerminal(next)
 	default:
@@ -131,8 +131,18 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 			model = "gemini-3.8-flash"
 		}
 		now := formatTimestamp(s.clock.Now())
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at,runtime) VALUES(?,?,0,?,?,?,'running','running','idle',0,?,1,?,?,?,?,?,'embedded')`, child.AgentID, child.AgentID, cwd, provider, model, child.AgentID+"-session", parent.Generation, revision, manifest, now, now); err != nil {
-			return err
+		hasParent, colErr := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+		if colErr != nil {
+			return colErr
+		}
+		if hasParent {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at,runtime,parent_agent_id) VALUES(?,?,0,?,?,?,'running','running','idle',0,?,1,?,?,?,?,?,'embedded',?)`, child.AgentID, child.AgentID, cwd, provider, model, child.AgentID+"-session", parent.Generation, revision, manifest, now, now, parent.AgentID); err != nil {
+				return err
+			}
+		} else {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at,runtime) VALUES(?,?,0,?,?,?,'running','running','idle',0,?,1,?,?,?,?,?,'embedded')`, child.AgentID, child.AgentID, cwd, provider, model, child.AgentID+"-session", parent.Generation, revision, manifest, now, now); err != nil {
+				return err
+			}
 		}
 		kind := child.SubagentType
 		if kind == "" {
@@ -424,4 +434,57 @@ func (s *Store) pruneManagedSubagentsTx(ctx context.Context, now time.Time, age 
 		_, err = s.bumpManagedProjectionVersion(ctx)
 	}
 	return int(n), err
+}
+
+// PruneExpiredSubagents deletes terminal subagents whose terminal_at is older than ttl.
+func (s *Store) PruneExpiredSubagents(ctx context.Context, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = 1 * time.Hour
+	}
+	return s.runImmediate(ctx, func() error {
+		cutoff := formatTimestamp(s.clock.Now().Add(-ttl))
+		res, err := s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id IN (SELECT agent_id FROM managed_subagents WHERE terminal_at IS NOT NULL AND terminal_at < ?)`, cutoff)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `DELETE FROM managed_subagents WHERE terminal_at IS NOT NULL AND terminal_at < ?`, cutoff)
+		if err != nil {
+			return err
+		}
+		hasParent, _ := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+		if hasParent {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE (agent_id LIKE 'subagent-%' OR (parent_agent_id IS NOT NULL AND parent_agent_id != '')) AND desired_state='terminated' AND updated_at < ?`, cutoff)
+		} else {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id LIKE 'subagent-%' AND desired_state='terminated' AND updated_at < ?`, cutoff)
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			_, _ = s.bumpManagedProjectionVersion(ctx)
+		}
+		return nil
+	})
+}
+
+// TimeoutRunningSubagents marks subagents running or queued longer than timeout as error.
+func (s *Store) TimeoutRunningSubagents(ctx context.Context, timeout time.Duration) (int, error) {
+	if timeout <= 0 {
+		timeout = 1 * time.Hour
+	}
+	var count int
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		cutoff := formatTimestamp(s.clock.Now().Add(-timeout))
+		res, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='error', error='subagent execution timed out (exceeded 1 hour TTL)', updated_at=?, terminal_at=? WHERE status IN ('queued', 'running') AND created_at < ?`, now, now, cutoff)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		count = int(n)
+		if count > 0 {
+			_, _ = s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', activity_state='stopped', accepting_prompts=0, last_error_code='SUBAGENT_TIMEOUT', last_error_message='subagent execution timed out', last_error_at=?, updated_at=? WHERE agent_id IN (SELECT agent_id FROM managed_subagents WHERE error='subagent execution timed out (exceeded 1 hour TTL)') AND desired_state='running'`, now, now)
+			_, _ = s.bumpManagedProjectionVersion(ctx)
+		}
+		return nil
+	})
+	return count, err
 }

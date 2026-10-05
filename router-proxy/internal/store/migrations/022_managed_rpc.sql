@@ -25,7 +25,7 @@ CREATE TABLE managed_agents (
   selected_model_provider TEXT NOT NULL,
   selected_model_id TEXT NOT NULL,
   desired_state TEXT NOT NULL CHECK (desired_state IN ('running')),
-  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('starting', 'running', 'failed')),
+  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('starting', 'running', 'failed', 'terminated')),
   activity_state TEXT NOT NULL CHECK (activity_state IN ('starting', 'idle', 'stopped', 'failed')),
   accepting_prompts INTEGER NOT NULL DEFAULT 0 CHECK (accepting_prompts IN (0, 1)),
   pi_session_id TEXT,

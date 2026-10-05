@@ -2,6 +2,7 @@ package managed
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -121,6 +122,9 @@ func ProjectionArchiveEnvelope(archive *store.ManagedAgentArchive, generatedAt t
 func ProjectionListEnvelope(snapshot store.ManagedAgentsSnapshot) map[string]any {
 	agents := make([]map[string]any, 0, len(snapshot.Agents))
 	for _, agent := range snapshot.Agents {
+		if agent == nil || strings.HasPrefix(agent.AgentID, "subagent-") || agent.ParentAgentID != "" {
+			continue
+		}
 		agents = append(agents, PublicAgentWithGoal(agent, snapshot.GoalPolicies[agent.AgentID]))
 	}
 	return map[string]any{"generated_at": snapshot.GeneratedAt.UTC().Format(time.RFC3339Nano), "projection_version": snapshot.ProjectionVersion, "agents": agents}
