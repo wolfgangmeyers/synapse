@@ -84,4 +84,19 @@ describe("PromptTemplateDialog", () => {
     expect(screen.getByText("No matching prompt templates")).toBeInTheDocument();
   });
   it("previews tokens and inserts at the captured selection", async () => { const user = userEvent.setup(); const onInsert = vi.fn(); render(<PromptTemplateDialog {...base} templateToUse={template} selection={{ start: 2, end: 2 }} onInsert={onInsert} />); fireEvent.change(screen.getByRole("textbox", { name: "file" }), { target: { value: "app.ts" } }); expect(screen.getByText("Review app.ts")).toBeInTheDocument(); await user.click(screen.getByRole("button", { name: "Paste" })); expect(onInsert).toHaveBeenCalledWith("Review app.ts", { start: 2, end: 2 }); });
+
+  it("renders clean icon-only action-buttons with tooltips in toolbar", () => {
+    const { container } = render(<PromptTemplateDialog {...base} />);
+    const importBtn = screen.getByTitle("Import templates");
+    expect(importBtn).toHaveClass("action-button");
+    expect(importBtn.querySelector(".fa-file-import")).toBeInTheDocument();
+
+    const exportBtn = screen.getByTitle("Export templates");
+    expect(exportBtn).toHaveClass("action-button");
+    expect(exportBtn.querySelector(".fa-file-export")).toBeInTheDocument();
+
+    const addBtn = screen.getByTitle("New template");
+    expect(addBtn).toHaveClass("action-button");
+    expect(addBtn.querySelector(".fa-plus")).toBeInTheDocument();
+  });
 });

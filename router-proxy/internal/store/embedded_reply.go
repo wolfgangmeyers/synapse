@@ -102,8 +102,28 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 				thinking.WriteString(th.Thinking)
 			}
 		}
-		if text.Len() == 0 {
-			// Fallback: If assistant executed tools or completed silently, do not fail.
+		hasToolCalls := false
+		for _, c := range assistant.Content {
+			if _, ok := c.(ai.ToolCall); ok {
+				hasToolCalls = true
+				break
+			} else if tc, ok := c.(*ai.ToolCall); ok && tc != nil {
+				hasToolCalls = true
+				break
+			}
+		}
+		if !hasToolCalls {
+			var toolCount int
+			err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq > ? AND seq <= ? AND (kind='toolResult' OR (kind='assistant' AND instr(body, '"toolCall"') > 0))`, b.AgentID, b.SessionID, b.Epoch, b.Generation, ackSeq, expectedSeq).Scan(&toolCount)
+			if err != nil {
+				return err
+			}
+			if toolCount > 0 {
+				hasToolCalls = true
+			}
+		}
+		if text.Len() == 0 && !hasToolCalls {
+			// Fallback: If assistant completed silently without tool calls, do not fail.
 			text.WriteString("(Action completed without additional text)")
 		}
 		seq, digest, err := s.embeddedHead(ctx, b)
@@ -188,7 +208,7 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 				break
 			}
 		}
-		if alreadySent {
+		if alreadySent || text.Len() == 0 {
 			return nil
 		}
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))

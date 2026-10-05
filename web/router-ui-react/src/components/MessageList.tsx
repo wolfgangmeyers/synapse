@@ -34,13 +34,27 @@ function activitySequence(entry: ManagedHistoryEntry): number {
   return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
-function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry): boolean {
+function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, allEntries?: readonly ManagedHistoryEntry[]): boolean {
   // A managed child stays in the persistent active-subagents area until its
   // terminal update. Its actual subagent tool invocation remains a normal
   // Complete history entry because it has presentation.kind === "tool".
   if (isActiveManagedSubagentLifecycle(entry)) return false;
   // Complete is an outcome timeline, not a lifecycle progress log.
   if (entry.presentation?.kind === "lifecycle" || entry.presentation?.kind === "state") return false;
+  const isOutboundMessage = entry.presentation?.kind === "message" && (
+    entry.message === "Message sent" || entry.message === "Reply sent" ||
+    (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
+  );
+  if (isOutboundMessage) {
+    const rawContent = entry.message_content ?? entry.presentation?.summary;
+    const trimmed = rawContent?.trim();
+    if (!trimmed || trimmed === "(Action completed without additional text)") {
+      const toolCallsExist = allEntries
+        ? allEntries.some((e) => e.presentation?.kind === "tool" || (e as { category?: unknown }).category === "managed_tool")
+        : true;
+      if (toolCallsExist) return false;
+    }
+  }
   if (entry.presentation?.kind !== "child") return true;
   return ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
 }
@@ -77,10 +91,10 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
       })),
     ];
     for (const entry of activityEntries ?? []) {
-      if (!isMeaningfulCompleteActivity(entry) || isAlreadyInMessages(entry, messages)) {
+      if (!isMeaningfulCompleteActivity(entry, activityEntries) || isAlreadyInMessages(entry, messages)) {
         continue;
       }
-      const userMail = isMailboxSendToUser(entry, currentUser);
+      const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
       if (userMail !== undefined) {
         const thinkingText = getThinkingContent(entry);
         if (thinkingText) {
