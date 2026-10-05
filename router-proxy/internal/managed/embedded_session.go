@@ -800,6 +800,22 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		freshWorkerMu.Lock()
 		execution := reminderExecutions[result.ToolCallID]
 		freshWorkerMu.Unlock()
+		if result.IsError {
+			if commit {
+				if !execution.replay {
+					body, err := json.Marshal(result)
+					if err != nil {
+						return err
+					}
+					_ = m.store.ObserveEmbeddedEffect(resultCtx, binding, result.ToolCallID, body)
+				}
+				freshWorkerMu.Lock()
+				delete(reminderExecutions, result.ToolCallID)
+				delete(freshReminderIntents, result.ToolCallID)
+				freshWorkerMu.Unlock()
+			}
+			return nil
+		}
 		if execution.uncertain {
 			return errors.New("reminder outcome unknown: no checked SDK result")
 		}
@@ -828,6 +844,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			freshWorkerMu.Lock()
 			delete(reminderExecutions, result.ToolCallID)
+			delete(freshReminderIntents, result.ToolCallID)
 			freshWorkerMu.Unlock()
 		}
 		return nil

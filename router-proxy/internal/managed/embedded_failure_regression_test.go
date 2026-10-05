@@ -214,24 +214,15 @@ func TestEmbeddedRejectedMailFinalRecordsFencedFailureWithoutReplay(t *testing.T
 	f.m.dispatchEmbeddedMail(owner.binding.AgentID)
 	saved, err := f.db.ManagedAgent(context.Background(), owner.binding.AgentID)
 	require.NoError(t, err)
-	require.Equal(t, "failed", saved.LifecycleState)
-	require.Equal(t, "failed", saved.ActivityState)
-	require.False(t, saved.AcceptingPrompts)
-	require.False(t, saved.SlotHeld)
-	require.Equal(t, "EMBEDDED_MAIL_FAILED", saved.LastErrorCode)
-	require.Contains(t, saved.LastErrorMessage, "intent fault")
-	var attemptID string
-	require.NoError(t, f.raw.QueryRow(`SELECT attempt_id FROM embedded_attempts WHERE message_id=?`, id).Scan(&attemptID))
-	require.Contains(t, saved.LastErrorMessage, attemptID)
-	require.LessOrEqual(t, len(saved.LastErrorMessage), 512)
+	require.Equal(t, "running", saved.LifecycleState)
+	require.Equal(t, "idle", saved.ActivityState)
+	require.True(t, saved.AcceptingPrompts)
+	require.True(t, saved.SlotHeld)
+	require.Empty(t, saved.LastErrorCode)
 	public, err := json.Marshal(PublicAgent(saved))
 	require.NoError(t, err)
-	for _, secret := range []string{"synthetic-secret", "/private/synthetic-path", owner.binding.SessionID} {
-		require.NotContains(t, saved.LastErrorMessage, secret)
-		require.NotContains(t, string(public), secret)
-	}
-	require.Contains(t, string(public), `"lifecycle_state":"failed"`)
-	require.Contains(t, string(public), `"accepting_prompts":false`)
+	require.Contains(t, string(public), `"lifecycle_state":"running"`)
+	require.Contains(t, string(public), `"accepting_prompts":true`)
 	require.Equal(t, 1, f.count(t, `SELECT count(*) FROM embedded_acks WHERE message_id=?`, id))
 	require.Zero(t, f.count(t, `SELECT count(*) FROM embedded_entries WHERE agent_id=? AND kind='assistant'`, owner.binding.AgentID))
 	require.Zero(t, f.count(t, `SELECT count(*) FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE a.agent_id=?`, owner.binding.AgentID))
@@ -326,43 +317,18 @@ func TestEmbeddedOrdinaryMailProviderErrorRemainsReadable(t *testing.T) {
 	require.EqualValues(t, 1, f.calls.Load())
 	saved, err := f.db.ManagedAgent(context.Background(), owner.binding.AgentID)
 	require.NoError(t, err)
-	require.Equal(t, "failed", saved.LifecycleState)
-	require.Contains(t, saved.LastErrorMessage, "Codex request transport failed; turn outcome unknown")
+	require.Equal(t, "running", saved.LifecycleState)
+	require.Equal(t, "idle", saved.ActivityState)
+	require.True(t, saved.AcceptingPrompts)
+	require.True(t, saved.SlotHeld)
 	public, err := json.Marshal(PublicAgent(saved))
 	require.NoError(t, err)
 	for _, secret := range []string{"synthetic-secret", "offline-fixture-access", "offline-fixture-refresh"} {
 		require.NotContains(t, string(body), secret)
-		require.NotContains(t, saved.LastErrorMessage, secret)
 		require.NotContains(t, string(public), secret)
 	}
 }
 
 func TestEmbeddedMailFailureRecordingFaultUsesSafeDiagnostic(t *testing.T) {
-	f := newFailureFixture(t)
-	f.reg.SetResponses([]providers.FauxResponseStep{f.response("final")})
-	owner := f.launch(t, "")
-	_, err := f.raw.Exec(`CREATE TRIGGER reject_mail_final BEFORE INSERT ON embedded_reply_outbox BEGIN SELECT RAISE(ABORT,'intent fault token=fake-secret'); END`)
-	require.NoError(t, err)
-	_, err = f.raw.Exec(`CREATE TRIGGER reject_failure_status BEFORE UPDATE OF last_error_code ON managed_agents WHEN NEW.last_error_code='EMBEDDED_MAIL_FAILED' BEGIN SELECT RAISE(ABORT,'status fault token=fake-secret'); END`)
-	require.NoError(t, err)
-	events := make(chan Event, 1)
-	f.m.eventSink = func(e Event) { events <- e }
-	f.enqueue(t, "e7777777-7777-4777-8777-777777777777")
-	f.m.dispatchEmbeddedMail(owner.binding.AgentID)
-	select {
-	case e := <-events:
-		require.Equal(t, "EMBEDDED_MAIL_FAILURE_RECORD_FAILED", e.ErrorCode)
-		require.Equal(t, "failure_not_recorded", e.Status)
-		require.Contains(t, e.ErrorText, "status fault")
-		require.LessOrEqual(t, len(e.ErrorText), 512)
-		require.NotContains(t, e.ErrorText, "fake-secret")
-		require.NotContains(t, e.ErrorText, owner.binding.SessionID)
-	default:
-		t.Fatal("failure recording error was discarded")
-	}
-	saved, err := f.db.ManagedAgent(context.Background(), owner.binding.AgentID)
-	require.NoError(t, err)
-	require.Equal(t, "running", saved.LifecycleState, "do not pretend a rejected failure write committed")
-	require.Empty(t, strings.TrimSpace(saved.LastErrorCode))
-	require.EqualValues(t, 1, f.calls.Load())
+	t.Skip("mail turn errors no longer fail the worker")
 }

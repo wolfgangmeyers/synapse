@@ -226,3 +226,96 @@ func reminderSDKTimeoutDiagnostic(t *testing.T, path, agentID string) {
 		}
 	}
 }
+
+func TestEmbeddedReminderFailureTransitionsToObservedNeverUnknown(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	const toolName = "mecha_reminder"
+	const failCallID = "reminder-fail-call"
+	const okCallID = "reminder-ok-call"
+	failArgs := map[string]any{"action": "delete", "id": "nonexistent-reminder-id"}
+	okArgs := map[string]any{"action": "list"}
+
+	seen := make(chan reminderSDKObservation, 4)
+	reg.SetResponses([]providers.FauxResponseStep{
+		// Turn 1: Propose failing reminder call
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall(toolName, failArgs, failCallID)}, ai.StopToolUse)
+		},
+		// Turn 1 follow-up after error: Propose ok reminder call
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			seen <- reminderSDKResult(h, failCallID)
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall(toolName, okArgs, okCallID)}, ai.StopToolUse)
+		},
+		// Turn 2 follow-up after ok list: Done
+		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			seen <- reminderSDKResult(h, okCallID)
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "all done"}}, ai.StopStop)
+		},
+	})
+
+	m, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+	})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+
+	request := LaunchRequest{
+		Name:               "reminder-fail-test",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "test reminder failure",
+		RequestID:          "a5555555-5555-4555-8555-555555555599",
+	}
+	launched, err := m.Launch(ctx, request)
+	require.NoError(t, err)
+
+	diagnoseTimeout := func() { reminderSDKTimeoutDiagnostic(t, path, launched.Agent.AgentID) }
+	failedResult := waitReminderSDK(t, seen, diagnoseTimeout)
+	require.NotNil(t, failedResult.result)
+	require.Equal(t, failCallID, failedResult.result.ToolCallID)
+	require.True(t, failedResult.result.IsError, "failed reminder call must produce IsError = true")
+
+	check, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer check.Close()
+
+	// Verify the failing effect transitioned to 'observed' and is NOT 'unknown'
+	var effectState string
+	var resultBytes []byte
+	require.NoError(t, check.QueryRowContext(ctx, `SELECT state, result FROM embedded_effects WHERE effect_id=?`, failCallID).Scan(&effectState, &resultBytes))
+	require.Equal(t, "observed", effectState, "failed reminder effect must transition to state='observed'")
+	require.NotEmpty(t, resultBytes, "failed reminder effect must have non-empty result")
+
+	// Wait for subsequent successful turn
+	okResult := waitReminderSDK(t, seen)
+	require.NotNil(t, okResult.result)
+	require.Equal(t, okCallID, okResult.result.ToolCallID)
+	require.False(t, okResult.result.IsError, "subsequent reminder call must succeed")
+
+	// Verify agent settles back to idle and running after turn completion
+	require.Eventually(t, func() bool {
+		agentRecord, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+		return err == nil && agentRecord.LifecycleState == "running" && agentRecord.ActivityState == "idle" && agentRecord.AcceptingPrompts && agentRecord.SlotHeld
+	}, 3*time.Second, 10*time.Millisecond)
+
+	// After all tool calls settle, verify NO unknown effects remain
+	var unknownCount int
+	require.NoError(t, check.QueryRowContext(ctx, `SELECT count(*) FROM embedded_effects WHERE state='unknown'`).Scan(&unknownCount))
+	require.Zero(t, unknownCount, "no effects should remain in 'unknown' state")
+}
