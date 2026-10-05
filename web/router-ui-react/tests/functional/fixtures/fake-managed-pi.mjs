@@ -168,12 +168,12 @@ function emitChildDeltaReceipt(customType, content, id, details) {
 function waitForMarker(path) {
   if (existsSync(path)) return Promise.resolve();
   return new Promise((resolve) => {
-    const watcher = watch(dirname(path), (_event, changed) => {
-      if (changed === path.split("/").pop() && existsSync(path)) {
-        watcher.close();
+    const timer = setInterval(() => {
+      if (existsSync(path)) {
+        clearInterval(timer);
         resolve();
       }
-    });
+    }, 50);
   });
 }
 async function emitDirectLifecycle(envelope) {

@@ -354,20 +354,20 @@ describe("App integration", () => {
   it("moves a saved same-host router connection onto the Web UI proxy", async () => {
     const storage = new MemoryStorage();
     const directRouter = "http://web-ui.test:8765";
-    const bootstrapRouter = "http://web-ui.test:8787";
+    const bootstrapRouter = "http://web-ui.test:8788";
     storage.setItem(ACTIVE_ROUTER_KEY, directRouter);
     storage.setItem(ROUTERS_KEY, JSON.stringify([directRouter]));
     vi.stubEnv("VITE_ROUTER_URL", bootstrapRouter);
 
     render(<App storage={storage} connect={false} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: /Router web-ui.test:8787/ })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /Router web-ui.test:8788/ })).toBeInTheDocument());
     expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(bootstrapRouter);
   });
 
   it("keeps the saved router and conversation selection when Vite provides a bootstrap URL", async () => {
     const storage = new MemoryStorage();
     const intendedRouter = "http://intended-router.test:43123";
-    const bootstrapRouter = "http://web-ui.test:8787";
+    const bootstrapRouter = "http://web-ui.test:8788";
     const owner = ownerScope(intendedRouter, "wolfgang");
     storage.setItem(ACTIVE_ROUTER_KEY, bootstrapRouter);
     storage.setItem(ROUTERS_KEY, JSON.stringify([intendedRouter, bootstrapRouter]));

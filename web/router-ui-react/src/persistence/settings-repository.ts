@@ -87,7 +87,7 @@ function stringRecord(value: unknown): Record<string, string> {
 function canonicalRouters(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
-  const routers: string[] = [];
+  let routers: string[] = [];
   for (const candidate of value) {
     if (typeof candidate !== "string") continue;
     try {
@@ -100,6 +100,7 @@ function canonicalRouters(value: unknown): string[] {
       // A malformed saved URL cannot be used as a storage key.
     }
   }
+  routers = routers.filter((r) => !r.includes(":8787"));
   return routers;
 }
 
@@ -121,15 +122,28 @@ export function persistedActiveRouter(storage: StorageAdapter | undefined = stor
 
 export function loadSettings(storage: StorageAdapter | undefined = storageOrUndefined(), defaultRouter = DEFAULT_ROUTER_URL): SettingsState {
   const fallback = emptySettings(defaultRouter);
+  if (fallback.activeRouter.includes(":8787")) {
+    fallback.activeRouter = DEFAULT_ROUTER_URL;
+    fallback.routers = [DEFAULT_ROUTER_URL];
+  }
   if (storage === undefined) return fallback;
 
-  const routers = canonicalRouters(parseJson(storage.getItem(ROUTERS_KEY)));
+  let routers = canonicalRouters(parseJson(storage.getItem(ROUTERS_KEY)));
+  routers = routers.filter((r) => !r.includes(":8787"));
   const activeValue = storage.getItem(ACTIVE_ROUTER_KEY);
   let activeRouter = activeValue === null ? fallback.activeRouter : activeValue;
+  if (activeRouter.includes(":8787")) {
+    activeRouter = DEFAULT_ROUTER_URL;
+    storage.setItem(ACTIVE_ROUTER_KEY, DEFAULT_ROUTER_URL);
+  }
   try {
     activeRouter = normalizeRouterUrl(activeRouter);
   } catch {
     activeRouter = fallback.activeRouter;
+  }
+  if (activeRouter.includes(":8787")) {
+    activeRouter = DEFAULT_ROUTER_URL;
+    storage.setItem(ACTIVE_ROUTER_KEY, DEFAULT_ROUTER_URL);
   }
   if (!routers.includes(activeRouter)) routers.unshift(activeRouter);
   if (routers.length === 0) routers.push(fallback.activeRouter);
@@ -166,8 +180,12 @@ export function loadSettings(storage: StorageAdapter | undefined = storageOrUnde
 
 export function saveSettings(settings: SettingsState, storage: StorageAdapter | undefined = storageOrUndefined()): void {
   if (storage === undefined) return;
-  const routers = canonicalRouters(settings.routers);
-  const activeRouter = normalizeRouterUrl(settings.activeRouter);
+  let routers = canonicalRouters(settings.routers);
+  routers = routers.filter((r) => !r.includes(":8787"));
+  let activeRouter = normalizeRouterUrl(settings.activeRouter);
+  if (activeRouter.includes(":8787")) {
+    activeRouter = DEFAULT_ROUTER_URL;
+  }
   if (!routers.includes(activeRouter)) routers.unshift(activeRouter);
   const aliases: Record<string, string> = {};
   for (const [key, value] of Object.entries(settings.aliases)) {

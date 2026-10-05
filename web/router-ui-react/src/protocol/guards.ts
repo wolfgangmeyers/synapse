@@ -261,7 +261,7 @@ function isManagedHistoryPresentation(value: unknown): boolean {
   if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 48)) return false;
   if (value.to !== undefined && !isSafeManagedHistoryString(value.to, 1, 48)) return false;
   if (value.child_label !== undefined && !isSafeManagedHistoryString(value.child_label, 1, 160)) return false;
-  if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown"].includes(value.child_state))) return false;
+  if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown", "cancelled"].includes(value.child_state))) return false;
   if (value.thinking !== undefined && typeof value.thinking !== "string") return false;
   return (value.summary === undefined || isSafeManagedHistoryString(value.summary, 1, 512)) && (value.error === undefined || isManagedHistoryError(value.error));
 }
@@ -324,7 +324,7 @@ export function isUILiveFrame(value: unknown): value is UILiveFrame {
 function isAgentRole(value: unknown): value is "agent" | "user_interaction" { return value === "agent" || value === "user_interaction"; }
 function isClientActivityState(value: unknown): value is ActivityFrame["activity_state"] { return value === "active" || value === "settled" || value === "compacting"; }
 function isObservableActivityState(value: unknown): value is AgentActivityFrame["activity_state"] { return value === "active" || value === "idle" || value === "compacting"; }
-function isChildStatus(value: unknown): value is LifecycleChild["status"] { return value === "queued" || value === "running" || value === "completed" || value === "steered" || value === "aborted" || value === "stopped" || value === "error"; }
+function isChildStatus(value: unknown): value is LifecycleChild["status"] { return value === "queued" || value === "running" || value === "completed" || value === "steered" || value === "aborted" || value === "stopped" || value === "error" || value === "cancelled"; }
 function isSourceKind(value: unknown): boolean { return value === "agent" || value === "web_ui" || value === "android" || value === "discord" || value === "reminder" || value === "system" || value === "unknown"; }
 function isArrivalSourceKind(value: unknown): boolean { return value === "agent" || value === "discord" || value === "reminder"; }
 

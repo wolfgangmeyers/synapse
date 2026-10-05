@@ -99,19 +99,15 @@ describe("ConversationHeader interrupt control", () => {
     expect(reminderBtn).not.toHaveClass("empty");
   });
 
-  it("shows Restart Worker button when agent is failed and calls onRestart", () => {
+  it("does not render Restart Worker button when agent is failed", () => {
     const failedAgent: Agent = {
       agent_id: "worker-failed",
       source: "router-managed",
       activity_state: "failed",
     };
-    const onRestart = vi.fn();
 
-    render(<ConversationHeader agent={failedAgent} onRestart={onRestart} />);
-    const restartBtn = screen.getByRole("button", { name: "Restart failed worker" });
-    expect(restartBtn).toBeInTheDocument();
-    restartBtn.click();
-    expect(onRestart).toHaveBeenCalledWith("worker-failed");
+    render(<ConversationHeader agent={failedAgent} />);
+    expect(screen.queryByRole("button", { name: "Restart failed worker" })).not.toBeInTheDocument();
   });
 });
 
