@@ -18,7 +18,6 @@ export interface AgentRowProps {
   onToggleSubagents?: ((agentId: string) => void) | undefined;
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
-  onRestart?: ((agentId: string) => void) | undefined;
 }
 function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   return (agent.managed_children ?? []).flatMap((child) => {
@@ -27,7 +26,7 @@ function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   });
 }
 
-export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival, onRestart }: AgentRowProps): ReactElement {
+export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival }: AgentRowProps): ReactElement {
   const working = agent.activity_state === "active";
   const compacting = agent.activity_state === "compacting";
   const managed = agent.source === "router-managed";
@@ -46,16 +45,6 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
   const hasReminders = reminderCount > 0;
   const className = ["agent-row", selected ? "active" : "", working ? "working" : "", compacting ? "compacting" : "", failed ? "failed" : "", expanded ? "expanded" : "", hasSubagents ? "has-subagents" : ""].filter(Boolean).join(" ");
   const stopActionPropagation = (event: React.SyntheticEvent<HTMLButtonElement>): void => { event.stopPropagation(); };
-  const handleRestart = async (event: React.SyntheticEvent): Promise<void> => {
-    stopActionPropagation(event as React.SyntheticEvent<HTMLButtonElement>);
-    if (onRestart) {
-      onRestart(agent.agent_id);
-      return;
-    }
-    try {
-      await fetch(`/v1/managed-agents/${encodeURIComponent(agent.agent_id)}/restart`, { method: "POST" });
-    } catch {}
-  };
 
   return <div role="listitem" className={className} aria-selected={selected} data-agent-id={agent.agent_id}
     data-managed-projection-version={managed ? agent.managedProjectionVersion : undefined}
@@ -74,7 +63,7 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
           {arrival ? <ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /> : null}
         </span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}
-        {failed ? <span className="managed-failure-indicator" role="alert" aria-label="Managed worker failed"><i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />Failed<button type="button" className="restart-worker-button" aria-label="Restart failed worker" title="Restart failed worker" onClick={(event) => void handleRestart(event)} onKeyDown={stopActionPropagation}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" /></button></span> : null}
+        {failed ? <span className="managed-failure-indicator" role="alert" aria-label="Managed worker failed"><i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />Failed</span> : null}
       </span>
       {working ? <span className="working-indicator" aria-label="Working"><span /></span> : null}
     </div>
