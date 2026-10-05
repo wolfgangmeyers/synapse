@@ -917,8 +917,8 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_ToolResultImage(t *testing.T
 		ai.AssistantMessage{
 			Content: []ai.Content{
 				ai.ToolCall{
-					ID:   "call-screen-1",
-					Name: "screenshot",
+					ID:        "call-screen-1",
+					Name:      "screenshot",
 					Arguments: map[string]any{},
 				},
 			},
@@ -1038,4 +1038,86 @@ func TestOpenAI_ImageConversion(t *testing.T) {
 	require.Len(t, toolContent, 1)
 	require.Equal(t, "image_url", toolContent[0].(map[string]any)["type"])
 	require.Equal(t, "data:image/png;base64,"+fakePNG, toolContent[0].(map[string]any)["image_url"].(map[string]any)["url"])
+}
+
+func TestGoogleAuth_StreamThinkingTrace(t *testing.T) {
+	origURL := googleGenerateContentURL
+	defer func() { googleGenerateContentURL = origURL }()
+
+	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Let me think about this.\",\"thought\":true}],\"role\":\"model\"}}]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Here is the answer.\"}],\"role\":\"model\"}}]}}\n\n"))
+	}))
+	defer mockAPI.Close()
+	googleGenerateContentURL = mockAPI.URL
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	initialAuth := map[string]any{
+		"antigravity": map[string]any{
+			"access":    "test-token",
+			"refresh":   "test-refresh-token",
+			"expires":   time.Now().UnixMilli() + 3600*1000,
+			"projectId": "test-project",
+		},
+	}
+	data, _ := json.Marshal(initialAuth)
+	_ = os.WriteFile(authPath, data, 0600)
+
+	m := &Manager{config: Config{PiAgentDir: tempDir}}
+	transcript := ai.TranscriptContext{
+		Messages: []ai.Message{
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Question"},
+				},
+			},
+		},
+	}
+
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+
+	var thinkingEvents []ai.AssistantMessageEvent
+	var textEvents []ai.AssistantMessageEvent
+	var finalDone *ai.AssistantMessage
+
+	for event := range stream.Events() {
+		switch event.Type {
+		case ai.EventThinkingStart, ai.EventThinkingDelta, ai.EventThinkingEnd:
+			thinkingEvents = append(thinkingEvents, event)
+		case ai.EventTextStart, ai.EventTextDelta, ai.EventTextEnd:
+			textEvents = append(textEvents, event)
+		case ai.EventDone:
+			finalDone = event.Message
+		}
+	}
+
+	require.NotEmpty(t, thinkingEvents)
+	var thinkingDelta strings.Builder
+	for _, ev := range thinkingEvents {
+		if ev.Type == ai.EventThinkingDelta {
+			thinkingDelta.WriteString(ev.Delta)
+		}
+	}
+	require.Equal(t, "Let me think about this.", thinkingDelta.String())
+
+	require.NotEmpty(t, textEvents)
+	var textDelta strings.Builder
+	for _, ev := range textEvents {
+		if ev.Type == ai.EventTextDelta {
+			textDelta.WriteString(ev.Delta)
+		}
+	}
+	require.Equal(t, "Here is the answer.", textDelta.String())
+
+	require.NotNil(t, finalDone)
+	require.Len(t, finalDone.Content, 2)
+	th, isTh := finalDone.Content[0].(ai.ThinkingContent)
+	require.True(t, isTh)
+	require.Equal(t, "Let me think about this.", th.Thinking)
+	txt, isTxt := finalDone.Content[1].(ai.TextContent)
+	require.True(t, isTxt)
+	require.Equal(t, "Here is the answer.", txt.Text)
 }

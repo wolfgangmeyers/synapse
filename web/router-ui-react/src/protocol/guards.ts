@@ -255,13 +255,14 @@ function isManagedHistoryError(value: unknown): boolean {
     && isPatternString(value.code, /^[A-Za-z][A-Za-z0-9_]*$/, 1, 128) && typeof value.retryable === "boolean" && typeof value.detail_available === "boolean";
 }
 function isManagedHistoryPresentation(value: unknown): boolean {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "tool_name", "outcome", "from", "to", "child_label", "child_state", "summary", "error"]) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth"].includes(value.kind)) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "tool_name", "outcome", "from", "to", "child_label", "child_state", "summary", "error", "thinking"]) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth", "thinking"].includes(value.kind)) return false;
   if (value.tool_name !== undefined && !isPatternString(value.tool_name, /^[A-Za-z][A-Za-z0-9_.-]*$/, 1, 128)) return false;
   if (value.outcome !== undefined && (typeof value.outcome !== "string" || !["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown"].includes(value.outcome))) return false;
   if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 48)) return false;
   if (value.to !== undefined && !isSafeManagedHistoryString(value.to, 1, 48)) return false;
   if (value.child_label !== undefined && !isSafeManagedHistoryString(value.child_label, 1, 160)) return false;
   if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown"].includes(value.child_state))) return false;
+  if (value.thinking !== undefined && typeof value.thinking !== "string") return false;
   return (value.summary === undefined || isSafeManagedHistoryString(value.summary, 1, 512)) && (value.error === undefined || isManagedHistoryError(value.error));
 }
 function isJsonValue(value: unknown, ancestors = new Set<object>(), depth = 0): value is JsonValue {
@@ -288,7 +289,7 @@ function isManagedHistoryToolInput(value: unknown): value is JsonValue {
   }
 }
 export function isManagedHistoryEntry(value: unknown): value is ManagedHistoryEntry {
-  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message", "presentation", "message_content", "sender_identity", "tool_input"])
+  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message", "presentation", "message_content", "sender_identity", "tool_input", "thinking"])
     && isSafeString(value.id, 1, 128)
     && isAgentId(value.agent_id)
     && (value.at === undefined || isRouterUtcTimestamp(value.at))
@@ -297,7 +298,8 @@ export function isManagedHistoryEntry(value: unknown): value is ManagedHistoryEn
     && (value.presentation === undefined || isManagedHistoryPresentation(value.presentation))
     && (value.message_content === undefined || isSafeString(value.message_content, 0, 65536))
     && (value.sender_identity === undefined || isSafeString(value.sender_identity, 1, 128))
-    && (value.tool_input === undefined || isManagedHistoryToolInput(value.tool_input));
+    && (value.tool_input === undefined || isManagedHistoryToolInput(value.tool_input))
+    && (value.thinking === undefined || typeof value.thinking === "string");
 }
 export function isManagedCompleteHistoryEntry(value: unknown): value is ManagedHistoryEntry {
   return isManagedHistoryEntry(value) && (value.message === undefined || isSafeManagedHistoryString(value.message, 0, 512));

@@ -31,6 +31,7 @@ type ManagedHistoryPresentation struct {
 	ChildState string               `json:"child_state,omitempty"`
 	Summary    string               `json:"summary,omitempty"`
 	Error      *ManagedHistoryError `json:"error,omitempty"`
+	Thinking   string               `json:"thinking,omitempty"`
 }
 
 type ManagedHistoryEntry struct {
@@ -43,6 +44,7 @@ type ManagedHistoryEntry struct {
 	MessageContent *string                     `json:"message_content,omitempty"`
 	SenderIdentity *string                     `json:"sender_identity,omitempty"`
 	ToolInput      json.RawMessage             `json:"tool_input,omitempty"`
+	Thinking       string                      `json:"thinking,omitempty"`
 }
 
 type managedHistoryDetails struct {
@@ -350,8 +352,14 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 				entry.Level = level
 				entry.Message = message
 				entry.Presentation = presentation
+				if presentation != nil && presentation.Thinking != "" {
+					entry.Thinking = presentation.Thinking
+				}
 			} else {
 				entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
+				if entry.Presentation != nil && entry.Presentation.Thinking != "" {
+					entry.Thinking = entry.Presentation.Thinking
+				}
 			}
 			entry.ID = fmt.Sprintf("complete:%d", sequence)
 			entry.AgentID = agentID

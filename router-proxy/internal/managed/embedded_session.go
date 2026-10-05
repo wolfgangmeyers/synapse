@@ -539,10 +539,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
 		return err
 	}
+	var turnErr error
 	_ = m.store.SetEmbeddedActivityState(ctx, binding, "active")
 	m.publishProjection()
 	defer func() {
-		_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
+		if errors.Is(turnErr, context.Canceled) || (turnErr != nil && strings.Contains(turnErr.Error(), "context canceled")) {
+			_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), binding.AgentID)
+		} else {
+			_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
+		}
 		m.publishProjection()
 		m.OfferDirect(binding.AgentID)
 	}()
@@ -1425,16 +1430,27 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			break
 		}
 	}
+	handleTurnErr := func(err error) error {
+		if err != nil {
+			turnErr = err
+			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), binding.AgentID)
+				m.publishProjection()
+				m.OfferDirect(binding.AgentID)
+			}
+		}
+		return err
+	}
 	if wake != nil {
 		// ClaimEmbeddedRestartWake already starts an interrupted 076 notice.
 		// Do not enter the ordinary recovery path, which starts it again.
-		return p.runClaimedWake(ctx, session, *wake, wakePrompts)
+		return handleTurnErr(p.runClaimedWake(ctx, session, *wake, wakePrompts))
 	}
 	if recoveryNotice != nil && recoveryNotice.State != "started" {
 		p.notice = recoveryNotice
 		if recoveryNotice.State == "appended" {
 			p.noticeStart = true
-			return session.Continue(ctx)
+			return handleTurnErr(session.Continue(ctx))
 		}
 		message := ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: recoveryNotice.Text}}}
 		var err error
@@ -1443,14 +1459,14 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return err
 		}
 		_, err = session.RunMessages(ctx, []agent.AgentMessage{message})
-		return err
+		return handleTurnErr(err)
 	}
 	if resumeUnentered {
 		p.turnSeq, p.turnDigest = p.seq, p.digest
 		// Continue the restored checked user, never append a duplicate user.
 		// StreamFn fences and commits provider entry before dispatch.
 		if err := session.Continue(ctx); err != nil {
-			return err
+			return handleTurnErr(err)
 		}
 		if generation, ok := ctx.Value(embeddedOriginalRestartGenerationKey{}).(int64); ok {
 			_, err := m.store.ScheduleEmbeddedSettledOriginalWake(ctx, binding, generation, p.turnSeq, p.turnDigest)
@@ -1463,7 +1479,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			Content: ai.ContentList{ai.TextContent{Text: "Continue working on the current goal."}},
 		}})
 		if err != nil {
-			return err
+			return handleTurnErr(err)
 		}
 		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
 	}
@@ -1490,21 +1506,21 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return p.mailAppendErr
 		}
 		if err != nil {
-			return err
+			return handleTurnErr(err)
 		}
 		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
 	}
 	if explicitPrompt != "" {
 		_, err := session.Run(ctx, explicitPrompt)
 		if err != nil {
-			return err
+			return handleTurnErr(err)
 		}
 		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
 	}
 	if !hasUser && saved.PendingInitialInstruction != "" {
 		_, err := session.Run(ctx, saved.PendingInitialInstruction)
 		if err != nil {
-			return err
+			return handleTurnErr(err)
 		}
 		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
 	}

@@ -361,6 +361,10 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 					parts = append(parts, map[string]any{"text": tc.Text})
 				} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
 					parts = append(parts, map[string]any{"text": tc.Text})
+				} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
+					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
+				} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
+					parts = append(parts, map[string]any{"thought": true, "text": th.Thinking})
 				} else if call, ok := c.(ai.ToolCall); ok {
 					callID := call.ID
 					if callID == "" {
@@ -570,9 +574,14 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		buf := make([]byte, 1024*1024)
 		scanner.Buffer(buf, 1024*1024)
 
-		var accumulatedText strings.Builder
+		type contentBlock struct {
+			kind string
+			buf  strings.Builder
+		}
+		var blocks []*contentBlock
+		var currentBlock *contentBlock
+		currentBlockIndex := -1
 		var accumulatedToolCalls []ai.ToolCall
-		textStarted := false
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -591,6 +600,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 							Role  string `json:"role"`
 							Parts []struct {
 								Text         string `json:"text"`
+								Thought      bool   `json:"thought"`
 								FunctionCall *struct {
 									Name string         `json:"name"`
 									Args map[string]any `json:"args"`
@@ -618,18 +628,73 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			for _, candidate := range sse.Response.Candidates {
 				for _, part := range candidate.Content.Parts {
 					if part.Text != "" {
-						if !textStarted {
-							stream.Push(ai.AssistantMessageEvent{Type: ai.EventTextStart, ContentIndex: 0})
-							textStarted = true
+						wantKind := "text"
+						if part.Thought {
+							wantKind = "thinking"
 						}
-						accumulatedText.WriteString(part.Text)
-						stream.Push(ai.AssistantMessageEvent{
-							Type:         ai.EventTextDelta,
-							ContentIndex: 0,
-							Delta:        part.Text,
-						})
+						if currentBlock == nil || currentBlock.kind != wantKind {
+							if currentBlock != nil {
+								if currentBlock.kind == "thinking" {
+									stream.Push(ai.AssistantMessageEvent{
+										Type:         ai.EventThinkingEnd,
+										ContentIndex: currentBlockIndex,
+										Content:      currentBlock.buf.String(),
+									})
+								} else {
+									stream.Push(ai.AssistantMessageEvent{
+										Type:         ai.EventTextEnd,
+										ContentIndex: currentBlockIndex,
+										Content:      currentBlock.buf.String(),
+									})
+								}
+							}
+							currentBlock = &contentBlock{kind: wantKind}
+							blocks = append(blocks, currentBlock)
+							currentBlockIndex = len(blocks) - 1
+							if wantKind == "thinking" {
+								stream.Push(ai.AssistantMessageEvent{
+									Type:         ai.EventThinkingStart,
+									ContentIndex: currentBlockIndex,
+								})
+							} else {
+								stream.Push(ai.AssistantMessageEvent{
+									Type:         ai.EventTextStart,
+									ContentIndex: currentBlockIndex,
+								})
+							}
+						}
+						currentBlock.buf.WriteString(part.Text)
+						if wantKind == "thinking" {
+							stream.Push(ai.AssistantMessageEvent{
+								Type:         ai.EventThinkingDelta,
+								ContentIndex: currentBlockIndex,
+								Delta:        part.Text,
+							})
+						} else {
+							stream.Push(ai.AssistantMessageEvent{
+								Type:         ai.EventTextDelta,
+								ContentIndex: currentBlockIndex,
+								Delta:        part.Text,
+							})
+						}
 					}
 					if part.FunctionCall != nil {
+						if currentBlock != nil {
+							if currentBlock.kind == "thinking" {
+								stream.Push(ai.AssistantMessageEvent{
+									Type:         ai.EventThinkingEnd,
+									ContentIndex: currentBlockIndex,
+									Content:      currentBlock.buf.String(),
+								})
+							} else {
+								stream.Push(ai.AssistantMessageEvent{
+									Type:         ai.EventTextEnd,
+									ContentIndex: currentBlockIndex,
+									Content:      currentBlock.buf.String(),
+								})
+							}
+							currentBlock = nil
+						}
 						callID := ""
 						if m != nil && m.ids != nil {
 							callID, _ = m.ids.Next()
@@ -658,15 +723,32 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			}
 		}
 
-		if textStarted {
-			stream.Push(ai.AssistantMessageEvent{Type: ai.EventTextEnd, ContentIndex: 0})
+		if currentBlock != nil {
+			if currentBlock.kind == "thinking" {
+				stream.Push(ai.AssistantMessageEvent{
+					Type:         ai.EventThinkingEnd,
+					ContentIndex: currentBlockIndex,
+					Content:      currentBlock.buf.String(),
+				})
+			} else {
+				stream.Push(ai.AssistantMessageEvent{
+					Type:         ai.EventTextEnd,
+					ContentIndex: currentBlockIndex,
+					Content:      currentBlock.buf.String(),
+				})
+			}
+			currentBlock = nil
 		}
 
 		finalMsg := &ai.AssistantMessage{
 			Content: ai.ContentList{},
 		}
-		if accumulatedText.Len() > 0 {
-			finalMsg.Content = append(finalMsg.Content, ai.TextContent{Text: accumulatedText.String()})
+		for _, b := range blocks {
+			if b.kind == "thinking" && b.buf.Len() > 0 {
+				finalMsg.Content = append(finalMsg.Content, ai.ThinkingContent{Thinking: b.buf.String()})
+			} else if b.kind == "text" && b.buf.Len() > 0 {
+				finalMsg.Content = append(finalMsg.Content, ai.TextContent{Text: b.buf.String()})
+			}
 		}
 		for _, tc := range accumulatedToolCalls {
 			finalMsg.Content = append(finalMsg.Content, tc)

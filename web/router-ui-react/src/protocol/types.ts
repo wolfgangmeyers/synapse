@@ -905,7 +905,7 @@ export interface ManagedChildrenProjection {
   recovery_state: "current" | "reconstructing";
   children: ManagedChild[];
 }
-export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth";
+export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking";
 export type ManagedHistoryOutcome = "active" | "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "interrupted" | "aborted" | "reconciled_unknown";
 export interface ManagedHistoryError {
   code: string;
@@ -926,6 +926,7 @@ export interface ManagedHistoryPresentation {
   child_state?: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "confirmed" | "interrupted_unknown";
   summary?: string;
   error?: ManagedHistoryError;
+  thinking?: string;
 }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export interface ManagedHistoryEntry {
@@ -941,6 +942,7 @@ export interface ManagedHistoryEntry {
   sender_identity?: string;
   /** Router-redacted decoded input for a tool invocation. */
   tool_input?: JsonValue;
+  thinking?: string;
 }
 export interface ManagedAgentsSnapshotFrame {
   type: "managed_agents_snapshot";
