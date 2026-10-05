@@ -47,7 +47,11 @@ export function getMailboxSendDetails(input: JsonValue | undefined): { recipient
   return undefined;
 }
 
-export function isMailboxSendToUser(entry: ManagedHistoryEntry, currentUserId?: string): { recipient: string; body: string; from: string } | undefined {
+export function isMailboxSendToUser(
+  entry: ManagedHistoryEntry,
+  currentUserId?: string,
+  entriesOrHasToolCalls?: boolean | readonly ManagedHistoryEntry[],
+): { recipient: string; body: string; from: string } | undefined {
   const toolName = normalizedToolName(entry.presentation?.tool_name);
   const isWorkerSend = toolName === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send";
   const isMailboxTool = toolName === "mecha_mailbox_send" || isWorkerSend;
@@ -60,16 +64,27 @@ export function isMailboxSendToUser(entry: ManagedHistoryEntry, currentUserId?: 
 
   const mailboxDetails = getMailboxSendDetails(entry.tool_input);
   const recipient = mailboxDetails?.recipient ?? entry.presentation?.to;
-  const body = mailboxDetails?.body ?? entry.message_content;
+  const rawBody = mailboxDetails?.body ?? entry.message_content;
+  const body = rawBody?.trim();
 
   if (!recipient || !body) return undefined;
+
+  const toolCallsExist = typeof entriesOrHasToolCalls === "boolean"
+    ? entriesOrHasToolCalls
+    : Array.isArray(entriesOrHasToolCalls)
+      ? entriesOrHasToolCalls.some((e) => e.presentation?.kind === "tool" || (e as { category?: unknown }).category === "managed_tool")
+      : true;
+
+  if (body === "(Action completed without additional text)" && toolCallsExist) {
+    return undefined;
+  }
 
   const normalizedRecipient = recipient.trim().toLowerCase();
   const normalizedUser = (currentUserId || "wolfgang").trim().toLowerCase();
 
   if (normalizedRecipient === normalizedUser) {
     const from = entry.presentation?.from ?? entry.sender_identity ?? entry.agent_id;
-    return { recipient, body, from };
+    return { recipient, body: rawBody ?? body, from };
   }
 
   return undefined;
@@ -535,7 +550,19 @@ export function ThinkingTraceCard({
   );
 }
 
-export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry }): ReactElement {
+export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry }): ReactElement | null {
+  const isOutboundMessage = entry.presentation?.kind === "message" && (
+    entry.message === "Message sent" || entry.message === "Reply sent" ||
+    (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
+  );
+  if (isOutboundMessage) {
+    const rawContent = entry.message_content ?? entry.presentation?.summary;
+    const trimmed = rawContent?.trim();
+    if (!trimmed || trimmed === "(Action completed without additional text)") {
+      return null;
+    }
+  }
+
   const [detailMounted, setDetailMounted] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailTrigger = useRef<HTMLElement | undefined>(undefined);

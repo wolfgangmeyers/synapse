@@ -423,4 +423,93 @@ describe("Selected-agent conversation modes", () => {
     expect(bubble).toBeInTheDocument();
     expect(within(bubble!).getByText("Finished the task.")).toBeInTheDocument();
   });
+
+  it("omits fallback chat bubble when assistant has Action completed without additional text while tool calls exist", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-bash-call",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "bash",
+              outcome: "success",
+            },
+            tool_input: {
+              command: "echo test",
+            },
+          },
+          {
+            id: "act-fallback-reply",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:02:00.000Z",
+            message: "Message sent",
+            message_content: "(Action completed without additional text)",
+            presentation: {
+              kind: "message",
+              outcome: "success",
+              from: "worker-1",
+              to: "wolfgang",
+            },
+          },
+        ]}
+      />
+    );
+
+    // The tool execution card is rendered
+    expect(container.querySelector("[data-activity-id='act-bash-call']")).toBeInTheDocument();
+    // No chat bubble is rendered for the fallback text
+    expect(container.querySelector(".bubble-wrap")).not.toBeInTheDocument();
+    expect(screen.queryByText("(Action completed without additional text)")).not.toBeInTheDocument();
+  });
+
+  it("omits chat bubble when assistant has empty text content while tool calls exist", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-read-call",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "read",
+              outcome: "success",
+            },
+            tool_input: {
+              path: "/tmp/foo",
+            },
+          },
+          {
+            id: "act-empty-reply",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:02:00.000Z",
+            message: "Message sent",
+            message_content: "",
+            presentation: {
+              kind: "message",
+              outcome: "success",
+              from: "worker-1",
+              to: "wolfgang",
+            },
+          },
+        ]}
+      />
+    );
+
+    // The tool execution card is rendered
+    expect(container.querySelector("[data-activity-id='act-read-call']")).toBeInTheDocument();
+    // No empty chat bubble is rendered
+    expect(container.querySelector(".bubble-wrap")).not.toBeInTheDocument();
+  });
 });
