@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,7 +118,7 @@ func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
 	}
 
 	// 1. When no entries exist, return default prompt.
-	prompt := m.formatGoalContinuationPrompt(ctx, binding)
+	prompt := m.formatGoalContinuationPrompt(ctx, binding, nil)
 	require.Equal(t, goalContinuationDefaultPrompt, prompt)
 
 	// Insert row in managed_agents
@@ -149,7 +150,7 @@ func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
 	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", normalAsst)
 	require.NoError(t, err)
 
-	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	prompt = m.formatGoalContinuationPrompt(ctx, binding, nil)
 	require.Equal(t, goalContinuationDefaultPrompt, prompt)
 
 	// Case B: Assistant claims subagent is executing, with no active subagents -> corrective notice prompt!
@@ -161,7 +162,7 @@ func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
 	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", claimAsst)
 	require.NoError(t, err)
 
-	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	prompt = m.formatGoalContinuationPrompt(ctx, binding, nil)
 	require.Equal(t, goalContinuationNoSubagentsNoticePrompt, prompt)
 
 	// Case C: Assistant claims "awaiting completion" -> corrective notice prompt!
@@ -173,7 +174,7 @@ func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
 	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", awaitingAsst)
 	require.NoError(t, err)
 
-	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	prompt = m.formatGoalContinuationPrompt(ctx, binding, nil)
 	require.Equal(t, goalContinuationNoSubagentsNoticePrompt, prompt)
 
 	// Case D: Assistant message has a tool call -> default prompt
@@ -188,7 +189,7 @@ func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
 	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", toolCallAsst)
 	require.NoError(t, err)
 
-	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	prompt = m.formatGoalContinuationPrompt(ctx, binding, nil)
 	require.Equal(t, goalContinuationDefaultPrompt, prompt)
 }
 
@@ -372,7 +373,7 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 		requests.Add(1)
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
 					continuations.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "autonomous progress text only"}}, ai.StopStop)
 				}
@@ -448,3 +449,15 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 	lane := m.laneFor(launched.Agent.AgentID)
 	require.Equal(t, 0, lane.consecutiveContinuations, "human prompt must reset consecutive continuations")
 }
+
+func TestUnwrapEmbeddedMailText(t *testing.T) {
+	raw := `{"Version":"embedded-mail/v1","AttemptID":"123","MessageID":"456","IncarnationID":"789","Sender":"wolfgang","Recipient":"workflows","Body":"WHY DO YOU KEEP STOPPING?"}`
+	unwrapped := unwrapEmbeddedMailText(raw)
+	require.Contains(t, unwrapped, "[Direct message from wolfgang]: WHY DO YOU KEEP STOPPING?")
+	require.Contains(t, unwrapped, "You MUST address and answer this message directly")
+
+	// Plain text should be left unchanged
+	plain := "Just a normal prompt"
+	require.Equal(t, plain, unwrapEmbeddedMailText(plain))
+}
+

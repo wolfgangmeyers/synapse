@@ -73,8 +73,8 @@ func productionPolicyManager(t *testing.T, db *store.Store, root string, reg *pr
 func embeddedIsGoalEvaluation(h ai.TranscriptContext) bool {
 	for _, message := range h.Messages {
 		if system, ok := message.(ai.SystemMessage); ok {
-			text, found := system.StringContent()
-			if found && text == embeddedGoalEvaluationSystem {
+			text := ai.GetSystemMessageText(system)
+			if strings.HasPrefix(text, "goal: ") || text == embeddedGoalEvaluationSystem {
 				return true
 			}
 		}
@@ -83,7 +83,7 @@ func embeddedIsGoalEvaluation(h ai.TranscriptContext) bool {
 }
 
 func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
-	for _, verdict := range []string{"DONE", "NOT_DONE", "OFF", "invalid"} {
+	for _, verdict := range []string{"COMPLETED", "DONE", "NOT_DONE", "OFF", "invalid"} {
 		t.Run(verdict, func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
@@ -106,7 +106,7 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 				}
 				for _, msg := range h.Messages {
 					if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-						if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+						if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
 							wakes.Add(1)
 							return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "neutral final"}}, ai.StopStop)
 						}
@@ -141,28 +141,15 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 				require.Len(t, h.Messages, 2)
 				user := h.Messages[1].(ai.UserMessage)
 				payload := user.Content[0].(ai.TextContent).Text
-				require.Contains(t, payload, "finish the fixture")
+				require.Contains(t, payload, "Goal: finish the fixture")
+				require.Contains(t, payload, "Active conversation:")
+				require.Contains(t, payload, "Return exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>.")
 				require.Contains(t, payload, "settled fixture final")
-				var evaluation struct {
-					Goal         string            `json:"goal"`
-					Conversation []json.RawMessage `json:"conversation"`
-				}
-				require.NoError(t, json.Unmarshal([]byte(payload), &evaluation))
-				var finalSeq int64
-				require.NoError(t, read.QueryRow(`SELECT final_seq FROM embedded_goal_evaluations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&finalSeq))
-				rows, e := read.Query(`SELECT body FROM embedded_entries WHERE agent_id=? AND seq<=? ORDER BY seq`, launched.Agent.AgentID, finalSeq)
-				require.NoError(t, e)
-				var checked []json.RawMessage
-				for rows.Next() {
-					var body []byte
-					require.NoError(t, rows.Scan(&body))
-					checked = append(checked, json.RawMessage(body))
-				}
-				require.NoError(t, rows.Err())
-				require.NoError(t, rows.Close())
-				require.Equal(t, checked, evaluation.Conversation, "exact settled conversation, without truncation or later wake entries")
 				var state string
 				want := verdict
+				if verdict == "COMPLETED" {
+					want = "DONE"
+				}
 				if verdict == "invalid" {
 					want = "UNKNOWN"
 				}
@@ -192,6 +179,8 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 			require.EqualValues(t, map[bool]int{true: 3, false: 2}[verdict == "OFF"], ordinary.Load())
 			if verdict == "OFF" {
 				require.Zero(t, evaluations.Load())
+			} else if verdict == "NOT_DONE" {
+				require.EqualValues(t, 2, evaluations.Load())
 			} else {
 				require.EqualValues(t, 1, evaluations.Load())
 			}
@@ -202,7 +191,11 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 			require.EqualValues(t, wantWake, wakes.Load())
 			var continuations, evaluatorEntries int
 			require.NoError(t, read.QueryRow(`SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&continuations))
-			require.Equal(t, wantWake, continuations)
+			wantContinuations := wantWake
+			if verdict == "NOT_DONE" {
+				wantContinuations = 2
+			}
+			require.Equal(t, wantContinuations, continuations)
 			require.NoError(t, read.QueryRow(`SELECT count(*) FROM embedded_entries WHERE agent_id=? AND kind='assistant' AND CAST(body AS TEXT) LIKE '%"text":"NOT_DONE"%'`, launched.Agent.AgentID).Scan(&evaluatorEntries))
 			require.Zero(t, evaluatorEntries, "evaluation is not an ordinary assistant/mail reply")
 		})

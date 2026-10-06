@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func TestEmbeddedGoalMultiTurnContinuationLoop(t *testing.T) {
 
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
 					continuations.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation work completed"}}, ai.StopStop)
 				}
@@ -240,7 +241,7 @@ func TestEmbeddedGoalThinkingBlockVerdictParsing(t *testing.T) {
 				}
 				for _, msg := range h.Messages {
 					if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-						if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+						if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
 							return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation final"}}, ai.StopStop)
 						}
 					}

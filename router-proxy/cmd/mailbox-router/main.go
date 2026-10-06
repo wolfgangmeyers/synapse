@@ -347,6 +347,9 @@ func main() {
 		codexOptions.RPCFactory = managedRPCFactory()
 		codexOptions.CatalogSource = managed.StoreCatalogSource{Store: durable}
 		codexOptions.RootControlHandlers = rootHandlers
+		if codexOptions.GoalContinuationDelay <= 0 {
+			codexOptions.GoalContinuationDelay = 10 * time.Second
+		}
 		managedManager, err = managed.NewManager(codexOptions)
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)

@@ -1086,7 +1086,8 @@ func (m *Manager) resumeParentGoalIfIdle(parent store.EmbeddedBinding) {
 	if ok && owner.binding == parent {
 		m.startManagedTask(func() {
 			runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-			_ = m.runEmbeddedSessionTurn(runCtx, *parentAgent, "Continue working on the current goal.", nil)
+			prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding, nil)
+			_ = m.runEmbeddedSessionTurn(runCtx, *parentAgent, prompt, nil)
 		})
 	}
 }
