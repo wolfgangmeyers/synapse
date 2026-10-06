@@ -9,6 +9,42 @@
       "updated_at": "2026-08-31T15:26:37.675Z"
     },
     {
+      "name": "PR Review",
+      "body": "Review the PR at ${URL}. This is not a read-only review, I expect you to actually post a review on the PR. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
+      "id": "01231aba-fe0a-4fca-99fe-267bd96421cd",
+      "updated_at": "2026-08-29T04:01:45.060Z"
+    },
+    {
+      "name": "Green CI",
+      "body": "Check your PR for CI failures or merge conflicts. If any are found, set a goal to get these fixed. You need to get your PR free of merge conflicts and CI failures, CI must be green. Also set a 15 minute recurring reminder to keep checking it. You can remove the reminder and goal once it's green. Inform me once it is.",
+      "id": "c791788d-a6d6-4470-9e0f-6c8d40da10ac",
+      "updated_at": "2026-09-01T21:13:26.302Z"
+    },
+    {
+      "name": "Consistency Check",
+      "body": "Have a subagent go through an audit to see if we are using existing patterns for this PR. Check each individual file in the PR to make sure that it uses existing patterns and doesn't invent any new ones - there should be at least one or two places in the codebase that use the same pattern. The key priority here is consistency with the existing codebase, it outweighs \"doing it better\".",
+      "id": "cb1611c4-fc1f-425d-a849-8412cab82d9c",
+      "updated_at": "2026-08-31T15:19:47.808Z"
+    },
+    {
+      "name": "Scope Creep Check",
+      "body": "Have a subagent double-check that all of the changes in this PR are in support of the ticket, and that no additional scope has crept in.",
+      "id": "a118b74d-b3e5-4762-a0fd-3ba54df4180d",
+      "updated_at": "2026-08-31T15:16:30.800Z"
+    },
+    {
+      "name": "Confidence Check",
+      "body": "Do you have high confidence that the requirements for ${ticket} is met? If not, what would be required to reach high confidence. Give your answer in plain English, and make it easy to understand.",
+      "id": "d00d417e-9bc4-4803-84d2-e324fddd5ae4",
+      "updated_at": "2026-09-14T16:09:33.890Z"
+    },
+    {
+      "name": "New Ticket",
+      "body": "Get a worker started on ${ticket}. Make sure that the worker name is both descriptive and begins with the ticket number (the same thing as the tmux window name), and inform the worker by mailbox what their window name is. Create a new worktree, then start a new window in that worktree and hand off the task to the worker. Make sure to include instructions for the worker to set a goal with clear success criteria. Also get the ticket marked as in progress (if applicable). Make sure the worker loads the worker skill.",
+      "id": "a6fd1989-441d-485d-803f-0e28ed5ac5f7",
+      "updated_at": "2026-08-31T18:23:07.286Z"
+    },
+    {
       "name": "Check behavioral test coverage",
       "body": "BEFORE CLAIMING THIS WORK IS READY, CONFIRM THE BEHAVIORAL FUNCTIONAL TEST REQUIREMENT IS SATISFIED. Continue the current task, but ensure every applicable requirement is covered by a deterministic test that puts the system-owned pieces together and proves the observable behavior. Mock true external dependencies such as LLMs and third-party services as necessary. Unit and component tests are supporting evidence, not substitutes when a cross-component functional test is practical. Fill any material gaps before final handoff, and report any behavior that can only be proven through live acceptance.",
       "id": "e914f4f8-76c6-4a66-8342-d95c055d0263",
@@ -21,40 +57,10 @@
       "updated_at": "2026-09-14T19:25:50.144Z"
     },
     {
-      "name": "Confidence Check",
-      "body": "Do you have high confidence that the requirements for ${ticket} is met? If not, what would be required to reach high confidence. Give your answer in plain English, and make it easy to understand.",
-      "id": "d00d417e-9bc4-4803-84d2-e324fddd5ae4",
-      "updated_at": "2026-09-14T16:09:33.890Z"
-    },
-    {
-      "name": "Consistency Check",
-      "body": "Have a subagent go through an audit to see if we are using existing patterns for this PR. Check each individual file in the PR to make sure that it uses existing patterns and doesn't invent any new ones - there should be at least one or two places in the codebase that use the same pattern. The key priority here is consistency with the existing codebase, it outweighs \"doing it better\".",
-      "id": "cb1611c4-fc1f-425d-a849-8412cab82d9c",
-      "updated_at": "2026-08-31T15:19:47.808Z"
-    },
-    {
-      "name": "Green CI",
-      "body": "Check your PR for CI failures or merge conflicts. If any are found, set a goal to get these fixed. You need to get your PR free of merge conflicts and CI failures, CI must be green. Also set a 15 minute recurring reminder to keep checking it. You can remove the reminder and goal once it's green. Inform me once it is.",
-      "id": "c791788d-a6d6-4470-9e0f-6c8d40da10ac",
-      "updated_at": "2026-09-01T21:13:26.302Z"
-    },
-    {
-      "name": "New Ticket",
-      "body": "Get a worker started on ${ticket}. Make sure that the worker name is both descriptive and begins with the ticket number (the same thing as the tmux window name), and inform the worker by mailbox what their window name is. Create a new worktree, then start a new window in that worktree and hand off the task to the worker. Make sure to include instructions for the worker to set a goal with clear success criteria. Also get the ticket marked as in progress (if applicable). Make sure the worker loads the worker skill.",
-      "id": "a6fd1989-441d-485d-803f-0e28ed5ac5f7",
-      "updated_at": "2026-08-31T18:23:07.286Z"
-    },
-    {
       "name": "Parallelize",
       "body": "Consider the next steps towards your goal, and think about if you can parallelize any of them. If so, and if you are not currently running many things in parallel already, do so. It will speed up completion of the goal.",
       "id": "4a85d3eb-429f-4cb0-ab6c-948048fbd575",
       "updated_at": "2026-09-07T16:12:23.677Z"
-    },
-    {
-      "name": "PR Review",
-      "body": "Review the PR at ${URL}. This is not a read-only review, I expect you to actually post a review on the PR. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 4-7 focus areas. For a tiny/simple PR, two reviewer subagents can handle all focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.\n\nIMPORTANT: you should limit how many rounds of actual review you do. There should be a maximum of 2 rounds of new feedback; if you are on the third round of review, just make sure that all previous feedback has either been fixed, or has a reasonable justification for not fixing (like deferring to a future PR instead of this one, or that it's just internal/test code). If you are on round 3 or higher, do not do a normal review, just verify that previous feedback has either been fixed or a non-fix has been justified.\n\nALSO IMPORTANT: Do not withhold approval due to merge conflicts or failing CI. Those have to be resolved anyway to merge.",
-      "id": "01231aba-fe0a-4fca-99fe-267bd96421cd",
-      "updated_at": "2026-08-29T04:01:45.060Z"
     },
     {
       "name": "PR Sweep",
@@ -73,12 +79,6 @@
       "body": "Launch a subagent to write up a clear set of requirements for ${project}. The requirements should be in plain English, and easy to read and understand for a human. They should only contain decisions that would be important for a human to make. The idea is that all of the rest of the effort we put into the feature will be to directly support one of these requirements.",
       "id": "c4024a61-3ec9-46fa-b3ba-7542d7aba9e5",
       "updated_at": "2026-10-03T05:04:38.634Z"
-    },
-    {
-      "name": "Scope Creep Check",
-      "body": "Have a subagent double-check that all of the changes in this PR are in support of the ticket, and that no additional scope has crept in.",
-      "id": "a118b74d-b3e5-4762-a0fd-3ba54df4180d",
-      "updated_at": "2026-08-31T15:16:30.800Z"
     },
     {
       "name": "Set Goal",
@@ -111,10 +111,16 @@
       "updated_at": "2026-09-24T03:40:01.001Z"
     },
     {
+      "name": "Supervisor Review",
+      "body": "Launch an independent supervisor review subagent to review your changes. Make sure any feedback is valid (it must be within the scope of the requirements, which are usually in a ticket), report the findings to me so they are well-formatted and easy to understand (no jargon), then address the feedback if any.",
+      "id": "1f50b43e-0848-46a5-83da-fca5c644ce99",
+      "updated_at": "2026-10-06T22:05:22.110Z"
+    },
+    {
       "name": "Supervisor Status Update",
-      "body": "Tell me at a high level so it's really easy to understand what everybody's status is right now. Is anyone blocked or has anyone come to a halt when they should be moving",
-      "id": "50f0c2ad-ee34-4380-9e90-3d2377b22e06",
-      "updated_at": "2026-09-02T22:35:50.769Z"
+      "body": "Tell me at a high level so it's really easy to understand what everybody's status is right now. Is anyone blocked or has anyone come to a halt when they should be moving?",
+      "id": "512f0ffd-148f-4a6b-9594-ae42e0f49c67",
+      "updated_at": "2026-09-02T21:50:28.925Z"
     },
     {
       "name": "Supervisor Sweep",
