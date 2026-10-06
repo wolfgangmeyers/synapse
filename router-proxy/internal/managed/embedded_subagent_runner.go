@@ -143,6 +143,7 @@ func (m *Manager) finalizeQueuedTask(task *subagentTask, status, resultText stri
 			m.AsyncDeliverSubagentParentWake(task.parent, *latestRecord)
 		}
 	}
+	m.resumeParentGoalIfIdle(task.parent)
 }
 
 func (m *Manager) closeSubagents() {
@@ -646,6 +647,7 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 }
 
 func (m *Manager) runSubagent(task *subagentTask) {
+	defer m.resumeParentGoalIfIdle(task.parent)
 	defer m.releaseSubagentSlot(task)
 
 	taskCtx, cancel := context.WithCancel(m.runCtx)
@@ -1020,3 +1022,72 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (m *Manager) resumeParentGoalIfIdle(parent store.EmbeddedBinding) {
+	if parent.AgentID == "" {
+		return
+	}
+	// Check if any subagents remain active for this parent
+	m.subagentsMu.Lock()
+	hasActive := false
+	for _, t := range m.subagentsActive {
+		if t.parent.AgentID == parent.AgentID {
+			hasActive = true
+			break
+		}
+	}
+	if !hasActive {
+		for _, t := range m.subagentsQueue {
+			if t.parent.AgentID == parent.AgentID {
+				hasActive = true
+				break
+			}
+		}
+	}
+	m.subagentsMu.Unlock()
+	if hasActive {
+		return
+	}
+
+	ctx := m.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	subagents, err := m.store.ManagedSubagents(ctx, parent)
+	if err == nil {
+		for _, s := range subagents {
+			if s.Status == "queued" || s.Status == "running" {
+				return
+			}
+		}
+	}
+
+	parentAgent, err := m.store.ManagedAgent(ctx, parent.AgentID)
+	if err != nil || parentAgent == nil || parentAgent.ActivityState != "idle" || parentAgent.LifecycleState != "running" || parentAgent.DesiredState != "running" {
+		return
+	}
+
+	policy, err := m.store.ManagedGoalPolicyFor(ctx, parent.AgentID)
+	if err != nil || policy == nil || !policy.Config.Enabled {
+		return
+	}
+
+	if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(ctx, parent); err == nil && found {
+		m.startManagedTask(func() {
+			m.startEmbeddedGoalContinuation(parent, key)
+		})
+		return
+	}
+
+	m.mu.Lock()
+	owner, ok := m.embeddedOwners[parent.AgentID]
+	m.mu.Unlock()
+	if ok && owner.binding == parent {
+		m.startManagedTask(func() {
+			runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+			_ = m.runEmbeddedSessionTurn(runCtx, *parentAgent, "Continue working on the current goal.", nil)
+		})
+	}
+}
+

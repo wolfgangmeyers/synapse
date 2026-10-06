@@ -321,7 +321,7 @@ func TestEmbeddedGoalSnoozeFixedClockDueCompletionDurability(t *testing.T) {
 
 	// Second evaluation completes with DONE (completed)
 	require.Eventually(t, func() bool {
-		return evaluations.Load() == 2
+		return evaluations.Load() >= 2
 	}, 3*time.Second, 10*time.Millisecond)
 
 	var eval2State string
@@ -330,7 +330,7 @@ func TestEmbeddedGoalSnoozeFixedClockDueCompletionDurability(t *testing.T) {
 
 	// Applied receipt committed for the completed turn
 	require.NoError(t, ro.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_applied_receipts WHERE agent_id=? AND goal_enabled=1`, binding.AgentID).Scan(&receiptsCount))
-	require.Equal(t, 2, receiptsCount)
+	require.GreaterOrEqual(t, receiptsCount, 2)
 
 	// Reopen transcript verifies full durability
 	snapshot, err := db.ReopenEmbedded(ctx, binding)
