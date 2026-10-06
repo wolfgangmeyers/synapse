@@ -3,6 +3,7 @@ package managed
 import (
 	"bytes"
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -184,12 +185,15 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		}
 	}
 	if !ok {
+		log.Printf("kickoffIdleGoalContinuation: no owner for %s after waiting", agentID)
 		return
 	}
 	if binding.SessionID != "" && owner.binding.SessionID != binding.SessionID {
+		log.Printf("kickoffIdleGoalContinuation: session mismatch for %s", agentID)
 		return
 	}
 	if binding.Epoch != 0 && owner.binding.Epoch != binding.Epoch {
+		log.Printf("kickoffIdleGoalContinuation: epoch mismatch for %s", agentID)
 		return
 	}
 
@@ -203,28 +207,35 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
 	if err != nil || curAgent == nil || curAgent.ActivityState != "idle" || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
+		log.Printf("kickoffIdleGoalContinuation: agent %s not idle/running: err=%v", agentID, err)
 		return
 	}
 	if curAgent.PiSessionID != owner.binding.SessionID || curAgent.SessionEpoch != owner.binding.Epoch || curAgent.RuntimeGeneration != owner.binding.Generation {
+		log.Printf("kickoffIdleGoalContinuation: generation mismatch for %s", agentID)
 		return
 	}
 
 	if m.hasActiveSubagents(agentID) {
+		log.Printf("kickoffIdleGoalContinuation: agent %s has active subagents", agentID)
 		return
 	}
 
 	policy, err := m.store.ManagedGoalPolicyFor(m.runCtx, agentID)
 	if err != nil || policy == nil || !policy.Config.Enabled {
+		log.Printf("kickoffIdleGoalContinuation: agent %s policy disabled: %v", agentID, err)
 		return
 	}
 	if policy.EvaluatorState == "done" || policy.LastOutcome == store.EmbeddedGoalEvaluationDone {
+		log.Printf("kickoffIdleGoalContinuation: agent %s goal done", agentID)
 		return
 	}
 	if policy.EvaluatorState == "evaluating" {
+		log.Printf("kickoffIdleGoalContinuation: agent %s goal evaluating", agentID)
 		return
 	}
 	now := formatManagedTime(m.clock.Now())
 	if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
+		log.Printf("kickoffIdleGoalContinuation: agent %s goal snoozed until %s", agentID, policy.SnoozedUntil)
 		return
 	}
 
@@ -237,7 +248,10 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding)
-	_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil)
+	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
+	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
+		log.Printf("kickoffIdleGoalContinuation: runEmbeddedSessionTurn error for %s: %v", agentID, err)
+	}
 }
 
 const goalContinuationDefaultPrompt = "Continue working on the current goal."
