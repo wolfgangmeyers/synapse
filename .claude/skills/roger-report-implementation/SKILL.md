@@ -76,6 +76,17 @@ Use generated frontend API types and regenerate the client after backend route/s
 
 Inspect indexes for selective filters, joins, and ordering. Add only justified indexes, with matching ORM metadata and an Alembic migration following RogerEMR conventions; verify the current migration head. Measure representative paths when query shape or volume makes the need uncertain.
 
+### Shared architecture and anti-duplication discipline
+
+Follow the mandatory report patterns in `~/.mecha-developer/kb/rogeremr-report-patterns.md`:
+- **Search Before Adding:** Never declare a report-local enum, CRUD query, predicate, or URL parser without searching `backend/app/services/reports/`, `backend/app/crud/`, and `frontend/src/`. Reuse shared primitives (e.g. `table_export.SortOrder`).
+- **Patient Population:** Use `patient_population_predicates` in `backend/app/services/reports/utils.py` for imported and test patient filtering across ORM and Core queries. Do not write ad-hoc `import_source.is_(None)` predicates.
+- **Clinic Access:** Use `AgencyClinicCRUD.ensure_exists` for existence checks and `AgencyClinicCRUD.list_options` for dropdown options. Never issue direct `select(AgencyClinic)` queries in report services.
+- **Router Query Models:** Use Pydantic query models with `params: Annotated[ReportPageParams, Query()]` on routers; do not repeat 10+ query parameters across functions. (Do not use `Depends(Model)` for repeated list keys).
+- **Report URL State:** Put report URL state in a typed `use<ReportName>ReportParams` hook under `frontend/src/hooks/reportParams/`.
+- **Metadata-Driven XLSX:** Use `format_report_sheet` in `table_export.py` with column field metadata instead of copying openpyxl formatting loops.
+- **Service Economy:** Eliminate pass-through wrappers (`get_report -> list_rows`), resolve sort defaults once (`query.resolved_sort()`), and load ambient agency context once in the service.
+
 ## Stack and branch discipline
 
 Determine dependencies from the current remote heads before implementation. Before sibling report work, inspect whether an open report branch split shared routing or report files such as `backend/app/api/reports.py` into a reports package. A shared split report-router/file change can require a report PR to be stacked **directly on Patient Diagnoses**. When that dependency exists, do not base on main and do not chain through Schedule, Open OASIS, Worklog, Wound Status, or another sibling report merely because it was implemented earlier. Add another report layer only for a concrete code dependency.
