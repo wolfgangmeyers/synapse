@@ -42,14 +42,26 @@ func (m *Manager) SetEmbeddedStartupGeneration(g int64) error {
 		return errors.New("missing embedded startup generation")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return errors.New("manager is closed")
 	}
 	if m.embeddedStartupGeneration != 0 && m.embeddedStartupGeneration != g {
+		m.mu.Unlock()
 		return errors.New("embedded startup generation changed")
 	}
 	m.embeddedStartupGeneration = g
+	m.mu.Unlock()
+
+	if m.store != nil {
+		ctx := m.runCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := m.store.ResetActiveEmbeddedAgents(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -306,6 +318,11 @@ func (m *Manager) dispatchEmbeddedStartupWake(ctx context.Context, saved store.M
 // RecoverEmbeddedRoots re-dispatches only saved embedded launch reservations.
 // A real runner must validate and reopen its own ordered SQLite session.
 func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
+	if m.store != nil {
+		if err := m.store.ResetActiveEmbeddedAgents(ctx); err != nil {
+			return err
+		}
+	}
 	_ = m.ReconcileInterruptedSubagents(ctx)
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {

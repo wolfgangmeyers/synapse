@@ -41,3 +41,35 @@ func TestSetEmbeddedActivityStateTogglesAndBumpsProjection(t *testing.T) {
 	// Invalid state returns error
 	require.Error(t, s.SetEmbeddedActivityState(ctx, b, "unknown_state"))
 }
+
+func TestResetActiveEmbeddedAgentsStartupRecovery(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	b1 := redBind(t, s, "active-agent-1", "session-1", 1, "gen-1", "worker")
+	b2 := redBind(t, s, "active-agent-2", "session-2", 1, "gen-1", "root")
+
+	// Set both to active
+	require.NoError(t, s.SetEmbeddedActivityState(ctx, b1, "active"))
+	require.NoError(t, s.SetEmbeddedActivityState(ctx, b2, "active"))
+
+	a1, err := s.ManagedAgent(ctx, b1.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", a1.ActivityState)
+
+	a2, err := s.ManagedAgent(ctx, b2.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", a2.ActivityState)
+
+	// Simulate router startup resetting active agents to idle
+	require.NoError(t, s.ResetActiveEmbeddedAgents(ctx))
+
+	a1, err = s.ManagedAgent(ctx, b1.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", a1.ActivityState)
+
+	a2, err = s.ManagedAgent(ctx, b2.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", a2.ActivityState)
+}
+

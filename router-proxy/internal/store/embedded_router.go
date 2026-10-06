@@ -462,6 +462,28 @@ func (s *Store) ResetEmbeddedAgentInterrupt(ctx context.Context, agentID string)
 	})
 }
 
+// ResetActiveEmbeddedAgents resets any running embedded agents that were left in active state
+// to idle. At router startup / new process generation, no turn can be active since the
+// previous process was killed.
+func (s *Store) ResetActiveEmbeddedAgents(ctx context.Context) error {
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'idle', updated_at = ? WHERE lifecycle_state = 'running' AND activity_state = 'active' AND runtime = 'embedded'`, now)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			_, err = s.bumpManagedProjectionVersion(ctx)
+			return err
+		}
+		return nil
+	})
+}
+
 // ResetEmbeddedSession accepts only the managed row's replacement epoch. The
 // old row remains historical, but loses its current bit atomically with insert.
 func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBinding, role string) error {

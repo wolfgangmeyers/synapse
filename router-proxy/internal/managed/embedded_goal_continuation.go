@@ -1,10 +1,13 @@
 package managed
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/ai"
 )
 
 type embeddedGoalTimer struct{ cancel func() }
@@ -112,9 +115,10 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 		return
 	}
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+	prompt := m.formatGoalContinuationPrompt(ctx, owner.binding)
 	// Start committed UNKNOWN before any SDK provider request. An error or
 	// process loss cannot authorize replay; the saved transcript is evidence.
-	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, "", nil, &key)
+	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key)
 }
 
 func (m *Manager) hasActiveSubagents(agentID string) bool {
@@ -232,6 +236,88 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	}
 
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-	_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, "Continue working on the current goal.", nil)
+	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding)
+	_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil)
+}
+
+const goalContinuationDefaultPrompt = "Continue working on the current goal."
+const goalContinuationNoSubagentsNoticePrompt = "Continue working on the current goal. Notice: There are NO active subagents running. To launch a subagent, you must invoke the subagent tool directly via the API. Otherwise, execute tools (bash, read, edit) directly to make progress on the goal."
+
+func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding store.EmbeddedBinding) string {
+	if m.store == nil {
+		return goalContinuationDefaultPrompt
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var snapshot store.EmbeddedSnapshot
+	var err error
+	if binding.OwnerToken > 0 {
+		snapshot, err = m.store.ReopenEmbedded(ctx, binding)
+	}
+	if binding.OwnerToken <= 0 || err != nil {
+		snapshot, err = m.store.ReopenLatestAgentEmbedded(ctx, binding.AgentID)
+	}
+	if err != nil || len(snapshot.Entries) == 0 {
+		return goalContinuationDefaultPrompt
+	}
+
+	var lastAssistant *store.EmbeddedEntry
+	for i := len(snapshot.Entries) - 1; i >= 0; i-- {
+		if snapshot.Entries[i].Kind == "assistant" {
+			lastAssistant = &snapshot.Entries[i]
+			break
+		}
+	}
+	if lastAssistant == nil {
+		return goalContinuationDefaultPrompt
+	}
+
+	bodyLower := strings.ToLower(string(lastAssistant.Body))
+	claimedSubagent := strings.Contains(bodyLower, "subagent") ||
+		strings.Contains(bodyLower, "awaiting completion") ||
+		strings.Contains(bodyLower, "executing")
+
+	if !claimedSubagent {
+		return goalContinuationDefaultPrompt
+	}
+
+	hasActiveSubagents := m.hasActiveSubagents(binding.AgentID)
+	if hasActiveSubagents {
+		return goalContinuationDefaultPrompt
+	}
+
+	hasToolCalls := false
+	if msg, err := ai.UnmarshalMessage(lastAssistant.Body); err == nil {
+		var content ai.ContentList
+		switch asst := msg.(type) {
+		case ai.AssistantMessage:
+			content = asst.Content
+		case *ai.AssistantMessage:
+			if asst != nil {
+				content = asst.Content
+			}
+		}
+		for _, part := range content {
+			if _, ok := part.(ai.ToolCall); ok {
+				hasToolCalls = true
+				break
+			}
+			if _, ok := part.(*ai.ToolCall); ok {
+				hasToolCalls = true
+				break
+			}
+		}
+	}
+	if !hasToolCalls && bytes.Contains(lastAssistant.Body, []byte(`"toolCall"`)) {
+		hasToolCalls = true
+	}
+
+	if !hasToolCalls || strings.Contains(bodyLower, "subagent") || strings.Contains(bodyLower, "awaiting completion") {
+		return goalContinuationNoSubagentsNoticePrompt
+	}
+
+	return goalContinuationDefaultPrompt
 }
 
