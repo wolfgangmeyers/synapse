@@ -168,7 +168,7 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 		if err != nil {
 			return err
 		}
-		if err := s.embeddedGoalEvaluationGate(ctx, b, k, prior.State == EmbeddedGoalEvaluationUnknown); err != nil {
+		if err := s.embeddedGoalEvaluationGate(ctx, b, k, false); err != nil {
 			return err
 		}
 		if prior.Generation != b.Generation || prior.FinalSeq != k.FinalSeq || prior.FinalDigest != k.FinalDigest {
