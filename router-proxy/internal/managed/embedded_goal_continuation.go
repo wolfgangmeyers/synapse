@@ -116,3 +116,122 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 	// process loss cannot authorize replay; the saved transcript is evidence.
 	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, "", nil, &key)
 }
+
+func (m *Manager) hasActiveSubagents(agentID string) bool {
+	m.subagentsMu.Lock()
+	for _, task := range m.subagentsActive {
+		if task.parent.AgentID == agentID {
+			task.mu.Lock()
+			st := task.status
+			task.mu.Unlock()
+			if st == "queued" || st == "running" {
+				m.subagentsMu.Unlock()
+				return true
+			}
+		}
+	}
+	m.subagentsMu.Unlock()
+
+	ctx := m.runCtx
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	curAgent, err := m.store.ManagedAgent(ctx, agentID)
+	if err != nil || curAgent == nil {
+		return false
+	}
+	binding := store.EmbeddedBinding{
+		AgentID:    curAgent.AgentID,
+		SessionID:  curAgent.PiSessionID,
+		Epoch:      curAgent.SessionEpoch,
+		Generation: curAgent.RuntimeGeneration,
+	}
+	subagents, err := m.store.ManagedSubagents(ctx, binding)
+	if err == nil {
+		for _, s := range subagents {
+			if s.Status == "queued" || s.Status == "running" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// kickoffIdleGoalContinuation checks if an agent is currently running and idle
+// with an active goal and no active subagents, and triggers a continuation turn.
+func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
+	if m.isClosed() {
+		return
+	}
+	agentID := binding.AgentID
+	var owner embeddedOwner
+	var ok bool
+	for i := 0; i < 50; i++ {
+		m.mu.Lock()
+		owner, ok = m.embeddedOwners[agentID]
+		m.mu.Unlock()
+		if ok {
+			break
+		}
+		select {
+		case <-m.runCtx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if !ok {
+		return
+	}
+	if binding.SessionID != "" && owner.binding.SessionID != binding.SessionID {
+		return
+	}
+	if binding.Epoch != 0 && owner.binding.Epoch != binding.Epoch {
+		return
+	}
+
+	lane := m.laneFor(agentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+
+	if m.runCtx.Err() != nil || m.isClosed() {
+		return
+	}
+
+	curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
+	if err != nil || curAgent == nil || curAgent.ActivityState != "idle" || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
+		return
+	}
+	if curAgent.PiSessionID != owner.binding.SessionID || curAgent.SessionEpoch != owner.binding.Epoch || curAgent.RuntimeGeneration != owner.binding.Generation {
+		return
+	}
+
+	if m.hasActiveSubagents(agentID) {
+		return
+	}
+
+	policy, err := m.store.ManagedGoalPolicyFor(m.runCtx, agentID)
+	if err != nil || policy == nil || !policy.Config.Enabled {
+		return
+	}
+	if policy.EvaluatorState == "done" || policy.LastOutcome == store.EmbeddedGoalEvaluationDone {
+		return
+	}
+	if policy.EvaluatorState == "evaluating" {
+		return
+	}
+	now := formatManagedTime(m.clock.Now())
+	if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
+		return
+	}
+
+	if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding); err == nil && found {
+		m.startManagedTask(func() {
+			m.startEmbeddedGoalContinuation(owner.binding, key)
+		})
+		return
+	}
+
+	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+	_ = m.runEmbeddedSessionTurn(runCtx, *curAgent, "Continue working on the current goal.", nil)
+}
+

@@ -78,6 +78,21 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 	if err != nil {
 		return RootControlHandlerResult{}, err
 	}
+	if action != "status" {
+		resultingPolicy, pErr := m.store.ManagedGoalPolicyFor(ctx, agentID)
+		if pErr == nil && resultingPolicy != nil && resultingPolicy.Config.Enabled && (resultingPolicy.ProjectionState == "applied" || resultingPolicy.ProjectionState == "pending") {
+			curAgent, aErr := m.store.ManagedAgent(ctx, agentID)
+			if aErr == nil && curAgent != nil && curAgent.LifecycleState == "running" && curAgent.ActivityState == "idle" {
+				ownerBinding := owner.binding
+				m.mu.Lock()
+				if o, ok := m.embeddedOwners[agentID]; ok {
+					ownerBinding = o.binding
+				}
+				m.mu.Unlock()
+				go m.kickoffIdleGoalContinuation(ownerBinding)
+			}
+		}
+	}
 	return RootControlHandlerResult{Status: "ok", Details: map[string]any{"goal_state": embeddedBrowserGoalState(policy)}}, nil
 }
 
