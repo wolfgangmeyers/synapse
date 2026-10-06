@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -87,4 +88,173 @@ func TestEmbeddedGoalContinuationDoneAndOffDoNotStart(t *testing.T) {
 			require.Zero(t, count)
 		})
 	}
+}
+
+func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	m, err := NewManager(ManagerOptions{
+		Store:    db,
+		Manifest: manifest,
+		Config:   Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+	})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+
+	agentID := "subagent-claim-test"
+	binding := store.EmbeddedBinding{
+		AgentID:    agentID,
+		SessionID:  "session-1",
+		Epoch:      1,
+		Generation: "gen-1",
+	}
+
+	// 1. When no entries exist, return default prompt.
+	prompt := m.formatGoalContinuationPrompt(ctx, binding)
+	require.Equal(t, goalContinuationDefaultPrompt, prompt)
+
+	// Insert row in managed_agents
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,?,'openai-codex','gpt-5','running','running','idle','embedded',?,?,?,1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		agentID, agentID, root, binding.SessionID, binding.Epoch, binding.Generation)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	// Bind session in store
+	require.NoError(t, db.BindEmbeddedSession(ctx, binding, "root"))
+	token, err := db.AcquireEmbeddedOwner(ctx, binding, "owner-1", time.Minute)
+	require.NoError(t, err)
+	binding.OwnerToken = token
+
+	// Append user entry
+	userBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Do something"}}})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, binding, "user", userBody)
+	require.NoError(t, err)
+
+	// Case A: Normal assistant text message without subagent claims -> default prompt
+	normalAsst, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{ai.TextContent{Text: "I edited the file."}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", normalAsst)
+	require.NoError(t, err)
+
+	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	require.Equal(t, goalContinuationDefaultPrompt, prompt)
+
+	// Case B: Assistant claims subagent is executing, with no active subagents -> corrective notice prompt!
+	claimAsst, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{ai.TextContent{Text: "Subagent `subagent-101` is executing. Resting and awaiting completion notification."}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", claimAsst)
+	require.NoError(t, err)
+
+	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	require.Equal(t, goalContinuationNoSubagentsNoticePrompt, prompt)
+
+	// Case C: Assistant claims "awaiting completion" -> corrective notice prompt!
+	awaitingAsst, err := json.Marshal(ai.AssistantMessage{
+		Content:    ai.ContentList{ai.TextContent{Text: "Task started. Awaiting completion."}},
+		StopReason: ai.StopStop,
+	})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", awaitingAsst)
+	require.NoError(t, err)
+
+	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	require.Equal(t, goalContinuationNoSubagentsNoticePrompt, prompt)
+
+	// Case D: Assistant message has a tool call -> default prompt
+	toolCallAsst, err := json.Marshal(ai.AssistantMessage{
+		Content: ai.ContentList{
+			ai.TextContent{Text: "Executing tool"},
+			ai.ToolCall{ID: "call-1", Name: "bash", Arguments: map[string]any{"command": "ls"}},
+		},
+		StopReason: ai.StopToolUse,
+	})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, binding, "assistant", toolCallAsst)
+	require.NoError(t, err)
+
+	prompt = m.formatGoalContinuationPrompt(ctx, binding)
+	require.Equal(t, goalContinuationDefaultPrompt, prompt)
+}
+
+func TestEmbeddedStartupRecoveryResetsActiveToIdle(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	m1, err := NewManager(ManagerOptions{
+		Store:    db,
+		Manifest: manifest,
+		Config:   Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+	})
+	require.NoError(t, err)
+
+	gen1 := setEmbeddedRecoveryGeneration(t, ctx, db, m1)
+	require.Positive(t, gen1)
+
+	// Create an embedded agent in running & active state
+	binding := store.EmbeddedBinding{
+		AgentID:    "agent-startup-active",
+		SessionID:  "session-startup-active",
+		Epoch:      1,
+		Generation: "gen-startup-active",
+	}
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,?,'openai-codex','gpt-5','running','running','idle','embedded',?,?,?,1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		binding.AgentID, binding.AgentID, root, binding.SessionID, binding.Epoch, binding.Generation)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	require.NoError(t, db.BindEmbeddedSession(ctx, binding, "root"))
+	token, err := db.AcquireEmbeddedOwner(ctx, binding, "owner-active", time.Minute)
+	require.NoError(t, err)
+	binding.OwnerToken = token
+	require.NoError(t, db.SetEmbeddedActivityState(ctx, binding, "active"))
+
+	agent, err := db.ManagedAgent(ctx, binding.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+	require.Equal(t, "running", agent.LifecycleState)
+
+	// Close m1 (simulating process kill)
+	require.NoError(t, m1.Close(ctx))
+
+	// Start m2 (simulating router boot / startup)
+	m2, err := NewManager(ManagerOptions{
+		Store:    db,
+		Manifest: manifest,
+		Config:   Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+	})
+	require.NoError(t, err)
+	defer m2.Close(ctx)
+
+	// On startup recovery (SetEmbeddedStartupGeneration):
+	gen2 := setEmbeddedRecoveryGeneration(t, ctx, db, m2)
+	require.Positive(t, gen2)
+
+	// Verify that the active agent was reset to idle!
+	agent, err = db.ManagedAgent(ctx, binding.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
 }

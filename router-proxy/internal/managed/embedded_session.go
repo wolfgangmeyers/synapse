@@ -1531,8 +1531,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return nil
 	}
 	if continuation != nil {
+		promptText := "Continue working on the current goal."
+		if explicitPrompt != "" {
+			promptText = explicitPrompt
+		}
 		_, err := session.RunMessages(ctx, []agent.AgentMessage{ai.UserMessage{
-			Content: ai.ContentList{ai.TextContent{Text: "Continue working on the current goal."}},
+			Content: ai.ContentList{ai.TextContent{Text: promptText}},
 		}})
 		if err != nil {
 			return handleTurnErr(err)
