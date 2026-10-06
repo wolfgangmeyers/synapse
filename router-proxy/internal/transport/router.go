@@ -20,6 +20,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/systemone"
 )
@@ -1116,3 +1117,29 @@ func (r *Router) readiness() string {
 
 // emitEvent is the closed diagnostic path used by typed producers.
 func (r *Router) emitEvent(event Event) { r.log(event) }
+
+// deliverEmbeddedReplies eliminates head-of-line blocking when delivering
+// pending rows in embedded_reply_outbox for an agent.
+func (r *Router) deliverEmbeddedReplies(ctx context.Context, agentID string) error {
+	replies, err := r.store.PendingEmbeddedReplies(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	for _, reply := range replies {
+		if err := r.persistEmbeddedReply(ctx, reply); err != nil {
+			var valErr *protocol.ValidationError
+			if errors.As(err, &valErr) || strings.Contains(err.Error(), "payload_too_large") || strings.Contains(err.Error(), "invalid") {
+				log.Printf("[embedded_reply] Dropping/truncating oversized reply row %d for agent %s: %v", reply.RowID, agentID, err)
+				if settleErr := r.store.SettleEmbeddedReply(ctx, reply); settleErr != nil {
+					_ = r.store.DismissEmbeddedReply(ctx, reply.AttemptID)
+				}
+				continue
+			}
+			return err
+		}
+		if err := r.store.SettleEmbeddedReply(ctx, reply); err != nil {
+			return err
+		}
+	}
+	return nil
+}

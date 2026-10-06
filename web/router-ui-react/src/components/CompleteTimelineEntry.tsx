@@ -131,7 +131,8 @@ function toolParamPreview(input: JsonValue | undefined): string | undefined {
     }
     if (typeof input.action === "string" && input.action.trim()) {
       const parts = [input.action];
-      if (typeof input.target === "string") parts.push(input.target);
+      if (typeof input.goal === "string" && input.goal.trim()) parts.push(input.goal);
+      else if (typeof input.target === "string") parts.push(input.target);
       else if (typeof input.name === "string") parts.push(input.name);
       else if (typeof input.alias === "string") parts.push(input.alias);
       return cleanOneLine(parts.join(" "));

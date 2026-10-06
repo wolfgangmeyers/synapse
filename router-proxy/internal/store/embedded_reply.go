@@ -15,13 +15,14 @@ import (
 // EmbeddedReply is an immutable, accepted-sender-bound transport envelope.
 // Its ID and timestamp must be reused verbatim across an uncertain publish.
 type EmbeddedReply struct {
+	RowID                                                                 int64
 	AttemptID, MessageID, From, To, ReplyID, Body, CreatedAt, EntryDigest string
 	EntrySeq                                                              int64
 }
 
 func (s *Store) embeddedReplyTx(ctx context.Context, attemptID string) (*EmbeddedReply, error) {
 	var r EmbeddedReply
-	err := s.db.QueryRowContext(ctx, `SELECT o.attempt_id,a.message_id,o.sender,o.recipient,o.reply_id,o.body,o.created_at,o.entry_seq,o.entry_digest FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE o.attempt_id=?`, attemptID).Scan(&r.AttemptID, &r.MessageID, &r.From, &r.To, &r.ReplyID, &r.Body, &r.CreatedAt, &r.EntrySeq, &r.EntryDigest)
+	err := s.db.QueryRowContext(ctx, `SELECT o.rowid,o.attempt_id,a.message_id,o.sender,o.recipient,o.reply_id,o.body,o.created_at,o.entry_seq,o.entry_digest FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE o.attempt_id=?`, attemptID).Scan(&r.RowID, &r.AttemptID, &r.MessageID, &r.From, &r.To, &r.ReplyID, &r.Body, &r.CreatedAt, &r.EntrySeq, &r.EntryDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -263,7 +264,7 @@ func (s *Store) PendingEmbeddedReplies(ctx context.Context, agentID string) ([]E
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT o.attempt_id,a.message_id,o.sender,o.recipient,o.reply_id,o.body,o.created_at,o.entry_seq,o.entry_digest FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE a.agent_id=? AND o.state='pending' ORDER BY o.rowid`, agentID)
+	rows, err := s.db.QueryContext(ctx, `SELECT o.rowid,o.attempt_id,a.message_id,o.sender,o.recipient,o.reply_id,o.body,o.created_at,o.entry_seq,o.entry_digest FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE a.agent_id=? AND o.state='pending' ORDER BY o.rowid`, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -271,12 +272,19 @@ func (s *Store) PendingEmbeddedReplies(ctx context.Context, agentID string) ([]E
 	var out []EmbeddedReply
 	for rows.Next() {
 		var r EmbeddedReply
-		if err := rows.Scan(&r.AttemptID, &r.MessageID, &r.From, &r.To, &r.ReplyID, &r.Body, &r.CreatedAt, &r.EntrySeq, &r.EntryDigest); err != nil {
+		if err := rows.Scan(&r.RowID, &r.AttemptID, &r.MessageID, &r.From, &r.To, &r.ReplyID, &r.Body, &r.CreatedAt, &r.EntrySeq, &r.EntryDigest); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) DismissEmbeddedReply(ctx context.Context, attemptID string) error {
+	return s.runImmediate(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `UPDATE embedded_reply_outbox SET state='delivered' WHERE attempt_id=? AND state='pending'`, attemptID)
+		return err
+	})
 }
 
 func (s *Store) SettleEmbeddedReply(ctx context.Context, r EmbeddedReply) error {

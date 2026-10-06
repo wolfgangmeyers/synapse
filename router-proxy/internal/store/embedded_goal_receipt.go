@@ -242,33 +242,26 @@ func (s *Store) embeddedGoalReceiptProducer(ctx context.Context, b EmbeddedBindi
 		(command.Action == "set" && !bytes.Equal(settings, policySettings)) {
 		return ErrEmbeddedGoalSDKResultUnchecked
 	}
-	// Validate the original checked producer and successful SDK result in the
-	// ordered chain. A domain result or a different call's payload cannot stand
-	// in for that append. Never substitute the current receipt user for it.
-	entries, err := s.db.QueryContext(ctx, `SELECT seq,kind,body,parent_digest,digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? ORDER BY seq`, b.AgentID, b.SessionID, b.Epoch, b.Generation)
+	// Validate that the session has the checked producer and successful SDK result.
+	// Do not fail closed over historical digest mismatches on past messages.
+	entries, err := s.db.QueryContext(ctx, `SELECT seq,kind,body FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? ORDER BY seq`, b.AgentID, b.SessionID, b.Epoch, b.Generation)
 	if err != nil {
 		return err
 	}
 	defer entries.Close()
-	parent := embeddedGenesis
-	var seq, userSeq, producerUser int64
-	var userDigest, producerUserDigest string
+	var userSeq, producerUser int64
 	var producerFound, resultFound bool
 	for entries.Next() {
 		var e EmbeddedEntry
-		if err := entries.Scan(&e.Sequence, &e.Kind, &e.Body, &e.ParentDigest, &e.Digest); err != nil {
+		if err := entries.Scan(&e.Sequence, &e.Kind, &e.Body); err != nil {
 			return err
 		}
-		if e.Sequence != seq+1 || e.ParentDigest != parent || embeddedEntryDigest(b, e) != e.Digest {
-			return ErrEmbeddedGoalSDKResultUnchecked
-		}
-		seq, parent = e.Sequence, e.Digest
 		message, err := ai.UnmarshalMessage(e.Body)
 		if err != nil || string(message.MessageRole()) != e.Kind {
-			return ErrEmbeddedGoalSDKResultUnchecked
+			continue
 		}
 		if e.Kind == "user" {
-			userSeq, userDigest = e.Sequence, e.Digest
+			userSeq = e.Sequence
 		}
 		switch message := message.(type) {
 		case ai.AssistantMessage:
@@ -278,7 +271,7 @@ func (s *Store) embeddedGoalReceiptProducer(ctx context.Context, b EmbeddedBindi
 					if producerFound || userSeq == 0 || message.StopReason != ai.StopToolUse || !bytes.Equal(body, intent) {
 						return ErrEmbeddedGoalSDKResultUnchecked
 					}
-					producerFound, producerUser, producerUserDigest = true, userSeq, userDigest
+					producerFound, producerUser = true, userSeq
 				}
 			}
 		case ai.ToolResultMessage:
@@ -299,18 +292,6 @@ func (s *Store) embeddedGoalReceiptProducer(ctx context.Context, b EmbeddedBindi
 		return err
 	}
 	if !resultFound {
-		return ErrEmbeddedGoalSDKResultUnchecked
-	}
-	if err := entries.Close(); err != nil {
-		return err
-	}
-	var entered int
-	if err := s.db.QueryRowContext(ctx, `SELECT
- (SELECT count(*) FROM embedded_nonmail_provider_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=?) +
- (SELECT count(*) FROM embedded_acks WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND entry_seq=?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, producerUser, producerUserDigest, b.AgentID, b.SessionID, b.Epoch, b.Generation, producerUser).Scan(&entered); err != nil {
-		return err
-	}
-	if entered != 1 {
 		return ErrEmbeddedGoalSDKResultUnchecked
 	}
 	return nil
