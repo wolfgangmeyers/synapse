@@ -258,3 +258,193 @@ func TestEmbeddedStartupRecoveryResetsActiveToIdle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "idle", agent.ActivityState)
 }
+
+func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content ai.ContentList
+	}{
+		{"empty-content", ai.ContentList{}},
+		{"whitespace-text", ai.ContentList{ai.TextContent{Text: "   \n\t  "}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			path := filepath.Join(root, "router.db")
+			db, err := store.Open(ctx, path, store.Options{})
+			require.NoError(t, err)
+			defer db.Close()
+			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+			require.NoError(t, err)
+			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+			defer reg.Unregister()
+
+			var requests atomic.Int32
+			reg.SetResponses([]providers.FauxResponseStep{
+				// Turn 1 step 1: set goal
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{
+						providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "circuit breaker test"}, "cb-set"),
+					}, ai.StopToolUse)
+				},
+				// Turn 1 step 2: empty or whitespace-only assistant message
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
+				},
+				// Continuation step (should NOT be reached)
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "unreachable"}}, ai.StopStop)
+				},
+			})
+
+			var evaluations atomic.Int32
+			m, err := NewManager(ManagerOptions{
+				Store:                 db,
+				Manifest:              manifest,
+				Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+				CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+				EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+				CodexCredentialStore:  testfixture.CodexAdmission(t),
+				GoalContinuationDelay: 20 * time.Millisecond,
+				EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
+					evaluations.Add(1)
+					return store.EmbeddedGoalEvaluationNotDone, "still needs work", nil
+				},
+			})
+			require.NoError(t, err)
+			defer m.Close(ctx)
+			setEmbeddedRecoveryGeneration(t, ctx, db, m)
+
+			launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+				Name:               "circuit-breaker-" + tc.name,
+				Cwd:                root,
+				Runtime:            "embedded",
+				Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+				InitialInstruction: "start work",
+				RequestID:          "cb111111-1111-4111-8111-111111111111",
+			})
+			require.NoError(t, err)
+
+			// Wait for the turn to complete (2 requests: goal tool call + empty response)
+			require.Eventually(t, func() bool {
+				return requests.Load() == 2
+			}, 3*time.Second, 10*time.Millisecond)
+
+			// Verify circuit breaker tripped: evaluator was NEVER called
+			time.Sleep(100 * time.Millisecond)
+			require.Zero(t, evaluations.Load(), "evaluator must not be called when assistant is empty")
+			require.Equal(t, int32(2), requests.Load(), "no continuation request should have been dispatched")
+
+			// Verify agent settles cleanly to idle
+			require.Eventually(t, func() bool {
+				agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+				return err == nil && agent.ActivityState == "idle"
+			}, 3*time.Second, 10*time.Millisecond)
+
+			// Verify no continuations in database
+			readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+			require.NoError(t, err)
+			defer readOnly.Close()
+			var contCount int
+			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&contCount))
+			require.Zero(t, contCount)
+		})
+	}
+}
+
+func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var requests, evaluations, continuations atomic.Int32
+	respond := func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+		requests.Add(1)
+		for _, msg := range h.Messages {
+			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
+				if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+					continuations.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "autonomous progress text only"}}, ai.StopStop)
+				}
+				if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "human prompt to unpause" {
+					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "human prompt acknowledged"}}, ai.StopStop)
+				}
+			}
+		}
+		n := requests.Load()
+		if n == 1 {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "cap test goal"}, "cap-set"),
+			}, ai.StopToolUse)
+		}
+		return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "initial work final"}}, ai.StopStop)
+	}
+
+	steps := make([]providers.FauxResponseStep, 30)
+	for i := range steps {
+		steps[i] = respond
+	}
+	reg.SetResponses(steps)
+
+	// Set cap to 3 consecutive continuations with fast 10ms pacing
+	m, err := NewManager(ManagerOptions{
+		Store:                           db,
+		Manifest:                        manifest,
+		Config:                          Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:                   CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver:           func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:            testfixture.CodexAdmission(t),
+		GoalContinuationDelay:           10 * time.Millisecond,
+		MaxConsecutiveGoalContinuations: 3,
+		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
+			evaluations.Add(1)
+			return store.EmbeddedGoalEvaluationNotDone, "needs more work", nil
+		},
+	})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+	setEmbeddedRecoveryGeneration(t, ctx, db, m)
+
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               "cap-test-agent",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "start autonomous work",
+		RequestID:          "cap-req-1111-1111-1111-111111111111",
+	})
+	require.NoError(t, err)
+
+	// Wait until 3 continuations run
+	require.Eventually(t, func() bool {
+		return continuations.Load() >= 3
+	}, 4*time.Second, 10*time.Millisecond)
+
+	// After reaching the cap of 3, continuations must halt
+	time.Sleep(150 * time.Millisecond)
+	contSnap := continuations.Load()
+	require.Equal(t, int32(3), contSnap, "continuations should halt at cap of 3")
+
+	// Verify agent settles to idle
+	require.Eventually(t, func() bool {
+		agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+		return err == nil && agent.ActivityState == "idle"
+	}, 3*time.Second, 10*time.Millisecond)
+
+	// User sends a human prompt: resets the cap!
+	require.NoError(t, m.AdmitPromptWithRequestID(ctx, launched.Agent.AgentID, "human prompt to unpause", "req-human-unpause"))
+
+	// Verify lane counter reset to 0
+	lane := m.laneFor(launched.Agent.AgentID)
+	require.Equal(t, 0, lane.consecutiveContinuations, "human prompt must reset consecutive continuations")
+}

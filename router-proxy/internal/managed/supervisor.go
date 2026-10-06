@@ -100,6 +100,10 @@ type ManagerOptions struct {
 	// registry. Nil retains safe correlated unavailable results until the host
 	// wires its real supervisor-service adapters.
 	RootControlHandlers []RootControlHandler
+	// GoalContinuationDelay and MaxConsecutiveGoalContinuations configure pacing
+	// and maximum consecutive continuation turns for autonomous goal loops.
+	GoalContinuationDelay           time.Duration
+	MaxConsecutiveGoalContinuations int
 }
 
 // RestartRequest already contains canonical operation metadata. A future HTTP
@@ -142,9 +146,10 @@ type ResetResult struct {
 // close, and exit handling all acquire this one owner before they can touch the
 // durable transition or either process group.
 type managedAgentLane struct {
-	serial    sync.Mutex
-	admission sync.Mutex
-	selection sync.Mutex // saved model snapshot at SDK turn admission only
+	serial                   sync.Mutex
+	admission                sync.Mutex
+	selection                sync.Mutex // saved model snapshot at SDK turn admission only
+	consecutiveContinuations int
 }
 
 const (
@@ -294,6 +299,8 @@ type Manager struct {
 	embeddedMailPublisher                      func(store.EnqueueResult)
 	embeddedBeforeToolHandoff                  func(*store.EmbeddedToolInvocation) // test-only, original committed handoff
 	embeddedBeforeToolDomain                   func()                              // test-only, after owner checks, before producer transaction
+	goalContinuationDelay                      time.Duration
+	maxConsecutiveGoalContinuations            int
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -385,6 +392,16 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
+	if options.GoalContinuationDelay > 0 {
+		manager.goalContinuationDelay = options.GoalContinuationDelay
+	} else {
+		manager.goalContinuationDelay = defaultGoalContinuationDelay
+	}
+	if options.MaxConsecutiveGoalContinuations > 0 {
+		manager.maxConsecutiveGoalContinuations = options.MaxConsecutiveGoalContinuations
+	} else {
+		manager.maxConsecutiveGoalContinuations = defaultMaxConsecutiveGoalContinuations
+	}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
 	// every surviving active builtin row before any manager can expose history.
@@ -1691,6 +1708,7 @@ func (m *Manager) RestartAfterAuthChange(ctx context.Context, operationID string
 }
 
 func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) error {
+	m.laneFor(agentID).consecutiveContinuations = 0
 	candidate, lookupErr := m.store.ManagedAgent(ctx, agentID)
 	if lookupErr == nil && candidate.Runtime == "embedded" {
 		id, err := m.ids.Next()

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -54,6 +55,7 @@ type embeddedPersistence struct {
 	publishComplete   func(store.ManagedHistoryEntry)
 	toolInputs        map[string]any
 	currentThinking   string
+	toolExecuted      bool
 }
 
 func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
@@ -134,6 +136,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 	}
 	if result, ok := message.(ai.ToolResultMessage); ok {
+		p.toolExecuted = true
 		toolName := result.ToolName
 		toolCallID := result.ToolCallID
 		if toolCallID != "" && toolName != "" {
@@ -579,9 +582,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return err
 	}
 	var turnErr error
+	var p *embeddedPersistence
 	_ = m.store.SetEmbeddedActivityState(ctx, binding, "active")
 	m.publishProjection()
 	defer func() {
+		if p != nil && p.toolExecuted {
+			m.laneFor(binding.AgentID).consecutiveContinuations = 0
+		} else if continuation == nil && (explicitPrompt != "" || mail != nil) {
+			m.laneFor(binding.AgentID).consecutiveContinuations = 0
+		}
 		if errors.Is(turnErr, context.Canceled) || (turnErr != nil && strings.Contains(turnErr.Error(), "context canceled")) {
 			_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), binding.AgentID)
 		} else {
@@ -648,7 +657,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return err
 		}
 	}
-	p := &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
+	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
 			return err
@@ -1193,6 +1202,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
 				if p != nil {
+					p.toolExecuted = true
 					if p.toolInputs == nil {
 						p.toolInputs = make(map[string]any)
 					}
@@ -1649,6 +1659,30 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	}
 	assistant, ok := message.(ai.AssistantMessage)
 	if !ok || assistant.StopReason != ai.StopStop {
+		return nil
+	}
+	toolCalls := 0
+	hasText := false
+	for _, part := range assistant.Content {
+		switch c := part.(type) {
+		case ai.ToolCall:
+			toolCalls++
+		case *ai.ToolCall:
+			if c != nil {
+				toolCalls++
+			}
+		case ai.TextContent:
+			if strings.TrimSpace(c.Text) != "" {
+				hasText = true
+			}
+		case *ai.TextContent:
+			if c != nil && strings.TrimSpace(c.Text) != "" {
+				hasText = true
+			}
+		}
+	}
+	if toolCalls == 0 && !hasText {
+		log.Printf("GOAL CIRCUIT BREAKER: agent %s emitted empty response on turn %d; stopping continuation loop", binding.AgentID, p.turnSeq)
 		return nil
 	}
 	key := store.EmbeddedGoalEvaluationKey{UserSeq: p.turnSeq, UserDigest: p.turnDigest,
