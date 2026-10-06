@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -123,6 +124,20 @@ func (m *Manager) compactEmbeddedAtProvider(ctx context.Context, p *embeddedPers
 	})
 }
 
+func unwrapEmbeddedMailText(text string) string {
+	if !strings.Contains(text, `"Version":"embedded-mail/v1"`) && !strings.Contains(text, `"Version": "embedded-mail/v1"`) {
+		return text
+	}
+	var mailEnv struct {
+		Sender string `json:"Sender"`
+		Body   string `json:"Body"`
+	}
+	if err := json.Unmarshal([]byte(text), &mailEnv); err == nil && mailEnv.Sender != "" {
+		return fmt.Sprintf("[Direct message from %s]: %s\n\n(IMPORTANT: This is a direct message from %s. You MUST address and answer this message directly in your response text before taking any other action.)", mailEnv.Sender, mailEnv.Body, mailEnv.Sender)
+	}
+	return text
+}
+
 func (m *Manager) fitEmbeddedContext(ctx context.Context, p *embeddedPersistence, owner embeddedOwner, model *ai.Model, stream agent.StreamFn, messages []agent.AgentMessage) ([]agent.AgentMessage, error) {
 	if model == nil || model.ContextWindow <= embeddedContextHeadroom {
 		return nil, errors.New("selected model window unknown or insufficient for fixed headroom")
@@ -154,6 +169,28 @@ func (m *Manager) fitEmbeddedContext(ctx context.Context, p *embeddedPersistence
 	}
 	if embeddedProjectedTokens(view) > model.ContextWindow-embeddedContextHeadroom {
 		return nil, errors.New("compacted context has insufficient fixed headroom")
+	}
+	for i, msg := range view {
+		if um, ok := msg.(ai.UserMessage); ok {
+			var newContent ai.ContentList
+			changed := false
+			for _, part := range um.Content {
+				if tc, ok := part.(ai.TextContent); ok {
+					unwrapped := unwrapEmbeddedMailText(tc.Text)
+					if unwrapped != tc.Text {
+						newContent = append(newContent, ai.TextContent{Text: unwrapped})
+						changed = true
+						continue
+					}
+				}
+				newContent = append(newContent, part)
+			}
+			if changed {
+				copyMsg := um
+				copyMsg.Content = newContent
+				view[i] = copyMsg
+			}
+		}
 	}
 	return view, nil
 }

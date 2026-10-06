@@ -3,6 +3,7 @@ package managed
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -55,12 +56,12 @@ func (m *Manager) dispatchEmbeddedGoalContinuation(binding store.EmbeddedBinding
 			return
 		}
 	}
-	minDelay := m.goalContinuationDelay
-	if minDelay <= 0 {
-		minDelay = defaultGoalContinuationDelay
+	if m.goalContinuationDelay > 0 {
+		due := m.clock.Now().Add(m.goalContinuationDelay)
+		m.scheduleEmbeddedGoalContinuation(binding, key, due)
+		return
 	}
-	due := m.clock.Now().Add(minDelay)
-	m.scheduleEmbeddedGoalContinuation(binding, key, due)
+	m.startEmbeddedGoalContinuation(binding, key)
 }
 
 func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, due time.Time) {
@@ -141,7 +142,7 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 	}
 	lane.consecutiveContinuations++
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-	prompt := m.formatGoalContinuationPrompt(ctx, owner.binding)
+	prompt := m.formatGoalContinuationPrompt(ctx, owner.binding, &key)
 	// Start committed UNKNOWN before any SDK provider request. An error or
 	// process loss cannot authorize replay; the saved transcript is evidence.
 	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key)
@@ -259,7 +260,7 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		log.Printf("kickoffIdleGoalContinuation: agent %s policy disabled: %v", agentID, err)
 		return
 	}
-	if policy.EvaluatorState == "done" || policy.LastOutcome == store.EmbeddedGoalEvaluationDone {
+	if policy.EvaluatorState == "done" || policy.LastOutcome == store.EmbeddedGoalEvaluationDone || policy.LastOutcome == store.EmbeddedGoalEvaluationCompleted {
 		log.Printf("kickoffIdleGoalContinuation: agent %s goal done", agentID)
 		return
 	}
@@ -273,6 +274,11 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 
+	if hasPending, err := m.store.HasPendingWakeOrStartedContinuation(m.runCtx, owner.binding); err == nil && hasPending {
+		log.Printf("kickoffIdleGoalContinuation: agent %s has pending wake or started continuation", agentID)
+		return
+	}
+
 	if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding); err == nil && found {
 		m.startManagedTask(func() {
 			m.startEmbeddedGoalContinuation(owner.binding, key)
@@ -281,7 +287,7 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	}
 
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding)
+	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding, nil)
 	lane.consecutiveContinuations++
 	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
 	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
@@ -292,9 +298,33 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 const goalContinuationDefaultPrompt = "Continue working on the current goal."
 const goalContinuationNoSubagentsNoticePrompt = "Continue working on the current goal. Notice: There are NO active subagents running. To launch a subagent, you must invoke the subagent tool directly via the API. Otherwise, execute tools (bash, read, edit) directly to make progress on the goal."
 
-func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding store.EmbeddedBinding) string {
+func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding store.EmbeddedBinding, key *store.EmbeddedGoalEvaluationKey) string {
+	goal := ""
+	if m.store != nil {
+		if policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID); err == nil && policy != nil && policy.Config.Goal != "" {
+			goal = policy.Config.Goal
+		}
+	}
+
+	rationale := ""
+	if key != nil && m.store != nil {
+		if row, err := m.store.EmbeddedEvaluationRow(ctx, binding, *key); err == nil && row.Reason != "" {
+			rationale = row.Reason
+		}
+	}
+	if rationale == "" {
+		rationale = "Take the next actionable step to make progress on the goal."
+	}
+
+	var basePrompt string
+	if goal != "" {
+		basePrompt = fmt.Sprintf("NOT_DONE: Continue %s by completing its next actionable step now.\nVERDICT: NOT_DONE\nREASON: %s", goal, rationale)
+	} else {
+		basePrompt = goalContinuationDefaultPrompt
+	}
+
 	if m.store == nil {
-		return goalContinuationDefaultPrompt
+		return basePrompt
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -309,7 +339,7 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 		snapshot, err = m.store.ReopenLatestAgentEmbedded(ctx, binding.AgentID)
 	}
 	if err != nil || len(snapshot.Entries) == 0 {
-		return goalContinuationDefaultPrompt
+		return basePrompt
 	}
 
 	var lastAssistant *store.EmbeddedEntry
@@ -320,7 +350,7 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 		}
 	}
 	if lastAssistant == nil {
-		return goalContinuationDefaultPrompt
+		return basePrompt
 	}
 
 	bodyLower := strings.ToLower(string(lastAssistant.Body))
@@ -329,12 +359,12 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 		strings.Contains(bodyLower, "executing")
 
 	if !claimedSubagent {
-		return goalContinuationDefaultPrompt
+		return basePrompt
 	}
 
 	hasActiveSubagents := m.hasActiveSubagents(binding.AgentID)
 	if hasActiveSubagents {
-		return goalContinuationDefaultPrompt
+		return basePrompt
 	}
 
 	hasToolCalls := false
@@ -364,9 +394,12 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 	}
 
 	if !hasToolCalls || strings.Contains(bodyLower, "subagent") || strings.Contains(bodyLower, "awaiting completion") {
-		return goalContinuationNoSubagentsNoticePrompt
+		if goal == "" {
+			return goalContinuationNoSubagentsNoticePrompt
+		}
+		return basePrompt + " Notice: There are NO active subagents running. To launch a subagent, you must invoke the subagent tool directly via the API. Otherwise, execute tools (bash, read, edit) directly to make progress on the goal."
 	}
 
-	return goalContinuationDefaultPrompt
+	return basePrompt
 }
 

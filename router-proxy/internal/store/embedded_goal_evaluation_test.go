@@ -165,3 +165,33 @@ func TestEmbeddedGoalDiagnostics(t *testing.T) {
 	require.Equal(t, k.GoalRevision, last.GoalRevision)
 }
 
+func TestEmbeddedEvaluationCompletedMarksPolicyDone(t *testing.T) {
+	s, b, k := evaluationFixture(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	receiptForEvaluation(t, s, b, &k)
+	_, claimed, err := s.ClaimEmbeddedGoalEvaluation(ctx, b, k)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	verdict, changed, err := s.CompleteEmbeddedGoalEvaluation(ctx, b, k, EmbeddedGoalEvaluationCompleted, "task is complete")
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, EmbeddedGoalEvaluationCompleted, verdict.State)
+	require.Equal(t, "task is complete", verdict.Reason)
+
+	policy, err := s.ManagedGoalPolicyFor(ctx, b.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "done", policy.EvaluatorState)
+	require.Equal(t, "COMPLETED", policy.LastOutcome)
+
+	counts, last, err := s.EmbeddedGoalDiagnostics(ctx, b.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), counts["COMPLETED"])
+	require.Equal(t, int64(0), counts["NOT_DONE"])
+	require.NotNil(t, last)
+	require.Equal(t, EmbeddedGoalEvaluationCompleted, last.Verdict)
+}
+
+

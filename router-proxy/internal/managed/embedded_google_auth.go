@@ -406,10 +406,12 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 			var parts []any
 			for _, part := range um.Content {
 				if tc, ok := part.(ai.TextContent); ok && tc.Text != "" {
-					parts = append(parts, map[string]any{"text": tc.Text})
+					cleaned := unwrapEmbeddedMailText(tc.Text)
+					parts = append(parts, map[string]any{"text": cleaned})
 					continue
 				} else if tc, ok := part.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
-					parts = append(parts, map[string]any{"text": tc.Text})
+					cleaned := unwrapEmbeddedMailText(tc.Text)
+					parts = append(parts, map[string]any{"text": cleaned})
 					continue
 				}
 				if img, ok := part.(ai.ImageContent); ok {

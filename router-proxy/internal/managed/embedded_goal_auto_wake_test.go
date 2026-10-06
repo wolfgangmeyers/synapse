@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestEmbeddedGoalAutoWakeOnSettingGoal(t *testing.T) {
 	respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
 					continuationTurns.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation turn finished"}}, ai.StopStop)
 				}
@@ -104,7 +105,7 @@ func TestEmbeddedGoalAutoWakeSubagentActivePreventsTurn(t *testing.T) {
 	respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && text.Text == "Continue working on the current goal." {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
 					continuationTurns.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation turn finished"}}, ai.StopStop)
 				}
@@ -204,7 +205,7 @@ func TestEmbeddedGoalAutoWakeOnStartupRecovery(t *testing.T) {
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
 				if text, ok := u.Content[0].(ai.TextContent); ok {
-					if text.Text == "Continue working on the current goal." {
+					if text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") {
 						continuations.Add(1)
 						return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "recovered continuation finished"}}, ai.StopStop)
 					}

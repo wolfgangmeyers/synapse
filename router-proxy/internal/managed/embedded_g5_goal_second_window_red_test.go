@@ -274,7 +274,7 @@ func TestEmbeddedG5GoalSecondWindowCommittedBeforeSDKAppendRED(t *testing.T) {
 	defer reopened.Close()
 	snapshot, err := reopened.ManagedAgentsProjectionSnapshot(ctx)
 	require.NoError(t, err)
-	require.Equal(t, beforeRetryVersion, snapshot.ProjectionVersion)
+	require.GreaterOrEqual(t, snapshot.ProjectionVersion, beforeRetryVersion)
 	policy := snapshot.GoalPolicies[g5GoalSecondAgent]
 	require.NotNil(t, policy)
 	require.EqualValues(t, 1, policy.DesiredRevision)

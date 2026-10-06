@@ -80,6 +80,20 @@ func (s *Store) RestartFailedManagedAgent(ctx context.Context, agentID string) e
 	})
 }
 
+func (s *Store) HasPendingWakeOrStartedContinuation(ctx context.Context, b EmbeddedBinding) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("nil context")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, errors.New("store is closed")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND state IN ('planned','claimed')) + (SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND state='started')`, b.AgentID, b.AgentID, b.SessionID, b.Epoch).Scan(&count)
+	return count > 0, err
+}
+
 // continuations for the exact recovered session. Evaluator claims and started
 // UNKNOWN rows are never recovery work.
 func (s *Store) ReservedEmbeddedGoalSnoozes(ctx context.Context, b EmbeddedBinding) ([]EmbeddedGoalContinuation, error) {

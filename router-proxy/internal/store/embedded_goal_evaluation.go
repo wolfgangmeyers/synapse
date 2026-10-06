@@ -27,9 +27,10 @@ type EmbeddedGoalEvaluation struct {
 }
 
 const (
-	EmbeddedGoalEvaluationUnknown = "UNKNOWN"
-	EmbeddedGoalEvaluationDone    = "DONE"
-	EmbeddedGoalEvaluationNotDone = "NOT_DONE"
+	EmbeddedGoalEvaluationUnknown   = "UNKNOWN"
+	EmbeddedGoalEvaluationDone      = "DONE"
+	EmbeddedGoalEvaluationCompleted = "COMPLETED"
+	EmbeddedGoalEvaluationNotDone   = "NOT_DONE"
 )
 
 func validEmbeddedGoalEvaluationKey(k EmbeddedGoalEvaluationKey) bool {
@@ -117,6 +118,10 @@ func (s *Store) embeddedEvaluationRow(ctx context.Context, b EmbeddedBinding, k 
 	return e, err
 }
 
+func (s *Store) EmbeddedEvaluationRow(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey) (EmbeddedGoalEvaluation, error) {
+	return s.embeddedEvaluationRow(ctx, b, k)
+}
+
 // ClaimEmbeddedGoalEvaluation must precede invocation. false means the claim
 // already exists: UNKNOWN is interruption evidence, never retry permission.
 func (s *Store) ClaimEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey) (EmbeddedGoalEvaluation, bool, error) {
@@ -158,7 +163,7 @@ func (s *Store) ClaimEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBindi
 // reserves one non-mail continuation in the same transaction. It never
 // mutates the managed goal projection or the mail reply outbox.
 func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey, outcome, reason string) (EmbeddedGoalEvaluation, bool, error) {
-	if ctx == nil || !validEmbeddedGoalEvaluationKey(k) || (outcome != EmbeddedGoalEvaluationDone && outcome != EmbeddedGoalEvaluationNotDone) || len(reason) > 512 || strings.ContainsRune(reason, 0) {
+	if ctx == nil || !validEmbeddedGoalEvaluationKey(k) || (outcome != EmbeddedGoalEvaluationDone && outcome != EmbeddedGoalEvaluationCompleted && outcome != EmbeddedGoalEvaluationNotDone) || len(reason) > 512 || strings.ContainsRune(reason, 0) {
 		return EmbeddedGoalEvaluation{}, false, errors.New("invalid embedded evaluation verdict")
 	}
 	var e EmbeddedGoalEvaluation
@@ -181,12 +186,19 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 				}
 			}
 			e = prior
+			if outcome == EmbeddedGoalEvaluationCompleted && e.State == EmbeddedGoalEvaluationDone {
+				e.State = EmbeddedGoalEvaluationCompleted
+			}
 			return nil
 		}
 		if prior.OwnerToken != b.OwnerToken {
 			return errors.New("stale embedded evaluation claim owner")
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_evaluations SET state=?,reason=?,completed_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=? AND goal_revision=? AND owner_token=? AND final_seq=? AND final_digest=? AND state='UNKNOWN'`, outcome, reason, formatTimestamp(s.clock.Now()), b.AgentID, b.SessionID, b.Epoch, b.Generation, k.UserSeq, k.UserDigest, k.GoalRevision, b.OwnerToken, k.FinalSeq, k.FinalDigest)
+		dbState := outcome
+		if outcome == EmbeddedGoalEvaluationCompleted {
+			dbState = EmbeddedGoalEvaluationDone
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_evaluations SET state=?,reason=?,completed_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=? AND goal_revision=? AND owner_token=? AND final_seq=? AND final_digest=? AND state='UNKNOWN'`, dbState, reason, formatTimestamp(s.clock.Now()), b.AgentID, b.SessionID, b.Epoch, b.Generation, k.UserSeq, k.UserDigest, k.GoalRevision, b.OwnerToken, k.FinalSeq, k.FinalDigest)
 		if err != nil {
 			return err
 		}
@@ -197,9 +209,19 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 		if n != 1 {
 			return errors.New("stale embedded evaluation claim")
 		}
+		if outcome == EmbeddedGoalEvaluationCompleted || outcome == EmbeddedGoalEvaluationDone {
+			now := formatTimestamp(s.clock.Now())
+			_, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='done',last_outcome='COMPLETED',updated_at=?,evaluator_reason=? WHERE agent_id=? AND applied_revision=? AND projection_state='applied'`, now, reason, b.AgentID, k.GoalRevision)
+			if err != nil {
+				return err
+			}
+		}
 		e, err = s.embeddedEvaluationRow(ctx, b, k)
 		if err != nil {
 			return err
+		}
+		if outcome == EmbeddedGoalEvaluationCompleted && e.State == EmbeddedGoalEvaluationDone {
+			e.State = EmbeddedGoalEvaluationCompleted
 		}
 		if outcome == EmbeddedGoalEvaluationNotDone {
 			if err := s.reserveEmbeddedGoalContinuation(ctx, e); err != nil {
@@ -226,7 +248,7 @@ func (s *Store) EmbeddedGoalDiagnostics(ctx context.Context, agentID string) (ma
 	counts := map[string]int64{"COMPLETED": 0, "NOT_DONE": 0}
 	var doneCount, notDoneCount int64
 	row := s.db.QueryRowContext(ctx, `SELECT
-		COALESCE(SUM(CASE WHEN state='DONE' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN state='DONE' OR state='COMPLETED' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN state='NOT_DONE' THEN 1 ELSE 0 END), 0)
 		FROM embedded_goal_evaluations WHERE agent_id=? AND completed_at IS NOT NULL`, agentID)
 	if err := row.Scan(&doneCount, &notDoneCount); err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -245,6 +267,9 @@ func (s *Store) EmbeddedGoalDiagnostics(ctx context.Context, agentID string) (ma
 			return counts, nil, nil
 		}
 		return counts, nil, err
+	}
+	if last.Verdict == EmbeddedGoalEvaluationDone {
+		last.Verdict = EmbeddedGoalEvaluationCompleted
 	}
 	return counts, &last, nil
 }

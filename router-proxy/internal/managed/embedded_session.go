@@ -1541,7 +1541,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return nil
 	}
 	if continuation != nil {
-		promptText := "Continue working on the current goal."
+		promptText := m.formatGoalContinuationPrompt(ctx, binding, continuation)
 		if explicitPrompt != "" {
 			promptText = explicitPrompt
 		}
@@ -1713,11 +1713,12 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		if evalErr == nil && m.runCtx.Err() == nil {
 			_, changed, evalErr = m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
 		}
-		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationNotDone) {
+		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted || outcome == store.EmbeddedGoalEvaluationNotDone) {
 			m.recordGoalEvaluationActivity(binding, key, outcome, reason)
 		}
 		lane.serial.Unlock()
 		if evalErr != nil || !changed || outcome != store.EmbeddedGoalEvaluationNotDone {
+			m.publishProjection()
 			return
 		}
 		m.dispatchEmbeddedGoalContinuation(binding, key)
