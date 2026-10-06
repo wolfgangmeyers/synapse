@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+
 import {
   compactionNotificationMessage,
   effectiveCompactionPolicy,
@@ -7,6 +9,8 @@ import {
   postCompactionNotificationMessage,
   resolveCompactionPolicy,
   selectCompactionTier,
+  loadCompactionPolicyFromFile,
+  resolveCompactionPolicyFile,
 } from "./compaction-policy.js";
 import type {
   CompactionLevelInput,
@@ -105,6 +109,7 @@ export type CompactionOrchestration = {
   runPendingSelfCompaction: (context: CompactionContext) => void;
   enforceHardCompaction: (context: CompactionContext) => boolean;
   monitorContextThreshold: (context: CompactionContext) => void;
+  refreshPolicyFromFile: () => boolean;
   onSessionBeforeCompact: (event: CompactionEvent, context: CompactionContext) => Promise<void>;
   onSessionCompact: (context: CompactionContext) => void;
   onSessionCompactFailed: (context: CompactionContext) => void;
@@ -154,6 +159,8 @@ export function createCompactionOrchestration(
   let notifiedCompactionPercent = 0;
   let pendingSelfCompaction: PendingSelfCompaction | undefined;
   let pendingHardCompaction: PendingHardCompaction | undefined;
+  let loadedPolicyFile: string | undefined;
+  let loadedPolicyMtime = -1;
 
   const isChild = (context: CompactionContext): boolean => options.isChildSession(context.sessionManager.getSessionId());
 
@@ -173,7 +180,28 @@ export function createCompactionOrchestration(
     options.setMailboxStatus(context, "connected");
   };
 
+  const refreshPolicyFromFile = (): boolean => {
+    const filePath = resolveCompactionPolicyFile(options.getEnvironment());
+    if (filePath === undefined) return false;
+    try {
+      const mtime = statSync(filePath).mtimeMs;
+      if (filePath === loadedPolicyFile && mtime === loadedPolicyMtime) return false;
+      const loaded = loadCompactionPolicyFromFile(filePath);
+      if (loaded === undefined) return false;
+      compactionPolicy = loaded;
+      compactionPolicyError = undefined;
+      loadedPolicyFile = filePath;
+      loadedPolicyMtime = mtime;
+      notifiedCompactionPercent = 0;
+      return true;
+    } catch (error) {
+      compactionPolicyError = error instanceof Error ? error : new Error(String(error));
+      return false;
+    }
+  };
+
   const status = (context: CompactionContext): CompactionStatus => {
+    refreshPolicyFromFile();
     const usage = context.getContextUsage?.();
     const environment = options.getEnvironment();
     const effective = effectiveCompactionPolicy(compactionPolicy, context.model, environment);
@@ -256,6 +284,7 @@ export function createCompactionOrchestration(
   };
 
   const enforceHardCompaction = (context: CompactionContext): boolean => {
+    refreshPolicyFromFile();
     if (pendingHardCompaction !== undefined) {
       context.abort?.();
       return true;
@@ -301,6 +330,7 @@ export function createCompactionOrchestration(
   };
 
   const monitorContextThreshold = (context: CompactionContext): void => {
+    refreshPolicyFromFile();
     if (isChild(context)) return;
     const usage = context.getContextUsage?.();
     if (usage?.percent === null || usage?.percent === undefined) return;
@@ -380,6 +410,7 @@ export function createCompactionOrchestration(
     runPendingSelfCompaction,
     enforceHardCompaction,
     monitorContextThreshold,
+    refreshPolicyFromFile,
     onSessionBeforeCompact,
     onSessionCompact,
     onSessionCompactFailed,
