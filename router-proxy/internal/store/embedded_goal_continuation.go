@@ -51,7 +51,7 @@ func (s *Store) LatestReservedEmbeddedGoalContinuation(ctx context.Context, b Em
 	var k EmbeddedGoalEvaluationKey
 	var finalSeq sql.NullInt64
 	var finalDigest sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT user_seq, user_digest, goal_revision, final_seq, final_digest FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND state='reserved' ORDER BY user_seq DESC LIMIT 1`, b.AgentID, b.SessionID, b.Epoch).Scan(&k.UserSeq, &k.UserDigest, &k.GoalRevision, &finalSeq, &finalDigest)
+	err := s.db.QueryRowContext(ctx, `SELECT c.user_seq, c.user_digest, c.goal_revision, e.final_seq, e.final_digest FROM embedded_goal_continuations c JOIN embedded_goal_evaluations e ON e.agent_id=c.agent_id AND e.session_id=c.session_id AND e.epoch=c.epoch AND e.user_seq=c.user_seq AND e.user_digest=c.user_digest AND e.goal_revision=c.goal_revision WHERE c.agent_id=? AND c.session_id=? AND c.epoch=? AND c.state='reserved' ORDER BY c.user_seq DESC LIMIT 1`, b.AgentID, b.SessionID, b.Epoch).Scan(&k.UserSeq, &k.UserDigest, &k.GoalRevision, &finalSeq, &finalDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return k, false, nil
 	}
