@@ -226,6 +226,14 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 			if keepOwner {
 				m.OfferDirect(agent.AgentID) // queued during launch or cold recovery
 				m.recoverReservedEmbeddedGoalSnoozes(binding)
+				if recovered {
+					if policy, err := m.store.ManagedGoalPolicyFor(runCtx, agent.AgentID); err == nil && policy != nil && policy.Config.Enabled {
+						curAgent, err := m.store.ManagedAgent(runCtx, agent.AgentID)
+						if err == nil && curAgent != nil && curAgent.ActivityState == "idle" && curAgent.LifecycleState == "running" && !m.hasActiveSubagents(agent.AgentID) {
+							go m.kickoffIdleGoalContinuation(binding)
+						}
+					}
+				}
 			}
 		}
 	}()
