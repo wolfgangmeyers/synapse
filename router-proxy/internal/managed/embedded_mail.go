@@ -2,8 +2,8 @@ package managed
 
 import (
 	"context"
-	"errors"
-	"strings"
+	"log"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -54,25 +54,50 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 		if !admitted {
 			return
 		}
+		binding := owner.binding
+		log.Printf("[embedded:%s] Turn started (source: %s, message: %s)", binding.AgentID, "mail", attempt.MessageID)
 		ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-		if err := m.runEmbeddedMail(ctx, *saved, attempt); err != nil {
-			var rolledBack *store.EmbeddedMailAppendRolledBack
-			if errors.As(err, &rolledBack) {
-				// Keep the unstarted reservation and live owner available for a
-				// later explicit offer or cold recovery. Do not spin on the fault.
-				return
-			}
+		finalSeq, err := m.runEmbeddedMail(ctx, *saved, attempt)
+		if err != nil {
+			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", binding.AgentID, "mail", attempt.MessageID, err)
+			lane.mailAttempts[attempt.MessageID]++
+			attempts := lane.mailAttempts[attempt.MessageID]
+
 			// Do not fail the worker on turn errors. Transition cleanly back to idle:
 			if fenceErr := m.store.RenewEmbeddedOwner(context.Background(), owner.binding, owner.identity, embeddedOwnerTTL); fenceErr == nil {
 				_ = m.store.SetEmbeddedActivityState(context.Background(), owner.binding, "idle")
-				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), owner.binding.AgentID) // or ensure running, accepting_prompts=1, slot_held=1
+				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), owner.binding.AgentID)
 				m.publishProjection()
 			}
-			if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
-				m.OfferDirect(agentID)
+
+			if attempts >= 3 {
+				log.Printf("[embedded:%s] POISON PILL: message %s failed 3 times; dead-lettering to prevent spin loop: %v", agentID, attempt.MessageID, err)
+				delete(lane.mailAttempts, attempt.MessageID)
+				if dismissErr := m.store.DismissMailboxMessage(context.Background(), attempt.MessageID); dismissErr != nil {
+					log.Printf("[embedded:%s] ERROR dismissing dead-lettered message %s: %v", agentID, attempt.MessageID, dismissErr)
+				}
+				return
 			}
-			return // no retry of an ambiguous started SDK turn
+
+			baseBackoff := 5 * time.Second
+			if m.embeddedMailBackoff > 0 {
+				baseBackoff = m.embeddedMailBackoff
+			}
+			backoff := time.Duration(1<<(attempts-1)) * baseBackoff
+
+			m.startManagedTask(func() {
+				timer := time.NewTimer(backoff)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+					m.OfferDirect(agentID)
+				case <-m.runCtx.Done():
+				}
+			})
+			return
 		}
+		delete(lane.mailAttempts, attempt.MessageID)
+		log.Printf("[embedded:%s] Turn finished successfully (seq: %d)", binding.AgentID, finalSeq)
 		m.flushEmbeddedReplies(ctx, agentID)
 	}
 }

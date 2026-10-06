@@ -56,6 +56,8 @@ type embeddedPersistence struct {
 	toolInputs        map[string]any
 	currentThinking   string
 	toolExecuted      bool
+	source            string
+	msgID             string
 }
 
 func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
@@ -76,7 +78,12 @@ func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
 	}
 }
 
-func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) error {
+func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", p.binding.AgentID, p.source, p.msgID, retErr)
+		}
+	}()
 	if message.MessageRole() == ai.RoleUser {
 		p.currentThinking = ""
 	}
@@ -548,8 +555,8 @@ func (m *Manager) runEmbeddedSessionOriginalRestart(ctx context.Context, saved s
 	return m.runEmbeddedSession(context.WithValue(ctx, embeddedOriginalRestartGenerationKey{}, generation), saved)
 }
 
-func (m *Manager) runEmbeddedMail(ctx context.Context, saved store.ManagedAgentRecord, attempt *store.EmbeddedMailAttempt) error {
-	return m.runEmbeddedSessionTurn(ctx, saved, "", attempt)
+func (m *Manager) runEmbeddedMail(ctx context.Context, saved store.ManagedAgentRecord, attempt *store.EmbeddedMailAttempt) (int64, error) {
+	return m.runEmbeddedSessionTurnScoped(ctx, saved, "", attempt, nil, nil, nil)
 }
 
 // Explicit prompts are only supplied by an already-claimed runner; recovery
@@ -563,29 +570,58 @@ func (m *Manager) runEmbeddedSessionTurn(ctx context.Context, saved store.Manage
 }
 
 func (m *Manager) runEmbeddedSessionTurnWithContinuation(ctx context.Context, saved store.ManagedAgentRecord, explicitPrompt string, mail *store.EmbeddedMailAttempt, continuation *store.EmbeddedGoalEvaluationKey) error {
-	return m.runEmbeddedSessionTurnScoped(ctx, saved, explicitPrompt, mail, continuation, nil, nil)
+	_, err := m.runEmbeddedSessionTurnScoped(ctx, saved, explicitPrompt, mail, continuation, nil, nil)
+	return err
 }
 
 // A caller supplies an already claimed wake and the exact prompt for one SDK
 // invocation. This is not a scheduler: it never reserves, claims, or retries.
 func (m *Manager) runEmbeddedClaimedWake(ctx context.Context, saved store.ManagedAgentRecord, scope embeddedClaimedWakeScope, prompts []agent.AgentMessage) error {
-	return m.runEmbeddedSessionTurnScoped(ctx, saved, "", nil, nil, &scope, prompts)
+	_, err := m.runEmbeddedSessionTurnScoped(ctx, saved, "", nil, nil, &scope, prompts)
+	return err
 }
 
-func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.ManagedAgentRecord, explicitPrompt string, mail *store.EmbeddedMailAttempt, continuation *store.EmbeddedGoalEvaluationKey, wake *embeddedClaimedWakeScope, wakePrompts []agent.AgentMessage) error {
+func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.ManagedAgentRecord, explicitPrompt string, mail *store.EmbeddedMailAttempt, continuation *store.EmbeddedGoalEvaluationKey, wake *embeddedClaimedWakeScope, wakePrompts []agent.AgentMessage) (finalSeq int64, turnErr error) {
 	owner, ok := ctx.Value(embeddedOwnerContextKey{}).(embeddedOwner)
 	if !ok || owner.binding.AgentID != saved.AgentID || owner.binding.SessionID != saved.PiSessionID || owner.binding.Epoch != saved.SessionEpoch || owner.binding.Generation != saved.RuntimeGeneration {
-		return errors.New("embedded runner requires claimed owner")
+		return 0, errors.New("embedded runner requires claimed owner")
 	}
 	binding := owner.binding
 	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-		return err
+		return 0, err
 	}
-	var turnErr error
+	source := "prompt"
+	msgID := ""
+	if mail != nil {
+		source = "mail"
+		msgID = mail.MessageID
+	} else if wake != nil {
+		source = "wake"
+		msgID = wake.id
+	} else if continuation != nil {
+		source = "continuation"
+		msgID = fmt.Sprintf("%d:%s", continuation.UserSeq, continuation.UserDigest)
+	} else if explicitPrompt != "" {
+		source = "prompt"
+		msgID = ""
+	} else if saved.PendingInitialInstruction != "" {
+		source = "initial_instruction"
+		msgID = ""
+	}
+	if mail == nil {
+		log.Printf("[embedded:%s] Turn started (source: %s, message: %s)", binding.AgentID, source, msgID)
+	}
 	var p *embeddedPersistence
 	_ = m.store.SetEmbeddedActivityState(ctx, binding, "active")
 	m.publishProjection()
 	defer func() {
+		if turnErr != nil {
+			if mail == nil {
+				log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", binding.AgentID, source, msgID, turnErr)
+			}
+		} else if mail == nil && p != nil {
+			log.Printf("[embedded:%s] Turn finished successfully (seq: %d)", binding.AgentID, p.seq)
+		}
 		if p != nil && p.toolExecuted {
 			m.laneFor(binding.AgentID).consecutiveContinuations = 0
 		} else if continuation == nil && (explicitPrompt != "" || mail != nil) {
@@ -597,16 +633,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
 		}
 		m.publishProjection()
-		m.OfferDirect(binding.AgentID)
+		if mail == nil || turnErr == nil {
+			m.OfferDirect(binding.AgentID)
+		}
 	}()
 	// Restored selections are untrusted admission input too. Check the real
 	// SDK identity and private credential before any test substitution, tools,
 	// conversation append, or provider work.
 	if _, err := m.admitEmbeddedModel(ctx, Model{Provider: saved.SelectedModel.Provider, ID: saved.SelectedModel.ID}); err != nil {
-		return err
+		return 0, err
 	}
 	if err := m.validateEmbeddedWorkingDirectory(saved.Cwd); err != nil {
-		return err
+		return 0, err
 	}
 	model := ai.GetModel(saved.SelectedModel.Provider, saved.SelectedModel.ID)
 	if model == nil && (saved.SelectedModel.Provider == "antigravity" || saved.SelectedModel.Provider == "google") {
@@ -625,7 +663,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if m.embeddedModelResolver != nil {
 		resolved := m.embeddedModelResolver(saved)
 		if resolved == nil {
-			return errors.New("embedded model is unavailable")
+			return 0, errors.New("embedded model is unavailable")
 		}
 		if resolved.Provider == "openai-codex" {
 			model = resolved
@@ -634,12 +672,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			// not selection authority. Never substitute a built-in provider (which
 			// could resolve ambient auth). The SDK session keeps its Codex identity.
 			if len(ai.GetModels(resolved.Provider)) != 0 {
-				return errors.New("embedded provider substitution denied")
+				return 0, errors.New("embedded provider substitution denied")
 			}
 			for _, provider := range ai.GetProviders() {
 				for _, builtIn := range ai.GetModels(provider) {
 					if resolved.Api == builtIn.Api {
-						return errors.New("embedded provider substitution denied")
+						return 0, errors.New("embedded provider substitution denied")
 					}
 				}
 			}
@@ -650,17 +688,17 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 	}
 	if model == nil {
-		return errors.New("embedded model is unavailable")
+		return 0, errors.New("embedded model is unavailable")
 	}
 	if model.Provider == "openai-codex" {
 		if err := validateEmbeddedCodexModel(model); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
+	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	// Only an intent admitted by this SDK turn may cross the first reservation
@@ -925,7 +963,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	tools := []agent.AgentTool{}
 	role, err := m.store.EmbeddedSessionRole(ctx, binding)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if role == "root" || role == "worker" {
 		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_mailbox_send", toolAdmitted, toolCompleted, nil))
@@ -980,15 +1018,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}))
 		readTool, err := coding.CreateTool("read", saved.Cwd)
 		if err != nil {
-			return fmt.Errorf("embedded read tool: %w", err)
+			return 0, fmt.Errorf("embedded read tool: %w", err)
 		}
 		editTool, err := coding.CreateTool("edit", saved.Cwd)
 		if err != nil {
-			return fmt.Errorf("embedded edit tool: %w", err)
+			return 0, fmt.Errorf("embedded edit tool: %w", err)
 		}
 		writeTool, err := coding.CreateTool("write", saved.Cwd)
 		if err != nil {
-			return fmt.Errorf("embedded write tool: %w", err)
+			return 0, fmt.Errorf("embedded write tool: %w", err)
 		}
 		wrapTool := func(tool agent.AgentTool) agent.AgentTool {
 			original := tool.Execute
@@ -1022,7 +1060,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if m.embeddedExternalTool != nil {
 		tool := *m.embeddedExternalTool
 		if tool.Name == "" || tool.Parameters == nil || tool.Execute == nil {
-			return errors.New("invalid registered embedded external tool")
+			return 0, errors.New("invalid registered embedded external tool")
 		}
 		original := tool.Execute
 		tool.Execute = func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
@@ -1447,14 +1485,14 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		m.activeSessionsMu.Unlock()
 	}()
 	if err := p.restore(ctx, session); err != nil {
-		return err
+		return 0, err
 	}
 	var recoveryNotice *store.EmbeddedInterruptedNotice
 	var resumeUnentered bool
 	if wake == nil && mail == nil && explicitPrompt == "" && continuation == nil && binding.OwnerToken > 1 {
 		snap, err := m.store.ReopenEmbedded(ctx, binding)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		for i := len(snap.Entries) - 1; i >= 0; i-- {
 			if snap.Entries[i].Kind != "user" {
@@ -1462,7 +1500,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			recoveryNotice, err = m.store.PrepareEmbeddedInterruptedNotice(ctx, binding, snap.Entries[i].Sequence)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			if recoveryNotice != nil {
 				break
@@ -1472,7 +1510,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if i == len(snap.Entries)-1 {
 				resumeUnentered, err = m.store.EmbeddedUnenteredUser(ctx, binding, snap.Entries[i].Sequence, snap.Entries[i].Digest)
 				if err != nil {
-					return err
+					return 0, err
 				}
 			}
 			break
@@ -1510,35 +1548,46 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if wake != nil {
 		// ClaimEmbeddedRestartWake already starts an interrupted 076 notice.
 		// Do not enter the ordinary recovery path, which starts it again.
-		return handleTurnErr(p.runClaimedWake(ctx, session, *wake, wakePrompts))
+		if err := handleTurnErr(p.runClaimedWake(ctx, session, *wake, wakePrompts)); err != nil {
+			return 0, err
+		}
+		return p.seq, nil
 	}
 	if recoveryNotice != nil && recoveryNotice.State != "started" {
 		p.notice = recoveryNotice
 		if recoveryNotice.State == "appended" {
 			p.noticeStart = true
-			return handleTurnErr(session.Continue(ctx))
+			if err := handleTurnErr(session.Continue(ctx)); err != nil {
+				return 0, err
+			}
+			return p.seq, nil
 		}
 		message := ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: recoveryNotice.Text}}}
 		var err error
 		p.noticeMessage, err = json.Marshal(message)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		_, err = session.RunMessages(ctx, []agent.AgentMessage{message})
-		return handleTurnErr(err)
+		if err := handleTurnErr(err); err != nil {
+			return 0, err
+		}
+		return p.seq, nil
 	}
 	if resumeUnentered {
 		p.turnSeq, p.turnDigest = p.seq, p.digest
 		// Continue the restored checked user, never append a duplicate user.
 		// StreamFn fences and commits provider entry before dispatch.
 		if err := session.Continue(ctx); err != nil {
-			return handleTurnErr(err)
+			return 0, handleTurnErr(err)
 		}
 		if generation, ok := ctx.Value(embeddedOriginalRestartGenerationKey{}).(int64); ok {
 			_, err := m.store.ScheduleEmbeddedSettledOriginalWake(ctx, binding, generation, p.turnSeq, p.turnDigest)
-			return err
+			if err != nil {
+				return 0, handleTurnErr(err)
+			}
 		}
-		return nil
+		return p.seq, nil
 	}
 	if continuation != nil {
 		promptText := m.formatGoalContinuationPrompt(ctx, binding, continuation)
@@ -1549,52 +1598,64 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			Content: ai.ContentList{ai.TextContent{Text: promptText}},
 		}})
 		if err != nil {
-			return handleTurnErr(err)
+			return 0, handleTurnErr(err)
 		}
-		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
+		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
+			return 0, handleTurnErr(err)
+		}
+		return p.seq, nil
 	}
 	// A failed system declaration can leave only a system entry; the first
 	// user prompt is still due. Once a user is durable, never silently
 	// reissue a provider request after an ambiguous interruption.
 	if mail != nil {
 		if mail.Binding.AgentID != binding.AgentID || mail.Binding.SessionID != binding.SessionID || mail.Binding.Epoch != binding.Epoch || mail.Binding.Generation != binding.Generation || mail.Binding.OwnerToken != binding.OwnerToken {
-			return errors.New("embedded mail owner mismatch")
+			return 0, errors.New("embedded mail owner mismatch")
 		}
 		message, err := store.EmbeddedMailUserMessage(mail, m.clock.Now().UnixMilli())
 		if err != nil {
-			return err
+			return 0, err
 		}
 		p.mailMessage, err = json.Marshal(message)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		p.mail = mail
 		_, err = session.RunMessages(ctx, []agent.AgentMessage{message})
 		// The SDK may turn a rejected checked append into a local synthetic
 		// error. Preserve the Store's transaction outcome, not its error text.
 		if p.mailAppendErr != nil {
-			return p.mailAppendErr
+			return 0, handleTurnErr(p.mailAppendErr)
 		}
 		if err != nil {
-			return handleTurnErr(err)
+			return 0, handleTurnErr(err)
 		}
-		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
+		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
+			return 0, handleTurnErr(err)
+		}
+		return p.seq, nil
 	}
 	if explicitPrompt != "" {
 		_, err := session.Run(ctx, explicitPrompt)
 		if err != nil {
-			return handleTurnErr(err)
+			return 0, handleTurnErr(err)
 		}
-		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
+		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
+			return 0, handleTurnErr(err)
+		}
+		return p.seq, nil
 	}
 	if !hasUser && saved.PendingInitialInstruction != "" {
 		_, err := session.Run(ctx, saved.PendingInitialInstruction)
 		if err != nil {
-			return handleTurnErr(err)
+			return 0, handleTurnErr(err)
 		}
-		return m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream)
+		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
+			return 0, handleTurnErr(err)
+		}
+		return p.seq, nil
 	}
-	return nil
+	return p.seq, nil
 }
 
 // evaluateEmbeddedTurn runs only after a successful SDK turn. The receipt is
