@@ -104,6 +104,7 @@ type ManagerOptions struct {
 	// and maximum consecutive continuation turns for autonomous goal loops.
 	GoalContinuationDelay           time.Duration
 	MaxConsecutiveGoalContinuations int
+	EmbeddedMailBackoff             time.Duration
 }
 
 // RestartRequest already contains canonical operation metadata. A future HTTP
@@ -150,6 +151,7 @@ type managedAgentLane struct {
 	admission                sync.Mutex
 	selection                sync.Mutex // saved model snapshot at SDK turn admission only
 	consecutiveContinuations int
+	mailAttempts             map[string]int
 }
 
 const (
@@ -282,6 +284,7 @@ type Manager struct {
 	beforeTerminationArtifactCleanup           func(context.Context, string) error
 	restartAllDispatcher                       RestartAllDispatcher
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
+	embeddedMailBackoff                        time.Duration
 	rootControlHandlers                        *RootControlHandlerRegistry
 	rootRecoveryOperatorOwner                  string
 	subagentsMu                                sync.Mutex
@@ -393,6 +396,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
 	manager.goalContinuationDelay = options.GoalContinuationDelay
+	manager.embeddedMailBackoff = options.EmbeddedMailBackoff
 	if options.MaxConsecutiveGoalContinuations > 0 {
 		manager.maxConsecutiveGoalContinuations = options.MaxConsecutiveGoalContinuations
 	} else {
@@ -1251,8 +1255,13 @@ func (m *Manager) startManagedTask(task func()) bool {
 func (m *Manager) laneLocked(agentID string) *managedAgentLane {
 	lane := m.lanes[agentID]
 	if lane == nil {
-		lane = &managedAgentLane{}
+		lane = &managedAgentLane{
+			mailAttempts: make(map[string]int),
+		}
 		m.lanes[agentID] = lane
+	}
+	if lane.mailAttempts == nil {
+		lane.mailAttempts = make(map[string]int)
 	}
 	return lane
 }

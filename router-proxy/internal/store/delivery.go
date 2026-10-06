@@ -842,6 +842,21 @@ func (s *Store) DismissDeadLetter(ctx context.Context, messageID string) (bool, 
 	return dismissed, err
 }
 
+// DismissMailboxMessage transitions a mailbox message to dead_letter state.
+// Used for poison pill prevention when a message fails repeated execution attempts.
+func (s *Store) DismissMailboxMessage(ctx context.Context, messageID string) error {
+	if messageID == "" {
+		return errors.New("messageId is required")
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, "UPDATE messages SET state = 'dead_letter' WHERE id = ?", messageID); err != nil {
+			return err
+		}
+		return s.rearmFailedReminder(ctx, messageID, now)
+	})
+}
+
 func (s *Store) MessageFor(ctx context.Context, messageID string) (*domain.Message, error) {
 	return s.messageForTx(ctx, messageID)
 }
