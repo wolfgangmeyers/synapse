@@ -90,7 +90,7 @@ func (s *Store) HasPendingWakeOrStartedContinuation(ctx context.Context, b Embed
 		return false, errors.New("store is closed")
 	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND state IN ('planned','claimed')) + (SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND state='started')`, b.AgentID, b.AgentID, b.SessionID, b.Epoch).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND state IN ('planned','claimed')) + (SELECT count(*) FROM embedded_goal_continuations c WHERE c.agent_id=? AND c.session_id=? AND c.epoch=? AND c.state='started' AND NOT EXISTS (SELECT 1 FROM embedded_entries e WHERE e.agent_id=c.agent_id AND e.session_id=c.session_id AND e.epoch=c.epoch AND e.kind='assistant' AND e.seq > c.user_seq))`, b.AgentID, b.AgentID, b.SessionID, b.Epoch).Scan(&count)
 	return count > 0, err
 }
 

@@ -2,7 +2,12 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
+	"strings"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -29,6 +34,11 @@ func (m *Manager) RecoverEmbeddedReplies(ctx context.Context) error {
 	return nil
 }
 
+// DeliverEmbeddedReplies is the public entry point for delivering pending replies.
+func (m *Manager) DeliverEmbeddedReplies(ctx context.Context, agentID string) error {
+	return m.deliverEmbeddedReplies(ctx, agentID)
+}
+
 func (m *Manager) deliverEmbeddedReplies(ctx context.Context, agentID string) error {
 	replies, err := m.store.PendingEmbeddedReplies(ctx, agentID)
 	if err != nil {
@@ -42,6 +52,14 @@ func (m *Manager) deliverEmbeddedReplies(ctx context.Context, agentID string) er
 	}
 	for _, reply := range replies {
 		if err := publish(ctx, reply); err != nil {
+			var valErr *protocol.ValidationError
+			if errors.As(err, &valErr) || strings.Contains(err.Error(), "payload_too_large") || strings.Contains(err.Error(), "invalid") {
+				log.Printf("[embedded_reply] Dropping/truncating oversized reply row %d for agent %s: %v", reply.RowID, agentID, err)
+				if settleErr := m.store.SettleEmbeddedReply(ctx, reply); settleErr != nil {
+					_ = m.store.DismissEmbeddedReply(ctx, reply.AttemptID)
+				}
+				continue
+			}
 			return err
 		}
 		if err := m.store.SettleEmbeddedReply(ctx, reply); err != nil {
