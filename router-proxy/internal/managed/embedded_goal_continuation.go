@@ -13,6 +13,9 @@ import (
 
 type embeddedGoalTimer struct{ cancel func() }
 
+const defaultGoalContinuationDelay = 10 * time.Second
+const defaultMaxConsecutiveGoalContinuations = 10
+
 // Recovery only restores timers for durable, unstarted snoozed reservations.
 // The ordinary start path still fences ownership, policy, due, and final turn.
 func (m *Manager) recoverReservedEmbeddedGoalSnoozes(binding store.EmbeddedBinding) {
@@ -30,21 +33,34 @@ func (m *Manager) recoverReservedEmbeddedGoalSnoozes(binding store.EmbeddedBindi
 }
 
 // dispatchEmbeddedGoalContinuation schedules only the saved key after its
-// durable verdict. An unsnoozed reservation keeps the immediate G4 path.
+// durable verdict. It enforces the consecutive continuation cap and minimum delay pacing.
 func (m *Manager) dispatchEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey) {
 	reservation, err := m.store.EmbeddedGoalContinuationFor(m.runCtx, binding, key)
 	if err != nil || reservation.State != "reserved" {
 		return
 	}
-	if reservation.DueAt.Valid {
-		due, err := time.Parse("2006-01-02T15:04:05.000Z", reservation.DueAt.String)
-		if err != nil {
-			return
-		}
-		m.scheduleEmbeddedGoalContinuation(binding, key, due)
+	lane := m.laneFor(binding.AgentID)
+	maxContinuations := m.maxConsecutiveGoalContinuations
+	if maxContinuations <= 0 {
+		maxContinuations = defaultMaxConsecutiveGoalContinuations
+	}
+	if lane.consecutiveContinuations >= maxContinuations {
+		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations)
 		return
 	}
-	m.startEmbeddedGoalContinuation(binding, key)
+	if reservation.DueAt.Valid {
+		due, err := time.Parse("2006-01-02T15:04:05.000Z", reservation.DueAt.String)
+		if err == nil {
+			m.scheduleEmbeddedGoalContinuation(binding, key, due)
+			return
+		}
+	}
+	minDelay := m.goalContinuationDelay
+	if minDelay <= 0 {
+		minDelay = defaultGoalContinuationDelay
+	}
+	due := m.clock.Now().Add(minDelay)
+	m.scheduleEmbeddedGoalContinuation(binding, key, due)
 }
 
 func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, due time.Time) {
@@ -92,6 +108,14 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 	if m.runCtx.Err() != nil {
 		return
 	}
+	maxContinuations := m.maxConsecutiveGoalContinuations
+	if maxContinuations <= 0 {
+		maxContinuations = defaultMaxConsecutiveGoalContinuations
+	}
+	if lane.consecutiveContinuations >= maxContinuations {
+		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations)
+		return
+	}
 	lane.selection.Lock()
 	saved, err := m.store.ManagedAgent(m.runCtx, binding.AgentID)
 	m.mu.Lock()
@@ -115,6 +139,7 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 	if err != nil || !started {
 		return
 	}
+	lane.consecutiveContinuations++
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 	prompt := m.formatGoalContinuationPrompt(ctx, owner.binding)
 	// Start committed UNKNOWN before any SDK provider request. An error or
@@ -205,6 +230,15 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 
+	maxContinuations := m.maxConsecutiveGoalContinuations
+	if maxContinuations <= 0 {
+		maxContinuations = defaultMaxConsecutiveGoalContinuations
+	}
+	if lane.consecutiveContinuations >= maxContinuations {
+		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", agentID, lane.consecutiveContinuations)
+		return
+	}
+
 	curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
 	if err != nil || curAgent == nil || curAgent.ActivityState != "idle" || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
 		log.Printf("kickoffIdleGoalContinuation: agent %s not idle/running: err=%v", agentID, err)
@@ -248,6 +282,7 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding)
+	lane.consecutiveContinuations++
 	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
 	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
 		log.Printf("kickoffIdleGoalContinuation: runEmbeddedSessionTurn error for %s: %v", agentID, err)

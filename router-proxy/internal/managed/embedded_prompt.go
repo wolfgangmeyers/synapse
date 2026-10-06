@@ -16,6 +16,7 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 		return m.AdmitPrompt(ctx, agentID, message)
 	}
 	lane := m.laneFor(agentID)
+	lane.consecutiveContinuations = 0
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
 	lane.serial.Lock()

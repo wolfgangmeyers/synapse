@@ -52,8 +52,9 @@ func productionPolicyManager(t *testing.T, db *store.Store, root string, reg *pr
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest,
-		Config:        Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-		CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		Config:                 Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:          CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		GoalContinuationDelay:  20 * time.Millisecond,
 		EmbeddedModelResolver: func(saved store.ManagedAgentRecord) *ai.Model {
 			pinned := ai.GetModel(saved.SelectedModel.Provider, saved.SelectedModel.ID)
 			require.NotNil(t, pinned)

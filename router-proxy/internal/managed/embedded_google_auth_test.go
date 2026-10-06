@@ -1039,6 +1039,75 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(
 	require.NotContains(t, textPart["text"], "exit=0")
 }
 
+func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlternation(t *testing.T) {
+	// Case 1: user -> empty assistant -> user continuation prompt
+	messages1 := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Please start the task."},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Continue working on the current goal."},
+			},
+		},
+	}
+
+	contents1 := convertMessagesToGoogleContents(messages1)
+	// Must produce 3 turns: user -> model (empty placeholder) -> user
+	require.Len(t, contents1, 3)
+	require.Equal(t, "user", contents1[0]["role"])
+	require.Equal(t, "model", contents1[1]["role"])
+	require.Equal(t, "user", contents1[2]["role"])
+
+	modelParts1 := contents1[1]["parts"].([]any)
+	require.Len(t, modelParts1, 1)
+	require.Equal(t, "(empty response)", modelParts1[0].(map[string]any)["text"])
+
+	// Case 2: tool response -> empty assistant -> user continuation prompt
+	messages2 := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Initial instruction"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Calling tool"},
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-write-1",
+			ToolName:   "write",
+			Content: []ai.Content{
+				ai.TextContent{Text: "Successfully wrote file"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Continue working on the current goal."},
+			},
+		},
+	}
+
+	contents2 := convertMessagesToGoogleContents(messages2)
+	// Must produce 5 turns alternating user -> model -> user -> model -> user
+	require.Len(t, contents2, 5)
+	require.Equal(t, "user", contents2[0]["role"])
+	require.Equal(t, "model", contents2[1]["role"])
+	require.Equal(t, "user", contents2[2]["role"])
+	require.Equal(t, "model", contents2[3]["role"])
+	require.Equal(t, "user", contents2[4]["role"])
+	require.Equal(t, "(empty response)", contents2[3]["parts"].([]any)[0].(map[string]any)["text"])
+}
+
 
 func TestOpenAI_ImageConversion(t *testing.T) {
 	fakePNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="

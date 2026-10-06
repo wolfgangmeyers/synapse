@@ -356,6 +356,39 @@ func stripSimulatedObservations(text string) string {
 	return strings.TrimSpace(strings.Join(filtered, "\n"))
 }
 
+func isAssistantContentEmpty(am ai.AssistantMessage) bool {
+	if len(am.Content) == 0 {
+		return true
+	}
+	for _, c := range am.Content {
+		switch part := c.(type) {
+		case ai.ToolCall:
+			return false
+		case *ai.ToolCall:
+			if part != nil {
+				return false
+			}
+		case ai.TextContent:
+			if strings.TrimSpace(part.Text) != "" {
+				return false
+			}
+		case *ai.TextContent:
+			if part != nil && strings.TrimSpace(part.Text) != "" {
+				return false
+			}
+		case ai.ThinkingContent:
+			if strings.TrimSpace(part.Thinking) != "" {
+				return false
+			}
+		case *ai.ThinkingContent:
+			if part != nil && strings.TrimSpace(part.Thinking) != "" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[string]string) []map[string]any {
 	droppedToolCalls := make(map[string]string)
 	if len(dropped) > 0 && dropped[0] != nil {
@@ -476,6 +509,9 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 					droppedToolCalls[callID] = label
 					droppedToolCalls[call.Name] = label
 				}
+			}
+			if len(parts) == 0 && isAssistantContentEmpty(am) {
+				parts = append(parts, map[string]any{"text": "(empty response)"})
 			}
 			if len(parts) > 0 {
 				rawContents = append(rawContents, map[string]any{"role": "model", "parts": parts})
