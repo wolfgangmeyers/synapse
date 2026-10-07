@@ -66,13 +66,18 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   const scope = useMemo<RouterScope>(() => { const candidate = options.agentId ?? options.defaultAgentId ?? "wolfgang"; return { routerUrl: normalizeRouterUrl(options.routerUrl), agentId: isAgentId(candidate) ? candidate : "wolfgang" }; }, [options.routerUrl, options.agentId, options.defaultAgentId]);
   const transport = useMemo(() => createRouterTransport({ ...options, routerUrl: scope.routerUrl, agentId: scope.agentId, defaultAgentId: scope.agentId }), [scope.routerUrl, scope.agentId, options.storage, options.fetchImpl, options.webSocketFactory, options.autoReconnect, options.persistDelivery]);
   const [state, dispatch] = useReducer(reducer, options.initialState ?? createInitialState(scope));
+  const stateRef = useRef(state); stateRef.current = state;
   const scopeRef = useRef(scope); scopeRef.current = scope;
   const providerAuthFrameRef = useRef(options.onProviderAuthFrame); providerAuthFrameRef.current = options.onProviderAuthFrame;
   const uiLiveErrorRef = useRef(options.onUILiveError); uiLiveErrorRef.current = options.onUILiveError;
   const startManagedSurfaceRef = useRef<(() => void) | undefined>(undefined);
+  const syncGroundTruthRef = useRef<((includeHistory?: boolean) => Promise<void>) | undefined>(undefined);
   const uiLive = useMemo(() => createUILiveClient({
     routerUrl: scope.routerUrl,
     ...(options.uiLiveWebSocketFactory === undefined ? {} : { webSocketFactory: options.uiLiveWebSocketFactory }),
+    onConnect: () => {
+      void syncGroundTruthRef.current?.(true);
+    },
     onFrame: (frame) => {
       const currentScope = scopeRef.current;
       if (frame.type === "managed_agents_snapshot") {
@@ -122,6 +127,28 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         } catch {
           // A child projection can be repaired by the next refresh or live frame.
         }
+
+        const selected = stateRef.current.selectedPeer;
+        const peerId = selected
+          ? (selected.startsWith("router-managed:") ? selected.slice("router-managed:".length) : selected.startsWith("tmux:") ? selected.slice("tmux:".length) : selected)
+          : undefined;
+        const targetAgentId = (peerId && snapshot.agents.some((a) => a.agent_id === peerId))
+          ? peerId
+          : snapshot.agents.find((a) => a.activity_state === "active")?.agent_id;
+
+        if (targetAgentId) {
+          try {
+            const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 200 });
+            if (active) {
+              for (const entry of historyPage.entries) {
+                dispatch({ type: "managed/history", scope: scopeRef.current, view: "complete", entry });
+              }
+            }
+          } catch {
+            // history can be loaded on selection
+          }
+        }
+
         if (capabilities.ui_live_v1 !== false && canConnectUILive(options)) {
           try { uiLive.connect(); } catch {
             // The HTTP snapshot remains usable while the live connection recovers.
@@ -156,8 +183,88 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         }
       }
     };
+    let reconcileInFlight = false;
+    let reconcilePending = false;
+    let reconcilePendingHistory = false;
+
+    const reconcileGroundTruth = async (includeHistory = false): Promise<void> => {
+      if (!active) return;
+      if (reconcileInFlight) {
+        reconcilePending = true;
+        if (includeHistory) reconcilePendingHistory = true;
+        return;
+      }
+      reconcileInFlight = true;
+      try {
+        const snapshot = await transport.http.managedAgents();
+        if (!active) return;
+        const currentScope = scopeRef.current;
+        dispatch({ type: "managed/reconcile", scope: currentScope, version: snapshot.projection_version, agents: snapshot.agents });
+        refreshManagedGoalProjection(transport, dispatch, currentScope, snapshot.agents);
+
+        if (includeHistory) {
+          try {
+            const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
+            if (active) dispatch({ type: "managed/children", scope: currentScope, children });
+          } catch {
+            // child projection can be repaired on next pass
+          }
+
+          const selected = stateRef.current.selectedPeer;
+          const peerId = selected
+            ? (selected.startsWith("router-managed:") ? selected.slice("router-managed:".length) : selected.startsWith("tmux:") ? selected.slice("tmux:".length) : selected)
+            : undefined;
+          const targetAgentId = (peerId && snapshot.agents.some((a) => a.agent_id === peerId))
+            ? peerId
+            : snapshot.agents.find((a) => a.activity_state === "active")?.agent_id;
+
+          if (targetAgentId) {
+            try {
+              const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 200 });
+              if (active) {
+                for (const entry of historyPage.entries) {
+                  dispatch({ type: "managed/history", scope: currentScope, view: "complete", entry });
+                }
+              }
+            } catch {
+              // history can be reloaded on next selection
+            }
+          }
+        }
+      } catch {
+        // Router startup or temporary blip
+      } finally {
+        reconcileInFlight = false;
+        if (reconcilePending && active) {
+          const runHistory = reconcilePendingHistory;
+          reconcilePending = false;
+          reconcilePendingHistory = false;
+          void reconcileGroundTruth(runHistory);
+        }
+      }
+    };
+    syncGroundTruthRef.current = reconcileGroundTruth;
+
+    const pollIntervalTimer = setInterval(() => {
+      if (active && options.connect !== false) {
+        void reconcileGroundTruth(false);
+      }
+    }, 3_000);
+
     dispatch({ type: "scope/reset", scope });
-    const unsubscribe = transport.subscribe((event) => { const action = eventAction(event, scopeRef.current); if (action) dispatch(action); });
+    let wasConnected = false;
+    const unsubscribe = transport.subscribe((event) => {
+      if (event.type === "status") {
+        if (event.status === "connected") {
+          if (wasConnected) {
+            void reconcileGroundTruth(true);
+          }
+          wasConnected = true;
+        }
+      }
+      const action = eventAction(event, scopeRef.current);
+      if (action) dispatch(action);
+    });
     if (options.connect !== false) {
       transport.connect();
       void startManagedSurface();
@@ -165,6 +272,8 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     return () => {
       active = false;
       startManagedSurfaceRef.current = undefined;
+      syncGroundTruthRef.current = undefined;
+      clearInterval(pollIntervalTimer);
       if (managedSnapshotRetryTimer !== undefined) clearTimeout(managedSnapshotRetryTimer);
       if (startManagedSurfaceRetryTimer !== undefined) clearTimeout(startManagedSurfaceRetryTimer);
       unsubscribe();

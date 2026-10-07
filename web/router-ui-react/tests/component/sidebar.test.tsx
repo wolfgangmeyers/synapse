@@ -12,7 +12,7 @@ describe("Sidebar", () => {
     const brand = container.querySelector(".brand");
     expect(brand).toContainElement(screen.getByRole("img", { name: "Mecha Developer" }));
     expect(screen.getByRole("img", { name: "Mecha Developer" })).toHaveAttribute("src", "/logo.png");
-    expect(brand?.children).toHaveLength(1);
+    expect(brand?.children).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Refresh agents" })).not.toBeInTheDocument();
     expect(screen.queryByText("Your agent network")).not.toBeInTheDocument();
   });

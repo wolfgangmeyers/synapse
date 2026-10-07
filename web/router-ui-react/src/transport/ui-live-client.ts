@@ -7,6 +7,7 @@ export interface UILiveClientOptions {
   routerUrl: string;
   webSocketFactory?: WebSocketFactory;
   retryDelayMs?: number;
+  onConnect?: () => void;
   onFrame: (frame: UILiveFrame) => void;
   onRecovery?: () => void;
   onError?: (error: Error) => void;
@@ -147,6 +148,9 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     if (stopped || socket !== undefined) return;
     const candidate = factory(url);
     socket = candidate;
+    candidate.addEventListener("open", () => {
+      options.onConnect?.();
+    });
     candidate.addEventListener("message", (event) => onMessage(event.data));
     candidate.addEventListener("close", () => {
       if (socket !== candidate) return;

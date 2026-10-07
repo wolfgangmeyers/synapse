@@ -13,6 +13,7 @@ export type AppAction =
   | { type: "agents/set"; scope: RouterScope; agents: Agent[] }
   | { type: "managed/enabled"; scope: RouterScope; enabled: boolean }
   | { type: "managed/snapshot"; scope: RouterScope; version: number; agents: ManagedAgent[] }
+  | { type: "managed/reconcile"; scope: RouterScope; version: number; agents: ManagedAgent[] }
   | { type: "managed/delta"; scope: RouterScope; version: number; baseVersion: number; agent: ManagedAgent; recordKey?: string }
   | { type: "managed/removed"; scope: RouterScope; version: number; baseVersion: number; agentId: string; recordKey?: string }
   | { type: "managed/goal-state"; scope: RouterScope; agentId: string; goalState: GoalState }
@@ -86,6 +87,77 @@ export function reducer(state: AppState, action: AppAction): AppState {
       const agents = action.agents.map((agent): ManagedAgentView => ({ ...agent, managedProjectionVersion: action.version }));
       return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: retainManagedGoalStates(agents, state.managedAgents) };
     }
+    case "managed/reconcile": {
+      const current = state.managedAgents ?? [];
+      const currentMap = new Map(current.map((agent) => [agent.agent_id, agent]));
+      const incomingIds = new Set(action.agents.map((agent) => agent.agent_id));
+      let changed = false;
+
+      if (current.some((agent) => !incomingIds.has(agent.agent_id))) {
+        changed = true;
+      }
+
+      const nextAgents: ManagedAgentView[] = [];
+      for (const incoming of action.agents) {
+        const existing = currentMap.get(incoming.agent_id);
+        if (!existing) {
+          changed = true;
+          nextAgents.push({ ...incoming, managedProjectionVersion: action.version });
+          continue;
+        }
+
+        const goalState = incoming.goal_state ?? existing.goal_state;
+        const agentChanged =
+          existing.activity_state !== incoming.activity_state ||
+          existing.lifecycle_state !== incoming.lifecycle_state ||
+          existing.accepting_prompts !== incoming.accepting_prompts ||
+          existing.desired_state !== incoming.desired_state ||
+          existing.cwd !== incoming.cwd ||
+          existing.runtime !== incoming.runtime ||
+          existing.last_error !== incoming.last_error ||
+          JSON.stringify(existing.goal_state) !== JSON.stringify(goalState) ||
+          JSON.stringify(existing.model) !== JSON.stringify(incoming.model);
+
+        if (agentChanged) {
+          changed = true;
+          const merged = {
+            ...existing,
+            ...incoming,
+            managedProjectionVersion: Math.max(existing.managedProjectionVersion ?? 0, action.version),
+          };
+          if (goalState !== undefined) {
+            merged.goal_state = goalState;
+          } else {
+            delete merged.goal_state;
+          }
+          nextAgents.push(merged);
+        } else {
+          nextAgents.push(existing);
+        }
+      }
+
+      const nextVersion = Math.max(state.managedProjectionVersion ?? 0, action.version);
+      if (!changed && nextVersion === state.managedProjectionVersion && state.managedAvailable) {
+        return state;
+      }
+
+      let nextChildren = state.managedChildren;
+      if (changed) {
+        const removedIds = current.filter((agent) => !incomingIds.has(agent.agent_id)).map((agent) => agent.agent_id);
+        if (removedIds.length > 0) {
+          nextChildren = { ...state.managedChildren };
+          for (const id of removedIds) delete nextChildren[id];
+        }
+      }
+
+      return {
+        ...state,
+        managedAvailable: true,
+        managedProjectionVersion: nextVersion,
+        managedAgents: nextAgents,
+        managedChildren: nextChildren,
+      };
+    }
     case "managed/delta": {
       if (state.managedProjectionVersion !== action.baseVersion || action.version !== action.baseVersion + 1) return state;
       const agents = state.managedAgents ?? [];
@@ -116,7 +188,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
     }
     case "managed/recover": {
       const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutVersions } = state;
-      return { ...withoutVersions, managedAgents: [], managedChildren: {} };
+      return withoutVersions;
     }
     case "managed/history": {
       const history = state.managedHistory ?? {};
