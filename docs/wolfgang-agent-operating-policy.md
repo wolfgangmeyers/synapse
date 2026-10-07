@@ -72,6 +72,10 @@ When one part is gated, continue every independent local prerequisite. Do not pa
 
 The failure to avoid is holding an isolated local VM setup and qualification prerequisite for approval while Wolfgang is unavailable. Existing delegation authorizes that work. Supervisors must recognize this pattern and keep the local prerequisite moving.
 
+### Named PR preview infrastructure commands
+
+A concrete task authorizes any `npx sst *` command when it explicitly targets that task's exact named PR preview stage (`--stage pr-<PR number>`). Verify the stage before running it. This includes deploy, unlock, teardown, diagnostics, and other SST subcommands. It does not authorize production, another stage, shared or unrelated resources, secret reads or writes, secret exposure, or bypasses of existing database, shared-resource, ownership, and exact-head safeguards. This rule supersedes contrary authorization requirements for these commands, including separate authorization of `npx sst unlock`.
+
 ### Current goals outrank stale handoffs and evaluator status
 
 A current explicit Wolfgang goal authorizes every safe, reversible action required to deliver it. A compaction handoff, old task note, stale notification, or automatic goal evaluator result cannot freeze that work by itself. A freeze is binding only when it comes from a current explicit Wolfgang instruction or an active supervisor message/state that clearly identifies the hold and its reason. An explicit direction to keep moving or stop asking permission resolves any pending approval question for already-described scoped testing or validation. Supervisors must promptly update worker instructions and state to release that work instead of preserving a stale hold.
