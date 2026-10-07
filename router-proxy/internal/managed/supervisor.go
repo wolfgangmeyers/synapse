@@ -156,6 +156,8 @@ type managedAgentLane struct {
 	consecutiveEmptyTurns    int
 	goalAttempt              int
 	mailAttempts             map[string]int
+	warningEpoch             int64
+	warningEmitted           bool
 }
 
 const (

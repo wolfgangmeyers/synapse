@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -14,6 +17,24 @@ import (
 )
 
 const ContextResetWakePrompt = "Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."
+const ContextResetWarningReminder = "Context usage threshold warning: You are approaching the context reset boundary. Please use the scratchpad tool to record your current plan, key findings, and immediate next steps now before context reset occurs."
+
+func contextWarningThresholdExceeded(model Model, currentTokens int) bool {
+	if model.ContextWindow <= 0 {
+		return false
+	}
+	var threshold int
+	if model.ContextWindow >= 1_000_000 {
+		threshold = model.ContextWindow * 40 / 100
+	} else {
+		threshold = model.ContextWindow * 70 / 100
+	}
+	return currentTokens >= threshold
+}
+
+func ContextWarningThresholdExceeded(model Model, currentTokens int) bool {
+	return contextWarningThresholdExceeded(model, currentTokens)
+}
 
 type managerContextKey struct{}
 
@@ -194,6 +215,9 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	runCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
 
 	log.Printf("[embedded:%s] Context reset completed (%s). Dispatched wake turn to epoch %d", binding.AgentID, reason, nextEpoch)
+	lane := m.laneFor(binding.AgentID)
+	lane.warningEmitted = false
+	lane.warningEpoch = nextEpoch
 	if err := m.runEmbeddedSessionPrompt(runCtx, *updatedAgent, ContextResetWakePrompt); err != nil {
 		return fmt.Errorf("dispatch context reset wake turn: %w", err)
 	}
@@ -239,5 +263,59 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 		if err := m.ExecuteContextReset(ctx, binding, "threshold_exceeded"); err != nil {
 			log.Printf("[embedded:%s] auto context reset failed: %v", binding.AgentID, err)
 		}
+	} else if contextWarningThresholdExceeded(managedModel, currentTokens) {
+		lane := m.laneFor(binding.AgentID)
+		if lane.warningEpoch != binding.Epoch {
+			lane.warningEpoch = binding.Epoch
+			lane.warningEmitted = false
+		}
+		if !lane.warningEmitted {
+			lane.warningEmitted = true
+			log.Printf("[embedded:%s] Emitted pre-reset scratchpad reminder (tokens: %d)", binding.AgentID, currentTokens)
+			if err := m.emitContextWarningReminder(ctx, binding); err != nil {
+				log.Printf("[embedded:%s] failed to emit pre-reset scratchpad reminder: %v", binding.AgentID, err)
+			}
+		}
 	}
+}
+
+func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.EmbeddedBinding) error {
+	if m.store == nil {
+		return errors.New("store is nil")
+	}
+	msgID := fmt.Sprintf("warning-reminder-%s-%d-%s", binding.AgentID, binding.Epoch, uuid.New().String()[:8])
+	now := formatManagedTime(time.Now())
+	if m.clock != nil {
+		now = formatManagedTime(m.clock.Now())
+	}
+	source := protocol.MessageSource{Kind: "reminder"}
+	subject := "Context usage threshold warning"
+	envelope := protocol.Envelope{
+		ID:        msgID,
+		From:      "supervisor",
+		To:        binding.AgentID,
+		Subject:   &subject,
+		Body:      ContextResetWarningReminder,
+		CreatedAt: now,
+		Source:    &source,
+	}
+	result, err := m.store.Enqueue(ctx, envelope, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body:   &envelope.Body,
+			Source: &source,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue warning reminder: %w", err)
+	}
+	m.mu.Lock()
+	publish := m.embeddedMailPublisher
+	m.mu.Unlock()
+	if publish != nil {
+		publish(result)
+	} else {
+		_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
+	}
+	m.OfferDirect(binding.AgentID)
+	return nil
 }

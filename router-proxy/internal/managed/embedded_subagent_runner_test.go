@@ -29,7 +29,7 @@ func subagentTestParent(t *testing.T, s *store.Store, id string) store.EmbeddedB
 	agent := store.ManagedAgentRecord{
 		AgentID: id, Name: id, SlotHeld: true, Cwd: t.TempDir(),
 		SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-sol"},
-		Runtime:       runtime, PiSessionID: id + "-session", SessionEpoch: 1,
+		Runtime:       runtime, DesiredState: "running", PiSessionID: id + "-session", SessionEpoch: 1,
 		ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64),
 	}
 	op := store.ManagedOperation{

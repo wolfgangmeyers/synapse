@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
@@ -430,6 +431,12 @@ func TestAutoResetAtThreshold(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, wakeReceived.Load(), "turn 1 at ~70% should not trigger 80%% reset")
 
+		// Wait for any background warning reminder turn to complete before sending next prompt
+		require.Eventually(t, func() bool {
+			a, e := db.ManagedAgent(ctx, parent.AgentID)
+			return e == nil && a.ActivityState == "idle"
+		}, 3*time.Second, 10*time.Millisecond)
+
 		// Turns 2-4: Small follow-up turns
 		for i := 2; i <= 4; i++ {
 			err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, fmt.Sprintf("Follow up step %d", i))
@@ -521,5 +528,193 @@ func TestAutoResetAtThreshold(t *testing.T) {
 		curAgent, err := db.ManagedAgent(ctx, parent.AgentID)
 		require.NoError(t, err)
 		require.Equal(t, int64(2), curAgent.SessionEpoch, "agent must be advanced to epoch 2")
+	})
+}
+
+// TestPreResetScratchpadWarningReminder verifies:
+// 1. contextWarningThresholdExceeded calculation:
+//    - 40% for 1M+ models
+//    - 70% for <1M models
+// 2. Scratchpad warning reminder prompt is emitted when threshold is reached
+// 3. Warning reminder is tracked per epoch and not repeatedly emitted in the same epoch
+func TestPreResetScratchpadWarningReminder(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("WarningThresholdCalculations", func(t *testing.T) {
+		// 1M+ models: 40%
+		model1M := Model{Provider: "google", ID: "gemini-flash", ContextWindow: 1_000_000}
+		require.False(t, contextWarningThresholdExceeded(model1M, 399_999), "39.9999% should not exceed 40% warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model1M, 400_000), "exact 40% should exceed warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model1M, 450_000), "45% should exceed 40% warning threshold")
+		require.True(t, ContextWarningThresholdExceeded(model1M, 400_000), "exported ContextWarningThresholdExceeded must match")
+
+		// 2M model: 40% = 800,000
+		model2M := Model{Provider: "google", ID: "gemini-pro", ContextWindow: 2_000_000}
+		require.False(t, contextWarningThresholdExceeded(model2M, 799_999))
+		require.True(t, contextWarningThresholdExceeded(model2M, 800_000))
+
+		// <1M models: 70%
+		model100k := Model{Provider: "anthropic", ID: "claude-haiku", ContextWindow: 100_000}
+		require.False(t, contextWarningThresholdExceeded(model100k, 69_999), "69.999% should not exceed 70% warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model100k, 70_000), "exact 70% should exceed warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model100k, 75_000), "75% should exceed 70% warning threshold")
+		require.True(t, ContextWarningThresholdExceeded(model100k, 70_000), "exported ContextWarningThresholdExceeded must match")
+
+		// 200k model: 70% = 140,000
+		model200k := Model{Provider: "anthropic", ID: "claude-sonnet", ContextWindow: 200_000}
+		require.False(t, contextWarningThresholdExceeded(model200k, 139_999))
+		require.True(t, contextWarningThresholdExceeded(model200k, 140_000))
+
+		// <= 0
+		require.False(t, contextWarningThresholdExceeded(Model{ContextWindow: 0}, 100))
+		require.False(t, contextWarningThresholdExceeded(Model{ContextWindow: -10}, 100))
+	})
+
+	t.Run("WarningReminderEmittedWhenExceedingThreshold", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test_warning.db")
+		db, err := store.Open(ctx, dbPath, store.Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		const window = 100_000 // <1M model: 70% = 70,000 warning, 80% = 80,000 auto-reset
+		reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+			Models: []providers.FauxModelDefinition{{
+				ID:            "warning-test-model",
+				ContextWindow: window,
+				MaxTokens:     4096,
+				Input:         []string{"text"},
+			}},
+		})
+		defer reg.Unregister()
+
+		var reminderReceived atomic.Bool
+		steps := make([]providers.FauxResponseStep, 20)
+		for i := range steps {
+			steps[i] = func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+				if len(h.Messages) > 0 {
+					lastMsg := h.Messages[len(h.Messages)-1]
+					if u, ok := lastMsg.(ai.UserMessage); ok && len(u.Content) > 0 {
+						if txt, ok := u.Content[0].(ai.TextContent); ok {
+							if strings.Contains(txt.Text, "Context usage threshold warning") {
+								reminderReceived.Store(true)
+							}
+						}
+					}
+				}
+				return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "OK"}}, ai.StopStop)
+			}
+		}
+		reg.SetResponses(steps)
+
+		mgr := makeSubagentTestManager(t, db, reg, 4)
+		defer mgr.Close(ctx)
+
+		parent := subagentTestParent(t, db, "warning-agent")
+		registerParentOwner(mgr, parent)
+
+		savedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+		require.NoError(t, err)
+
+		owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+		ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+		// Turn 1: Large prompt that reaches ~71,250 tokens (57,000 words * 5 chars)
+		// Context window = 100,000. 70% warning threshold is 70,000 tokens. 80% reset threshold is 80,000 tokens.
+		prompt1 := strings.Repeat("data ", 57000)
+		err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, prompt1)
+		require.NoError(t, err)
+
+		// Verify warning reminder was emitted
+		require.Eventually(t, func() bool {
+			return reminderReceived.Load()
+		}, 3*time.Second, 20*time.Millisecond, "warning reminder should be emitted when crossing 70%% threshold")
+
+		// Wait for the warning reminder turn to complete and agent to return to idle
+		require.Eventually(t, func() bool {
+			a, err := db.ManagedAgent(ctx, parent.AgentID)
+			return err == nil && a.ActivityState == "idle"
+		}, 3*time.Second, 20*time.Millisecond)
+
+		lane := mgr.laneFor(parent.AgentID)
+		require.True(t, lane.warningEmitted, "lane.warningEmitted must be true after reminder emitted")
+
+		// Reset reminderReceived flag to test de-duplication
+		reminderReceived.Store(false)
+
+		// Turn 2: Follow-up turn still in warning zone (>70% but <80%)
+		err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, "short follow-up")
+		require.NoError(t, err)
+
+		// Verify reminder is NOT re-emitted in the same epoch
+		time.Sleep(100 * time.Millisecond)
+		require.False(t, reminderReceived.Load(), "warning reminder must NOT be re-emitted in same epoch")
+	})
+
+	t.Run("1MPlusModelWarningReminderEmittedAt40Percent", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test_warning_1m.db")
+		db, err := store.Open(ctx, dbPath, store.Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		const window = 1_000_000 // 1M model: 40% = 400,000 warning, 50% = 500,000 auto-reset
+		reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+			Models: []providers.FauxModelDefinition{{
+				ID:            "warning-1m-test-model",
+				ContextWindow: window,
+				MaxTokens:     4096,
+				Input:         []string{"text"},
+			}},
+		})
+		defer reg.Unregister()
+
+		var reminderReceived atomic.Bool
+		steps := make([]providers.FauxResponseStep, 20)
+		for i := range steps {
+			steps[i] = func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+				if len(h.Messages) > 0 {
+					lastMsg := h.Messages[len(h.Messages)-1]
+					if u, ok := lastMsg.(ai.UserMessage); ok && len(u.Content) > 0 {
+						if txt, ok := u.Content[0].(ai.TextContent); ok {
+							if strings.Contains(txt.Text, "Context usage threshold warning") {
+								reminderReceived.Store(true)
+							}
+						}
+					}
+				}
+				return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "OK"}}, ai.StopStop)
+			}
+		}
+		reg.SetResponses(steps)
+
+		mgr := makeSubagentTestManager(t, db, reg, 4)
+		defer mgr.Close(ctx)
+
+		parent := subagentTestParent(t, db, "warning-1m-agent")
+		registerParentOwner(mgr, parent)
+
+		savedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+		require.NoError(t, err)
+
+		owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+		ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+		// Run turns that accumulate history to cross 400,000 tokens without exceeding max single-message body size (1MB).
+		// Each turn adds ~85,000 tokens (~65,000 words = 325KB).
+		// 5 turns = ~425,000 tokens, which crosses the 40% (400,000) warning threshold.
+		for i := 1; i <= 5; i++ {
+			err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, strings.Repeat("data ", 65000))
+			require.NoError(t, err)
+			if reminderReceived.Load() {
+				break
+			}
+		}
+
+		// Verify warning reminder was emitted
+		require.Eventually(t, func() bool {
+			return reminderReceived.Load()
+		}, 3*time.Second, 20*time.Millisecond, "warning reminder should be emitted when crossing 40%% threshold on 1M+ model")
+
+		lane := mgr.laneFor(parent.AgentID)
+		require.True(t, lane.warningEmitted, "lane.warningEmitted must be true after reminder emitted")
 	})
 }
