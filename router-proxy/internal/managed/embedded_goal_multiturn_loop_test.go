@@ -294,3 +294,100 @@ func TestEmbeddedGoalThinkingBlockVerdictParsing(t *testing.T) {
 		})
 	}
 }
+
+// TestEmbeddedGoalAutonomousLoopWithToolExecutions tests that a multi-step turn
+// where the assistant executes a tool (bash) and concludes with an empty message
+// (content: [] and stopReason: "stop", the exact Gemini pattern from workflows)
+// does NOT trip the empty-turn circuit breaker, completes goal evaluation with NOT_DONE,
+// and automatically dispatches continuation for the next turn.
+func TestEmbeddedGoalAutonomousLoopWithToolExecutions(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var evaluations, continuations atomic.Int32
+	var turnStep atomic.Int32
+
+	respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+		if embeddedIsGoalEvaluation(h) {
+			evaluations.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.ThinkingContent{Thinking: "Tool execution happened, but goal is not yet finished."},
+				ai.TextContent{Text: "NOT_DONE"},
+			}, ai.StopStop)
+		}
+
+		for _, msg := range h.Messages {
+			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
+					continuations.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation step executed"}}, ai.StopStop)
+				}
+			}
+		}
+
+		step := turnStep.Add(1)
+		switch step {
+		case 1:
+			// Turn 1 step 1: set standing goal
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "autonomous tool execution goal"}, "loop-goal-set"),
+			}, ai.StopToolUse)
+		case 2:
+			// Turn 1 step 2: call bash tool
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo 'workflow tool execution'"}, "bash-call-1"),
+			}, ai.StopToolUse)
+		case 3:
+			// Turn 1 step 3: concluding assistant message with empty content and stopReason: "stop" (Gemini pattern)
+			return providers.FauxAssistantMessage(ai.ContentList{}, ai.StopStop)
+		default:
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "fallback final"}}, ai.StopStop)
+		}
+	}
+
+	steps := make([]providers.FauxResponseStep, 20)
+	for i := range steps {
+		steps[i] = respond
+	}
+	reg.SetResponses(steps)
+
+	m := productionPolicyManager(t, db, root, reg)
+	defer m.Close(ctx)
+
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               "autonomous-tools-agent",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "start autonomous loop with tools",
+		RequestID:          "e5555555-5555-4555-8555-555555555593",
+	})
+	require.NoError(t, err)
+
+	read, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	require.NoError(t, err)
+	defer read.Close()
+
+	// Wait for Turn 1 to complete: circuit breaker must NOT trip, and goal evaluation must complete with NOT_DONE
+	require.Eventually(t, func() bool {
+		return evaluations.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Verify that goal evaluation completed with NOT_DONE in durable store
+	var evalState string
+	require.NoError(t, read.QueryRow(`SELECT state FROM embedded_goal_evaluations WHERE agent_id=? ORDER BY completed_at DESC LIMIT 1`, launched.Agent.AgentID).Scan(&evalState))
+	require.Equal(t, store.EmbeddedGoalEvaluationNotDone, evalState)
+
+	// Verify that continuation automatically dispatches the next turn
+	require.Eventually(t, func() bool {
+		return continuations.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
