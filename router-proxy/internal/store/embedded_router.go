@@ -533,6 +533,48 @@ func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBind
 	})
 }
 
+// ResetEmbeddedSessionEpoch updates managed_agents and advances embedded_sessions to next in one transaction.
+func (s *Store) ResetEmbeddedSessionEpoch(ctx context.Context, old, next EmbeddedBinding, role string) error {
+	if err := validateEmbedded(old); err != nil {
+		return err
+	}
+	if err := validateEmbedded(next); err != nil {
+		return err
+	}
+	if old.AgentID != next.AgentID || next.Epoch <= old.Epoch || !validEmbeddedRole(role) {
+		return errors.New("invalid embedded reset")
+	}
+	return s.runImmediate(ctx, func() error {
+		var session, generation, savedRole string
+		var epoch int64
+		err := s.db.QueryRowContext(ctx, `SELECT session_id,epoch,generation,role FROM embedded_sessions WHERE agent_id=? AND current=1`, old.AgentID).Scan(&session, &epoch, &generation, &savedRole)
+		if err != nil {
+			return err
+		}
+		if session == next.SessionID && epoch == next.Epoch && generation == next.Generation && savedRole == role {
+			return s.embeddedOwnerFence(ctx, next)
+		}
+		if err := s.embeddedOwnerFence(ctx, old); err != nil {
+			return err
+		}
+		if session != old.SessionID || epoch != old.Epoch || generation != old.Generation || savedRole != role {
+			return errors.New("stale embedded reset")
+		}
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?, session_epoch=?, updated_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND runtime_generation=?`, next.SessionID, next.Epoch, now, old.AgentID, old.SessionID, old.Epoch, old.Generation); err != nil {
+			return err
+		}
+		if err := s.clearEmbeddedLifecycleRecoveryTx(ctx, old.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET current=0 WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, old.AgentID, old.SessionID, old.Epoch, old.Generation); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, next.AgentID, next.SessionID, next.Epoch, next.Generation, role)
+		return err
+	})
+}
+
 // clearEmbeddedLifecycleRecoveryTx is called only inside an immediate transaction
 // after the managed identity fence. Older schemas may lack either table.
 func (s *Store) clearEmbeddedLifecycleRecoveryTx(ctx context.Context, agentID string) error {

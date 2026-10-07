@@ -10,10 +10,28 @@ import (
 )
 
 type Model struct {
-	Provider  string `json:"provider"`
-	ID        string `json:"id"`
-	Name      string `json:"name,omitempty"`
-	Available bool   `json:"available"`
+	Provider      string `json:"provider"`
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Available     bool   `json:"available"`
+	ContextWindow int    `json:"context_window,omitempty"`
+}
+
+func contextThresholdExceeded(model Model, currentTokens int) bool {
+	if model.ContextWindow <= 0 {
+		return false
+	}
+	var threshold int
+	if model.ContextWindow >= 1_000_000 {
+		threshold = model.ContextWindow * 50 / 100
+	} else {
+		threshold = model.ContextWindow * 80 / 100
+	}
+	return currentTokens >= threshold
+}
+
+func ContextThresholdExceeded(model Model, currentTokens int) bool {
+	return contextThresholdExceeded(model, currentTokens)
 }
 type Catalog struct {
 	AuthRevision int64

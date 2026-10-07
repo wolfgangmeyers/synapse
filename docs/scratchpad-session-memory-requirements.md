@@ -19,9 +19,9 @@ We are replacing lossy compaction entirely. Instead of automated summarization, 
 | **Data model** | Flat entry ledger with `id`, `agent_id`, `content`, `pinned`, and `created_at`. No nested hierarchies. |
 | **Pinned entries** | Pinned entries represent permanent working constraints, goals, or architectural facts. They are never dropped during fetch or handoff. |
 | **Tool interface** | Single `scratchpad` tool with five core actions: `append`, `fetch`, `paginate`, `search`, and `pin`/`unpin`. |
-| **Context reset behavior** | Clears conversation context to 0 tokens. System prompt, loaded skills, and tool definitions are preserved. |
-| **Genesis handoff** | Injects all pinned entries plus a bounded window of recent entries (5–10 items) directly into the first turn after reset. |
-| **Threshold monitoring** | At 80% context window utilization, the router fires a threshold reminder prompting the worker to update its scratchpad and trigger a context reset. |
+| **Context reset behavior** | Clears conversation context to 0 tokens, injects system prompt, skills, and tools, ports over the last few messages (last 4–6 messages / recent turns) so the agent preserves recent actions and scratchpad updates, and automatically wakes the agent with a post-reset prompt: `"Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."` |
+| **Genesis handoff** | Injects all pinned entries plus a bounded window of recent entries (5–10 items) directly into the first turn after reset, alongside the ported recent messages. |
+| **Threshold monitoring** | Context threshold: **50% of context window for 1M+ models**, **80% for <1M models**. Auto-reset triggers when token threshold is hit, OR when worker invokes `context_reset` tool. |
 
 ---
 
@@ -65,31 +65,32 @@ The router exposes a dedicated `scratchpad` tool with the following actions:
 
 ### 3. Context Reset & Genesis Handoff
 
-- **R1. Clean 0-token reset:**
-  - When a context reset occurs, all prior conversation messages and tool call results are wiped from the active context.
-  - Token count resets to 0 conversation tokens.
-  - Base system instructions, loaded skills, and tool definitions are preserved without modification.
+- **R1. Clean 0-token reset & preservation:**
+  - When a context reset occurs, the prior conversation messages and tool call results are wiped to 0 tokens.
+  - Base system instructions, loaded skills, and tool definitions are preserved and reinjected.
+  - Ports the **last few messages** (last 4–6 messages / recent turns) over to the new session context so the agent sees its recent actions and scratchpad updates.
 - **R2. Genesis handoff generation:**
   - Before starting the fresh session turn, the runtime queries the scratchpad store for the agent.
   - It gathers:
     1. All entries where `pinned = true`.
     2. The 5–10 most recent entries.
   - It formats these entries into a structured session memory handoff note.
-- **R3. Genesis turn injection:**
-  - The handoff note is injected as the initial developer/system message in the fresh context.
-  - The agent begins its new turn with full awareness of its pinned goals, decisions, and immediate next steps, with zero token baggage from completed work.
+- **R3. Genesis turn injection & auto-wake:**
+  - The handoff note, genesis prompt, and ported recent messages are injected into the fresh context.
+  - The runtime automatically wakes the agent with a post-reset prompt: `"Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."`
+  - The agent begins its new turn with full awareness of its pinned goals, decisions, immediate next steps, and recent context, with fresh headroom.
 
-### 4. Threshold Monitoring & Reminders
+### 4. Threshold Monitoring & Auto-Reset
 
 - **M1. Context tracking:**
   - The runtime (`pi-go` / `router-proxy`) tracks token usage after each assistant turn.
-- **M2. 80% threshold reminder:**
-  - When context reaches or exceeds 80% of the model's context window, the system issues a reminder.
-  - The reminder prompts the worker:
-    1. Review current working state.
-    2. Append key findings, decisions, and next actions to `scratchpad`.
-    3. Pin critical requirements or constraints.
-    4. Trigger context reset to start a fresh, clean window.
+- **M2. Threshold evaluation:**
+  - Hard threshold: **50% of context window for 1M+ models**, **80% for <1M models**.
+  - Evaluated via `contextThresholdExceeded(model Model, currentTokens int) bool`.
+- **M3. Auto-reset and explicit tool invocation:**
+  - Auto-reset triggers automatically when the token threshold is exceeded after any turn.
+  - Workers can also trigger reset explicitly at any time by calling the `context_reset` tool.
+  - When triggered, `ExecuteContextReset(ctx, binding, reason)` executes the reset lifecycle.
 
 ---
 
@@ -107,14 +108,17 @@ The router exposes a dedicated `scratchpad` tool with the following actions:
 - Unit and store tests covering entry creation, retrieval, search ranking, and scoping.
 
 ### Phase 2: Context Reset & Genesis Handoff Injection
-- Implement clean context reset mechanism in `pi-go` / `router-proxy`.
-- Ensure conversation history is completely cleared while preserving system prompt, skills, and tools.
+- Implement clean context reset mechanism in `pi-go` / `router-proxy` (`ExecuteContextReset`).
+- Ensure conversation history is cleared down to 0 tokens while preserving system prompt, skills, and tools.
+- Port the last 4–6 messages / recent turns over to the new session epoch so recent actions and scratchpad updates are preserved.
 - Implement handoff note assembler that pulls pinned entries + 5–10 recent entries.
-- Wire genesis turn injection so the handoff note is delivered as the first turn context of the reset session.
-- Integration tests verifying context token count drops to 0 and scratchpad handoff appears in the new turn.
+- Wire genesis turn injection so the handoff note and ported recent messages appear in the reset session.
+- Automatically wake the agent with: `"Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."`
+- Integration tests verifying context token reset, message porting, and auto-wake prompt.
 
-### Phase 3: Threshold Reminders
-- Add context usage tracking at turn boundaries.
-- Implement 80% context threshold detection.
-- Deliver proactive prompt/reminder nudging the agent to update scratchpad and trigger reset.
-- End-to-end integration tests verifying threshold warning, worker update, reset, and clean resumption.
+### Phase 3: Threshold Monitoring & Auto-Reset
+- Add context usage tracking at turn boundaries (`contextThresholdExceeded`).
+- Implement hard threshold evaluation: **50% of context window for 1M+ models**, **80% for <1M models**.
+- Auto-trigger `ExecuteContextReset` when threshold is hit.
+- Expose `context_reset` tool for workers to invoke explicitly.
+- End-to-end integration tests verifying auto-reset at 50% and 80%, message porting, auto-wake execution, and explicit `context_reset` tool invocation.
