@@ -4098,6 +4098,9 @@ func (s *Store) MarkManagedReady(ctx context.Context, agentID string) error {
 		if err := markManagedCrashReadyTx(ctx, s.db, agentID, now, s.clock.Now()); err != nil {
 			return err
 		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state = 'active', updated_at = ? WHERE source_kind = 'managed' AND owner_identity = ? AND state = 'reserved'`, now, agentID); err != nil && !strings.Contains(err.Error(), "no such table") {
+			return err
+		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})

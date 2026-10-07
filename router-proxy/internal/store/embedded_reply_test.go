@@ -47,13 +47,8 @@ func TestEmbeddedReplyWithoutTextContent(t *testing.T) {
 	require.NoError(t, err, "assistant message without text content must finalize successfully")
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	// 3. Verify reply outbox row has the fallback message text
-	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"))
-	reply, err := s.embeddedReplyTx(ctx, attempt.AttemptID)
-	require.NoError(t, err)
-	require.NotNil(t, reply)
-	require.Equal(t, "supervisor", reply.To)
-	require.Equal(t, "(Action completed without additional text)", reply.Body)
+	// 3. Verify reply outbox does NOT insert a fake fallback message text
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "assistant message without text must not insert fallback text into outbox")
 }
 
 func TestEmbeddedReplyWithoutTextContentWhenToolCallsPresent(t *testing.T) {

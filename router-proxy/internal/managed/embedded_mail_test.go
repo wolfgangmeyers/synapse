@@ -264,3 +264,182 @@ func TestEmbeddedMailMidTurnSteering(t *testing.T) {
 	require.True(t, sawSteering.Load(), "steering message must be delivered to runLoop()")
 	require.True(t, sawAttachmentRef.Load(), "attachment path must be delivered in steering message")
 }
+
+// TestEmbeddedMailToolsNoSyntheticFallbackText verifies that turns executing tools
+// provide their responses without injecting the synthetic fallback string
+// "(Action completed without additional text)" into the reply outbox.
+func TestEmbeddedMailToolsNoSyntheticFallbackText(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	require.NoError(t, os.Chmod(root, 0700))
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	t.Run("ToolExecutionWithAssistantTextEmitsCleanResponse", func(t *testing.T) {
+		initialStep := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "ready"}}, ai.StopStop)
+		}
+		reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep})
+
+		manager, err := NewManager(ManagerOptions{
+			Store:                        db,
+			Manifest:                     manifest,
+			Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+			CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+			EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+			CodexCredentialStore:         testfixture.CodexAdmission(t),
+			EmbeddedMailBackoff:          10 * time.Millisecond,
+		})
+		require.NoError(t, err)
+		defer manager.Close(ctx)
+
+		launched, err := manager.Launch(ctx, LaunchRequest{
+			Name: "clean-reply-worker", Cwd: root, Runtime: "embedded",
+			Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+			RequestID: "c1111111-1111-4111-8111-111111111111",
+		})
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			a, e := db.ManagedAgent(ctx, launched.Agent.AgentID)
+			return e == nil && a.LifecycleState == "running" && a.ActivityState == "idle"
+		}, 3*time.Second, 10*time.Millisecond)
+
+		step2Finished := make(chan struct{})
+		step1 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo synthesized"}, "bash-call-1"),
+			}, ai.StopToolUse)
+		}
+		step2 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			defer close(step2Finished)
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Here is the synthesized answer based on tool output."},
+			}, ai.StopStop)
+		}
+		reg.SetResponses([]providers.FauxResponseStep{step1, step2})
+
+		turnMsgID := "c2222222-2222-4222-8222-222222222222"
+		_, err = db.Enqueue(ctx, protocol.Envelope{
+			ID:        turnMsgID,
+			From:      "supervisor",
+			To:        launched.Agent.AgentID,
+			Body:      "execute tool and answer",
+			CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		}, store.EnqueueOptions{})
+		require.NoError(t, err)
+		_, err = db.ResolveMessageTarget(ctx, turnMsgID)
+		require.NoError(t, err)
+
+		manager.OfferDirect(launched.Agent.AgentID)
+
+		select {
+		case <-step2Finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for step2 to finish")
+		}
+
+		require.Eventually(t, func() bool {
+			a, e := db.ManagedAgent(ctx, launched.Agent.AgentID)
+			return e == nil && a.ActivityState == "idle"
+		}, 3*time.Second, 10*time.Millisecond)
+
+		// Verify outbox message has the actual synthesized text, never the synthetic fallback
+		rawDB, err := sql.Open("sqlite", path)
+		require.NoError(t, err)
+		defer rawDB.Close()
+
+		var outboxBody string
+		err = rawDB.QueryRowContext(ctx, `SELECT body FROM embedded_reply_outbox WHERE sender=? ORDER BY rowid DESC LIMIT 1`, launched.Agent.AgentID).Scan(&outboxBody)
+		require.NoError(t, err)
+		require.Equal(t, "Here is the synthesized answer based on tool output.", outboxBody)
+		require.NotContains(t, outboxBody, "(Action completed without additional text)")
+
+		var fallbackCount int
+		require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox WHERE body LIKE '%Action completed without additional text%'`).Scan(&fallbackCount))
+		require.Zero(t, fallbackCount, "synthetic fallback text must never appear in outbox")
+	})
+
+	t.Run("ToolExecutionWithEmptyTextDoesNotEmitFallbackBubble", func(t *testing.T) {
+		initialStep := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "ready"}}, ai.StopStop)
+		}
+		reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep})
+
+		manager, err := NewManager(ManagerOptions{
+			Store:                        db,
+			Manifest:                     manifest,
+			Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+			CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+			EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+			CodexCredentialStore:         testfixture.CodexAdmission(t),
+			EmbeddedMailBackoff:          10 * time.Millisecond,
+		})
+		require.NoError(t, err)
+		defer manager.Close(ctx)
+
+		launched, err := manager.Launch(ctx, LaunchRequest{
+			Name: "silent-reply-worker", Cwd: root, Runtime: "embedded",
+			Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+			RequestID: "c3333333-3333-4333-8333-333333333333",
+		})
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			a, e := db.ManagedAgent(ctx, launched.Agent.AgentID)
+			return e == nil && a.LifecycleState == "running" && a.ActivityState == "idle"
+		}, 3*time.Second, 10*time.Millisecond)
+
+		step2Finished := make(chan struct{})
+		step1 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo silent"}, "bash-call-2"),
+			}, ai.StopToolUse)
+		}
+		step2 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			// Final response completes with no text content
+			defer close(step2Finished)
+			return providers.FauxAssistantMessage(ai.ContentList{}, ai.StopStop)
+		}
+		reg.SetResponses([]providers.FauxResponseStep{step1, step2, initialStep, initialStep})
+
+		turnMsgID := "c4444444-4444-4444-8444-444444444444"
+		_, err = db.Enqueue(ctx, protocol.Envelope{
+			ID:        turnMsgID,
+			From:      "supervisor",
+			To:        launched.Agent.AgentID,
+			Body:      "execute silently",
+			CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		}, store.EnqueueOptions{})
+		require.NoError(t, err)
+		_, err = db.ResolveMessageTarget(ctx, turnMsgID)
+		require.NoError(t, err)
+
+		manager.OfferDirect(launched.Agent.AgentID)
+
+		select {
+		case <-step2Finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for silent step2 to finish")
+		}
+
+		require.Eventually(t, func() bool {
+			a, e := db.ManagedAgent(ctx, launched.Agent.AgentID)
+			return e == nil && a.ActivityState == "idle"
+		}, 3*time.Second, 10*time.Millisecond)
+
+		rawDB, err := sql.Open("sqlite", path)
+		require.NoError(t, err)
+		defer rawDB.Close()
+
+		var fallbackCount int
+		require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox WHERE body LIKE '%Action completed without additional text%'`).Scan(&fallbackCount))
+		require.Zero(t, fallbackCount, "synthetic fallback text must never appear in outbox")
+	})
+}
