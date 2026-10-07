@@ -108,4 +108,31 @@ describe("agent projections", () => { it("uses connected agents as authority and
     const ids = result.map((r) => r.agent_id);
     expect(ids).toEqual(["managed-1", "worker-1"]);
   });
+  it("reconciles individual agent states smoothly without flickering or resetting", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const alpha = { ...managed("alpha"), activity_state: "active" as const, lifecycle_state: "running" as const };
+    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 7, agents: [alpha] });
+    expect(state.managedAgents?.[0]?.activity_state).toBe("active");
+
+    // Reconcile when alpha transitions to idle
+    const idleAlpha = { ...managed("alpha"), activity_state: "idle" as const, lifecycle_state: "running" as const };
+    state = reducer(state, { type: "managed/reconcile", scope, version: 7, agents: [idleAlpha] });
+    expect(state.managedAgents?.[0]?.activity_state).toBe("idle");
+    expect(state.managedAgents?.[0]?.lifecycle_state).toBe("running");
+
+    // Reconcile when same states arrive returns same state reference
+    const unchanged = reducer(state, { type: "managed/reconcile", scope, version: 7, agents: [idleAlpha] });
+    expect(unchanged).toBe(state);
+  });
+  it("retains managed agents during managed/recover to prevent UI flicker", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const alpha = managed("alpha");
+    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 5, agents: [alpha] });
+    expect(state.managedAgents).toHaveLength(1);
+    expect(state.managedProjectionVersion).toBe(5);
+
+    const recovered = reducer(state, { type: "managed/recover", scope });
+    expect(recovered.managedAgents).toEqual([{ ...alpha, managedProjectionVersion: 5 }]);
+    expect(recovered.managedProjectionVersion).toBeUndefined();
+  });
 });

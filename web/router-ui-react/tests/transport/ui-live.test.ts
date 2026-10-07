@@ -68,6 +68,26 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
+  it("calls onConnect when the underlying websocket opens", () => {
+    const sockets: UILiveSocket[] = [];
+    const connects = vi.fn();
+    const client = createUILiveClient({
+      routerUrl: "http://router.test",
+      webSocketFactory: () => {
+        const socket = new UILiveSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      onConnect: connects,
+      onFrame: () => {},
+    });
+    client.connect();
+    expect(connects).not.toHaveBeenCalled();
+    sockets[0]?.emit("open", {});
+    expect(connects).toHaveBeenCalledTimes(1);
+    client.close();
+  });
+
   it("applies new and bounded legacy lifecycle frames without recovery", () => {
     vi.useFakeTimers();
     const sockets: UILiveSocket[] = [];

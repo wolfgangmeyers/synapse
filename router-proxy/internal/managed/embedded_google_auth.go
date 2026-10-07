@@ -396,6 +396,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 			droppedToolCalls[k] = v
 		}
 	}
+	toolCallNames := make(map[string]string)
 
 	var rawContents []map[string]any
 
@@ -438,10 +439,81 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 		} else if tm, ok := asToolResultMsg(msg); ok {
 			outText := ai.ContentText(tm.Content)
 
+			toolName := tm.ToolName
+			if toolName == "" && tm.ToolCallID != "" {
+				if name, exists := toolCallNames[tm.ToolCallID]; exists {
+					toolName = name
+				}
+			}
+
+			// Ensure that when tool results arrive, they match the corresponding functionCall in the preceding model message
+			var precedingModelTurn map[string]any
+			var modelTurnIndex = -1
+			for i := len(rawContents) - 1; i >= 0; i-- {
+				if rawContents[i]["role"] == "model" {
+					precedingModelTurn = rawContents[i]
+					modelTurnIndex = i
+					break
+				}
+				if rawContents[i]["role"] != "user" {
+					break
+				}
+			}
+
+			if precedingModelTurn != nil {
+				existingCalls := 0
+				if modelParts, ok := precedingModelTurn["parts"].([]any); ok {
+					for _, p := range modelParts {
+						if pMap, ok := p.(map[string]any); ok {
+							if fc, ok := pMap["functionCall"].(map[string]any); ok {
+								if fc["name"] == toolName {
+									existingCalls++
+								}
+							}
+						}
+					}
+				}
+				existingResponses := 0
+				for i := modelTurnIndex + 1; i < len(rawContents); i++ {
+					if userParts, ok := rawContents[i]["parts"].([]any); ok {
+						for _, p := range userParts {
+							if pMap, ok := p.(map[string]any); ok {
+								if fr, ok := pMap["functionResponse"].(map[string]any); ok {
+									if fr["name"] == toolName {
+										existingResponses++
+									}
+								}
+							}
+						}
+					}
+				}
+				if existingResponses+1 > existingCalls {
+					precedingModelTurn["parts"] = append(precedingModelTurn["parts"].([]any), map[string]any{
+						"functionCall": map[string]any{
+							"name": toolName,
+							"args": map[string]any{},
+						},
+					})
+				}
+			} else if len(rawContents) > 0 {
+				precedingModelTurn = map[string]any{
+					"role": "model",
+					"parts": []any{
+						map[string]any{
+							"functionCall": map[string]any{
+								"name": toolName,
+								"args": map[string]any{},
+							},
+						},
+					},
+				}
+				rawContents = append(rawContents, precedingModelTurn)
+			}
+
 			var parts []any
 			parts = append(parts, map[string]any{
 				"functionResponse": map[string]any{
-					"name": tm.ToolName,
+					"name": toolName,
 					"response": map[string]any{
 						"output": outText,
 					},
@@ -526,6 +598,21 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 					}
 					droppedToolCalls[callID] = label
 					droppedToolCalls[call.Name] = label
+
+					if call.ID != "" {
+						toolCallNames[call.ID] = call.Name
+					}
+
+					args := call.Arguments
+					if args == nil {
+						args = map[string]any{}
+					}
+					parts = append(parts, map[string]any{
+						"functionCall": map[string]any{
+							"name": call.Name,
+							"args": args,
+						},
+					})
 				} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
 					callID := call.ID
 					if callID == "" {
@@ -538,6 +625,21 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 					}
 					droppedToolCalls[callID] = label
 					droppedToolCalls[call.Name] = label
+
+					if call.ID != "" {
+						toolCallNames[call.ID] = call.Name
+					}
+
+					args := call.Arguments
+					if args == nil {
+						args = map[string]any{}
+					}
+					parts = append(parts, map[string]any{
+						"functionCall": map[string]any{
+							"name": call.Name,
+							"args": args,
+						},
+					})
 				}
 			}
 			if len(parts) > 0 {

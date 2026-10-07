@@ -140,10 +140,18 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 }
 
 func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, overridePrompt string) {
+	if m.hasActiveSubagents(binding.AgentID) {
+		log.Printf("[embedded:%s] Suppressing goal continuation because subagents are active", binding.AgentID)
+		return
+	}
 	lane := m.laneFor(binding.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
 	if m.runCtx.Err() != nil {
+		return
+	}
+	if m.hasActiveSubagents(binding.AgentID) {
+		log.Printf("[embedded:%s] Suppressing goal continuation because subagents are active", binding.AgentID)
 		return
 	}
 	maxContinuations := m.maxConsecutiveGoalContinuations

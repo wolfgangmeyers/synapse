@@ -443,8 +443,8 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 		t.Errorf("turn 2 role expected model, got %v", turn2["role"])
 	}
 	parts2 := turn2["parts"].([]any)
-	if len(parts2) != 1 {
-		t.Fatalf("turn 2 expected 1 part, got %d", len(parts2))
+	if len(parts2) != 2 {
+		t.Fatalf("turn 2 expected 2 parts (text + functionCall), got %d", len(parts2))
 	}
 	part2Map := parts2[0].(map[string]any)
 	if part2Map["text"] != "I will check the file." {
@@ -453,8 +453,12 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 	if strings.Contains(part2Map["text"].(string), "[Invoked") {
 		t.Errorf("turn 2 must NOT contain [Invoked], got %v", part2Map["text"])
 	}
-	if _, hasFC := part2Map["functionCall"]; hasFC {
-		t.Errorf("turn 2 should NOT contain functionCall, got %+v", part2Map)
+	part2FCMap := parts2[1].(map[string]any)
+	fc, hasFC := part2FCMap["functionCall"].(map[string]any)
+	if !hasFC {
+		t.Errorf("turn 2 part 2 must contain functionCall, got %+v", part2FCMap)
+	} else if fc["name"] != "read" {
+		t.Errorf("turn 2 functionCall expected name 'read', got %v", fc["name"])
 	}
 
 	turn3 := contents[2].(map[string]any)
@@ -613,16 +617,28 @@ func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
 		}
 	}
 
-	if len(contents) != 1 {
-		t.Fatalf("expected 1 merged user turn, got %d: %+v", len(contents), contents)
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 alternating turns, got %d: %+v", len(contents), contents)
 	}
-	userTurn := contents[0].(map[string]any)
-	if userTurn["role"] != "user" {
-		t.Fatalf("expected role 'user', got %v", userTurn["role"])
+	userTurn1 := contents[0].(map[string]any)
+	if userTurn1["role"] != "user" {
+		t.Fatalf("expected turn 1 role 'user', got %v", userTurn1["role"])
 	}
-	parts := userTurn["parts"].([]any)
-	if len(parts) != 3 {
-		t.Fatalf("expected 3 merged parts in user turn, got %d: %+v", len(parts), parts)
+	modelTurn := contents[1].(map[string]any)
+	if modelTurn["role"] != "model" {
+		t.Fatalf("expected turn 2 role 'model', got %v", modelTurn["role"])
+	}
+	modelParts := modelTurn["parts"].([]any)
+	if len(modelParts) != 1 {
+		t.Fatalf("expected 1 part in model turn, got %d", len(modelParts))
+	}
+	fc, ok := modelParts[0].(map[string]any)["functionCall"].(map[string]any)
+	if !ok || fc["name"] != "read" {
+		t.Fatalf("expected functionCall for 'read', got %+v", modelParts[0])
+	}
+	userTurn2 := contents[2].(map[string]any)
+	if userTurn2["role"] != "user" {
+		t.Fatalf("expected turn 3 role 'user', got %v", userTurn2["role"])
 	}
 }
 
@@ -1261,3 +1277,111 @@ func TestGoogleAuth_StreamThinkingTrace(t *testing.T) {
 	require.True(t, isTxt)
 	require.Equal(t, "Here is the answer.", txt.Text)
 }
+
+func TestGoogleAuth_ConvertMessagesToGoogleContents_EmitsFunctionCall(t *testing.T) {
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "List directory contents"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "I will list the files in the directory."},
+				ai.ToolCall{
+					ID:   "call-bash-123",
+					Name: "bash",
+					Arguments: map[string]any{
+						"command": "ls -la",
+					},
+				},
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-bash-123",
+			ToolName:   "bash",
+			Content: []ai.Content{
+				ai.TextContent{Text: "total 0\n-rw-r--r-- 1 test test 0 file.txt"},
+			},
+		},
+	}
+
+	contents := convertMessagesToGoogleContents(messages)
+	require.Len(t, contents, 3)
+
+	// Turn 0: user
+	require.Equal(t, "user", contents[0]["role"])
+	parts0 := contents[0]["parts"].([]any)
+	require.Len(t, parts0, 1)
+	require.Equal(t, "List directory contents", parts0[0].(map[string]any)["text"])
+
+	// Turn 1: model with text and functionCall
+	require.Equal(t, "model", contents[1]["role"])
+	parts1 := contents[1]["parts"].([]any)
+	require.Len(t, parts1, 2)
+	require.Equal(t, "I will list the files in the directory.", parts1[0].(map[string]any)["text"])
+	fcMap, ok := parts1[1].(map[string]any)["functionCall"].(map[string]any)
+	require.True(t, ok, "expected functionCall in model parts")
+	require.Equal(t, "bash", fcMap["name"])
+	require.Equal(t, map[string]any{"command": "ls -la"}, fcMap["args"])
+
+	// Turn 2: user with functionResponse matching the functionCall
+	require.Equal(t, "user", contents[2]["role"])
+	parts2 := contents[2]["parts"].([]any)
+	require.Len(t, parts2, 1)
+	frMap, ok := parts2[0].(map[string]any)["functionResponse"].(map[string]any)
+	require.True(t, ok, "expected functionResponse in user parts")
+	require.Equal(t, "bash", frMap["name"])
+	respMap, ok := frMap["response"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "total 0\n-rw-r--r-- 1 test test 0 file.txt", respMap["output"])
+}
+
+func TestGoogleAuth_ConvertMessagesToGoogleContents_EmitsFunctionCall_ToolCallOnly(t *testing.T) {
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Read config"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				&ai.ToolCall{
+					ID:   "call-read-456",
+					Name: "read",
+					Arguments: map[string]any{
+						"path": "config.json",
+					},
+				},
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-read-456",
+			ToolName:   "read",
+			Content: []ai.Content{
+				ai.TextContent{Text: "{\"debug\": true}"},
+			},
+		},
+	}
+
+	contents := convertMessagesToGoogleContents(messages)
+	require.Len(t, contents, 3)
+
+	require.Equal(t, "user", contents[0]["role"])
+	require.Equal(t, "model", contents[1]["role"])
+	require.Equal(t, "user", contents[2]["role"])
+
+	modelParts := contents[1]["parts"].([]any)
+	require.Len(t, modelParts, 1)
+	fcMap, ok := modelParts[0].(map[string]any)["functionCall"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "read", fcMap["name"])
+	require.Equal(t, map[string]any{"path": "config.json"}, fcMap["args"])
+
+	userParts := contents[2]["parts"].([]any)
+	require.Len(t, userParts, 1)
+	frMap, ok := userParts[0].(map[string]any)["functionResponse"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "read", frMap["name"])
+}
+
