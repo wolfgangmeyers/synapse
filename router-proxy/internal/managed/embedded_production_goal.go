@@ -126,9 +126,6 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 	if err != nil {
 		return "", "", err
 	}
-	if len(current.Entries) == 0 || current.Entries[len(current.Entries)-1].Digest != key.FinalDigest {
-		return "", "", errors.New("goal evaluation settled head changed")
-	}
 	policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID)
 	if err != nil {
 		return "", "", err
@@ -137,7 +134,14 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 		return "", "", errors.New("goal evaluation canceled or superseded")
 	}
 
-	activeConversation := extractConversationTurns(snapshot.Entries)
+	entries := current.Entries
+	if len(entries) == 0 {
+		entries = snapshot.Entries
+	}
+	if len(entries) == 0 {
+		return "", "", errors.New("goal evaluation transcript empty")
+	}
+	activeConversation := extractConversationTurns(entries)
 	userPrompt := fmt.Sprintf("Goal: %s\n\nActive conversation:\n%s\n\nReturn exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>.", goal, activeConversation)
 	systemPrompt := strings.ReplaceAll(embeddedGoalEvaluationSystem, "<goal description>", goal)
 

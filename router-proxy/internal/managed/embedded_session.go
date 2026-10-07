@@ -1724,21 +1724,69 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	}
 	toolCalls := 0
 	hasText := false
-	for _, part := range assistant.Content {
-		switch c := part.(type) {
-		case ai.ToolCall:
-			toolCalls++
-		case *ai.ToolCall:
-			if c != nil {
+	for _, entry := range snapshot.Entries {
+		if entry.Sequence < p.turnSeq {
+			continue
+		}
+		msg, err := ai.UnmarshalMessage(entry.Body)
+		if err != nil {
+			if entry.Kind == "tool_result" || entry.Kind == "toolResult" || entry.Kind == string(ai.RoleToolResult) {
 				toolCalls++
 			}
-		case ai.TextContent:
-			if strings.TrimSpace(c.Text) != "" {
-				hasText = true
+			continue
+		}
+		switch m := msg.(type) {
+		case ai.ToolResultMessage:
+			if m.ToolName != "goal" && m.ToolName != "goal_snooze" {
+				toolCalls++
 			}
-		case *ai.TextContent:
-			if c != nil && strings.TrimSpace(c.Text) != "" {
-				hasText = true
+		case *ai.ToolResultMessage:
+			if m != nil && m.ToolName != "goal" && m.ToolName != "goal_snooze" {
+				toolCalls++
+			}
+		case ai.AssistantMessage:
+			for _, part := range m.Content {
+				switch c := part.(type) {
+				case ai.ToolCall:
+					if c.Name != "goal" && c.Name != "goal_snooze" {
+						toolCalls++
+					}
+				case *ai.ToolCall:
+					if c != nil && c.Name != "goal" && c.Name != "goal_snooze" {
+						toolCalls++
+					}
+				case ai.TextContent:
+					if strings.TrimSpace(c.Text) != "" {
+						hasText = true
+					}
+				case *ai.TextContent:
+					if c != nil && strings.TrimSpace(c.Text) != "" {
+						hasText = true
+					}
+				}
+			}
+		case *ai.AssistantMessage:
+			if m != nil {
+				for _, part := range m.Content {
+					switch c := part.(type) {
+					case ai.ToolCall:
+						if c.Name != "goal" && c.Name != "goal_snooze" {
+							toolCalls++
+						}
+					case *ai.ToolCall:
+						if c != nil && c.Name != "goal" && c.Name != "goal_snooze" {
+							toolCalls++
+						}
+					case ai.TextContent:
+						if strings.TrimSpace(c.Text) != "" {
+							hasText = true
+						}
+					case *ai.TextContent:
+						if c != nil && strings.TrimSpace(c.Text) != "" {
+							hasText = true
+						}
+					}
+				}
 			}
 		}
 	}
