@@ -43,6 +43,7 @@ import { withAbsoluteAttachmentUrls } from "./transport/attachment-urls";
 import { createHistoryThumbnail } from "./domain/images";
 import { cacheKeyForAttachment, saveCachedImage } from "./persistence/history-repository";
 import { RouterLogViewer } from "./components/RouterLogViewer";
+import { WorkflowStatesPage } from "./components/WorkflowStatesPage";
 
 export interface AppProps {
   routerUrl?: string | undefined;
@@ -214,6 +215,17 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const [managedAgentID, setManagedAgentID] = useState<string>();
   const [scrollLocked, setScrollLocked] = useState(false);
   const [chatOnly, setChatOnly] = useState(false);
+  const [currentRoute, setCurrentRoute] = useState<string>(() => {
+    return window.location.hash === "#/workflows" ? "workflows" : "chat";
+  });
+
+  useEffect(() => {
+    const handleHashChange = (): void => {
+      setCurrentRoute(window.location.hash === "#/workflows" ? "workflows" : "chat");
+    };
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
   const [managedError, setManagedError] = useState<string>();
   const [managedLiveError, setManagedLiveError] = useState<string>();
   const [managedPending, setManagedPending] = useState(false);
@@ -680,6 +692,17 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     });
   };
 
+  if (currentRoute === "workflows") {
+    return <>
+      <div className="workflows-spa-container" style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
+        <WorkflowStatesPage
+          client={session.transport.http}
+          onBack={() => { window.location.hash = ""; }}
+        />
+      </div>
+    </>;
+  }
+
   return <>
     <AppShell
       sidebar={<Sidebar routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} {...(managedLiveError ? { managedStatus: managedLiveError } : {})} agents={visibleAgents} {...(selectedSourceKey === undefined ? {} : { selectedAgentId: selectedSourceKey })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onRefresh={() => { void reconciliation.refresh(); void refreshManaged().catch(() => undefined); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} {...(session.state.managedAvailable ? { onLaunchManaged: () => { setManagedAgentID(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); setDialog("managed"); }, onRestartAllManaged: restartAllManaged, onProviderSettings: () => { setManagedError(undefined); setDialog("provider-settings"); }, onSystemOneConfig: () => { setDialog("systemone-config"); } } : { onSystemOneConfig: () => { setDialog("systemone-config"); } })} />}
@@ -721,3 +744,4 @@ export { ImagePreview } from "./components/ImagePreview";
 export { EmptyState } from "./components/EmptyState";
 export { StatusMessage } from "./components/StatusMessage";
 export { RouterLogViewer } from "./components/RouterLogViewer";
+export { WorkflowStatesPage, WorkflowsPage } from "./components/WorkflowStatesPage";
