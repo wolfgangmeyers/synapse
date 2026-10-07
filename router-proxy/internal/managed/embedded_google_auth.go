@@ -389,12 +389,295 @@ func isAssistantContentEmpty(am ai.AssistantMessage) bool {
 	return true
 }
 
-func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[string]string) []map[string]any {
-	droppedToolCalls := make(map[string]string)
-	if len(dropped) > 0 && dropped[0] != nil {
-		for k, v := range dropped[0] {
-			droppedToolCalls[k] = v
+func estimateMessageTokens(m ai.Message) int {
+	if um, ok := asUserMsg(m); ok {
+		chars := 0
+		for _, part := range um.Content {
+			if tc, ok := part.(ai.TextContent); ok {
+				chars += len(tc.Text)
+			} else if tc, ok := part.(*ai.TextContent); ok && tc != nil {
+				chars += len(tc.Text)
+			} else if _, ok := part.(ai.ImageContent); ok {
+				chars += 1000
+			} else if img, ok := part.(*ai.ImageContent); ok && img != nil {
+				chars += 1000
+			}
 		}
+		return (chars + 3) / 4 + 4
+	}
+	if am, ok := asAssistantMsg(m); ok {
+		chars := 0
+		for _, part := range am.Content {
+			if tc, ok := part.(ai.TextContent); ok {
+				chars += len(tc.Text)
+			} else if tc, ok := part.(*ai.TextContent); ok && tc != nil {
+				chars += len(tc.Text)
+			} else if th, ok := part.(ai.ThinkingContent); ok {
+				chars += len(th.Thinking)
+			} else if th, ok := part.(*ai.ThinkingContent); ok && th != nil {
+				chars += len(th.Thinking)
+			} else if call, ok := part.(ai.ToolCall); ok {
+				argsBytes, _ := json.Marshal(call.Arguments)
+				chars += len(call.Name) + len(argsBytes)
+			} else if call, ok := part.(*ai.ToolCall); ok && call != nil {
+				argsBytes, _ := json.Marshal(call.Arguments)
+				chars += len(call.Name) + len(argsBytes)
+			}
+		}
+		return (chars + 3) / 4 + 4
+	}
+	if tm, ok := asToolResultMsg(m); ok {
+		chars := len(ai.ContentText(tm.Content))
+		for _, part := range tm.Content {
+			if _, ok := part.(ai.ImageContent); ok {
+				chars += 1000
+			} else if img, ok := part.(*ai.ImageContent); ok && img != nil {
+				chars += 1000
+			}
+		}
+		return (chars + 3) / 4 + 4
+	}
+	if sm, ok := asSystemMsg(m); ok {
+		chars := len(ai.GetSystemMessageText(sm))
+		return (chars + 3) / 4 + 4
+	}
+	return 4
+}
+
+func estimateTranscriptTokens(messages []ai.Message) int {
+	total := 0
+	for _, m := range messages {
+		total += estimateMessageTokens(m)
+	}
+	return total
+}
+
+func estimateGoogleContentsTokens(contents []map[string]any) int {
+	total := 0
+	for _, item := range contents {
+		parts, _ := item["parts"].([]any)
+		for _, p := range parts {
+			pMap, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := pMap["text"].(string); ok {
+				total += (len(text) + 3) / 4
+			}
+			if fc, ok := pMap["functionCall"].(map[string]any); ok {
+				name, _ := fc["name"].(string)
+				args, _ := json.Marshal(fc["args"])
+				total += (len(name) + len(args) + 3) / 4 + 4
+			}
+			if fr, ok := pMap["functionResponse"].(map[string]any); ok {
+				name, _ := fr["name"].(string)
+				resp, _ := json.Marshal(fr["response"])
+				total += (len(name) + len(resp) + 3) / 4 + 4
+			}
+			if _, ok := pMap["inlineData"]; ok {
+				total += 258
+			}
+		}
+		total += 4
+	}
+	return total
+}
+
+func estimateTranscriptTokensPruned(messages []ai.Message, omitted map[int]bool) int {
+	total := 0
+	for i, m := range messages {
+		if omitted[i] {
+			continue
+		}
+		total += estimateMessageTokens(m)
+	}
+	return total
+}
+
+func collectPruned(messages []ai.Message, omitted map[int]bool) []ai.Message {
+	var result []ai.Message
+	for i, m := range messages {
+		if omitted[i] {
+			continue
+		}
+		result = append(result, m)
+	}
+	return result
+}
+
+func parseConvertOptions(args []any) (int, map[string]string) {
+	contextWindow := 1048576 // default to 1M (Gemini standard)
+	droppedToolCalls := make(map[string]string)
+
+	for _, arg := range args {
+		switch v := arg.(type) {
+		case int:
+			if v > 0 {
+				contextWindow = v
+			}
+		case *ai.Model:
+			if v != nil && v.ContextWindow > 0 {
+				contextWindow = v.ContextWindow
+			}
+		case map[string]string:
+			if v != nil {
+				for k, val := range v {
+					droppedToolCalls[k] = val
+				}
+			}
+		}
+	}
+	return contextWindow, droppedToolCalls
+}
+
+func pruneTranscriptMessages(messages []ai.Message, targetTokens int) []ai.Message {
+	if len(messages) <= 50 {
+		return messages
+	}
+
+	suffixStart := len(messages) - 50
+	if suffixStart < 1 {
+		suffixStart = 1
+	}
+
+	pruned := make([]ai.Message, len(messages))
+	copy(pruned, messages)
+
+	// Stage 1: Prune intermediate ToolResultMessages, thinking content, and oversized tool call args
+	for i := 1; i < suffixStart; i++ {
+		if _, ok := asUserMsg(pruned[i]); ok {
+			// ALWAYS KEEP EVERY user message!
+			continue
+		}
+		if tm, ok := asToolResultMsg(pruned[i]); ok {
+			prunedTM := tm
+			prunedTM.Content = ai.ContentList{ai.TextContent{Text: "[Output omitted for context fitting]"}}
+			pruned[i] = prunedTM
+			continue
+		}
+		if am, ok := asAssistantMsg(pruned[i]); ok {
+			var newContent ai.ContentList
+			for _, part := range am.Content {
+				if _, isThinking := part.(ai.ThinkingContent); isThinking {
+					continue
+				}
+				if _, isThinkingPtr := part.(*ai.ThinkingContent); isThinkingPtr {
+					continue
+				}
+				if call, isCall := part.(ai.ToolCall); isCall {
+					argsBytes, _ := json.Marshal(call.Arguments)
+					if len(argsBytes) > 500 {
+						call.Arguments = map[string]any{"_omitted": "[Arguments omitted for context fitting]"}
+					}
+					newContent = append(newContent, call)
+				} else if call, isCallPtr := part.(*ai.ToolCall); isCallPtr && call != nil {
+					argsBytes, _ := json.Marshal(call.Arguments)
+					cCopy := *call
+					if len(argsBytes) > 500 {
+						cCopy.Arguments = map[string]any{"_omitted": "[Arguments omitted for context fitting]"}
+					}
+					newContent = append(newContent, cCopy)
+				} else {
+					newContent = append(newContent, part)
+				}
+			}
+			prunedAM := am
+			prunedAM.Content = newContent
+			pruned[i] = prunedAM
+			continue
+		}
+	}
+
+	if estimateTranscriptTokens(pruned) <= targetTokens {
+		return pruned
+	}
+
+	// Stage 2: Omit intermediate tool call & response pairs from oldest to newest
+	omitted := make(map[int]bool)
+
+	callIDToResultIdx := make(map[string]int)
+	callNameToResultIdx := make(map[string]int)
+	for i := 1; i < suffixStart; i++ {
+		if tm, ok := asToolResultMsg(pruned[i]); ok {
+			if tm.ToolCallID != "" {
+				callIDToResultIdx[tm.ToolCallID] = i
+			}
+			if tm.ToolName != "" {
+				callNameToResultIdx[tm.ToolName] = i
+			}
+		}
+	}
+
+	for i := 1; i < suffixStart; i++ {
+		if estimateTranscriptTokensPruned(pruned, omitted) <= targetTokens {
+			break
+		}
+		if _, ok := asUserMsg(pruned[i]); ok {
+			continue // NEVER omit user messages
+		}
+		if am, ok := asAssistantMsg(pruned[i]); ok {
+			var remainingParts ai.ContentList
+			hasToolCall := false
+			for _, part := range am.Content {
+				var callID, callName string
+				if call, isCall := part.(ai.ToolCall); isCall {
+					callID = call.ID
+					callName = call.Name
+				} else if call, isCallPtr := part.(*ai.ToolCall); isCallPtr && call != nil {
+					callID = call.ID
+					callName = call.Name
+				}
+				if callName != "" || callID != "" {
+					hasToolCall = true
+					if resIdx, found := callIDToResultIdx[callID]; found {
+						omitted[resIdx] = true
+					} else if resIdx, found := callNameToResultIdx[callName]; found {
+						omitted[resIdx] = true
+					}
+					continue
+				}
+				remainingParts = append(remainingParts, part)
+			}
+			if hasToolCall {
+				if isAssistantContentEmpty(ai.AssistantMessage{Content: remainingParts}) {
+					omitted[i] = true
+				} else {
+					updatedAM := am
+					updatedAM.Content = remainingParts
+					pruned[i] = updatedAM
+				}
+			}
+		}
+	}
+
+	if estimateTranscriptTokensPruned(pruned, omitted) <= targetTokens {
+		return collectPruned(pruned, omitted)
+	}
+
+	// Stage 3: Omit older intermediate assistant text messages from oldest to newest
+	for i := 1; i < suffixStart; i++ {
+		if estimateTranscriptTokensPruned(pruned, omitted) <= targetTokens {
+			break
+		}
+		if _, ok := asUserMsg(pruned[i]); ok {
+			continue // NEVER touch user messages
+		}
+		if _, ok := asAssistantMsg(pruned[i]); ok {
+			omitted[i] = true
+		}
+	}
+
+	return collectPruned(pruned, omitted)
+}
+
+func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[string]any {
+	contextWindow, droppedToolCalls := parseConvertOptions(args)
+	triggerTokens := contextWindow * 80 / 100
+	targetTokens := contextWindow * 50 / 100
+
+	initialTokens := estimateTranscriptTokens(messages)
+	if initialTokens > triggerTokens || len(messages) > 100 {
+		messages = pruneTranscriptMessages(messages, targetTokens)
 	}
 	toolCallNames := make(map[string]string)
 
@@ -678,6 +961,51 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 		})
 	}
 
+	// Ensure that all functionCalls in non-final model turns have matching functionResponses in the next user turn
+	for i := 0; i < len(contents)-1; i++ {
+		if contents[i]["role"] == "model" && contents[i+1]["role"] == "user" {
+			modelParts, _ := contents[i]["parts"].([]any)
+			userParts, _ := contents[i+1]["parts"].([]any)
+
+			callCounts := make(map[string]int)
+			for _, p := range modelParts {
+				if pMap, ok := p.(map[string]any); ok {
+					if fc, ok := pMap["functionCall"].(map[string]any); ok {
+						if name, ok := fc["name"].(string); ok && name != "" {
+							callCounts[name]++
+						}
+					}
+				}
+			}
+
+			responseCounts := make(map[string]int)
+			for _, p := range userParts {
+				if pMap, ok := p.(map[string]any); ok {
+					if fr, ok := pMap["functionResponse"].(map[string]any); ok {
+						if name, ok := fr["name"].(string); ok && name != "" {
+							responseCounts[name]++
+						}
+					}
+				}
+			}
+
+			for toolName, calls := range callCounts {
+				resps := responseCounts[toolName]
+				for r := resps; r < calls; r++ {
+					userParts = append(userParts, map[string]any{
+						"functionResponse": map[string]any{
+							"name": toolName,
+							"response": map[string]any{
+								"output": "[Output omitted for context fitting]",
+							},
+						},
+					})
+				}
+			}
+			contents[i+1]["parts"] = userParts
+		}
+	}
+
 	if len(contents) > 0 {
 		firstTurn := contents[0]
 		if firstTurn["role"] == "model" {
@@ -722,7 +1050,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			systemParts = append(systemParts, map[string]any{"text": EmbeddedSystemInstruction})
 		}
 
-		contents := convertMessagesToGoogleContents(transcript.Messages)
+		contents := convertMessagesToGoogleContents(transcript.Messages, requestModel)
 
 		currentTools := ai.GetCurrentTools(transcript.Messages)
 		var tools []any

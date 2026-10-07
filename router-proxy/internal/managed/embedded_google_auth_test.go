@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1433,6 +1434,224 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_RetainsLongTranscript(t *tes
 	require.True(t, ok)
 	require.NotEmpty(t, parts79)
 	require.Equal(t, "Assistant follow-up response 79", parts79[0].(map[string]any)["text"])
+}
+
+func TestGoogleAuth_LargeTranscriptPrunedRetainsAllUserMessages(t *testing.T) {
+	// Construct a transcript with 2,000 messages and > 1.5M tokens
+	var messages []ai.Message
+	var expectedUserTexts []string
+
+	// Message 0: Genesis prompt / initial task
+	genesisPrompt := "Genesis prompt: build the core system and coordinate all workflows."
+	messages = append(messages, ai.UserMessage{
+		Content: []ai.Content{
+			ai.TextContent{Text: genesisPrompt},
+		},
+	})
+	expectedUserTexts = append(expectedUserTexts, genesisPrompt)
+
+	// Middle messages: 1 to 1949
+	// Interspersed with user messages, assistant tool calls, and oversized tool results
+	largeOutput := strings.Repeat("Oversized bash output line for testing token limits in context.\n", 130) // ~8KB per result
+	for i := 1; i < 1950; i++ {
+		if i%10 == 0 {
+			// User conversation message
+			userTxt := fmt.Sprintf("Wolfgang chat directive message %d: status update please", i)
+			messages = append(messages, ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: userTxt},
+				},
+			})
+			expectedUserTexts = append(expectedUserTexts, userTxt)
+		} else if i%2 == 1 {
+			// Assistant tool call
+			messages = append(messages, ai.AssistantMessage{
+				Content: []ai.Content{
+					ai.ToolCall{
+						ID:        fmt.Sprintf("call_%d", i),
+						Name:      "bash",
+						Arguments: map[string]any{"command": fmt.Sprintf("run_check_%d", i)},
+					},
+				},
+			})
+		} else {
+			// Large tool result
+			messages = append(messages, ai.ToolResultMessage{
+				ToolCallID: fmt.Sprintf("call_%d", i-1),
+				ToolName:   "bash",
+				Content: []ai.Content{
+					ai.TextContent{Text: fmt.Sprintf("Result for %d:\n%s", i, largeOutput)},
+				},
+			})
+		}
+	}
+
+	// Recent 50 messages: 1950 to 1999 (active turn context)
+	for i := 1950; i < 2000; i++ {
+		if i%2 == 0 {
+			userTxt := fmt.Sprintf("Recent user message %d", i)
+			messages = append(messages, ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: userTxt},
+				},
+			})
+			expectedUserTexts = append(expectedUserTexts, userTxt)
+		} else {
+			messages = append(messages, ai.AssistantMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: fmt.Sprintf("Recent assistant response %d", i)},
+				},
+			})
+		}
+	}
+	require.Len(t, messages, 2000)
+
+	initialTokens := estimateTranscriptTokens(messages)
+	t.Logf("Initial transcript tokens: %d (messages: %d)", initialTokens, len(messages))
+	require.Greater(t, initialTokens, 1500000, "transcript must exceed 1.5M tokens initially")
+
+	// Convert with default 1M context window (trigger 80% = 800k, target 50% = 500k)
+	contents := convertMessagesToGoogleContents(messages)
+	require.NotEmpty(t, contents)
+
+	prunedTokens := estimateGoogleContentsTokens(contents)
+	t.Logf("Pruned payload tokens: %d (converted turns: %d)", prunedTokens, len(contents))
+	require.Less(t, prunedTokens, 600000, "pruned contents must be cleanly under 600,000 tokens")
+
+	// 1. Genesis prompt must be retained at contents[0]
+	require.Equal(t, "user", contents[0]["role"])
+	parts0, ok := contents[0]["parts"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, parts0)
+	require.Contains(t, parts0[0].(map[string]any)["text"], genesisPrompt)
+
+	// 2. Every single user message must be preserved
+	var allUserContent strings.Builder
+	for _, turn := range contents {
+		if turn["role"] == "user" {
+			for _, p := range turn["parts"].([]any) {
+				if pMap, ok := p.(map[string]any); ok {
+					if txt, ok := pMap["text"].(string); ok {
+						allUserContent.WriteString(txt)
+						allUserContent.WriteString("\n")
+					}
+				}
+			}
+		}
+	}
+	allUserStr := allUserContent.String()
+	for _, want := range expectedUserTexts {
+		require.Contains(t, allUserStr, want, "every user message must be preserved")
+	}
+
+	// 3. Verify Gemini role alternation
+	require.Equal(t, "user", contents[0]["role"])
+	for i := 1; i < len(contents); i++ {
+		prevRole := contents[i-1]["role"].(string)
+		currRole := contents[i]["role"].(string)
+		require.NotEqual(t, prevRole, currRole, "consecutive turns must alternate role")
+	}
+
+	// 4. Verify thought_signature on any functionCall
+	for _, turn := range contents {
+		if turn["role"] == "model" {
+			for _, p := range turn["parts"].([]any) {
+				if pMap, ok := p.(map[string]any); ok {
+					if _, ok := pMap["functionCall"]; ok {
+						require.Equal(t, "skip_thought_signature_validator", pMap["thought_signature"])
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestGoogleAuth_WorkflowsLiveEntriesPruning(t *testing.T) {
+	dbPath := "/home/wolfgang/.mecha-developer/router.sqlite"
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		t.Skip("router.sqlite not found")
+	}
+
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	require.NoError(t, err)
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT body FROM embedded_entries WHERE agent_id='workflows' ORDER BY seq`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var messages []ai.Message
+	var wolfgangChats []string
+	for rows.Next() {
+		var raw []byte
+		require.NoError(t, rows.Scan(&raw))
+		msg, err := ai.UnmarshalMessage(raw)
+		require.NoError(t, err)
+		messages = append(messages, msg)
+
+		if um, ok := asUserMsg(msg); ok {
+			for _, part := range um.Content {
+				if tc, ok := part.(ai.TextContent); ok && tc.Text != "" {
+					cleaned := unwrapEmbeddedMailText(tc.Text)
+					wolfgangChats = append(wolfgangChats, cleaned)
+				} else if tc, ok := part.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
+					cleaned := unwrapEmbeddedMailText(tc.Text)
+					wolfgangChats = append(wolfgangChats, cleaned)
+				}
+			}
+		}
+	}
+	require.GreaterOrEqual(t, len(messages), 1800, "expected at least 1800 entries for workflows")
+	require.NotEmpty(t, wolfgangChats, "expected non-empty Wolfgang chat messages")
+
+	// Convert with Gemini context window (1,048,576)
+	contents := convertMessagesToGoogleContents(messages, 1048576)
+	require.NotEmpty(t, contents)
+
+	// Verify token count is under 500,000 tokens
+	tokens := estimateGoogleContentsTokens(contents)
+	t.Logf("Workflows entries: %d original messages, %d converted turns, estimated %d tokens", len(messages), len(contents), tokens)
+	require.Less(t, tokens, 500000, "converted payload must be under 500,000 tokens")
+
+	// Verify all of Wolfgang's chat messages are preserved
+	var allUserContent strings.Builder
+	for _, turn := range contents {
+		if turn["role"] == "user" {
+			for _, p := range turn["parts"].([]any) {
+				if pMap, ok := p.(map[string]any); ok {
+					if txt, ok := pMap["text"].(string); ok {
+						allUserContent.WriteString(txt)
+						allUserContent.WriteString("\n")
+					}
+				}
+			}
+		}
+	}
+	allUserStr := allUserContent.String()
+	for _, chat := range wolfgangChats {
+		require.Contains(t, allUserStr, chat, "Wolfgang's chat message must be retained")
+	}
+
+	// Verify Gemini role alternation
+	require.Equal(t, "user", contents[0]["role"])
+	for i := 1; i < len(contents); i++ {
+		prevRole := contents[i-1]["role"].(string)
+		currRole := contents[i]["role"].(string)
+		require.NotEqual(t, prevRole, currRole, "consecutive turns must alternate role")
+	}
+
+	// Verify all functionCalls have thought_signature
+	for _, turn := range contents {
+		if turn["role"] == "model" {
+			for _, p := range turn["parts"].([]any) {
+				if pMap, ok := p.(map[string]any); ok {
+					if _, ok := pMap["functionCall"]; ok {
+						require.Equal(t, "skip_thought_signature_validator", pMap["thought_signature"])
+					}
+				}
+			}
+		}
+	}
 }
 
 
