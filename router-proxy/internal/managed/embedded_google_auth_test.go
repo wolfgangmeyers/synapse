@@ -1385,3 +1385,54 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmitsFunctionCall_ToolCallOn
 	require.Equal(t, "read", frMap["name"])
 }
 
+func TestGoogleAuth_ConvertMessagesToGoogleContents_RetainsLongTranscript(t *testing.T) {
+	// Create a transcript with >60 messages (e.g., 80 messages: 40 user, 40 assistant).
+	// Verify that the very first user message and full conversation history are preserved.
+	var messages []ai.Message
+	messages = append(messages, ai.UserMessage{
+		Content: []ai.Content{
+			ai.TextContent{Text: "Initial user message that must not be truncated"},
+		},
+	})
+	messages = append(messages, ai.AssistantMessage{
+		Content: []ai.Content{
+			ai.TextContent{Text: "Initial assistant response"},
+		},
+	})
+
+	for i := 2; i < 80; i++ {
+		if i%2 == 0 {
+			messages = append(messages, ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: fmt.Sprintf("User follow-up message %d", i)},
+				},
+			})
+		} else {
+			messages = append(messages, ai.AssistantMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: fmt.Sprintf("Assistant follow-up response %d", i)},
+				},
+			})
+		}
+	}
+	require.Len(t, messages, 80)
+
+	contents := convertMessagesToGoogleContents(messages)
+	require.Len(t, contents, 80)
+
+	// Initial user message must be retained at contents[0]
+	require.Equal(t, "user", contents[0]["role"])
+	parts0, ok := contents[0]["parts"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, parts0)
+	require.Equal(t, "Initial user message that must not be truncated", parts0[0].(map[string]any)["text"])
+
+	// Check final turn as well
+	require.Equal(t, "model", contents[79]["role"])
+	parts79, ok := contents[79]["parts"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, parts79)
+	require.Equal(t, "Assistant follow-up response 79", parts79[0].(map[string]any)["text"])
+}
+
+

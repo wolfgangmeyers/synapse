@@ -390,22 +390,6 @@ func isAssistantContentEmpty(am ai.AssistantMessage) bool {
 }
 
 func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[string]string) []map[string]any {
-	const maxMessages = 60
-	if len(messages) > maxMessages {
-		start := len(messages) - maxMessages
-		for start < len(messages) {
-			if _, ok := asToolResultMsg(messages[start]); !ok {
-				if _, ok := asUserMsg(messages[start]); ok {
-					break
-				}
-			}
-			start++
-		}
-		if start < len(messages) {
-			messages = messages[start:]
-		}
-	}
-
 	droppedToolCalls := make(map[string]string)
 	if len(dropped) > 0 && dropped[0] != nil {
 		for k, v := range dropped[0] {
