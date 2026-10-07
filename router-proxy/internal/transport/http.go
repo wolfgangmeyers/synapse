@@ -198,6 +198,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/prompt-templates":
 		r.handlePromptCollection(w, req)
 		return
+	case path == "/v1/workflow-states":
+		r.handleWorkflowStatesCollection(w, req)
+		return
 	case req.Method == http.MethodGet && path == "/v1/settings/systemone":
 		r.handleSystemOneConfigGET(w, req)
 		return
@@ -226,6 +229,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	if id, action, ok := routeID(req.URL.EscapedPath(), "/v1/prompt-templates/"); ok {
 		_ = action
 		r.handlePromptItem(w, req, id)
+		return
+	}
+	if id, _, ok := routeID(req.URL.EscapedPath(), "/v1/workflow-states/"); ok {
+		r.handleWorkflowStateItem(w, req, id)
 		return
 	}
 	if id, action, ok := routeID(path, "/v1/messages/"); ok {
