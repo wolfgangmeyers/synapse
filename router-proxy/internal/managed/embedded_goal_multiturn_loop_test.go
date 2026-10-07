@@ -206,19 +206,19 @@ func TestEmbeddedGoalThinkingBlockVerdictParsing(t *testing.T) {
 			wantVerdict: store.EmbeddedGoalEvaluationNotDone,
 		},
 		{
-			name: "no text content produces error",
+			name: "no text content falls back to NOT_DONE",
 			content: ai.ContentList{
 				ai.ThinkingContent{Thinking: "Only thinking, no text output."},
 			},
-			wantErr: true,
+			wantVerdict: store.EmbeddedGoalEvaluationNotDone,
 		},
 		{
-			name: "unparseable text produces error",
+			name: "unparseable text falls back to NOT_DONE",
 			content: ai.ContentList{
 				ai.ThinkingContent{Thinking: "Thinking..."},
 				ai.TextContent{Text: "I am undecided and cannot tell."},
 			},
-			wantErr: true,
+			wantVerdict: store.EmbeddedGoalEvaluationNotDone,
 		},
 	}
 
@@ -511,6 +511,146 @@ func TestEmbeddedGoalReNudgesOnSingleEmptyResponse(t *testing.T) {
 		agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
 		return err == nil && agent.ActivityState == "idle" && agent.LifecycleState == "running"
 	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestEmbeddedGoalEvaluatorErrorFallsBackToNotDoneAndContinues tests that:
+// - Turn 1: Evaluator returns an error (ai.StopError). The system does NOT stall in UNKNOWN;
+//   it logs the error, falls back to NOT_DONE, and dispatches a continuation turn.
+// - Turn 2: Evaluator returns malformed/unparseable text. The system fails open to NOT_DONE
+//   and dispatches another continuation turn.
+// - Turn 3: Evaluator returns DONE. The agent completes and settles cleanly.
+// - Durable assertions: No rows remain in UNKNOWN, fallback rows are NOT_DONE, and continuations ran.
+func TestEmbeddedGoalEvaluatorErrorFallsBackToNotDoneAndContinues(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var ordinary, evaluations, continuations atomic.Int32
+	respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+		if embeddedIsGoalEvaluation(h) {
+			n := evaluations.Add(1)
+			switch n {
+			case 1:
+				// Turn 1 evaluation fails with StopError (simulating model/stream error)
+				return providers.FauxAssistantMessage(nil, ai.StopError)
+			case 2:
+				// Turn 2 evaluation returns unparseable/malformed text (simulating hallucinated/broken output)
+				return providers.FauxAssistantMessage(ai.ContentList{
+					ai.TextContent{Text: "I am unable to determine completion status from the transcript."},
+				}, ai.StopStop)
+			default:
+				// Turn 3 evaluation completes with DONE
+				return providers.FauxAssistantMessage(ai.ContentList{
+					ai.TextContent{Text: "DONE"},
+				}, ai.StopStop)
+			}
+		}
+
+		for _, msg := range h.Messages {
+			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") || strings.HasPrefix(text.Text, "NOT_DONE: ")) {
+					continuations.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation progress made"}}, ai.StopStop)
+				}
+			}
+		}
+
+		n := ordinary.Add(1)
+		if n == 1 {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "resilient evaluator goal"}, "resilient-set"),
+			}, ai.StopToolUse)
+		}
+		return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "initial work final"}}, ai.StopStop)
+	}
+
+	steps := make([]providers.FauxResponseStep, 20)
+	for i := range steps {
+		steps[i] = respond
+	}
+	reg.SetResponses(steps)
+
+	m := productionPolicyManager(t, db, root, reg)
+	defer m.Close(ctx)
+
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               "resilient-evaluator-agent",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "start work on resilient goal",
+		RequestID:          "e7777777-7777-4777-8777-777777777797",
+	})
+	require.NoError(t, err)
+
+	read, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	require.NoError(t, err)
+	defer read.Close()
+
+	// Wait for Turn 1 to complete, evaluator error to occur, fall back to NOT_DONE, and Turn 2 continuation to run
+	require.Eventually(t, func() bool {
+		return continuations.Load() >= 1 && evaluations.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Wait for Turn 2 to complete, unparseable output to fall back to NOT_DONE, and Turn 3 continuation to run
+	require.Eventually(t, func() bool {
+		return continuations.Load() >= 2 && evaluations.Load() >= 2
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Wait for Turn 3 to complete and final evaluation to return DONE
+	require.Eventually(t, func() bool {
+		return evaluations.Load() >= 3
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Verify worker settles cleanly to idle
+	require.Eventually(t, func() bool {
+		agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+		return err == nil && agent.ActivityState == "idle" && agent.LifecycleState == "running"
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Assert that NO evaluation row stalled in UNKNOWN
+	var unknownCount int
+	require.NoError(t, read.QueryRow(`SELECT count(*) FROM embedded_goal_evaluations WHERE agent_id=? AND state='UNKNOWN'`, launched.Agent.AgentID).Scan(&unknownCount))
+	require.Equal(t, 0, unknownCount, "no evaluation must stall in UNKNOWN")
+
+	// Verify all 3 evaluations completed
+	var completedCount int
+	require.NoError(t, read.QueryRow(`SELECT count(*) FROM embedded_goal_evaluations WHERE agent_id=? AND completed_at IS NOT NULL`, launched.Agent.AgentID).Scan(&completedCount))
+	require.Equal(t, 3, completedCount)
+
+	// Verify specific states and reasons
+	type evalRow struct {
+		state  string
+		reason string
+	}
+	rows, err := read.Query(`SELECT state, reason FROM embedded_goal_evaluations WHERE agent_id=? ORDER BY user_seq ASC`, launched.Agent.AgentID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var evals []evalRow
+	for rows.Next() {
+		var r evalRow
+		require.NoError(t, rows.Scan(&r.state, &r.reason))
+		evals = append(evals, r)
+	}
+	require.Len(t, evals, 3)
+
+	// Turn 1 evaluation: fell back from eval error
+	require.Equal(t, store.EmbeddedGoalEvaluationNotDone, evals[0].state)
+	require.Contains(t, evals[0].reason, "Evaluator inconclusive:")
+
+	// Turn 2 evaluation: fell back from unparseable text
+	require.Equal(t, store.EmbeddedGoalEvaluationNotDone, evals[1].state)
+	require.Equal(t, "Inconclusive evaluator output; continuing progress on goal", evals[1].reason)
+
+	// Turn 3 evaluation: completed normally with DONE
+	require.Equal(t, store.EmbeddedGoalEvaluationDone, evals[2].state)
 }
 
 
