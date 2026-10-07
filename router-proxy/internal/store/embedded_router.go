@@ -9,6 +9,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"errors"
@@ -1282,6 +1284,92 @@ func EmbeddedMailUserMessage(a *EmbeddedMailAttempt, timestamp int64) (ai.UserMe
 		return ai.UserMessage{}, err
 	}
 	return message.(ai.UserMessage), nil
+}
+
+type MailAttachment struct {
+	ID        string `json:"id,omitempty"`
+	URL       string `json:"url,omitempty"`
+	MIMEType  string `json:"mime_type,omitempty"`
+	SizeBytes int    `json:"size_bytes,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Data      string `json:"data,omitempty"`
+}
+
+type ClaimedEmbeddedMailAttempt struct {
+	ID          string           `json:"id"`
+	MessageID   string           `json:"message_id"`
+	Sender      string           `json:"sender"`
+	Recipient   string           `json:"recipient"`
+	Body        string           `json:"body"`
+	Attachments []MailAttachment `json:"attachments,omitempty"`
+}
+
+func (s *Store) ClaimEmbeddedMailAttempt(ctx context.Context, messageID string) (*ClaimedEmbeddedMailAttempt, error) {
+	if messageID == "" {
+		return nil, errors.New("missing message ID")
+	}
+	var out *ClaimedEmbeddedMailAttempt
+	err := s.runImmediate(ctx, func() error {
+		var sender, recipient, body, state, expiry string
+		err := s.db.QueryRowContext(ctx, `SELECT sender, recipient, body, state, expires_at FROM messages WHERE id=?`, messageID).Scan(&sender, &recipient, &body, &state, &expiry)
+		if err != nil {
+			return err
+		}
+		if state != "queued" || expiry <= formatTimestamp(s.clock.Now()) {
+			return errors.New("embedded message is no longer queued or has expired")
+		}
+		res, err := s.db.ExecContext(ctx, `UPDATE messages SET state='acknowledged' WHERE id=? AND state='queued'`, messageID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("embedded message already claimed or acknowledged")
+		}
+		_ = s.completeLinkedReminder(ctx, messageID)
+
+		var attachmentsJSON sql.NullString
+		_ = s.db.QueryRowContext(ctx, `SELECT attachments_json FROM conversation_messages WHERE message_id=? ORDER BY conversation_sequence DESC LIMIT 1`, messageID).Scan(&attachmentsJSON)
+
+		var attachments []MailAttachment
+		if attachmentsJSON.Valid && attachmentsJSON.String != "" && attachmentsJSON.String != "[]" {
+			if err := json.Unmarshal([]byte(attachmentsJSON.String), &attachments); err != nil {
+				var stringPaths []string
+				if err2 := json.Unmarshal([]byte(attachmentsJSON.String), &stringPaths); err2 == nil {
+					for _, p := range stringPaths {
+						attachments = append(attachments, MailAttachment{Path: p})
+					}
+				}
+			}
+		}
+
+		if s.path != "" {
+			attDir := s.path + ".attachments"
+			for i := range attachments {
+				if attachments[i].Path == "" && attachments[i].ID != "" {
+					cand := filepath.Join(attDir, attachments[i].ID)
+					if _, err := os.Stat(cand); err == nil {
+						attachments[i].Path = cand
+					}
+				}
+			}
+		}
+
+		out = &ClaimedEmbeddedMailAttempt{
+			ID:          messageID,
+			MessageID:   messageID,
+			Sender:      sender,
+			Recipient:   recipient,
+			Body:        body,
+			Attachments: attachments,
+		}
+		return nil
+	})
+	return out, err
 }
 
 // PollAndAdmitEmbeddedPendingMessages checks if there are any unread queued
