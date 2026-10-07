@@ -625,7 +625,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if p != nil && p.toolExecuted {
 			m.laneFor(binding.AgentID).consecutiveContinuations = 0
 		} else if continuation == nil && (explicitPrompt != "" || mail != nil) {
-			m.laneFor(binding.AgentID).consecutiveContinuations = 0
+			lane := m.laneFor(binding.AgentID)
+			lane.consecutiveContinuations = 0
+			lane.consecutiveEmptyTurns = 0
+			lane.goalAttempt = 0
 		}
 		if errors.Is(turnErr, context.Canceled) || (turnErr != nil && strings.Contains(turnErr.Error(), "context canceled")) {
 			_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), binding.AgentID)
@@ -1778,22 +1781,66 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 							toolCalls++
 						}
 					case ai.TextContent:
-						if strings.TrimSpace(c.Text) != "" {
+						t := strings.TrimSpace(c.Text)
+						if t != "" && t != "(empty response)" {
 							hasText = true
 						}
 					case *ai.TextContent:
-						if c != nil && strings.TrimSpace(c.Text) != "" {
-							hasText = true
+						if c != nil {
+							t := strings.TrimSpace(c.Text)
+							if t != "" && t != "(empty response)" {
+								hasText = true
+							}
 						}
 					}
 				}
 			}
 		}
 	}
+	lane := m.laneFor(binding.AgentID)
 	if toolCalls == 0 && !hasText {
-		log.Printf("GOAL CIRCUIT BREAKER: agent %s emitted empty response on turn %d; stopping continuation loop", binding.AgentID, p.turnSeq)
+		lane.consecutiveEmptyTurns++
+		if lane.consecutiveEmptyTurns < 3 {
+			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns)
+			lane.goalAttempt++
+			if lane.goalAttempt > 20 {
+				lane.goalAttempt = 20
+			}
+			goal := policy.Config.Goal
+			nudge := notDoneWakeup(goal, lane.goalAttempt)
+			continuationPrompt := "You emitted an empty response without taking action. You must take concrete action now on this goal: " + goal + ". Execute a bash command, read a file, or edit code to make progress.\n" + nudge
+
+			key := store.EmbeddedGoalEvaluationKey{UserSeq: p.turnSeq, UserDigest: p.turnDigest,
+				GoalRevision: receipt.GoalRevision, FinalSeq: last.Sequence, FinalDigest: last.Digest}
+			_, claimed, err := m.store.ClaimEmbeddedGoalEvaluation(ctx, binding, key)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return nil
+			}
+			m.startManagedTask(func() {
+				lane := m.laneFor(binding.AgentID)
+				lane.serial.Lock()
+				outcome := store.EmbeddedGoalEvaluationNotDone
+				reason := "Empty response without action"
+				_, changed, evalErr := m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
+				if evalErr == nil {
+					m.recordGoalEvaluationActivity(binding, key, outcome, reason)
+				}
+				lane.serial.Unlock()
+				if evalErr != nil || !changed {
+					m.publishProjection()
+					return
+				}
+				m.startEmbeddedGoalContinuationWithPrompt(binding, key, continuationPrompt)
+			})
+			return nil
+		}
+		log.Printf("GOAL CIRCUIT BREAKER: agent %s emitted 3 consecutive empty responses; pausing continuation loop", binding.AgentID)
 		return nil
 	}
+	lane.consecutiveEmptyTurns = 0
 	key := store.EmbeddedGoalEvaluationKey{UserSeq: p.turnSeq, UserDigest: p.turnDigest,
 		GoalRevision: receipt.GoalRevision, FinalSeq: last.Sequence, FinalDigest: last.Digest}
 	_, claimed, err := m.store.ClaimEmbeddedGoalEvaluation(ctx, binding, key)
@@ -1824,6 +1871,12 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted || outcome == store.EmbeddedGoalEvaluationNotDone) {
 			m.recordGoalEvaluationActivity(binding, key, outcome, reason)
+		}
+		if outcome == store.EmbeddedGoalEvaluationNotDone {
+			lane.goalAttempt++
+			if lane.goalAttempt > 20 {
+				lane.goalAttempt = 20
+			}
 		}
 		lane.serial.Unlock()
 		if evalErr != nil || !changed || outcome != store.EmbeddedGoalEvaluationNotDone {

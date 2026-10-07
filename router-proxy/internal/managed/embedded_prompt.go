@@ -17,6 +17,8 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	}
 	lane := m.laneFor(agentID)
 	lane.consecutiveContinuations = 0
+	lane.consecutiveEmptyTurns = 0
+	lane.goalAttempt = 0
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
 	lane.serial.Lock()

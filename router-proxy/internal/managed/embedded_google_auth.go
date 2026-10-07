@@ -470,16 +470,44 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 				rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
 			}
 		} else if am, ok := asAssistantMsg(msg); ok {
+			toolCallCount := 0
+			hasNonEmptyText := false
+			for _, c := range am.Content {
+				switch part := c.(type) {
+				case ai.ToolCall:
+					toolCallCount++
+				case *ai.ToolCall:
+					if part != nil {
+						toolCallCount++
+					}
+				case ai.TextContent:
+					t := strings.TrimSpace(part.Text)
+					if t != "" && t != "(empty response)" {
+						hasNonEmptyText = true
+					}
+				case *ai.TextContent:
+					if part != nil {
+						t := strings.TrimSpace(part.Text)
+						if t != "" && t != "(empty response)" {
+							hasNonEmptyText = true
+						}
+					}
+				}
+			}
+			if toolCallCount == 0 && !hasNonEmptyText {
+				continue
+			}
+
 			var parts []any
 			for _, c := range am.Content {
 				if tc, ok := c.(ai.TextContent); ok && tc.Text != "" {
 					cleaned := stripSimulatedObservations(tc.Text)
-					if cleaned != "" {
+					if cleaned != "" && cleaned != "(empty response)" {
 						parts = append(parts, map[string]any{"text": cleaned})
 					}
 				} else if tc, ok := c.(*ai.TextContent); ok && tc != nil && tc.Text != "" {
 					cleaned := stripSimulatedObservations(tc.Text)
-					if cleaned != "" {
+					if cleaned != "" && cleaned != "(empty response)" {
 						parts = append(parts, map[string]any{"text": cleaned})
 					}
 				} else if th, ok := c.(ai.ThinkingContent); ok && th.Thinking != "" {
@@ -511,9 +539,6 @@ func convertMessagesToGoogleContents(messages []ai.Message, dropped ...map[strin
 					droppedToolCalls[callID] = label
 					droppedToolCalls[call.Name] = label
 				}
-			}
-			if len(parts) == 0 && isAssistantContentEmpty(am) {
-				parts = append(parts, map[string]any{"text": "(empty response)"})
 			}
 			if len(parts) > 0 {
 				rawContents = append(rawContents, map[string]any{"role": "model", "parts": parts})

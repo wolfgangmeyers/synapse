@@ -1041,6 +1041,8 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_FilterSimulatedObservations(
 
 func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlternation(t *testing.T) {
 	// Case 1: user -> empty assistant -> user continuation prompt
+	// Empty assistant message must be omitted so the model never sees empty responses,
+	// and consecutive user messages are merged into a single valid user turn.
 	messages1 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -1058,17 +1060,16 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	}
 
 	contents1 := convertMessagesToGoogleContents(messages1)
-	// Must produce 3 turns: user -> model (empty placeholder) -> user
-	require.Len(t, contents1, 3)
+	// Must omit the empty assistant message and merge the user turns
+	require.Len(t, contents1, 1)
 	require.Equal(t, "user", contents1[0]["role"])
-	require.Equal(t, "model", contents1[1]["role"])
-	require.Equal(t, "user", contents1[2]["role"])
-
-	modelParts1 := contents1[1]["parts"].([]any)
-	require.Len(t, modelParts1, 1)
-	require.Equal(t, "(empty response)", modelParts1[0].(map[string]any)["text"])
+	parts1 := contents1[0]["parts"].([]any)
+	require.Len(t, parts1, 2)
+	require.Equal(t, "Please start the task.", parts1[0].(map[string]any)["text"])
+	require.Equal(t, "Continue working on the current goal.", parts1[1].(map[string]any)["text"])
 
 	// Case 2: tool response -> empty assistant -> user continuation prompt
+	// Tool result (role user) and user prompt (role user) merge into a single user turn.
 	messages2 := []ai.Message{
 		ai.UserMessage{
 			Content: []ai.Content{
@@ -1098,14 +1099,38 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	}
 
 	contents2 := convertMessagesToGoogleContents(messages2)
-	// Must produce 5 turns alternating user -> model -> user -> model -> user
-	require.Len(t, contents2, 5)
+	// Must produce 3 turns: user -> model ("Calling tool") -> user (tool result + prompt)
+	require.Len(t, contents2, 3)
 	require.Equal(t, "user", contents2[0]["role"])
 	require.Equal(t, "model", contents2[1]["role"])
 	require.Equal(t, "user", contents2[2]["role"])
-	require.Equal(t, "model", contents2[3]["role"])
-	require.Equal(t, "user", contents2[4]["role"])
-	require.Equal(t, "(empty response)", contents2[3]["parts"].([]any)[0].(map[string]any)["text"])
+
+	// Case 3: assistant with "(empty response)" text or whitespace-only is also omitted
+	messages3 := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Prompt 1"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "(empty response)"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "   \n\t  "},
+			},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Prompt 2"},
+			},
+		},
+	}
+	contents3 := convertMessagesToGoogleContents(messages3)
+	require.Len(t, contents3, 1)
+	require.Equal(t, "user", contents3[0]["role"])
 }
 
 

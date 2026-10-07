@@ -62,7 +62,7 @@ func TestEmbeddedGoalMultiTurnContinuationLoop(t *testing.T) {
 
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") || strings.HasPrefix(text.Text, "NOT_DONE: ")) {
 					continuations.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation work completed"}}, ai.StopStop)
 				}
@@ -241,7 +241,7 @@ func TestEmbeddedGoalThinkingBlockVerdictParsing(t *testing.T) {
 				}
 				for _, msg := range h.Messages {
 					if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-						if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
+						if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") || strings.HasPrefix(text.Text, "NOT_DONE: ")) {
 							return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation final"}}, ai.StopStop)
 						}
 					}
@@ -325,7 +325,7 @@ func TestEmbeddedGoalAutonomousLoopWithToolExecutions(t *testing.T) {
 
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") || strings.HasPrefix(text.Text, "NOT_DONE: ")) {
 					continuations.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "continuation step executed"}}, ai.StopStop)
 				}
@@ -390,4 +390,127 @@ func TestEmbeddedGoalAutonomousLoopWithToolExecutions(t *testing.T) {
 		return continuations.Load() >= 1
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+// TestEmbeddedGoalReNudgesOnSingleEmptyResponse tests that when an assistant emits
+// an empty response on turn 1 with a standing goal:
+// - Turn 2 receives the actionable re-nudge prompt instead of the continuation loop dying.
+// - Turn 2 executes tools and completes.
+// - The empty counter resets and the goal continues to completion.
+func TestEmbeddedGoalReNudgesOnSingleEmptyResponse(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var evaluations atomic.Int32
+	var turnStep atomic.Int32
+	var receivedReNudge atomic.Bool
+	var promptText atomic.Value
+
+	expectedGoal := "test empty response re-nudge goal"
+	expectedActionablePrefix := "You emitted an empty response without taking action. You must take concrete action now on this goal: " + expectedGoal + ". Execute a bash command, read a file, or edit code to make progress."
+
+	respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+		if embeddedIsGoalEvaluation(h) {
+			evaluations.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.ThinkingContent{Thinking: "Tool execution happened, goal is now complete."},
+				ai.TextContent{Text: "DONE"},
+			}, ai.StopStop)
+		}
+
+		for _, msg := range h.Messages {
+			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
+				if text, ok := u.Content[0].(ai.TextContent); ok {
+					if strings.Contains(text.Text, "You emitted an empty response without taking action.") {
+						receivedReNudge.Store(true)
+						promptText.Store(text.Text)
+					}
+				}
+			}
+		}
+
+		step := turnStep.Add(1)
+		switch step {
+		case 1:
+			// Turn 1 step 1: set standing goal
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": expectedGoal}, "renudge-goal-set"),
+			}, ai.StopToolUse)
+		case 2:
+			// Turn 1 step 2: empty assistant response (0 tools, 0 text)
+			return providers.FauxAssistantMessage(ai.ContentList{}, ai.StopStop)
+		case 3:
+			// Turn 2 step 1: re-nudged turn executes bash tool
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo 'making progress on goal'"}, "bash-call-1"),
+			}, ai.StopToolUse)
+		case 4:
+			// Turn 2 step 2: concludes with text
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Turn 2 completed actionable tool work."},
+			}, ai.StopStop)
+		default:
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "fallback final"}}, ai.StopStop)
+		}
+	}
+
+	steps := make([]providers.FauxResponseStep, 20)
+	for i := range steps {
+		steps[i] = respond
+	}
+	reg.SetResponses(steps)
+
+	m := productionPolicyManager(t, db, root, reg)
+	defer m.Close(ctx)
+
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               "renudge-empty-agent",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "start work on empty response re-nudge",
+		RequestID:          "f5555555-5555-4555-8555-555555555594",
+	})
+	require.NoError(t, err)
+
+	read, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	require.NoError(t, err)
+	defer read.Close()
+
+	// Wait for Turn 2 to receive the actionable re-nudge prompt
+	require.Eventually(t, func() bool {
+		return receivedReNudge.Load()
+	}, 5*time.Second, 10*time.Millisecond, "turn 2 must receive actionable re-nudge prompt")
+
+	// Verify the re-nudge prompt contains the expected actionable directive
+	actualPrompt, _ := promptText.Load().(string)
+	require.Contains(t, actualPrompt, expectedActionablePrefix)
+
+	// Wait for Turn 2 to complete tool execution and goal evaluation to return DONE
+	require.Eventually(t, func() bool {
+		return evaluations.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Verify the final evaluation state is DONE in durable store
+	var finalEvalState string
+	require.NoError(t, read.QueryRow(`SELECT state FROM embedded_goal_evaluations WHERE agent_id=? ORDER BY completed_at DESC LIMIT 1`, launched.Agent.AgentID).Scan(&finalEvalState))
+	require.Equal(t, store.EmbeddedGoalEvaluationDone, finalEvalState)
+
+	// Verify the lane empty counter was reset to 0 after tool execution
+	lane := m.laneFor(launched.Agent.AgentID)
+	require.Equal(t, 0, lane.consecutiveEmptyTurns, "consecutiveEmptyTurns must be reset to 0 after tool execution")
+
+	// Verify agent settles cleanly to idle
+	require.Eventually(t, func() bool {
+		agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+		return err == nil && agent.ActivityState == "idle" && agent.LifecycleState == "running"
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 

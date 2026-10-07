@@ -151,6 +151,8 @@ type managedAgentLane struct {
 	admission                sync.Mutex
 	selection                sync.Mutex // saved model snapshot at SDK turn admission only
 	consecutiveContinuations int
+	consecutiveEmptyTurns    int
+	goalAttempt              int
 	mailAttempts             map[string]int
 }
 
@@ -1253,6 +1255,9 @@ func (m *Manager) startManagedTask(task func()) bool {
 }
 
 func (m *Manager) laneLocked(agentID string) *managedAgentLane {
+	if m.lanes == nil {
+		m.lanes = make(map[string]*managedAgentLane)
+	}
 	lane := m.lanes[agentID]
 	if lane == nil {
 		lane = &managedAgentLane{
@@ -1713,7 +1718,10 @@ func (m *Manager) RestartAfterAuthChange(ctx context.Context, operationID string
 }
 
 func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) error {
-	m.laneFor(agentID).consecutiveContinuations = 0
+	lane := m.laneFor(agentID)
+	lane.consecutiveContinuations = 0
+	lane.consecutiveEmptyTurns = 0
+	lane.goalAttempt = 0
 	candidate, lookupErr := m.store.ManagedAgent(ctx, agentID)
 	if lookupErr == nil && candidate.Runtime == "embedded" {
 		id, err := m.ids.Next()
@@ -1722,7 +1730,7 @@ func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) erro
 		}
 		return m.AdmitPromptWithRequestID(ctx, agentID, message, id)
 	}
-	lane := m.laneFor(agentID)
+	lane = m.laneFor(agentID)
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
 	binding, ok := m.bindingFor(agentID)

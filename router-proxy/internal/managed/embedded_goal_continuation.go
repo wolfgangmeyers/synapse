@@ -15,7 +15,40 @@ import (
 type embeddedGoalTimer struct{ cancel func() }
 
 const defaultGoalContinuationDelay = 10 * time.Second
-const defaultMaxConsecutiveGoalContinuations = 10
+const defaultMaxConsecutiveGoalContinuations = 20
+
+var notDoneWakeups = []string{
+	"NOT_DONE: Review %s and take the next concrete action now.",
+	"NOT_DONE: Continue %s by completing its next actionable step now.",
+	"NOT_DONE: Re-engage with %s and deliver the next concrete result now.",
+	"NOT_DONE: Identify what remains for %s and act on it now.",
+	"NOT_DONE: Advance %s with a specific, verifiable next action now.",
+	"NOT_DONE: %s still needs action—COMPLETE the next step now!",
+	"NOT_DONE: Return to %s, address the current gap, and move it forward NOW.",
+	"NOT_DONE: Take ownership of %s and complete its next concrete action now!",
+	"NOT_DONE: Do not leave %s idle—resolve the next blocker and proceed NOW.",
+	"NOT_DONE: %s requires visible progress: take the next actionable step now!",
+	"NOT_DONE: %s is NOT_DONE. Resolve the highest-priority remaining item and act now.",
+	"NOT_DONE: Move %s forward immediately by completing the next required action.",
+	"NOT_DONE: %s remains incomplete—address the outstanding work and produce a result NOW.",
+	"NOT_DONE: Take direct action on %s now; do not stop at planning or inspection.",
+	"NOT_DONE: %s needs urgent progress. Complete the next concrete deliverable NOW!",
+	"NOT_DONE: %s IS STILL INCOMPLETE. Take the next required action immediately!",
+	"NOT_DONE: ACT NOW on %s: resolve the top remaining issue and report the concrete result.",
+	"NOT_DONE: %s cannot remain stalled. COMPLETE THE NEXT ACTION NOW and make progress visible!",
+	"NOT_DONE: TAKE OWNERSHIP of %s immediately—finish the highest-priority remaining step and verify it NOW!",
+	"NOT_DONE: %s IS NOT COMPLETE. ACT NOW, DELIVER THE NEXT VERIFIED RESULT, AND ACCOUNT FOR THE REMAINING WORK!",
+}
+
+func notDoneWakeup(goal string, attempt int) string {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > len(notDoneWakeups) {
+		attempt = len(notDoneWakeups)
+	}
+	return fmt.Sprintf(notDoneWakeups[attempt-1], goal)
+}
 
 // Recovery only restores timers for durable, unstarted snoozed reservations.
 // The ordinary start path still fences ownership, policy, due, and final turn.
@@ -103,6 +136,10 @@ func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding
 }
 
 func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey) {
+	m.startEmbeddedGoalContinuationWithPrompt(binding, key, "")
+}
+
+func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, overridePrompt string) {
 	lane := m.laneFor(binding.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
@@ -141,8 +178,17 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 		return
 	}
 	lane.consecutiveContinuations++
+	if lane.goalAttempt < lane.consecutiveContinuations {
+		lane.goalAttempt = lane.consecutiveContinuations
+	}
+	if lane.goalAttempt > 20 {
+		lane.goalAttempt = 20
+	}
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-	prompt := m.formatGoalContinuationPrompt(ctx, owner.binding, &key)
+	prompt := overridePrompt
+	if prompt == "" {
+		prompt = m.formatGoalContinuationPrompt(ctx, owner.binding, &key)
+	}
 	// Start committed UNKNOWN before any SDK provider request. An error or
 	// process loss cannot authorize replay; the saved transcript is evidence.
 	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key)
@@ -289,6 +335,10 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding, nil)
 	lane.consecutiveContinuations++
+	lane.goalAttempt++
+	if lane.goalAttempt > 20 {
+		lane.goalAttempt = 20
+	}
 	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
 	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
 		log.Printf("kickoffIdleGoalContinuation: runEmbeddedSessionTurn error for %s: %v", agentID, err)
@@ -316,9 +366,18 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 		rationale = "Take the next actionable step to make progress on the goal."
 	}
 
+	lane := m.laneFor(binding.AgentID)
+	attempt := lane.goalAttempt
+	if attempt <= 0 {
+		attempt = lane.consecutiveContinuations
+	}
+	if attempt <= 0 {
+		attempt = 1
+	}
+
 	var basePrompt string
 	if goal != "" {
-		basePrompt = fmt.Sprintf("NOT_DONE: Continue %s by completing its next actionable step now.\nVERDICT: NOT_DONE\nREASON: %s", goal, rationale)
+		basePrompt = fmt.Sprintf("%s\nVERDICT: NOT_DONE\nREASON: %s", notDoneWakeup(goal, attempt), rationale)
 	} else {
 		basePrompt = goalContinuationDefaultPrompt
 	}

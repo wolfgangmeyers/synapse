@@ -103,6 +103,12 @@ func (m *Manager) embeddedGoalTool(owner embeddedOwner, admitted func(string) *s
 		if err != nil {
 			return agent.AgentToolResult{}, err
 		}
+		if command.Action == "set" {
+			lane := m.laneFor(owner.binding.AgentID)
+			lane.consecutiveEmptyTurns = 0
+			lane.goalAttempt = 0
+			lane.consecutiveContinuations = 0
+		}
 		if m.embeddedAfterGoalCommit != nil {
 			m.embeddedAfterGoalCommit(ctx)
 		}
