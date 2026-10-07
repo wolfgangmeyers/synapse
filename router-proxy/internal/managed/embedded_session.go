@@ -1865,8 +1865,17 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			}
 		}
 		outcome, reason, evalErr := evaluator(m.runCtx, key)
+		if evalErr != nil {
+			log.Printf("[embedded:%s] Goal evaluation error (%v); falling back to NOT_DONE to ensure worker never stalls", binding.AgentID, evalErr)
+			outcome = store.EmbeddedGoalEvaluationNotDone
+			reason = "Evaluator inconclusive: " + evalErr.Error()
+			if len(reason) > 512 {
+				reason = reason[:512]
+			}
+			evalErr = nil
+		}
 		changed := false
-		if evalErr == nil && m.runCtx.Err() == nil {
+		if m.runCtx.Err() == nil {
 			_, changed, evalErr = m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
 		}
 		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted || outcome == store.EmbeddedGoalEvaluationNotDone) {

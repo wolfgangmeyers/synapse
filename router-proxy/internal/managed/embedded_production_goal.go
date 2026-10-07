@@ -165,12 +165,15 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 	}
 	rawText := textBuilder.String()
 	if rawText == "" {
-		return "", "", errors.New("goal evaluation verdict must be text")
+		return store.EmbeddedGoalEvaluationNotDone, "Inconclusive evaluator output; continuing progress on goal", nil
 	}
 	verdict, reason = parseGoalEvaluationResponse(rawText)
 	if verdict == "" {
 		log.Printf("GOAL EVALUATION WARNING for %s: unparseable verdict output: %q", binding.AgentID, rawText)
-		return "", "", fmt.Errorf("goal evaluation verdict invalid: %q", rawText)
+		return store.EmbeddedGoalEvaluationNotDone, "Inconclusive evaluator output; continuing progress on goal", nil
+	}
+	if verdict != store.EmbeddedGoalEvaluationCompleted {
+		verdict = store.EmbeddedGoalEvaluationNotDone
 	}
 	return verdict, reason, nil
 }
