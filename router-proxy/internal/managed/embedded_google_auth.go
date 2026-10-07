@@ -834,6 +834,20 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 					return
 				}
 			}
+		} else if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+			time.Sleep(1500 * time.Millisecond)
+			httpReq, err = http.NewRequestWithContext(requestCtx, http.MethodPost, googleGenerateContentURL, bytes.NewReader(payloadBytes))
+			if err == nil {
+				httpReq.Header.Set("Authorization", "Bearer "+token)
+				httpReq.Header.Set("Content-Type", "application/json")
+				httpReq.Header.Set("User-Agent", "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
+				resp, err = client.Do(httpReq)
+				if err != nil {
+					stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
+					return
+				}
+			}
 		}
 		defer resp.Body.Close()
 
