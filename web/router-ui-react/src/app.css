@@ -2039,3 +2039,22 @@ p:empty { display: none; }
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.workflow-state-dialog {
+  width: min(600px, 92vw);
+}
+
+.workflow-state-form {
+  display: grid;
+  gap: 14px;
+}
+
+.workflow-dialog-actions {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.delete-confirm-dialog {
+  width: min(440px, 90vw);
+}
+
+
