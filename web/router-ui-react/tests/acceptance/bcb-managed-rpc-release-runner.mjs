@@ -475,6 +475,20 @@ async function selectAndRevealManagedChildren(bcb, tab) {
   return visible;
 }
 
+export function isScopedRecentAgentMap(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 20) return false;
+  return Object.entries(value).every(([scope, recent]) => {
+    const parts = scope.split("\u001f");
+    if (parts.length !== 2 || !parts[1]) return false;
+    try {
+      const url = new URL(parts[0]);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return false;
+    } catch { return false; }
+    return Array.isArray(recent) && recent.length <= 10 && new Set(recent).size === recent.length
+      && recent.every((agent) => typeof agent === "string" && /^(tmux|router-managed):\S.*$/.test(agent));
+  });
+}
+
 async function auditBrowserStorage(bcb, tab, sentinel) {
   const audit = await execBrowser(bcb, tab, `(async () => {
     const sentinel = ${JSON.stringify(sentinel ?? "")};
@@ -487,6 +501,7 @@ async function auditBrowserStorage(bcb, tab, sentinel) {
       "mecha.web.agentId",
       "mecha.web.drafts",
       "mecha.web.managedRecentFolders",
+      "mecha.web.recentAgents",
     ]);
     const secretMarker = /(?:api[-_ ]?key|secret|password|authorization|bearer|access[-_]?token|refresh[-_]?token|cookie)/i;
     const utf8 = new TextEncoder();
@@ -511,6 +526,7 @@ async function auditBrowserStorage(bcb, tab, sentinel) {
       if (key === "mecha.web.agentId" && typeof value === "string") classification = "legacy-agent-id";
       if (key === "mecha.web.drafts" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) classification = "draft-record-map";
       if (key === "mecha.web.managedRecentFolders" && Array.isArray(parsed) && parsed.length <= 10 && parsed.every((folder) => typeof folder === "string" && (/^[/]/.test(folder) || folder === "~" || folder.startsWith("~/")))) classification = "managed-recent-folder-list";
+      if (key === "mecha.web.recentAgents" && (${isScopedRecentAgentMap.toString()})(parsed)) classification = "scoped-recent-agent-map";
       // The caller writes this value only after the allowlist and secret scan
       // pass. A failed audit becomes a failed step artifact without this data.
       entries.push({ key, value, byte_length: utf8.encode(value).byteLength, value_sha256: await sha256(value), known_key: knownKeys.has(key), classification, secret_marker_present: secretMarker.test(key) || secretMarker.test(value), sentinel_present: sentinel !== "" && value.includes(sentinel) });

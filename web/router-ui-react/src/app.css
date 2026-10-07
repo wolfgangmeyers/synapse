@@ -563,7 +563,9 @@ p:empty { display: none; }
   font-weight: 800;
 }
 .agent-filter { margin: 0 0 12px; }
-.agents { display: grid; gap: 10px; min-width: 0; overflow-x: hidden; }
+/* A normal row is a 66px avatar plus 28px padding. Expanded rows keep their natural height. */
+.agents { --agent-row-min-height: 94px; --agent-row-gap: 10px; display: grid; grid-auto-rows: max-content; align-content: start; gap: var(--agent-row-gap); min-width: 0; min-height: 0; max-height: calc(15 * var(--agent-row-min-height) + 14 * var(--agent-row-gap)); overflow-x: hidden; overflow-y: auto; overflow-anchor: none; }
+.agents > .agent-row { min-height: var(--agent-row-min-height); }
 .agent-row {
   width: 100%;
   max-width: 100%;
@@ -1326,7 +1328,9 @@ p:empty { display: none; }
 }
 
 /* React presentation helpers. */
-.sidebar-content { min-height: 0; height: 100%; }
+.sidebar-content { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.sidebar-content > * { flex-shrink: 0; }
+.sidebar-content > .agents { flex-shrink: 1; }
 .conversation > .conversation-runtime { grid-row: 1 / -1; min-height: 0; height: 100%; }
 .conversation-content { min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
 .conversation-tools { display: flex; align-items: flex-end; gap: 10px; padding: 10px 22px 0; background: var(--surface); }
