@@ -150,6 +150,8 @@ type managedAgentLane struct {
 	serial                   sync.Mutex
 	admission                sync.Mutex
 	selection                sync.Mutex // saved model snapshot at SDK turn admission only
+	activeMu                 sync.RWMutex
+	activeSession            *coding.Session
 	consecutiveContinuations int
 	consecutiveEmptyTurns    int
 	goalAttempt              int

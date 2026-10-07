@@ -1477,6 +1477,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			return nil
 		}})
+	lane := m.laneFor(saved.AgentID)
+	lane.activeMu.Lock()
+	lane.activeSession = session
+	lane.activeMu.Unlock()
+	defer func() {
+		lane.activeMu.Lock()
+		lane.activeSession = nil
+		lane.activeMu.Unlock()
+	}()
 	m.activeSessionsMu.Lock()
 	m.activeEmbeddedSessions[saved.AgentID] = session
 	m.activeSessionsMu.Unlock()
