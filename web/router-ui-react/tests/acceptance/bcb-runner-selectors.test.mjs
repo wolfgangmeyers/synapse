@@ -17,10 +17,32 @@ import {
   NARROW_VIEWPORT,
   requireDesktopViewport,
   requireNarrowViewport,
+  requireSidebarViewport,
   runRequested,
   setViewport,
   stopChild,
 } from "./bcb-runner.mjs";
+
+test("sidebar viewport check rejects truncation, missing scrolling, and incorrect rendered geometry", () => {
+  const ids = Array.from({ length: 20 }, (_, index) => `worker-${index}`);
+  const proof = { ids, clientHeight: 1550, scrollHeight: 2070, overflowY: "auto", heights: ids.map(() => 94), gap: 10, visibleRows: 15 };
+  assert.doesNotThrow(() => requireSidebarViewport(proof, ids));
+  assert.throws(() => requireSidebarViewport({ ...proof, ids: ids.slice(0, 15) }, ids), /truncated/);
+  assert.throws(() => requireSidebarViewport({ ...proof, scrollHeight: 1550 }, ids), /does not scroll/);
+  assert.throws(() => requireSidebarViewport({ ...proof, overflowY: "hidden" }, ids), /does not scroll/);
+  assert.throws(() => requireSidebarViewport({ ...proof, heights: ids.map(() => 100) }, ids), /15 normal rows/);
+  assert.throws(() => requireSidebarViewport({ ...proof, clientHeight: 1446, visibleRows: 14 }, ids), /15 normal rows/);
+  assert.throws(() => requireSidebarViewport({ ...proof, visibleRows: 16 }, ids), /15 normal rows/);
+});
+
+test("browser storage audit accepts only bounded source-qualified scoped recency maps", async () => {
+  const { isScopedRecentAgentMap } = await import("./bcb-managed-rpc-release-runner.mjs");
+  const key = "http://router.test\u001fweb";
+  assert.equal(isScopedRecentAgentMap({ [key]: ["tmux:worker", "router-managed:worker"], "http://other.test\u001fweb": ["tmux:worker"] }), true);
+  for (const invalid of [null, [], ["tmux:worker"], { unscoped: [] }, { [key]: "tmux:worker" }, { [key]: ["worker"] }, { [key]: ["tmux:worker", "tmux:worker"] }, { [key]: Array.from({ length: 11 }, (_, i) => `tmux:${i}`) }, Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`http://router-${i}.test\u001fweb`, []]))]) {
+    assert.equal(isScopedRecentAgentMap(invalid), false);
+  }
+});
 
 test("release dispatcher requires the complete isolated managed-RPC mode pair", async () => {
   await assert.rejects(runRequested(["--managed-rpc"]), /Usage: test:acceptance:bcb/);

@@ -8,7 +8,7 @@ afterEach(cleanup);
 
 describe("Sidebar", () => {
   it("shows only the accessible brand logo in the branding area", () => {
-    const { container } = render(<Sidebar routerLabel="local" connection="connected" agents={[]} />);
+    const { container } = render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[]} />);
     const brand = container.querySelector(".brand");
     expect(brand).toContainElement(screen.getByRole("img", { name: "Mecha Developer" }));
     expect(screen.getByRole("img", { name: "Mecha Developer" })).toHaveAttribute("src", "/logo.png");
@@ -19,7 +19,7 @@ describe("Sidebar", () => {
 
   it("filters and selects agents", () => {
     const onSelect = vi.fn();
-    render(<Sidebar routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);
+    render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);
     expect(screen.getByRole("button", { name: "Router local and provider sign-in settings" })).toHaveTextContent("Router & sign-in");
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "alpha" } });
     expect(screen.getByRole("button", { name: /Alpha Bot/i })).toBeTruthy();
@@ -29,7 +29,7 @@ describe("Sidebar", () => {
   });
 
   it("does not render a live-update error banner in the sidebar", () => {
-    render(<Sidebar routerLabel="local" connection="connected" agents={[]} managedStatus="Live managed-worker updates could not be applied. The router will retry. (Code: UI_LIVE_CONNECTION_FAILED)" />);
+    render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[]} managedStatus="Live managed-worker updates could not be applied. The router will retry. (Code: UI_LIVE_CONNECTION_FAILED)" />);
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
@@ -38,7 +38,7 @@ describe("Sidebar", () => {
     const onLaunchManaged = vi.fn();
     const onRestartAllManaged = vi.fn();
     const onProviderSettings = vi.fn();
-    render(<Sidebar routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onRestartAllManaged={onRestartAllManaged} onProviderSettings={onProviderSettings} />);
+    render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onRestartAllManaged={onRestartAllManaged} onProviderSettings={onProviderSettings} />);
 
     const connection = screen.getByLabelText("Connection status");
     const menuButton = screen.getByRole("button", { name: "Managed actions" });

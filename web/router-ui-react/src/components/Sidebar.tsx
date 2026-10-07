@@ -1,13 +1,17 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from "react";
-import type { Agent } from "../state/agent-projection";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { sourceAgentKey, type Agent } from "../state/agent-projection";
 import type { Arrival } from "../domain/arrivals";
 import { humanName } from "../state/selectors";
 import { BrandHeader } from "./BrandHeader";
 import { RouterSelector } from "./RouterSelector";
 import { ConnectionStatus, type ConnectionState } from "./ConnectionStatus";
 import { AgentList } from "./AgentList";
+import { loadRecentAgents, normalizeRecentAgents, saveRecentAgents } from "../persistence/recent-agents";
+import { ownerScope, type StorageAdapter } from "../persistence/settings-repository";
+import type { RouterScope } from "../state/scopes";
 
 export interface SidebarProps {
+  scope: RouterScope;
   routerLabel: string;
   connection: ConnectionState;
   connectionIdentity?: string | undefined;
@@ -16,6 +20,7 @@ export interface SidebarProps {
   agents: Agent[];
   selectedAgentId?: string | undefined;
   filter?: string | undefined;
+  storage?: StorageAdapter | undefined;
   arrivals?: Map<string, Arrival> | Record<string, Arrival> | undefined;
   reminderCounts?: Map<string, number> | Record<string, number> | undefined;
   expandedAgentIds?: Set<string> | undefined;
@@ -33,14 +38,45 @@ export interface SidebarProps {
   onProviderSettings?: (() => void) | undefined;
   onSystemOneConfig?: (() => void) | undefined;
 }
-export function Sidebar({ routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival, onLaunchManaged, onRestartAllManaged, onProviderSettings, onSystemOneConfig }: SidebarProps): ReactElement {
+function browserStorage(): StorageAdapter | undefined {
+  try { return globalThis.localStorage; } catch { return undefined; }
+}
+
+export function Sidebar({ scope, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival, onLaunchManaged, onRestartAllManaged, onProviderSettings, onSystemOneConfig }: SidebarProps): ReactElement {
   const [localFilter, setLocalFilter] = useState(filter ?? "");
+  const persistence = useMemo(() => storage ?? browserStorage(), [storage]);
+  const scopeKey = ownerScope(scope.routerUrl, scope.agentId);
+  const [recent, setRecent] = useState(() => loadRecentAgents(persistence, scopeKey));
+  const recentScope = useRef({ persistence, scopeKey });
+  useLayoutEffect(() => {
+    if (recentScope.current.persistence === persistence && recentScope.current.scopeKey === scopeKey) return;
+    recentScope.current = { persistence, scopeKey };
+    setRecent(loadRecentAgents(persistence, scopeKey));
+  }, [persistence, scopeKey]);
+  const agentListRef = useRef<HTMLDivElement>(null);
   const [managedActionsOpen, setManagedActionsOpen] = useState(false);
   const managedActionsId = useId();
   const managedActionsRef = useRef<HTMLDivElement>(null);
   const hasManagedActions = Boolean(onLaunchManaged || onRestartAllManaged || onProviderSettings || onSystemOneConfig);
   const activeFilter = filter ?? localFilter;
-  const visible = useMemo(() => { const query = activeFilter.trim().toLowerCase(); return [...agents].filter((agent) => !query || agent.agent_id.toLowerCase().includes(query) || humanName(agent.agent_id).toLowerCase().includes(query)).sort((a, b) => a.agent_id.localeCompare(b.agent_id)); }, [agents, activeFilter]);
+  const visible = useMemo(() => {
+    const query = activeFilter.trim().toLowerCase();
+    const ranks = new Map(recent.map((key, index) => [key, index]));
+    const key = (agent: Agent): string => sourceAgentKey(agent.source, agent.agent_id);
+    return agents.filter((agent) => !query || agent.agent_id.toLowerCase().includes(query) || humanName(agent.agent_id).toLowerCase().includes(query))
+      .sort((a, b) => (ranks.get(key(a)) ?? recent.length) - (ranks.get(key(b)) ?? recent.length)
+        || a.agent_id.localeCompare(b.agent_id) || key(a).localeCompare(key(b)));
+  }, [agents, activeFilter, recent]);
+  const selectAgent = (key: string): void => {
+    const next = normalizeRecentAgents([key, ...recent]);
+    setRecent(next);
+    saveRecentAgents(persistence, scopeKey, next);
+    setLocalFilter("");
+    onFilterChange?.("");
+    onSelectAgent?.(key);
+  };
+  // Reset after React moves the picked row, before the browser paints its old scroll position.
+  useLayoutEffect(() => { if (agentListRef.current) agentListRef.current.scrollTop = 0; }, [recent]);
   const changeFilter = (value: string): void => { setLocalFilter(value); onFilterChange?.(value); };
   const runManagedAction = (action: (() => void) | undefined): void => { action?.(); setManagedActionsOpen(false); };
 
@@ -53,5 +89,5 @@ export function Sidebar({ routerLabel, connection, connectionIdentity, connectio
     return () => { document.removeEventListener("pointerdown", closeOnOutsidePointer); document.removeEventListener("keydown", closeOnEscape); };
   }, [managedActionsOpen]);
 
-  return <div className="sidebar-content"><BrandHeader onRefresh={onRefresh} /><RouterSelector label={routerLabel} onClick={onRouterClick} /><div className="connection-actions"><ConnectionStatus status={connection} identity={connectionIdentity} detail={connectionDetail} />{hasManagedActions ? <div className="managed-actions" ref={managedActionsRef}><button type="button" className="managed-actions-trigger" aria-label="Managed actions" aria-haspopup="menu" aria-expanded={managedActionsOpen} aria-controls={`${managedActionsId}-menu`} onClick={() => setManagedActionsOpen((open) => !open)}><i className="fa-solid fa-ellipsis" aria-hidden="true" /></button>{managedActionsOpen ? <div id={`${managedActionsId}-menu`} className="managed-actions-menu" role="menu" aria-label="Managed actions">{onLaunchManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onLaunchManaged)}>Launch managed agent</button> : null}{onRestartAllManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartAllManaged)}>Restart all managed</button> : null}{onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}{onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}</div> : null}</div> : null}</div><div className="section-title"><span>Agents</span><small>{visible.length}</small></div><input className="agent-filter" type="search" value={activeFilter} onChange={(event) => changeFilter(event.currentTarget.value)} placeholder="Filter connected agents" autoComplete="off" aria-label="Filter connected agents" /><AgentList agents={visible} selectedAgentId={selectedAgentId} arrivals={arrivals} reminderCounts={reminderCounts} expandedAgentIds={expandedAgentIds} onSelectAgent={onSelectAgent} onGoal={onGoal} onReminders={onReminders} onToggleSubagents={onToggleSubagents} onOpenArrival={onOpenArrival} onDismissArrival={onDismissArrival} /></div>;
+  return <div className="sidebar-content"><BrandHeader onRefresh={onRefresh} /><RouterSelector label={routerLabel} onClick={onRouterClick} /><div className="connection-actions"><ConnectionStatus status={connection} identity={connectionIdentity} detail={connectionDetail} />{hasManagedActions ? <div className="managed-actions" ref={managedActionsRef}><button type="button" className="managed-actions-trigger" aria-label="Managed actions" aria-haspopup="menu" aria-expanded={managedActionsOpen} aria-controls={`${managedActionsId}-menu`} onClick={() => setManagedActionsOpen((open) => !open)}><i className="fa-solid fa-ellipsis" aria-hidden="true" /></button>{managedActionsOpen ? <div id={`${managedActionsId}-menu`} className="managed-actions-menu" role="menu" aria-label="Managed actions">{onLaunchManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onLaunchManaged)}>Launch managed agent</button> : null}{onRestartAllManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartAllManaged)}>Restart all managed</button> : null}{onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}{onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}</div> : null}</div> : null}</div><div className="section-title"><span>Agents</span><small>{visible.length}</small></div><input className="agent-filter" type="search" value={activeFilter} onChange={(event) => changeFilter(event.currentTarget.value)} placeholder="Filter connected agents" autoComplete="off" aria-label="Filter connected agents" /><AgentList listRef={agentListRef} agents={visible} selectedAgentId={selectedAgentId} arrivals={arrivals} reminderCounts={reminderCounts} expandedAgentIds={expandedAgentIds} onSelectAgent={selectAgent} onGoal={onGoal} onReminders={onReminders} onToggleSubagents={onToggleSubagents} onOpenArrival={onOpenArrival} onDismissArrival={onDismissArrival} /></div>;
 }

@@ -424,7 +424,34 @@ export function requireNarrowViewport(viewport) {
   if (viewport?.innerWidth !== NARROW_VIEWPORT.width) throw new Error(`BCB did not report the required ${NARROW_VIEWPORT.width}px viewport`);
 }
 
-async function run() {
+export function sidebarGeometryScript() {
+  return `(() => {
+    const list = document.querySelector('.sidebar-content > .agents');
+    if (!(list instanceof HTMLElement)) throw new Error('agent list missing');
+    const rows = [...list.querySelectorAll(':scope > .agent-row')];
+    const bounds = list.getBoundingClientRect();
+    const heights = rows.map((row) => row.getBoundingClientRect().height);
+    const gap = parseFloat(getComputedStyle(list).rowGap);
+    return {
+      ids: rows.map((row) => row.dataset.agentId),
+      clientHeight: list.clientHeight, scrollHeight: list.scrollHeight,
+      overflowY: getComputedStyle(list).overflowY, heights, gap,
+      visibleRows: rows.filter((row) => { const rect = row.getBoundingClientRect(); return rect.top >= bounds.top - 1 && rect.bottom <= bounds.top + list.clientHeight + 1; }).length,
+      viewport: { innerWidth, innerHeight },
+    };
+  })()`;
+}
+
+export function requireSidebarViewport(proof, expectedIds) {
+  if (JSON.stringify([...proof.ids].sort()) !== JSON.stringify([...expectedIds].sort())) throw new Error('connected agent rows were truncated');
+  if (!(proof.scrollHeight > proof.clientHeight) || proof.overflowY !== 'auto') throw new Error('agent list does not scroll');
+  const rowHeight = proof.heights[0];
+  if (!(rowHeight > 0) || !Number.isFinite(proof.gap) || proof.heights.some((height) => Math.abs(height - rowHeight) > 1)) throw new Error('expected equal normal row heights');
+  const expectedHeight = 15 * rowHeight + 14 * proof.gap;
+  if (Math.abs(proof.clientHeight - expectedHeight) > 1 || proof.visibleRows !== 15) throw new Error('agent viewport must show 15 normal rows');
+}
+
+async function run({ sidebarRecencyOnly = false } = {}) {
   const taskRoot = await createTaskRoot("router-ui-react-bcb");
   const outputRoot = process.env.MECHA_BCB_ARTIFACT_DIR ?? join("/private/tmp", `router-ui-react-bcb-${Date.now()}`);
   const artifacts = join(taskRoot, "artifacts");
@@ -476,6 +503,24 @@ async function run() {
       if (text.includes("8765")) throw new Error("UI rendered live-router port");
       return { router: resources.router.httpUrl, agent: UI_AGENT };
     });
+
+    await step("sidebar-15-row-viewport", async () => {
+      const peers = [];
+      const ids = Array.from({ length: 20 }, (_, index) => `viewport-${String(index).padStart(2, "0")}`);
+      try {
+        for (const agent_id of ids) peers.push(await connectFixturePeer(resources.router, { agent_id, instance_id: `${agent_id}-instance`, role: "agent" }));
+        // Give the sidebar enough room to reach its cap; ordinary windows can show fewer rows.
+        await setViewport(resources.chrome.cdpPort, await currentBcbTab(resources.bcb, resources.tabId), DESKTOP_VIEWPORT.width, 2400);
+        await waitBrowser(resources.bcb, resources.tabId, `document.querySelectorAll('.agents > .agent-row').length === ${ids.length}`, "all viewport fixture rows");
+        const proof = await execBrowser(resources.bcb, resources.tabId, sidebarGeometryScript());
+        requireSidebarViewport(proof, ids);
+        return proof;
+      } finally {
+        await Promise.all(peers.map((peer) => peer.close()));
+        await setViewport(resources.chrome.cdpPort, await currentBcbTab(resources.bcb, resources.tabId), DESKTOP_VIEWPORT.width, DESKTOP_VIEWPORT.height);
+      }
+    });
+    if (sidebarRecencyOnly) { report.result = "passed"; return report; }
 
     resources.peer = await connectFixturePeer(resources.router, { agent_id: PEER_AGENT, instance_id: "bcb-peer-instance" });
     const fixture = attachFixtureController(resources.peer);
@@ -671,6 +716,7 @@ async function run() {
 
 export async function runRequested(arguments_ = process.argv.slice(2)) {
   if (arguments_.length === 0) return run();
+  if (arguments_.length === 1 && arguments_[0] === "--sidebar-recency") return run({ sidebarRecencyOnly: true });
   if (arguments_.length === 2 && arguments_.includes("--managed-rpc") && arguments_.includes("--release")) {
     const { runManagedRpcRelease } = await import("./bcb-managed-rpc-release-runner.mjs");
     return runManagedRpcRelease();
@@ -683,7 +729,7 @@ export async function runRequested(arguments_ = process.argv.slice(2)) {
     const options = parseManagedRecoveryArguments(arguments_);
     return runManagedRecovery({ trials: options.trials });
   }
-  throw new Error("Usage: test:acceptance:bcb [--managed-rpc --release | --managed-recovery --trials 5]");
+  throw new Error("Usage: test:acceptance:bcb [--sidebar-recency | --managed-rpc --release | --managed-recovery --trials 5]");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

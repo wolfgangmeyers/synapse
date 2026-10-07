@@ -6,14 +6,15 @@ import { App } from "../../src/App";
 import { createInitialState } from "../../src/state/app-state";
 import { reducer } from "../../src/state/reducer";
 import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTER_ALIASES_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
+import { RECENT_AGENTS_KEY } from "../../src/persistence/recent-agents";
 import { MANAGED_RECENT_FOLDERS_KEY } from "../../src/persistence/managed-folder-history";
 import { HistoryRepository } from "../../src/persistence/history-repository";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 import type { ManagedAgent } from "../../src/protocol/types";
 import { afterEach, beforeEach } from "vitest";
 
-beforeEach(() => { localStorage.clear(); });
-afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllEnvs(); });
+beforeEach(() => { vi.stubGlobal("localStorage", new MemoryStorage()); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -43,6 +44,48 @@ class AppSocket implements WebSocketLike {
 }
 
 describe("App integration", () => {
+  it.each([
+    { routerUrl: "http://second-router.test", agentId: "web" },
+    { routerUrl: "http://first-router.test", agentId: "other-owner" },
+  ])("keeps sidebar recency scoped through App for %j", async (secondScope) => {
+    const storage = new MemoryStorage();
+    const firstScope = { routerUrl: "http://first-router.test", agentId: "web" };
+    const rowIds = (): (string | null)[] => Array.from(document.querySelectorAll(".agents > .agent-row")).map((row) => row.getAttribute("data-agent-id"));
+    const mount = async (scope: typeof firstScope): Promise<void> => {
+      storage.setItem(AGENT_IDS_KEY, JSON.stringify({ [scope.routerUrl]: scope.agentId }));
+      const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [{ ...peer, agent_id: "alpha" }, { ...peer, agent_id: "zebra" }] });
+        if (url.endsWith("/v1/capabilities")) return jsonResponse({});
+        if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+        if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+        if (url.includes("/v1/conversations?")) return jsonResponse({ owner: scope.agentId, peer: new URL(url).searchParams.get("peer"), high_water_sequence: 0, messages: [] });
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const webSocketFactory = (): WebSocketLike => {
+        const socket = new AppSocket();
+        queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+        return socket;
+      };
+      render(<App routerUrl={scope.routerUrl} agentId={scope.agentId} storage={storage} transportOptions={{ fetchImpl, webSocketFactory }} />);
+      await screen.findByRole("button", { name: "Zebra (zebra)" });
+    };
+    await mount(firstScope);
+    fireEvent.click(screen.getByRole("button", { name: "Zebra (zebra)" }));
+    expect(rowIds()).toEqual(["zebra", "alpha"]);
+    cleanup();
+    await mount(secondScope);
+    expect(rowIds()).toEqual(["alpha", "zebra"]);
+    fireEvent.click(screen.getByRole("button", { name: "Alpha (alpha)" }));
+    cleanup();
+    await mount(firstScope);
+    expect(rowIds()).toEqual(["zebra", "alpha"]);
+    expect(JSON.parse(storage.getItem(RECENT_AGENTS_KEY) ?? "{}")).toEqual({
+      [ownerScope(firstScope.routerUrl, firstScope.agentId)]: ["tmux:zebra"],
+      [ownerScope(secondScope.routerUrl, secondScope.agentId)]: ["tmux:alpha"],
+    });
+  });
+
   it("renders selected managed-agent in complete view with messages and activity", async () => {
     const managedAgent: ManagedAgent = { agent_id: "managed-worker", source: "router-managed", cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
     const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
