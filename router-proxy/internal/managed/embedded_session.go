@@ -1002,6 +1002,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			reminderExecutions[id] = reminderExecution{expected: &expected, replay: replay}
 			freshWorkerMu.Unlock()
 		}))
+		resetCB := func(reason string) {
+			m.mu.Lock()
+			if m.contextResetRequested == nil {
+				m.contextResetRequested = make(map[string]string)
+			}
+			m.contextResetRequested[owner.binding.AgentID] = reason
+			m.mu.Unlock()
+		}
+		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))
+		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "reset"))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
@@ -1299,6 +1309,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				if _, err := embeddedGoalSnoozeArguments(call.ToolCall.Arguments); err != nil {
 					return &agent.PolicyDenial{Reason: err.Error()}
 				}
+			}
+			if call.ToolCall.Name == "context_reset" || call.ToolCall.Name == "reset" {
+				if role != "root" && role != "worker" {
+					return &agent.PolicyDenial{Reason: "context reset requires embedded root or worker"}
+				}
+				return nil
 			}
 			if call.ToolCall.Name == "bash" {
 				if role != "root" && role != "worker" {
@@ -1615,6 +1631,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
+		m.checkContextResetAfterTurn(ctx, binding, model, session)
 		return p.seq, nil
 	}
 	// A failed system declaration can leave only a system entry; the first
@@ -1645,6 +1662,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
+		m.checkContextResetAfterTurn(ctx, binding, model, session)
 		return p.seq, nil
 	}
 	if explicitPrompt != "" {
@@ -1654,6 +1672,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
+		}
+		if explicitPrompt != ContextResetWakePrompt {
+			m.checkContextResetAfterTurn(ctx, binding, model, session)
 		}
 		return p.seq, nil
 	}
@@ -1665,8 +1686,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
+		m.checkContextResetAfterTurn(ctx, binding, model, session)
 		return p.seq, nil
 	}
+	m.checkContextResetAfterTurn(ctx, binding, model, session)
 	return p.seq, nil
 }
 
