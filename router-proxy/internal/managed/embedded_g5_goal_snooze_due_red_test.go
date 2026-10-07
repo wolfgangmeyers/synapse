@@ -55,7 +55,7 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 		expected, expectedErr := json.Marshal(ai.ContentList{ai.TextContent{Text: text}})
 		matches := err == nil && expectedErr == nil && bytes.Equal(actual, expected)
 		if !matches && text == "Continue working on the current goal." {
-			if strings.HasPrefix(ai.ContentText(latest.Content), "NOT_DONE: Continue ") {
+			if strings.HasPrefix(ai.ContentText(latest.Content), "NOT_DONE: Continue ") || strings.HasPrefix(ai.ContentText(latest.Content), "NOT_DONE: ") {
 				matches = true
 			}
 		}

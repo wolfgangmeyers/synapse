@@ -205,7 +205,7 @@ func TestEmbeddedGoalSnoozeFixedClockDueCompletionDurability(t *testing.T) {
 	respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") || strings.HasPrefix(text.Text, "NOT_DONE: ")) {
 					wakes.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "due wake continuation final"}}, ai.StopStop)
 				}

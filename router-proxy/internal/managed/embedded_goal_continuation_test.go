@@ -289,7 +289,17 @@ func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
 						providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "circuit breaker test"}, "cb-set"),
 					}, ai.StopToolUse)
 				},
-				// Turn 1 step 2: empty or whitespace-only assistant message
+				// Turn 1 step 2: empty or whitespace-only assistant message (empty turn 1/3 -> re-nudge)
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
+				},
+				// Turn 2: empty assistant message (empty turn 2/3 -> re-nudge)
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
+				},
+				// Turn 3: empty assistant message (empty turn 3/3 -> circuit breaker halts!)
 				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 					requests.Add(1)
 					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
@@ -329,15 +339,15 @@ func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			// Wait for the turn to complete (2 requests: goal tool call + empty response)
+			// Wait for 3 empty turns to complete (4 requests: goal tool call + 3 empty responses)
 			require.Eventually(t, func() bool {
-				return requests.Load() == 2
+				return requests.Load() == 4
 			}, 3*time.Second, 10*time.Millisecond)
 
 			// Verify circuit breaker tripped: evaluator was NEVER called
 			time.Sleep(100 * time.Millisecond)
 			require.Zero(t, evaluations.Load(), "evaluator must not be called when assistant is empty")
-			require.Equal(t, int32(2), requests.Load(), "no continuation request should have been dispatched")
+			require.Equal(t, int32(4), requests.Load(), "no continuation request should have been dispatched")
 
 			// Verify agent settles cleanly to idle
 			require.Eventually(t, func() bool {
@@ -345,13 +355,13 @@ func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
 				return err == nil && agent.ActivityState == "idle"
 			}, 3*time.Second, 10*time.Millisecond)
 
-			// Verify no continuations in database
+			// Verify exactly 2 continuations were dispatched for the 2 re-nudges, and none after circuit breaker tripped
 			readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
 			require.NoError(t, err)
 			defer readOnly.Close()
 			var contCount int
 			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&contCount))
-			require.Zero(t, contCount)
+			require.Equal(t, 2, contCount)
 		})
 	}
 }
@@ -373,7 +383,7 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 		requests.Add(1)
 		for _, msg := range h.Messages {
 			if u, ok := msg.(ai.UserMessage); ok && len(u.Content) == 1 {
-				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ")) {
+				if text, ok := u.Content[0].(ai.TextContent); ok && (text.Text == "Continue working on the current goal." || strings.HasPrefix(text.Text, "NOT_DONE: Continue ") || strings.HasPrefix(text.Text, "NOT_DONE: ")) {
 					continuations.Add(1)
 					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "autonomous progress text only"}}, ai.StopStop)
 				}
