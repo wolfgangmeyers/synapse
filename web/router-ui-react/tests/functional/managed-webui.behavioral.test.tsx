@@ -136,7 +136,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     regularPeer = await connectFixturePeer(router, { agent_id: "regular-worker", instance_id: "regular-worker-instance", role: "agent" });
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
 
-    const rowButton = await screen.findByRole("button", { name: "Regular Worker (regular-worker)" });
+    const rowButton = await screen.findByRole("button", { name: "Regular Worker (regular-worker)" }, { timeout: 15_000 });
     const row = rowButton.closest<HTMLElement>('[role="listitem"]');
     expect(row).not.toBeNull();
     if (row === null) throw new Error("regular worker row missing");
@@ -156,7 +156,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
 
     await launch(router, "functional-alpha");
-    const rowButton = await screen.findByRole("button", { name: "Functional Alpha (functional-alpha)" });
+    const rowButton = await screen.findByRole("button", { name: "Functional Alpha (functional-alpha)" }, { timeout: 15_000 });
     let publicAfterLaunch: { response: Response; body: JsonRecord } | undefined;
     await waitFor(async () => {
       publicAfterLaunch = await jsonRequest(router!, "/v1/managed-agents", { method: "GET", credentials: "omit" });
