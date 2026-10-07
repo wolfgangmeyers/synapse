@@ -1,6 +1,7 @@
 import { useState, useEffect, type ReactElement } from "react";
 import type { RouterHttpClient } from "../transport/http-client";
 import type { WorkflowState, WorkflowStateInput } from "../domain/workflow-states";
+import { DialogShell } from "./DialogShell";
 
 export interface WorkflowStatesPageProps {
   client: RouterHttpClient;
@@ -194,85 +195,98 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
         )}
       </div>
 
-      {/* Create / Edit Modal */}
-      {isCreating || editingState ? (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="state-form-title">
-          <div className="modal-content">
-            <h3 id="state-form-title">{editingState ? "Edit Workflow State" : "New Workflow State"}</h3>
-            <form onSubmit={handleSave}>
-              {formError ? <div className="alert alert-danger">{formError}</div> : null}
-              <div className="form-group">
-                <label htmlFor="state-name">State Name *</label>
-                <input
-                  id="state-name"
-                  type="text"
-                  className="form-control"
-                  placeholder="e.g. initial-triage, code-review"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  autoFocus
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="state-desc">Description</label>
-                <input
-                  id="state-desc"
-                  type="text"
-                  className="form-control"
-                  placeholder="What is this state for?"
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="state-entry">Entry Text</label>
-                <textarea
-                  id="state-entry"
-                  className="form-control"
-                  rows={6}
-                  placeholder="Text that automatically posts to the conversation when entering this state..."
-                  value={formEntryText}
-                  onChange={(e) => setFormEntryText(e.target.value)}
-                />
-                <small className="form-text text-muted">
-                  This text will automatically post to the agent when entering this state.
-                </small>
-              </div>
-              <div className="modal-actions">
-                <button type="button" className="btn btn-secondary" onClick={closeForm} disabled={saving}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={saving}>
-                  {saving ? "Saving..." : editingState ? "Save Changes" : "Create State"}
-                </button>
-              </div>
-            </form>
+      {/* Create / Edit Modal Popup */}
+      <DialogShell
+        open={isCreating || Boolean(editingState)}
+        title={editingState ? "Edit Workflow State" : "New Workflow State"}
+        titleId="state-form-title"
+        description="Configure entry text and metadata for this workflow state."
+        onClose={closeForm}
+        closeLabel="Close workflow state editor"
+        className="message-dialog workflow-state-dialog"
+      >
+        <form
+          onSubmit={(e) => {
+            void handleSave(e);
+          }}
+          className="workflow-state-form"
+        >
+          {formError ? <div className="alert alert-danger">{formError}</div> : null}
+          <div className="form-group">
+            <label htmlFor="state-name">State Name *</label>
+            <input
+              id="state-name"
+              type="text"
+              className="form-control"
+              placeholder="e.g. initial-triage, code-review"
+              value={formName}
+              onChange={(e) => setFormName(e.target.value)}
+              required
+            />
           </div>
-        </div>
-      ) : null}
+          <div className="form-group">
+            <label htmlFor="state-desc">Description</label>
+            <input
+              id="state-desc"
+              type="text"
+              className="form-control"
+              placeholder="What is this state for?"
+              value={formDescription}
+              onChange={(e) => setFormDescription(e.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="state-entry">Entry Text</label>
+            <textarea
+              id="state-entry"
+              className="form-control"
+              rows={6}
+              placeholder="Text that automatically posts to the conversation when entering this state..."
+              value={formEntryText}
+              onChange={(e) => setFormEntryText(e.target.value)}
+            />
+            <small className="form-text text-muted">
+              This text will automatically post to the agent when entering this state.
+            </small>
+          </div>
+          <div className="dialog-actions workflow-dialog-actions">
+            <button type="button" className="btn btn-secondary" onClick={closeForm} disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={saving}>
+              {saving ? "Saving..." : editingState ? "Save Changes" : "Create State"}
+            </button>
+          </div>
+        </form>
+      </DialogShell>
 
-      {/* Delete Confirmation Modal */}
-      {deleteConfirmId ? (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal-content delete-confirm-modal">
-            <h3>Delete Workflow State</h3>
-            <p>Are you sure you want to delete this state? This action cannot be undone.</p>
-            <div className="modal-actions">
-              <button type="button" className="btn btn-secondary" onClick={() => setDeleteConfirmId(undefined)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={() => handleDelete(deleteConfirmId)}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
+      {/* Delete Confirmation Modal Popup */}
+      <DialogShell
+        open={Boolean(deleteConfirmId)}
+        title="Delete Workflow State"
+        titleId="delete-state-dialog-title"
+        description="Are you sure you want to delete this state? This action cannot be undone."
+        onClose={() => setDeleteConfirmId(undefined)}
+        closeLabel="Close delete confirmation"
+        className="message-dialog delete-confirm-dialog"
+      >
+        <div className="dialog-actions workflow-dialog-actions">
+          <button type="button" className="btn btn-secondary" onClick={() => setDeleteConfirmId(undefined)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => {
+              if (deleteConfirmId) {
+                void handleDelete(deleteConfirmId);
+              }
+            }}
+          >
+            Delete
+          </button>
         </div>
-      ) : null}
+      </DialogShell>
     </div>
   );
 }
