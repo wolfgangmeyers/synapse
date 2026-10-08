@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -676,12 +677,20 @@ def main():
     # Initialize worktree if requested (mise trust + winit)
     if args.init:
         print(f"Initializing worktree at {work_dir}...")
-        subprocess.run(["mise", "trust"], cwd=work_dir, capture_output=True)
-        winit_result = subprocess.run(["winit"], cwd=work_dir, capture_output=True, text=True)
-        if winit_result.returncode != 0 and winit_result.stderr:
-            print(f"  winit warning: {winit_result.stderr.strip()}", file=sys.stderr)
+        actions = []
+        if shutil.which("mise"):
+            subprocess.run(["mise", "trust"], cwd=work_dir, capture_output=True)
+            actions.append("mise trust")
+        if shutil.which("winit"):
+            winit_result = subprocess.run(["winit"], cwd=work_dir, capture_output=True, text=True)
+            if winit_result.returncode != 0 and winit_result.stderr:
+                print(f"  winit warning: {winit_result.stderr.strip()}", file=sys.stderr)
+            else:
+                actions.append("winit")
+        if actions:
+            print(f"  Worktree initialized ({' + '.join(actions)}).")
         else:
-            print("  Worktree initialized (mise trust + winit).")
+            print("  Worktree initialized.")
 
     # Build the agent command
     if args.agent == "pi":

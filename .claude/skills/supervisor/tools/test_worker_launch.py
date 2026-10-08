@@ -591,6 +591,25 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn("only supported for Pi", stderr.getvalue())
         window_exists.assert_not_called()
 
+    def test_init_skips_missing_tools_gracefully(self):
+        with patch.object(worker_launch.shutil, "which", return_value=None):
+            _, output = self._run_main("init-worker", "--init")
+        self.subprocess_run.assert_not_called()
+        self.assertIn("Initializing worktree at", output)
+        self.assertIn("Worktree initialized.", output)
+
+    def test_init_runs_tools_when_present(self):
+        def fake_which(cmd):
+            return f"/usr/local/bin/{cmd}" if cmd in ("mise", "winit") else None
+
+        with patch.object(worker_launch.shutil, "which", side_effect=fake_which):
+            self.subprocess_run_return = Mock(return_value=Mock(returncode=0, stderr=""))
+            _, output = self._run_main("init-worker", "--init")
+        self.assertEqual(self.subprocess_run.call_count, 2)
+        self.assertEqual(self.subprocess_run.call_args_list[0], call(["mise", "trust"], cwd=self.tmpdir.name, capture_output=True))
+        self.assertEqual(self.subprocess_run.call_args_list[1], call(["winit"], cwd=self.tmpdir.name, capture_output=True, text=True))
+        self.assertIn("Worktree initialized (mise trust + winit).", output)
+
     def test_claude_launch_through_symlinked_tools_dir_hands_node_a_resolved_sidecar_path(self):
         """Paths handed to other processes must be canonical, not as-invoked.
 
@@ -693,7 +712,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
              patch.object(worker_launch, "new_window"), \
              patch.object(worker_launch, "send_text", side_effect=lambda _window, command: commands.append(command)) as send_text, \
              patch.object(worker_launch, "send_enter"), \
-             patch.object(worker_launch.subprocess, "run"), \
+             patch.object(worker_launch.subprocess, "run", getattr(self, "subprocess_run_return", Mock())) as mock_run, \
              patch.object(worker_launch.subprocess, "Popen"), \
              patch.object(worker_launch.time, "sleep"), \
              patch.object(worker_launch, "_claude_pretrust_workspace") as claude_pretrust, \
@@ -708,6 +727,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
                 "cursor": cursor_pretrust,
                 "codex": codex_pretrust,
             }
+            self.subprocess_run = mock_run
             self.home = home
             self.calls = order
             worker_launch.main()
