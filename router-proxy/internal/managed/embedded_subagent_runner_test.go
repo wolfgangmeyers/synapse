@@ -1446,3 +1446,128 @@ func TestSubagentReleaseSlotStaleAttemptGuard(t *testing.T) {
 	mgr.releaseSubagentSlot(newTask)
 	require.Nil(t, mgr.subagentsActive[childID], "matching task release must free active slot")
 }
+
+func TestSubagentCompletionRecordedInCompleteHistory(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_history.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer rawDB.Close()
+
+	parent := subagentTestParent(t, db, "parent-history")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Subagent completed task successfully."},
+			}, ai.StopStop)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Parent response 1"},
+			}, ai.StopStop)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Parent response 2"},
+			}, ai.StopStop)
+		},
+	})
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	published := make(chan store.ManagedHistoryEntry, 10)
+	mgr.SetCompleteHistoryPublisher(func(entry store.ManagedHistoryEntry) {
+		published <- entry
+	})
+	registerParentOwner(mgr, parent)
+
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     "subagent-hist-1",
+		Description: "fetch repository status",
+		Prompt:      "check status",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", res.Status)
+
+	require.Eventually(t, func() bool {
+		rec, err := db.ManagedSubagent(ctx, parent, "subagent-hist-1")
+		return err == nil && rec.Status == "completed"
+	}, 3*time.Second, 20*time.Millisecond)
+
+	var completionEntry store.ManagedHistoryEntry
+	timeout := time.After(3 * time.Second)
+	found := false
+	for !found {
+		select {
+		case entry := <-published:
+			if entry.AgentID == parent.AgentID && entry.Presentation != nil && entry.Presentation.Kind == "subagent_complete" {
+				completionEntry = entry
+				found = true
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for subagent completion history event on parent")
+		}
+	}
+
+	require.Equal(t, parent.AgentID, completionEntry.AgentID)
+	require.Equal(t, "Subagent completed", completionEntry.Message)
+	require.NotNil(t, completionEntry.Presentation)
+	require.Equal(t, "subagent_complete", completionEntry.Presentation.Kind)
+	require.Equal(t, "subagent", completionEntry.Presentation.ToolName)
+	require.Equal(t, "completed", completionEntry.Presentation.Outcome)
+	require.Equal(t, "Subagent completed: fetch repository status", completionEntry.Presentation.Summary)
+	require.Equal(t, "subagent-hist-1", completionEntry.Presentation.ChildLabel)
+	require.NotEmpty(t, completionEntry.Presentation.OccurredAt)
+	require.NotNil(t, completionEntry.MessageContent)
+	require.Equal(t, "Subagent completed task successfully.", *completionEntry.MessageContent)
+
+	// Verify directly in raw SQLite table managed_complete_history
+	var cat, msg, presJSON, msgContent string
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT category, message, presentation_json, message_content FROM managed_complete_history WHERE agent_id = ? AND event_key = ?`, parent.AgentID, "subagent-complete:subagent-hist-1:1").Scan(&cat, &msg, &presJSON, &msgContent))
+	require.Equal(t, "managed_subagent", cat)
+	require.Equal(t, "Subagent completed", msg)
+	require.Contains(t, presJSON, `"kind":"subagent_complete"`)
+	require.Contains(t, presJSON, `"tool_name":"subagent"`)
+	require.Contains(t, presJSON, `"outcome":"completed"`)
+	require.Equal(t, "Subagent completed task successfully.", msgContent)
+
+	// Now spawn another subagent and stop it, verifying "Subagent failed"
+	resFail, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     "subagent-hist-fail",
+		Description: "failing subagent",
+		Prompt:      "fail please",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", resFail.Status)
+
+	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, "subagent-hist-fail"))
+
+	var failEntry store.ManagedHistoryEntry
+	timeoutFail := time.After(3 * time.Second)
+	foundFail := false
+	for !foundFail {
+		select {
+		case entry := <-published:
+			if entry.AgentID == parent.AgentID && entry.Presentation != nil && entry.Presentation.Kind == "subagent_complete" && entry.Presentation.Outcome == "failed" {
+				failEntry = entry
+				foundFail = true
+			}
+		case <-timeoutFail:
+			t.Fatal("timed out waiting for subagent failure history event on parent")
+		}
+	}
+	require.Equal(t, parent.AgentID, failEntry.AgentID)
+	require.Equal(t, "Subagent failed", failEntry.Message)
+	require.Equal(t, "subagent_complete", failEntry.Presentation.Kind)
+	require.Equal(t, "subagent", failEntry.Presentation.ToolName)
+	require.Equal(t, "failed", failEntry.Presentation.Outcome)
+	require.Equal(t, "Subagent failed: failing subagent", failEntry.Presentation.Summary)
+}
+

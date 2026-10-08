@@ -542,13 +542,6 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 	m.removeFromQueueLocked(childID)
 	m.subagentsMu.Unlock()
 	_ = m.store.UpdateManagedSubagentAttempt(ctx, task.parent, childID, task.attempt, taskStatus, store.ManagedSubagentResult{
-		Status:          "cancelled",
-		TurnCount:       task.turnCount,
-		ToolUseCount:    task.toolUseCount,
-		TotalTokens:     task.totalTokens,
-		DurationSeconds: task.durationSeconds,
-	})
-	_ = m.store.UpdateManagedSubagentAttempt(ctx, task.parent, childID, task.attempt, taskStatus, store.ManagedSubagentResult{
 		Status:          "stopped",
 		TurnCount:       task.turnCount,
 		ToolUseCount:    task.toolUseCount,
@@ -563,6 +556,7 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 			desc = rec.Description
 		}
 	}
+	m.recordSubagentCompletionHistory(task.parent.AgentID, childID, task.attempt, desc, "failed", "stopped", "", "Subagent stopped.")
 	subject := "Subagent Terminated"
 	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").", childID, desc, childID)
 	source := protocol.MessageSource{Kind: "system"}
@@ -636,6 +630,16 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 	m.subagentsMu.Unlock()
 
 	latestRecord, err := m.store.ManagedSubagent(context.Background(), task.parent, task.childID)
+	outcome := "completed"
+	if terminalStatus != "completed" && terminalStatus != "steered" {
+		outcome = "failed"
+	}
+	desc := strings.TrimSpace(task.description)
+	if desc == "" && latestRecord != nil {
+		desc = strings.TrimSpace(latestRecord.Description)
+	}
+	m.recordSubagentCompletionHistory(task.parent.AgentID, task.childID, task.attempt, desc, outcome, terminalStatus, resultText, errorMsg)
+
 	if err == nil && latestRecord != nil {
 		if latestRecord.Attempt == task.attempt && latestRecord.Status == terminalStatus {
 			m.AsyncDeliverSubagentParentWake(task.parent, *latestRecord)
@@ -652,6 +656,76 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 			rec.DurationSeconds = finalDuration
 			m.AsyncDeliverSubagentParentWake(task.parent, rec)
 		}
+	}
+}
+
+func (m *Manager) recordSubagentCompletionHistory(parentAgentID, childID string, attempt int, description, outcome, status, resultText, errorMsg string) {
+	if parentAgentID == "" || childID == "" {
+		return
+	}
+	now := m.clock.Now()
+	nowStr := formatManagedTime(now)
+
+	level := "info"
+	message := "Subagent completed"
+	if outcome == "failed" {
+		level = "error"
+		message = "Subagent failed"
+	}
+
+	summary := "Subagent " + outcome
+	if description != "" {
+		summary = "Subagent " + outcome + ": " + description
+	} else if childID != "" {
+		summary = "Subagent " + outcome + ": " + childID
+	}
+	if !store.IsSafeManagedHistoryText(summary, 512, true) {
+		summary = "Subagent " + outcome + ": " + childID
+		if !store.IsSafeManagedHistoryText(summary, 512, true) {
+			summary = "Subagent " + outcome
+		}
+	}
+
+	presentation := &store.ManagedHistoryPresentation{
+		Kind:       "subagent_complete",
+		ToolName:   "subagent",
+		Outcome:    outcome,
+		Summary:    summary,
+		ChildLabel: childID,
+		OccurredAt: nowStr,
+	}
+
+	toolInput := map[string]any{
+		"agent_id": childID,
+		"status":   status,
+	}
+	if description != "" {
+		toolInput["description"] = description
+	}
+
+	var messageContent *string
+	if strings.TrimSpace(resultText) != "" {
+		trimmed := strings.TrimSpace(resultText)
+		messageContent = &trimmed
+	} else if strings.TrimSpace(errorMsg) != "" {
+		trimmed := strings.TrimSpace(errorMsg)
+		messageContent = &trimmed
+	}
+
+	eventKey := fmt.Sprintf("subagent-complete:%s:%d", childID, attempt)
+	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(
+		context.Background(),
+		parentAgentID,
+		"managed_subagent",
+		level,
+		message,
+		eventKey,
+		presentation,
+		toolInput,
+		messageContent,
+	)
+	if err == nil {
+		m.publishCompleteHistory(entry)
 	}
 }
 
@@ -998,6 +1072,7 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 	}
 	for _, rec := range records {
 		childID := rec.AgentID
+		m.recordSubagentCompletionHistory(rec.ParentAgentID, rec.AgentID, rec.Attempt, rec.Description, "failed", "interrupted", "", "Interrupted on restart")
 		subject := "Subagent Interrupted on Restart"
 		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").", childID, rec.Description, childID)
 		source := protocol.MessageSource{Kind: "system"}

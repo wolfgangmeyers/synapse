@@ -1301,8 +1301,7 @@ p:empty { display: none; }
 .activity-entry[role="button"] { cursor: pointer; }
 .activity-entry[role="button"]:hover { background: rgba(181,188,208,0.12); }
 .activity-entry:focus-within { outline: 2px solid var(--primary); outline-offset: 3px; }
-.activity-detail-dialog { max-height: calc(100dvh - 32px); overflow: hidden; }
-.activity-detail-dialog .dialog-shell { max-height: calc(100dvh - 32px); overflow-y: auto; }
+.activity-detail-dialog { max-height: calc(100dvh - 32px); overflow-y: auto; }
 .activity-detail-heading { display: flex; align-items: center; gap: 9px; }
 .activity-detail-heading .message-dialog-label { margin: 0; }
 .activity-detail-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: rgba(157,168,255,0.14); color: var(--primary); }

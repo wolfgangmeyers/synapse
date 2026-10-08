@@ -525,4 +525,73 @@ describe("Complete timeline entry", () => {
       from: "workflows",
     });
   });
+
+  it("renders subagent completed card with distinct icon, label, description preview, and expandable result dialog", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:subagent-done",
+      agent_id: "managed-worker",
+      at,
+      message: "Subagent completed",
+      message_content: "All 42 unit tests passed in 1.2s.",
+      tool_input: {
+        agent_id: "subagent-worker-123",
+        description: "Run unit tests",
+        status: "completed",
+      },
+      presentation: {
+        kind: "subagent_complete",
+        tool_name: "subagent",
+        outcome: "completed",
+        summary: "Subagent completed: Run unit tests",
+        child_label: "subagent-worker-123",
+        occurred_at: at,
+      },
+    }} />);
+
+    expect(container.querySelector(".fa-circle-check")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--green")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--terminal-success")).toBeInTheDocument();
+    expect(screen.getByText("Subagent completed")).toBeInTheDocument();
+    expect(screen.getByText("Run unit tests (subagent-worker-123)")).toBeInTheDocument();
+
+    await user.click(container.querySelector(".activity-entry")!);
+    expect(screen.getByRole("dialog", { name: /Subagent completed/ })).toBeInTheDocument();
+    expect(screen.getByText("All 42 unit tests passed in 1.2s.")).toBeInTheDocument();
+  });
+
+  it("renders subagent failed card with distinct icon, label, preview, and error dialog", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:subagent-fail",
+      agent_id: "managed-worker",
+      at,
+      level: "error",
+      message: "Subagent failed",
+      message_content: "Process exited with code 1: command not found",
+      tool_input: {
+        agent_id: "subagent-worker-456",
+        description: "Build binary",
+        status: "error",
+      },
+      presentation: {
+        kind: "subagent_complete",
+        tool_name: "subagent",
+        outcome: "failed",
+        summary: "Subagent failed: Build binary",
+        child_label: "subagent-worker-456",
+        occurred_at: at,
+      },
+    }} />);
+
+    expect(container.querySelector(".fa-circle-xmark")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--danger")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--terminal-danger")).toBeInTheDocument();
+    expect(screen.getByText("Subagent failed")).toBeInTheDocument();
+    expect(screen.getByText("Build binary (subagent-worker-456)")).toBeInTheDocument();
+
+    await user.click(container.querySelector(".activity-entry")!);
+    expect(screen.getByRole("dialog", { name: /Subagent failed/ })).toBeInTheDocument();
+    expect(screen.getByText("Process exited with code 1: command not found")).toBeInTheDocument();
+  });
 });

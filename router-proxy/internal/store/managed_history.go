@@ -32,6 +32,7 @@ type ManagedHistoryPresentation struct {
 	Summary    string               `json:"summary,omitempty"`
 	Error      *ManagedHistoryError `json:"error,omitempty"`
 	Thinking   string               `json:"thinking,omitempty"`
+	OccurredAt string               `json:"occurred_at,omitempty"`
 }
 
 type ManagedHistoryEntry struct {
@@ -87,14 +88,18 @@ func managedHistoryText(value string, maximum int, allowEmpty bool) bool {
 	return true
 }
 
+func IsSafeManagedHistoryText(value string, maximum int, allowEmpty bool) bool {
+	return managedHistoryText(value, maximum, allowEmpty)
+}
+
 func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if value == nil {
 		return true
 	}
-	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true}[value.Kind] {
+	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true, "subagent_complete": true, "subagent": true}[value.Kind] {
 		return false
 	}
-	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || !managedHistoryText(value.Summary, 512, true) {
+	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || !managedHistoryText(value.Summary, 512, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) {
 		return false
 	}
 	if value.ToolName != "" && strings.ContainsAny(value.ToolName, " \t\r\n\x00") {
@@ -160,6 +165,12 @@ func defaultManagedHistoryPresentation(category, level, message string) *Managed
 		return &ManagedHistoryPresentation{Kind: "lifecycle", Outcome: "success"}
 	case "managed_control":
 		return &ManagedHistoryPresentation{Kind: "tool", Outcome: "success"}
+	case "managed_subagent":
+		outcome := "completed"
+		if level == "error" || strings.Contains(strings.ToLower(message), "failed") {
+			outcome = "failed"
+		}
+		return &ManagedHistoryPresentation{Kind: "subagent_complete", ToolName: "subagent", Outcome: outcome}
 	case "reminder":
 		return &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
 	case "delivery":

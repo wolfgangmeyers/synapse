@@ -315,6 +315,50 @@ function childVisual(presentation: ManagedHistoryPresentation): CompleteTimeline
   return { icon, tone, label: "Subagent", ...(detail ? { detail: cleanOneLine(detail) } : {}), isHighValue: recovery || terminal !== undefined };
 }
 
+function subagentCompleteVisual(presentation: ManagedHistoryPresentation, entry?: ManagedHistoryEntry): CompleteTimelineVisual {
+  const succeeded = presentation.outcome === "completed" || presentation.outcome === "success";
+  const failed = presentation.outcome === "failed" || presentation.outcome === "error" || presentation.outcome === "aborted";
+  const label = succeeded ? "Subagent completed" : "Subagent failed";
+  const icon = succeeded ? "fa-solid fa-circle-check" : "fa-solid fa-circle-xmark";
+  const tone: CompleteTimelineTone = succeeded ? "green" : "danger";
+
+  let preview: string | undefined;
+  if (isRecord(entry?.tool_input)) {
+    const desc = typeof entry.tool_input.description === "string" ? entry.tool_input.description.trim() : "";
+    const agentId = typeof entry.tool_input.agent_id === "string" ? entry.tool_input.agent_id.trim() : "";
+    if (desc && agentId && desc !== agentId) {
+      preview = `${desc} (${agentId})`;
+    } else if (desc) {
+      preview = desc;
+    } else if (agentId) {
+      preview = agentId;
+    }
+  }
+  if (!preview && presentation.summary) {
+    const s = cleanOneLine(presentation.summary);
+    if (s) {
+      const match = s.match(/^Subagent (?:completed|finished|failed):\s*(.+)$/i);
+      preview = match && match[1] ? match[1].trim() : s;
+    }
+  }
+  if (!preview && presentation.child_label) {
+    preview = cleanOneLine(presentation.child_label);
+  }
+  if (!preview && entry?.message_content) {
+    preview = cleanOneLine(entry.message_content);
+  }
+
+  const detail = preview ?? (succeeded ? "Completed successfully" : "The operation could not be completed.");
+  return {
+    icon,
+    tone,
+    label,
+    dialogTitle: label,
+    detail,
+    isHighValue: true,
+  };
+}
+
 function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
   const child = presentation.child_label !== undefined;
   const labels: Record<string, string> = child ? {
@@ -409,6 +453,9 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
     const dialogTitle = entry.message || (isOutbound ? "Message sent" : "Recorded activity");
     return { icon: "fa-solid fa-circle-check", tone: presentation.outcome === "error" ? "danger" : "blue", label, subject, dialogTitle, detail, isHighValue: presentation.outcome === "error" };
   }
+  if (presentation.kind === "subagent_complete" || (presentation.kind === "subagent" && (presentation.outcome === "completed" || presentation.outcome === "failed" || presentation.outcome === "success" || presentation.outcome === "error"))) {
+    return subagentCompleteVisual(presentation, entry);
+  }
   if (presentation.kind === "tool") return toolVisual(presentation, entry);
   if (presentation.kind === "child" || presentation.kind === "recovery") return childVisual(presentation);
   if (presentation.kind === "compaction") return compactionVisual(presentation);
@@ -479,6 +526,9 @@ function isTerminalSuccessPresentation(presentation: ManagedHistoryPresentation 
   if (presentation?.kind === "compaction") return presentation.outcome === "completed";
   if (presentation?.kind === "tool") return presentation.outcome === "success";
   if (presentation?.kind === "goal_evaluation") return presentation.outcome === "done" || presentation.outcome === "success";
+  if (presentation?.kind === "subagent_complete" || presentation?.kind === "subagent") {
+    return presentation.outcome === "completed" || presentation.outcome === "success";
+  }
   const terminal = isChildOrRecoveryPresentation(presentation) ? childTerminalOutcome(presentation) : undefined;
   return terminal?.success === true;
 }
@@ -488,6 +538,9 @@ function isTerminalDangerPresentation(presentation: ManagedHistoryPresentation |
     return presentation.outcome === "failed" || presentation.outcome === "interrupted" || presentation.outcome === "aborted" || presentation.outcome === "reconciled_unknown";
   }
   if (presentation?.kind === "tool") return presentation.outcome === "error" || presentation.outcome === "failed" || presentation.outcome === "interrupted";
+  if (presentation?.kind === "subagent_complete" || presentation?.kind === "subagent") {
+    return presentation.outcome === "failed" || presentation.outcome === "error" || presentation.outcome === "aborted";
+  }
   if (isChildOrRecoveryPresentation(presentation)) return childTerminalOutcome(presentation)?.success === false;
   return false;
 }
@@ -618,10 +671,12 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false }: Compl
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
   const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
-  const isTool = entry.presentation?.kind === "tool";
-  const isGoalEval = entry.presentation?.kind === "goal_evaluation";
+  const presentation = entry.presentation;
+  const isTool = presentation?.kind === "tool";
+  const isGoalEval = presentation?.kind === "goal_evaluation";
+  const isSubagentComplete = presentation?.kind === "subagent_complete" || (presentation?.kind === "subagent" && (presentation?.outcome === "completed" || presentation?.outcome === "failed" || presentation?.outcome === "success" || presentation?.outcome === "error"));
   const thinkingText = suppressThinking ? undefined : getThinkingContent(entry);
-  const hasDetails = isThinkingKind || thinkingText !== undefined || isGoalEval || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
+  const hasDetails = isThinkingKind || thinkingText !== undefined || isGoalEval || isSubagentComplete || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
   const accessibleName = [
     visual.dialogTitle && visual.dialogTitle !== visual.label ? visual.dialogTitle : undefined,
     visual.label,
@@ -630,7 +685,6 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false }: Compl
     time.title,
     hasDetails ? "View details" : undefined,
   ].filter((value): value is string => value !== undefined && value !== "").join(". ");
-  const presentation = entry.presentation;
   const active = isActivePresentation(presentation);
   const terminalSuccess = isTerminalSuccessPresentation(presentation);
   const terminalDanger = isTerminalDangerPresentation(presentation);
