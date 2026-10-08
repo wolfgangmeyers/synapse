@@ -478,7 +478,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     updateWorkflowState: async (id, payload) => jsonRequest(`/v1/workflow-states/${encodeURIComponent(id)}`, "PUT", payload) as Promise<WorkflowStateResponse>,
     deleteWorkflowState: (id) => request(`/v1/workflow-states/${encodeURIComponent(id)}`, { method: "DELETE" }),
     setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null) =>
-      jsonRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", { workflow_state_id: workflowStateId }),
+      managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", { workflow_state_id: workflowStateId }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
     managedAgents: async () => managedAgents(await managedRequest("/v1/managed-agents", "GET")),
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),
