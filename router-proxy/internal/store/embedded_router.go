@@ -1454,7 +1454,7 @@ func (s *Store) PollAndAdmitEmbeddedPendingMessages(ctx context.Context, b Embed
 		rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.message_incarnation_id, m.sender, m.body
 			FROM messages m
 			WHERE m.recipient = ? AND m.state = 'queued' AND m.expires_at > ?
-			ORDER BY m.enqueue_sequence`, b.AgentID, now)
+			ORDER BY m.created_at ASC, m.id ASC`, b.AgentID, now)
 		if err != nil {
 			return err
 		}
@@ -1571,7 +1571,7 @@ func (s *Store) NextEmbeddedMail(ctx context.Context, agentID string) (string, e
 		return "", errors.New("store is closed")
 	}
 	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' ORDER BY m.enqueue_sequence LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -1587,7 +1587,7 @@ func (s *Store) NextEmbeddedSteerMail(ctx context.Context, agentID string) (stri
 		return "", errors.New("store is closed")
 	}
 	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' AND NOT EXISTS (SELECT 1 FROM embedded_attempts ea WHERE ea.message_id=m.id) ORDER BY m.enqueue_sequence LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' AND NOT EXISTS (SELECT 1 FROM embedded_attempts ea WHERE ea.message_id=m.id) ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

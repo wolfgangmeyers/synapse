@@ -1001,7 +1001,7 @@ func (s *Store) queuedRows(ctx context.Context, recipient, owner, now string) ([
 			OR EXISTS (SELECT 1 FROM message_target_snapshots target JOIN recipient_sources source ON source.recipient_name = target.recipient_name
 				WHERE target.message_id = messages.id AND target.source_kind = 'tmux' AND source.source_kind = 'tmux'
 				AND source.state = 'active' AND source.owner_identity = target.owner_identity AND target.owner_identity = ? AND ? <> ''))
-		ORDER BY enqueue_sequence ASC`, recipient, now, owner, owner)
+		ORDER BY created_at ASC, enqueue_sequence ASC, id ASC`, recipient, now, owner, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -1375,7 +1375,7 @@ func (s *Store) AllocateManagedDirectAttempt(ctx context.Context, fence ManagedR
 			AND NOT EXISTS (SELECT 1 FROM managed_direct_delivery_attempts active WHERE active.message_id = m.id AND active.message_incarnation_id = m.message_incarnation_id AND active.state IN ('direct_pending','direct_prompted'))
 			AND (NOT EXISTS (SELECT 1 FROM managed_direct_delivery_attempts previous WHERE previous.message_id = m.id AND previous.message_incarnation_id = m.message_incarnation_id)
 				OR EXISTS (SELECT 1 FROM managed_direct_delivery_attempts previous WHERE previous.message_id = m.id AND previous.message_incarnation_id = m.message_incarnation_id AND previous.attempt_number = (SELECT MAX(last.attempt_number) FROM managed_direct_delivery_attempts last WHERE last.message_id = m.id AND last.message_incarnation_id = m.message_incarnation_id) AND previous.state = 'released' AND previous.next_attempt_at <= ?))
-			ORDER BY m.enqueue_sequence ASC LIMIT 1`, now, fence.AgentID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, now)
+			ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, now, fence.AgentID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, now)
 		var id, incarnation string
 		var ignored int64
 		if err := row.Scan(&id, &incarnation, &ignored); errors.Is(err, sql.ErrNoRows) {
