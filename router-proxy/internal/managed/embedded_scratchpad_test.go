@@ -2,7 +2,9 @@ package managed
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ func TestEmbeddedScratchpadSchema(t *testing.T) {
 	require.True(t, schema.Check(map[string]any{"action": "search", "query": "test", "limit": 5}))
 	require.True(t, schema.Check(map[string]any{"action": "pin", "id": "entry-1"}))
 	require.True(t, schema.Check(map[string]any{"action": "unpin", "id": "entry-1"}))
+	require.True(t, schema.Check(map[string]any{"action": "delete", "id": "entry-1"}))
 
 	// Invalid action
 	require.False(t, schema.Check(map[string]any{"action": "unknown"}))
@@ -130,7 +133,31 @@ func TestEmbeddedScratchpadToolExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, res.Content[0].(ai.TextContent).Text, "unpinned.")
 
-	// 7. Error handling
+	// 7. Delete entry
+	res, err = tool.Execute(ctx, "call-8", map[string]any{
+		"action": "delete",
+		"id":     unpinnedEntry.ID,
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	require.Equal(t, fmt.Sprintf("Deleted scratchpad entry %s", unpinnedEntry.ID), res.Content[0].(ai.TextContent).Text)
+
+	// Verify unpinnedEntry is deleted and cannot be fetched
+	entriesAfterDelete, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+	require.NoError(t, err)
+	require.Len(t, entriesAfterDelete, 1)
+	require.NotEqual(t, unpinnedEntry.ID, entriesAfterDelete[0].ID)
+
+	// 8. 4000 character length limit rejection
+	tooLongContent := strings.Repeat("a", 4001)
+	_, err = tool.Execute(ctx, "call-err-long", map[string]any{
+		"action":  "append",
+		"content": tooLongContent,
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, fmt.Sprintf("scratchpad entry exceeds maximum allowed length of 4000 characters (got %d); save large content to a file and record the path", len(tooLongContent)), err.Error())
+
+	// 9. Error handling
 	_, err = tool.Execute(ctx, "call-err-1", map[string]any{
 		"action": "append",
 		// missing content
@@ -140,6 +167,18 @@ func TestEmbeddedScratchpadToolExecution(t *testing.T) {
 	_, err = tool.Execute(ctx, "call-err-2", map[string]any{
 		"action": "pin",
 		// missing id
+	}, nil)
+	require.Error(t, err)
+
+	_, err = tool.Execute(ctx, "call-err-delete-noid", map[string]any{
+		"action": "delete",
+		// missing id
+	}, nil)
+	require.Error(t, err)
+
+	_, err = tool.Execute(ctx, "call-err-delete-notfound", map[string]any{
+		"action": "delete",
+		"id":     "non-existent-id",
 	}, nil)
 	require.Error(t, err)
 

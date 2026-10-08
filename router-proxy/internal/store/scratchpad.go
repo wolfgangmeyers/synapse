@@ -23,6 +23,9 @@ func (s *Store) AppendScratchpadEntry(ctx context.Context, agentID, content stri
 	if strings.TrimSpace(agentID) == "" {
 		return nil, errors.New("agent_id must not be empty")
 	}
+	if runeLen := len([]rune(content)); runeLen > 4000 {
+		return nil, fmt.Errorf("scratchpad entry exceeds maximum allowed length of 4000 characters (got %d); save large content to a file and record the path", runeLen)
+	}
 	var id string
 	if s.ids != nil {
 		id, _ = s.ids.Next()
@@ -242,6 +245,31 @@ func (s *Store) SetScratchpadPinned(ctx context.Context, agentID, entryID string
 	}
 	if n == 0 {
 		return fmt.Errorf("scratchpad entry %q not found for agent %q: %w", entryID, agentID, sql.ErrNoRows)
+	}
+	return nil
+}
+
+func (s *Store) DeleteScratchpadEntry(ctx context.Context, agentID, entryID string) error {
+	if strings.TrimSpace(agentID) == "" {
+		return errors.New("agent_id must not be empty")
+	}
+	if strings.TrimSpace(entryID) == "" {
+		return errors.New("entry_id must not be empty")
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM scratchpad_entries WHERE agent_id = ? AND id = ?`,
+		agentID, entryID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("scratchpad entry not found")
 	}
 	return nil
 }
