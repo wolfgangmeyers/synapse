@@ -130,10 +130,9 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		if !hasToolCalls && p.currentThinking != "" {
 			thinkingKey := fmt.Sprintf("thinking:%s:%x", p.binding.AgentID, sha256.Sum256([]byte(p.currentThinking)))
 			pres := &store.ManagedHistoryPresentation{
-				Kind:     "thinking",
-				Outcome:  "success",
-				Summary:  p.currentThinking,
-				Thinking: p.currentThinking,
+				Kind:    "thinking",
+				Outcome: "success",
+				Summary: "Thinking process",
 			}
 			thinkingCopy := p.currentThinking
 			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_thinking", "info", "Thinking Process", thinkingKey, pres, nil, &thinkingCopy)
@@ -144,7 +143,9 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 	}
 	if result, ok := message.(ai.ToolResultMessage); ok {
-		p.toolExecuted = true
+		if result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "context_reset" && result.ToolName != "reset" {
+			p.toolExecuted = true
+		}
 		toolName := result.ToolName
 		toolCallID := result.ToolCallID
 		if toolCallID != "" && toolName != "" {
@@ -1277,7 +1278,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			toolName := call.ToolCall.Name
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
-				if p != nil {
+				if p != nil && toolName != "goal" && toolName != "goal_snooze" && toolName != "context_reset" && toolName != "reset" {
 					p.toolExecuted = true
 					if p.toolInputs == nil {
 						p.toolInputs = make(map[string]any)
@@ -1659,9 +1660,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
-		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
-			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
-		}
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1834,12 +1832,16 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 						toolCalls++
 					}
 				case ai.TextContent:
-					if strings.TrimSpace(c.Text) != "" {
+					t := strings.TrimSpace(c.Text)
+					if t != "" && t != "(empty response)" {
 						hasText = true
 					}
 				case *ai.TextContent:
-					if c != nil && strings.TrimSpace(c.Text) != "" {
-						hasText = true
+					if c != nil {
+						t := strings.TrimSpace(c.Text)
+						if t != "" && t != "(empty response)" {
+							hasText = true
+						}
 					}
 				}
 			}
