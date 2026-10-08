@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -23,7 +24,15 @@ func (m *Manager) steerPrompt(ctx context.Context, agentID, message, requestID s
 	active.Steer(userMsg)
 	log.Printf("[embedded:%s] Successfully steered prompt mid-turn into active session", agentID)
 
-	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(ctx, agentID, "managed_message", "info", "Message received", fmt.Sprintf("steered-prompt:%s:%s", agentID, requestID), &store.ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: "user", To: agentID}, nil, &message)
+	from := "user"
+	messageText := "Message received"
+	summary := ""
+	if strings.HasPrefix(message, "[Workflow Activated:") {
+		from = "system"
+		messageText = "Workflow activated"
+		summary = strings.SplitN(strings.TrimPrefix(message, "["), "]", 2)[0]
+	}
+	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(ctx, agentID, "managed_message", "info", messageText, fmt.Sprintf("steered-prompt:%s:%s", agentID, requestID), &store.ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: from, To: agentID, Summary: summary}, nil, &message)
 	if err == nil {
 		m.publishCompleteHistory(entry)
 	}
@@ -111,6 +120,34 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	}
 	if replay {
 		return nil
+	}
+	from := "user"
+	messageText := "Message received"
+	summary := ""
+	if strings.HasPrefix(message, "[Workflow Activated:") {
+		from = "system"
+		messageText = "Workflow activated"
+		summary = strings.SplitN(strings.TrimPrefix(message, "["), "]", 2)[0]
+	}
+	promptEntry, err := m.store.RecordManagedCompleteHistoryWithDetails(
+		ctx,
+		agentID,
+		"managed_message",
+		"info",
+		messageText,
+		fmt.Sprintf("embedded-prompt:%s:%s", agentID, requestID),
+		&store.ManagedHistoryPresentation{
+			Kind:    "message",
+			Outcome: "success",
+			From:    from,
+			To:      agentID,
+			Summary: summary,
+		},
+		nil,
+		&message,
+	)
+	if err == nil {
+		m.publishCompleteHistory(promptEntry)
 	}
 	turnCtx, cancel := context.WithCancel(m.runCtx)
 	defer cancel()

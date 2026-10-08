@@ -246,11 +246,6 @@ func TestEmbeddedMailMidTurnSteering(t *testing.T) {
 	handled := manager.trySteerActiveSession(launched.Agent.AgentID, active)
 	require.True(t, handled, "trySteerActiveSession should successfully steer message mid-turn")
 
-	// Verify message state was updated to acknowledged
-	steeredMsgRecord, err := db.MessageFor(ctx, steerMsgID)
-	require.NoError(t, err)
-	require.Equal(t, domain.MessageAcknowledged, steeredMsgRecord.State)
-
 	// Allow step 1 to complete so the loop executes tool and advances to step 2
 	close(allowStep1Finish)
 
@@ -260,9 +255,26 @@ func TestEmbeddedMailMidTurnSteering(t *testing.T) {
 		return e == nil && a.ActivityState == "idle"
 	}, 3*time.Second, 10*time.Millisecond)
 
+	// Verify message state was updated to acknowledged
+	steeredMsgRecord, err := db.MessageFor(ctx, steerMsgID)
+	require.NoError(t, err)
+	require.Equal(t, domain.MessageAcknowledged, steeredMsgRecord.State)
+
 	// Verify the message was received by runLoop() as a steering message
 	require.True(t, sawSteering.Load(), "steering message must be delivered to runLoop()")
 	require.True(t, sawAttachmentRef.Load(), "attachment path must be delivered in steering message")
+
+	// Verify that the final assistant response produces a reply in embedded_reply_outbox for the steered message sender
+	rawDB, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer rawDB.Close()
+
+	var replySender, replyRecipient, replyBody string
+	err = rawDB.QueryRowContext(ctx, `SELECT sender, recipient, body FROM embedded_reply_outbox WHERE attempt_id=(SELECT attempt_id FROM embedded_attempts WHERE message_id=?)`, steerMsgID).Scan(&replySender, &replyRecipient, &replyBody)
+	require.NoError(t, err)
+	require.Equal(t, launched.Agent.AgentID, replySender)
+	require.Equal(t, "supervisor", replyRecipient)
+	require.Contains(t, replyBody, "handled steering and finished turn")
 }
 
 // TestEmbeddedMailToolsNoSyntheticFallbackText verifies that turns executing tools

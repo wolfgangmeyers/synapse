@@ -1216,6 +1216,7 @@ type EmbeddedMailAttempt struct {
 	AttemptID, MessageID, MessageIncarnationID, SnapshotID string
 	Sender, Body, AcceptedDigest                           string
 	Binding                                                EmbeddedBinding
+	Attachments                                            []MailAttachment
 }
 
 func (s *Store) embeddedMailAttemptTx(ctx context.Context, id string) (*EmbeddedMailAttempt, error) {
@@ -1284,6 +1285,7 @@ func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, mess
 				return errors.New("embedded mail no longer reservable")
 			}
 			a.Binding.OwnerToken = b.OwnerToken
+			a.Attachments = s.loadMessageAttachmentsTx(ctx, messageID)
 			out = a
 			return nil
 		}
@@ -1306,7 +1308,7 @@ func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, mess
 		if err != nil {
 			return err
 		}
-		a = &EmbeddedMailAttempt{AttemptID: id, MessageID: messageID, MessageIncarnationID: incarnation, SnapshotID: target.SnapshotID, Sender: sender, Body: body, AcceptedDigest: embeddedHash([]byte(messageID), []byte(incarnation), []byte(sender), []byte(recipient), []byte(body)), Binding: b}
+		a = &EmbeddedMailAttempt{AttemptID: id, MessageID: messageID, MessageIncarnationID: incarnation, SnapshotID: target.SnapshotID, Sender: sender, Body: body, AcceptedDigest: embeddedHash([]byte(messageID), []byte(incarnation), []byte(sender), []byte(recipient), []byte(body)), Binding: b, Attachments: s.loadMessageAttachmentsTx(ctx, messageID)}
 		if _, err = s.embeddedMailAcceptedTx(ctx, a, true); err != nil {
 			return err
 		}
@@ -1362,6 +1364,36 @@ type ClaimedEmbeddedMailAttempt struct {
 	Attachments []MailAttachment `json:"attachments,omitempty"`
 }
 
+func (s *Store) loadMessageAttachmentsTx(ctx context.Context, messageID string) []MailAttachment {
+	var attachmentsJSON sql.NullString
+	_ = s.db.QueryRowContext(ctx, `SELECT attachments_json FROM conversation_messages WHERE message_id=? ORDER BY conversation_sequence DESC LIMIT 1`, messageID).Scan(&attachmentsJSON)
+
+	var attachments []MailAttachment
+	if attachmentsJSON.Valid && attachmentsJSON.String != "" && attachmentsJSON.String != "[]" {
+		if err := json.Unmarshal([]byte(attachmentsJSON.String), &attachments); err != nil {
+			var stringPaths []string
+			if err2 := json.Unmarshal([]byte(attachmentsJSON.String), &stringPaths); err2 == nil {
+				for _, p := range stringPaths {
+					attachments = append(attachments, MailAttachment{Path: p})
+				}
+			}
+		}
+	}
+
+	if s.path != "" {
+		attDir := s.path + ".attachments"
+		for i := range attachments {
+			if attachments[i].Path == "" && attachments[i].ID != "" {
+				cand := filepath.Join(attDir, attachments[i].ID)
+				if _, err := os.Stat(cand); err == nil {
+					attachments[i].Path = cand
+				}
+			}
+		}
+	}
+	return attachments
+}
+
 func (s *Store) ClaimEmbeddedMailAttempt(ctx context.Context, messageID string) (*ClaimedEmbeddedMailAttempt, error) {
 	if messageID == "" {
 		return nil, errors.New("missing message ID")
@@ -1394,32 +1426,7 @@ func (s *Store) ClaimEmbeddedMailAttempt(ctx context.Context, messageID string) 
 		}
 		_ = s.completeLinkedReminder(ctx, messageID)
 
-		var attachmentsJSON sql.NullString
-		_ = s.db.QueryRowContext(ctx, `SELECT attachments_json FROM conversation_messages WHERE message_id=? ORDER BY conversation_sequence DESC LIMIT 1`, messageID).Scan(&attachmentsJSON)
-
-		var attachments []MailAttachment
-		if attachmentsJSON.Valid && attachmentsJSON.String != "" && attachmentsJSON.String != "[]" {
-			if err := json.Unmarshal([]byte(attachmentsJSON.String), &attachments); err != nil {
-				var stringPaths []string
-				if err2 := json.Unmarshal([]byte(attachmentsJSON.String), &stringPaths); err2 == nil {
-					for _, p := range stringPaths {
-						attachments = append(attachments, MailAttachment{Path: p})
-					}
-				}
-			}
-		}
-
-		if s.path != "" {
-			attDir := s.path + ".attachments"
-			for i := range attachments {
-				if attachments[i].Path == "" && attachments[i].ID != "" {
-					cand := filepath.Join(attDir, attachments[i].ID)
-					if _, err := os.Stat(cand); err == nil {
-						attachments[i].Path = cand
-					}
-				}
-			}
-		}
+		attachments := s.loadMessageAttachmentsTx(ctx, messageID)
 
 		out = &ClaimedEmbeddedMailAttempt{
 			ID:          messageID,
@@ -1758,6 +1765,120 @@ func (s *Store) appendEmbeddedMailAndACK(ctx context.Context, b EmbeddedBinding,
 		return ManagedHistoryEntry{}, &EmbeddedMailAppendRolledBack{Cause: err}
 	}
 	return historyEntry, err
+}
+
+// AppendEmbeddedSteerMailAndACK commits a mid-turn steered user message, records
+// its ACK in embedded_acks, and transitions the message to acknowledged state.
+func (s *Store) AppendEmbeddedSteerMailAndACK(ctx context.Context, b EmbeddedBinding, attempt string, sdkMessage []byte) (EmbeddedEntry, ManagedHistoryEntry, error) {
+	if attempt == "" {
+		return EmbeddedEntry{}, ManagedHistoryEntry{}, errors.New("missing attempt")
+	}
+	if len(sdkMessage) == 0 {
+		return EmbeddedEntry{}, ManagedHistoryEntry{}, errors.New("missing SDK mail message")
+	}
+	var entry EmbeddedEntry
+	var historyEntry ManagedHistoryEntry
+	committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, func() error {
+		if err := s.embeddedFence(ctx, b); err != nil {
+			return err
+		}
+		var message, key string
+		err := s.db.QueryRowContext(ctx, `SELECT message_id,append_key FROM embedded_attempts WHERE attempt_id=? AND agent_id=? AND session_id=? AND epoch=? AND generation=?`, attempt, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&message, &key)
+		if err != nil {
+			return err
+		}
+		a, err := s.embeddedMailAttemptTx(ctx, message)
+		if err != nil {
+			return err
+		}
+		if a == nil || a.AttemptID != attempt {
+			return errors.New("embedded steer mail attempt mismatch")
+		}
+		state, err := s.embeddedMailAcceptedTx(ctx, a, false)
+		if err != nil {
+			return err
+		}
+		var ackSeq int64
+		err = s.db.QueryRowContext(ctx, `SELECT entry_seq FROM embedded_acks WHERE attempt_id=? AND message_id=? AND agent_id=? AND session_id=? AND epoch=? AND generation=?`, attempt, message, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&ackSeq)
+		if err == nil {
+			if state != "acknowledged" {
+				return errors.New("embedded ACK missing ordinary acknowledgement")
+			}
+			if err = s.db.QueryRowContext(ctx, `SELECT seq,parent_digest,kind,body,digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND seq=?`, b.AgentID, b.SessionID, b.Epoch, ackSeq).Scan(&entry.Sequence, &entry.ParentDigest, &entry.Kind, &entry.Body, &entry.Digest); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		var occupied int
+		if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_append_keys WHERE append_key=?`, key).Scan(&occupied); err != nil {
+			return err
+		}
+		if occupied != 0 {
+			return errors.New("unacknowledged embedded append key")
+		}
+
+		msg, err := ai.UnmarshalMessage(sdkMessage)
+		if err != nil {
+			return err
+		}
+		if msg.MessageRole() != ai.RoleUser {
+			return errors.New("steered message must have role user")
+		}
+
+		seq, digest, err := s.embeddedHead(ctx, b)
+		if err != nil {
+			return err
+		}
+		entry, err = s.appendEmbeddedTx(ctx, b, "user", sdkMessage, seq, digest)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_append_keys(append_key,agent_id,session_id,epoch,generation,entry_seq) VALUES(?,?,?,?,?,?)`, key, b.AgentID, b.SessionID, b.Epoch, b.Generation, entry.Sequence)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_acks(attempt_id,message_id,agent_id,session_id,epoch,generation,entry_seq) VALUES(?,?,?,?,?,?,?)`, attempt, message, b.AgentID, b.SessionID, b.Epoch, b.Generation, entry.Sequence)
+		if err != nil {
+			return err
+		}
+		var sourceKind string
+		_ = s.db.QueryRowContext(ctx, `SELECT source_kind FROM messages WHERE id=?`, message).Scan(&sourceKind)
+		r, err := s.db.ExecContext(ctx, `UPDATE messages SET state='acknowledged' WHERE id=? AND message_incarnation_id=? AND state='queued' AND expires_at>?`, message, a.MessageIncarnationID, formatTimestamp(s.clock.Now()))
+		if err != nil {
+			return err
+		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return errors.New("embedded ordinary ACK lost race")
+		}
+		category := "managed_message"
+		messageText := "Message received"
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: a.Sender, To: b.AgentID}
+		if sourceKind == "reminder" {
+			category = "reminder"
+			messageText = "Reminder received"
+			presentation = &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
+		}
+		presentationJSON, err := managedHistoryPresentationJSON(presentation)
+		if err != nil {
+			return err
+		}
+		eventKey := fmt.Sprintf("embedded-mail:%s:%s", b.AgentID, attempt)
+		details := managedHistoryDetails{MessageContent: &a.Body, SenderIdentity: &a.Sender}
+		historyEntry, err = s.recordManagedCompleteHistoryStrictTx(ctx, b.AgentID, category, "info", messageText, eventKey, presentationJSON, presentation, details)
+		if err != nil {
+			return err
+		}
+		return s.completeLinkedReminder(ctx, message)
+	})
+	if err != nil && !committed && conclusive {
+		return EmbeddedEntry{}, ManagedHistoryEntry{}, &EmbeddedMailAppendRolledBack{Cause: err}
+	}
+	return entry, historyEntry, err
 }
 
 func checkEmbeddedMailUser(body []byte, a *EmbeddedMailAttempt) error {
