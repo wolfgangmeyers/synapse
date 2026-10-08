@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -176,8 +177,48 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 }
 
 // AsyncDeliverSubagentParentWake dispatches DeliverSubagentParentWake in a managed background task.
+// If the parent is restarting or not ready, it delivers the completion notification to the parent mailbox.
 func (m *Manager) AsyncDeliverSubagentParentWake(parent store.EmbeddedBinding, record store.ManagedSubagentRecord) {
 	m.startManagedTask(func() {
-		_ = m.DeliverSubagentParentWake(m.runCtx, parent, record)
+		if err := m.DeliverSubagentParentWake(m.runCtx, parent, record); err != nil {
+			m.deliverSubagentMailboxNotification(parent, record)
+		}
 	})
+}
+
+func (m *Manager) deliverSubagentMailboxNotification(parent store.EmbeddedBinding, record store.ManagedSubagentRecord) {
+	subject := fmt.Sprintf("Subagent %s Completed", record.AgentID)
+	if record.Status != "completed" && record.Status != "steered" {
+		subject = fmt.Sprintf("Subagent %s %s", record.AgentID, record.Status)
+	}
+	body := FormatSubagentNotification(record)
+	source := protocol.MessageSource{Kind: "system"}
+	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
+	nowText := formatManagedTime(m.clock.Now())
+	envelope := protocol.Envelope{
+		ID:        msgID,
+		From:      "supervisor",
+		To:        parent.AgentID,
+		Subject:   &subject,
+		Body:      body,
+		CreatedAt: nowText,
+		Source:    &source,
+	}
+	result, err := m.store.Enqueue(context.Background(), envelope, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body:   &body,
+			Source: &source,
+		},
+	})
+	if err == nil && (result.Created || result.ConversationCreated) {
+		m.mu.Lock()
+		publish := m.embeddedMailPublisher
+		m.mu.Unlock()
+		if publish != nil {
+			publish(result)
+		} else {
+			_, _ = m.store.ResolveMessageTarget(context.Background(), result.Message.ID)
+		}
+		m.OfferDirect(parent.AgentID)
+	}
 }

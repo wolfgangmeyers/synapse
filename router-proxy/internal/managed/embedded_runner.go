@@ -435,15 +435,30 @@ func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
-		if agent.Runtime != "embedded" || agent.DesiredState != "running" || (agent.LifecycleState != "starting" && agent.LifecycleState != "running") {
+		if agent.ParentAgentID != "" || strings.HasPrefix(agent.AgentID, "subagent-") {
+			continue
+		}
+		if agent.Runtime != "embedded" || agent.DesiredState != "running" {
 			continue
 		}
 
-		if agent.LaunchOperationID == "" {
-			continue
+		if agent.LifecycleState != "starting" && agent.LifecycleState != "running" {
+			_ = m.store.RestartFailedManagedAgent(ctx, agent.AgentID)
+			agent.LifecycleState = "running"
 		}
-		m.startEmbeddedRoot(*agent, agent.LaunchOperationID, true)
+
+		opID := agent.LaunchOperationID
+		if opID == "" {
+			if id, err := m.ids.Next(); err == nil && id != "" {
+				opID = id
+			} else {
+				opID = agent.AgentID + "-launch"
+			}
+			agent.LaunchOperationID = opID
+		}
+		m.startEmbeddedRoot(*agent, opID, true)
 	}
+	_ = m.RecoverActiveSubagents(ctx)
 	return nil
 }
 

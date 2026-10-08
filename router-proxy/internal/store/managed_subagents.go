@@ -90,6 +90,13 @@ func (s *Store) subagentReadFenceTx(ctx context.Context, parent EmbeddedBinding)
 }
 
 func (s *Store) subagentWriteFenceTx(ctx context.Context, parent EmbeddedBinding) error {
+	if parent.OwnerToken <= 0 {
+		var token int64
+		_ = s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_expires_at > ?`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, formatTimestamp(s.clock.Now())).Scan(&token)
+		if token > 0 {
+			parent.OwnerToken = token
+		}
+	}
 	if err := s.embeddedFence(ctx, parent); err != nil {
 		return err
 	}
@@ -148,7 +155,7 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if kind == "" {
 			kind = "general-purpose"
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_subagents(agent_id,parent_agent_id,parent_session_id,parent_epoch,parent_generation,description,subagent_type,status,max_turns,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, child.AgentID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, child.Description, kind, child.Status, child.MaxTurns, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_subagents(agent_id,parent_agent_id,parent_session_id,parent_epoch,parent_generation,description,subagent_type,status,max_turns,created_at,updated_at,resume_prompt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, child.AgentID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, child.Description, kind, child.Status, child.MaxTurns, now, now, child.ResumePrompt)
 		if err != nil {
 			return err
 		}
@@ -360,20 +367,12 @@ func (s *Store) ResumeManagedSubagent(ctx context.Context, parent EmbeddedBindin
 	return resumed, err
 }
 
-// Reconcile only orphaned active child work on a freshly opened store. The
-// router has not admitted runners at this point, so no live generation can be
-// overwritten. Queued work is also inert after restart.
+// Reconcile only orphaned active child work on a freshly opened store. Subagents
+// whose parents are active/running are preserved for restart resumption.
 func (s *Store) reconcileManagedSubagents(ctx context.Context) error {
 	return s.runImmediate(ctx, func() error {
-		var active bool
-		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM managed_subagents WHERE status IN ('running','queued'))`).Scan(&active); err != nil {
-			return err
-		}
-		if !active {
-			return nil
-		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='interrupted',error='router process terminated abruptly',updated_at=?,terminal_at=? WHERE status IN ('running','queued')`, now, now)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='interrupted',error='parent agent terminated',updated_at=?,terminal_at=? WHERE status IN ('running','queued') AND parent_agent_id IN (SELECT agent_id FROM managed_agents WHERE desired_state='terminated')`, now, now)
 		if err != nil {
 			return err
 		}
@@ -386,6 +385,62 @@ func (s *Store) reconcileManagedSubagents(ctx context.Context) error {
 		}
 		return err
 	})
+}
+
+// ActiveManagedSubagents returns all managed subagents that are currently running or queued.
+func (s *Store) ActiveManagedSubagents(ctx context.Context) ([]*ManagedSubagentRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status IN ('running','queued') ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []*ManagedSubagentRecord
+	for rows.Next() {
+		rec, err := scanManagedSubagent(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
+}
+
+// CompletedSubagentsPendingNotification returns all completed or terminal subagents that
+// have not yet had a completion notification message enqueued to their parent mailbox.
+func (s *Store) CompletedSubagentsPendingNotification(ctx context.Context) ([]*ManagedSubagentRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status IN ('completed','steered','aborted','stopped','error')
+		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id LIKE 'subagent-completed-' || agent_id || '%' OR m.id LIKE 'subagent-terminated-' || agent_id || '%')
+		AND NOT EXISTS (SELECT 1 FROM conversation_messages c WHERE c.message_id LIKE 'subagent-completed-' || agent_id || '%' OR c.message_id LIKE 'subagent-terminated-' || agent_id || '%')
+		ORDER BY agent_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []*ManagedSubagentRecord
+	for rows.Next() {
+		rec, err := scanManagedSubagent(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
 }
 
 // InterruptedSubagentsPendingNotification returns all interrupted subagents that

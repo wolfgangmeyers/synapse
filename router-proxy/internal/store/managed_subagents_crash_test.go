@@ -110,18 +110,18 @@ func TestManagedSubagentAbruptCrashSIGKILLReconciliation(t *testing.T) {
 	require.NoError(t, err)
 	currentParent.OwnerToken = newToken
 
-	// Assert in-flight child transitioned from running -> interrupted with exact error message.
-	interruptedChild, err := reopened.ManagedSubagent(ctx, currentParent, "subagent-crash-running")
+	// Assert in-flight child retains running status for restart resumption with progress preserved.
+	inFlightChild, err := reopened.ManagedSubagent(ctx, currentParent, "subagent-crash-running")
 	require.NoError(t, err)
-	require.Equal(t, "interrupted", interruptedChild.Status)
-	require.Equal(t, "router process terminated abruptly", interruptedChild.Error)
-	require.NotEmpty(t, interruptedChild.TerminalAt)
-	require.Equal(t, 1, interruptedChild.TurnCount)
-	require.Equal(t, 2, interruptedChild.ToolUseCount)
-	require.Equal(t, 50, interruptedChild.TotalTokens)
-	require.Equal(t, 1.2, interruptedChild.DurationSeconds)
-	require.Equal(t, "in-flight crash child", interruptedChild.Description)
-	require.Equal(t, "general-purpose", interruptedChild.SubagentType)
+	require.Equal(t, "running", inFlightChild.Status)
+	require.Empty(t, inFlightChild.Error)
+	require.Empty(t, inFlightChild.TerminalAt)
+	require.Equal(t, 1, inFlightChild.TurnCount)
+	require.Equal(t, 2, inFlightChild.ToolUseCount)
+	require.Equal(t, 50, inFlightChild.TotalTokens)
+	require.Equal(t, 1.2, inFlightChild.DurationSeconds)
+	require.Equal(t, "in-flight crash child", inFlightChild.Description)
+	require.Equal(t, "general-purpose", inFlightChild.SubagentType)
 
 	// Assert completed child retains exact pre-crash terminal result and final text/stats.
 	completedChild, err := reopened.ManagedSubagent(ctx, currentParent, "subagent-crash-completed")
