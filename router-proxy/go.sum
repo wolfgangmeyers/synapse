@@ -20,8 +20,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
 github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
-github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008151604-70bc8060a4a4 h1:hZnclMPFSYobqffb9jXXoFZFhWu+Y9eQSlrBotPaqvQ=
-github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008151604-70bc8060a4a4/go.mod h1:Ks4OQItOlcj/EjCFL/uHhkwme5r4SKDYttx3nHiDVbo=
+github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008190227-790d0ba5128f h1:8k3iGY04k3Wzmbd1d4dnxgS/kPqYOJZBCHvnR7U1ZQI=
+github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008190227-790d0ba5128f/go.mod h1:Ks4OQItOlcj/EjCFL/uHhkwme5r4SKDYttx3nHiDVbo=
 golang.org/x/exp v0.0.0-20231108232855-2478ac86f678 h1:mchzmB1XO2pMaKFRqk/+MV3mgGG96aqaPXaMifQU47w=
 golang.org/x/exp v0.0.0-20231108232855-2478ac86f678/go.mod h1:zk2irFbV9DP96SEBUUAy67IdHUaZuSnrz1n472HUCLE=
 golang.org/x/image v0.41.0 h1:8wS72eGJMJaBxK6okTzd4WaXumUlTVlb753MlsSvTCo=
