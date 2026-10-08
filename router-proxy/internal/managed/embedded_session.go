@@ -588,7 +588,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	}
 	binding := owner.binding
 	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-		return 0, err
+		token, acqErr := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
+		if acqErr != nil {
+			return 0, err
+		}
+		binding.OwnerToken = token
+		owner.binding.OwnerToken = token
+		m.mu.Lock()
+		if existing, ok := m.embeddedOwners[saved.AgentID]; ok && existing.identity == owner.identity && existing.binding.Epoch == owner.binding.Epoch {
+			existing.binding.OwnerToken = token
+			m.embeddedOwners[saved.AgentID] = existing
+		}
+		m.mu.Unlock()
 	}
 	source := "prompt"
 	msgID := ""

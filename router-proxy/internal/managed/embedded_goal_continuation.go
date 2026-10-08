@@ -174,8 +174,19 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 		return
 	}
 	if err := m.store.RenewEmbeddedOwner(m.runCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-		lane.selection.Unlock()
-		return
+		token, acqErr := m.store.AcquireEmbeddedOwner(m.runCtx, binding, owner.identity, embeddedOwnerTTL)
+		if acqErr != nil {
+			lane.selection.Unlock()
+			return
+		}
+		binding.OwnerToken = token
+		owner.binding.OwnerToken = token
+		m.mu.Lock()
+		if existing, ok := m.embeddedOwners[binding.AgentID]; ok && existing.identity == owner.identity && existing.binding.Epoch == owner.binding.Epoch {
+			existing.binding.OwnerToken = token
+			m.embeddedOwners[binding.AgentID] = existing
+		}
+		m.mu.Unlock()
 	}
 	// Store validates the original verdict, chain, and exact retained neutral
 	// exception atomically with start. A Manager physical-head query is neither
@@ -469,4 +480,3 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 
 	return basePrompt
 }
-

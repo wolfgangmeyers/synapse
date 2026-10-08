@@ -48,7 +48,14 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
 	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+		token, acqErr := m.store.AcquireEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
+		if acqErr != nil {
+			return &store.ManagedAgentNotReadyError{AgentID: agentID}
+		}
+		owner.binding.OwnerToken = token
+		m.mu.Lock()
+		m.embeddedOwners[agentID] = owner
+		m.mu.Unlock()
 	}
 	replay, err := m.store.ReserveEmbeddedPrompt(ctx, owner.binding, requestID, message)
 	lane.selection.Unlock()

@@ -62,7 +62,15 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 				return false
 			}
 			if err := m.store.RenewEmbeddedOwner(m.runCtx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-				return false
+				token, acqErr := m.store.AcquireEmbeddedOwner(m.runCtx, owner.binding, owner.identity, embeddedOwnerTTL)
+				if acqErr != nil {
+					log.Printf("[embedded:%s] ERROR renewing/acquiring owner lease for mail: renew=%v, acquire=%v", agentID, err, acqErr)
+					return false
+				}
+				owner.binding.OwnerToken = token
+				m.mu.Lock()
+				m.embeddedOwners[agentID] = owner
+				m.mu.Unlock()
 			}
 			id, err := m.store.NextEmbeddedMail(m.runCtx, agentID)
 			if err != nil || id == "" {
@@ -221,4 +229,3 @@ func buildSteerUserMessage(msg *store.ClaimedEmbeddedMailAttempt, nowMilli int64
 		Timestamp: nowMilli,
 	}
 }
-

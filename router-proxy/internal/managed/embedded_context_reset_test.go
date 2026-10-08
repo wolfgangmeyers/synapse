@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/ai/providers"
@@ -292,6 +295,94 @@ func TestPostResetAutoWakeContinuesWorkerLoop(t *testing.T) {
 	require.True(t, followUpReceived.Load(), "worker loop must accept follow-up turns in the new session")
 }
 
+// TestPostResetMailDispatchAfterLeaseExpiry verifies that after context reset,
+// if the owner lease expires while the agent is idle, inbound mail can still be admitted
+// and dispatched successfully rather than being stranded in the queued state.
+func TestPostResetMailDispatchAfterLeaseExpiry(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 10, 7, 20, 30, 0, 0, time.UTC))
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer db.Close()
+
+	var mailTurnReceived atomic.Bool
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+		Models: []providers.FauxModelDefinition{{
+			ID:            "mail-expiry-test",
+			ContextWindow: 1_000_000,
+			MaxTokens:     4096,
+			Input:         []string{"text"},
+		}},
+	})
+	defer reg.Unregister()
+
+	loopSteps := make([]providers.FauxResponseStep, 20)
+	for i := range loopSteps {
+		loopSteps[i] = func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			if len(h.Messages) > 0 {
+				lastMsg := h.Messages[len(h.Messages)-1]
+				if u, ok := lastMsg.(ai.UserMessage); ok && len(u.Content) > 0 {
+					if txt, ok := u.Content[0].(ai.TextContent); ok {
+						if strings.Contains(txt.Text, "scratchpad tools") {
+							mailTurnReceived.Store(true)
+							return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "Here are the scratchpad tools."}}, ai.StopStop)
+						}
+					}
+				}
+			}
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "Initial response."}}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(loopSteps)
+
+	mgr := makeSubagentTestManagerWithClock(t, db, reg, 4, clock)
+	defer mgr.Close(ctx)
+
+	parent := subagentTestParent(t, db, "reset-mail-agent")
+	registerParentOwner(mgr, parent)
+
+	savedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+
+	owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+	ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+	// Turn 1
+	err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, "Initial task")
+	require.NoError(t, err)
+
+	// Execute context reset (advancing epoch from 1 to 2)
+	err = mgr.ExecuteContextReset(ownerCtx, parent, "user_request")
+	require.NoError(t, err)
+
+	// Advance clock by 40s (exceeding the 30s embeddedOwnerTTL so the owner lease in SQLite expires)
+	require.NoError(t, clock.Advance(40*time.Second))
+
+	// Enqueue a mail message
+	msgID := "test-scratchpad-mail-id"
+	_, err = db.Enqueue(ctx, protocol.Envelope{
+		ID:        msgID,
+		From:      "wolfgang",
+		To:        parent.AgentID,
+		Body:      "list out the scratchpad tools",
+		CreatedAt: clock.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}, store.EnqueueOptions{})
+	require.NoError(t, err)
+	_, err = db.ResolveMessageTarget(ctx, msgID)
+	require.NoError(t, err)
+
+	// Dispatch embedded mail
+	mgr.dispatchEmbeddedMail(parent.AgentID)
+
+	// Verify the mail turn was executed and message acknowledged
+	require.True(t, mailTurnReceived.Load(), "mail turn must execute even if owner lease had expired while idle")
+	mail, err := db.MessageFor(ctx, msgID)
+	require.NoError(t, err)
+	require.Equal(t, domain.MessageAcknowledged, mail.State)
+}
+
 // TestExplicitContextResetToolInvocation verifies that when a worker agent calls
 // the context_reset tool, the reset is triggered at the turn boundary.
 func TestExplicitContextResetToolInvocation(t *testing.T) {
@@ -533,8 +624,9 @@ func TestAutoResetAtThreshold(t *testing.T) {
 
 // TestPreResetScratchpadWarningReminder verifies:
 // 1. contextWarningThresholdExceeded calculation:
-//    - 40% for 1M+ models
-//    - 70% for <1M models
+//   - 40% for 1M+ models
+//   - 70% for <1M models
+//
 // 2. Scratchpad warning reminder prompt is emitted when threshold is reached
 // 3. Warning reminder is tracked per epoch and not repeatedly emitted in the same epoch
 func TestPreResetScratchpadWarningReminder(t *testing.T) {
