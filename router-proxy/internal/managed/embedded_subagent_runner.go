@@ -92,6 +92,9 @@ You are STRICTLY PROHIBITED from:
 - Anticipate potential challenges
 - Follow existing patterns where appropriate
 
+### Responsiveness & Communication
+When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.
+
 # Tool Usage
 - Use the read tool for reading files
 - Use Bash ONLY for read-only operations
@@ -106,7 +109,10 @@ You are STRICTLY PROHIBITED from:
 ### Critical Files for Implementation
 List 3-5 most important files to modify, with 1-line justification each.`
 	default:
-		return ""
+		return `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+
+### Responsiveness & Communication
+When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.`
 	}
 }
 

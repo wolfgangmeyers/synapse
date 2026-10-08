@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,7 +75,13 @@ func TestEmbeddedProductionSessionColdReopen(t *testing.T) {
 	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
 	defer reg.Unregister()
 	var calls, neutralCalls atomic.Int32
+	var sawResponsivenessPrompt atomic.Bool
 	reg.SetResponses([]providers.FauxResponseStep{func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+		sys := ai.GetCurrentSystemPrompt(h.Messages)
+		if strings.Contains(sys, "### Responsiveness & Communication") &&
+			strings.Contains(sys, "always acknowledge the user with a brief conversational response first") {
+			sawResponsivenessPrompt.Store(true)
+		}
 		user, ok := h.Messages[len(h.Messages)-1].(ai.UserMessage)
 		require.True(t, ok)
 		require.Equal(t, ai.ContentList{ai.TextContent{Text: "durable prompt"}}, user.Content)
@@ -118,6 +125,7 @@ func TestEmbeddedProductionSessionColdReopen(t *testing.T) {
 	require.Equal(t, "user", snap.Entries[1].Kind)
 	require.Equal(t, "assistant", snap.Entries[2].Kind)
 	require.EqualValues(t, 1, calls.Load())
+	require.True(t, sawResponsivenessPrompt.Load(), "embedded worker must receive responsiveness instruction in system prompt")
 	require.NoError(t, manager.Close(ctx))
 	leaseRead, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
 	require.NoError(t, err)

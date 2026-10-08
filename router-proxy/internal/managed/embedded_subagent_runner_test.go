@@ -1350,7 +1350,9 @@ func TestSubagentRunnerPlanAndDefaultSystemPromptInStreamContext(t *testing.T) {
 	defer reg.Unregister()
 
 	var planSawReadonlyPrompt atomic.Bool
+	var planSawResponsivenessPrompt atomic.Bool
 	var defaultSawCodingPrompt atomic.Bool
+	var defaultSawResponsivenessPrompt atomic.Bool
 
 	reg.SetResponses([]providers.FauxResponseStep{
 		// 1. Plan subagent stream request
@@ -1359,6 +1361,10 @@ func TestSubagentRunnerPlanAndDefaultSystemPromptInStreamContext(t *testing.T) {
 			if strings.Contains(sys, "# CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS") &&
 				strings.Contains(sys, "You are a software architect and planning specialist") {
 				planSawReadonlyPrompt.Store(true)
+			}
+			if strings.Contains(sys, "### Responsiveness & Communication") &&
+				strings.Contains(sys, "always acknowledge the user with a brief conversational response first") {
+				planSawResponsivenessPrompt.Store(true)
 			}
 			return providers.FauxAssistantMessage(ai.ContentList{
 				ai.TextContent{Text: "Plan created."},
@@ -1369,6 +1375,10 @@ func TestSubagentRunnerPlanAndDefaultSystemPromptInStreamContext(t *testing.T) {
 			sys := ai.GetCurrentSystemPrompt(req.Messages)
 			if strings.Contains(sys, "expert coding assistant") && !strings.Contains(sys, "READ-ONLY MODE") {
 				defaultSawCodingPrompt.Store(true)
+			}
+			if strings.Contains(sys, "### Responsiveness & Communication") &&
+				strings.Contains(sys, "always acknowledge the user with a brief conversational response first") {
+				defaultSawResponsivenessPrompt.Store(true)
 			}
 			return providers.FauxAssistantMessage(ai.ContentList{
 				ai.TextContent{Text: "Coding task done."},
@@ -1396,6 +1406,7 @@ func TestSubagentRunnerPlanAndDefaultSystemPromptInStreamContext(t *testing.T) {
 	}, 4*time.Second, 20*time.Millisecond)
 
 	require.True(t, planSawReadonlyPrompt.Load(), "Plan subagent must receive specialized read-only planning system prompt in stream context")
+	require.True(t, planSawResponsivenessPrompt.Load(), "Plan subagent must receive responsiveness communication prompt")
 
 	// 2. Unknown type subagent (fallback to general-purpose default coding prompt)
 	resDefault, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
@@ -1413,6 +1424,7 @@ func TestSubagentRunnerPlanAndDefaultSystemPromptInStreamContext(t *testing.T) {
 	}, 4*time.Second, 20*time.Millisecond)
 
 	require.True(t, defaultSawCodingPrompt.Load(), "unknown type must fall back to standard genuine coding system prompt in stream context")
+	require.True(t, defaultSawResponsivenessPrompt.Load(), "default subagent must receive responsiveness communication prompt")
 }
 
 func TestSubagentReleaseSlotStaleAttemptGuard(t *testing.T) {
