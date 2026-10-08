@@ -40,7 +40,8 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, allEntries?: r
   // Complete history entry because it has presentation.kind === "tool".
   if (isActiveManagedSubagentLifecycle(entry)) return false;
   // Complete is an outcome timeline, not a lifecycle progress log.
-  if (entry.presentation?.kind === "lifecycle" || entry.presentation?.kind === "state") return false;
+  if (entry.presentation?.kind === "lifecycle") return false;
+  if (entry.presentation?.kind === "state" && !entry.message?.toLowerCase().includes("workflow") && !entry.presentation?.summary?.toLowerCase().includes("workflow") && !entry.presentation?.to) return false;
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
     (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)

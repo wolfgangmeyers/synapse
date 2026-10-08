@@ -82,7 +82,7 @@ export function isMailboxSendToUser(
   const normalizedRecipient = recipient.trim().toLowerCase();
   const normalizedUser = (currentUserId || "wolfgang").trim().toLowerCase();
 
-  if (normalizedRecipient === normalizedUser) {
+  if (normalizedRecipient === normalizedUser || normalizedRecipient === "user") {
     const from = entry.presentation?.from ?? entry.sender_identity ?? entry.agent_id;
     return { recipient, body: rawBody ?? body, from };
   }
@@ -355,6 +355,23 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
       const dialogTitle = entry.message || "Message sent";
       return { icon: "fa-solid fa-paper-plane", tone: "blue", label, subject, dialogTitle, detail, isHighValue: false };
     }
+    const isWorkflow = entry.message?.toLowerCase().includes("workflow") || presentation.summary?.toLowerCase().includes("workflow") || entry.message_content?.startsWith("[Workflow Activated:");
+    if (isWorkflow) {
+      const label = presentation.summary || entry.message || "Workflow activated";
+      const subject = extractSubject(entry, entry.message_content);
+      const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
+      const dialogTitle = label;
+      return { icon: "fa-solid fa-bolt", tone: "purple", label, subject, dialogTitle, detail, isHighValue: true };
+    }
+    const isPrompt = entry.message?.toLowerCase().includes("prompt") || presentation.summary?.toLowerCase().includes("prompt");
+    if (isPrompt) {
+      const sender = entry.sender_identity ?? presentation.from;
+      const label = sender ? `Prompt from ${sender}` : "Prompt";
+      const subject = extractSubject(entry, entry.message_content);
+      const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
+      const dialogTitle = entry.message || "Prompt";
+      return { icon: "fa-solid fa-terminal", tone: "blue", label, subject, dialogTitle, detail, isHighValue: false };
+    }
     const sender = entry.sender_identity ?? presentation.from;
     const label = sender ? `From ${sender}` : reminder ? "Reminder received" : "Message received";
     const subject = extractSubject(entry, entry.message_content);
@@ -363,6 +380,21 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
     return { icon: reminder ? "fa-solid fa-clock" : "fa-solid fa-envelope", tone: reminder ? "yellow" : "blue", label, subject, dialogTitle, detail, isHighValue: false };
   }
   if (presentation.kind === "message") {
+    const isWorkflow = entry.message?.toLowerCase().includes("workflow") || presentation.summary?.toLowerCase().includes("workflow") || entry.message_content?.startsWith("[Workflow Activated:");
+    if (isWorkflow) {
+      const label = presentation.summary || entry.message || "Workflow activated";
+      const subject = extractSubject(entry, entry.message_content);
+      const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
+      return { icon: "fa-solid fa-bolt", tone: "purple", label, subject, dialogTitle: label, detail, isHighValue: true };
+    }
+    const isPrompt = entry.message?.toLowerCase().includes("prompt") || presentation.summary?.toLowerCase().includes("prompt");
+    if (isPrompt) {
+      const sender = entry.sender_identity ?? presentation.from;
+      const label = sender ? `Prompt from ${sender}` : "Prompt";
+      const subject = extractSubject(entry, entry.message_content);
+      const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
+      return { icon: "fa-solid fa-terminal", tone: "blue", label, subject, dialogTitle: entry.message || "Prompt", detail, isHighValue: false };
+    }
     const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || (presentation.from === entry.agent_id && presentation.to !== undefined);
     let label: string;
     if (isOutbound && presentation.to) {
@@ -381,6 +413,11 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   if (presentation.kind === "child" || presentation.kind === "recovery") return childVisual(presentation);
   if (presentation.kind === "compaction") return compactionVisual(presentation);
   if (presentation.kind === "state") {
+    const isWorkflow = entry.message?.toLowerCase().includes("workflow") || presentation.summary?.toLowerCase().includes("workflow");
+    if (isWorkflow) {
+      const label = presentation.summary || entry.message || "Workflow state activated";
+      return { icon: "fa-solid fa-bolt", tone: "purple", label, detail: presentation.to ? `Activated: ${presentation.to}` : cleanOneLine(presentation.summary), isHighValue: true };
+    }
     const statePair = presentation.from && presentation.to ? `${presentation.from} → ${presentation.to}` : undefined;
     return { icon: "fa-solid fa-arrow-right", tone: "green", label: "State changed", detail: statePair ?? cleanOneLine(presentation.summary), isHighValue: false };
   }
