@@ -98,7 +98,10 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 			respond := func(h ai.TranscriptContext, opts *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 				if embeddedIsGoalEvaluation(h) {
 					evaluations.Add(1)
-					evalSeen <- h
+					select {
+					case evalSeen <- h:
+					default:
+					}
 					require.NotNil(t, opts.MaxTokens)
 					require.Equal(t, embeddedGoalEvaluationMaxTokens, *opts.MaxTokens)
 					require.Zero(t, opts.MaxRetries)
@@ -121,7 +124,7 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 				}
 				return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "settled fixture final"}}, ai.StopStop)
 			}
-			steps := make([]providers.FauxResponseStep, 8)
+			steps := make([]providers.FauxResponseStep, 24)
 			for i := range steps {
 				steps[i] = respond
 			}
@@ -151,12 +154,12 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 					want = "DONE"
 				}
 				if verdict == "invalid" {
-					want = "UNKNOWN"
+					want = store.EmbeddedGoalEvaluationNotDone
 				}
 				require.Eventually(t, func() bool {
 					return read.QueryRow(`SELECT state FROM embedded_goal_evaluations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&state) == nil && state == want
 				}, 3*time.Second, 10*time.Millisecond)
-				if verdict == "NOT_DONE" {
+				if verdict == "NOT_DONE" || verdict == "invalid" {
 					require.Eventually(t, func() bool { return wakes.Load() == 1 }, 3*time.Second, 10*time.Millisecond)
 					require.Eventually(t, func() bool {
 						var n int
@@ -173,26 +176,28 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 				evaluation, claimed, e := db.ClaimEmbeddedGoalEvaluation(ctx, owner.binding, key)
 				require.NoError(t, e)
 				require.False(t, claimed)
-				require.Equal(t, "UNKNOWN", evaluation.State)
+				require.Equal(t, store.EmbeddedGoalEvaluationNotDone, evaluation.State)
 			}
 			require.NoError(t, m.Close(ctx)) // joins evaluator/continuation; exact counts after settlement
 			require.EqualValues(t, map[bool]int{true: 3, false: 2}[verdict == "OFF"], ordinary.Load())
 			if verdict == "OFF" {
 				require.Zero(t, evaluations.Load())
-			} else if verdict == "NOT_DONE" {
+			} else if verdict == "NOT_DONE" || verdict == "invalid" {
 				require.EqualValues(t, 2, evaluations.Load())
 			} else {
 				require.EqualValues(t, 1, evaluations.Load())
 			}
-			wantWake := 0
 			if verdict == "NOT_DONE" {
-				wantWake = 1
+				require.EqualValues(t, 1, wakes.Load())
+			} else if verdict == "invalid" {
+				require.Positive(t, wakes.Load())
+			} else {
+				require.Zero(t, wakes.Load())
 			}
-			require.EqualValues(t, wantWake, wakes.Load())
 			var continuations, evaluatorEntries int
 			require.NoError(t, read.QueryRow(`SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&continuations))
-			wantContinuations := wantWake
-			if verdict == "NOT_DONE" {
+			wantContinuations := 0
+			if verdict == "NOT_DONE" || verdict == "invalid" {
 				wantContinuations = 2
 			}
 			require.Equal(t, wantContinuations, continuations)

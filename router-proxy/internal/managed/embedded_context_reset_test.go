@@ -687,7 +687,7 @@ func TestPreResetScratchpadWarningReminder(t *testing.T) {
 					lastMsg := h.Messages[len(h.Messages)-1]
 					if u, ok := lastMsg.(ai.UserMessage); ok && len(u.Content) > 0 {
 						if txt, ok := u.Content[0].(ai.TextContent); ok {
-							if strings.Contains(txt.Text, "Context usage threshold warning") {
+							if strings.Contains(txt.Text, "Context threshold reached:") || strings.Contains(txt.Text, "Context usage threshold warning") {
 								reminderReceived.Store(true)
 							}
 						}
@@ -767,7 +767,7 @@ func TestPreResetScratchpadWarningReminder(t *testing.T) {
 					lastMsg := h.Messages[len(h.Messages)-1]
 					if u, ok := lastMsg.(ai.UserMessage); ok && len(u.Content) > 0 {
 						if txt, ok := u.Content[0].(ai.TextContent); ok {
-							if strings.Contains(txt.Text, "Context usage threshold warning") {
+							if strings.Contains(txt.Text, "Context threshold reached:") || strings.Contains(txt.Text, "Context usage threshold warning") {
 								reminderReceived.Store(true)
 							}
 						}

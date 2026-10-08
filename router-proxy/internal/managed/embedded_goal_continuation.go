@@ -164,30 +164,16 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	}
 	lane.selection.Lock()
 	saved, err := m.store.ManagedAgent(m.runCtx, binding.AgentID)
-	m.mu.Lock()
-	owner, ok := m.embeddedOwners[binding.AgentID]
-	closed := m.closed
-	m.mu.Unlock()
-	if err != nil || !ok || closed || saved.Runtime != "embedded" || saved.DesiredState != "running" || saved.LifecycleState != "running" ||
-		owner.binding != binding || saved.PiSessionID != binding.SessionID || saved.SessionEpoch != binding.Epoch || saved.RuntimeGeneration != binding.Generation {
+	if err != nil || saved.Runtime != "embedded" || saved.DesiredState != "running" || saved.LifecycleState != "running" {
 		lane.selection.Unlock()
 		return
 	}
-	if err := m.store.RenewEmbeddedOwner(m.runCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-		token, acqErr := m.store.AcquireEmbeddedOwner(m.runCtx, binding, owner.identity, embeddedOwnerTTL)
-		if acqErr != nil {
-			lane.selection.Unlock()
-			return
-		}
-		binding.OwnerToken = token
-		owner.binding.OwnerToken = token
-		m.mu.Lock()
-		if existing, ok := m.embeddedOwners[binding.AgentID]; ok && existing.identity == owner.identity && existing.binding.Epoch == owner.binding.Epoch {
-			existing.binding.OwnerToken = token
-			m.embeddedOwners[binding.AgentID] = existing
-		}
-		m.mu.Unlock()
+	owner, err := m.ensureEmbeddedOwner(m.runCtx, binding.AgentID, *saved)
+	if err != nil {
+		lane.selection.Unlock()
+		return
 	}
+	binding = owner.binding
 	// Store validates the original verdict, chain, and exact retained neutral
 	// exception atomically with start. A Manager physical-head query is neither
 	// semantic authority nor an admission fence against other Store callers.

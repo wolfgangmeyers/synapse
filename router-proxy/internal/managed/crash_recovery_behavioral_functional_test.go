@@ -461,6 +461,7 @@ func TestManagedUnconfirmedOrderlyMarkerProbesBeforeReplacement(t *testing.T) {
 			ops := &coldRecoveryOps{states: map[int]ProcessProbeState{fence.ProcessPID: testCase.state, replacement.identity.PID: ProcessOwned}}
 			manager := newCrashRecoveryManager(t, durable, config, manifest, clock, deterministic.NewSequenceIDSource("unconfirmed-recovery"), factory, rpc, ops)
 			defer manager.Close(ctx)
+			bindColdRecoverySession(t, manager, durable, path, old.AgentID)
 			require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
 			require.Equal(t, testCase.wantLaunch, factory.StartCalls() == 1)
 			marker, err = durable.ManagedOrderlyStopMarker(ctx, fence.AgentID)

@@ -40,22 +40,9 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	if saved.LifecycleState != "running" || saved.DesiredState != "running" || !saved.AcceptingPrompts || !saved.SlotHeld {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
-	m.mu.Lock()
-	owner, ok := m.embeddedOwners[agentID]
-	closed := m.closed
-	m.mu.Unlock()
-	if !ok || closed || m.runCtx.Err() != nil || owner.binding.AgentID != agentID || owner.binding.SessionID != saved.PiSessionID || owner.binding.Epoch != saved.SessionEpoch || owner.binding.Generation != saved.RuntimeGeneration {
+	owner, err := m.ensureEmbeddedOwner(ctx, agentID, *saved)
+	if err != nil {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
-	}
-	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-		token, acqErr := m.store.AcquireEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
-		if acqErr != nil {
-			return &store.ManagedAgentNotReadyError{AgentID: agentID}
-		}
-		owner.binding.OwnerToken = token
-		m.mu.Lock()
-		m.embeddedOwners[agentID] = owner
-		m.mu.Unlock()
 	}
 	replay, err := m.store.ReserveEmbeddedPrompt(ctx, owner.binding, requestID, message)
 	lane.selection.Unlock()

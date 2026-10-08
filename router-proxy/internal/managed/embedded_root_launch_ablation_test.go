@@ -127,11 +127,11 @@ func TestEmbeddedRootLaunchAblationDeclaration(t *testing.T) {
 	// Addressed mailbox is Manager-owned, independent of a host external tool.
 	// Keep this literal contract independent of either captured declaration.
 	require.Nil(t, m.embeddedExternalTool)
-	wantNames := []string{"mecha_mailbox_send", "goal", "goal_snooze", "mecha_context", "mecha_reminder", "bash", "read", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "mecha_worker"}
+	wantNames := []string{"mecha_mailbox_send", "goal", "goal_snooze", "mecha_context", "mecha_reminder", "context_reset", "reset", "scratchpad", "bash", "read", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "mecha_worker"}
 	require.Equal(t, wantNames, toolNames(workerTools))
 	wantRootNames := append([]string(nil), wantNames...)
 	if embeddedRootLaunchAblation {
-		wantRootNames = wantRootNames[:12]
+		wantRootNames = wantRootNames[:len(wantRootNames)-1]
 	}
 	require.Equal(t, wantRootNames, toolNames(rootTools))
 	mailbox := workerTools[0].Parameters
@@ -152,7 +152,7 @@ func TestEmbeddedRootLaunchAblationDeclaration(t *testing.T) {
 		{1, []any{"set", "status", "off"}},
 		{3, []any{"status", "compact"}},
 		{4, []any{"list", "create", "update", "delete"}},
-		{12, []any{"list", "launch", "send", "cleanup"}},
+		{15, []any{"list", "launch", "send", "cleanup"}},
 	} {
 		tool := workerTools[check.index]
 		require.NotNil(t, tool.Parameters, tool.Name)

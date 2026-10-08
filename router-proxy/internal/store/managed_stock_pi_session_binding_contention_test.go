@@ -36,6 +36,8 @@ func TestBindManagedPiSessionRejectsStaleProcessAndAllowsOneWinner(t *testing.T)
 	currentFence.RuntimeGeneration = "replacement-generation"
 	_, err := durable.db.ExecContext(ctx, `UPDATE managed_agents SET process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=? WHERE agent_id=?`, currentFence.ProcessPID, currentFence.ProcessStartMarker, currentFence.ProcessIncarnation, currentFence.RuntimeGeneration, agentID)
 	require.NoError(t, err)
+	_, err = durable.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=? WHERE agent_id=?`, currentFence.ProcessPID, currentFence.ProcessStartMarker, currentFence.ProcessIncarnation, currentFence.RuntimeGeneration, agentID)
+	require.NoError(t, err)
 
 	binder, ok := any(durable).(managedPiSessionBinder)
 	require.True(t, ok, "Store must provide fenced BindManagedPiSession capability")
