@@ -126,6 +126,10 @@ Never kill your own worker or tmux window. Send the structured completion mail a
 
 ## Rules
 
+### Responsiveness & Communication
+
+When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.
+
 **Review findings need a protected requirement.** Before accepting a PR or review finding, map it to the approved specification, a task acceptance criterion, or a concrete security, data-loss, or existing-behavior risk. Reject findings that contradict specified behavior or demand unsupported scope; record the exact protected requirement with each retained finding.
 
 **Do not add lifecycle, race, or retry guards without a stated requirement, platform contract, or demonstrated concrete safety, data-loss, or existing-behavior risk; name the protected requirement.**

@@ -711,6 +711,13 @@ func (m *Manager) runEmbeddedClaimedWake(ctx context.Context, saved store.Manage
 	return err
 }
 
+func resolveEmbeddedWorkerSystemPrompt(role string) string {
+	return `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+
+### Responsiveness & Communication
+When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.`
+}
+
 func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.ManagedAgentRecord, explicitPrompt string, mail *store.EmbeddedMailAttempt, continuation *store.EmbeddedGoalEvaluationKey, wake *embeddedClaimedWakeScope, wakePrompts []agent.AgentMessage) (finalSeq int64, turnErr error) {
 	owner, ok := ctx.Value(embeddedOwnerContextKey{}).(embeddedOwner)
 	if !ok || owner.binding.AgentID != saved.AgentID || owner.binding.SessionID != saved.PiSessionID || owner.binding.Epoch != saved.SessionEpoch || owner.binding.Generation != saved.RuntimeGeneration {
@@ -1174,7 +1181,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, fmt.Errorf("embedded read tool: %w", err)
 		}
-		readTool.PromptGuidelines = append(readTool.PromptGuidelines, "When you run a command or tool to investigate, continue until the task is complete, or write your answer to the user.")
+		readTool.PromptGuidelines = append(readTool.PromptGuidelines, "When you run a command or tool to investigate, continue until the task is complete, or write your answer to the user.", "When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.")
 		editTool, err := coding.CreateTool("edit", saved.Cwd)
 		if err != nil {
 			return 0, fmt.Errorf("embedded edit tool: %w", err)
@@ -1347,7 +1354,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if model.MaxTokens > 0 && model.MaxTokens < maxTokens {
 		maxTokens = model.MaxTokens
 	}
-	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
+	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: resolveEmbeddedWorkerSystemPrompt(role), OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
 		ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
 			if call.ToolCall.Name != "bash" {
 				return nil, nil
