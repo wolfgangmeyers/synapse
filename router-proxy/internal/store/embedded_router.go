@@ -466,7 +466,7 @@ func (s *Store) ResetEmbeddedAgentInterrupt(ctx context.Context, agentID string)
 
 // ResetActiveEmbeddedAgents resets any running embedded agents that were left in active state
 // to idle. At router startup / new process generation, no turn can be active since the
-// previous process was killed.
+// previous process was killed. It also reconciles dangling active tool history rows.
 func (s *Store) ResetActiveEmbeddedAgents(ctx context.Context) error {
 	return s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
@@ -478,7 +478,22 @@ func (s *Store) ResetActiveEmbeddedAgents(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if n > 0 {
+		var historyExists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='managed_complete_history'`).Scan(&historyExists); err != nil {
+			return err
+		}
+		var histN int64
+		if historyExists > 0 {
+			histResult, err := s.db.ExecContext(ctx, `UPDATE managed_complete_history SET presentation_json=json_set(presentation_json, '$.outcome', 'failed', '$.summary', 'Interrupted by restart') WHERE json_extract(presentation_json, '$.outcome') = 'active'`)
+			if err != nil {
+				return err
+			}
+			histN, err = histResult.RowsAffected()
+			if err != nil {
+				return err
+			}
+		}
+		if n > 0 || histN > 0 {
 			_, err = s.bumpManagedProjectionVersion(ctx)
 			return err
 		}
