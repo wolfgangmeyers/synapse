@@ -1050,6 +1050,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, fmt.Errorf("embedded read tool: %w", err)
 		}
+		readTool.PromptGuidelines = append(readTool.PromptGuidelines, "When you run a command or tool to investigate, continue until the task is complete, or write your answer to the user.")
 		editTool, err := coding.CreateTool("edit", saved.Cwd)
 		if err != nil {
 			return 0, fmt.Errorf("embedded edit tool: %w", err)
@@ -1658,6 +1659,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
+		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
+		}
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1689,6 +1693,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
+		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
+		}
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1699,6 +1706,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		_, err := session.Run(ctx, explicitPrompt)
 		if err != nil {
 			return 0, handleTurnErr(err)
+		}
+		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
 		}
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
@@ -1712,6 +1722,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		_, err := session.Run(ctx, saved.PendingInitialInstruction)
 		if err != nil {
 			return 0, handleTurnErr(err)
+		}
+		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
 		}
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)

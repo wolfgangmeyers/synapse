@@ -185,16 +185,23 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 				break
 			}
 		}
-		if alreadySent || text.Len() == 0 {
+		if alreadySent {
+			return nil
+		}
+		replyBodyText := text.String()
+		if len(strings.TrimSpace(replyBodyText)) == 0 && len(strings.TrimSpace(thinking.String())) > 0 {
+			replyBodyText = thinking.String()
+		}
+		if len(strings.TrimSpace(replyBodyText)) == 0 {
 			return nil
 		}
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, text.String(), formatTimestamp(s.clock.Now()))
+		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, replyBodyText, formatTimestamp(s.clock.Now()))
 		if err != nil {
 			return err
 		}
-		replyBody := text.String()
+		replyBody := replyBodyText
 		category := "managed_message"
 		messageText := "Message sent"
 		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: a.Sender, Thinking: thinking.String()}
