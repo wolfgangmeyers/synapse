@@ -275,7 +275,7 @@ func (m *Manager) fetchSubagentTranscript(ctx context.Context, parent store.Embe
 		case "system", "user", "assistant", "tool_result", "toolResult":
 			msg, err := ai.UnmarshalMessage(entry.Body)
 			if err != nil {
-				return "", fmt.Errorf("decode subagent message entry %d (%s): %w", entry.Sequence, entry.Kind, err)
+				return "", fmt.Errorf("corrupt embedded entry chain: decode subagent message entry %d (%s): %w", entry.Sequence, entry.Kind, err)
 			}
 			messages = append(messages, msg)
 		default:

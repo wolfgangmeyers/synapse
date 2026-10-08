@@ -132,7 +132,8 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
   const isWorkerSend = presentation?.tool_name === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send";
   const isMailboxSend = presentation?.tool_name === "mecha_mailbox_send" || isWorkerSend;
   const mailboxDetails = isMailboxSend ? getMailboxSendDetails(entry.tool_input) : undefined;
-  const isTool = !isMailboxSend && (presentation?.kind === "tool" || entry.tool_input !== undefined);
+  const isSubagentComplete = presentation?.kind === "subagent_complete" || (presentation?.kind === "subagent" && (presentation?.outcome === "completed" || presentation?.outcome === "failed" || presentation?.outcome === "success" || presentation?.outcome === "error"));
+  const isTool = !isMailboxSend && !isSubagentComplete && (presentation?.kind === "tool" || entry.tool_input !== undefined);
   const isOutbound = isMailboxSend || entry.message === "Message sent" || entry.message === "Reply sent" || (presentation?.from === entry.agent_id && presentation?.to !== undefined);
   const recipientTarget = mailboxDetails?.recipient ?? presentation?.to;
   const command = getToolCommand(entry.tool_input);
@@ -149,7 +150,12 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
       {entry.sender_identity && !isOutbound && !isThinking ? <p className="activity-detail-sender">From <strong>{entry.sender_identity}</strong></p> : null}
       {recipientTarget ? <p className="activity-detail-sender">To <strong>{recipientTarget}</strong></p> : null}
       {visual.subject ? <p className="activity-detail-sender">Subject: <strong>{visual.subject}</strong></p> : null}
-      {isThinking ? <>
+      {isSubagentComplete ? <>
+        {thinkingText ? <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText} /></div></section> : null}
+        {hasToolInput ? <section><h3>Subagent Details</h3>{renderToolParameters(entry.tool_input)}</section> : null}
+        {entry.message_content ? <section><h3>Result</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content} /></div></section> : summaryText ? <section><h3>Summary</h3><p className="activity-detail-payload">{summaryText}</p></section> : null}
+        {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
+      </> : isThinking ? <>
         <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText ?? entry.message_content ?? presentation?.summary ?? ""} /></div></section>
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
       </> : isTool ? <>
