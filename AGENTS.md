@@ -130,6 +130,10 @@ For any production-code implementation or change, the canonical `dev-loop` workf
 
 Prioritize behavioral functional tests that put as many system-owned components and boundaries together as practical, with dependencies mocked as necessary, and prove the software works. Automated tests must not call LLMs or external services; replace those dependencies with deterministic mocks at the external boundary. Tests must satisfy and map every applicable requirement. Isolated unit tests are supporting evidence, not sufficient when an owned cross-component path can be exercised.
 
+## Behavioral Functional Testing Standard
+
+Behavioral functional tests should exercise things hooked together — ideally a full router running workers with mock LLMs in those tests, verifying all expected behavior end-to-end across the full lifecycle (inbound messages, turns, tool execution, answer synthesis, context reset, scratchpad, goal loops, outbox delivery, and WebSocket notifications).
+
 ## TypeScript Type Safety
 
 In `pi-extensions/mecha-messaging`, TypeScript code must preserve type safety. Do not use `as any`, `as unknown as`, or assertion/casting escape hatches to silence or evade a type error. Use runtime validation and narrowing at external or untyped boundaries. An assertion is allowed only when a documented, narrow boundary-validation case is absolutely necessary: keep it at that boundary, validate the value first, and add a nearby comment naming the boundary and the validation that makes the assertion sound. Do not weaken the compiler or linter to make an unsafe assertion pass.
