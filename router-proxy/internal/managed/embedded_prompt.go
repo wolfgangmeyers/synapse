@@ -2,8 +2,33 @@ package managed
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"time"
+
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/ai"
+	"github.com/sky-valley/pi/coding"
 )
+
+func (m *Manager) steerPrompt(ctx context.Context, agentID, message, requestID string, active *coding.Session) error {
+	nowMilli := time.Now().UnixMilli()
+	if m.clock != nil {
+		nowMilli = m.clock.Now().UnixMilli()
+	}
+	userMsg := ai.UserMessage{
+		Content:   ai.ContentList{ai.TextContent{Text: message}},
+		Timestamp: nowMilli,
+	}
+	active.Steer(userMsg)
+	log.Printf("[embedded:%s] Successfully steered prompt mid-turn into active session", agentID)
+
+	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(ctx, agentID, "managed_message", "info", "Message received", fmt.Sprintf("steered-prompt:%s:%s", agentID, requestID), &store.ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: "user", To: agentID}, nil, &message)
+	if err == nil {
+		m.publishCompleteHistory(entry)
+	}
+	return nil
+}
 
 // AdmitPromptWithRequestID is the embedded public turn admission with a durable
 // retry identity. Stock RPC admission retains its existing behavior.
@@ -19,9 +44,43 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	lane.consecutiveContinuations = 0
 	lane.consecutiveEmptyTurns = 0
 	lane.goalAttempt = 0
+
+	lane.activeMu.RLock()
+	active := lane.activeSession
+	lane.activeMu.RUnlock()
+	if active != nil {
+		return m.steerPrompt(ctx, agentID, message, requestID, active)
+	}
+
 	lane.admission.Lock()
 	defer lane.admission.Unlock()
-	lane.serial.Lock()
+
+	lane.activeMu.RLock()
+	active = lane.activeSession
+	lane.activeMu.RUnlock()
+	if active != nil {
+		return m.steerPrompt(ctx, agentID, message, requestID, active)
+	}
+
+	locked := lane.serial.TryLock()
+	if !locked {
+		for i := 0; i < 20; i++ {
+			lane.activeMu.RLock()
+			active = lane.activeSession
+			lane.activeMu.RUnlock()
+			if active != nil {
+				return m.steerPrompt(ctx, agentID, message, requestID, active)
+			}
+			if lane.serial.TryLock() {
+				locked = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !locked {
+			lane.serial.Lock()
+		}
+	}
 	defer lane.serial.Unlock()
 	lane.selection.Lock()
 	selectionHeld := true

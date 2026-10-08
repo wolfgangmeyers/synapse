@@ -149,7 +149,32 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
         left.id.localeCompare(right.id)
     );
   }, [activityEntries, currentUser, messages]);
-  const latestItem = items.at(-1);
+  const renderedItems = useMemo(() => {
+    let lastThinking: string | undefined;
+    const result: Array<{ item: FeedItem; suppressThinking: boolean }> = [];
+    for (const item of items) {
+      if (item.type === "message") {
+        lastThinking = undefined;
+        result.push({ item, suppressThinking: false });
+        continue;
+      }
+      const isThinkingKind = item.entry.presentation?.kind === "thinking";
+      const thinkingText = getThinkingContent(item.entry);
+      if (thinkingText) {
+        if (thinkingText === lastThinking) {
+          if (isThinkingKind) {
+            continue;
+          }
+          result.push({ item, suppressThinking: true });
+          continue;
+        }
+        lastThinking = thinkingText;
+      }
+      result.push({ item, suppressThinking: false });
+    }
+    return result;
+  }, [items]);
+  const latestItem = renderedItems.at(-1)?.item;
   const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;
   useLayoutEffect(() => {
     if (scrollLocked) return;
@@ -170,7 +195,7 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
     // The selected agent's retained page may arrive after this component. Do
     // not announce that replay as if every old error just happened.
     if (!activityHistoryReady) return;
-    const activities = items.filter((item): item is Extract<FeedItem, { type: "activity" }> => item.type === "activity");
+    const activities = renderedItems.filter((r): r is { item: Extract<FeedItem, { type: "activity" }>; suppressThinking: boolean } => r.item.type === "activity").map((r) => r.item);
     if (!activityLiveInitialized.current) {
       for (const activity of activities) announcedActivity.current.add(activity.id);
       activityLiveInitialized.current = true;
@@ -179,15 +204,15 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
     const newHighValue = activities.filter((activity) => !announcedActivity.current.has(activity.id) && completeTimelineVisual(activity.entry).isHighValue);
     for (const activity of activities) announcedActivity.current.add(activity.id);
     setAnnouncement(newHighValue.slice(-3).map((activity) => completeTimelineVisual(activity.entry).label).join(". "));
-  }, [activityHistoryReady, items]);
+  }, [activityHistoryReady, renderedItems]);
   const onScroll = (): void => { const element = ref.current; if (!element) return; onNearBottomChange?.(shouldFollowToBottom(element.scrollTop, element.clientHeight, element.scrollHeight)); };
-  const hasItems = items.length > 0;
+  const hasItems = renderedItems.length > 0;
   const hasActivity = activityEntries !== undefined;
   let previousDate: string | undefined;
-  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{items.map((item) => {
+  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{renderedItems.map(({ item, suppressThinking }) => {
     const currentDate = dateLabel(item.timestamp);
     const separator = currentDate !== undefined && currentDate !== previousDate ? <li key={`date:${currentDate}:${item.id}`} className="timeline-date" aria-hidden="true">{currentDate}</li> : null;
     previousDate = currentDate ?? previousDate;
-    return <Fragment key={`${item.type}:${item.id}`}>{separator}<li className={`timeline-item timeline-item--${item.type}`}>{item.type === "message" ? <MessageBubble message={item.message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})} /> : <CompleteTimelineEntry entry={item.entry} />}</li></Fragment>;
+    return <Fragment key={`${item.type}:${item.id}`}>{separator}<li className={`timeline-item timeline-item--${item.type}`}>{item.type === "message" ? <MessageBubble message={item.message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})} /> : <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} />}</li></Fragment>;
   })}</ol> : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : <EmptyState title={hasActivity ? "No messages or activity yet" : "No messages yet"} description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."} />}{hasItems && error ? <p className="error" role="alert">{error}</p> : null}<p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p></div>;
 }

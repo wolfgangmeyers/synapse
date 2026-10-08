@@ -103,6 +103,12 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
 		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
 		return true
+	case req.Method == http.MethodGet && managedWorkflowStatePath(req.URL.Path) != "":
+		r.handleManagedWorkflowStateGET(w, req, managedWorkflowStatePath(req.URL.Path))
+		return true
+	case req.Method == http.MethodPut && managedWorkflowStatePath(req.URL.Path) != "":
+		r.handleManagedWorkflowStatePUT(w, req, managedWorkflowStatePath(req.URL.Path))
+		return true
 	case req.Method == http.MethodGet && managedGoalPath(req.URL.Path) != "":
 		r.handleManagedGoalGET(w, req, managedGoalPath(req.URL.Path))
 		return true
@@ -1283,6 +1289,18 @@ func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request)
 	}
 	r.writeManagedJSON(w, req, 200, managed.ProjectionEnvelope(snapshot), nil)
 }
+func managedWorkflowStatePath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/workflow-state") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/workflow-state")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
 func managedGoalPath(path string) string {
 	const prefix = "/v1/managed-agents/"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/goal") {
@@ -1367,6 +1385,106 @@ func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, er
 		return nil, errors.New("managed goal settings are invalid")
 	}
 	return map[string]any{"goal_lock_enabled": goalLock, "snooze_enabled": snooze, "snooze_duration_ms": duration, "snooze_turn_limit": turnLimit, "snooze_budget_cap_ms": budget, "snooze_refill_yield_ms": yield, "snooze_refill_elapsed_ms": elapsed}, nil
+}
+
+func (r *Router) handleManagedWorkflowStateGET(w http.ResponseWriter, req *http.Request, agentID string) {
+	agent, err := r.store.ManagedAgent(req.Context(), agentID)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		return
+	}
+	var activeState *store.WorkflowState
+	if agent.ActiveWorkflowStateID != "" {
+		st, err := r.store.GetWorkflowState(req.Context(), agent.ActiveWorkflowStateID)
+		if err == nil {
+			activeState = st
+		}
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
+		"agent_id":                  agentID,
+		"active_workflow_state_id":  agent.ActiveWorkflowStateID,
+		"active_workflow_state":     activeState,
+	}, nil)
+}
+
+func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.Request, agentID string) {
+	requestID := req.Header.Get("X-Request-ID")
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 16*1024, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	rawAction, hasAction := payload["action"]
+	if !hasAction {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_ACTION", "action is required ('activate' or 'deactivate')"})
+		return
+	}
+	var action string
+	if err := json.Unmarshal(rawAction, &action); err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_ACTION", "action must be a string"})
+		return
+	}
+
+	agent, err := r.store.ManagedAgent(req.Context(), agentID)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		return
+	}
+
+	switch action {
+	case "activate":
+		rawWorkflowID, hasWorkflowID := payload["workflow_state_id"]
+		if !hasWorkflowID {
+			r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_FIELD", "workflow_state_id is required for activate"})
+			return
+		}
+		var workflowStateID string
+		if err := json.Unmarshal(rawWorkflowID, &workflowStateID); err != nil || strings.TrimSpace(workflowStateID) == "" {
+			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_FIELD", "workflow_state_id must be a non-empty string"})
+			return
+		}
+		wfState, err := r.store.GetWorkflowState(req.Context(), workflowStateID)
+		if err != nil {
+			r.writeManagedError(w, req, &managedHTTPError{404, "WORKFLOW_STATE_NOT_FOUND", "Workflow state not found"})
+			return
+		}
+
+		if err := r.store.SetManagedAgentActiveWorkflowState(req.Context(), agentID, &wfState.ID); err != nil {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update agent workflow state"})
+			return
+		}
+
+		// Inject entry text prompt if configured and agent is embedded/running
+		if strings.TrimSpace(wfState.EntryText) != "" && agent.Runtime == "embedded" && agent.LifecycleState == "running" {
+			promptMsg := "[Workflow Activated: " + wfState.Name + "]\n\n" + wfState.EntryText
+			// Admit prompt using the client's request ID or a sub-derived request ID
+			_ = r.managed.AdmitPromptWithRequestID(req.Context(), agentID, promptMsg, requestID)
+		}
+
+		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
+			"agent_id":                 agentID,
+			"active_workflow_state_id": wfState.ID,
+			"active_workflow_state":    wfState,
+		}, nil)
+
+	case "deactivate":
+		if err := r.store.SetManagedAgentActiveWorkflowState(req.Context(), agentID, nil); err != nil {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
+			return
+		}
+		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
+			"agent_id":                 agentID,
+			"active_workflow_state_id": "",
+			"active_workflow_state":    nil,
+		}, nil)
+
+	default:
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_ACTION", "action must be 'activate' or 'deactivate'"})
+	}
 }
 
 func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, agentID string) {

@@ -562,9 +562,35 @@ p:empty { display: none; }
   margin: 28px 0 10px;
   font-weight: 800;
 }
-.agent-filter { margin: 0 0 12px; }
-/* A normal row is a 66px avatar plus 28px padding. Expanded rows keep their natural height. */
-.agents { --agent-row-min-height: 94px; --agent-row-gap: 10px; display: grid; grid-auto-rows: max-content; align-content: start; gap: var(--agent-row-gap); min-width: 0; min-height: 0; max-height: calc(15 * var(--agent-row-min-height) + 14 * var(--agent-row-gap)); overflow-x: hidden; overflow-y: auto; overflow-anchor: none; }
+.workflow-header-button {
+  background: var(--surface);
+  border: 1px solid var(--border-color, #444);
+  color: var(--text-muted, #aaa);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.15s ease-in-out;
+}
+.workflow-header-button:hover {
+  background: var(--surface-hover, #2a2a2a);
+  color: var(--text, #fff);
+  border-color: var(--primary, #3b82f6);
+}
+.workflow-header-button.has-workflow {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: #60a5fa;
+}
+.workflow-dropdown-item:hover {
+  background: var(--surface-hover, #333) !important;
+}
+.workflow-dropdown-item.deactivate:hover {
+  background: rgba(239, 68, 68, 0.15) !important;
+}
+/* A normal row is a 42px avatar plus 18px padding (~61px min-height). Expanded rows keep their natural height. */
+.agents { --agent-row-min-height: 61px; --agent-row-gap: 10px; display: grid; grid-auto-rows: max-content; align-content: start; gap: var(--agent-row-gap); min-width: 0; min-height: 0; max-height: calc(15 * var(--agent-row-min-height) + 14 * var(--agent-row-gap)); overflow-x: hidden; overflow-y: auto; overflow-anchor: none; }
 .agents > .agent-row { min-height: var(--agent-row-min-height); }
 .agent-row {
   width: 100%;
@@ -574,8 +600,8 @@ p:empty { display: none; }
   position: relative;
   gap: 10px;
   text-align: left;
-  padding: 14px 44px 14px 14px;
-  border-radius: 20px;
+  padding: 9px 38px 9px 10px;
+  border-radius: 14px;
   background: var(--surface) !important;
   color: var(--text) !important;
   cursor: pointer;
@@ -639,13 +665,45 @@ p:empty { display: none; }
   line-height: 1;
   cursor: pointer;
 }
-.arrival-indicator { align-items: center; max-width: min(100%, 300px); color: #211600; background: linear-gradient(135deg, rgba(255,209,102,0.96), rgba(255,184,77,0.94)); border-color: rgba(255,209,102,0.46); }
+.arrival-indicator {
+  align-items: center;
+  margin-top: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
 .arrival-indicator.header { margin-top: 0; max-width: min(100%, 420px); }
 .arrival-copy { display: grid; min-width: 0; }
 .arrival-copy strong, .arrival-copy small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
 .arrival-copy small { opacity: 0.82; font-weight: 800; }
-.arrival-dismiss { min-width: 22px; width: 22px; min-height: 22px; height: 22px; margin-left: 2px; padding: 0; border-radius: 999px; background: rgba(33,22,0,0.16); color: #211600; font-size: 12px; }
-.arrival-icon { width: 12px; flex: 0 0 12px; color: #211600; font-size: 11px; line-height: 1; }
+.arrival-dismiss { display: none; }
+.arrival-icon { font-size: 13px; line-height: 1; color: var(--yellow); }
+.agent-row-arrival { display: inline-flex; align-items: center; }
+.arrival-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  width: 22px;
+  min-height: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255,209,102,0.46);
+  border-radius: 999px;
+  background: rgba(255,209,102,0.18);
+  color: var(--yellow);
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+.arrival-open:hover {
+  background: rgba(255,209,102,0.32);
+  border-color: rgba(255,209,102,0.7);
+}
+.arrival-open:focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 2px;
+}
 .compacting-indicator { color: #f2e8ff; background: rgba(126,34,206,0.28); border-color: rgba(192,132,252,0.44); cursor: default; }
 .compacting-indicator.inline { margin-top: 0; font-size: 12px; }
 .subagent-indicator.expanded { align-items: flex-start; max-width: min(100%, 360px); padding: 7px 10px 9px; border-radius: 12px; }
@@ -739,8 +797,8 @@ p:empty { display: none; }
 .avatar {
   display: grid;
   place-items: center;
-  width: 66px;
-  height: 66px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: var(--secondary);
   color: var(--ink);

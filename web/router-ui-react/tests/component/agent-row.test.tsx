@@ -204,4 +204,30 @@ describe("AgentRow", () => {
     fireEvent.click(screen.getByRole("button", { name: /Build Agent/i }));
     expect(onSelect).toHaveBeenCalledWith("build-agent");
   });
+
+  it("renders mailbox arrival as an envelope icon with tooltip and click action", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    const arrival = {
+      id: "arr-1",
+      agent: "build-agent",
+      from: "alice",
+      subject: "PR review requested",
+      preview: "Can you check the PR?",
+      received_at: "2030-01-01T00:00:00.000Z",
+      sourceKind: "agent" as const,
+      body: "Can you check the PR?",
+      expiresAtMs: Date.now() + 60_000,
+    };
+    render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle" }} arrival={arrival} onOpenArrival={onOpen} />);
+
+    const openBtn = screen.getByRole("button", { name: "Open message from alice" });
+    expect(openBtn).toBeInTheDocument();
+    expect(openBtn).toHaveAttribute("title", "alice: PR review requested");
+    expect(openBtn.querySelector(".fa-envelope")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dismiss message from alice" })).not.toBeInTheDocument();
+
+    await user.click(openBtn);
+    expect(onOpen).toHaveBeenCalledWith(arrival);
+  });
 });

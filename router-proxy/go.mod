@@ -16,7 +16,7 @@ require (
 	github.com/coder/websocket v1.8.12
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
@@ -34,4 +34,4 @@ require (
 	modernc.org/token v1.1.0 // indirect
 )
 
-replace github.com/sky-valley/pi => github.com/wolfgangmeyers/pi-go-embedded-sdk v0.0.0-20260930044440-f1e2aa9112f7
+replace github.com/sky-valley/pi => github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008151604-70bc8060a4a4

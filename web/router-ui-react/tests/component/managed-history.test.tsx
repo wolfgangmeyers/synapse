@@ -512,4 +512,111 @@ describe("Selected-agent conversation modes", () => {
     // No empty chat bubble is rendered
     expect(container.querySelector(".bubble-wrap")).not.toBeInTheDocument();
   });
+
+  it("deduplicates identical thinking trace cards before consecutive tool calls in a multi-step turn", () => {
+    const identicalThinking = "Investigating the file structure to find the right configuration.";
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-step-1",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "bash",
+              outcome: "success",
+              thinking: identicalThinking,
+            },
+            tool_input: { command: "ls -la" },
+            thinking: identicalThinking,
+          },
+          {
+            id: "act-step-2",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:05.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "read",
+              outcome: "success",
+              thinking: identicalThinking,
+            },
+            tool_input: { path: "config.json" },
+            thinking: identicalThinking,
+          },
+          {
+            id: "act-step-3",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:10.000Z",
+            presentation: {
+              kind: "thinking",
+              outcome: "success",
+              thinking: identicalThinking,
+            },
+            thinking: identicalThinking,
+          },
+        ]}
+      />
+    );
+
+    // Both tool entries should be rendered in the DOM
+    expect(container.querySelector("[data-activity-id='act-step-1']")).toBeInTheDocument();
+    expect(container.querySelector("[data-activity-id='act-step-2']")).toBeInTheDocument();
+
+    // Exactly one thinking trace card should be rendered across the entire sequence
+    const thinkingCards = container.querySelectorAll(".thinking-trace-card");
+    expect(thinkingCards).toHaveLength(1);
+    expect(screen.getByText(identicalThinking)).toBeInTheDocument();
+  });
+
+  it("renders distinct thinking trace cards when thinking changes in a multi-step turn", () => {
+    const thinking1 = "First thought: search for files.";
+    const thinking2 = "Second thought: apply patch to configuration.";
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[]}
+        activityEntries={[
+          {
+            id: "act-step-1",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:00.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "bash",
+              outcome: "success",
+              thinking: thinking1,
+            },
+            tool_input: { command: "find ." },
+            thinking: thinking1,
+          },
+          {
+            id: "act-step-2",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:01:05.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "edit",
+              outcome: "success",
+              thinking: thinking2,
+            },
+            tool_input: { path: "config.json" },
+            thinking: thinking2,
+          },
+        ]}
+      />
+    );
+
+    // Both distinct thinking trace cards should be rendered
+    const thinkingCards = container.querySelectorAll(".thinking-trace-card");
+    expect(thinkingCards).toHaveLength(2);
+    expect(screen.getByText(thinking1)).toBeInTheDocument();
+    expect(screen.getByText(thinking2)).toBeInTheDocument();
+  });
 });
