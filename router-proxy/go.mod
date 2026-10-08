@@ -34,4 +34,4 @@ require (
 	modernc.org/token v1.1.0 // indirect
 )
 
-replace github.com/sky-valley/pi => github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008151604-70bc8060a4a4
+replace github.com/sky-valley/pi => github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261008190227-790d0ba5128f

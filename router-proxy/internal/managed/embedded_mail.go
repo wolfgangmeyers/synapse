@@ -162,6 +162,9 @@ func (m *Manager) trySteerActiveSession(agentID string, active *coding.Session) 
 	if err != nil || msgID == "" {
 		return false
 	}
+	if p.hasSteerAttempt(msgID) {
+		return false
+	}
 	attempt, err := m.store.ReserveEmbeddedMail(ctx, p.binding, msgID)
 	if err != nil || attempt == nil {
 		log.Printf("[embedded:%s] Failed to reserve steer mail %s: %v", agentID, msgID, err)
@@ -180,7 +183,9 @@ func (m *Manager) trySteerActiveSession(agentID string, active *coding.Session) 
 		return false
 	}
 
-	p.queueSteerAttempt(attempt, userMsgBytes)
+	if !p.queueSteerAttempt(attempt, userMsgBytes) {
+		return false
+	}
 	active.Steer(userMsg)
 	log.Printf("[embedded:%s] Successfully steered message %s mid-turn into active session", agentID, attempt.MessageID)
 	return true

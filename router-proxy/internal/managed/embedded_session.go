@@ -69,13 +69,30 @@ type embeddedPersistence struct {
 	msgID             string
 }
 
-func (p *embeddedPersistence) queueSteerAttempt(attempt *store.EmbeddedMailAttempt, userMsg []byte) {
+func (p *embeddedPersistence) hasSteerAttempt(messageID string) bool {
 	p.steerMu.Lock()
 	defer p.steerMu.Unlock()
+	for _, item := range p.steerQueue {
+		if item.attempt.MessageID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *embeddedPersistence) queueSteerAttempt(attempt *store.EmbeddedMailAttempt, userMsg []byte) bool {
+	p.steerMu.Lock()
+	defer p.steerMu.Unlock()
+	for _, item := range p.steerQueue {
+		if item.attempt.MessageID == attempt.MessageID {
+			return false
+		}
+	}
 	p.steerQueue = append(p.steerQueue, &steerPending{
 		attempt: attempt,
 		userMsg: userMsg,
 	})
+	return true
 }
 
 func (p *embeddedPersistence) popSteerAttempt(body []byte) *store.EmbeddedMailAttempt {
