@@ -1012,6 +1012,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "reset"))
+		tools = append(tools, m.embeddedScratchpadTool(owner))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
@@ -1313,6 +1314,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if call.ToolCall.Name == "context_reset" || call.ToolCall.Name == "reset" {
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: "context reset requires embedded root or worker"}
+				}
+				return nil
+			}
+			if call.ToolCall.Name == "scratchpad" {
+				if role != "root" && role != "worker" {
+					return &agent.PolicyDenial{Reason: "scratchpad requires embedded root or worker"}
 				}
 				return nil
 			}

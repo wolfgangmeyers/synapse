@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -188,7 +189,29 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	}
 
 	// Append scratchpad entries (if any)
-	// (Persistent scratchpad table will be injected here when populated)
+	scratchpadEntries, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 10)
+	if err == nil && len(scratchpadEntries) > 0 {
+		var sb strings.Builder
+		sb.WriteString("Persistent scratchpad memory handoff:\n")
+		for _, e := range scratchpadEntries {
+			status := "Recent"
+			if e.Pinned {
+				status = "Pinned"
+			}
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", status, e.Content))
+		}
+		scratchpadMsg := ai.UserMessage{
+			Content: ai.ContentList{
+				ai.TextContent{Text: strings.TrimRight(sb.String(), "\n")},
+			},
+		}
+		scratchpadBody, err := json.Marshal(scratchpadMsg)
+		if err == nil {
+			if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, "user", scratchpadBody); err != nil {
+				return fmt.Errorf("append scratchpad handoff: %w", err)
+			}
+		}
+	}
 
 	// Append ported recent messages
 	for _, msg := range portedMessages {
