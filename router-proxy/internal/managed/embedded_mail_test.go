@@ -442,4 +442,76 @@ func TestEmbeddedMailToolsNoSyntheticFallbackText(t *testing.T) {
 		require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox WHERE body LIKE '%Action completed without additional text%'`).Scan(&fallbackCount))
 		require.Zero(t, fallbackCount, "synthetic fallback text must never appear in outbox")
 	})
+
+	t.Run("ToolExecutionWithEmptyTextTriggersAnswerSynthesisNudge", func(t *testing.T) {
+		initialStep := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "ready"}}, ai.StopStop)
+		}
+		reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep})
+
+		manager, err := NewManager(ManagerOptions{
+			Store:                        db,
+			Manifest:                     manifest,
+			Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+			CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+			EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+			CodexCredentialStore:         testfixture.CodexAdmission(t),
+			EmbeddedMailBackoff:          10 * time.Millisecond,
+		})
+		require.NoError(t, err)
+		defer manager.Close(ctx)
+
+		launched, err := manager.Launch(ctx, LaunchRequest{
+			Name: "nudge-reply-worker", Cwd: root, Runtime: "embedded",
+			Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+			RequestID: "d1111111-1111-4111-8111-111111111111",
+		})
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			a, e := db.ManagedAgent(ctx, launched.Agent.AgentID)
+			return e == nil && a.LifecycleState == "running" && a.ActivityState == "idle"
+		}, 3*time.Second, 10*time.Millisecond)
+
+		step1 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo check"}, "bash-call-nudge"),
+			}, ai.StopToolUse)
+		}
+		step2 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			// Model returns only thinking and 0 text, simulating Gemini 3.8 Flash behavior
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.ThinkingContent{Thinking: "Investigated and concluded task in thoughts"},
+			}, ai.StopStop)
+		}
+		var sawNudgePrompt atomic.Bool
+		step3Finished := make(chan struct{})
+		step3 := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+			defer close(step3Finished)
+			for _, msg := range h.Messages {
+				if userMsg, ok := msg.(ai.UserMessage); ok {
+					for _, c := range userMsg.Content {
+						if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "Please provide your direct conversational response and answer to the user") {
+							sawNudgePrompt.Store(true)
+						}
+					}
+				}
+			}
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Here is my synthesized conversational response after the nudge."},
+			}, ai.StopStop)
+		}
+		reg.SetResponses([]providers.FauxResponseStep{step1, step2, step3, initialStep})
+
+		err = manager.AdmitPromptWithRequestID(ctx, launched.Agent.AgentID, "run check and answer", "d2222222-2222-4222-8222-222222222222")
+		require.NoError(t, err)
+
+		select {
+		case <-step3Finished:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for step3 to finish")
+		}
+
+		require.True(t, sawNudgePrompt.Load(), "model must receive the answer synthesis nudge prompt")
+	})
 }

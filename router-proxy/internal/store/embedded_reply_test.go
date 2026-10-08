@@ -112,3 +112,49 @@ func TestEmbeddedReplyWithoutTextContentWhenToolCallsPresent(t *testing.T) {
 	// 4. Verify (Action completed without additional text) is NOT forced into reply outbox
 	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "reply outbox must not force fallback bubble when tool calls are present")
 }
+
+func TestEmbeddedReplyThinkingFallbackWhenTextEmpty(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	path := filepath.Join(t.TempDir(), "reply-thinking-fallback.db")
+	s, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, err)
+	defer s.Close()
+
+	b := redBind(t, s, "reply-worker-thinking", "reply-session-thinking", 1, "reply-generation-1", "worker")
+
+	// 1. Inbound mail from "supervisor"
+	mail := testEnvelope("mail-from-supervisor-thinking", "investigate something")
+	mail.From = "supervisor"
+	mail.To = b.AgentID
+	_, err = s.Enqueue(ctx, mail)
+	require.NoError(t, err)
+
+	attempt := reserveEmbeddedMailTest(t, s, b, mail.ID)
+	require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, b, attempt.AttemptID, []byte(attempt.Body)))
+
+	snap, err := s.ReopenEmbedded(ctx, b)
+	require.NoError(t, err)
+	require.Len(t, snap.Entries, 1)
+
+	// 2. Final assistant message with thinking content but zero text
+	finalMsg, err := json.Marshal(ai.AssistantMessage{
+		StopReason: ai.StopStop,
+		Content: ai.ContentList{
+			ai.ThinkingContent{Thinking: "Analyzing commits and determined the issue is resolved."},
+		},
+	})
+	require.NoError(t, err)
+
+	finalEntry, err := s.AppendEmbeddedFinalAndReply(ctx, b, attempt.AttemptID, snap.Entries[0].Sequence, snap.Entries[0].Digest, finalMsg)
+	require.NoError(t, err, "assistant message with thinking content must finalize successfully")
+	require.Equal(t, "assistant", finalEntry.Kind)
+
+	// 3. Verify reply outbox HAS the thinking text as fallback
+	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"), "reply outbox must promote thinking content when text is empty")
+	reply, err := s.embeddedReplyTx(ctx, attempt.AttemptID)
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+	require.Equal(t, "Analyzing commits and determined the issue is resolved.", reply.Body)
+}
+

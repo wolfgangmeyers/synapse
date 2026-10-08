@@ -68,7 +68,12 @@ type embeddedBashFailureClass uint8
 const embeddedBashOutputTruncated embeddedBashFailureClass = 1
 
 func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string, fresh func(string) bool, produced func(string, ai.ToolResultMessage, bool), failed func(string, embeddedBashFailureClass)) agent.AgentTool {
-	return agent.AgentTool{Name: "bash", Description: "Run a bash command in the current working directory.", Parameters: embeddedBashSchema(), Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+	return agent.AgentTool{
+		Name:             "bash",
+		Description:      "Run a bash command in the current working directory.",
+		PromptGuidelines: []string{"When you run a command to investigate, continue until the task is complete, or write your answer to the user."},
+		Parameters:       embeddedBashSchema(),
+		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 		effect, err := m.store.RecoverEmbeddedEffect(ctx, owner.binding, id)
 		if err != nil {
 			return agent.AgentToolResult{}, err
