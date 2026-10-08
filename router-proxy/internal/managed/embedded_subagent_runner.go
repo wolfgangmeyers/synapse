@@ -157,7 +157,6 @@ func (m *Manager) closeSubagents() {
 	m.subagentsMu.Lock()
 	for _, task := range m.subagentsActive {
 		task.mu.Lock()
-		task.stopped = true
 		if task.cancel != nil {
 			task.cancel()
 		}
@@ -641,11 +640,8 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 	m.recordSubagentCompletionHistory(task.parent.AgentID, task.childID, task.attempt, desc, outcome, terminalStatus, resultText, errorMsg)
 
 	if err == nil && latestRecord != nil {
-		if latestRecord.Attempt == task.attempt && latestRecord.Status == terminalStatus {
-			m.AsyncDeliverSubagentParentWake(task.parent, *latestRecord)
-		} else {
-			// Construct exact attempt-scoped terminal record so notification has correct attempt stats
-			rec := *latestRecord
+		rec := *latestRecord
+		if latestRecord.Attempt != task.attempt || latestRecord.Status != terminalStatus {
 			rec.Attempt = task.attempt
 			rec.Status = terminalStatus
 			rec.ResultText = resultText
@@ -654,8 +650,8 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 			rec.ToolUseCount = finalTools
 			rec.TotalTokens = finalTokens
 			rec.DurationSeconds = finalDuration
-			m.AsyncDeliverSubagentParentWake(task.parent, rec)
 		}
+		m.AsyncDeliverSubagentParentWake(task.parent, rec)
 	}
 }
 
@@ -755,6 +751,9 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		}
 		if childBinding.OwnerToken > 0 && ownerID != "" {
 			_ = m.store.ReleaseEmbeddedOwner(context.Background(), childBinding, ownerID)
+		}
+		if m.isClosed() && !task.stopped {
+			return
 		}
 		if terminalStatus != "" {
 			m.finalizeSubagent(task, terminalStatus, resultText, errorMsg)
@@ -1029,7 +1028,31 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	})
 	defer unsubscribe()
 
-	_, runErr := session.Run(taskCtx, task.prompt)
+	var runErr error
+	hasUserOrTool := false
+	var lastRole ai.Role
+	for _, msg := range session.History() {
+		role := msg.MessageRole()
+		if role != ai.RoleSystem {
+			hasUserOrTool = true
+			lastRole = role
+		}
+	}
+
+	if !hasUserOrTool {
+		_, runErr = session.Run(taskCtx, task.prompt)
+	} else if lastRole == ai.RoleUser || lastRole == ai.RoleToolResult {
+		runErr = session.Continue(taskCtx)
+		if runErr != nil && strings.Contains(runErr.Error(), "Cannot continue") {
+			_, runErr = session.Run(taskCtx, "Continue working from your saved context.")
+		}
+	} else {
+		prompt := "Continue working from your saved context."
+		if task.prompt != "" && task.attempt > 1 && task.turnCount == 0 {
+			prompt = task.prompt
+		}
+		_, runErr = session.Run(taskCtx, prompt)
+	}
 
 	task.mu.Lock()
 	resultText = session.LastAssistantText()
@@ -1040,7 +1063,14 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	} else if task.hardAborted {
 		terminalStatus = "aborted"
 		resultText = "Subagent aborted: exceeded maximum turn limit and grace period without settling."
-	} else if task.stopped || taskCtx.Err() != nil || errors.Is(runErr, context.Canceled) {
+	} else if task.stopped {
+		terminalStatus = "stopped"
+		resultText = "Subagent stopped."
+		errorMsg = ""
+	} else if m.isClosed() || (m.runCtx != nil && m.runCtx.Err() != nil) || errors.Is(runErr, context.Canceled) || (runErr != nil && strings.Contains(runErr.Error(), "context canceled")) {
+		// Router is shutting down/restarting. Preserve running state for restart recovery.
+		terminalStatus = ""
+	} else if taskCtx.Err() != nil {
 		terminalStatus = "stopped"
 		resultText = "Subagent stopped."
 		errorMsg = ""
@@ -1055,6 +1085,120 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		}
 	}
 	task.mu.Unlock()
+}
+
+// RecoverActiveSubagents queries running/queued subagents from the store and resumes them across router restart.
+func (m *Manager) RecoverActiveSubagents(ctx context.Context) error {
+	if ctx == nil {
+		ctx = m.runCtx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	records, err := m.store.ActiveManagedSubagents(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range records {
+		parentAgent, err := m.store.ManagedAgent(ctx, rec.ParentAgentID)
+		if err != nil || parentAgent == nil || parentAgent.DesiredState != "running" {
+			continue
+		}
+		if parentAgent.SessionEpoch != rec.ParentEpoch {
+			continue
+		}
+		parentBinding := store.EmbeddedBinding{
+			AgentID:    rec.ParentAgentID,
+			SessionID:  rec.ParentSessionID,
+			Epoch:      rec.ParentEpoch,
+			Generation: rec.ParentGeneration,
+		}
+		m.mu.Lock()
+		if owner, ok := m.embeddedOwners[rec.ParentAgentID]; ok && owner.binding.Epoch == rec.ParentEpoch {
+			parentBinding.OwnerToken = owner.binding.OwnerToken
+		}
+		m.mu.Unlock()
+
+		task := &subagentTask{
+			parent:          parentBinding,
+			childID:         rec.AgentID,
+			attempt:         rec.Attempt,
+			subagentType:    rec.SubagentType,
+			description:     rec.Description,
+			maxTurns:        rec.MaxTurns,
+			prompt:          rec.ResumePrompt,
+			status:          "queued",
+			baseTurns:       rec.TurnCount,
+			baseToolUses:    rec.ToolUseCount,
+			baseTokens:      rec.TotalTokens,
+			baseDuration:    rec.DurationSeconds,
+			durationSeconds: rec.DurationSeconds,
+		}
+
+		m.subagentsMu.Lock()
+		m.subagentsRegistry[rec.AgentID] = task
+		if len(m.subagentsActive) < m.subagentCapacity() {
+			task.status = "running"
+			m.subagentsActive[rec.AgentID] = task
+			m.subagentsMu.Unlock()
+			started := m.startManagedTask(func() { m.runSubagent(task) })
+			if !started {
+				m.subagentsMu.Lock()
+				delete(m.subagentsActive, rec.AgentID)
+				m.subagentsMu.Unlock()
+			}
+		} else {
+			m.subagentsQueue = append(m.subagentsQueue, task)
+			m.subagentsMu.Unlock()
+		}
+	}
+
+	// Also deliver any completed notifications that were missed during restart
+	completed, err := m.store.CompletedSubagentsPendingNotification(ctx)
+	if err == nil {
+		for _, rec := range completed {
+			subject := fmt.Sprintf("Subagent %s Completed", rec.AgentID)
+			body := FormatSubagentNotification(*rec)
+			source := protocol.MessageSource{Kind: "system"}
+			msgID := fmt.Sprintf("subagent-completed-%s-%d", rec.AgentID, rec.Attempt)
+			now := formatManagedTime(m.clock.Now())
+			envelope := protocol.Envelope{
+				ID:        msgID,
+				From:      "supervisor",
+				To:        rec.ParentAgentID,
+				Subject:   &subject,
+				Body:      body,
+				CreatedAt: now,
+				Source:    &source,
+			}
+			result, err := m.store.Enqueue(ctx, envelope, store.EnqueueOptions{
+				Conversation: &store.ConversationOptions{
+					Body:   &body,
+					Source: &source,
+				},
+			})
+			if err == nil && (result.Created || result.ConversationCreated) {
+				m.mu.Lock()
+				publish := m.embeddedMailPublisher
+				m.mu.Unlock()
+				if publish != nil {
+					publish(result)
+				} else {
+					_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
+				}
+				m.OfferDirect(rec.ParentAgentID)
+			}
+			parentBinding := store.EmbeddedBinding{
+				AgentID:    rec.ParentAgentID,
+				SessionID:  rec.ParentSessionID,
+				Epoch:      rec.ParentEpoch,
+				Generation: rec.ParentGeneration,
+			}
+			m.AsyncDeliverSubagentParentWake(parentBinding, *rec)
+		}
+	}
+
+	return nil
 }
 
 // ReconcileInterruptedSubagents notifies parent workers of previously running subagents

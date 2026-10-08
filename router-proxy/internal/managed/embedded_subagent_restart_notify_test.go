@@ -53,12 +53,19 @@ func TestReconcileInterruptedSubagentsNotifiesParent(t *testing.T) {
 	require.NoError(t, mgr.Close(ctx))
 	require.NoError(t, db.Close())
 
-	// Reopen store: store.Open executes reconcileManagedSubagents which updates running -> interrupted
+	// Set status to interrupted in raw DB to simulate interrupted subagent
+	rawInitDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = rawInitDB.ExecContext(ctx, `UPDATE managed_subagents SET status='interrupted', error='router process terminated abruptly' WHERE agent_id=?`, childID)
+	require.NoError(t, err)
+	require.NoError(t, rawInitDB.Close())
+
+	// Reopen store
 	reopenedDB, err := store.Open(ctx, dbPath, store.Options{})
 	require.NoError(t, err)
 	defer reopenedDB.Close()
 
-	// Verify the subagent was marked interrupted by store reconciliation
+	// Verify the subagent remains interrupted
 	rawDB, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
 	defer rawDB.Close()
