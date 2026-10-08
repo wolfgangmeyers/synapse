@@ -14,7 +14,26 @@ import (
 
 func embeddedReminderSchema() *ai.Schema {
 	closed := false
-	s := ai.Object(ai.Prop("action", ai.EnumOf("list", "create", "update", "delete")), ai.Opt("body", ai.String()), ai.Opt("due_at", ai.String()), ai.Opt("id", ai.String()), ai.Opt("interval_ms", ai.Integer()))
+	s := ai.Object(
+		ai.Prop("action", ai.EnumOf("list", "create", "update", "delete")),
+		ai.Opt("body", ai.String("Reminder message text (aliases: message, content, text)")),
+		ai.Opt("message", ai.String("Alias for body")),
+		ai.Opt("content", ai.String("Alias for body")),
+		ai.Opt("text", ai.String("Alias for body")),
+		ai.Opt("due_at", ai.String("RFC3339 timestamp when reminder is due (aliases: scheduled_at, scheduledAt, time)")),
+		ai.Opt("scheduled_at", ai.String("Alias for due_at")),
+		ai.Opt("scheduledAt", ai.String("Alias for due_at")),
+		ai.Opt("time", ai.String("Alias for due_at")),
+		ai.Opt("id", ai.String("Reminder ID for update or delete")),
+		ai.Opt("interval_ms", ai.Integer("Recurring interval in milliseconds")),
+		ai.Opt("interval_minutes", ai.Integer("Recurring interval in minutes")),
+		ai.Opt("intervalMinutes", ai.Integer("Recurring interval in minutes")),
+		ai.Opt("delay_minutes", ai.Integer("Delay from now in minutes before reminder fires")),
+		ai.Opt("delayMinutes", ai.Integer("Delay from now in minutes before reminder fires")),
+		ai.Opt("delay_seconds", ai.Integer("Delay from now in seconds before reminder fires")),
+		ai.Opt("subject", ai.String("Optional subject or title for the reminder (aliases: title)")),
+		ai.Opt("title", ai.String("Alias for subject")),
+	)
 	s.AdditionalAllowed = &closed
 	return s
 }

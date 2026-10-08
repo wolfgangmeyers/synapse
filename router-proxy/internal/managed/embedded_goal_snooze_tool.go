@@ -21,6 +21,46 @@ func embeddedGoalSnoozeSchema() *ai.Schema {
 
 // The parser runs before SDK intent admission, using the original arguments.
 func embeddedGoalSnoozeArguments(args map[string]any) ([]byte, error) {
+	if rawVal, ok := args["duration_ms"]; ok {
+		switch v := rawVal.(type) {
+		case float64:
+			if int64(v) > 60000 {
+				args["duration_ms"] = int64(60000)
+			}
+		case int:
+			if int64(v) > 60000 {
+				args["duration_ms"] = int64(60000)
+			}
+		case int64:
+			if v > 60000 {
+				args["duration_ms"] = int64(60000)
+			}
+		case json.Number:
+			if i, err := v.Int64(); err == nil && i > 60000 {
+				args["duration_ms"] = int64(60000)
+			}
+		}
+	} else if rawVal, ok := args["duration"]; ok {
+		switch v := rawVal.(type) {
+		case float64:
+			d := int64(v)
+			if d > 60000 {
+				d = 60000
+			}
+			args["duration_ms"] = d
+		case int:
+			d := int64(v)
+			if d > 60000 {
+				d = 60000
+			}
+			args["duration_ms"] = d
+		case int64:
+			if v > 60000 {
+				v = 60000
+			}
+			args["duration_ms"] = v
+		}
+	}
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return nil, &store.EmbeddedGoalSnoozeDenial{Reason: "invalid arguments"}
