@@ -23,6 +23,11 @@ import (
 	"github.com/sky-valley/pi/coding"
 )
 
+type steerPending struct {
+	attempt *store.EmbeddedMailAttempt
+	userMsg []byte
+}
+
 // embeddedPersistence serializes one root's checked SDK callbacks in its
 // Manager lane. SQLite owns the binding, append head, and checkpoint fence.
 type embeddedPersistence struct {
@@ -36,6 +41,8 @@ type embeddedPersistence struct {
 	mailMessage       []byte
 	mailAttempt       string
 	mailAppendErr     error
+	steerMu           sync.Mutex
+	steerQueue        []*steerPending
 	notice            *store.EmbeddedInterruptedNotice
 	noticeMessage     []byte
 	noticeStart       bool
@@ -60,6 +67,32 @@ type embeddedPersistence struct {
 	toolExecuted      bool
 	source            string
 	msgID             string
+}
+
+func (p *embeddedPersistence) queueSteerAttempt(attempt *store.EmbeddedMailAttempt, userMsg []byte) {
+	p.steerMu.Lock()
+	defer p.steerMu.Unlock()
+	p.steerQueue = append(p.steerQueue, &steerPending{
+		attempt: attempt,
+		userMsg: userMsg,
+	})
+}
+
+func (p *embeddedPersistence) popSteerAttempt(body []byte) *store.EmbeddedMailAttempt {
+	p.steerMu.Lock()
+	defer p.steerMu.Unlock()
+	if len(p.steerQueue) == 0 {
+		return nil
+	}
+	for i, item := range p.steerQueue {
+		if bytes.Equal(body, item.userMsg) {
+			p.steerQueue = append(p.steerQueue[:i], p.steerQueue[i+1:]...)
+			return item.attempt
+		}
+	}
+	item := p.steerQueue[0]
+	p.steerQueue = p.steerQueue[1:]
+	return item.attempt
 }
 
 func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
@@ -335,6 +368,22 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 		return nil
 	}
+	if message.MessageRole() == ai.RoleUser {
+		if steerAttempt := p.popSteerAttempt(body); steerAttempt != nil {
+			entry, historyEntry, err := p.db.AppendEmbeddedSteerMailAndACK(ctx, p.binding, steerAttempt.AttemptID, body)
+			if err != nil {
+				return err
+			}
+			p.seq, p.digest = entry.Sequence, entry.Digest
+			p.turnSeq, p.turnDigest = entry.Sequence, entry.Digest
+			p.mailAttempt = steerAttempt.AttemptID
+			p.traceChecked(message)
+			if p.publishComplete != nil && historyEntry.ID != "" {
+				p.publishComplete(historyEntry)
+			}
+			return nil
+		}
+	}
 	if p.wake != nil {
 		final := false
 		switch assistant := message.(type) {
@@ -426,6 +475,65 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			p.mailAttempt = ""
 			if p.afterUserAppend != nil {
 				p.afterUserAppend(ctx)
+			}
+		} else if message.MessageRole() == ai.RoleAssistant {
+			final := false
+			var text strings.Builder
+			var thinking strings.Builder
+			switch assistant := message.(type) {
+			case ai.AssistantMessage:
+				final = assistant.StopReason == ai.StopStop
+				for _, c := range assistant.Content {
+					if t, ok := c.(ai.TextContent); ok {
+						text.WriteString(t.Text)
+					} else if t, ok := c.(*ai.TextContent); ok && t != nil {
+						text.WriteString(t.Text)
+					} else if th, ok := c.(ai.ThinkingContent); ok {
+						thinking.WriteString(th.Thinking)
+					} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil {
+						thinking.WriteString(th.Thinking)
+					}
+				}
+			case *ai.AssistantMessage:
+				if assistant != nil {
+					final = assistant.StopReason == ai.StopStop
+					for _, c := range assistant.Content {
+						if t, ok := c.(ai.TextContent); ok {
+							text.WriteString(t.Text)
+						} else if t, ok := c.(*ai.TextContent); ok && t != nil {
+							text.WriteString(t.Text)
+						} else if th, ok := c.(ai.ThinkingContent); ok {
+							thinking.WriteString(th.Thinking)
+						} else if th, ok := c.(*ai.ThinkingContent); ok && th != nil {
+							thinking.WriteString(th.Thinking)
+						}
+					}
+				}
+			}
+			if final && len(strings.TrimSpace(text.String())) > 0 {
+				replyBodyText := text.String()
+				eventKey := fmt.Sprintf("embedded-assistant:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
+				presentation := &store.ManagedHistoryPresentation{
+					Kind:     "message",
+					Outcome:  "success",
+					From:     p.binding.AgentID,
+					To:       "user",
+					Thinking: thinking.String(),
+				}
+				historyEntry, err := p.db.RecordManagedCompleteHistoryWithDetails(
+					ctx,
+					p.binding.AgentID,
+					"managed_message",
+					"info",
+					"Message sent",
+					eventKey,
+					presentation,
+					nil,
+					&replyBodyText,
+				)
+				if err == nil && p.publishComplete != nil && historyEntry.ID != "" {
+					p.publishComplete(historyEntry)
+				}
 			}
 		}
 	}
@@ -1543,10 +1651,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	lane := m.laneFor(saved.AgentID)
 	lane.activeMu.Lock()
 	lane.activeSession = session
+	lane.activePersistence = p
 	lane.activeMu.Unlock()
 	defer func() {
 		lane.activeMu.Lock()
 		lane.activeSession = nil
+		lane.activePersistence = nil
 		lane.activeMu.Unlock()
 	}()
 	m.activeSessionsMu.Lock()

@@ -2,11 +2,13 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -1461,8 +1463,30 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		// Inject entry text prompt if configured and agent is embedded/running
 		if strings.TrimSpace(wfState.EntryText) != "" && agent.Runtime == "embedded" && agent.LifecycleState == "running" {
 			promptMsg := "[Workflow Activated: " + wfState.Name + "]\n\n" + wfState.EntryText
-			// Admit prompt using the client's request ID or a sub-derived request ID
-			_ = r.managed.AdmitPromptWithRequestID(req.Context(), agentID, promptMsg, requestID)
+			promptReqID, err := r.nextID()
+			if err != nil {
+				promptReqID = requestID
+			}
+			go func() {
+				_ = r.managed.AdmitPromptWithRequestID(context.Background(), agentID, promptMsg, promptReqID)
+			}()
+		} else if strings.TrimSpace(wfState.EntryText) == "" {
+			eventKey := fmt.Sprintf("workflow-state:%s:%s:%s", agentID, wfState.ID, requestID)
+			r.recordCompleteHistoryWithPresentation(
+				req.Context(),
+				agentID,
+				"managed_message",
+				"info",
+				"Workflow state activated",
+				eventKey,
+				&store.ManagedHistoryPresentation{
+					Kind:    "state",
+					Outcome: "success",
+					From:    "",
+					To:      wfState.Name,
+					Summary: "Workflow activated: " + wfState.Name,
+				},
+			)
 		}
 
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{

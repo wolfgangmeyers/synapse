@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -149,12 +150,21 @@ func (m *Manager) trySteerActiveSession(agentID string, active *coding.Session) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	lane := m.laneFor(agentID)
+	lane.activeMu.RLock()
+	p := lane.activePersistence
+	lane.activeMu.RUnlock()
+	if p == nil {
+		return false
+	}
+
 	msgID, err := m.store.NextEmbeddedSteerMail(ctx, agentID)
 	if err != nil || msgID == "" {
 		return false
 	}
-	msg, err := m.store.ClaimEmbeddedMailAttempt(ctx, msgID)
-	if err != nil || msg == nil {
+	attempt, err := m.store.ReserveEmbeddedMail(ctx, p.binding, msgID)
+	if err != nil || attempt == nil {
+		log.Printf("[embedded:%s] Failed to reserve steer mail %s: %v", agentID, msgID, err)
 		return false
 	}
 
@@ -163,18 +173,20 @@ func (m *Manager) trySteerActiveSession(agentID string, active *coding.Session) 
 		nowMilli = m.clock.Now().UnixMilli()
 	}
 
-	userMsg := buildSteerUserMessage(msg, nowMilli)
-	active.Steer(userMsg)
-	log.Printf("[embedded:%s] Successfully steered message %s mid-turn into active session", agentID, msg.ID)
-
-	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(ctx, agentID, "managed_message", "info", "Message received", fmt.Sprintf("steered-mail:%s:%s", agentID, msg.ID), &store.ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: msg.Sender, To: agentID}, nil, &msg.Body)
-	if err == nil {
-		m.publishCompleteHistory(entry)
+	userMsg := buildSteerUserMessage(attempt, nowMilli)
+	userMsgBytes, err := json.Marshal(userMsg)
+	if err != nil {
+		log.Printf("[embedded:%s] Failed to marshal steer user message: %v", agentID, err)
+		return false
 	}
+
+	p.queueSteerAttempt(attempt, userMsgBytes)
+	active.Steer(userMsg)
+	log.Printf("[embedded:%s] Successfully steered message %s mid-turn into active session", agentID, attempt.MessageID)
 	return true
 }
 
-func buildSteerUserMessage(msg *store.ClaimedEmbeddedMailAttempt, nowMilli int64) ai.UserMessage {
+func buildSteerUserMessage(msg *store.EmbeddedMailAttempt, nowMilli int64) ai.UserMessage {
 	text := unwrapEmbeddedMailText(msg.Body)
 	var content ai.ContentList
 	var attachmentRefs []string
