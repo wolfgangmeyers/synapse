@@ -383,6 +383,7 @@ export interface RouterHttpClient {
   createWorkflowState(payload: unknown): Promise<WorkflowStateResponse>;
   updateWorkflowState(id: string, payload: unknown): Promise<WorkflowStateResponse>;
   deleteWorkflowState(id: string): Promise<unknown>;
+  setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null): Promise<unknown>;
   attachmentUrl(reference: string): string;
   managedAgents(): Promise<ManagedAgentsResponse>;
   managedAgent(id: string): Promise<ManagedAgentResponse>;
@@ -476,6 +477,8 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     createWorkflowState: async (payload) => jsonRequest("/v1/workflow-states", "POST", payload) as Promise<WorkflowStateResponse>,
     updateWorkflowState: async (id, payload) => jsonRequest(`/v1/workflow-states/${encodeURIComponent(id)}`, "PUT", payload) as Promise<WorkflowStateResponse>,
     deleteWorkflowState: (id) => request(`/v1/workflow-states/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null) =>
+      jsonRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", { workflow_state_id: workflowStateId }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
     managedAgents: async () => managedAgents(await managedRequest("/v1/managed-agents", "GET")),
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),

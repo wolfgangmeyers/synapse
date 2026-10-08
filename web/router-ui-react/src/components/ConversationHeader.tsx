@@ -1,4 +1,5 @@
 import type { ReactElement, ReactNode } from "react";
+import { useEffect, useState } from "react";
 import type { Agent } from "../state/agent-projection";
 import { humanName } from "../state/selectors";
 import { SubagentBadge } from "./SubagentBadge";
@@ -6,6 +7,7 @@ import { ArrivalIndicator } from "./ArrivalIndicator";
 import { AgentAvatar } from "./AgentAvatar";
 import type { Arrival } from "../domain/arrivals";
 import type { RouterHttpClient } from "../transport/http-client";
+import type { WorkflowState } from "../domain/workflow-states";
 
 export type ConversationView = "quiet" | "complete";
 
@@ -78,10 +80,89 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
   const failureMessage = managedFailure?.last_error?.message ? `Unavailable: ${managedFailure.last_error.message}` : "Unavailable: managed worker failed.";
   const displayedSubagents = agent?.source === "router-managed" ? activeManagedSubagents(agent) : agent?.subagents ?? [];
   const displayedSubagentCount = agent?.source === "router-managed" ? displayedSubagents.length : agent?.subagent_count;
+
+  const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowState[]>([]);
+  const [showWorkflowDropdown, setShowWorkflowDropdown] = useState(false);
+  const [workflowUpdating, setWorkflowUpdating] = useState(false);
+
+  useEffect(() => {
+    if (!client || typeof client.workflowStates !== "function" || !agent || agent.source !== "router-managed") return;
+    let mounted = true;
+    client.workflowStates().then((res) => {
+      if (mounted) setAvailableWorkflows(res.workflow_states || []);
+    }).catch(() => {});
+    return () => { mounted = false; };
+  }, [client, agent?.agent_id, agent?.source]);
+
+  const activeWorkflowId = agent?.active_workflow_state_id || agent?.managed_agent?.active_workflow_state_id;
+  const activeWorkflow = availableWorkflows.find((w) => w.id === activeWorkflowId);
+
+  const handleSelectWorkflow = async (workflowId: string | null) => {
+    if (!client || !agent || workflowUpdating) return;
+    setWorkflowUpdating(true);
+    try {
+      await client.setManagedAgentWorkflowState(agent.agent_id, workflowId);
+      setShowWorkflowDropdown(false);
+    } catch (e) {
+      console.error("Failed to update agent workflow state", e);
+    } finally {
+      setWorkflowUpdating(false);
+    }
+  };
   return <header className={`conversation-header${agent ? " selected" : ""}`}><div className={`avatar ${visibleActivity === "active" ? "working" : visibleActivity === "compacting" ? "compacting" : terminating ? "terminating" : agent ? "" : "muted"}`} aria-hidden="true">{agent ? <AgentAvatar agentId={agent.agent_id} /> : "?"}</div><div className="peer-heading"><h2><span className="peer-name-label">{agent ? humanName(agent.agent_id) : "Pick an agent"}</span>{visibleActivity === "active" ? <span className="working-indicator inline" aria-label="Working"><span /></span> : null}{agent?.activity_state === "active" ? <button type="button" className="interrupt-worker-button header-button-interrupt" aria-label="Interrupt worker" title="Interrupt worker" onClick={() => {
     if (onInterrupt) onInterrupt();
     else if (client && agent) void client.interruptManagedAgent(agent.agent_id).catch(() => {});
-  }}><i className="fa-solid fa-square" aria-hidden="true" /></button> : null}{agent && showGoalControl ? <button type="button" className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`} onClick={onGoal} aria-label="Set goal" title="Set goal"><i className="fa-solid fa-flag" aria-hidden="true" /></button> : null}{agent && onLogs ? <button type="button" className="logs-header-button" onClick={onLogs} aria-label="Logs" title={`View logs for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-file-lines" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
+  }}><i className="fa-solid fa-square" aria-hidden="true" /></button> : null}{agent && showGoalControl ? <button type="button" className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`} onClick={onGoal} aria-label="Set goal" title="Set goal"><i className="fa-solid fa-flag" aria-hidden="true" /></button> : null}{agent?.source === "router-managed" && client ? (
+  <div className="workflow-header-control" style={{ position: "relative", display: "inline-block" }}>
+    <button
+      type="button"
+      className={`workflow-header-button ${activeWorkflowId ? "has-workflow active" : ""}`}
+      onClick={() => setShowWorkflowDropdown((v) => !v)}
+      aria-label="Workflow State"
+      title={activeWorkflow ? `Active Workflow: ${activeWorkflow.name}` : "Set Workflow State"}
+      disabled={workflowUpdating}
+    >
+      <i className="fa-solid fa-diagram-project" aria-hidden="true" />
+      {activeWorkflow ? <span className="workflow-header-badge-label" style={{ marginLeft: 4, fontSize: "0.85em", fontWeight: 600 }}>{activeWorkflow.name}</span> : null}
+    </button>
+    {showWorkflowDropdown ? (
+      <div className="workflow-header-dropdown" style={{ position: "absolute", top: "100%", right: 0, zIndex: 1000, background: "var(--bg-primary, #1e1e1e)", border: "1px solid var(--border-color, #444)", borderRadius: 6, minWidth: 200, padding: 4, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
+        <div style={{ fontSize: "0.8em", padding: "4px 8px", color: "var(--text-muted, #888)", borderBottom: "1px solid var(--border-color, #333)", marginBottom: 4 }}>
+          Workflow State
+        </div>
+        {activeWorkflowId ? (
+          <button
+            type="button"
+            className="workflow-dropdown-item deactivate"
+            style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: "none", border: "none", cursor: "pointer", color: "var(--color-danger, #ff5555)", display: "flex", alignItems: "center", gap: 6, borderRadius: 4 }}
+            onClick={() => void handleSelectWorkflow(null)}
+          >
+            <i className="fa-solid fa-xmark" aria-hidden="true" /> Deactivate Workflow
+          </button>
+        ) : null}
+        {availableWorkflows.length === 0 ? (
+          <div style={{ fontSize: "0.85em", padding: "6px 8px", color: "var(--text-muted, #888)" }}>No workflows available</div>
+        ) : (
+          availableWorkflows.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              className={`workflow-dropdown-item ${w.id === activeWorkflowId ? "selected" : ""}`}
+              style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: w.id === activeWorkflowId ? "var(--bg-secondary, #2a2a2a)" : "none", border: "none", cursor: "pointer", color: "inherit", display: "flex", flexDirection: "column", gap: 2, borderRadius: 4 }}
+              onClick={() => void handleSelectWorkflow(w.id)}
+            >
+              <span style={{ fontWeight: w.id === activeWorkflowId ? "bold" : "normal", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                {w.name}
+                {w.id === activeWorkflowId ? <i className="fa-solid fa-check" style={{ color: "var(--color-success, #4caf50)" }} aria-hidden="true" /> : null}
+              </span>
+              {w.description ? <span style={{ fontSize: "0.75em", opacity: 0.7 }}>{w.description}</span> : null}
+            </button>
+          ))
+        )}
+      </div>
+    ) : null}
+  </div>
+) : null}{agent && onLogs ? <button type="button" className="logs-header-button" onClick={onLogs} aria-label="Logs" title={`View logs for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-file-lines" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
   <button type="button" className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`} onClick={onReminders} aria-label="Add reminder" title="Add reminder">
     <i className="fa-solid fa-clock" aria-hidden="true" />
   </button>

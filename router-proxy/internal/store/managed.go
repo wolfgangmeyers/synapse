@@ -134,6 +134,8 @@ type ManagedAgentRecord struct {
 	LaunchRecipe *ManagedLaunchRecipe
 	// ParentAgentID records the parent agent ID if this agent is a subagent.
 	ParentAgentID string
+	// ActiveWorkflowStateID records the currently active workflow state ID if set.
+	ActiveWorkflowStateID string
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -4485,6 +4487,12 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedLaunchRecipeTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedParentAgentIDTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
+	if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4525,6 +4533,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedParentAgentIDTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -4583,6 +4594,55 @@ func loadManagedParentAgentIDTx(ctx context.Context, db *sql.DB, agent *ManagedA
 	agent.ParentAgentID = parentID.String
 	return nil
 }
+
+func loadManagedActiveWorkflowStateIDTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	hasCol, err := managedAgentColumnTx(ctx, db, "active_workflow_state_id")
+	if err != nil || !hasCol || agent == nil {
+		return err
+	}
+	var stateID sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT active_workflow_state_id FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&stateID); err != nil {
+		return err
+	}
+	agent.ActiveWorkflowStateID = stateID.String
+	return nil
+}
+
+func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID string, workflowStateID *string) error {
+	hasCol, err := managedAgentColumnTx(ctx, s.db, "active_workflow_state_id")
+	if err != nil {
+		return err
+	}
+	if !hasCol {
+		return errors.New("active_workflow_state_id column does not exist")
+	}
+	var stateIDVal sql.NullString
+	if workflowStateID != nil && *workflowStateID != "" {
+		stateIDVal = sql.NullString{String: *workflowStateID, Valid: true}
+		// Verify workflow state exists
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_states WHERE id=?`, *workflowStateID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errors.New("workflow state not found")
+			}
+			return err
+		}
+	}
+	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`, stateIDVal, now, agentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("managed agent not found")
+	}
+	return nil
+}
+
 
 // loadManagedLaunchRecipeTx attaches the durable launch recipe to an agent
 // record if present. Pre-045 stores lack the table entirely, and pre-086
@@ -4685,6 +4745,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 			return rollback(err)
 		}
 		if err := loadManagedParentAgentIDTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
+		if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
 		if agent.Runtime == "embedded" {
@@ -4801,6 +4864,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedParentAgentIDTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy

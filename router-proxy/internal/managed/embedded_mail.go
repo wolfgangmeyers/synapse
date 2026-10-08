@@ -28,12 +28,40 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 	if active != nil {
 		// Steer the message mid-turn!
 		// Try to fetch next mail without locking lane.serial
-		if handled := m.trySteerActiveSession(agentID, active); handled {
+		steeredAny := false
+		for m.trySteerActiveSession(agentID, active) {
+			steeredAny = true
+		}
+		if steeredAny {
 			return
 		}
 	}
 
-	lane.serial.Lock()
+	locked := lane.serial.TryLock()
+	if !locked {
+		for i := 0; i < 20; i++ {
+			lane.activeMu.RLock()
+			active = lane.activeSession
+			lane.activeMu.RUnlock()
+			if active != nil {
+				steeredAny := false
+				for m.trySteerActiveSession(agentID, active) {
+					steeredAny = true
+				}
+				if steeredAny {
+					return
+				}
+			}
+			if lane.serial.TryLock() {
+				locked = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !locked {
+			lane.serial.Lock()
+		}
+	}
 	defer lane.serial.Unlock()
 	for {
 		if m.runCtx.Err() != nil {
@@ -121,7 +149,7 @@ func (m *Manager) trySteerActiveSession(agentID string, active *coding.Session) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	msgID, err := m.store.NextEmbeddedMail(ctx, agentID)
+	msgID, err := m.store.NextEmbeddedSteerMail(ctx, agentID)
 	if err != nil || msgID == "" {
 		return false
 	}
@@ -138,6 +166,11 @@ func (m *Manager) trySteerActiveSession(agentID string, active *coding.Session) 
 	userMsg := buildSteerUserMessage(msg, nowMilli)
 	active.Steer(userMsg)
 	log.Printf("[embedded:%s] Successfully steered message %s mid-turn into active session", agentID, msg.ID)
+
+	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(ctx, agentID, "managed_message", "info", "Message received", fmt.Sprintf("steered-mail:%s:%s", agentID, msg.ID), &store.ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: msg.Sender, To: agentID}, nil, &msg.Body)
+	if err == nil {
+		m.publishCompleteHistory(entry)
+	}
 	return true
 }
 

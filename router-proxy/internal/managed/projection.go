@@ -28,6 +28,7 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"model":         map[string]any{"provider": agent.SelectedModel.Provider, "id": agent.SelectedModel.ID},
 		"desired_state": agent.DesiredState, "lifecycle_state": agent.LifecycleState, "activity_state": agent.ActivityState,
 		"accepting_prompts": agent.AcceptingPrompts,
+		"active_workflow_state_id": agent.ActiveWorkflowStateID,
 		"manifest":          map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":        agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
 	}

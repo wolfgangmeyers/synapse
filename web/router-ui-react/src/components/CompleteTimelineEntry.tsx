@@ -551,7 +551,17 @@ export function ThinkingTraceCard({
   );
 }
 
-export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry }): ReactElement | null {
+export interface CompleteTimelineEntryProps {
+  entry: ManagedHistoryEntry;
+  suppressThinking?: boolean;
+}
+
+export function CompleteTimelineEntry({ entry, suppressThinking = false }: CompleteTimelineEntryProps): ReactElement | null {
+  const isThinkingKind = entry.presentation?.kind === "thinking";
+  if (isThinkingKind && suppressThinking) {
+    return null;
+  }
+
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
     (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
@@ -572,9 +582,8 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const error = entry.presentation?.error;
   const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
   const isTool = entry.presentation?.kind === "tool";
-  const isThinkingKind = entry.presentation?.kind === "thinking";
   const isGoalEval = entry.presentation?.kind === "goal_evaluation";
-  const thinkingText = getThinkingContent(entry);
+  const thinkingText = suppressThinking ? undefined : getThinkingContent(entry);
   const hasDetails = isThinkingKind || thinkingText !== undefined || isGoalEval || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
   const accessibleName = [
     visual.dialogTitle && visual.dialogTitle !== visual.label ? visual.dialogTitle : undefined,

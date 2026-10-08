@@ -56,6 +56,7 @@ type embeddedPersistence struct {
 	flushReplies      func(string)
 	toolInputs        map[string]any
 	currentThinking   string
+	lastThinkingText  string
 	toolExecuted      bool
 	source            string
 	msgID             string
@@ -97,11 +98,12 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			assistantContent = assistant.Content
 		}
 	}
+	var stepThinking string
 	for _, part := range assistantContent {
 		if th, ok := part.(ai.ThinkingContent); ok && th.Thinking != "" {
-			p.currentThinking += th.Thinking
+			stepThinking += th.Thinking
 		} else if th, ok := part.(*ai.ThinkingContent); ok && th != nil && th.Thinking != "" {
-			p.currentThinking += th.Thinking
+			stepThinking += th.Thinking
 		}
 		if call, ok := part.(ai.ToolCall); ok && call.ID != "" {
 			if p.toolInputs == nil {
@@ -113,6 +115,15 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				p.toolInputs = make(map[string]any)
 			}
 			p.toolInputs[call.ID] = call.Arguments
+		}
+	}
+	if stepThinking != "" {
+		if p.currentThinking == "" || stepThinking == p.currentThinking {
+			p.currentThinking = stepThinking
+		} else if strings.HasPrefix(stepThinking, p.currentThinking) {
+			p.currentThinking = stepThinking
+		} else {
+			p.currentThinking += stepThinking
 		}
 	}
 	if assistantContent != nil {
@@ -128,16 +139,20 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 		if !hasToolCalls && p.currentThinking != "" {
-			thinkingKey := fmt.Sprintf("thinking:%s:%x", p.binding.AgentID, sha256.Sum256([]byte(p.currentThinking)))
-			pres := &store.ManagedHistoryPresentation{
-				Kind:    "thinking",
-				Outcome: "success",
-				Summary: "Thinking process",
-			}
-			thinkingCopy := p.currentThinking
-			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_thinking", "info", "Thinking Process", thinkingKey, pres, nil, &thinkingCopy)
-			if err == nil && p.publishComplete != nil {
-				p.publishComplete(entry)
+			newThinking := strings.TrimSpace(p.currentThinking)
+			if newThinking != "" && newThinking != p.lastThinkingText {
+				thinkingKey := fmt.Sprintf("thinking:%s:%x", p.binding.AgentID, sha256.Sum256([]byte(p.currentThinking)))
+				pres := &store.ManagedHistoryPresentation{
+					Kind:    "thinking",
+					Outcome: "success",
+					Summary: "Thinking process",
+				}
+				thinkingCopy := p.currentThinking
+				entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_thinking", "info", "Thinking Process", thinkingKey, pres, nil, &thinkingCopy)
+				if err == nil && p.publishComplete != nil {
+					p.publishComplete(entry)
+				}
+				p.lastThinkingText = newThinking
 			}
 			p.currentThinking = ""
 		}

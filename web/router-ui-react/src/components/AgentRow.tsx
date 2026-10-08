@@ -56,11 +56,11 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
         <span className="agent-name-line">
           {hasGoal ? onGoal ? <button type="button" className="goal-indicator" title="Set goal" aria-label="Set goal" onClick={(event) => { stopActionPropagation(event); onGoal(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-flag" aria-hidden="true" /></button> : <span className="goal-indicator" title="Goal active" aria-label="Goal active"><i className="fa-solid fa-flag" aria-hidden="true" /></span> : null}
           {hasReminders ? onReminders ? <button type="button" className="reminder-row-indicator" title="Add reminder" aria-label="Add reminder" onClick={(event) => { stopActionPropagation(event); onReminders(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-clock" aria-hidden="true" /></button> : <span className="reminder-row-indicator" title={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`} aria-label={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`}><i className="fa-solid fa-clock" aria-hidden="true" /></span> : null}
+          {arrival ? <span className="agent-row-arrival" onClick={(event) => event.stopPropagation()}><ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /></span> : null}
           <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? (agent.managed_agent?.runtime === "embedded" ? "Embedded" : "RPC") : "tmux"}</small>
         </span>
-        {hasSignals ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
-          {showSubagentBadge ? <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} /> : null}
-          {arrival ? <ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /> : null}
+        {showSubagentBadge ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
+          <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} />
         </span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}
         {failed ? <span className="managed-failure-indicator" role="alert" aria-label="Managed worker failed"><i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />Failed</span> : null}

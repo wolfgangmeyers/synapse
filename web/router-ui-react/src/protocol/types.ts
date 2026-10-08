@@ -865,6 +865,7 @@ export interface ManagedAgent {
     applied_revision?: number;
     projection_state?: "pending" | "applied" | "failed";
   };
+  active_workflow_state_id?: string | null;
 }
 
 export interface ManagedArchiveDelivery {
