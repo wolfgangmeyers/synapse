@@ -44,7 +44,7 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, allEntries?: r
   if (entry.presentation?.kind === "state" && !entry.message?.toLowerCase().includes("workflow") && !entry.presentation?.summary?.toLowerCase().includes("workflow")) return false;
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
-    (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
+    entry.presentation?.from === entry.agent_id
   );
   if (isOutboundMessage) {
     const rawContent = entry.message_content ?? entry.presentation?.summary;

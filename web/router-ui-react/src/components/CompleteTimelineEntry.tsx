@@ -57,7 +57,7 @@ export function isMailboxSendToUser(
   const isMailboxTool = toolName === "mecha_mailbox_send" || isWorkerSend;
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
-    (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
+    entry.presentation?.from === entry.agent_id
   );
 
   if (!isMailboxTool && !isOutboundMessage) return undefined;
@@ -390,7 +390,7 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   const hasInboundDetails = entry.message_content !== undefined || entry.sender_identity !== undefined;
   if (hasInboundDetails && (presentation.kind === "message" || presentation.kind === "reminder")) {
     const reminder = presentation.kind === "reminder";
-    const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || (presentation.from === entry.agent_id && presentation.to !== undefined);
+    const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || presentation.from === entry.agent_id;
     if (isOutbound) {
       const to = presentation.to;
       const label = to ? `To ${to}` : entry.message || "Message sent";
@@ -439,19 +439,19 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
       const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
       return { icon: "fa-solid fa-terminal", tone: "blue", label, subject, dialogTitle: entry.message || "Prompt", detail, isHighValue: false };
     }
-    const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || (presentation.from === entry.agent_id && presentation.to !== undefined);
+    const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || presentation.from === entry.agent_id;
     let label: string;
     if (isOutbound && presentation.to) {
       label = `To ${presentation.to}`;
     } else if (!isOutbound && presentation.from) {
       label = `From ${presentation.from}`;
     } else {
-      label = entry.message || "Recorded activity";
+      label = entry.message || (isOutbound ? "Message sent" : "Recorded activity");
     }
     const subject = extractSubject(entry, entry.message_content);
     const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
     const dialogTitle = entry.message || (isOutbound ? "Message sent" : "Recorded activity");
-    return { icon: "fa-solid fa-circle-check", tone: presentation.outcome === "error" ? "danger" : "blue", label, subject, dialogTitle, detail, isHighValue: presentation.outcome === "error" };
+    return { icon: isOutbound ? "fa-solid fa-paper-plane" : "fa-solid fa-circle-check", tone: presentation.outcome === "error" ? "danger" : "blue", label, subject, dialogTitle, detail, isHighValue: presentation.outcome === "error" };
   }
   if (presentation.kind === "subagent_complete" || (presentation.kind === "subagent" && (presentation.outcome === "completed" || presentation.outcome === "failed" || presentation.outcome === "success" || presentation.outcome === "error"))) {
     return subagentCompleteVisual(presentation, entry);
@@ -654,7 +654,7 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false }: Compl
 
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
-    (entry.presentation?.from === entry.agent_id && entry.presentation?.to !== undefined)
+    entry.presentation?.from === entry.agent_id
   );
   if (isOutboundMessage) {
     const rawContent = entry.message_content ?? entry.presentation?.summary;

@@ -118,10 +118,6 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		if _, err = s.db.ExecContext(ctx, `INSERT INTO embedded_append_keys(append_key,agent_id,session_id,epoch,generation,entry_seq) VALUES(?,?,?,?,?,?)`, key, b.AgentID, b.SessionID, b.Epoch, b.Generation, entry.Sequence); err != nil {
 			return err
 		}
-		// Reminder turns complete in the SDK, but have no sender to reply to.
-		if sourceKind == "reminder" {
-			return nil
-		}
 		// If the agent already sent a message to the original sender during this turn,
 		// suppress automatic reply outbox insertion to avoid duplicate replies.
 		entryRows, err := s.db.QueryContext(ctx, `SELECT body FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq > ? AND seq <= ? AND kind='assistant'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, ackSeq, expectedSeq)
@@ -197,9 +193,11 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		}
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, replyBodyText, formatTimestamp(s.clock.Now()))
-		if err != nil {
-			return err
+		if sourceKind != "reminder" {
+			_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, replyBodyText, formatTimestamp(s.clock.Now()))
+			if err != nil {
+				return err
+			}
 		}
 		replyBody := replyBodyText
 		category := "managed_message"

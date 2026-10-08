@@ -526,6 +526,29 @@ describe("Complete timeline entry", () => {
     });
   });
 
+  it("renders outbound assistant message addressed to reminders visibly as a compact card with detail dialog", async () => {
+    const user = userEvent.setup();
+    const millipedeReply = "Got the reminder!\n\nThe animal with the most appendages is the millipede ***Eumillipes persephone***, which has been recorded with up to **1,306 legs**.";
+    const entry: ManagedHistoryEntry = {
+      id: "complete:millipede-reply",
+      agent_id: "workflows",
+      at,
+      message: "Message sent",
+      message_content: millipedeReply,
+      presentation: { kind: "message", outcome: "success", from: "workflows", to: "reminders" },
+    };
+
+    const { container } = render(<CompleteTimelineEntry entry={entry} />);
+
+    expect(container.querySelector(".fa-paper-plane")).toBeInTheDocument();
+    expect(screen.getByText("To reminders")).toBeInTheDocument();
+    expect(screen.getByText(/The animal with the most appendages is the millipede/)).toBeInTheDocument();
+
+    await user.click(container.querySelector(".activity-entry")!);
+    expect(screen.getByRole("heading", { level: 2, name: "Message sent" })).toBeInTheDocument();
+    expect(screen.getByText("reminders")).toBeInTheDocument();
+  });
+
   it("renders subagent completed card with distinct icon, label, description preview, and expandable result dialog", async () => {
     const user = userEvent.setup();
     const { container } = render(<CompleteTimelineEntry entry={{

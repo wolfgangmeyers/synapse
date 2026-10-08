@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Conversation } from "../../src/components/Conversation";
 import { MessageList } from "../../src/components/MessageList";
+import type { ManagedHistoryEntry } from "../../src/protocol/types";
 
 describe("Conversation", () => {
   afterEach(() => cleanup());
@@ -267,5 +268,71 @@ describe("Conversation", () => {
 
     expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
     expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
+  });
+
+  it("renders reminders and assistant replies to reminders visibly in both complete and chatOnly modes", () => {
+    const reminderReceived: ManagedHistoryEntry = {
+      id: "complete:rem-1",
+      agent_id: "workflows",
+      at: "2026-10-08T19:26:08.783Z",
+      level: "info",
+      message: "Reminder received",
+      message_content: "Testing out workflow 1-shot reminder. Notify the user if you got this and answer this question: What animal has the most appendages?",
+      sender_identity: "reminders",
+      presentation: {
+        kind: "reminder" as const,
+        outcome: "success" as const,
+      },
+    };
+
+    const reminderReply: ManagedHistoryEntry = {
+      id: "complete:rem-reply-1",
+      agent_id: "workflows",
+      at: "2026-10-08T19:26:08.800Z",
+      level: "info",
+      message: "Message sent",
+      message_content: "Got the reminder! The animal with the most appendages is the millipede Eumillipes persephone.",
+      sender_identity: "workflows",
+      presentation: {
+        kind: "message" as const,
+        outcome: "success" as const,
+        from: "workflows",
+        to: "reminders",
+      },
+    };
+
+    const { container, rerender } = render(
+      <Conversation
+        peer={{ agent_id: "workflows", source: "router-managed" }}
+        conversationView="complete"
+        ownerId="wolfgang"
+        messages={[]}
+        activityEntries={[reminderReceived, reminderReply]}
+      />
+    );
+
+    // Verify reminder received card
+    expect(container.querySelector("[data-activity-id='complete:rem-1']")).toBeInTheDocument();
+    expect(screen.getByText("From reminders")).toBeInTheDocument();
+
+    // Verify reminder reply card
+    expect(container.querySelector("[data-activity-id='complete:rem-reply-1']")).toBeInTheDocument();
+    expect(screen.getByText("To reminders")).toBeInTheDocument();
+    expect(screen.getByText(/The animal with the most appendages is the millipede/)).toBeInTheDocument();
+
+    // Verify both are retained in chatOnly mode
+    rerender(
+      <Conversation
+        peer={{ agent_id: "workflows", source: "router-managed" }}
+        conversationView="complete"
+        ownerId="wolfgang"
+        chatOnly={true}
+        messages={[]}
+        activityEntries={[reminderReceived, reminderReply]}
+      />
+    );
+
+    expect(screen.getByText("From reminders")).toBeInTheDocument();
+    expect(screen.getByText("To reminders")).toBeInTheDocument();
   });
 });
