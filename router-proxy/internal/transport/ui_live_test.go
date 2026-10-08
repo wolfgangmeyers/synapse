@@ -208,6 +208,14 @@ func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *tes
 	require.Equal(t, "managed_agents_snapshot", gap["type"])
 }
 
+func TestUILiveTransitionEmitsSnapshotWhenVersionUnchangedButAgentsDiffer(t *testing.T) {
+	prior := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha", "active_workflow_state_id": ""}}}
+	sameVersionUpdated := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha", "active_workflow_state_id": "wf-1"}}}
+	transition := uiLiveTransition(prior, sameVersionUpdated)
+	// Falls back to full snapshot so the client is guaranteed to receive the change
+	require.Equal(t, "managed_agents_snapshot", transition["type"])
+}
+
 func TestManagedHistoryFramePreservesPresentEmptyMessageDetails(t *testing.T) {
 	emptyBody := ""
 	sender := "original-sender"

@@ -220,13 +220,14 @@ func (h *uiLiveHub) publish(ctx context.Context) {
 		return
 	}
 	prior := h.current
+	agentsChanged := prior == nil || snapshot.version != prior.version || !reflect.DeepEqual(prior.agents, snapshot.agents)
 	childrenChanged := prior == nil || prior.childrenVersion != snapshot.childrenVersion || !reflect.DeepEqual(prior.children, snapshot.children)
-	if prior != nil && snapshot.version <= prior.version && !childrenChanged {
+	if !agentsChanged && !childrenChanged {
 		h.mu.Unlock()
 		return
 	}
 	frames := make([]map[string]any, 0, 2)
-	if prior == nil || snapshot.version > prior.version {
+	if agentsChanged {
 		frames = append(frames, uiLiveTransition(prior, snapshot))
 	}
 	if childrenChanged {
