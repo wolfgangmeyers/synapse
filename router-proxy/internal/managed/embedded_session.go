@@ -1323,6 +1323,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if requestModel.Provider == "antigravity" || requestModel.Provider == "google" {
 			return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
 		}
+		if requestModel.Provider == "google-vertex" {
+			return m.streamEmbeddedVertex(requestCtx, requestModel, transcript, opts)
+		}
 		if requestModel.Provider != "openai-codex" {
 			return ai.StreamSimple(requestCtx, requestModel, ai.Context{Messages: transcript.Messages}, opts)
 		}
