@@ -31,50 +31,45 @@ func TestSubagentStreamContextNormalizedSystemMessageAndTools(t *testing.T) {
 	defaultDone := make(chan struct{}, 1)
 	planDone := make(chan struct{}, 1)
 
-	reg.SetResponses([]providers.FauxResponseStep{
-		func(req ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			sysPrompt := ai.GetCurrentSystemPrompt(req.Messages)
-			mu.Lock()
-			if strings.Contains(sysPrompt, "CRITICAL: READ-ONLY MODE") {
-				planReqMessages = req.Messages
-				select {
-				case planDone <- struct{}{}:
-				default:
-				}
-			} else {
-				defaultReqMessages = req.Messages
-				select {
-				case defaultDone <- struct{}{}:
-				default:
+	capture := func(req ai.TranscriptContext) {
+		sysPrompt := ai.GetCurrentSystemPrompt(req.Messages)
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(sysPrompt, "CRITICAL: READ-ONLY MODE") {
+			planReqMessages = req.Messages
+			select {
+			case planDone <- struct{}{}:
+			default:
+			}
+		} else {
+			// Only capture the child subagent's request, not the parent wake notification
+			for _, m := range req.Messages {
+				if u, ok := m.(ai.UserMessage); ok {
+					for _, c := range u.Content {
+						if t, ok := c.(ai.TextContent); ok && t.Text == "run default check" {
+							defaultReqMessages = req.Messages
+							select {
+							case defaultDone <- struct{}{}:
+							default:
+							}
+							return
+						}
+					}
 				}
 			}
-			mu.Unlock()
+		}
+	}
+
+	steps := make([]providers.FauxResponseStep, 10)
+	for i := range steps {
+		steps[i] = func(req ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			capture(req)
 			return providers.FauxAssistantMessage(ai.ContentList{
 				ai.TextContent{Text: "task finished"},
 			}, ai.StopStop)
-		},
-		func(req ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			sysPrompt := ai.GetCurrentSystemPrompt(req.Messages)
-			mu.Lock()
-			if strings.Contains(sysPrompt, "CRITICAL: READ-ONLY MODE") {
-				planReqMessages = req.Messages
-				select {
-				case planDone <- struct{}{}:
-				default:
-				}
-			} else {
-				defaultReqMessages = req.Messages
-				select {
-				case defaultDone <- struct{}{}:
-				default:
-				}
-			}
-			mu.Unlock()
-			return providers.FauxAssistantMessage(ai.ContentList{
-				ai.TextContent{Text: "task finished"},
-			}, ai.StopStop)
-		},
-	})
+		}
+	}
+	reg.SetResponses(steps)
 
 	mgr := makeSubagentTestManager(t, db, reg, 4)
 	defer mgr.Close(ctx)

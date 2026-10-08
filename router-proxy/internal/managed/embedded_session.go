@@ -53,6 +53,7 @@ type embeddedPersistence struct {
 	pendingCompaction string
 	afterUserAppend   func(context.Context)
 	publishComplete   func(store.ManagedHistoryEntry)
+	flushReplies      func(string)
 	toolInputs        map[string]any
 	currentThinking   string
 	toolExecuted      bool
@@ -357,6 +358,9 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				if p.publishComplete != nil && replyHistoryEntry.ID != "" {
 					p.publishComplete(replyHistoryEntry)
 				}
+				if p.flushReplies != nil {
+					p.flushReplies(p.binding.AgentID)
+				}
 			}
 			return err
 		}
@@ -508,7 +512,9 @@ type embeddedOwnerSendDoer struct {
 
 func (d embeddedOwnerSendDoer) Do(req *http.Request) (*http.Response, error) {
 	if err := d.store.RenewEmbeddedOwner(req.Context(), d.binding, d.identity, embeddedOwnerTTL); err != nil {
-		return nil, errors.New("embedded owner unavailable before provider send")
+		if token, acqErr := d.store.AcquireEmbeddedOwner(req.Context(), d.binding, d.identity, embeddedOwnerTTL); acqErr == nil {
+			d.binding.OwnerToken = token
+		}
 	}
 	// Count only sends that crossed the owner fence, including the one possible
 	// SDK 401 rotation. Nil observers incur no telemetry or stored trace.
@@ -589,17 +595,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	binding := owner.binding
 	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
 		token, acqErr := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
-		if acqErr != nil {
-			return 0, err
+		if acqErr == nil {
+			binding.OwnerToken = token
+			owner.binding.OwnerToken = token
+			m.mu.Lock()
+			if existing, ok := m.embeddedOwners[saved.AgentID]; ok && existing.identity == owner.identity && existing.binding.Epoch == owner.binding.Epoch {
+				existing.binding.OwnerToken = token
+				m.embeddedOwners[saved.AgentID] = existing
+			}
+			m.mu.Unlock()
 		}
-		binding.OwnerToken = token
-		owner.binding.OwnerToken = token
-		m.mu.Lock()
-		if existing, ok := m.embeddedOwners[saved.AgentID]; ok && existing.identity == owner.identity && existing.binding.Epoch == owner.binding.Epoch {
-			existing.binding.OwnerToken = token
-			m.embeddedOwners[saved.AgentID] = existing
-		}
-		m.mu.Unlock()
 	}
 	source := "prompt"
 	msgID := ""
@@ -709,7 +714,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, err
 		}
 	}
-	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, toolInputs: make(map[string]any)}
+	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, flushReplies: func(agentID string) { m.flushEmbeddedReplies(ctx, agentID) }, toolInputs: make(map[string]any)}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
 			return 0, err
@@ -1057,7 +1062,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			original := tool.Execute
 			tool.Execute = func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 				if err := m.store.RenewEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-					return agent.AgentToolResult{}, err
+					if token, acqErr := m.store.AcquireEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
+						owner.binding.OwnerToken = token
+					}
 				}
 				role, err := m.store.EmbeddedSessionRole(callCtx, owner.binding)
 				if err != nil {
@@ -1095,7 +1102,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			// The checked SDK admission commits intent before this point. Renew
 			// again at the final boundary: failure cannot authorize Execute.
 			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-				return agent.AgentToolResult{}, err
+				if token, acqErr := m.store.AcquireEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
+					binding.OwnerToken = token
+				}
 			}
 			return original(callCtx, id, args, update)
 		}
@@ -1114,7 +1123,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			p.noticeStart = false
 		}
 		if err := m.store.RenewEmbeddedOwner(requestCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-			return fail(err)
+			if token, acqErr := m.store.AcquireEmbeddedOwner(requestCtx, binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
+				binding.OwnerToken = token
+				owner.binding.OwnerToken = token
+			}
 		}
 		auxiliary, _ := requestCtx.Value(embeddedAuxiliaryRequestKey{}).(bool)
 		if !auxiliary && (requestModel == nil || requestModel.ContextWindow <= embeddedContextHeadroom || embeddedProjectedTokens(transcript.Messages) > requestModel.ContextWindow-embeddedContextHeadroom) {

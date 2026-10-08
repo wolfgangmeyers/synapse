@@ -3803,7 +3803,7 @@ func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntime
 		if err := s.confirmManagedChildRecoveryForDeltaTx(ctx, fence, delta, state); err != nil {
 			return err
 		}
-		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+		if _, err := s.recomputeManagedParentActivityChangedTx(ctx, fence); err != nil {
 			return err
 		}
 		updated = true

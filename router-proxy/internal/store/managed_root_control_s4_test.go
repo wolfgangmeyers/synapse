@@ -30,7 +30,7 @@ func TestManagedRootControlDurablyCompletesAndDeliversOneExactResult(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, 1, appendClaim.Request.AppendAttempt)
 	require.NoError(t, store.MarkManagedControlAppendSubmitted(ctx, input.RequestID, appendOwner, 1, fence))
-	require.NoError(t, store.DeliverManagedControlReceipt(ctx, ManagedControlReceipt{RequestID: input.RequestID, AppendOwner: appendOwner, Attempt: 1, EntryIdentity: completed.ResultEntryID, Fence: fence}))
+	require.NoError(t, store.DeliverManagedControlReceipt(ctx, ManagedControlReceipt{RequestID: input.RequestID, AppendOwner: appendOwner, Attempt: 1, EntryIdentity: completed.ResultEntryID, ReceiptID: "receipt-1", PayloadSHA256: testManifestHash, Fence: fence}))
 	row, err := store.ManagedControlRequest(ctx, input.RequestID)
 	require.NoError(t, err)
 	require.Equal(t, "delivered", row.State)

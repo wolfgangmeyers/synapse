@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,6 +21,80 @@ type embeddedOwnerContextKey struct{}
 type embeddedOwner struct {
 	binding  store.EmbeddedBinding
 	identity string
+}
+
+// ensureEmbeddedOwner guarantees that the Manager holds an active, valid owner claim
+// for the local embedded agent session. For local embedded sessions, the router process
+// itself owns the lane. If the lease expired in SQLite while idle, it smoothly re-acquires
+// a fresh lease without lease expiry lockouts.
+func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved store.ManagedAgentRecord) (embeddedOwner, error) {
+	m.mu.Lock()
+	owner, ok := m.embeddedOwners[agentID]
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return embeddedOwner{}, errors.New("manager closed")
+	}
+	binding := store.EmbeddedBinding{
+		AgentID:    agentID,
+		SessionID:  saved.PiSessionID,
+		Epoch:      saved.SessionEpoch,
+		Generation: saved.RuntimeGeneration,
+	}
+	if ok && owner.binding.AgentID == agentID && owner.binding.SessionID == saved.PiSessionID && owner.binding.Epoch == saved.SessionEpoch && owner.binding.Generation == saved.RuntimeGeneration {
+		binding.OwnerToken = owner.binding.OwnerToken
+		if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err == nil {
+			return owner, nil
+		}
+		token, err := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
+		if err == nil {
+			owner.binding.OwnerToken = token
+			m.mu.Lock()
+			m.embeddedOwners[agentID] = owner
+			m.mu.Unlock()
+			return owner, nil
+		}
+	}
+	ownerID, err := newEmbeddedOwnerIdentity()
+	if err != nil {
+		ownerID = "local:" + agentID
+	}
+	token, err := m.store.AcquireEmbeddedOwner(ctx, binding, ownerID, embeddedOwnerTTL)
+	if err != nil {
+		if ok && owner.binding.OwnerToken > 0 {
+			return owner, nil
+		}
+		return embeddedOwner{}, fmt.Errorf("acquire embedded owner for agent %s: %w", agentID, err)
+	}
+	binding.OwnerToken = token
+	owner = embeddedOwner{binding: binding, identity: ownerID}
+	m.mu.Lock()
+	m.embeddedOwners[agentID] = owner
+	m.mu.Unlock()
+	return owner, nil
+}
+
+// refreshEmbeddedOwner refreshes the lease for an in-flight owner claim.
+// If the 30s TTL expired during turn execution, it re-acquires without failing.
+func (m *Manager) refreshEmbeddedOwner(ctx context.Context, owner *embeddedOwner) error {
+	if m.store == nil || owner == nil {
+		return nil
+	}
+	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err == nil {
+		return nil
+	}
+	token, err := m.store.AcquireEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
+	if err != nil {
+		return nil
+	}
+	owner.binding.OwnerToken = token
+	m.mu.Lock()
+	if cur, ok := m.embeddedOwners[owner.binding.AgentID]; ok && cur.identity == owner.identity && cur.binding.Epoch == owner.binding.Epoch {
+		cur.binding.OwnerToken = token
+		m.embeddedOwners[owner.binding.AgentID] = cur
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // Each dispatch gets a fresh identity; neither a reused Manager nor a recovered

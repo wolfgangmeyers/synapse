@@ -308,37 +308,39 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 	if model == nil {
 		return nil, nil, errors.New("embedded model is unavailable")
 	}
-	if model.Provider == "antigravity" || model.Provider == "google" || record.SelectedModel.Provider == "antigravity" || record.SelectedModel.Provider == "google" {
-		stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
-			return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
-		}
-	} else if model.Provider == "openai-codex" || record.SelectedModel.Provider == "openai-codex" {
-		var used string
-		stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
-			if opts == nil {
-				opts = &ai.SimpleStreamOptions{}
-			} else {
-				copy := *opts
-				opts = &copy
+	if stream == nil {
+		if model.Provider == "antigravity" || model.Provider == "google" || record.SelectedModel.Provider == "antigravity" || record.SelectedModel.Provider == "google" {
+			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
+				return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
 			}
-			existingOnPayload := opts.OnPayload
-			opts.OnPayload = func(payload any, model *ai.Model) (any, error) {
-				if m, ok := payload.(map[string]any); ok {
-					delete(m, "max_output_tokens")
+		} else if model.Provider == "openai-codex" || record.SelectedModel.Provider == "openai-codex" {
+			var used string
+			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
+				if opts == nil {
+					opts = &ai.SimpleStreamOptions{}
+				} else {
+					copy := *opts
+					opts = &copy
 				}
-				if existingOnPayload != nil {
-					return existingOnPayload(payload, model)
+				existingOnPayload := opts.OnPayload
+				opts.OnPayload = func(payload any, model *ai.Model) (any, error) {
+					if m, ok := payload.(map[string]any); ok {
+						delete(m, "max_output_tokens")
+					}
+					if existingOnPayload != nil {
+						return existingOnPayload(payload, model)
+					}
+					return payload, nil
 				}
-				return payload, nil
+				opts.CodexAuth = func(authCtx context.Context) (ai.ModelAuth, error) {
+					auth, authErr := m.embeddedCodexAuth(authCtx)
+					if authErr == nil {
+						used = auth.APIKey
+					}
+					return auth, authErr
+				}
+				return m.streamEmbeddedCodexWith401Rotation(requestCtx, requestModel, transcript, opts, &used)
 			}
-			opts.CodexAuth = func(authCtx context.Context) (ai.ModelAuth, error) {
-				auth, authErr := m.embeddedCodexAuth(authCtx)
-				if authErr == nil {
-					used = auth.APIKey
-				}
-				return auth, authErr
-			}
-			return m.streamEmbeddedCodexWith401Rotation(requestCtx, requestModel, transcript, opts, &used)
 		}
 	}
 	return model, stream, nil
@@ -773,19 +775,24 @@ func (m *Manager) runSubagent(task *subagentTask) {
 					if renewCtx.Err() != nil || errors.Is(err, context.Canceled) {
 						return
 					}
-					task.mu.Lock()
-					if task.stopped {
+					token, acqErr := m.store.AcquireEmbeddedOwner(renewCtx, childBinding, ownerID, embeddedOwnerTTL)
+					if acqErr == nil {
+						childBinding.OwnerToken = token
+					} else {
+						task.mu.Lock()
+						if task.stopped {
+							task.mu.Unlock()
+							return
+						}
+						task.leaseErr = fmt.Errorf("owner lease renewal failed: %w", err)
+						sess := task.activeSession
 						task.mu.Unlock()
+						cancel()
+						if sess != nil {
+							sess.Abort()
+						}
 						return
 					}
-					task.leaseErr = fmt.Errorf("owner lease renewal failed: %w", err)
-					sess := task.activeSession
-					task.mu.Unlock()
-					cancel()
-					if sess != nil {
-						sess.Abort()
-					}
-					return
 				}
 			}
 		}

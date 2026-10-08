@@ -20,6 +20,19 @@ import (
 const ContextResetWakePrompt = "Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."
 const ContextResetWarningReminder = "Context usage threshold warning: You are approaching the context reset boundary. Please use the scratchpad tool to record your current plan, key findings, and immediate next steps now before context reset occurs."
 
+func FormatContextResetWarningReminder(currentTokens, contextWindow int) string {
+	resetBoundaryPct := 80
+	if contextWindow >= 1_000_000 {
+		resetBoundaryPct = 50
+	}
+	pct := float64(0)
+	if contextWindow > 0 {
+		pct = float64(currentTokens) / float64(contextWindow) * 100.0
+	}
+	return fmt.Sprintf("Context threshold reached: %d / %d tokens (%.1f%%). Approaching automatic reset boundary at %d%%. Please use the scratchpad tool to record your current plan, key findings, and immediate next steps before reset occurs.",
+		currentTokens, contextWindow, pct, resetBoundaryPct)
+}
+
 func contextWarningThresholdExceeded(model Model, currentTokens int) bool {
 	if model.ContextWindow <= 0 {
 		return false
@@ -296,14 +309,14 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 		if !lane.warningEmitted {
 			lane.warningEmitted = true
 			log.Printf("[embedded:%s] Emitted pre-reset scratchpad reminder (tokens: %d)", binding.AgentID, currentTokens)
-			if err := m.emitContextWarningReminder(ctx, binding); err != nil {
+			if err := m.emitContextWarningReminder(ctx, binding, currentTokens, model.ContextWindow); err != nil {
 				log.Printf("[embedded:%s] failed to emit pre-reset scratchpad reminder: %v", binding.AgentID, err)
 			}
 		}
 	}
 }
 
-func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.EmbeddedBinding) error {
+func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.EmbeddedBinding, currentTokens, contextWindow int) error {
 	if m.store == nil {
 		return errors.New("store is nil")
 	}
@@ -314,12 +327,13 @@ func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.
 	}
 	source := protocol.MessageSource{Kind: "reminder"}
 	subject := "Context usage threshold warning"
+	body := FormatContextResetWarningReminder(currentTokens, contextWindow)
 	envelope := protocol.Envelope{
 		ID:        msgID,
 		From:      "supervisor",
 		To:        binding.AgentID,
 		Subject:   &subject,
-		Body:      ContextResetWarningReminder,
+		Body:      body,
 		CreatedAt: now,
 		Source:    &source,
 	}

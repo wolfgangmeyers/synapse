@@ -44,7 +44,7 @@ func TestMigration027Accepted026FixturePreservesChildrenAndBackfillsEveryStage(t
 	require.NoError(t, before.db.QueryRow(`SELECT COUNT(*) FROM managed_agents`).Scan(&parentRows))
 	require.NoError(t, before.Close())
 
-	after, err := Open(ctx, path, Options{})
+	after, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")+1]})
 	require.NoError(t, err)
 	defer after.Close()
 	for _, child := range children {
