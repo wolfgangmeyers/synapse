@@ -460,7 +460,7 @@ func TestBehavioral_Scratchpad_HookedWorkerTurns(t *testing.T) {
 	require.True(t, sawDeleted.Load(), "delete must successfully remove the target note")
 
 	// Verify database state: only the pinned note remains
-	entries, err := h.db.FetchScratchpadRecent(h.ctx, launched.Agent.AgentID, 10)
+	entries, _, err := h.db.FetchScratchpadRecent(h.ctx, launched.Agent.AgentID, 10)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "exactly one scratchpad entry must remain in store")
 	require.True(t, entries[0].Pinned)
