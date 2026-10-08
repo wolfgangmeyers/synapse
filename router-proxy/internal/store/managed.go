@@ -3307,7 +3307,7 @@ func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fenc
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+	if err := s.pruneManagedCompleteHistoryTx(ctx, fence.AgentID); err != nil {
 		return ManagedHistoryEntry{}, err
 	}
 	return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", completeSequence), At: occurredAt, Level: "info", Message: message, Presentation: presentation}, nil
@@ -4639,6 +4639,9 @@ func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID 
 	}
 	if n == 0 {
 		return errors.New("managed agent not found")
+	}
+	if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+		return err
 	}
 	return nil
 }
