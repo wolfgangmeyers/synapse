@@ -124,4 +124,60 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	require.NoError(t, json.NewDecoder(res.Body).Decode(&getResp3))
 	res.Body.Close()
 	require.Equal(t, "", getResp3["active_workflow_state_id"])
+
+	// 4. Test state with reminders activation and cleanup upon deactivation
+	subj := "Review Mode Subject"
+	wsWithRem, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		Name:        "review-mode-with-reminders",
+		Description: "Review with automated reminders",
+		EntryText:   "Review checklist entry",
+		Reminders: []store.WorkflowReminderConfig{
+			{
+				ID:           "test-rem-oneshot",
+				Type:         store.WorkflowReminderOneShot,
+				Subject:      &subj,
+				Body:         "Please complete the code review checklist.",
+				DelaySeconds: 100,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	activateWithRemBody, err := json.Marshal(map[string]any{
+		"action":            "activate",
+		"workflow_state_id": wsWithRem.ID,
+	})
+	require.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(activateWithRemBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", uuid.NewString())
+
+	res, err = client.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	// Verify reminder was created
+	rems, err := durable.Reminders(ctx)
+	require.NoError(t, err)
+	require.Len(t, rems, 1)
+	require.Equal(t, agentID, rems[0].Target)
+	require.Equal(t, "Please complete the code review checklist.", rems[0].Body)
+
+	// Deactivate and verify reminder was cleaned up
+	deactReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(deactivateBody))
+	require.NoError(t, err)
+	deactReq.Header.Set("Content-Type", "application/json")
+	deactReq.Header.Set("X-Request-ID", uuid.NewString())
+
+	res, err = client.Do(deactReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	// Verify reminder was cleaned up
+	rems, err = durable.Reminders(ctx)
+	require.NoError(t, err)
+	require.Empty(t, rems)
 }

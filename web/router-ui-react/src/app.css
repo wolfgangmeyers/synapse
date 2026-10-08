@@ -562,6 +562,7 @@ p:empty { display: none; }
   margin: 28px 0 10px;
   font-weight: 800;
 }
+.agent-filter { margin: 0 0 12px; }
 .workflow-header-button {
   background: var(--surface);
   border: 1px solid var(--border-color, #444);
@@ -1300,6 +1301,7 @@ p:empty { display: none; }
 .activity-entry[role="button"] { cursor: pointer; }
 .activity-entry[role="button"]:hover { background: rgba(181,188,208,0.12); }
 .activity-entry:focus-within { outline: 2px solid var(--primary); outline-offset: 3px; }
+.activity-detail-dialog { max-height: calc(100dvh - 32px); overflow: hidden; }
 .activity-detail-dialog .dialog-shell { max-height: calc(100dvh - 32px); overflow-y: auto; }
 .activity-detail-heading { display: flex; align-items: center; gap: 9px; }
 .activity-detail-heading .message-dialog-label { margin: 0; }
@@ -2102,12 +2104,98 @@ p:empty { display: none; }
 }
 
 .workflow-state-dialog {
-  width: min(600px, 92vw);
+  width: min(680px, 92vw);
 }
 
 .workflow-state-form {
   display: grid;
   gap: 14px;
+}
+
+.workflow-reminders-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.workflow-reminders-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.workflow-reminders-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-reminders-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workflow-reminder-item {
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.workflow-reminder-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.workflow-reminder-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.workflow-reminder-item-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.workflow-reminder-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.workflow-reminder-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #60a5fa;
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.workflow-reminder-badge.recurring {
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.3);
+  color: #c084fc;
 }
 
 .workflow-dialog-actions {

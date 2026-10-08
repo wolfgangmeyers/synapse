@@ -1455,10 +1455,16 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			return
 		}
 
+		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
+
 		if err := r.store.SetManagedAgentActiveWorkflowState(req.Context(), agentID, &wfState.ID); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update agent workflow state"})
 			return
 		}
+
+		_ = r.store.SpawnWorkflowStateReminders(req.Context(), agentID, wfState)
+		r.sweepReminders(req.Context())
+		r.broadcast(map[string]any{"type": "reminders_changed"})
 
 		// Inject entry text prompt if configured and agent is embedded/running
 		if strings.TrimSpace(wfState.EntryText) != "" && agent.Runtime == "embedded" && agent.LifecycleState == "running" {
@@ -1496,10 +1502,13 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		}, nil)
 
 	case "deactivate":
+		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
 		if err := r.store.SetManagedAgentActiveWorkflowState(req.Context(), agentID, nil); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
 			return
 		}
+		r.sweepReminders(req.Context())
+		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 			"agent_id":                 agentID,
 			"active_workflow_state_id": "",
