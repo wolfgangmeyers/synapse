@@ -91,6 +91,12 @@ describe("protocol guards", () => {
     expect(isRouterUtcTimestamp("2026-09-09T09:48:28.4142040030Z")).toBe(false);
     expect(isManagedAgent(managedAgent)).toBe(true);
     expect(isManagedAgent({ ...managedAgent, updated_at: "2026-09-09T09:48:28.4142040030Z" })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: "" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: "state-uuid-123" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: null })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: 123 })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: "a".repeat(129) })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, runtime: "embedded", active_workflow_state_id: "" })).toBe(true);
   });
 
   it("accepts bounded Complete history details while keeping presentation metadata closed", () => {
