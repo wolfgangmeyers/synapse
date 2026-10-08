@@ -417,8 +417,14 @@ export function isDeliveryItems(value: unknown): value is DeliveryItem[] {
 }
 
 export function isConversationMessage(value: unknown): value is ConversationMessage {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["sequence", "id", "message_incarnation_id", "from", "to", "subject", "body", "created_at", "recorded_at", "attachments", "source"]) || !isSafeInteger(value.sequence, 1) || !isMessageId(value.id) || !isMessageIncarnationId(value.message_incarnation_id) || !isSafeString(value.from, 1, 128) || !isAgentId(value.to) || !isSafeString(value.body, 0, 65536) || !isUtcMillis(value.created_at) || !isUtcMillis(value.recorded_at) || !Array.isArray(value.attachments) || value.attachments.length > 3 || !value.attachments.every(isAttachmentReference)) return false;
-  return (value.subject === undefined || isSafeString(value.subject, 0, 256)) && (value.source === undefined || isMessageSource(value.source));
+  if (!isRecord(value)) return false;
+  if (typeof value.id !== "string" || value.id.length === 0) return false;
+  if (typeof value.body !== "string") return false;
+  const hasSender = (typeof value.from === "string" && value.from.length > 0) || (typeof value.sender === "string" && value.sender.length > 0);
+  if (!hasSender) return false;
+  const hasRecipient = (typeof value.to === "string" && value.to.length > 0) || (typeof value.recipient === "string" && value.recipient.length > 0);
+  if (!hasRecipient) return false;
+  return true;
 }
 
 function isCommonLeaseFrame(value: unknown, type: string, keys: readonly string[]): value is RecordValue {

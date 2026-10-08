@@ -96,17 +96,20 @@ export interface AttachmentReference {
 }
 
 export interface ConversationMessage {
-  sequence: number;
   id: MessageId;
-  message_incarnation_id: MessageIncarnationId;
-  from: string;
-  to: AgentId;
   body: string;
-  created_at: UtcMillis;
-  recorded_at: UtcMillis;
-  attachments: AttachmentReference[];
+  from?: string;
+  sender?: string;
+  to?: AgentId;
+  recipient?: AgentId;
+  sequence?: number;
+  message_incarnation_id?: MessageIncarnationId;
+  created_at?: UtcMillis | string;
+  recorded_at?: UtcMillis | string;
+  attachments?: AttachmentReference[];
   subject?: string;
   source?: MessageSource;
+  [key: string]: unknown;
 }
 
 export interface SubagentSummary {
