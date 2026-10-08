@@ -319,6 +319,10 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 				return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
 			}
+		} else if model.Provider == "google-vertex" || record.SelectedModel.Provider == "google-vertex" {
+			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
+				return m.streamEmbeddedVertex(requestCtx, requestModel, transcript, opts)
+			}
 		} else if model.Provider == "openai-codex" || record.SelectedModel.Provider == "openai-codex" {
 			var used string
 			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
@@ -1158,7 +1162,7 @@ func (m *Manager) RecoverActiveSubagents(ctx context.Context) error {
 	if err == nil {
 		for _, rec := range completed {
 			subject := fmt.Sprintf("Subagent %s Completed", rec.AgentID)
-			body := FormatSubagentNotification(*rec)
+			body := FormatSubagentWakePrompt(*rec)
 			source := protocol.MessageSource{Kind: "system"}
 			msgID := fmt.Sprintf("subagent-completed-%s-%d", rec.AgentID, rec.Attempt)
 			now := formatManagedTime(m.clock.Now())
