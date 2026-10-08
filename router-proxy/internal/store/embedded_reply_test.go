@@ -158,3 +158,70 @@ func TestEmbeddedReplyThinkingFallbackWhenTextEmpty(t *testing.T) {
 	require.Equal(t, "Analyzing commits and determined the issue is resolved.", reply.Body)
 }
 
+func TestEmbeddedReplyReminderRecordsHistoryWithoutOutbox(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	path := filepath.Join(t.TempDir(), "reply-reminder.db")
+	s, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, err)
+	defer s.Close()
+
+	b := redBind(t, s, "reply-worker-reminder", "reply-session-reminder", 1, "reply-generation-1", "worker")
+
+	// 1. Inbound reminder message from "reminders"
+	mail := testEnvelope("reminder-msg-1", "What animal has the most appendages?")
+	mail.From = "reminders"
+	mail.To = b.AgentID
+	_, err = s.Enqueue(ctx, mail)
+	require.NoError(t, err)
+	_, err = s.db.ExecContext(ctx, `UPDATE messages SET source_kind='reminder' WHERE id=?`, mail.ID)
+	require.NoError(t, err)
+
+	attempt := reserveEmbeddedMailTest(t, s, b, mail.ID)
+	require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, b, attempt.AttemptID, []byte(attempt.Body)))
+
+	snap, err := s.ReopenEmbedded(ctx, b)
+	require.NoError(t, err)
+	require.Len(t, snap.Entries, 1)
+
+	// 2. Assistant answers the reminder question
+	replyText := "The animal with the most appendages is the millipede Eumillipes persephone."
+	finalMsg, err := json.Marshal(ai.AssistantMessage{
+		StopReason: ai.StopStop,
+		Content: ai.ContentList{
+			ai.TextContent{Text: replyText},
+		},
+	})
+	require.NoError(t, err)
+
+	finalEntry, historyEntry, err := s.AppendEmbeddedFinalAndReplyWithHistory(ctx, b, attempt.AttemptID, snap.Entries[0].Sequence, snap.Entries[0].Digest, finalMsg)
+	require.NoError(t, err, "assistant reply to reminder must succeed")
+	require.Equal(t, "assistant", finalEntry.Kind)
+
+	// 3. Verify reply outbox is ZERO (no outbound mailbox message queued for "reminders")
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "reminder turn must not insert into embedded_reply_outbox")
+
+	// 4. Verify managed_complete_history DOES contain the assistant's reply
+	require.NotEmpty(t, historyEntry.ID, "historyEntry must have an ID")
+	require.Equal(t, "Message sent", historyEntry.Message)
+	require.NotNil(t, historyEntry.Presentation)
+	require.Equal(t, "reminders", historyEntry.Presentation.To)
+	require.Equal(t, b.AgentID, historyEntry.Presentation.From)
+	require.Equal(t, "message", historyEntry.Presentation.Kind)
+	require.NotNil(t, historyEntry.MessageContent)
+	require.Equal(t, replyText, *historyEntry.MessageContent)
+
+	page, err := s.ManagedHistoryPage(ctx, b.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, page.Entries)
+	found := false
+	for _, h := range page.Entries {
+		if h.Presentation != nil && h.Presentation.To == "reminders" && h.MessageContent != nil && *h.MessageContent == replyText {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "assistant response to reminder must be recorded in complete history")
+}
+
+
