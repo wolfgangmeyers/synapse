@@ -108,7 +108,7 @@ describe("source-backed isolated app behaviors", () => {
       return socket;
     };
     render(<App routerUrl={state.routerUrl} agentId={state.agentId} state={state} transportOptions={{ fetchImpl, webSocketFactory }} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument(), { timeout: 5000 });
     const workerButton = screen.getAllByRole("button", { name: "Worker One (worker-one)" })[0];
     if (!workerButton) throw new Error("worker button is missing");
     fireEvent.click(workerButton);

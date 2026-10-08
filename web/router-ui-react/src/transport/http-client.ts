@@ -84,7 +84,7 @@ function recordValue(value: unknown): Record<string, unknown> | undefined { retu
 function stringValue(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 function nonEmptyString(value: unknown): value is string { return typeof value === "string" && value.length > 0 && !value.includes("\u0000"); }
 function safeInteger(value: unknown, minimum = 0): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum; }
-function timestamp(value: unknown): value is string { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
+function timestamp(value: unknown): value is string { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value) && Number.isFinite(Date.parse(value)); }
 function invalidResponse(message: string, value: unknown): HttpRequestError { return new HttpRequestError(200, "invalid_response", message, value); }
 function validOptionalString(item: Record<string, unknown>, key: string): boolean { return !Object.hasOwn(item, key) || typeof item[key] === "string"; }
 function validOptionalTimestamp(item: Record<string, unknown>, key: string): boolean { return !Object.hasOwn(item, key) || timestamp(item[key]); }
@@ -100,7 +100,7 @@ function validSource(value: unknown): boolean {
 }
 function validMessage(value: unknown, complete: boolean): value is Record<string, unknown> {
   const item = recordValue(value); if (!item || !nonEmptyString(item.id)) return false;
-  if (complete && (!isConversationMessage(item) || !validSource(item.source))) return false;
+  if (complete && (!isConversationMessage(item) || (item.source !== undefined && !validSource(item.source)))) return false;
   if (!validOptionalString(item, "from") || (Object.hasOwn(item, "to") && !isAgentId(item.to)) || !validOptionalString(item, "body") || !validOptionalTimestamp(item, "created_at") || !validOptionalTimestamp(item, "recorded_at") || (Object.hasOwn(item, "sequence") && !safeInteger(item.sequence, 1)) || (Object.hasOwn(item, "message_incarnation_id") && !nonEmptyString(item.message_incarnation_id)) || (Object.hasOwn(item, "subject") && item.subject !== null && typeof item.subject !== "string") || (Object.hasOwn(item, "source") && !validSource(item.source))) return false;
   if (Object.hasOwn(item, "attachments") && !validAttachmentList(item.attachments)) return false;
   return true;
@@ -211,7 +211,9 @@ function conversation(value: unknown, routerUrl: string): ConversationResponse {
   const messages: HistoryMessage[] = [];
   for (const candidate of root.messages ?? []) {
     if (!isConversationMessage(candidate)) throw invalidResponse("Router returned an invalid conversation message", value);
-    messages.push(withAbsoluteAttachmentUrls({ ...candidate, id: candidate.id }, routerUrl));
+    const from = candidate.from ?? candidate.sender;
+    const to = candidate.to ?? candidate.recipient;
+    messages.push(withAbsoluteAttachmentUrls({ ...candidate, id: candidate.id, ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }, routerUrl));
   }
   return { owner: root.owner, peer: root.peer, high_water_sequence: root.high_water_sequence, messages };
 }

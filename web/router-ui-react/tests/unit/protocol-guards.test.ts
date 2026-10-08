@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isConversationMessage,
   isEnvelope,
   isGoalControlFrame,
   isInlineToolControlFrame,
@@ -322,5 +323,62 @@ describe("protocol guards", () => {
     const invalidBatch = parseServerFrame({ ...batch, delivery_messages: undefined });
     expect(invalidBatch.ok).toBe(false);
     if (!invalidBatch.ok) expect(invalidBatch.error.code).toBe("invalid_protocol_value");
+  });
+
+  describe("isConversationMessage", () => {
+    it("accepts a standard conversation message", () => {
+      const msg = {
+        sequence: 1,
+        id: "msg-1",
+        message_incarnation_id: "7d1c2651-d156-428e-970b-6fdda07862ea",
+        from: "wolfgang",
+        to: "workflows",
+        body: "Hello world",
+        created_at: "2026-10-07T13:28:29.155Z",
+        recorded_at: "2026-10-07T13:28:29.165Z",
+        attachments: [],
+        source: { kind: "web_ui" },
+      };
+      expect(isConversationMessage(msg)).toBe(true);
+    });
+
+    it("accepts messages with Postel resilience: extra fields, unpadded timestamps, sender/recipient alias", () => {
+      // Unpadded RFC3339 timestamp without millis (as returned by Go router when nanos == 0)
+      const unpaddedTimestampMsg = {
+        sequence: 13140,
+        id: "embedded-reply-7f119118",
+        message_incarnation_id: "6204312b-77ef-4763-adf7-a7d9b3c69dfa",
+        from: "workflows",
+        to: "wolfgang",
+        body: "3 * 3 is 9.",
+        created_at: "2026-10-08T16:34:00Z",
+        recorded_at: "2026-10-08T16:34:00Z",
+        attachments: [],
+        source: { kind: "agent" },
+        unexpected_extra_field: "tolerated",
+      };
+      expect(isConversationMessage(unpaddedTimestampMsg)).toBe(true);
+
+      // Sender and recipient field aliases with minimal fields
+      const aliasMsg = {
+        id: "msg-2",
+        sender: "workflows",
+        recipient: "wolfgang",
+        body: "test body",
+        extra_key: 123,
+      };
+      expect(isConversationMessage(aliasMsg)).toBe(true);
+    });
+
+    it("rejects messages missing required fields (id, sender, recipient, body)", () => {
+      expect(isConversationMessage(null)).toBe(false);
+      expect(isConversationMessage({})).toBe(false);
+      expect(isConversationMessage({ id: "", from: "a", to: "b", body: "c" })).toBe(false);
+      expect(isConversationMessage({ id: "1", from: "", to: "b", body: "c" })).toBe(false);
+      expect(isConversationMessage({ id: "1", from: "a", to: "", body: "c" })).toBe(false);
+      expect(isConversationMessage({ id: "1", from: "a", to: "b" })).toBe(false); // missing body
+      expect(isConversationMessage({ id: "1", from: "a", to: "b", body: 123 })).toBe(false); // non-string body
+      expect(isConversationMessage({ id: "1", body: "c" })).toBe(false); // missing sender & recipient
+    });
   });
 });
