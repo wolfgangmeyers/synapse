@@ -205,4 +205,67 @@ describe("Conversation", () => {
     expect(container.querySelector(".active-subagents")).not.toBeInTheDocument();
     expect(container.querySelector("#conversation-view-panel [data-activity-id='complete:tool']")).toBeInTheDocument();
   });
+
+  it("renders workflow activation prompt and assistant response bubble in Complete view and chat-only mode", () => {
+    const wfActivation = {
+      id: "complete:1",
+      agent_id: "workflows",
+      at: "2030-01-01T10:00:00.000Z",
+      message: "Workflow activated",
+      message_content: "[Workflow Activated: test-state]\n\nReport to the user what 3 * 3 is.",
+      presentation: {
+        kind: "message" as const,
+        outcome: "success" as const,
+        from: "system",
+        to: "workflows",
+        summary: "Workflow Activated: test-state",
+      },
+    };
+    const assistantReply = {
+      id: "complete:2",
+      agent_id: "workflows",
+      at: "2030-01-01T10:00:05.000Z",
+      message: "Message sent",
+      message_content: "3 * 3 is 9.",
+      presentation: {
+        kind: "message" as const,
+        outcome: "success" as const,
+        from: "workflows",
+        to: "user",
+      },
+    };
+
+    const { container, rerender } = render(
+      <Conversation
+        peer={{ agent_id: "workflows", source: "router-managed" }}
+        conversationView="complete"
+        ownerId="wolfgang"
+        messages={[]}
+        activityEntries={[wfActivation, assistantReply]}
+      />
+    );
+
+    // Verify workflow activation event card is visible
+    expect(container.querySelector("[data-activity-id='complete:1']")).toBeInTheDocument();
+    expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
+
+    // Verify assistant reply is rendered as a message bubble
+    expect(container.querySelector("[data-message-id='complete:2']")).toBeInTheDocument();
+    expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
+
+    // Verify both are also retained and rendered in chatOnly mode
+    rerender(
+      <Conversation
+        peer={{ agent_id: "workflows", source: "router-managed" }}
+        conversationView="complete"
+        ownerId="wolfgang"
+        chatOnly={true}
+        messages={[]}
+        activityEntries={[wfActivation, assistantReply]}
+      />
+    );
+
+    expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
+    expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
+  });
 });

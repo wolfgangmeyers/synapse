@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
-import { CompleteTimelineEntry } from "../../src/components/CompleteTimelineEntry";
+import { CompleteTimelineEntry, isMailboxSendToUser } from "../../src/components/CompleteTimelineEntry";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation } from "../../src/protocol/types";
 
 const at = "2030-01-01T10:14:00.000Z";
@@ -489,5 +489,40 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(".fa-flag")).toBeInTheDocument();
     expect(screen.getByText("Goal Evaluation • DONE")).toBeInTheDocument();
     expect(container.querySelector(".activity-entry--green")).toBeInTheDocument();
+  });
+
+  it("renders workflow activation prompt with purple tone, bolt icon, and prompt preview", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:wf-activation", agent_id: "managed-worker", at,
+      message: "Workflow activated",
+      message_content: "[Workflow Activated: test-state]\n\nReport to the user what 3 * 3 is.",
+      presentation: { kind: "message", outcome: "success", from: "system", to: "managed-worker", summary: "Workflow Activated: test-state" },
+    }} />);
+
+    expect(container.querySelector(".fa-bolt")).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--purple")).toBeInTheDocument();
+    expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
+    expect(screen.getByText("[Workflow Activated: test-state] Report to the user what 3 * 3 is.")).toBeInTheDocument();
+
+    await user.click(container.querySelector(".activity-entry")!);
+    expect(screen.getByRole("heading", { level: 2, name: "Workflow Activated: test-state" })).toBeInTheDocument();
+  });
+
+  it("recognizes assistant response addressed to 'user' via isMailboxSendToUser", () => {
+    const entry: ManagedHistoryEntry = {
+      id: "complete:assistant-reply",
+      agent_id: "workflows",
+      at,
+      message: "Message sent",
+      message_content: "3 * 3 is 9.",
+      presentation: { kind: "message", outcome: "success", from: "workflows", to: "user" },
+    };
+    const result = isMailboxSendToUser(entry, "wolfgang");
+    expect(result).toEqual({
+      recipient: "user",
+      body: "3 * 3 is 9.",
+      from: "workflows",
+    });
   });
 });
