@@ -202,10 +202,10 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	}
 
 	// Append scratchpad entries (if any)
-	scratchpadEntries, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 10)
+	scratchpadEntries, totalCount, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 10)
 	if err == nil && len(scratchpadEntries) > 0 {
 		var sb strings.Builder
-		sb.WriteString("Persistent scratchpad memory handoff:\n")
+		sb.WriteString(fmt.Sprintf("### Persistent Scratchpad Memory (%d of %d entries shown):\n", len(scratchpadEntries), totalCount))
 		for _, e := range scratchpadEntries {
 			status := "Recent"
 			if e.Pinned {
@@ -213,6 +213,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 			}
 			sb.WriteString(fmt.Sprintf("- [%s] %s\n", status, e.Content))
 		}
+		sb.WriteString("\nProceed with your work.")
 		scratchpadMsg := ai.UserMessage{
 			Content: ai.ContentList{
 				ai.TextContent{Text: strings.TrimRight(sb.String(), "\n")},

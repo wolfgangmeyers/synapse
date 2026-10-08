@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,8 +42,9 @@ func TestScratchpadCRUD(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify entry1 is now pinned
-	recent, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+	recent, total, err := db.FetchScratchpadRecent(ctx, agentID, 10)
 	require.NoError(t, err)
+	require.Equal(t, 2, total)
 	require.Len(t, recent, 2)
 	for _, e := range recent {
 		require.True(t, e.Pinned)
@@ -52,8 +54,9 @@ func TestScratchpadCRUD(t *testing.T) {
 	err = db.SetScratchpadPinned(ctx, agentID, entry2.ID, false)
 	require.NoError(t, err)
 
-	recent, err = db.FetchScratchpadRecent(ctx, agentID, 10)
+	recent, total, err = db.FetchScratchpadRecent(ctx, agentID, 10)
 	require.NoError(t, err)
+	require.Equal(t, 2, total)
 	require.Len(t, recent, 2)
 	// First entry in recent should be pinned (entry1)
 	require.Equal(t, entry1.ID, recent[0].ID)
@@ -115,8 +118,9 @@ func TestScratchpadFetchRecent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Fetch with limit = 1 (1 most recent unpinned, but ALL pinned)
-	entries, err := db.FetchScratchpadRecent(ctx, agentID, 1)
+	entries, total, err := db.FetchScratchpadRecent(ctx, agentID, 1)
 	require.NoError(t, err)
+	require.Equal(t, 5, total)
 	// Pinned: e4, e2 (both retained!). Unpinned (limit 1): e5.
 	require.Len(t, entries, 3)
 	require.Equal(t, e4.ID, entries[0].ID)
@@ -127,8 +131,9 @@ func TestScratchpadFetchRecent(t *testing.T) {
 	require.False(t, entries[2].Pinned)
 
 	// Fetch with limit = 2 (2 most recent unpinned: e5, e3, plus both pinned: e4, e2)
-	entries, err = db.FetchScratchpadRecent(ctx, agentID, 2)
+	entries, total, err = db.FetchScratchpadRecent(ctx, agentID, 2)
 	require.NoError(t, err)
+	require.Equal(t, 5, total)
 	require.Len(t, entries, 4)
 	require.Equal(t, e4.ID, entries[0].ID)
 	require.Equal(t, e2.ID, entries[1].ID)
@@ -136,8 +141,9 @@ func TestScratchpadFetchRecent(t *testing.T) {
 	require.Equal(t, e3.ID, entries[3].ID)
 
 	// Fetch with limit = 10 (all entries for this agent: 2 pinned + 3 unpinned)
-	entries, err = db.FetchScratchpadRecent(ctx, agentID, 10)
+	entries, total, err = db.FetchScratchpadRecent(ctx, agentID, 10)
 	require.NoError(t, err)
+	require.Equal(t, 5, total)
 	require.Len(t, entries, 5)
 	require.Equal(t, e4.ID, entries[0].ID)
 	require.Equal(t, e2.ID, entries[1].ID)
@@ -146,14 +152,16 @@ func TestScratchpadFetchRecent(t *testing.T) {
 	require.Equal(t, e1.ID, entries[4].ID)
 
 	// Verify other agent has only their entry
-	otherEntries, err := db.FetchScratchpadRecent(ctx, otherAgent, 5)
+	otherEntries, totalOther, err := db.FetchScratchpadRecent(ctx, otherAgent, 5)
 	require.NoError(t, err)
+	require.Equal(t, 1, totalOther)
 	require.Len(t, otherEntries, 1)
 	require.Equal(t, "Other agent note", otherEntries[0].Content)
 
 	// Empty result for unknown agent
-	emptyEntries, err := db.FetchScratchpadRecent(ctx, "unknown-agent", 5)
+	emptyEntries, totalEmpty, err := db.FetchScratchpadRecent(ctx, "unknown-agent", 5)
 	require.NoError(t, err)
+	require.Equal(t, 0, totalEmpty)
 	require.Empty(t, emptyEntries)
 }
 
@@ -275,8 +283,9 @@ func TestScratchpadDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify entry is removed and cannot be fetched
-	entries, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+	entries, total, err := db.FetchScratchpadRecent(ctx, agentID, 10)
 	require.NoError(t, err)
+	require.Equal(t, 0, total)
 	require.Empty(t, entries)
 
 	// Deleting already deleted entry returns not found error
@@ -312,3 +321,122 @@ func TestScratchpadAppendLengthLimit(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "scratchpad entry exceeds maximum allowed length of 4000 characters (got 4001); save large content to a file and record the path")
 }
+
+func TestCountScratchpadEntries(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(ctx, dbPath, Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agent1 := "agent-count-1"
+	agent2 := "agent-count-2"
+
+	// Validation: empty agentID returns error
+	_, err = db.CountScratchpadEntries(ctx, "")
+	require.Error(t, err)
+	_, err = db.CountScratchpadEntries(ctx, "   ")
+	require.Error(t, err)
+
+	// Initially 0 for both agents
+	count, err := db.CountScratchpadEntries(ctx, agent1)
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
+
+	// Append entry to agent1
+	e1, err := db.AppendScratchpadEntry(ctx, agent1, "Note 1", false)
+	require.NoError(t, err)
+
+	count, err = db.CountScratchpadEntries(ctx, agent1)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	// agent2 still 0
+	count2, err := db.CountScratchpadEntries(ctx, agent2)
+	require.NoError(t, err)
+	require.Equal(t, 0, count2)
+
+	// Append more entries to agent1 (both pinned and unpinned)
+	_, err = db.AppendScratchpadEntry(ctx, agent1, "Note 2", true)
+	require.NoError(t, err)
+	_, err = db.AppendScratchpadEntry(ctx, agent1, "Note 3", false)
+	require.NoError(t, err)
+
+	count, err = db.CountScratchpadEntries(ctx, agent1)
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+
+	// Append to agent2
+	_, err = db.AppendScratchpadEntry(ctx, agent2, "Agent2 Note", false)
+	require.NoError(t, err)
+
+	count2, err = db.CountScratchpadEntries(ctx, agent2)
+	require.NoError(t, err)
+	require.Equal(t, 1, count2)
+
+	// Delete from agent1 decreases count
+	err = db.DeleteScratchpadEntry(ctx, agent1, e1.ID)
+	require.NoError(t, err)
+
+	count, err = db.CountScratchpadEntries(ctx, agent1)
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+}
+
+func TestPinnedEntryLimit(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(ctx, dbPath, Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "agent-pin-limit"
+	otherAgent := "agent-pin-other"
+
+	// Append 10 pinned entries for agentID (all should succeed)
+	var pinnedIDs []string
+	for i := 1; i <= 10; i++ {
+		e, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("Pinned note %d", i), true)
+		require.NoError(t, err)
+		pinnedIDs = append(pinnedIDs, e.ID)
+	}
+
+	// 11th pinned append should fail with ErrPinnedLimitReached
+	_, err = db.AppendScratchpadEntry(ctx, agentID, "11th pinned note", true)
+	require.Error(t, err)
+	require.Equal(t, ErrPinnedLimitReached, err)
+	require.Equal(t, "pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
+
+	// Append unpinned entry should succeed
+	unpinnedEntry, err := db.AppendScratchpadEntry(ctx, agentID, "Unpinned note", false)
+	require.NoError(t, err)
+
+	// Setting pin on that unpinned entry should fail
+	err = db.SetScratchpadPinned(ctx, agentID, unpinnedEntry.ID, true)
+	require.Error(t, err)
+	require.Equal(t, ErrPinnedLimitReached, err)
+
+	// Setting pin on an already-pinned entry should not fail
+	err = db.SetScratchpadPinned(ctx, agentID, pinnedIDs[0], true)
+	require.NoError(t, err)
+
+	// Unpin one entry
+	err = db.SetScratchpadPinned(ctx, agentID, pinnedIDs[0], false)
+	require.NoError(t, err)
+
+	// Now pinning the unpinned entry should succeed
+	err = db.SetScratchpadPinned(ctx, agentID, unpinnedEntry.ID, true)
+	require.NoError(t, err)
+
+	// Pinned count is back to 10, so pinning pinnedIDs[0] again should fail
+	err = db.SetScratchpadPinned(ctx, agentID, pinnedIDs[0], true)
+	require.Error(t, err)
+	require.Equal(t, ErrPinnedLimitReached, err)
+
+	// Other agent is isolated and can pin entries
+	otherEntry, err := db.AppendScratchpadEntry(ctx, otherAgent, "Other pinned", true)
+	require.NoError(t, err)
+	require.True(t, otherEntry.Pinned)
+}
+
+

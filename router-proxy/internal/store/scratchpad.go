@@ -19,12 +19,35 @@ type ScratchpadEntry struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+var ErrPinnedLimitReached = errors.New("pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one")
+
+func (s *Store) CountPinnedScratchpadEntries(ctx context.Context, agentID string) (int, error) {
+	if strings.TrimSpace(agentID) == "" {
+		return 0, errors.New("agent_id must not be empty")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM scratchpad_entries WHERE agent_id = ? AND pinned = 1`, agentID).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) AppendScratchpadEntry(ctx context.Context, agentID, content string, pinned bool) (*ScratchpadEntry, error) {
 	if strings.TrimSpace(agentID) == "" {
 		return nil, errors.New("agent_id must not be empty")
 	}
 	if runeLen := len([]rune(content)); runeLen > 4000 {
 		return nil, fmt.Errorf("scratchpad entry exceeds maximum allowed length of 4000 characters (got %d); save large content to a file and record the path", runeLen)
+	}
+	if pinned {
+		pinnedCount, err := s.CountPinnedScratchpadEntries(ctx, agentID)
+		if err != nil {
+			return nil, err
+		}
+		if pinnedCount >= 10 {
+			return nil, ErrPinnedLimitReached
+		}
 	}
 	var id string
 	if s.ids != nil {
@@ -58,12 +81,29 @@ func (s *Store) AppendScratchpadEntry(ctx context.Context, agentID, content stri
 	}, nil
 }
 
-func (s *Store) FetchScratchpadRecent(ctx context.Context, agentID string, limit int) ([]ScratchpadEntry, error) {
+func (s *Store) CountScratchpadEntries(ctx context.Context, agentID string) (int, error) {
 	if strings.TrimSpace(agentID) == "" {
-		return nil, errors.New("agent_id must not be empty")
+		return 0, errors.New("agent_id must not be empty")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM scratchpad_entries WHERE agent_id = ?`, agentID).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Store) FetchScratchpadRecent(ctx context.Context, agentID string, limit int) ([]ScratchpadEntry, int, error) {
+	if strings.TrimSpace(agentID) == "" {
+		return nil, 0, errors.New("agent_id must not be empty")
 	}
 	if limit < 0 {
 		limit = 0
+	}
+
+	totalCount, err := s.CountScratchpadEntries(ctx, agentID)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	pinnedRows, err := s.db.QueryContext(ctx,
@@ -74,7 +114,7 @@ func (s *Store) FetchScratchpadRecent(ctx context.Context, agentID string, limit
 		agentID,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer pinnedRows.Close()
 
@@ -83,13 +123,13 @@ func (s *Store) FetchScratchpadRecent(ctx context.Context, agentID string, limit
 		var entry ScratchpadEntry
 		var pinnedInt int
 		if err := pinnedRows.Scan(&entry.ID, &entry.AgentID, &entry.Content, &pinnedInt, &entry.CreatedAt, &entry.UpdatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		entry.Pinned = pinnedInt == 1
 		entries = append(entries, entry)
 	}
 	if err := pinnedRows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if limit > 0 {
@@ -102,7 +142,7 @@ func (s *Store) FetchScratchpadRecent(ctx context.Context, agentID string, limit
 			agentID, limit,
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		defer unpinnedRows.Close()
 
@@ -110,20 +150,20 @@ func (s *Store) FetchScratchpadRecent(ctx context.Context, agentID string, limit
 			var entry ScratchpadEntry
 			var pinnedInt int
 			if err := unpinnedRows.Scan(&entry.ID, &entry.AgentID, &entry.Content, &pinnedInt, &entry.CreatedAt, &entry.UpdatedAt); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			entry.Pinned = pinnedInt == 1
 			entries = append(entries, entry)
 		}
 		if err := unpinnedRows.Err(); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
 	if entries == nil {
 		entries = []ScratchpadEntry{}
 	}
-	return entries, nil
+	return entries, totalCount, nil
 }
 
 func (s *Store) PaginateScratchpad(ctx context.Context, agentID string, limit, offset int) ([]ScratchpadEntry, int, error) {
@@ -137,8 +177,7 @@ func (s *Store) PaginateScratchpad(ctx context.Context, agentID string, limit, o
 		offset = 0
 	}
 
-	var total int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM scratchpad_entries WHERE agent_id = ?`, agentID).Scan(&total)
+	total, err := s.CountScratchpadEntries(ctx, agentID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -224,6 +263,26 @@ func (s *Store) SetScratchpadPinned(ctx context.Context, agentID, entryID string
 	}
 	if strings.TrimSpace(entryID) == "" {
 		return errors.New("entry_id must not be empty")
+	}
+
+	if pinned {
+		var currentPinned int
+		err := s.db.QueryRowContext(ctx, `SELECT pinned FROM scratchpad_entries WHERE id = ? AND agent_id = ?`, entryID, agentID).Scan(&currentPinned)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("scratchpad entry %q not found for agent %q: %w", entryID, agentID, sql.ErrNoRows)
+			}
+			return err
+		}
+		if currentPinned != 1 {
+			pinnedCount, err := s.CountPinnedScratchpadEntries(ctx, agentID)
+			if err != nil {
+				return err
+			}
+			if pinnedCount >= 10 {
+				return ErrPinnedLimitReached
+			}
+		}
 	}
 
 	now := formatTimestamp(s.clock.Now())

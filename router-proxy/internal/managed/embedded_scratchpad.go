@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
 )
@@ -93,6 +94,9 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 				}
 				entry, err := m.store.AppendScratchpadEntry(ctx, agentID, content, pinned)
 				if err != nil {
+					if errors.Is(err, store.ErrPinnedLimitReached) {
+						return agent.AgentToolResult{}, err
+					}
 					return agent.AgentToolResult{}, fmt.Errorf("append scratchpad entry: %w", err)
 				}
 				output := fmt.Sprintf("Appended scratchpad entry %s (pinned: %t)", entry.ID, entry.Pinned)
@@ -103,7 +107,7 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 				}, nil
 
 			case "fetch":
-				entries, err := m.store.FetchScratchpadRecent(ctx, agentID, limit)
+				entries, totalCount, err := m.store.FetchScratchpadRecent(ctx, agentID, limit)
 				if err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("fetch scratchpad entries: %w", err)
 				}
@@ -122,6 +126,12 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 						status = "Pinned"
 					}
 					sb.WriteString(fmt.Sprintf("- [%s] (%s) %s\n", status, e.ID, e.Content))
+				}
+				unshown := totalCount - len(entries)
+				if unshown > 0 {
+					sb.WriteString(fmt.Sprintf("\nShowing %d of %d total entries (%d older entries not shown. Use 'paginate' or 'search' to view them).\n", len(entries), totalCount, unshown))
+				} else {
+					sb.WriteString(fmt.Sprintf("\nShowing %d of %d total entries (all entries shown).\n", len(entries), totalCount))
 				}
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
@@ -194,6 +204,9 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 					pinnedVal = p
 				}
 				if err := m.store.SetScratchpadPinned(ctx, agentID, entryID, pinnedVal); err != nil {
+					if errors.Is(err, store.ErrPinnedLimitReached) {
+						return agent.AgentToolResult{}, err
+					}
 					return agent.AgentToolResult{}, fmt.Errorf("pin scratchpad entry: %w", err)
 				}
 				actionLabel := "pinned"

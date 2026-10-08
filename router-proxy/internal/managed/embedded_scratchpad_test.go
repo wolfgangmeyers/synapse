@@ -83,6 +83,7 @@ func TestEmbeddedScratchpadToolExecution(t *testing.T) {
 	require.Contains(t, fetchOut, "Architecture decision milestone")
 	require.Contains(t, fetchOut, "[Recent]")
 	require.Contains(t, fetchOut, "First unpinned note")
+	require.Contains(t, fetchOut, "Showing 2 of 2 total entries (all entries shown).")
 
 	// 4. Paginate
 	res, err = tool.Execute(ctx, "call-4", map[string]any{
@@ -105,7 +106,7 @@ func TestEmbeddedScratchpadToolExecution(t *testing.T) {
 	require.Contains(t, searchOut, "Architecture decision milestone")
 
 	// 6. Pin / Unpin
-	entries, err := db.FetchScratchpadRecent(ctx, agentID, 5)
+	entries, _, err := db.FetchScratchpadRecent(ctx, agentID, 5)
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
 	unpinnedEntry := entries[1] // the unpinned one
@@ -119,7 +120,7 @@ func TestEmbeddedScratchpadToolExecution(t *testing.T) {
 	require.Contains(t, res.Content[0].(ai.TextContent).Text, "pinned.")
 
 	// Verify it's now pinned
-	entriesAfterPin, err := db.FetchScratchpadRecent(ctx, agentID, 5)
+	entriesAfterPin, _, err := db.FetchScratchpadRecent(ctx, agentID, 5)
 	require.NoError(t, err)
 	for _, e := range entriesAfterPin {
 		require.True(t, e.Pinned)
@@ -143,7 +144,7 @@ func TestEmbeddedScratchpadToolExecution(t *testing.T) {
 	require.Equal(t, fmt.Sprintf("Deleted scratchpad entry %s", unpinnedEntry.ID), res.Content[0].(ai.TextContent).Text)
 
 	// Verify unpinnedEntry is deleted and cannot be fetched
-	entriesAfterDelete, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+	entriesAfterDelete, _, err := db.FetchScratchpadRecent(ctx, agentID, 10)
 	require.NoError(t, err)
 	require.Len(t, entriesAfterDelete, 1)
 	require.NotEqual(t, unpinnedEntry.ID, entriesAfterDelete[0].ID)
@@ -208,3 +209,145 @@ func TestRegisterEmbeddedToolsAndManifest(t *testing.T) {
 	require.Contains(t, manifestTools, "context_reset")
 	require.Contains(t, manifestTools, "reset")
 }
+
+func TestEmbeddedScratchpadFetchUnshownIndicator(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "worker-scratchpad-unshown"
+	binding := store.EmbeddedBinding{AgentID: agentID, SessionID: "session-1", Epoch: 1, Generation: "gen-1"}
+	owner := embeddedOwner{binding: binding, identity: "fixture:" + agentID}
+
+	mgr := &Manager{store: db}
+	tool := mgr.embeddedScratchpadTool(owner)
+
+	// Append 1 pinned entry
+	_, err = tool.Execute(ctx, "call-pin", map[string]any{
+		"action":  "append",
+		"content": "Pinned note",
+		"pinned":  true,
+	}, nil)
+	require.NoError(t, err)
+
+	// Append 4 unpinned entries (total = 5 entries)
+	for i := 1; i <= 4; i++ {
+		time.Sleep(10 * time.Millisecond)
+		_, err = tool.Execute(ctx, fmt.Sprintf("call-unpin-%d", i), map[string]any{
+			"action":  "append",
+			"content": fmt.Sprintf("Unpinned note %d", i),
+		}, nil)
+		require.NoError(t, err)
+	}
+
+	// Fetch with limit = 2 -> returns 1 pinned + 2 unpinned = 3 entries.
+	// Total = 5, unshown = 2.
+	res, err := tool.Execute(ctx, "call-fetch-partial", map[string]any{
+		"action": "fetch",
+		"limit":  2,
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	out := res.Content[0].(ai.TextContent).Text
+	require.Contains(t, out, "Showing 3 of 5 total entries (2 older entries not shown. Use 'paginate' or 'search' to view them).")
+
+	// Fetch with limit = 10 -> returns all 5 entries.
+	// Total = 5, unshown = 0.
+	res, err = tool.Execute(ctx, "call-fetch-all", map[string]any{
+		"action": "fetch",
+		"limit":  10,
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	allOut := res.Content[0].(ai.TextContent).Text
+	require.Contains(t, allOut, "Showing 5 of 5 total entries (all entries shown).")
+}
+
+func TestEmbeddedScratchpadPinnedLimit(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "worker-scratchpad-pin-limit"
+	binding := store.EmbeddedBinding{AgentID: agentID, SessionID: "session-1", Epoch: 1, Generation: "gen-1"}
+	owner := embeddedOwner{binding: binding, identity: "fixture:" + agentID}
+
+	mgr := &Manager{store: db}
+	tool := mgr.embeddedScratchpadTool(owner)
+
+	// Append 10 pinned notes
+	for i := 1; i <= 10; i++ {
+		res, err := tool.Execute(ctx, fmt.Sprintf("call-append-%d", i), map[string]any{
+			"action":  "append",
+			"content": fmt.Sprintf("Pinned milestone note %d", i),
+			"pinned":  true,
+		}, nil)
+		require.NoError(t, err)
+		require.Contains(t, res.Content[0].(ai.TextContent).Text, "pinned: true")
+	}
+
+	// 11th append with pinned: true must fail
+	_, err = tool.Execute(ctx, "call-append-11", map[string]any{
+		"action":  "append",
+		"content": "Exceeding pinned limit note",
+		"pinned":  true,
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
+
+	// Append unpinned note must succeed
+	_, err = tool.Execute(ctx, "call-append-unpinned", map[string]any{
+		"action":  "append",
+		"content": "Regular unpinned note",
+		"pinned":  false,
+	}, nil)
+	require.NoError(t, err)
+
+	// Get entries to locate unpinned and pinned IDs
+	entries, _, err := db.FetchScratchpadRecent(ctx, agentID, 20)
+	require.NoError(t, err)
+	require.Len(t, entries, 11)
+
+	var unpinnedID string
+	var firstPinnedID string
+	for _, e := range entries {
+		if !e.Pinned && unpinnedID == "" {
+			unpinnedID = e.ID
+		}
+		if e.Pinned && firstPinnedID == "" {
+			firstPinnedID = e.ID
+		}
+	}
+	require.NotEmpty(t, unpinnedID)
+	require.NotEmpty(t, firstPinnedID)
+
+	// Pinning the unpinned note must fail because 10 are already pinned
+	_, err = tool.Execute(ctx, "call-pin-unpinned", map[string]any{
+		"action": "pin",
+		"id":     unpinnedID,
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
+
+	// Unpin one note
+	res, err := tool.Execute(ctx, "call-unpin-1", map[string]any{
+		"action": "unpin",
+		"id":     firstPinnedID,
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, "unpinned.")
+
+	// Now pinning the unpinned note must succeed
+	res, err = tool.Execute(ctx, "call-pin-now-ok", map[string]any{
+		"action": "pin",
+		"id":     unpinnedID,
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, "pinned.")
+}
+
+
