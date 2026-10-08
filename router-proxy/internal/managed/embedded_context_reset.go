@@ -245,6 +245,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		return fmt.Errorf("dispatch context reset wake turn: %w", err)
 	}
 
+	m.OfferDirect(binding.AgentID)
 	return nil
 }
 

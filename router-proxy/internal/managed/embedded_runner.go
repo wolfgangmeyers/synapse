@@ -176,9 +176,31 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 				case <-runCtx.Done():
 					return
 				case <-ticks:
-					if m.store.RenewEmbeddedOwner(runCtx, binding, ownerID, embeddedOwnerTTL) != nil {
+					curAgent, err := m.store.ManagedAgent(runCtx, agent.AgentID)
+					if err != nil || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
 						cancel()
 						return
+					}
+					m.mu.Lock()
+					curOwner, ok := m.embeddedOwners[agent.AgentID]
+					closed := m.closed
+					m.mu.Unlock()
+					if closed {
+						return
+					}
+					if !ok {
+						curOwner = owner
+					}
+					if err := m.store.RenewEmbeddedOwner(runCtx, curOwner.binding, curOwner.identity, embeddedOwnerTTL); err != nil {
+						token, acqErr := m.store.AcquireEmbeddedOwner(runCtx, curOwner.binding, curOwner.identity, embeddedOwnerTTL)
+						if acqErr == nil {
+							m.mu.Lock()
+							if existing, ok := m.embeddedOwners[agent.AgentID]; ok && existing.identity == curOwner.identity && existing.binding.Epoch == curOwner.binding.Epoch {
+								existing.binding.OwnerToken = token
+								m.embeddedOwners[agent.AgentID] = existing
+							}
+							m.mu.Unlock()
+						}
 					}
 				}
 			}
