@@ -191,7 +191,7 @@ func TestEmbeddedOwnReminderAtomicCalls(t *testing.T) {
 	require.Error(t, err)
 	_, _, err = s.EmbeddedOwnReminderCall(ctx, worker, "call-1", create)
 	require.Error(t, err)
-	_, _, err = s.EmbeddedOwnReminderCall(ctx, root, "bad", []byte(`{"action":"list","extra":1}`))
+	_, _, err = s.EmbeddedOwnReminderCall(ctx, root, "bad", []byte(`{"action":"invalid"}`))
 	require.Error(t, err)
 	_, _, err = s.EmbeddedOwnReminderCall(ctx, root, "bad", []byte(`{"action":"list","action":"create"}`))
 	require.Error(t, err)

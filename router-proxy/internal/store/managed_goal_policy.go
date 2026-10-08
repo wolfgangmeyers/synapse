@@ -582,7 +582,11 @@ func (s *Store) SnoozeManagedGoalPolicy(ctx context.Context, fence ManagedRuntim
 		if idErr != nil {
 			return idErr
 		}
-		wakeAt := formatTimestamp(now.Add(time.Duration(current.Config.Settings.SnoozeDurationMS) * time.Millisecond))
+		snoozeDuration := current.Config.Settings.SnoozeDurationMS
+		if snoozeDuration > 60_000 {
+			snoozeDuration = 60_000
+		}
+		wakeAt := formatTimestamp(now.Add(time.Duration(snoozeDuration) * time.Millisecond))
 		args := append([]any{wakeAt, wakeAt, wakeupMessageID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, formatTimestamp(now), fence.AgentID}, managedFenceValues(fence)...)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='snoozed',next_wakeup_at=?,snoozed_until=?,wakeup_message_id=?,snooze_pi_session_id=?,snooze_session_epoch=?,snooze_process_pid=?,snooze_process_start_marker=?,snooze_process_incarnation=?,snooze_runtime_generation=?,evaluator_lease_until=NULL,updated_at=? WHERE agent_id=? AND evaluator_state='idle' AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state='idle')`, args...)
 		if err != nil {

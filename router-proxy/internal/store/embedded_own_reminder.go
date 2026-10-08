@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,12 +34,13 @@ func (s *Store) cancelPendingEmbeddedOwnRemindersTx(ctx context.Context, agentID
 	return err
 }
 
-// EmbeddedOwnReminderArguments is closed: identity is always the saved owner.
-// Presence flags distinguish omitted update fields from provided empty values.
+// EmbeddedOwnReminderArguments accepts standard fields and common LLM parameter aliases.
 type EmbeddedOwnReminderArguments struct {
 	Action, Body, DueAt, ID        string
+	Subject                        string
 	IntervalMS                     int64
 	HasBody, HasDueAt, HasInterval bool
+	HasSubject                     bool
 }
 type EmbeddedOwnReminderItem struct{ ID, DueAt, State string }
 type EmbeddedOwnReminderResult struct {
@@ -52,96 +54,226 @@ type EmbeddedOwnReminderError struct{ Reason string }
 
 func (e *EmbeddedOwnReminderError) Error() string { return "embedded own reminder: " + e.Reason }
 
+func parseFlexibleTimestamp(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("empty timestamp")
+	}
+	formats := []string{
+		"2006-01-02T15:04:05.000Z",
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, value); err == nil {
+			return t.UTC().Format("2006-01-02T15:04:05.000Z"), nil
+		}
+	}
+	return "", fmt.Errorf("invalid timestamp: %q", value)
+}
+
 func ParseEmbeddedOwnReminderArguments(raw []byte) (EmbeddedOwnReminderArguments, error) {
-	fail := func() (EmbeddedOwnReminderArguments, error) {
-		return EmbeddedOwnReminderArguments{}, &EmbeddedOwnReminderError{Reason: "invalid closed arguments"}
+	fail := func(reason string) (EmbeddedOwnReminderArguments, error) {
+		return EmbeddedOwnReminderArguments{}, &EmbeddedOwnReminderError{Reason: reason}
 	}
 	if len(raw) > 8192 {
-		return fail()
+		return fail("arguments exceed maximum payload size")
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	token, err := d.Token()
 	if err != nil || token != json.Delim('{') {
-		return fail()
+		return fail("invalid json object")
 	}
 	fields := make(map[string]json.RawMessage)
 	for d.More() {
 		key, err := d.Token()
 		if err != nil {
-			return fail()
+			return fail("invalid json token")
 		}
 		k, ok := key.(string)
-		if !ok || (k != "action" && k != "body" && k != "due_at" && k != "id" && k != "interval_ms") {
-			return fail()
+		if !ok {
+			return fail("invalid json property key")
 		}
 		if _, exists := fields[k]; exists {
-			return fail()
+			return fail("duplicate argument key: " + k)
 		}
 		var v json.RawMessage
 		if err := d.Decode(&v); err != nil {
-			return fail()
+			return fail("invalid json property value")
 		}
 		fields[k] = v
 	}
 	end, err := d.Token()
 	if err != nil || end != json.Delim('}') {
-		return fail()
+		return fail("unclosed json object")
 	}
 	if _, err = d.Token(); err != io.EOF {
-		return fail()
+		return fail("unexpected trailing input")
 	}
+
 	a := EmbeddedOwnReminderArguments{}
-	for key, value := range fields {
-		switch key {
-		case "interval_ms":
-			if err := json.Unmarshal(value, &a.IntervalMS); err != nil || a.IntervalMS < 1000 || a.IntervalMS > int64((7*24*time.Hour)/time.Millisecond) {
-				return fail()
+
+	rawToString := func(v json.RawMessage) (string, bool) {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			return s, true
+		}
+		return "", false
+	}
+
+	rawToInt64 := func(v json.RawMessage) (int64, bool) {
+		var n json.Number
+		dec := json.NewDecoder(bytes.NewReader(v))
+		dec.UseNumber()
+		if err := dec.Decode(&n); err == nil {
+			if i, err := n.Int64(); err == nil {
+				return i, true
 			}
-			a.HasInterval = true
-		case "action", "id", "body", "due_at":
-			var text string
-			if err := json.Unmarshal(value, &text); err != nil {
-				return fail()
+			if f, err := n.Float64(); err == nil {
+				return int64(f), true
 			}
-			switch key {
-			case "action":
-				a.Action = text
-			case "id":
-				a.ID = text
-			case "body":
-				a.Body, a.HasBody = text, true
-			case "due_at":
-				a.DueAt, a.HasDueAt = text, true
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			if i, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+				return i, true
+			}
+		}
+		return 0, false
+	}
+
+	// Action
+	if v, ok := fields["action"]; ok {
+		if s, ok := rawToString(v); ok {
+			a.Action = strings.ToLower(strings.TrimSpace(s))
+		}
+	}
+
+	// ID
+	if v, ok := fields["id"]; ok {
+		if s, ok := rawToString(v); ok {
+			a.ID = strings.TrimSpace(s)
+		}
+	}
+
+	// Text: message / body / content / text
+	for _, k := range []string{"body", "message", "content", "text"} {
+		if v, ok := fields[k]; ok {
+			if s, ok := rawToString(v); ok && strings.TrimSpace(s) != "" {
+				a.Body = s
+				a.HasBody = true
+				break
 			}
 		}
 	}
+
+	// Subject: subject / title
+	for _, k := range []string{"subject", "title"} {
+		if v, ok := fields[k]; ok {
+			if s, ok := rawToString(v); ok && strings.TrimSpace(s) != "" {
+				a.Subject = s
+				a.HasSubject = true
+				if !a.HasBody {
+					a.Body = s
+					a.HasBody = true
+				}
+				break
+			}
+		}
+	}
+
+	// Time: due_at / scheduled_at / scheduledAt / time
+	for _, k := range []string{"due_at", "scheduled_at", "scheduledAt", "time"} {
+		if v, ok := fields[k]; ok {
+			if s, ok := rawToString(v); ok && strings.TrimSpace(s) != "" {
+				if parsed, err := parseFlexibleTimestamp(s); err == nil {
+					a.DueAt = parsed
+					a.HasDueAt = true
+					break
+				}
+			}
+		}
+	}
+
+	// Interval/Delay:
+	// interval_ms / intervalMs / interval_minutes / intervalMinutes
+	for _, k := range []string{"interval_ms", "intervalMs"} {
+		if v, ok := fields[k]; ok {
+			if ms, ok := rawToInt64(v); ok && ms >= 1000 && ms <= int64((7*24*time.Hour)/time.Millisecond) {
+				a.IntervalMS = ms
+				a.HasInterval = true
+				break
+			}
+		}
+	}
+	if !a.HasInterval {
+		for _, k := range []string{"interval_minutes", "intervalMinutes"} {
+			if v, ok := fields[k]; ok {
+				if m, ok := rawToInt64(v); ok && m > 0 {
+					ms := m * 60 * 1000
+					if ms >= 1000 && ms <= int64((7*24*time.Hour)/time.Millisecond) {
+						a.IntervalMS = ms
+						a.HasInterval = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// delay_minutes / delayMinutes / delay_seconds
+	var delayDuration time.Duration
+	var hasDelay bool
+	for _, k := range []string{"delay_minutes", "delayMinutes"} {
+		if v, ok := fields[k]; ok {
+			if m, ok := rawToInt64(v); ok && m > 0 {
+				delayDuration = time.Duration(m) * time.Minute
+				hasDelay = true
+				break
+			}
+		}
+	}
+	if !hasDelay {
+		if v, ok := fields["delay_seconds"]; ok {
+			if s, ok := rawToInt64(v); ok && s > 0 {
+				delayDuration = time.Duration(s) * time.Second
+				hasDelay = true
+			}
+		}
+	}
+	if !a.HasDueAt && hasDelay {
+		a.DueAt = time.Now().UTC().Add(delayDuration).Format("2006-01-02T15:04:05.000Z")
+		a.HasDueAt = true
+	}
+
 	if a.HasBody && (a.Body == "" || len([]byte(a.Body)) > 4096 || !utf8.ValidString(a.Body)) {
-		return fail()
+		return fail("invalid body")
 	}
 	if a.HasDueAt {
 		if _, err := protocol.ParseTimestamp(a.DueAt); err != nil {
-			return fail()
+			return fail("invalid due_at")
 		}
 	}
 	switch a.Action {
 	case "create":
-		if !a.HasBody || !a.HasDueAt || a.ID != "" || len(fields) != 3 && !(len(fields) == 4 && a.HasInterval) {
-			return fail()
+		if !a.HasBody || !a.HasDueAt {
+			return fail("create requires body and due_at")
 		}
 	case "update":
-		if !reminderIDPattern.MatchString(a.ID) || !(a.HasBody || a.HasDueAt || a.HasInterval) || len(fields) != 2+reminderFlagInt(a.HasBody)+reminderFlagInt(a.HasDueAt)+reminderFlagInt(a.HasInterval) {
-			return fail()
+		if !reminderIDPattern.MatchString(a.ID) || !(a.HasBody || a.HasDueAt || a.HasInterval) {
+			return fail("update requires valid id and at least one property")
 		}
 	case "cancel", "delete":
-		if len(fields) != 2 || !reminderIDPattern.MatchString(a.ID) {
-			return fail()
+		if !reminderIDPattern.MatchString(a.ID) {
+			return fail("cancel requires valid id")
 		}
 	case "list":
-		if len(fields) != 1 {
-			return fail()
-		}
+		// valid
 	default:
-		return fail()
+		return fail("unknown action: " + a.Action)
 	}
 	return a, nil
 }
@@ -320,7 +452,11 @@ func (s *Store) embeddedOwnReminderCall(ctx context.Context, b EmbeddedBinding, 
 			if args.HasInterval {
 				interval = args.IntervalMS
 			}
-			_, err = s.db.ExecContext(ctx, `INSERT INTO reminders(id,target,creator,subject,body,created_at,next_due_at,interval_ms,sentinel_json,state,linked_message_id,occurrence_number,attempt_count,last_attempt_at) VALUES(?,?,?,NULL,?,?,?,?,NULL,'scheduled',NULL,0,0,NULL)`, reminderID, b.AgentID, b.AgentID, args.Body, formatTimestamp(now), formatTimestamp(due), interval)
+			var subject any
+			if args.HasSubject && args.Subject != "" {
+				subject = args.Subject
+			}
+			_, err = s.db.ExecContext(ctx, `INSERT INTO reminders(id,target,creator,subject,body,created_at,next_due_at,interval_ms,sentinel_json,state,linked_message_id,occurrence_number,attempt_count,last_attempt_at) VALUES(?,?,?,?,?,?,?,?,NULL,'scheduled',NULL,0,0,NULL)`, reminderID, b.AgentID, b.AgentID, subject, args.Body, formatTimestamp(now), formatTimestamp(due), interval)
 			if err != nil {
 				return err
 			}

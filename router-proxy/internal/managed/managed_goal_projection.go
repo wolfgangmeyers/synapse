@@ -92,6 +92,9 @@ func managedGoalSettingsFromArguments(value any) (store.ManagedGoalSettings, boo
 	if !lockOK || !snoozeOK || !durationOK || !turnOK || !budgetOK || !yieldOK || !elapsedOK || (turnLimit != nil && *turnLimit > 20) {
 		return store.ManagedGoalSettings{}, false
 	}
+	if duration > 60_000 {
+		duration = 60_000
+	}
 	return store.ManagedGoalSettings{GoalLockEnabled: goalLock, SnoozeEnabled: snooze, SnoozeDurationMS: duration, SnoozeTurnLimit: turnLimit, SnoozeBudgetCapMS: budget, SnoozeRefillYieldMS: yield, SnoozeRefillElapsedMS: elapsed}, true
 }
 
