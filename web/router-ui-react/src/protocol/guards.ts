@@ -158,8 +158,9 @@ export function isRouterUtcTimestamp(value: unknown): value is string {
 
 export function isManagedAgent(value: unknown): value is ManagedAgent {
   const required = ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"];
-  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state", "runtime"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state", "runtime", "active_workflow_state_id"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
   if (Object.hasOwn(value, "runtime") && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
+  if (Object.hasOwn(value, "active_workflow_state_id") && value.active_workflow_state_id !== null && !isSafeString(value.active_workflow_state_id, 0, 128)) return false;
   const model = value.model; const manifest = value.manifest; const lastError = value.last_error;
   if (!isAgentId(value.agent_id) || value.source !== "router-managed" || !isSafeString(value.cwd, 1, 4096) || !isSafeString(value.desired_state, 1, 64) || !isSafeString(value.lifecycle_state, 1, 64) || !isSafeString(value.activity_state, 1, 64) || typeof value.accepting_prompts !== "boolean" || !isRouterUtcTimestamp(value.created_at) || (value.started_at !== null && !isRouterUtcTimestamp(value.started_at)) || !isRouterUtcTimestamp(value.updated_at)) return false;
   if (!isExactRecord(model, ["provider", "id"]) || !isSafeString(model.provider, 1, 128) || !isSafeString(model.id, 1, 256)) return false;
