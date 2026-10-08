@@ -65,6 +65,8 @@ type embeddedPersistence struct {
 	currentThinking   string
 	lastThinkingText  string
 	toolExecuted      bool
+	thinkingGenerated bool
+	toolCallReceived  bool
 	source            string
 	msgID             string
 }
@@ -156,11 +158,13 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			stepThinking += th.Thinking
 		}
 		if call, ok := part.(ai.ToolCall); ok && call.ID != "" {
+			p.toolCallReceived = true
 			if p.toolInputs == nil {
 				p.toolInputs = make(map[string]any)
 			}
 			p.toolInputs[call.ID] = call.Arguments
 		} else if call, ok := part.(*ai.ToolCall); ok && call != nil && call.ID != "" {
+			p.toolCallReceived = true
 			if p.toolInputs == nil {
 				p.toolInputs = make(map[string]any)
 			}
@@ -168,6 +172,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 	}
 	if stepThinking != "" {
+		p.thinkingGenerated = true
 		if p.currentThinking == "" || stepThinking == p.currentThinking {
 			p.currentThinking = stepThinking
 		} else if strings.HasPrefix(stepThinking, p.currentThinking) {
@@ -735,6 +740,22 @@ func resolveEmbeddedWorkerSystemPrompt(role string) string {
 When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.`
 }
 
+const (
+	embeddedSynthesisPrompt    = "Please provide your direct conversational response and answer to the user based on the actions above."
+	embeddedThinkingOnlyPrompt = "You generated internal thinking without taking action or responding. Please execute your next tool call or provide your response to proceed."
+)
+
+func (m *Manager) nudgeEmbeddedSessionIfNeeded(ctx context.Context, session *coding.Session, p *embeddedPersistence) {
+	if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+		_, _ = session.Run(ctx, embeddedSynthesisPrompt)
+	} else if !p.toolExecuted && !p.toolCallReceived && len(strings.TrimSpace(session.LastAssistantText())) == 0 && p.thinkingGenerated {
+		_, _ = session.Run(ctx, embeddedThinkingOnlyPrompt)
+		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+			_, _ = session.Run(ctx, embeddedSynthesisPrompt)
+		}
+	}
+}
+
 func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.ManagedAgentRecord, explicitPrompt string, mail *store.EmbeddedMailAttempt, continuation *store.EmbeddedGoalEvaluationKey, wake *embeddedClaimedWakeScope, wakePrompts []agent.AgentMessage) (finalSeq int64, turnErr error) {
 	owner, ok := ctx.Value(embeddedOwnerContextKey{}).(embeddedOwner)
 	if !ok || owner.binding.AgentID != saved.AgentID || owner.binding.SessionID != saved.PiSessionID || owner.binding.Epoch != saved.SessionEpoch || owner.binding.Generation != saved.RuntimeGeneration {
@@ -1259,6 +1280,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		tools = append(tools, tool)
 	}
+	activeWorkflowState, activeStateErr := m.store.GetManagedAgentActiveWorkflowState(ctx, binding.AgentID)
+	if activeStateErr == nil && activeWorkflowState != nil && len(activeWorkflowState.AllowedTools) > 0 {
+		var filteredTools []agent.AgentTool
+		for _, tool := range tools {
+			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
+				filteredTools = append(filteredTools, tool)
+			}
+		}
+		tools = filteredTools
+	}
 	var appliedReceipt *store.EmbeddedGoalAppliedReceipt
 	// The SDK invokes StreamFn only when it has selected a provider request.
 	// MessageEnd persistence has already checked the initiating user and any
@@ -1424,8 +1455,19 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			bashExecutions[call.ToolCall.ID] = bashExecution{expected: &result, replay: true}
 			freshWorkerMu.Unlock()
 			return &result, nil
+		}, BeforeToolCall: func(callCtx context.Context, call agent.BeforeToolCallContext) *agent.BeforeToolCallResult {
+			if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, call.ToolCall.Name); err != nil {
+				return &agent.BeforeToolCallResult{
+					Block:  true,
+					Reason: err.Error(),
+				}
+			}
+			return nil
 		}, BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
 			toolName := call.ToolCall.Name
+			if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, toolName); err != nil {
+				return &agent.PolicyDenial{Reason: err.Error()}
+			}
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
 				if p != nil && toolName != "goal" && toolName != "goal_snooze" && toolName != "context_reset" && toolName != "reset" {
@@ -1812,6 +1854,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
+		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1843,9 +1886,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
-		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
-			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
-		}
+		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1857,9 +1898,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
-		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
-			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
-		}
+		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1873,9 +1912,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
-		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
-			_, _ = session.Run(ctx, "Please provide your direct conversational response and answer to the user based on the actions above.")
-		}
+		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}

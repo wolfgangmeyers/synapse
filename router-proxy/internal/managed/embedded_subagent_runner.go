@@ -908,6 +908,17 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		return
 	}
 
+	activeWorkflowState, activeStateErr := m.store.GetManagedAgentActiveWorkflowState(taskCtx, childAgent.AgentID)
+	if activeStateErr == nil && activeWorkflowState != nil && len(activeWorkflowState.AllowedTools) > 0 {
+		var filteredTools []agent.AgentTool
+		for _, tool := range tools {
+			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
+				filteredTools = append(filteredTools, tool)
+			}
+		}
+		tools = filteredTools
+	}
+
 	// 5. Fresh session with current attempt callbacks
 	session := coding.NewSession(coding.SessionOptions{
 		SessionID:          childBinding.SessionID,
@@ -918,6 +929,9 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		OrderedPersistence: p,
 		StreamFn:           stream,
 		BeforeToolCall: func(callCtx context.Context, c agent.BeforeToolCallContext) *agent.BeforeToolCallResult {
+			if err := admitWorkflowStateTool(callCtx, m.store, childAgent.AgentID, c.ToolCall.Name); err != nil {
+				return &agent.BeforeToolCallResult{Block: true, Reason: err.Error()}
+			}
 			task.mu.Lock()
 			defer task.mu.Unlock()
 			if task.maxTurns > 0 && task.turnCount >= task.maxTurns+5 {

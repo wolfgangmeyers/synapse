@@ -113,6 +113,27 @@ func FormatSubagentNotification(record store.ManagedSubagentRecord) string {
 	return FormatSubagentNotificationWithOptions(record, SubagentNotificationOptions{})
 }
 
+// FormatSubagentWakePrompt formats an actionable completion wake prompt for the parent agent.
+func FormatSubagentWakePrompt(record store.ManagedSubagentRecord) string {
+	previewText := record.ResultText
+	if previewText == "" && record.Error != "" {
+		previewText = record.Error
+	}
+	preview := SubagentResultPreview(previewText, MaxSubagentPreviewRunes)
+	if preview == "" {
+		preview = record.Status
+	}
+	desc := record.Description
+	if desc == "" {
+		desc = record.SubagentType
+	}
+	if desc == "" {
+		desc = "subagent"
+	}
+	return fmt.Sprintf("[Subagent Completed] Task %s (%s) finished with status %s: %s\n\nCall get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.",
+		record.AgentID, desc, record.Status, preview)
+}
+
 // FormatSubagentNotificationWithOptions formats a structured task notification with options.
 func FormatSubagentNotificationWithOptions(record store.ManagedSubagentRecord, opts SubagentNotificationOptions) string {
 	durStr := FormatSubagentDurationSeconds(record.DurationSeconds)

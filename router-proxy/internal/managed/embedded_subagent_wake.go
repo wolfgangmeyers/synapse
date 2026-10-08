@@ -141,7 +141,7 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 	}
 
 	// Format notification from the authentic persisted child record, not forged caller stats
-	notification := FormatSubagentNotification(*storedChild)
+	notification := FormatSubagentWakePrompt(*storedChild)
 	reqID := SubagentWakeRequestID(storedChild.AgentID, storedChild.Attempt)
 
 	// ReserveEmbeddedPrompt executes inside an immediate SQLite transaction, performing
@@ -191,7 +191,7 @@ func (m *Manager) deliverSubagentMailboxNotification(parent store.EmbeddedBindin
 	if record.Status != "completed" && record.Status != "steered" {
 		subject = fmt.Sprintf("Subagent %s %s", record.AgentID, record.Status)
 	}
-	body := FormatSubagentNotification(record)
+	body := FormatSubagentWakePrompt(record)
 	source := protocol.MessageSource{Kind: "system"}
 	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
 	nowText := formatManagedTime(m.clock.Now())

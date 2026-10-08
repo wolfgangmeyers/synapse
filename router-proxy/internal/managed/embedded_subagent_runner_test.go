@@ -869,7 +869,7 @@ func TestSubagentRunnerParentIdleWake(t *testing.T) {
 			for _, m := range hist.Messages {
 				if u, ok := m.(ai.UserMessage); ok {
 					for _, c := range u.Content {
-						if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "[Subagent Completion Notification]") {
+						if tc, ok := c.(ai.TextContent); ok && (strings.Contains(tc.Text, "[Subagent Completed]") || strings.Contains(tc.Text, "[Subagent Completion Notification]")) {
 							parentReceivedNotification.Store(true)
 							receivedPromptText = tc.Text
 							wakeDone <- struct{}{}
@@ -903,9 +903,8 @@ func TestSubagentRunnerParentIdleWake(t *testing.T) {
 	}
 
 	require.True(t, parentReceivedNotification.Load(), "parent must receive structured subagent completion notification")
-	require.Contains(t, receivedPromptText, "Child ID: "+childID)
-	require.Contains(t, receivedPromptText, "Status: completed")
-	require.Contains(t, receivedPromptText, "Result Preview:")
+	require.Contains(t, receivedPromptText, childID)
+	require.Contains(t, receivedPromptText, "finished with status completed")
 	require.Contains(t, receivedPromptText, "get_subagent_result")
 }
 
@@ -1115,7 +1114,7 @@ func TestParentSDKRegisteredSubagentToolEndToEnd(t *testing.T) {
 		for _, m := range req.Messages {
 			if u, ok := m.(ai.UserMessage); ok {
 				for _, c := range u.Content {
-					if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "[Subagent Completion Notification]") {
+					if tc, ok := c.(ai.TextContent); ok && (strings.Contains(tc.Text, "[Subagent Completed]") || strings.Contains(tc.Text, "[Subagent Completion Notification]")) {
 						isWake = true
 						wakeNoticeText = tc.Text
 						break
@@ -1307,7 +1306,7 @@ func TestParentSDKRegisteredSubagentToolEndToEnd(t *testing.T) {
 			}
 		case ai.UserMessage:
 			for _, c := range m.Content {
-				if textContent, ok := c.(ai.TextContent); ok && strings.Contains(textContent.Text, "[Subagent Completion Notification]") {
+				if textContent, ok := c.(ai.TextContent); ok && (strings.Contains(textContent.Text, "[Subagent Completed]") || strings.Contains(textContent.Text, "[Subagent Completion Notification]")) {
 					foundWakeNotice = true
 				}
 			}

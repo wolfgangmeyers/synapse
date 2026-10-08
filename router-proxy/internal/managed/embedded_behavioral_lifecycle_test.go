@@ -869,7 +869,7 @@ func TestBehavioral_Subagent_LifecycleAndResultCollection(t *testing.T) {
 		for _, m := range tc.Messages {
 			if u, ok := m.(ai.UserMessage); ok {
 				for _, c := range u.Content {
-					if txt, ok := c.(ai.TextContent); ok && strings.Contains(txt.Text, "[Subagent Completion Notification]") {
+					if txt, ok := c.(ai.TextContent); ok && (strings.Contains(txt.Text, "[Subagent Completed]") || strings.Contains(txt.Text, "[Subagent Completion Notification]")) {
 						isWake = true
 						wakeText = txt.Text
 					}
