@@ -96,9 +96,17 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 	desc, _ := rawString(payload, "description", false)
 	entryText, _ := rawString(payload, "entry_text", false)
 
+	var reminders []store.WorkflowReminderConfig
+	if raw, exists := payload["reminders"]; exists && len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &reminders); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+	}
+
 	return store.WorkflowStateRequest{
 		Name:        name,
 		Description: desc,
 		EntryText:   entryText,
+		Reminders:   reminders,
 	}, nil
 }

@@ -1,12 +1,24 @@
 import { useState, useEffect, type ReactElement } from "react";
 import type { RouterHttpClient } from "../transport/http-client";
-import type { WorkflowState, WorkflowStateInput } from "../domain/workflow-states";
+import type { WorkflowState, WorkflowStateInput, WorkflowReminderConfig, WorkflowReminderType } from "../domain/workflow-states";
+import { secureUuid } from "../platform/secure-uuid";
 import { DialogShell } from "./DialogShell";
 
 export interface WorkflowStatesPageProps {
   client: RouterHttpClient;
   onNavigateHome?: () => void;
   onBack?: () => void;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds >= 60 && seconds % 60 === 0) {
+    const mins = Math.floor(seconds / 60);
+    if (mins >= 60 && mins % 60 === 0) {
+      return `${mins / 60}h`;
+    }
+    return `${mins}m`;
+  }
+  return `${seconds}s`;
 }
 
 export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowStatesPageProps): ReactElement {
@@ -18,6 +30,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
   const [formName, setFormName] = useState("");
   const [formDescription, setFormDescription] = useState("");
   const [formEntryText, setFormEntryText] = useState("");
+  const [formReminders, setFormReminders] = useState<WorkflowReminderConfig[]>([]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | undefined>(undefined);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | undefined>(undefined);
@@ -44,6 +57,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormName("");
     setFormDescription("");
     setFormEntryText("");
+    setFormReminders([]);
     setFormError(undefined);
     setIsCreating(true);
   };
@@ -53,6 +67,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormName(state.name);
     setFormDescription(state.description);
     setFormEntryText(state.entry_text);
+    setFormReminders(state.reminders ? state.reminders.map((r) => ({ ...r })) : []);
     setFormError(undefined);
     setIsCreating(false);
   };
@@ -63,18 +78,121 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormError(undefined);
   };
 
+  const [isReminderDialogOpen, setIsReminderDialogOpen] = useState(false);
+  const [editingReminderIndex, setEditingReminderIndex] = useState<number | undefined>(undefined);
+  const [reminderDraftSubject, setReminderDraftSubject] = useState("");
+  const [reminderDraftBody, setReminderDraftBody] = useState("");
+  const [reminderDraftDelay, setReminderDraftDelay] = useState(300);
+  const [reminderDraftRecurring, setReminderDraftRecurring] = useState(false);
+  const [reminderDraftInterval, setReminderDraftInterval] = useState(300);
+  const [reminderDraftError, setReminderDraftError] = useState("");
+
+  const openAddReminder = () => {
+    setEditingReminderIndex(undefined);
+    setReminderDraftSubject("");
+    setReminderDraftBody("");
+    setReminderDraftDelay(300);
+    setReminderDraftRecurring(false);
+    setReminderDraftInterval(300);
+    setReminderDraftError("");
+    setIsReminderDialogOpen(true);
+  };
+
+  const openEditReminder = (index: number) => {
+    const reminder = formReminders[index];
+    if (!reminder) return;
+    setEditingReminderIndex(index);
+    setReminderDraftSubject(reminder.subject ?? "");
+    setReminderDraftBody(reminder.body);
+    setReminderDraftDelay(reminder.delay_seconds);
+    setReminderDraftRecurring(reminder.type === "recurring");
+    setReminderDraftInterval(reminder.interval_seconds ?? reminder.delay_seconds ?? 300);
+    setReminderDraftError("");
+    setIsReminderDialogOpen(true);
+  };
+
+  const handleSaveReminder = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = reminderDraftBody.trim();
+    if (!trimmed) {
+      setReminderDraftError("Enter reminder text.");
+      return;
+    }
+    if (typeof reminderDraftDelay !== "number" || isNaN(reminderDraftDelay) || reminderDraftDelay < 1) {
+      setReminderDraftError("Enter a delay of at least 1 second.");
+      return;
+    }
+    if (reminderDraftRecurring && (typeof reminderDraftInterval !== "number" || isNaN(reminderDraftInterval) || reminderDraftInterval < 1)) {
+      setReminderDraftError("Enter an interval of at least 1 second.");
+      return;
+    }
+
+    const reminderConfig: WorkflowReminderConfig = {
+      id: editingReminderIndex !== undefined ? formReminders[editingReminderIndex]?.id ?? secureUuid() : secureUuid(),
+      type: reminderDraftRecurring ? "recurring" : "one_shot",
+      delay_seconds: reminderDraftDelay,
+      body: trimmed,
+      ...(reminderDraftSubject.trim() ? { subject: reminderDraftSubject.trim() } : {}),
+      ...(reminderDraftRecurring ? { interval_seconds: reminderDraftInterval } : {}),
+    };
+
+    if (editingReminderIndex !== undefined) {
+      setFormReminders((prev) =>
+        prev.map((r, i) => (i === editingReminderIndex ? reminderConfig : r))
+      );
+    } else {
+      setFormReminders((prev) => [...prev, reminderConfig]);
+    }
+
+    setIsReminderDialogOpen(false);
+  };
+
+  const removeReminder = (index: number) => {
+    setFormReminders((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) {
       setFormError("State name is required");
       return;
     }
+
+    for (let i = 0; i < formReminders.length; i++) {
+      const r = formReminders[i];
+      if (!r) continue;
+      if (!r.body.trim()) {
+        setFormError(`Reminder #${i + 1} text is required`);
+        return;
+      }
+      if (typeof r.delay_seconds !== "number" || isNaN(r.delay_seconds) || r.delay_seconds < 0) {
+        setFormError(`Reminder #${i + 1} delay must be a non-negative number`);
+        return;
+      }
+      if (r.type === "recurring") {
+        if (typeof r.interval_seconds !== "number" || isNaN(r.interval_seconds) || r.interval_seconds <= 0) {
+          setFormError(`Reminder #${i + 1} interval must be greater than 0`);
+          return;
+        }
+      }
+    }
+
     setSaving(true);
     setFormError(undefined);
     const input: WorkflowStateInput = {
       name: formName.trim(),
       description: formDescription.trim(),
       entry_text: formEntryText,
+      reminders: formReminders.map((r) => ({
+        id: r.id,
+        type: r.type,
+        delay_seconds: Number(r.delay_seconds),
+        body: r.body.trim(),
+        ...(r.subject?.trim() ? { subject: r.subject.trim() } : {}),
+        ...(r.type === "recurring" && r.interval_seconds !== undefined
+          ? { interval_seconds: Number(r.interval_seconds) }
+          : {}),
+      })),
     };
 
     try {
@@ -175,6 +293,35 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                     </button>
                   </div>
                 </div>
+
+                {st.reminders && st.reminders.length > 0 ? (
+                  <div className="workflow-reminder-badges" aria-label="Configured reminders">
+                    {st.reminders.map((rem) => {
+                      const isRecurring = rem.type === "recurring";
+                      const label = isRecurring
+                        ? `Recurring every ${formatDuration(rem.interval_seconds ?? rem.delay_seconds)}${
+                            rem.delay_seconds > 0 ? ` (starts in ${formatDuration(rem.delay_seconds)})` : ""
+                          }`
+                        : `One-shot in ${formatDuration(rem.delay_seconds)}`;
+                      const fullTitle = `${rem.subject ? `[${rem.subject}] ` : ""}${rem.body}`;
+
+                      return (
+                        <span
+                          key={rem.id}
+                          className={`workflow-reminder-badge${isRecurring ? " recurring" : ""}`}
+                          title={fullTitle}
+                        >
+                          <i
+                            className={isRecurring ? "fa-solid fa-arrows-rotate" : "fa-solid fa-clock"}
+                            aria-hidden="true"
+                          />
+                          <span>{label}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : null}
+
                 {st.entry_text ? (
                   <div className="state-entry-text">
                     <div className="entry-text-label">Automatic Entry Text:</div>
@@ -200,7 +347,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
         open={isCreating || Boolean(editingState)}
         title={editingState ? "Edit Workflow State" : "New Workflow State"}
         titleId="state-form-title"
-        description="Configure entry text and metadata for this workflow state."
+        description="Configure entry text, reminders, and metadata for this workflow state."
         onClose={closeForm}
         closeLabel="Close workflow state editor"
         className="message-dialog workflow-state-dialog"
@@ -240,7 +387,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
             <textarea
               id="state-entry"
               className="form-control"
-              rows={6}
+              rows={5}
               placeholder="Text that automatically posts to the conversation when entering this state..."
               value={formEntryText}
               onChange={(e) => setFormEntryText(e.target.value)}
@@ -249,12 +396,155 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
               This text will automatically post to the agent when entering this state.
             </small>
           </div>
+
+          {/* Reminders section */}
+          <div className="workflow-reminders-section">
+            <div className="workflow-reminders-header">
+              <span className="workflow-reminders-title">
+                <i className="fa-solid fa-clock" aria-hidden="true" /> Reminders ({formReminders.length})
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={openAddReminder}
+              >
+                <i className="fa-solid fa-plus" aria-hidden="true" /> Add reminder
+              </button>
+            </div>
+
+            {formReminders.length === 0 ? (
+              <small className="text-muted">
+                No reminders configured. Reminders fire while an agent is in this state.
+              </small>
+            ) : (
+              <div className="workflow-reminders-list">
+                {formReminders.map((reminder, idx) => (
+                  <article className="reminder-list-item" key={reminder.id}>
+                    <strong>{reminder.subject || "Reminder"}</strong>
+                    <p>{reminder.body}</p>
+                    <small className="reminder-recurrence">
+                      {reminder.type === "recurring"
+                        ? `Recurring every ${formatDuration(reminder.interval_seconds ?? reminder.delay_seconds)}${
+                            reminder.delay_seconds > 0 ? ` (starts in ${formatDuration(reminder.delay_seconds)})` : ""
+                          }`
+                        : `One-shot in ${formatDuration(reminder.delay_seconds)}`}
+                    </small>
+                    <div className="reminder-lock-actions">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => openEditReminder(idx)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => removeReminder(idx)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="dialog-actions workflow-dialog-actions">
             <button type="button" className="btn btn-secondary" onClick={closeForm} disabled={saving}>
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={saving}>
               {saving ? "Saving..." : editingState ? "Save Changes" : "Create State"}
+            </button>
+          </div>
+        </form>
+      </DialogShell>
+
+      {/* Reminder Editor Modal Dialog */}
+      <DialogShell
+        open={isReminderDialogOpen}
+        title={editingReminderIndex !== undefined ? "Edit Reminder" : "New Reminder"}
+        titleId="workflow-reminder-dialog-title"
+        description="Configure a reminder that fires while the agent is in this workflow state."
+        onClose={() => setIsReminderDialogOpen(false)}
+        closeLabel="Close reminder editor"
+        className="message-dialog"
+      >
+        <form className="reminder-editor-form" noValidate onSubmit={handleSaveReminder}>
+          <label>
+            Subject
+            <input
+              value={reminderDraftSubject}
+              placeholder="Optional"
+              onChange={(e) => setReminderDraftSubject(e.target.value)}
+            />
+          </label>
+          <label>
+            Reminder *
+            <textarea
+              aria-label="Reminder"
+              value={reminderDraftBody}
+              placeholder="What reminder message to send..."
+              rows={4}
+              onChange={(e) => {
+                setReminderDraftBody(e.target.value);
+                setReminderDraftError("");
+              }}
+              required
+            />
+          </label>
+          <label>
+            Delay (seconds)
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={reminderDraftDelay}
+              onChange={(e) => setReminderDraftDelay(Number(e.target.value))}
+            />
+          </label>
+          <button
+            type="button"
+            className="goal-toggle"
+            aria-pressed={reminderDraftRecurring}
+            onClick={() => setReminderDraftRecurring(!reminderDraftRecurring)}
+          >
+            <span className="goal-toggle-label">Repeat every interval</span>
+            <span className="goal-toggle-track" aria-hidden="true">
+              <span className="goal-toggle-thumb">
+                <span className="goal-toggle-state">{reminderDraftRecurring ? "ON" : "OFF"}</span>
+              </span>
+            </span>
+          </button>
+          {reminderDraftRecurring ? (
+            <label>
+              Repeat interval (seconds)
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={reminderDraftInterval}
+                onChange={(e) => setReminderDraftInterval(Number(e.target.value))}
+              />
+            </label>
+          ) : null}
+          {reminderDraftError ? (
+            <p className="reminder-editor-status error" role="alert">
+              {reminderDraftError}
+            </p>
+          ) : null}
+          <div className="reminder-lock-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setIsReminderDialogOpen(false)}
+            >
+              Cancel
+            </button>
+            <button type="submit">
+              {editingReminderIndex !== undefined ? "Save changes" : "Save reminder"}
             </button>
           </div>
         </form>
@@ -293,4 +583,3 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
 
 export { WorkflowStatesPage as WorkflowsPage };
 export default WorkflowStatesPage;
-
