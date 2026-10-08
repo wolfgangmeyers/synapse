@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,4 +249,66 @@ func TestScratchpadSearch(t *testing.T) {
 	otherResults, err := db.SearchScratchpad(ctx, "other-agent", "Alpha", 10)
 	require.NoError(t, err)
 	require.Empty(t, otherResults)
+}
+
+func TestScratchpadDelete(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(ctx, dbPath, Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "agent-del-1"
+	otherAgent := "agent-del-2"
+
+	entry, err := db.AppendScratchpadEntry(ctx, agentID, "Note to be deleted", false)
+	require.NoError(t, err)
+	require.NotEmpty(t, entry.ID)
+
+	// Other agent cannot delete
+	err = db.DeleteScratchpadEntry(ctx, otherAgent, entry.ID)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad entry not found", err.Error())
+
+	// Successful deletion
+	err = db.DeleteScratchpadEntry(ctx, agentID, entry.ID)
+	require.NoError(t, err)
+
+	// Verify entry is removed and cannot be fetched
+	entries, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	// Deleting already deleted entry returns not found error
+	err = db.DeleteScratchpadEntry(ctx, agentID, entry.ID)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad entry not found", err.Error())
+
+	// Validation errors
+	err = db.DeleteScratchpadEntry(ctx, "", entry.ID)
+	require.Error(t, err)
+	err = db.DeleteScratchpadEntry(ctx, agentID, "")
+	require.Error(t, err)
+}
+
+func TestScratchpadAppendLengthLimit(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(ctx, dbPath, Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "agent-len-1"
+
+	// 4000 characters is allowed
+	exactContent := strings.Repeat("x", 4000)
+	e, err := db.AppendScratchpadEntry(ctx, agentID, exactContent, false)
+	require.NoError(t, err)
+	require.Equal(t, exactContent, e.Content)
+
+	// 4001 characters is rejected
+	tooLong := strings.Repeat("x", 4001)
+	_, err = db.AppendScratchpadEntry(ctx, agentID, tooLong, false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "scratchpad entry exceeds maximum allowed length of 4000 characters (got 4001); save large content to a file and record the path")
 }

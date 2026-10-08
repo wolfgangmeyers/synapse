@@ -13,10 +13,10 @@ import (
 func embeddedScratchpadSchema() *ai.Schema {
 	closed := false
 	schema := ai.Object(
-		ai.Prop("action", ai.EnumOf("append", "fetch", "paginate", "search", "pin", "unpin")),
-		ai.Opt("content", ai.String("Content of the scratchpad entry (for append).")),
+		ai.Prop("action", ai.EnumOf("append", "fetch", "paginate", "search", "pin", "unpin", "delete")),
+		ai.Opt("content", ai.String("Content of the scratchpad entry (for append, maximum 4000 characters).")),
 		ai.Opt("pinned", ai.Boolean("Whether the entry is pinned (for append / pin).")),
-		ai.Opt("id", ai.String("Entry ID (for pin / unpin).")),
+		ai.Opt("id", ai.String("Entry ID (for pin / unpin / delete).")),
 		ai.Opt("query", ai.String("Search query string (for search).")),
 		ai.Opt("limit", ai.Integer("Maximum entries to return (optional, default 5, max 20).")),
 		ai.Opt("offset", ai.Integer("Pagination offset (optional, default 0).")),
@@ -28,7 +28,7 @@ func embeddedScratchpadSchema() *ai.Schema {
 func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "scratchpad",
-		Description: "Persistent scratchpad memory for notes, milestones, and context across session resets. Supports append, fetch (recent + pinned), paginate, search, pin, and unpin.",
+		Description: "Persistent scratchpad memory for notes, milestones, and context across session resets. Supports append, fetch (recent + pinned), paginate, search, pin, unpin, and delete.",
 		Parameters:  embeddedScratchpadSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if m == nil || m.store == nil {
@@ -83,6 +83,9 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 				content, ok := args["content"].(string)
 				if !ok || strings.TrimSpace(content) == "" {
 					return agent.AgentToolResult{}, errors.New("content is required for append")
+				}
+				if runeLen := len([]rune(content)); runeLen > 4000 {
+					return agent.AgentToolResult{}, fmt.Errorf("scratchpad entry exceeds maximum allowed length of 4000 characters (got %d); save large content to a file and record the path", runeLen)
 				}
 				pinned := false
 				if p, ok := args["pinned"].(bool); ok {
@@ -214,6 +217,20 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
 						ai.TextContent{Text: fmt.Sprintf("Scratchpad entry %s unpinned.", entryID)},
+					},
+				}, nil
+
+			case "delete":
+				entryID, ok := args["id"].(string)
+				if !ok || strings.TrimSpace(entryID) == "" {
+					return agent.AgentToolResult{}, errors.New("id is required for delete")
+				}
+				if err := m.store.DeleteScratchpadEntry(ctx, agentID, entryID); err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("delete scratchpad entry: %w", err)
+				}
+				return agent.AgentToolResult{
+					Content: ai.ContentList{
+						ai.TextContent{Text: fmt.Sprintf("Deleted scratchpad entry %s", entryID)},
 					},
 				}, nil
 
