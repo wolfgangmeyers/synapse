@@ -133,11 +133,20 @@ func (m *Manager) SetEmbeddedStartupGeneration(g int64) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		if err := m.store.ResetActiveEmbeddedAgents(ctx); err != nil {
+		if err := m.ResetActiveEmbeddedAgents(ctx); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ResetActiveEmbeddedAgents resets active embedded agents to idle and reconciles
+// dangling tool history entries from interrupted turns.
+func (m *Manager) ResetActiveEmbeddedAgents(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+	return m.store.ResetActiveEmbeddedAgents(ctx)
 }
 
 func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID string, recovered bool) {
@@ -416,7 +425,7 @@ func (m *Manager) dispatchEmbeddedStartupWake(ctx context.Context, saved store.M
 // A real runner must validate and reopen its own ordered SQLite session.
 func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
 	if m.store != nil {
-		if err := m.store.ResetActiveEmbeddedAgents(ctx); err != nil {
+		if err := m.ResetActiveEmbeddedAgents(ctx); err != nil {
 			return err
 		}
 	}

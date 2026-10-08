@@ -61,6 +61,14 @@ func TestResetActiveEmbeddedAgentsStartupRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "active", a2.ActivityState)
 
+	// Insert dangling active history entry and completed entry
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id, category, level, message, occurred_at, presentation_json)
+		VALUES ('active-agent-1', 'managed_tool', 'info', 'Running bash', '2026-10-08T14:40:34.372Z', '{"kind":"tool","tool_name":"bash","outcome":"active","summary":"Running"}')`)
+	require.NoError(t, err)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id, category, level, message, occurred_at, presentation_json)
+		VALUES ('active-agent-1', 'managed_tool', 'info', 'Ran echo', '2026-10-08T14:40:30.000Z', '{"kind":"tool","tool_name":"bash","outcome":"completed","summary":"Succeeded"}')`)
+	require.NoError(t, err)
+
 	// Simulate router startup resetting active agents to idle
 	require.NoError(t, s.ResetActiveEmbeddedAgents(ctx))
 
@@ -71,5 +79,15 @@ func TestResetActiveEmbeddedAgentsStartupRecovery(t *testing.T) {
 	a2, err = s.ManagedAgent(ctx, b2.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "idle", a2.ActivityState)
+
+	var activeOutcome, activeSummary string
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT json_extract(presentation_json, '$.outcome'), json_extract(presentation_json, '$.summary') FROM managed_complete_history WHERE message='Running bash'`).Scan(&activeOutcome, &activeSummary))
+	require.Equal(t, "failed", activeOutcome)
+	require.Equal(t, "Interrupted by restart", activeSummary)
+
+	var completedOutcome, completedSummary string
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT json_extract(presentation_json, '$.outcome'), json_extract(presentation_json, '$.summary') FROM managed_complete_history WHERE message='Ran echo'`).Scan(&completedOutcome, &completedSummary))
+	require.Equal(t, "completed", completedOutcome)
+	require.Equal(t, "Succeeded", completedSummary)
 }
 
