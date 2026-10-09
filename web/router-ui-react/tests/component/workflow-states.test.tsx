@@ -276,4 +276,144 @@ describe("WorkflowStatesPage", () => {
 
     unmount();
   });
+
+  it("renders transitions and exit badges on state card", async () => {
+    const statesWithTransitions = [
+      {
+        id: "state-plan",
+        name: "Planning",
+        description: "Decompose requirements",
+        entry_text: "Plan carefully",
+        allow_exit: false,
+        transitions: [
+          { target_state_id: "state-impl", description: "When plan validated" },
+        ],
+        created_at: 1700000000000,
+        updated_at: 1700000000000,
+      },
+      {
+        id: "state-impl",
+        name: "Implementation",
+        description: "Write code",
+        entry_text: "Implement features",
+        allow_exit: true,
+        transitions: [],
+        created_at: 1700000000000,
+        updated_at: 1700000000000,
+      },
+    ];
+
+    const mockClient = {
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: statesWithTransitions }),
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowStatesPage client={mockClient} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Planning")).toBeDefined();
+    });
+
+    // Check exit locked on Planning
+    const planExitBadge = screen.getByTestId("state-exit-badge-state-plan");
+    expect(planExitBadge.textContent).toContain("Exit locked");
+
+    // Check transitions badge on Planning
+    const planTransitionsBadge = screen.getByTestId("state-transitions-badge-state-plan");
+    expect(planTransitionsBadge.textContent).toContain("1 transition");
+
+    // Check transitions summary list on Planning
+    const transitionsSummary = screen.getByTestId("state-transitions-list-state-plan");
+    expect(transitionsSummary.textContent).toContain("Implementation");
+    expect(transitionsSummary.textContent).toContain("When plan validated");
+
+    // Check exit allowed on Implementation
+    const implExitBadge = screen.getByTestId("state-exit-badge-state-impl");
+    expect(implExitBadge.textContent).toContain("Exit allowed");
+
+    // Check 0 transitions badge on Implementation
+    const implTransitionsBadge = screen.getByTestId("state-transitions-badge-state-impl");
+    expect(implTransitionsBadge.textContent).toContain("0 transitions");
+
+    unmount();
+  });
+
+  it("can configure exit toggle and transitions when creating a workflow state", async () => {
+    const user = userEvent.setup();
+    const existingStates = [
+      {
+        id: "state-impl",
+        name: "Implementation",
+        description: "Coding state",
+        entry_text: "",
+        created_at: 1700000000000,
+        updated_at: 1700000000000,
+      },
+    ];
+
+    const createMock = vi.fn().mockResolvedValue({
+      workflow_state: {
+        id: "state-new",
+        name: "Design Phase",
+        description: "Design state",
+        entry_text: "Design docs",
+        allow_exit: false,
+        transitions: [{ target_state_id: "state-impl", description: "Design approved" }],
+        created_at: 1700000000000,
+        updated_at: 1700000000000,
+      },
+    });
+
+    const mockClient = {
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: existingStates }),
+      createWorkflowState: createMock,
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowStatesPage client={mockClient} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Implementation")).toBeDefined();
+    });
+
+    // Open create modal
+    const newStateBtn = screen.getByRole("button", { name: /New State/i });
+    await user.click(newStateBtn);
+
+    // Fill name
+    const nameInput = screen.getByLabelText(/State Name \*/i);
+    await user.type(nameInput, "Design Phase");
+
+    // Toggle Allow Exit to OFF
+    const exitToggle = screen.getByTestId("allow-exit-toggle");
+    expect(exitToggle.getAttribute("aria-pressed")).toBe("true");
+    await user.click(exitToggle);
+    expect(exitToggle.getAttribute("aria-pressed")).toBe("false");
+
+    // Add a transition
+    const addTransitionBtn = screen.getByTestId("add-transition-btn");
+    await user.click(addTransitionBtn);
+
+    // Select target state and fill description
+    const targetSelect = screen.getByTestId("transition-target-0");
+    await user.selectOptions(targetSelect, "state-impl");
+
+    const descInput = screen.getByTestId("transition-desc-0");
+    await user.type(descInput, "Design approved");
+
+    // Submit form
+    const submitBtn = screen.getByRole("button", { name: /Create State/i });
+    await user.click(submitBtn);
+
+    await waitFor(() => {
+      expect(createMock).toHaveBeenCalledTimes(1);
+    });
+
+    const callArg = createMock.mock.calls[0]?.[0];
+    expect(callArg.name).toBe("Design Phase");
+    expect(callArg.allow_exit).toBe(false);
+    expect(callArg.transitions).toEqual([
+      { target_state_id: "state-impl", description: "Design approved" },
+    ]);
+
+    unmount();
+  });
 });

@@ -22,7 +22,13 @@ const (
 	maxWorkflowStateEntryTextBytes   = 65536
 	maxWorkflowReminderBodyBytes     = 16384
 	maxWorkflowReminderDelaySeconds  = 2592000
+	maxWorkflowTransitionDescriptionBytes = 1024
 )
+
+type WorkflowTransitionConfig struct {
+	TargetStateID string `json:"target_state_id"`
+	Description   string `json:"description"`
+}
 
 type WorkflowReminderType string
 
@@ -47,6 +53,8 @@ type WorkflowState struct {
 	EntryText    string                   `json:"entry_text"`
 	Reminders    []WorkflowReminderConfig `json:"reminders"`
 	AllowedTools []string                 `json:"allowed_tools"`
+	Transitions  []WorkflowTransitionConfig `json:"transitions"`
+	AllowExit    bool                     `json:"allow_exit"`
 	CreatedAt    string                   `json:"created_at"`
 	UpdatedAt    string                   `json:"updated_at"`
 }
@@ -58,6 +66,8 @@ type WorkflowStateRequest struct {
 	EntryText    string                   `json:"entry_text"`
 	Reminders    []WorkflowReminderConfig `json:"reminders"`
 	AllowedTools []string                 `json:"allowed_tools"`
+	Transitions  []WorkflowTransitionConfig `json:"transitions"`
+	AllowExit    *bool                    `json:"allow_exit,omitempty"`
 }
 
 type WorkflowStateValidationError struct {
@@ -88,6 +98,19 @@ func (e *WorkflowStateNotFoundError) Error() string {
 }
 func (e *WorkflowStateNotFoundError) Code() string { return "workflow_state_not_found" }
 
+type WorkflowStateInUseError struct {
+	ID      string
+	ReferrerState string
+}
+
+func (e *WorkflowStateInUseError) Error() string {
+	if e.ReferrerState != "" {
+		return fmt.Sprintf("workflow state %q is in use as a transition target by state %q", e.ID, e.ReferrerState)
+	}
+	return fmt.Sprintf("workflow state %q is in use as a transition target", e.ID)
+}
+func (e *WorkflowStateInUseError) Code() string { return "workflow_state_in_use" }
+
 var ValidWorkflowTools = map[string]bool{
 	"mecha_mailbox_send":  true,
 	"goal":                true,
@@ -105,13 +128,19 @@ var ValidWorkflowTools = map[string]bool{
 	"get_subagent_result": true,
 	"steer_subagent":      true,
 	"mecha_worker":        true,
+	"mecha_workflow_transition": true,
+	"workflow_transition":       true,
 }
 
 // IsToolAllowedInWorkflowState reports whether toolName is permitted under allowedTools.
 // If allowedTools is empty, all tools are permitted.
 // If allowedTools is non-empty, only tools in allowedTools are permitted,
 // treating "context_reset" and "reset" as interchangeable aliases.
+// mecha_workflow_transition and workflow_transition are implicitly allowed control tools.
 func IsToolAllowedInWorkflowState(toolName string, allowedTools []string) bool {
+	if toolName == "mecha_workflow_transition" || toolName == "workflow_transition" {
+		return true
+	}
 	if len(allowedTools) == 0 {
 		return true
 	}
@@ -120,6 +149,9 @@ func IsToolAllowedInWorkflowState(toolName string, allowedTools []string) bool {
 			return true
 		}
 		if (allowed == "context_reset" || allowed == "reset") && (toolName == "context_reset" || toolName == "reset") {
+			return true
+		}
+		if (allowed == "mecha_workflow_transition" || allowed == "workflow_transition") && (toolName == "mecha_workflow_transition" || toolName == "workflow_transition") {
 			return true
 		}
 	}
@@ -206,11 +238,45 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 		return err
 	}
 
+	selfID := ""
+	if req.ID != nil {
+		selfID = strings.TrimSpace(*req.ID)
+	}
+
+	seenTargets := make(map[string]bool, len(req.Transitions))
+	for i, tr := range req.Transitions {
+		targetID := strings.TrimSpace(tr.TargetStateID)
+		if targetID == "" {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].target_state_id", i), Message: "target_state_id must not be empty"}
+		}
+		if !workflowStateIDPattern.MatchString(targetID) {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].target_state_id", i), Message: "target_state_id must be a valid UUIDv4"}
+		}
+		if selfID != "" && targetID == selfID {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].target_state_id", i), Message: "self-transition is not permitted"}
+		}
+		if seenTargets[targetID] {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].target_state_id", i), Message: fmt.Sprintf("duplicate transition target %q", targetID)}
+		}
+		seenTargets[targetID] = true
+
+		desc := strings.TrimSpace(tr.Description)
+		if desc == "" {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].description", i), Message: "description must not be empty"}
+		}
+		if len([]byte(desc)) > maxWorkflowTransitionDescriptionBytes {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].description", i), Message: "description exceeds maximum byte length"}
+		}
+		if !utf8.ValidString(desc) || strings.ContainsRune(desc, 0) {
+			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].description", i), Message: "description contains invalid characters"}
+		}
+	}
+
 	return nil
 }
 
 func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -221,11 +287,15 @@ func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error)
 		var state WorkflowState
 		var remindersJSON sql.NullString
 		var allowedToolsJSON sql.NullString
-		if err := rows.Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		var transitionsJSON sql.NullString
+		var allowExitInt int
+		if err := rows.Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
 		state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
+		state.Transitions = unmarshalWorkflowTransitions(transitionsJSON.String)
+		state.AllowExit = (allowExitInt == 1)
 		states = append(states, state)
 	}
 	if err := rows.Err(); err != nil {
@@ -253,8 +323,10 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 	var state WorkflowState
 	var remindersJSON sql.NullString
 	var allowedToolsJSON sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-		Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &state.CreatedAt, &state.UpdatedAt)
+	var transitionsJSON sql.NullString
+	var allowExitInt int
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+		Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.CreatedAt, &state.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -263,7 +335,31 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 	}
 	state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
 	state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
+	state.Transitions = unmarshalWorkflowTransitions(transitionsJSON.String)
+	state.AllowExit = (allowExitInt == 1)
 	return &state, nil
+}
+
+func marshalWorkflowTransitions(transitions []WorkflowTransitionConfig) (string, error) {
+	if transitions == nil {
+		return "[]", nil
+	}
+	data, err := json.Marshal(transitions)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalWorkflowTransitions(raw string) []WorkflowTransitionConfig {
+	if strings.TrimSpace(raw) == "" {
+		return []WorkflowTransitionConfig{}
+	}
+	var transitions []WorkflowTransitionConfig
+	if err := json.Unmarshal([]byte(raw), &transitions); err != nil || transitions == nil {
+		return []WorkflowTransitionConfig{}
+	}
+	return transitions
 }
 
 func marshalWorkflowAllowedTools(tools []string) (string, error) {
@@ -356,8 +452,33 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			return err
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, name, desc, entryText, remindersJSON, allowedToolsJSON, now, now)
+		transitionsJSON, err := marshalWorkflowTransitions(req.Transitions)
+		if err != nil {
+			return err
+		}
+
+		// Verify that all transition target states exist
+		for _, tr := range req.Transitions {
+			var targetExists int
+			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_states WHERE id = ?`, tr.TargetStateID).Scan(&targetExists)
+			if errors.Is(err, sql.ErrNoRows) {
+				return &WorkflowStateValidationError{
+					Field:   "transitions",
+					Message: fmt.Sprintf("target state %q does not exist", tr.TargetStateID),
+				}
+			}
+			if err != nil {
+				return err
+			}
+		}
+
+		allowExitInt := 1
+		if req.AllowExit != nil && !*req.AllowExit {
+			allowExitInt = 0
+		}
+
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, name, desc, entryText, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -369,6 +490,10 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 		if remindersCopy == nil {
 			remindersCopy = []WorkflowReminderConfig{}
 		}
+		transitionsCopy := req.Transitions
+		if transitionsCopy == nil {
+			transitionsCopy = []WorkflowTransitionConfig{}
+		}
 
 		state = &WorkflowState{
 			ID:           id,
@@ -377,6 +502,8 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			EntryText:    entryText,
 			Reminders:    remindersCopy,
 			AllowedTools: sanitizedTools,
+			Transitions:  transitionsCopy,
+			AllowExit:    (allowExitInt == 1),
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}
@@ -433,8 +560,41 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			return err
 		}
 
-		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET name = ?, description = ?, entry_text = ?, reminders_json = ?, allowed_tools_json = ?, updated_at = ? WHERE id = ?`,
-			name, desc, entryText, remindersJSON, allowedToolsJSON, now, id)
+		transitionsJSON, err := marshalWorkflowTransitions(req.Transitions)
+		if err != nil {
+			return err
+		}
+
+		// Verify that all transition target states exist and none point to self
+		for _, tr := range req.Transitions {
+			if tr.TargetStateID == id {
+				return &WorkflowStateValidationError{
+					Field:   "transitions",
+					Message: "self-transition is not permitted",
+				}
+			}
+			var targetExists int
+			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_states WHERE id = ?`, tr.TargetStateID).Scan(&targetExists)
+			if errors.Is(err, sql.ErrNoRows) {
+				return &WorkflowStateValidationError{
+					Field:   "transitions",
+					Message: fmt.Sprintf("target state %q does not exist", tr.TargetStateID),
+				}
+			}
+			if err != nil {
+				return err
+			}
+		}
+
+		allowExitInt := 1
+		if req.AllowExit != nil {
+			if !*req.AllowExit {
+				allowExitInt = 0
+			}
+		}
+
+		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET name = ?, description = ?, entry_text = ?, reminders_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, updated_at = ? WHERE id = ?`,
+			name, desc, entryText, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, now, id)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -446,6 +606,10 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 		if remindersCopy == nil {
 			remindersCopy = []WorkflowReminderConfig{}
 		}
+		transitionsCopy := req.Transitions
+		if transitionsCopy == nil {
+			transitionsCopy = []WorkflowTransitionConfig{}
+		}
 
 		state = &WorkflowState{
 			ID:           id,
@@ -454,6 +618,8 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			EntryText:    entryText,
 			Reminders:    remindersCopy,
 			AllowedTools: sanitizedTools,
+			Transitions:  transitionsCopy,
+			AllowExit:    (allowExitInt == 1),
 			CreatedAt:    existing.CreatedAt,
 			UpdatedAt:    now,
 		}
@@ -466,15 +632,42 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 func (s *Store) DeleteWorkflowState(ctx context.Context, id string) (bool, error) {
 	var deleted bool
 	err := s.runImmediate(ctx, func() error {
+		// Check if any workflow state references this ID in transitions_json
+		rows, err := s.db.QueryContext(ctx, `SELECT id, name, transitions_json FROM workflow_states WHERE id != ?`, id)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var otherID, otherName string
+			var transitionsJSON sql.NullString
+			if err := rows.Scan(&otherID, &otherName, &transitionsJSON); err != nil {
+				return err
+			}
+			transitions := unmarshalWorkflowTransitions(transitionsJSON.String)
+			for _, tr := range transitions {
+				if tr.TargetStateID == id {
+					return &WorkflowStateInUseError{
+						ID:            id,
+						ReferrerState: otherName,
+					}
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
 		res, err := s.db.ExecContext(ctx, `DELETE FROM workflow_states WHERE id = ?`, id)
 		if err != nil {
 			return err
 		}
-		rows, err := res.RowsAffected()
+		rowsAff, err := res.RowsAffected()
 		if err != nil {
 			return err
 		}
-		deleted = rows > 0
+		deleted = rowsAff > 0
 		return nil
 	})
 	return deleted, err

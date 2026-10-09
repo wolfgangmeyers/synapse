@@ -110,11 +110,29 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		}
 	}
 
+	var transitions []store.WorkflowTransitionConfig
+	if raw, exists := payload["transitions"]; exists && len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &transitions); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+	}
+
+	var allowExit *bool
+	if raw, exists := payload["allow_exit"]; exists && len(raw) > 0 && string(raw) != "null" {
+		var ae bool
+		if err := json.Unmarshal(raw, &ae); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		allowExit = &ae
+	}
+
 	return store.WorkflowStateRequest{
 		Name:         name,
 		Description:  desc,
 		EntryText:    entryText,
 		Reminders:    reminders,
 		AllowedTools: allowedTools,
+		Transitions:  transitions,
+		AllowExit:    allowExit,
 	}, nil
 }

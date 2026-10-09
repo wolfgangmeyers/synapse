@@ -5,6 +5,7 @@ import {
   type WorkflowStateInput,
   type WorkflowReminderConfig,
   type WorkflowReminderType,
+  type WorkflowTransitionConfig,
   KNOWN_WORKFLOW_TOOLS,
 } from "../domain/workflow-states";
 import { secureUuid } from "../platform/secure-uuid";
@@ -39,6 +40,8 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
   const [formReminders, setFormReminders] = useState<WorkflowReminderConfig[]>([]);
   const [formAllToolsAllowed, setFormAllToolsAllowed] = useState(true);
   const [formAllowedTools, setFormAllowedTools] = useState<string[]>([]);
+  const [formTransitions, setFormTransitions] = useState<WorkflowTransitionConfig[]>([]);
+  const [formAllowExit, setFormAllowExit] = useState(true);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | undefined>(undefined);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | undefined>(undefined);
@@ -68,6 +71,8 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormReminders([]);
     setFormAllToolsAllowed(true);
     setFormAllowedTools([]);
+    setFormTransitions([]);
+    setFormAllowExit(true);
     setFormError(undefined);
     setIsCreating(true);
   };
@@ -81,6 +86,8 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     const hasRestrictions = Boolean(state.allowed_tools && state.allowed_tools.length > 0);
     setFormAllToolsAllowed(!hasRestrictions);
     setFormAllowedTools(hasRestrictions ? [...(state.allowed_tools ?? [])] : []);
+    setFormTransitions(state.transitions ? state.transitions.map((t) => ({ ...t })) : []);
+    setFormAllowExit(state.allow_exit !== false);
     setFormError(undefined);
     setIsCreating(false);
   };
@@ -164,6 +171,20 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormReminders((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const addTransition = () => {
+    setFormTransitions((prev) => [...prev, { target_state_id: "", description: "" }]);
+  };
+
+  const updateTransition = (index: number, field: "target_state_id" | "description", value: string) => {
+    setFormTransitions((prev) =>
+      prev.map((t, i) => (i === index ? { ...t, [field]: value } : t))
+    );
+  };
+
+  const removeTransition = (index: number) => {
+    setFormTransitions((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) {
@@ -190,6 +211,31 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
       }
     }
 
+    const validTransitions: WorkflowTransitionConfig[] = [];
+    const seenTargets = new Set<string>();
+    for (let i = 0; i < formTransitions.length; i++) {
+      const tr = formTransitions[i];
+      if (!tr) continue;
+      const targetId = tr.target_state_id.trim();
+      if (!targetId) {
+        setFormError(`Transition #${i + 1} must select a target state`);
+        return;
+      }
+      if (editingState && targetId === editingState.id) {
+        setFormError(`Transition #${i + 1} cannot point to the current state (self-transition is not permitted)`);
+        return;
+      }
+      if (seenTargets.has(targetId)) {
+        setFormError(`Duplicate transition target detected for state: ${targetId}`);
+        return;
+      }
+      seenTargets.add(targetId);
+      validTransitions.push({
+        target_state_id: targetId,
+        description: tr.description.trim(),
+      });
+    }
+
     setSaving(true);
     setFormError(undefined);
     const input: WorkflowStateInput = {
@@ -197,6 +243,8 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
       description: formDescription.trim(),
       entry_text: formEntryText,
       allowed_tools: formAllToolsAllowed ? [] : formAllowedTools,
+      transitions: validTransitions,
+      allow_exit: formAllowExit,
       reminders: formReminders.map((r) => ({
         id: r.id,
         type: r.type,
@@ -328,6 +376,44 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                       <span>All tools allowed</span>
                     </span>
                   )}
+                  {st.allow_exit === false ? (
+                    <span
+                      className="workflow-tool-badge restricted"
+                      title="Workers cannot exit this workflow from this state"
+                      data-testid={`state-exit-badge-${st.id}`}
+                    >
+                      <i className="fa-solid fa-lock" aria-hidden="true" />
+                      <span>Exit locked</span>
+                    </span>
+                  ) : (
+                    <span
+                      className="workflow-tool-badge unrestricted"
+                      title="Workers can exit this workflow from this state"
+                      data-testid={`state-exit-badge-${st.id}`}
+                    >
+                      <i className="fa-solid fa-door-open" aria-hidden="true" />
+                      <span>Exit allowed</span>
+                    </span>
+                  )}
+                  {st.transitions && st.transitions.length > 0 ? (
+                    <span
+                      className="workflow-tool-badge"
+                      title={`${st.transitions.length} forward transitions configured`}
+                      data-testid={`state-transitions-badge-${st.id}`}
+                    >
+                      <i className="fa-solid fa-arrow-right-arrow-left" aria-hidden="true" />
+                      <span>{st.transitions.length} transition{st.transitions.length > 1 ? "s" : ""}</span>
+                    </span>
+                  ) : (
+                    <span
+                      className="workflow-tool-badge"
+                      title="No forward transitions configured"
+                      data-testid={`state-transitions-badge-${st.id}`}
+                    >
+                      <i className="fa-solid fa-arrow-right-arrow-left" aria-hidden="true" />
+                      <span>0 transitions</span>
+                    </span>
+                  )}
                 </div>
 
                 {st.reminders && st.reminders.length > 0 ? (
@@ -355,6 +441,25 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                         </span>
                       );
                     })}
+                  </div>
+                ) : null}
+
+                {st.transitions && st.transitions.length > 0 ? (
+                  <div className="workflow-transitions-summary" data-testid={`state-transitions-list-${st.id}`}>
+                    <div className="workflow-transitions-summary-title">
+                      <i className="fa-solid fa-arrow-right-arrow-left" aria-hidden="true" /> Allowed Transitions:
+                    </div>
+                    <ul className="workflow-transitions-items">
+                      {st.transitions.map((tr, idx) => {
+                        const target = states.find((s) => s.id === tr.target_state_id);
+                        return (
+                          <li key={idx}>
+                            <strong>{target ? target.name : tr.target_state_id}</strong>
+                            {tr.description ? <span className="target-state-desc"> — {tr.description}</span> : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
                   </div>
                 ) : null}
 
@@ -573,6 +678,97 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                       </button>
                     </div>
                   </article>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Exit workflow toggle */}
+          <div className="workflow-exit-section">
+            <button
+              type="button"
+              className="goal-toggle workflow-tool-master-toggle"
+              aria-pressed={formAllowExit}
+              data-testid="allow-exit-toggle"
+              onClick={() => setFormAllowExit(!formAllowExit)}
+            >
+              <div className="workflow-master-toggle-text">
+                <span className="goal-toggle-label">Allow Workflow Exit</span>
+                <span className="workflow-toggle-subtext">
+                  Workers can exit the workflow without transitioning to another state
+                </span>
+              </div>
+              <span className="goal-toggle-track" aria-hidden="true">
+                <span className="goal-toggle-thumb">
+                  <span className="goal-toggle-state">{formAllowExit ? "ON" : "OFF"}</span>
+                </span>
+              </span>
+            </button>
+          </div>
+
+          {/* Transitions section */}
+          <div className="workflow-transitions-section">
+            <div className="workflow-transitions-header">
+              <span className="workflow-transitions-title">
+                <i className="fa-solid fa-arrow-right-arrow-left" aria-hidden="true" /> Allowed Transitions ({formTransitions.length})
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                data-testid="add-transition-btn"
+                onClick={addTransition}
+              >
+                <i className="fa-solid fa-plus" aria-hidden="true" /> Add transition
+              </button>
+            </div>
+
+            {formTransitions.length === 0 ? (
+              <small className="text-muted">
+                No forward transitions configured. Workers can only stay in this state or exit (if exit is allowed).
+              </small>
+            ) : (
+              <div className="workflow-transitions-list">
+                {formTransitions.map((tr, idx) => (
+                  <div className="workflow-transition-item" key={idx} data-testid={`transition-item-${idx}`}>
+                    <div className="workflow-transition-fields">
+                      <select
+                        className="form-control"
+                        aria-label="Target State"
+                        data-testid={`transition-target-${idx}`}
+                        value={tr.target_state_id}
+                        onChange={(e) => updateTransition(idx, "target_state_id", e.target.value)}
+                        required
+                      >
+                        <option value="">Select target state...</option>
+                        {states
+                          .filter((s) => !editingState || s.id !== editingState.id)
+                          .map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                      </select>
+                      <input
+                        type="text"
+                        className="form-control"
+                        aria-label="Transition description"
+                        data-testid={`transition-desc-${idx}`}
+                        placeholder="Condition / guidance for transition"
+                        value={tr.description}
+                        onChange={(e) => updateTransition(idx, "description", e.target.value)}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-icon btn-danger"
+                      title="Remove transition"
+                      aria-label="Remove transition"
+                      data-testid={`remove-transition-${idx}`}
+                      onClick={() => removeTransition(idx)}
+                    >
+                      <i className="fa-solid fa-trash" aria-hidden="true" />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
