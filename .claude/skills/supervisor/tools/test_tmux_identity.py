@@ -77,6 +77,54 @@ class CurrentAgentIdTest(unittest.TestCase):
             )
         )
 
+    def test_resolve_session_discovers_matching_session(self):
+        def fake_run(args, check=True, capture=True, timeout=None):
+            if args[:2] == ["has-session", "-t"] and args[2] == f"={_tmux.SESSION}":
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            if args[:2] == ["list-sessions", "-F"]:
+                return subprocess.CompletedProcess(args, 0, stdout="other\nmecha-client-0\n")
+            return subprocess.CompletedProcess(args, 1, stdout="")
+
+        original_run = _tmux.run
+        try:
+            _tmux.run = fake_run
+            self.assertEqual(_tmux.resolve_session(), "mecha-client-0")
+        finally:
+            _tmux.run = original_run
+
+    def test_resolve_session_prefers_exact_match(self):
+        def fake_run(args, check=True, capture=True, timeout=None):
+            if args[:2] == ["has-session", "-t"] and args[2] == f"={_tmux.SESSION}":
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            return subprocess.CompletedProcess(args, 1, stdout="")
+
+        original_run = _tmux.run
+        try:
+            _tmux.run = fake_run
+            self.assertEqual(_tmux.resolve_session(), _tmux.SESSION)
+        finally:
+            _tmux.run = original_run
+
+    def test_list_windows_uses_resolved_session(self):
+        calls = []
+
+        def fake_run(args, check=True, capture=True, timeout=None):
+            calls.append(args)
+            if args[:2] == ["has-session", "-t"] and args[2] == f"={_tmux.SESSION}":
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            if args[:2] == ["list-sessions", "-F"]:
+                return subprocess.CompletedProcess(args, 0, stdout="mecha-client-0\n")
+            if args[:2] == ["list-windows", "-t"] and args[2] == "=mecha-client-0":
+                return subprocess.CompletedProcess(args, 0, stdout="0: webui\n1: worker-1\n")
+            return subprocess.CompletedProcess(args, 1, stdout="")
+
+        original_run = _tmux.run
+        try:
+            _tmux.run = fake_run
+            self.assertEqual(_tmux.list_windows(), [("0", "webui"), ("1", "worker-1")])
+        finally:
+            _tmux.run = original_run
+
 
 if __name__ == "__main__":
     unittest.main()

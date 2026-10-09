@@ -60,9 +60,39 @@ def current_agent_id(environment=None, tmux_run=run):
     return window if _AGENT_ID.fullmatch(window) else None
 
 
+def resolve_session():
+    """Discover and return the active tmux session matching SESSION ("mecha").
+
+    If SESSION is an exact session, returns SESSION. Otherwise discovers the active
+    session matching SESSION (e.g. 'mecha-client-0' or a session containing 'mecha'),
+    matching how the Go router resolves it in router-proxy/internal/transport/live.go.
+    Falls back to SESSION if no match is found.
+    """
+    result = run(["has-session", "-t", f"={SESSION}"], check=False)
+    if result.returncode == 0:
+        return SESSION
+    result = run(["list-sessions", "-F", "#{session_name}"], check=False)
+    if result.returncode == 0:
+        candidates = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        for candidate in candidates:
+            if candidate == SESSION:
+                return candidate
+        for candidate in candidates:
+            if SESSION in candidate:
+                return candidate
+    result = run(["has-session", "-t", SESSION], check=False)
+    if result.returncode == 0:
+        return SESSION
+    return SESSION
+
+
 def session_exists():
     """Return True if the mecha tmux session exists."""
-    result = run(["has-session", "-t", f"={SESSION}"], check=False)
+    session = resolve_session()
+    result = run(["has-session", "-t", f"={session}"], check=False)
+    if result.returncode == 0:
+        return True
+    result = run(["has-session", "-t", session], check=False)
     return result.returncode == 0
 
 
@@ -76,12 +106,16 @@ def ensure_session():
 
 def list_windows():
     """Return a list of (index, name) tuples for all windows in the session."""
-    if not session_exists():
-        return []
+    session = resolve_session()
     result = run(
-        ["list-windows", "-t", f"={SESSION}", "-F", "#{window_index}: #{window_name}"],
+        ["list-windows", "-t", f"={session}", "-F", "#{window_index}: #{window_name}"],
         check=False,
     )
+    if result.returncode != 0:
+        result = run(
+            ["list-windows", "-t", session, "-F", "#{window_index}: #{window_name}"],
+            check=False,
+        )
     if result.returncode != 0:
         return []
     windows = []
