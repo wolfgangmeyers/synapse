@@ -130,7 +130,7 @@ func FormatSubagentWakePrompt(record store.ManagedSubagentRecord) string {
 	if desc == "" {
 		desc = "subagent"
 	}
-	return fmt.Sprintf("[Subagent Completed] Task %s (%s) finished with status %s: %s\n\nCall get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.",
+	return fmt.Sprintf("[Subagent Completed] Task %s (%s) finished with status %s: %s\n\nCall get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.",
 		record.AgentID, desc, record.Status, preview)
 }
 

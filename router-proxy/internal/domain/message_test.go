@@ -53,3 +53,35 @@ func TestBatchContentDoesNotNestAnExistingBatchHeader(t *testing.T) {
 	require.Equal(t, 1, strings.Count(result, BatchHeader))
 	require.Contains(t, result, "From: carol")
 }
+
+func TestMailboxContentSystemNotice(t *testing.T) {
+	// Without existing footer
+	body := "Subagent subagent-1 finished with status completed: done."
+	result := MailboxContent(body, "system")
+	require.Equal(t, body+"\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", result)
+
+	// With existing footer - should not duplicate
+	result2 := MailboxContent(result, "system")
+	require.Equal(t, result, result2)
+
+	// Non-system sender
+	userResult := MailboxContent(body, "wolfgang")
+	require.Equal(t, body+"\n\nReply via mailbox to wolfgang", userResult)
+}
+
+func TestBatchItemSystemNotice(t *testing.T) {
+	subject := "[System Notice] Subagent Completed: subagent-1"
+	msg := Message{
+		From:    "system",
+		To:      "worker",
+		Subject: &subject,
+		Body:    "Subagent completed successfully.",
+		Source:  protocol.MessageSource{Kind: "system"},
+	}
+	item := BatchItem(msg)
+	require.Contains(t, item, "From: system")
+	require.Contains(t, item, "Subject: [System Notice] Subagent Completed: subagent-1")
+	require.Contains(t, item, "[Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.]")
+	require.NotContains(t, item, "Reply via mailbox to system")
+}
+

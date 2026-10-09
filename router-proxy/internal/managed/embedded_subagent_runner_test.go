@@ -529,6 +529,13 @@ func TestSubagentRunnerStopQueuedAndRunning(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "stopped", rec2.Status)
 
+	stopMsg, err := db.MessageFor(ctx, "subagent-terminated-subagent-parent-stop-2-1")
+	require.NoError(t, err)
+	require.NotNil(t, stopMsg)
+	require.Equal(t, "system", stopMsg.From)
+	require.Equal(t, "[System Notice] Subagent Terminated: subagent-parent-stop-2", *stopMsg.Subject)
+	require.Contains(t, stopMsg.Body, "Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
+
 	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, "subagent-parent-stop-1"))
 	require.Eventually(t, func() bool {
 		rec1, err := db.ManagedSubagent(ctx, parent, "subagent-parent-stop-1")
@@ -906,6 +913,7 @@ func TestSubagentRunnerParentIdleWake(t *testing.T) {
 	require.Contains(t, receivedPromptText, childID)
 	require.Contains(t, receivedPromptText, "finished with status completed")
 	require.Contains(t, receivedPromptText, "get_subagent_result")
+	require.Contains(t, receivedPromptText, "Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
 }
 
 func TestSubagentRunnerParentEpochChangeBlocksWake(t *testing.T) {
@@ -1569,4 +1577,74 @@ func TestSubagentCompletionRecordedInCompleteHistory(t *testing.T) {
 	require.Equal(t, "failed", failEntry.Presentation.Outcome)
 	require.Equal(t, "Subagent failed: failing subagent", failEntry.Presentation.Summary)
 }
+
+func TestSubagentCompletionMailboxNotificationSenderIsSystem(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_mailbox_system.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer rawDB.Close()
+
+	parent := subagentTestParent(t, db, "parent-mailbox-system")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	turnDone := make(chan struct{}, 1)
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			defer func() {
+				select {
+				case turnDone <- struct{}{}:
+				default:
+				}
+			}()
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "Parent acknowledges subagent finish without mailing system."},
+			}, ai.StopStop)
+		},
+	})
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	childRecord := store.ManagedSubagentRecord{
+		AgentID:         "subagent-system-test-1",
+		ParentAgentID:   parent.AgentID,
+		ParentSessionID: parent.SessionID,
+		ParentEpoch:     parent.Epoch,
+		Description:     "system notification test child",
+		Status:          "completed",
+		Attempt:         1,
+		ResultText:      "Task finished with zero errors.",
+	}
+
+	mgr.deliverSubagentMailboxNotification(parent, childRecord)
+
+	expectedMsgID := "subagent-completed-subagent-system-test-1-1"
+	msg, err := db.MessageFor(ctx, expectedMsgID)
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	require.Equal(t, "system", msg.From)
+	require.Equal(t, parent.AgentID, msg.To)
+	require.NotNil(t, msg.Subject)
+	require.Equal(t, "[System Notice] Subagent Completed: subagent-system-test-1", *msg.Subject)
+	require.Contains(t, msg.Body, "Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
+
+	select {
+	case <-turnDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for parent turn to process mailbox message")
+	}
+
+	// Verify no outgoing reply to system was placed in embedded_reply_outbox
+	var outboxCount int
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox`).Scan(&outboxCount))
+	require.Zero(t, outboxCount, "no outgoing mailbox reply should be dispatched to system")
+}
+
 

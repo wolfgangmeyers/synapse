@@ -560,14 +560,14 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 		}
 	}
 	m.recordSubagentCompletionHistory(task.parent.AgentID, childID, task.attempt, desc, "failed", "stopped", "", "Subagent stopped.")
-	subject := "Subagent Terminated"
-	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").", childID, desc, childID)
+	subject := fmt.Sprintf("[System Notice] Subagent Terminated: %s", childID)
+	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", childID, desc, childID)
 	source := protocol.MessageSource{Kind: "system"}
 	msgID := fmt.Sprintf("subagent-terminated-%s-%d", childID, task.attempt)
 	now := formatManagedTime(m.clock.Now())
 	envelope := protocol.Envelope{
 		ID:        msgID,
-		From:      "supervisor",
+		From:      "system",
 		To:        task.parent.AgentID,
 		Subject:   &subject,
 		Body:      body,
@@ -1186,14 +1186,17 @@ func (m *Manager) RecoverActiveSubagents(ctx context.Context) error {
 	completed, err := m.store.CompletedSubagentsPendingNotification(ctx)
 	if err == nil {
 		for _, rec := range completed {
-			subject := fmt.Sprintf("Subagent %s Completed", rec.AgentID)
+			subject := fmt.Sprintf("[System Notice] Subagent Completed: %s", rec.AgentID)
+			if rec.Status != "completed" && rec.Status != "steered" {
+				subject = fmt.Sprintf("[System Notice] Subagent %s: %s", strings.Title(rec.Status), rec.AgentID)
+			}
 			body := FormatSubagentWakePrompt(*rec)
 			source := protocol.MessageSource{Kind: "system"}
 			msgID := fmt.Sprintf("subagent-completed-%s-%d", rec.AgentID, rec.Attempt)
 			now := formatManagedTime(m.clock.Now())
 			envelope := protocol.Envelope{
 				ID:        msgID,
-				From:      "supervisor",
+				From:      "system",
 				To:        rec.ParentAgentID,
 				Subject:   &subject,
 				Body:      body,
@@ -1246,14 +1249,14 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 	for _, rec := range records {
 		childID := rec.AgentID
 		m.recordSubagentCompletionHistory(rec.ParentAgentID, rec.AgentID, rec.Attempt, rec.Description, "failed", "interrupted", "", "Interrupted on restart")
-		subject := "Subagent Interrupted on Restart"
-		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").", childID, rec.Description, childID)
+		subject := fmt.Sprintf("[System Notice] Subagent Interrupted: %s", childID)
+		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", childID, rec.Description, childID)
 		source := protocol.MessageSource{Kind: "system"}
 		msgID := fmt.Sprintf("subagent-interrupted-%s-%s", childID, uuid.New().String()[:8])
 		now := formatManagedTime(m.clock.Now())
 		envelope := protocol.Envelope{
 			ID:        msgID,
-			From:      "supervisor",
+			From:      "system",
 			To:        rec.ParentAgentID,
 			Subject:   &subject,
 			Body:      body,
