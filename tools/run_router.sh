@@ -72,7 +72,7 @@ else
 fi
 
 usage() {
-  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Router-managed Pi is enabled by default; set MECHA_ROUTER_MANAGED=false for legacy-only routing." ""
+  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Running tools/run_router.sh is mandatory for automatic restarts." "Router-managed Pi is enabled by default; set MECHA_ROUTER_MANAGED=false for legacy-only routing." ""
 }
 
 case "${1:-}" in
@@ -84,32 +84,51 @@ case "${1:-}" in
       mkdir -p "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
       chmod 700 "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
     fi
-    exec make -C "$ROOT_DIR/router-proxy" run-router \
-      "ROUTER_DATABASE=$DATABASE" \
-      "ROUTER_HOST=$HOST" \
-      "ROUTER_PORT=$PORT" \
-      "ROUTER_LOG=$LOG" \
-      "ROUTER_MAX_BATCH_CHARS=$MAX_BATCH_CHARS" \
-      "ROUTER_AUDIT_SUPERVISOR_TARGET=$AUDIT_SUPERVISOR_TARGET" \
-      "ROUTER_AUDIT_TMUX_SESSION=$AUDIT_TMUX_SESSION" \
-      "ROUTER_POLICY_TIMEOUT=$POLICY_TIMEOUT" \
-      "ROUTER_MANAGED=$MANAGED" \
-      "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=$MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH" \
-      "ROUTER_MANAGED_PI=$MANAGED_PI" \
-      "ROUTER_MANAGED_HOME=$MANAGED_HOME" \
-      "ROUTER_MANAGED_PI_AGENT_DIR=$MANAGED_PI_AGENT_DIR" \
-      "ROUTER_MANAGED_SESSION_ROOT=$MANAGED_SESSION_ROOT" \
-      "ROUTER_MANAGED_MANIFEST=$MANAGED_MANIFEST" \
-      "ROUTER_MANAGED_MECHA_RPC=$MANAGED_MECHA_RPC" \
-      "ROUTER_MANAGED_PI_SUBAGENTS=$MANAGED_PI_SUBAGENTS" \
-      "ROUTER_MANAGED_CURSOR_EXTENSION=$MANAGED_CURSOR_EXTENSION" \
-      "ROUTER_MANAGED_ANTIGRAVITY_EXTENSION=$MANAGED_ANTIGRAVITY_EXTENSION" \
-      "ROUTER_MANAGED_AUTH_HELPER=$MANAGED_AUTH_HELPER" \
-      "ROUTER_MANAGED_RUNTIME_ROOT=$MANAGED_RUNTIME_ROOT" \
-      "ROUTER_MANAGED_CWD_ROOTS=$MANAGED_CWD_ROOTS" \
-      "ROUTER_MANAGED_QUIET_RECIPIENT=$MANAGED_QUIET_RECIPIENT" \
-      "ROUTER_MANAGED_UI_DIST=$MANAGED_UI_DIST" \
-      "ROUTER_CODEX_CREDENTIAL_PATH=$CODEX_CREDENTIAL_PATH"
+    ROUTER_RESTART_EXIT_CODE=75
+    EXIT_FILE="$(mktemp -t router_exit.XXXXXX)"
+    export ROUTER_EXIT_FILE="$EXIT_FILE"
+    trap 'rm -f "$EXIT_FILE"' EXIT INT TERM
+    while true; do
+      set +e
+      make -C "$ROOT_DIR/router-proxy" run-router \
+        "ROUTER_DATABASE=$DATABASE" \
+        "ROUTER_HOST=$HOST" \
+        "ROUTER_PORT=$PORT" \
+        "ROUTER_LOG=$LOG" \
+        "ROUTER_MAX_BATCH_CHARS=$MAX_BATCH_CHARS" \
+        "ROUTER_AUDIT_SUPERVISOR_TARGET=$AUDIT_SUPERVISOR_TARGET" \
+        "ROUTER_AUDIT_TMUX_SESSION=$AUDIT_TMUX_SESSION" \
+        "ROUTER_POLICY_TIMEOUT=$POLICY_TIMEOUT" \
+        "ROUTER_MANAGED=$MANAGED" \
+        "ROUTER_MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH=$MANAGED_ALLOW_LAUNCH_RECIPE_MISMATCH" \
+        "ROUTER_MANAGED_PI=$MANAGED_PI" \
+        "ROUTER_MANAGED_HOME=$MANAGED_HOME" \
+        "ROUTER_MANAGED_PI_AGENT_DIR=$MANAGED_PI_AGENT_DIR" \
+        "ROUTER_MANAGED_SESSION_ROOT=$MANAGED_SESSION_ROOT" \
+        "ROUTER_MANAGED_MANIFEST=$MANAGED_MANIFEST" \
+        "ROUTER_MANAGED_MECHA_RPC=$MANAGED_MECHA_RPC" \
+        "ROUTER_MANAGED_PI_SUBAGENTS=$MANAGED_PI_SUBAGENTS" \
+        "ROUTER_MANAGED_CURSOR_EXTENSION=$MANAGED_CURSOR_EXTENSION" \
+        "ROUTER_MANAGED_ANTIGRAVITY_EXTENSION=$MANAGED_ANTIGRAVITY_EXTENSION" \
+        "ROUTER_MANAGED_AUTH_HELPER=$MANAGED_AUTH_HELPER" \
+        "ROUTER_MANAGED_RUNTIME_ROOT=$MANAGED_RUNTIME_ROOT" \
+        "ROUTER_MANAGED_CWD_ROOTS=$MANAGED_CWD_ROOTS" \
+        "ROUTER_MANAGED_QUIET_RECIPIENT=$MANAGED_QUIET_RECIPIENT" \
+        "ROUTER_MANAGED_UI_DIST=$MANAGED_UI_DIST" \
+        "ROUTER_CODEX_CREDENTIAL_PATH=$CODEX_CREDENTIAL_PATH"
+      exit_code=$?
+      if [[ -s "$EXIT_FILE" ]]; then
+        exit_code="$(<"$EXIT_FILE")"
+        rm -f "$EXIT_FILE"
+      fi
+      set -e
+      if [[ "$exit_code" -eq "$ROUTER_RESTART_EXIT_CODE" ]]; then
+        printf '%s\n' "run_router.sh: router requested restart (exit code 75); relaunching..." >&2
+        sleep 0.5
+        continue
+      fi
+      exit "$exit_code"
+    done
     ;;
   *)
     printf '%s\n' "run_router.sh: unknown argument: $1" >&2

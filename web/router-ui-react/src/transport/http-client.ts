@@ -412,6 +412,7 @@ export interface RouterHttpClient {
   systemOneConfig(): Promise<SystemOneConfig>;
   saveSystemOneConfig(config: SystemOneConfig): Promise<SystemOneConfig>;
   testSystemOne(payload?: SystemOneTestRequest): Promise<SystemOneTestResponse>;
+  restartRouter(): Promise<{ ok: boolean; restarting: boolean }>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
   readonly baseUrl?: string;
@@ -560,6 +561,14 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         status: rec?.status === "ok" ? "ok" : "error",
         ...(rec?.response ? { response: rec.response as SystemOneTestResponse["response"] } : {}),
         ...(rec?.error ? { error: String(rec.error) } : {}),
+      };
+    },
+    restartRouter: async () => {
+      const body = await jsonRequest("/v1/router/restart", "POST", {});
+      const rec = recordValue(body);
+      return {
+        ok: Boolean(rec?.ok),
+        restarting: Boolean(rec?.restarting),
       };
     },
     routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },

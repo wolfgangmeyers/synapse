@@ -11,7 +11,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -256,6 +258,8 @@ type Options struct {
 	// TestOnlyHTTPHandler is mounted only by isolated acceptance binaries.
 	// Production commands leave it nil.
 	TestOnlyHTTPHandler http.Handler
+	ExitFunc            func(int)
+	RestartDelay        time.Duration
 }
 
 type Router struct {
@@ -267,6 +271,8 @@ type Router struct {
 	path           string
 	maxFrame       int
 	maxRequest     int
+	exitFunc       func(int)
+	restartDelay   time.Duration
 	lease          time.Duration
 	delivery       time.Duration
 	maxAttempts    int
@@ -631,7 +637,7 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok"}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok", exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
 	r.startupWork = r.runStartup
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
@@ -1143,3 +1149,15 @@ func (r *Router) deliverEmbeddedReplies(ctx context.Context, agentID string) err
 	}
 	return nil
 }
+
+func (r *Router) exit(code int) {
+	if exitFile := os.Getenv("ROUTER_EXIT_FILE"); exitFile != "" {
+		_ = os.WriteFile(exitFile, []byte(strconv.Itoa(code)), 0600)
+	}
+	if r.exitFunc != nil {
+		r.exitFunc(code)
+		return
+	}
+	os.Exit(code)
+}
+

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
@@ -211,6 +212,13 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	case req.Method == http.MethodPost && path == "/v1/systemone/test":
 		r.handleSystemOneTestPOST(w, req)
+		return
+	case path == "/v1/router/restart":
+		if req.Method != http.MethodPost {
+			r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+			return
+		}
+		r.handleRouterRestart(w, req)
 		return
 	case path == "/v1/systemone":
 		if req.Method == http.MethodGet {
@@ -1236,6 +1244,30 @@ func (r *Router) handleMessageItem(w http.ResponseWriter, req *http.Request, id,
 	default:
 		r.writeError(w, &httpError{404, "not_found", 0})
 	}
+}
+
+func (r *Router) handleRouterRestart(w http.ResponseWriter, req *http.Request) {
+	r.writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"restarting": true,
+	})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	delay := r.restartDelay
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+	go func() {
+		time.Sleep(delay)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = r.Close(shutdownCtx)
+		if r.store != nil {
+			_ = r.store.Close()
+		}
+		r.exit(75)
+	}()
 }
 
 func (r *Router) writeJSON(w http.ResponseWriter, status int, value any) {
