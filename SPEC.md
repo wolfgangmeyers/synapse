@@ -1,125 +1,135 @@
-# Managed-agent projection compatibility fix
+# Specification: Workflow State Tool Restrictions
 
-## Scope
+## 1. Problem Statement
+Currently, embedded workers running in router-proxy have access to all registered tools for their role across their entire lifecycle. When operators configure workflow states (e.g., "Reviewing", "Specifying", "Triage", "Auditing"), they cannot constrain which tools an embedded agent can invoke while in that state. For example, a "Reviewing" state may require read-only inspection (`read`, `bash` or `read` only) while strictly forbidding file mutations (`write`, `edit`) or external delegation (`subagent`, `mecha_worker`). Without enforcement at both the prompt/session declaration boundary and the runtime execution admission boundary, workers can hallucinate or attempt destructive actions that violate the intended workflow phase contract.
 
-Fix the browser-facing managed-agent projection and its UI-live compatibility handling. The change covers the router list projection, UI-live transition frames, Vite HTTP and WebSocket guards, and the client-side managed-row update path.
+## 2. Requirements & Boundaries
 
-Archive persistence and archive detail routes keep their current behavior. This fix does not change archive storage, cleanup, history, child projections, authentication, or router lifecycle behavior.
+### 2.1 Backward Compatibility & Default Behavior
+- Tool restrictions are opt-in per workflow state.
+- If a workflow state has `allowed_tools` set to `null`, `[]`, or omitted, all tools remain available to the embedded worker (existing behavior).
+- When `allowed_tools` contains one or more tool names, only those specified tools are provided to the agent and admitted for execution while that state is active.
 
-## Observable behavior
+### 2.2 Canonical Tool Identifier Whitelist
+Tool names configured in `allowed_tools` must be validated against the set of known embedded worker tools:
+- `mecha_mailbox_send`
+- `goal`
+- `goal_snooze`
+- `mecha_context`
+- `mecha_reminder`
+- `context_reset` (alias: `reset`)
+- `scratchpad`
+- `bash`
+- `read`
+- `edit`
+- `write`
+- `subagent`
+- `get_subagent_result`
+- `steer_subagent`
+- `mecha_worker`
 
-### Live-agent list
+Validation rules:
+- Tool names must be non-empty, trimmed, and belong to the whitelist.
+- `context_reset` and `reset` are aliased: allowing either allows both `context_reset` and `reset` in the runtime session.
+- Duplicates are de-duplicated on save.
+- Unknown tool names produce a 400 Bad Request error on state creation or update.
 
-`GET /v1/managed-agents` returns only current managed-agent rows in `agents`. Every returned row is the live `ManagedAgent` shape. Archive-shaped records do not appear in this browser-facing list, including when the underlying projection snapshot contains both live and archived records.
+### 2.3 Dynamic Tool Filtering on State Entry & Turn Execution
+When an embedded session prepares a turn in `router-proxy/internal/managed/embedded_session.go`:
+1. If the agent has an `active_workflow_state_id`, the manager inspects the active `WorkflowState`.
+2. If `AllowedTools` is non-empty:
+   - Tool list construction filters out any tool whose name is not in the allowed list (accounting for `context_reset`/`reset` aliasing).
+   - Only allowed tools are passed to `coding.NewSession(coding.SessionOptions{Tools: filteredTools, ...})`.
+3. If no state is active, or `AllowedTools` is empty/null, the full standard tool set is passed to `coding.Session`.
 
-A valid live row remains usable when it is adjacent to archive-shaped records. The response remains invalid when the live row itself is malformed or carries an unknown field. The existing live-agent detail route continues to return its current live detail contract, and archive persistence/detail behavior remains unchanged.
+### 2.4 Tool Execution Admission Fence
+In `embedded_session.go` `BeforeToolCall`:
+- If an agent is in an active workflow state with `AllowedTools` configured, and attempts to invoke a tool that is not allowed (e.g. through prompt hallucination or direct tool injection):
+  - The router denies execution cleanly before durable intent or effect execution.
+  - Return `&agent.PolicyDenial{Reason: fmt.Sprintf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)}`.
+  - The denial is recorded in tool history as a cleanly rejected tool outcome without crashing the runner or terminating the session.
 
-### UI-live snapshots
+### 2.5 Dynamic State Transitions
+- State transitions take effect immediately on the next prompt/turn.
+- When an agent transitions from state A (`allowed_tools: ["read"]`) to state B (`allowed_tools: null` or `["read", "write"]`), the next turn instantiates `coding.Session` with the newly active state's tool set.
+- Deactivating the active state restores full tool availability.
 
-A `managed_agents_snapshot` frame contains live managed-agent rows only. A mixed stored snapshot cannot cause an archive row to invalidate the frame or replace a valid live row.
+## 3. Data Storage & Schema Migration
 
-The UI displays every valid live row from the snapshot. An archive-shaped row is excluded from the live managed-agent projection. Other UI-live frame types keep their existing behavior.
+### 3.1 Migration 093
+File: `router-proxy/internal/store/migrations/093_workflow_state_allowed_tools.sql`
+```sql
+ALTER TABLE workflow_states ADD COLUMN allowed_tools_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(allowed_tools_json));
+```
 
-### UI-live delta and removal frames
+### 3.2 Store Layer (`router-proxy/internal/store/workflow_states.go`)
+- Update `WorkflowState` struct:
+  ```go
+  type WorkflowState struct {
+      ID           string          `json:"id"`
+      Name         string          `json:"name"`
+      Description  string          `json:"description"`
+      EntryText    string          `json:"entry_text"`
+      Reminders    []StateReminder `json:"reminders"`
+      AllowedTools []string        `json:"allowed_tools"`
+      CreatedAt    string          `json:"created_at"`
+      UpdatedAt    string          `json:"updated_at"`
+  }
+  ```
+- Update `CreateWorkflowState`, `UpdateWorkflowState`, `GetWorkflowState`, and `ListWorkflowStates`:
+  - Serialize/deserialize `allowed_tools_json`.
+  - Validate tool names against the whitelist on insert/update.
+  - Guarantee `AllowedTools` defaults to `nil` or `[]string{}` when stored as `[]`.
 
-The documented wire contract is:
+## 4. HTTP API Endpoints
 
-- `managed_agent_delta`: `type`, `protocol`, `projection_version`, `base_version`, `agent_id`, and `changes`.
-- `managed_agent_removed`: `type`, `protocol`, `projection_version`, `base_version`, and `agent_id`.
+### 4.1 Request & Response Contracts
+- `GET /v1/workflow-states`: Each item includes `"allowed_tools": ["read", "write"]` or `[]`.
+- `POST /v1/workflow-states`:
+  ```json
+  {
+    "name": "Reviewing",
+    "description": "Read-only inspection phase",
+    "entry_text": "Please review the proposed diff.",
+    "allowed_tools": ["read", "bash"],
+    "reminders": []
+  }
+  ```
+- `PUT /v1/workflow-states/{id}`:
+  Accepts updated `allowed_tools: string[] | null`.
+- Invalid tool names return HTTP 400 with `{ "error": "INVALID_TOOL_NAME", "message": "unknown tool: ..." }`.
 
-Neither new frame includes `record_key`. The router never emits that undocumented field in these frames. `changes` is one complete live managed-agent projection, and its `agent_id` matches the frame `agent_id`.
+## 5. Web UI
 
-A single live-agent update produces one delta when the projection versions are adjacent. A single live-agent removal produces one removal frame. Version gaps or batched changes continue to use an authoritative snapshot, so the browser never guesses a partial state.
+### 5.1 Domain Models (`web/router-ui-react/src/domain/workflow-states.ts`)
+- Add `allowed_tools?: string[] | null` to `WorkflowState`, `CreateWorkflowStateInput`, and `UpdateWorkflowStateInput`.
+- Export constant `KNOWN_WORKFLOW_TOOLS` containing the 14 valid tool identifiers with human-friendly descriptions.
 
-Removing one live agent removes only that agent's managed row and its associated live child state. Other managed rows remain visible, including a row with a different agent ID. Reusing an agent ID across an old archive and a current live row cannot make termination of the live row remove or overwrite the archive detail state because archives are outside the live projection.
+### 5.2 WorkflowStatesPage Component (`web/router-ui-react/src/components/WorkflowStatesPage.tsx`)
+- Display allowed tools badge/list on each state card:
+  - "All tools allowed" tag when empty or null.
+  - Comma-separated or tag list of allowed tools when restricted (e.g., "Allowed tools: read, bash").
+- Create / Edit Workflow State Modal:
+  - Add "Tool Restrictions" section.
+  - Checkbox / Toggle: "All tools allowed (unrestricted)" enabled by default.
+  - When unchecked, render multi-select or checkbox list for each known tool.
+  - Helper actions: "Select All", "Clear All", or common presets ("Read-only", "Code authoring").
 
-### Vite compatibility window
-
-The Vite protocol guards accept both forms during the compatibility window:
-
-1. The new documented delta and removal frames without `record_key`.
-2. A known legacy delta or removal frame with an optional `record_key` when that value is a valid bounded string.
-
-The guards reject unknown fields in both forms. They also reject an invalid `record_key`, invalid versions, invalid agent identity, malformed live changes, and other existing contract violations. The TypeScript frame types and clients expose the documented new contract while accepting the legacy wire form only at the validation boundary.
-
-HTTP and UI-live snapshot compatibility filters accept valid live rows from mixed legacy responses. They discard recognized archive-shaped records before live-agent validation. They do not discard valid live records merely because another record in the same response is archive-shaped. Unknown fields on a live record still fail validation.
-
-## High-level design
-
-1. **Managed projection boundary**
-   - Use the existing `ProjectionListEnvelope` and `PublicAgent`/`PublicArchive` separation as the boundary between durable storage and browser-facing data.
-   - Make the list projection explicitly live-only while leaving archive persistence and archive/detail routes on their existing paths.
-   - Keep the live projection identity based on the live agent ID for the browser-managed surface.
-
-2. **UI-live transport**
-   - Use `uiLiveProjectionFromStored` to build a live-only browser projection.
-   - Use `uiLiveTransition` to emit the documented delta/removal keys and to fall back to a full snapshot for gaps or ambiguous transitions.
-   - Make the transition/removal behavior operate on the same live row set that the client applies, so one termination cannot clear unrelated rows.
-
-3. **Vite HTTP and protocol boundaries**
-   - Keep strict exact-key validation in the existing HTTP response validators and `isUILiveFrame` guards.
-   - Normalize only the known archive-shaped records at the snapshot compatibility boundary.
-   - Permit the optional legacy `record_key` only on the two known legacy frame forms, with its existing safe-string validation. Do not generalize the exception to other frame types or fields.
-
-4. **Vite state application**
-   - Apply deltas and removals against the live managed-row identity used by the current reducer and UI-live client.
-   - Preserve projection-version fencing and recovery behavior.
-   - Ensure a removal is scoped to its target live agent and cannot match unrelated managed rows.
-
-## Edge and failure cases
-
-- Empty live list: return an empty `agents` array and preserve the response version metadata.
-- Mixed live and archive records: retain all valid live rows and omit archive rows in both HTTP and UI-live snapshots.
-- Archive-only stored snapshot: expose no live managed rows; archive persistence/detail routes remain available through their existing contracts.
-- Live row with an archive-only field or unknown field: reject the affected response/frame; do not silently broaden the live schema.
-- New delta/removal without `record_key`: accept and apply.
-- Legacy delta/removal with a valid `record_key`: accept and apply during the compatibility window.
-- Legacy delta/removal with an invalid or non-string `record_key`: reject and recover through the existing UI-live protocol path.
-- Any other undocumented field on either frame: reject.
-- Delta or removal with a version gap, stale base, or regressed version: preserve existing recovery behavior and do not mutate the managed rows.
-- Removal for an agent absent from the current live list: advance only when the existing version fence permits it; leave all other rows unchanged.
-- Two live rows with different IDs: removing one leaves the other and its child projection intact.
-- A live row and an archive with the same `agent_id`: live updates/removals affect only the live row; archive detail behavior is unchanged.
-- Router unavailable or projection read failure: preserve the current error/retry behavior. No router restart is part of this fix.
-
-## Alternatives considered
-
-### 1. Change only the Vite filters and guards
-
-This would let the browser ignore archive rows and accept both frame shapes, but the router would continue emitting archive-shaped list/snapshot data and undocumented `record_key` fields. Other browser clients would still receive the wrong contract, and the source of the mixed-record identity problem would remain.
-
-### 2. Remove archive persistence or change archive routes to look live-only
-
-This would simplify the projection, but it would destroy or hide retained archive detail that existing workflows depend on. It exceeds the bug scope and changes durable behavior that the request explicitly preserves.
-
-### 3. Make the router projections live-only, define the wire contract at the router, and keep narrow Vite compatibility at the boundary
-
-This is the chosen approach. The router owns the browser-facing shape, so list and UI-live snapshots agree. The Vite guards remain strict while accepting the two known legacy frame variants for the compatibility window. Keeping archive storage and detail routes separate preserves retention and avoids making archive identity part of the live-agent reducer.
-
-## Acceptance criteria
-
-- Browser-facing managed-agent lists and UI-live managed projections contain live agents only.
-- Archive persistence and archive/detail routes behave as they do today.
-- Router delta/removal frames omit `record_key` and match the documented key sets.
-- Vite accepts new frames without `record_key` and known legacy frames with an optional valid `record_key`.
-- Vite rejects unknown fields and invalid legacy values.
-- Mixed HTTP/UI-live snapshots retain every valid live row while excluding archive-shaped records.
-- Terminating/removing one agent cannot clear or replace unrelated managed rows.
-- No router restart, push, staging, or commit is required for this specification phase.
-- Only this `SPEC.md` is created for the scoped fix; existing dirty avatar/UI work remains untouched.
-
-# Goal Extension Loading Specification
-
-## Behavior
-
-Every managed Pi worker launch and resume command must start Pi with `--no-extensions` and one ordered list containing the Goal, canonical pi-subagents, and canonical mecha-messaging entrypoints exactly once. Goal is derived from `REPOSITORY_ROOT` with `os.path.realpath`; provider, model, session, router, Mailbox, and permission behavior remain unchanged. Missing extensions fail before tmux side effects.
-
-## Acceptance
-
-- New and resumed Pi argv use the same three-entrypoint order and preserve existing session selectors.
-- Goal remains portable across the primary checkout and isolated worktrees.
-- Focused tests prove argv parity, package-discovery duplicate avoidance, and pre-tmux missing-Goal failure.
-
-## Non-goals
-
-Extension discovery, runtime configuration, router/UI changes, global copies, dependency changes, and unrelated refactors are out of scope.
+## 6. Verification & Automated Tests
+1. **Store Migration & CRUD Unit Tests**:
+   - `router-proxy/internal/store/workflow_states_test.go`:
+     - Test storing, retrieving, updating `allowed_tools`.
+     - Test validation rejects invalid tool names.
+     - Test round-trip serialization of empty vs non-empty tool lists.
+2. **Managed Embedded Session Integration Test**:
+   - `router-proxy/internal/managed/embedded_workflow_tool_restrictions_test.go`:
+     - Launch embedded agent in default state -> verify all tools passed.
+     - Activate workflow state with restricted tools (`read` only) -> verify model receives only `read`, and attempting to call `bash` or `write` returns `PolicyDenial`.
+     - Deactivate or switch to unrestricted state -> verify full tool set restored.
+3. **HTTP Transport Tests**:
+   - Verify GET/POST/PUT `/v1/workflow-states` with `allowed_tools` and invalid tool payload validation.
+4. **Web UI Component Tests**:
+   - `web/router-ui-react/tests/component/workflow-states.test.tsx`:
+     - Verify card displays "All tools allowed" vs restricted badges.
+     - Verify modal allows selecting specific tools and submitting `allowed_tools`.
+     - Verify editing preserves or updates `allowed_tools`.

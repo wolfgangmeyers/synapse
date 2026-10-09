@@ -908,7 +908,12 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		return
 	}
 
-	activeWorkflowState, activeStateErr := m.store.GetManagedAgentActiveWorkflowState(taskCtx, childAgent.AgentID)
+	targetWorkflowAgentID := childAgent.AgentID
+	activeWorkflowState, activeStateErr := m.store.GetManagedAgentActiveWorkflowState(taskCtx, targetWorkflowAgentID)
+	if (activeStateErr != nil || activeWorkflowState == nil) && childAgent.ParentAgentID != "" {
+		targetWorkflowAgentID = childAgent.ParentAgentID
+		activeWorkflowState, activeStateErr = m.store.GetManagedAgentActiveWorkflowState(taskCtx, targetWorkflowAgentID)
+	}
 	if activeStateErr == nil && activeWorkflowState != nil && len(activeWorkflowState.AllowedTools) > 0 {
 		var filteredTools []agent.AgentTool
 		for _, tool := range tools {
@@ -943,6 +948,12 @@ func (m *Manager) runSubagent(task *subagentTask) {
 					task.cancel()
 				}
 				return &agent.BeforeToolCallResult{Block: true, Reason: "Hard turn limit reached"}
+			}
+			return nil
+		},
+		BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
+			if err := admitWorkflowStateTool(callCtx, m.store, childAgent.AgentID, call.ToolCall.Name); err != nil {
+				return &agent.PolicyDenial{Reason: err.Error()}
 			}
 			return nil
 		},
@@ -1342,4 +1353,3 @@ func (m *Manager) resumeParentGoalIfIdle(parent store.EmbeddedBinding) {
 		})
 	}
 }
-

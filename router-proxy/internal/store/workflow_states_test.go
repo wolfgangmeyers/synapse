@@ -272,3 +272,90 @@ func TestManagedAgentWorkflowRemindersLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, reminders)
 }
+
+func TestWorkflowStateAllowedTools(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	// 1. Create with empty/omitted allowed_tools defaults to []string{}
+	stateDefault, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name:        "default-tools",
+		Description: "testing default tools",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stateDefault)
+	require.Equal(t, []string{}, stateDefault.AllowedTools)
+
+	// Verify readback of default state
+	fetchedDefault, err := s.GetWorkflowState(ctx, stateDefault.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fetchedDefault)
+	require.Equal(t, []string{}, fetchedDefault.AllowedTools)
+
+	// 2. Create workflow state with allowed_tools: ["read", "bash"] -> verify readback
+	stateCustom, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name:         "custom-tools",
+		Description:  "testing custom tools",
+		AllowedTools: []string{"read", "bash"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stateCustom)
+	require.Equal(t, []string{"read", "bash"}, stateCustom.AllowedTools)
+
+	fetchedCustom, err := s.GetWorkflowState(ctx, stateCustom.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fetchedCustom)
+	require.Equal(t, []string{"read", "bash"}, fetchedCustom.AllowedTools)
+
+	// Verify in ListWorkflowStates
+	allStates, err := s.ListWorkflowStates(ctx)
+	require.NoError(t, err)
+	require.Len(t, allStates, 2)
+	for _, st := range allStates {
+		if st.ID == stateCustom.ID {
+			require.Equal(t, []string{"read", "bash"}, st.AllowedTools)
+		} else if st.ID == stateDefault.ID {
+			require.Equal(t, []string{}, st.AllowedTools)
+		}
+	}
+
+	// 3. Validation rejects invalid tool name: ["invalid_tool"] -> returns error
+	_, err = s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name:         "invalid-tools",
+		AllowedTools: []string{"invalid_tool"},
+	})
+	require.Error(t, err)
+	var valErr *WorkflowStateValidationError
+	require.ErrorAs(t, err, &valErr)
+	require.Equal(t, "allowed_tools", valErr.Field)
+
+	// Test trimming and deduplication
+	stateDedupe, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name:         "dedupe-tools",
+		AllowedTools: []string{" read ", "bash", "read", " write "},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"read", "bash", "write"}, stateDedupe.AllowedTools)
+
+	// 4. Test updating allowed_tools
+	updated, err := s.UpdateWorkflowState(ctx, stateCustom.ID, WorkflowStateRequest{
+		Name:         "custom-tools",
+		Description:  "updated description",
+		AllowedTools: []string{"mecha_mailbox_send", "scratchpad"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"mecha_mailbox_send", "scratchpad"}, updated.AllowedTools)
+
+	fetchedUpdated, err := s.GetWorkflowState(ctx, stateCustom.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"mecha_mailbox_send", "scratchpad"}, fetchedUpdated.AllowedTools)
+
+	// Reject invalid tool on update
+	_, err = s.UpdateWorkflowState(ctx, stateCustom.ID, WorkflowStateRequest{
+		Name:         "custom-tools",
+		AllowedTools: []string{"not_a_valid_tool"},
+	})
+	require.Error(t, err)
+	require.ErrorAs(t, err, &valErr)
+	require.Equal(t, "allowed_tools", valErr.Field)
+}

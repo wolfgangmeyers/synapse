@@ -71,6 +71,8 @@ var errorMessages = map[string]string{
 	"prompt_template_capacity_exceeded":       "Prompt template collection is full.",
 	"prompt_template_name_conflict":           "Prompt template name already exists.",
 	"invalid_prompt_template":                 "Prompt template request is invalid.",
+	"invalid_workflow_state":                  "Workflow state request is invalid.",
+	"workflow_state_name_conflict":            "Workflow state name already exists.",
 	"reminder_idempotency_conflict":           "Reminder ID already belongs to a different request.",
 	"reminder_not_cancelable":                 "Reminder is already linked to a delivery.",
 	"reminder_target_unavailable":             "Reminder target has never connected.",
@@ -1300,6 +1302,12 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		value = &httpError{409, "prompt_template_name_conflict", 0}
 	case *store.PromptTemplateCapacityError:
 		value = &httpError{409, "prompt_template_capacity_exceeded", 0}
+	case *store.WorkflowStateValidationError:
+		value = &httpError{400, "invalid_workflow_state", 0}
+	case *store.WorkflowStateNameConflictError:
+		value = &httpError{409, "workflow_state_name_conflict", 0}
+	case *store.WorkflowStateNotFoundError:
+		value = &httpError{404, "not_found", 0}
 	default:
 		if coded, ok := err.(interface{ Code() string }); ok {
 			value = &httpError{httpCode(coded.Code()), coded.Code(), 0}
