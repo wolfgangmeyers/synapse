@@ -264,6 +264,15 @@ func TestEmbeddedGoogleSearch_ToolGating(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tmpDir, ".pi", "agent", "auth.json"), authBytes, 0600)
 
 	require.True(t, mgr.hasGoogleSearchAuth(context.Background()))
+
+	// With only Gemini API key present
+	tmpDirKey := t.TempDir()
+	t.Setenv("HOME", tmpDirKey)
+	t.Setenv("PI_AUTH_FILE", filepath.Join(tmpDirKey, "nonexistent.json"))
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(tmpDirKey, "nonexistent-adc.json"))
+	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
+	require.True(t, mgr.hasGoogleSearchAuth(context.Background()))
+	t.Setenv("GEMINI_API_KEY", "")
 }
 
 func TestEmbeddedGoogleSearch_ToolSchema(t *testing.T) {

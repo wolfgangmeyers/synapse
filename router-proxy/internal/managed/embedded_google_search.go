@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	antigravityGroundingURL     = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
+	antigravityGroundingURL    = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
 	vertexGroundingURLTemplate = "https://%s-aiplatform.googleapis.com/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
+	geminiGroundingURLTemplate = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
 )
 
 func embeddedGoogleSearchSchema() *ai.Schema {
@@ -31,7 +32,7 @@ func embeddedGoogleSearchSchema() *ai.Schema {
 	return s
 }
 
-// hasGoogleSearchAuth reports true if either Antigravity credentials or Vertex AI ADC credentials
+// hasGoogleSearchAuth reports true if Antigravity credentials, Gemini API key, or Vertex AI ADC credentials
 // are available on this system.
 func (m *Manager) hasGoogleSearchAuth(ctx context.Context) bool {
 	if m == nil {
@@ -39,6 +40,9 @@ func (m *Manager) hasGoogleSearchAuth(ctx context.Context) bool {
 	}
 	token, _, err := m.embeddedGoogleAuth(ctx)
 	if err == nil && token != "" {
+		return true
+	}
+	if apiKey, aErr := m.resolveGoogleAPIKey(ctx); aErr == nil && apiKey != "" {
 		return true
 	}
 	vToken, _, _, vErr := m.embeddedVertexAuth(ctx, false)
@@ -120,7 +124,7 @@ func (m *Manager) embeddedGoogleSearchTool(owner embeddedOwner) agent.AgentTool 
 }
 
 // executeGoogleSearch attempts to execute search grounding via Antigravity first,
-// falling back to Vertex AI if Antigravity is uncredentialed or encounters an auth error.
+// falling back to Gemini API key grounding, and then to Vertex AI if prior methods fail or are uncredentialed.
 func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruction string, urls []string) (string, error) {
 	var antigravityErr error
 	token, projectID, err := m.embeddedGoogleAuth(ctx)
@@ -134,6 +138,16 @@ func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruc
 		antigravityErr = err
 	}
 
+	var geminiAPIErr error
+	apiKey, keyErr := m.resolveGoogleAPIKey(ctx)
+	if keyErr == nil && apiKey != "" {
+		res, gErr := m.executeGeminiAPIKeyGrounding(ctx, apiKey, query, instruction, urls)
+		if gErr == nil {
+			return res, nil
+		}
+		geminiAPIErr = gErr
+	}
+
 	// Fallback to Vertex AI
 	vToken, vProject, vLoc, vErr := m.embeddedVertexAuth(ctx, false)
 	if vErr == nil && vToken != "" {
@@ -141,16 +155,19 @@ func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruc
 		if vExecErr == nil {
 			return res, nil
 		}
-		if antigravityErr != nil {
-			return "", fmt.Errorf("google search failed (antigravity: %v; vertex: %v)", antigravityErr, vExecErr)
+		if antigravityErr != nil || geminiAPIErr != nil {
+			return "", fmt.Errorf("google search failed (antigravity: %v; gemini: %v; vertex: %v)", antigravityErr, geminiAPIErr, vExecErr)
 		}
 		return "", fmt.Errorf("vertex google search failed: %w", vExecErr)
 	}
 
+	if geminiAPIErr != nil {
+		return "", fmt.Errorf("gemini api google search failed: %w", geminiAPIErr)
+	}
 	if antigravityErr != nil {
 		return "", fmt.Errorf("antigravity google search failed: %w", antigravityErr)
 	}
-	return "", errors.New("no Google credentials available for search (neither Antigravity nor Vertex AI)")
+	return "", errors.New("no Google credentials available for search (neither Antigravity, Gemini API key, nor Vertex AI)")
 }
 
 type groundingChunkWeb struct {
@@ -399,3 +416,66 @@ func (m *Manager) executeVertexGrounding(ctx context.Context, token, projectID, 
 
 	return formatGroundingResponse(&parsed)
 }
+
+func (m *Manager) executeGeminiAPIKeyGrounding(ctx context.Context, apiKey, query, instruction string, urls []string) (string, error) {
+	model := "gemini-2.5-flash"
+	url := fmt.Sprintf(geminiGroundingURLTemplate, model, apiKey)
+
+	tools := []any{
+		map[string]any{"googleSearch": map[string]any{}},
+	}
+	if len(urls) > 0 {
+		tools = append(tools, map[string]any{"urlContext": map[string]any{}})
+	}
+
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{
+				"role":  "user",
+				"parts": []any{map[string]any{"text": query}},
+			},
+		},
+		"tools": tools,
+	}
+	if instruction != "" {
+		payload["systemInstruction"] = map[string]any{
+			"role":  "user",
+			"parts": []any{map[string]any{"text": instruction}},
+		}
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("gemini api grounding request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed generateContentResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("parsing gemini api grounding response: %w", err)
+	}
+
+	return formatGroundingResponse(&parsed)
+}
+
