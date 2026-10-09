@@ -386,6 +386,7 @@ export interface RouterHttpClient {
   updateWorkflowState(id: string, payload: unknown): Promise<WorkflowStateResponse>;
   deleteWorkflowState(id: string): Promise<unknown>;
   setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null): Promise<unknown>;
+  setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
   attachmentUrl(reference: string): string;
   managedAgents(): Promise<ManagedAgentsResponse>;
   managedAgent(id: string): Promise<ManagedAgentResponse>;
@@ -482,6 +483,8 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     deleteWorkflowState: (id) => request(`/v1/workflow-states/${encodeURIComponent(id)}`, { method: "DELETE" }),
     setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null) =>
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", workflowStateId ? { action: "activate", workflow_state_id: workflowStateId } : { action: "deactivate" }),
+    setManagedAgentAllowInlineTools: async (agentId: string, allowed: boolean) =>
+      managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/allow-inline-tools`, "POST", { allow_inline_tools: allowed }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
     managedAgents: async () => managedAgents(await managedRequest("/v1/managed-agents", "GET")),
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),

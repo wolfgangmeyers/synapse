@@ -864,6 +864,7 @@ export interface ManagedAgent {
   updated_at: RouterTimestamp;
   last_error: ManagedError | null;
   worktree?: boolean;
+  allow_inline_tools?: boolean | undefined;
   goal_state?: GoalState & {
     desired_revision?: number;
     applied_revision?: number;

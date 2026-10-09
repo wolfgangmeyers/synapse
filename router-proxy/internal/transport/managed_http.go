@@ -130,6 +130,12 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodDelete && managedTerminatePath(req.URL.Path) != "":
 		r.handleManagedTerminate(w, req, managedTerminatePath(req.URL.Path))
 		return true
+	case req.Method == http.MethodPatch && managedAgentPATCHPath(req.URL.Path) != "":
+		r.handleManagedAgentAllowInlineTools(w, req, managedAgentPATCHPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodPost && managedAllowInlineToolsPOSTPath(req.URL.Path) != "":
+		r.handleManagedAgentAllowInlineTools(w, req, managedAllowInlineToolsPOSTPath(req.URL.Path))
+		return true
 	case req.Method == http.MethodGet && managedChildrenPath(req.URL.Path) != "":
 		r.handleManagedChildrenGET(w, req, managedChildrenPath(req.URL.Path))
 		return true
@@ -1338,6 +1344,61 @@ func managedInlineToolsPath(path string) string {
 		return ""
 	}
 	return id
+}
+
+func managedAllowInlineToolsPOSTPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/allow-inline-tools") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/allow-inline-tools")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func managedAgentPATCHPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	id := strings.TrimPrefix(path, prefix)
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func (r *Router) handleManagedAgentAllowInlineTools(w http.ResponseWriter, req *http.Request, agentID string) {
+	agent, err := r.store.ManagedAgent(req.Context(), agentID)
+	if err != nil || agent == nil {
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		return
+	}
+	payload, _, decodeErr := decodeManagedObject(req, 16*1024, true)
+	if decodeErr != nil {
+		r.writeManagedError(w, req, decodeErr)
+		return
+	}
+	rawAllow, hasAllow := payload["allow_inline_tools"]
+	if !hasAllow {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "allow_inline_tools is required"})
+		return
+	}
+	var allow bool
+	if err := json.Unmarshal(rawAllow, &allow); err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "allow_inline_tools must be a boolean"})
+		return
+	}
+	if err := r.store.SetManagedAgentAllowInlineTools(req.Context(), agentID, allow); err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update allow_inline_tools"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
+		"agent_id":           agentID,
+		"allow_inline_tools": allow,
+	}, nil)
 }
 
 func managedGoalState(details map[string]any) map[string]any {
