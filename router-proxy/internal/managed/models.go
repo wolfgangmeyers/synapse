@@ -97,6 +97,11 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 		}
 		return Model{Provider: saved.Provider, ID: saved.ID, Name: name, Available: false}, nil
 	}
+	for _, model := range catalog.Models {
+		if model.Available {
+			return model, nil
+		}
+	}
 	// An omitted model delegates to the router's built-in Pi default. Provider
 	// catalogs gate explicit choices, but must not turn the optional launch field
 	// into a validation error while a catalog refresh or sign-in is unavailable.

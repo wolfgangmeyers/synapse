@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSelectModelUsesExplicitSavedThenSolFallback(t *testing.T) {
+func TestSelectModelUsesExplicitSavedThenFirstAvailableFallback(t *testing.T) {
 	catalog := CatalogFromModels(Model{Provider: "saved", ID: "model", Available: true}, Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Available: true})
 	current, err := catalog.Catalog(context.Background())
 	require.NoError(t, err)
@@ -27,7 +27,7 @@ func TestSelectModelUsesExplicitSavedThenSolFallback(t *testing.T) {
 	require.False(t, selected.Available)
 	selected, err = SelectModel(nil, nil, current)
 	require.NoError(t, err)
-	require.Equal(t, "gpt-5.6-sol", selected.ID)
+	require.Equal(t, "model", selected.ID)
 }
 
 func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
@@ -57,6 +57,15 @@ func TestSelectModelRejectsUnavailableExplicitButUsesServerFallbackWhenOmitted(t
 	selected, err := SelectModel(nil, nil, Catalog{Models: []Model{}})
 	require.NoError(t, err)
 	require.Equal(t, Model{Provider: "openai-codex", ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", Available: true}, selected)
+
+	// When an available model exists in catalog (e.g. Google), select it instead of Sol fallback
+	googleCatalog := Catalog{Models: []Model{
+		{Provider: "openai-codex", ID: "gpt-5.6-sol", Available: false},
+		{Provider: "google", ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Available: true},
+	}}
+	selected, err = SelectModel(nil, nil, googleCatalog)
+	require.NoError(t, err)
+	require.Equal(t, Model{Provider: "google", ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Available: true}, selected)
 }
 
 func TestPublicAgentOmitsPrivateProcessAndSessionIdentity(t *testing.T) {
