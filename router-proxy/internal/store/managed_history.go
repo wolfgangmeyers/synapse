@@ -247,6 +247,15 @@ func (s *Store) managedHistoryBoundaryTx(ctx context.Context, agentID string) (i
 	return 0, false, nil
 }
 
+func (s *Store) pruneManagedCompleteHistoryTx(ctx context.Context, agentID string) error {
+	if agentID != "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id=? AND sequence NOT IN (SELECT sequence FROM managed_complete_history WHERE agent_id=? ORDER BY sequence DESC LIMIT ?)`, agentID, agentID, maxManagedHistoryEntries)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id IS NULL AND sequence NOT IN (SELECT sequence FROM managed_complete_history WHERE agent_id IS NULL ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries)
+	return err
+}
+
 // AppendManagedCompleteHistory records a bounded, already-redacted operational
 // fact. Producers that have a canonical event type should use the presentation
 // overload so the UI never guesses semantics from the message string.
@@ -392,7 +401,7 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+	if err := s.pruneManagedCompleteHistoryTx(ctx, agentID); err != nil {
 		return ManagedHistoryEntry{}, err
 	}
 	return managedHistoryEntry(sequence, agentID, occurredAt, level, message, presentation, detail), nil

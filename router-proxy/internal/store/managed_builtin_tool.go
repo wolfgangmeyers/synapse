@@ -179,7 +179,7 @@ func (s *Store) BeginManagedToolInvocation(ctx context.Context, fence ManagedRun
 		if err != nil {
 			return err
 		}
-		if _, err = s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+		if err = s.pruneManagedCompleteHistoryTx(ctx, fence.AgentID); err != nil {
 			return err
 		}
 		entry = managedHistoryEntry(sequence, fence.AgentID, now, level, message, presentation, managedHistoryDetails{ToolInputJSON: toolInputJSON})

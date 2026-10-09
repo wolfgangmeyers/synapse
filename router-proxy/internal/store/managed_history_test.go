@@ -40,6 +40,33 @@ func TestManagedHistoryKeepsQuietEligibilityAtWriteAndCapsComplete(t *testing.T)
 	require.Equal(t, page.Entries, quietAfterCompleteCap.Entries, "complete-history retention must never evict quiet history")
 }
 
+func TestManagedHistoryPruneIsScopedToAgent(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	// Seed agent-b with some entries
+	for i := 0; i < 10; i++ {
+		_, err := durable.AppendManagedCompleteHistory(ctx, "agent-b", "test", "info", fmt.Sprintf("beta-%03d", i))
+		require.NoError(t, err)
+	}
+
+	// Fill agent-a to the cap and beyond
+	for i := 0; i < maxManagedHistoryEntries+5; i++ {
+		_, err := durable.AppendManagedCompleteHistory(ctx, "agent-a", "test", "info", fmt.Sprintf("alpha-%03d", i))
+		require.NoError(t, err)
+	}
+
+	// agent-a should be capped at maxManagedHistoryEntries
+	var countA int
+	require.NoError(t, durable.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM managed_complete_history WHERE agent_id='agent-a'").Scan(&countA))
+	require.Equal(t, maxManagedHistoryEntries, countA)
+
+	// agent-b MUST NOT be pruned when agent-a generates history!
+	var countB int
+	require.NoError(t, durable.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM managed_complete_history WHERE agent_id='agent-b'").Scan(&countB))
+	require.Equal(t, 10, countB, "pruning for agent-a must never evict agent-b history")
+}
+
 func TestManagedHistoryPageScopesFactsAndQuietMailToItsAgent(t *testing.T) {
 	durable := openTestStore(t)
 	ctx := context.Background()

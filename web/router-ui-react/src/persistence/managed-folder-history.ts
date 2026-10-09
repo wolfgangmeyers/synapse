@@ -1,7 +1,7 @@
 import type { StorageAdapter } from "./settings-repository";
 
 export const MANAGED_RECENT_FOLDERS_KEY = "mecha.web.managedRecentFolders";
-export const MANAGED_RECENT_FOLDERS_LIMIT = 10;
+export const MANAGED_RECENT_FOLDERS_LIMIT = 15;
 
 function validFolder(value: unknown): value is string {
   return typeof value === "string" && (value.startsWith("/") || value === "~" || value.startsWith("~/"));

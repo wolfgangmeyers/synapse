@@ -147,7 +147,7 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 		if err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+		if err := s.pruneManagedCompleteHistoryTx(ctx, fence.AgentID); err != nil {
 			return err
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
@@ -209,7 +209,7 @@ func (s *Store) RecordManagedParentCompactionNotification(ctx context.Context, f
 		if err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+		if err := s.pruneManagedCompleteHistoryTx(ctx, fence.AgentID); err != nil {
 			return err
 		}
 		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {

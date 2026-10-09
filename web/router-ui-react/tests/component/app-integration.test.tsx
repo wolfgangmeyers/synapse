@@ -254,15 +254,16 @@ describe("App integration", () => {
     await user.click(menuButton);
     await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await user.click(screen.getByLabelText("Working folder"));
-    expect(screen.getByRole("list", { name: "Recent folders" })).toHaveTextContent("/projects/recent-0");
-    expect(screen.getAllByRole("listitem")).toHaveLength(10);
+    await user.click(screen.getByRole("button", { name: "Recent folders" }));
+    const recentDialog = screen.getByRole("dialog", { name: "Choose working folder" });
+    expect(within(recentDialog).getByRole("option", { name: "Select folder /projects/recent-0" })).toBeInTheDocument();
+    expect(within(recentDialog).getAllByRole("option")).toHaveLength(10);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "  My   Agent  " } });
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/project" } });
     await user.click(screen.getByRole("button", { name: "Launch" }));
 
     await waitFor(() => expect(launchPayload).toEqual({ name: "My-Agent", cwd: "/allowed/project", runtime: "embedded" }));
-    await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project", ...recentFolders.slice(0, 9)])));
+    await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project", ...recentFolders.slice(0, 14)])));
   });
 
   it("keeps launch values visible when the router reports a name collision", async () => {

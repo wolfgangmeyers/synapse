@@ -15,7 +15,7 @@ class MemoryStorage {
 }
 
 describe("managed folder history", () => {
-  it("keeps a local deduplicated history of ten usable folder paths", () => {
+  it("keeps a local deduplicated history of fifteen usable folder paths", () => {
     const folders = recordManagedRecentFolder(
       Array.from({ length: MANAGED_RECENT_FOLDERS_LIMIT }, (_, index) => `/projects/${index}`),
       "/projects/new",
@@ -23,7 +23,7 @@ describe("managed folder history", () => {
 
     expect(folders).toHaveLength(MANAGED_RECENT_FOLDERS_LIMIT);
     expect(folders[0]).toBe("/projects/new");
-    expect(folders).not.toContain("/projects/9");
+    expect(folders).not.toContain(`/projects/${MANAGED_RECENT_FOLDERS_LIMIT - 1}`);
   });
 
   it("persists only absolute and home-relative folders", () => {

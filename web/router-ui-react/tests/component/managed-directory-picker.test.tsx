@@ -67,14 +67,24 @@ describe("ManagedDirectoryPicker", () => {
     expect(within(dialog).getByRole("button", { name: "fresh" })).toBeInTheDocument();
   });
 
-  it("keeps recent suggestions beside the freeform input", async () => {
+  it("keeps recent suggestions beside the freeform input and filters them", async () => {
     const user = userEvent.setup();
     render(<StatefulPicker />);
-    const input = screen.getByLabelText("Working folder");
-    await user.click(input);
-    expect(screen.getByRole("list", { name: "Recent folders" })).toHaveTextContent("/projects/alpha");
-    await user.type(input, "beta");
-    expect(screen.queryByRole("button", { name: "/projects/alpha" })).not.toBeInTheDocument();
+    const toggleButton = screen.getByRole("button", { name: "Recent folders" });
+    await user.click(toggleButton);
+    const dialog = screen.getByRole("dialog", { name: "Choose working folder" });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByRole("option", { name: "Select folder /projects/alpha" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("option", { name: "Select folder /projects/beta" })).toBeInTheDocument();
+
+    const searchInput = within(dialog).getByRole("searchbox", { name: "Search folders" });
+    await user.type(searchInput, "beta");
+    expect(within(dialog).queryByRole("option", { name: "Select folder /projects/alpha" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("option", { name: "Select folder /projects/beta" })).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("option", { name: "Select folder /projects/beta" }));
+    expect(screen.queryByRole("dialog", { name: "Choose working folder" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Working folder")).toHaveValue("/projects/beta");
   });
 
   it("accepts a Finder Files payload without opening a folder listing", async () => {
@@ -147,15 +157,32 @@ describe("ManagedDirectoryPicker", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Finder did not provide the local folder path. Use Browse or paste it.");
   });
 
-  it("provides a datalist with recent folders connected to the input", () => {
+  it("closes the recent folders menu on Escape or click outside", async () => {
+    const user = userEvent.setup();
     render(<StatefulPicker />);
-    const input = screen.getByLabelText("Working folder");
-    const datalistId = input.getAttribute("list");
-    expect(datalistId).toBeTruthy();
-    const datalist = document.getElementById(datalistId!);
-    expect(datalist).toBeInTheDocument();
-    expect(datalist?.tagName.toLowerCase()).toBe("datalist");
-    const options = Array.from(datalist?.querySelectorAll("option") ?? []).map((opt) => opt.value);
-    expect(options).toEqual(["/projects/alpha", "/projects/beta"]);
+    const toggleButton = screen.getByRole("button", { name: "Recent folders" });
+    await user.click(toggleButton);
+    expect(screen.getByRole("dialog", { name: "Choose working folder" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Choose working folder" })).not.toBeInTheDocument();
+
+    await user.click(toggleButton);
+    expect(screen.getByRole("dialog", { name: "Choose working folder" })).toBeInTheDocument();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("dialog", { name: "Choose working folder" })).not.toBeInTheDocument();
+  });
+
+  it("limits recent folders to 15 items in the dropdown", async () => {
+    const user = userEvent.setup();
+    const manyFolders = Array.from({ length: 20 }, (_, i) => `/path/to/folder-${i}`);
+    render(<ManagedDirectoryPicker value="" onChange={() => undefined} list={async (p) => ({ path: p, parent: "", directories: [] })} recentFolders={manyFolders} />);
+    const toggleButton = screen.getByRole("button", { name: "Recent folders" });
+    await user.click(toggleButton);
+    const dialog = screen.getByRole("dialog", { name: "Choose working folder" });
+    const options = within(dialog).getAllByRole("option");
+    expect(options).toHaveLength(15);
+    expect(options[0]).toHaveTextContent("/path/to/folder-0");
+    expect(options[14]).toHaveTextContent("/path/to/folder-14");
   });
 });

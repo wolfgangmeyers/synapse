@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
@@ -84,14 +84,9 @@ describe("Managed launch folder suggestions", () => {
     await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const input = screen.getByLabelText("Working folder");
-    const datalistId = input.getAttribute("list");
-    expect(datalistId).toBeTruthy();
-    const datalist = document.getElementById(datalistId!);
-    expect(datalist).toBeInTheDocument();
-    expect(datalist?.querySelector("option")?.value).toBe("/workspace/active-repo");
-
-    await user.click(input);
-    expect(screen.getByRole("list", { name: "Recent folders" })).toHaveTextContent("/workspace/active-repo");
+    const toggleButton = screen.getByRole("button", { name: "Recent folders" });
+    await user.click(toggleButton);
+    const dialog = screen.getByRole("dialog", { name: "Choose working folder" });
+    expect(within(dialog).getByRole("option", { name: "Select folder /workspace/active-repo" })).toBeInTheDocument();
   });
 });
