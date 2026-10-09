@@ -56,4 +56,28 @@ describe("managed Complete history reducer", () => {
     expect(insertedEntries).toHaveLength(200);
     expect(insertedEntries.map((item) => item.id)).toEqual(Array.from({ length: 200 }, (_, index) => `complete:${index + 1}`));
   });
+
+  it("maintains chronological order and protects newest entries when page arrives descending", () => {
+    let state = createInitialState(scope);
+    // Simulate HTTP response where entries are returned descending: 199 down to 0
+    for (let index = 199; index >= 0; index -= 1) {
+      state = append(state, entry(`complete:${index}`));
+    }
+    const entries = state.managedHistory?.["managed-alpha"]?.complete ?? [];
+    expect(entries).toHaveLength(200);
+    expect(entries.map((item) => item.id)).toEqual(Array.from({ length: 200 }, (_, index) => `complete:${index}`));
+
+    // When new live frames (complete:200, 201) arrive after context reset,
+    // the oldest entries (complete:0, 1) are evicted, NOT the recent entries (complete:198, 199)
+    state = append(state, entry("complete:200"));
+    state = append(state, entry("complete:201"));
+
+    const afterLive = state.managedHistory?.["managed-alpha"]?.complete ?? [];
+    expect(afterLive).toHaveLength(200);
+    expect(afterLive[0]?.id).toBe("complete:2");
+    expect(afterLive.some((item) => item.id === "complete:198")).toBe(true);
+    expect(afterLive.some((item) => item.id === "complete:199")).toBe(true);
+    expect(afterLive.some((item) => item.id === "complete:200")).toBe(true);
+    expect(afterLive[afterLive.length - 1]?.id).toBe("complete:201");
+  });
 });

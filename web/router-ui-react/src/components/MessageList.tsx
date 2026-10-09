@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
+import { isRecord } from "../protocol/guards";
 import type { ManagedHistoryEntry } from "../protocol/types";
 import { shouldFollowToBottom } from "../state/conversation-projection";
-import { CompleteTimelineEntry, completeTimelineVisual, getMailboxSendDetails, getThinkingContent, isActiveManagedSubagentLifecycle, isMailboxSendToUser } from "./CompleteTimelineEntry";
+import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getMailboxSendDetails, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
 
@@ -35,6 +36,7 @@ function activitySequence(entry: ManagedHistoryEntry): number {
 }
 
 function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, allEntries?: readonly ManagedHistoryEntry[]): boolean {
+  if (isContextResetEntry(entry)) return true;
   // A managed child stays in the persistent active-subagents area until its
   // terminal update. Its actual subagent tool invocation remains a normal
   // Complete history entry because it has presentation.kind === "tool".
@@ -66,12 +68,30 @@ function dateLabel(timestamp: number): string | undefined {
 }
 
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
+  if (isContextResetEntry(entry)) return false;
+  const toolName = entry.presentation?.tool_name;
+  const isTool = entry.presentation?.kind === "tool";
+  const isMailboxTool = toolName === "mecha_mailbox_send" || (toolName === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send");
+  const isMessageKind = entry.presentation?.kind === "message";
+  if (!isTool && !isMessageKind) return false;
+  if (isTool && !isMailboxTool) return false;
   const mailboxDetails = getMailboxSendDetails(entry.tool_input);
   const content = mailboxDetails?.body ?? entry.message_content;
   if (!content) return false;
   const to = mailboxDetails?.recipient ?? entry.presentation?.to;
   const from = entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id;
-  return messages.some((m) => m.body === content && (m.from === from || m.to === to || m.from === entry.sender_identity));
+  const entryTime = activityTime(entry);
+  return messages.some((m) => {
+    if (m.id === entry.id) return true;
+    if (m.body !== content) return false;
+    const senderMatches = m.from === from || m.to === to || m.from === entry.sender_identity;
+    if (!senderMatches) return false;
+    const mTime = messageTime(m, Number.MAX_SAFE_INTEGER);
+    if (entryTime !== Number.MAX_SAFE_INTEGER && mTime !== Number.MAX_SAFE_INTEGER) {
+      return Math.abs(entryTime - mTime) <= 120_000;
+    }
+    return true;
+  });
 }
 
 export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked }: MessageListProps): ReactElement {
@@ -152,11 +172,21 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   }, [activityEntries, currentUser, messages]);
   const renderedItems = useMemo(() => {
     let lastThinking: string | undefined;
-    const result: Array<{ item: FeedItem; suppressThinking: boolean }> = [];
+    let currentEpoch = 1;
+    const result: Array<{ item: FeedItem; suppressThinking: boolean; epoch?: number | string }> = [];
     for (const item of items) {
       if (item.type === "message") {
         lastThinking = undefined;
         result.push({ item, suppressThinking: false });
+        continue;
+      }
+      if (isContextResetEntry(item.entry)) {
+        currentEpoch += 1;
+        const parsedEpoch = extractEpoch(item.entry, currentEpoch);
+        if (typeof parsedEpoch === "number") {
+          currentEpoch = Math.max(currentEpoch, parsedEpoch);
+        }
+        result.push({ item, suppressThinking: false, epoch: parsedEpoch });
         continue;
       }
       const isThinkingKind = item.entry.presentation?.kind === "thinking";
@@ -210,10 +240,10 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   const hasItems = renderedItems.length > 0;
   const hasActivity = activityEntries !== undefined;
   let previousDate: string | undefined;
-  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{renderedItems.map(({ item, suppressThinking }) => {
+  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{renderedItems.map(({ item, suppressThinking, epoch }) => {
     const currentDate = dateLabel(item.timestamp);
     const separator = currentDate !== undefined && currentDate !== previousDate ? <li key={`date:${currentDate}:${item.id}`} className="timeline-date" aria-hidden="true">{currentDate}</li> : null;
     previousDate = currentDate ?? previousDate;
-    return <Fragment key={`${item.type}:${item.id}`}>{separator}<li className={`timeline-item timeline-item--${item.type}`}>{item.type === "message" ? <MessageBubble message={item.message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})} /> : <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} />}</li></Fragment>;
+    return <Fragment key={`${item.type}:${item.id}`}>{separator}<li className={`timeline-item timeline-item--${item.type}${item.type === "activity" && isContextResetEntry(item.entry) ? " timeline-item--context-reset" : ""}`}>{item.type === "message" ? <MessageBubble message={item.message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})} /> : <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />}</li></Fragment>;
   })}</ol> : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : <EmptyState title={hasActivity ? "No messages or activity yet" : "No messages yet"} description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."} />}{hasItems && error ? <p className="error" role="alert">{error}</p> : null}<p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p></div>;
 }

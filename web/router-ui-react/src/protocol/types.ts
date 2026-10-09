@@ -920,7 +920,7 @@ export interface ManagedChildrenProjection {
   recovery_state: "current" | "reconstructing";
   children: ManagedChild[];
 }
-export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking" | "goal_evaluation" | "subagent_complete" | "subagent";
+export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking" | "goal_evaluation" | "subagent_complete" | "subagent" | "context_reset";
 export type ManagedHistoryOutcome = "active" | "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "interrupted" | "aborted" | "reconciled_unknown" | "done" | "not_done";
 export interface ManagedHistoryError {
   code: string;
@@ -948,6 +948,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export interface ManagedHistoryEntry {
   id: string;
   agent_id: AgentId;
+  category?: string;
   at?: RouterTimestamp;
   level?: string;
   message?: string;

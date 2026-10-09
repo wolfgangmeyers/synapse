@@ -6,7 +6,7 @@ import type { Arrival } from "../domain/arrivals";
 import type { ManagedHistoryEntry } from "../protocol/types";
 import type { RouterHttpClient } from "../transport/http-client";
 import { isRecord } from "../protocol/guards";
-import { isMailboxSendToUser } from "./CompleteTimelineEntry";
+import { isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { ConversationHeader, type ConversationView } from "./ConversationHeader";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
@@ -68,9 +68,12 @@ export function Conversation({ peer, agent, client, activeReminderCount = 0, own
         const isMsg = category === "managed_message" ||
           category === "managed_prompt" ||
           category === "reminder" ||
+          category === "context_reset" ||
           kind === "message" ||
           kind === "reminder" ||
           kind === "state" ||
+          kind === "context_reset" ||
+          isContextResetEntry(entry) ||
           entry.message === "Message received" ||
           entry.message === "Message sent" ||
           entry.message === "Reply sent" ||

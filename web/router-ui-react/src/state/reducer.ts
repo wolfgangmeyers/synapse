@@ -58,6 +58,24 @@ function sameManagedHistoryEntry(left: ManagedHistoryEntry, right: ManagedHistor
       && leftPresentation.error.code === rightPresentation.error.code && leftPresentation.error.retryable === rightPresentation.error.retryable && leftPresentation.error.detail_available === rightPresentation.error.detail_available)));
   return left.id === right.id && left.agent_id === right.agent_id && left.at === right.at && left.level === right.level && left.message === right.message && samePresentation;
 }
+
+export function compareManagedHistoryEntries(left: ManagedHistoryEntry, right: ManagedHistoryEntry): number {
+  const matchLeft = /^complete:(\d+)(?::.*)?$/.exec(left.id);
+  const matchRight = /^complete:(\d+)(?::.*)?$/.exec(right.id);
+  if (matchLeft !== null && matchRight !== null) {
+    const seqLeft = Number(matchLeft[1]);
+    const seqRight = Number(matchRight[1]);
+    if (Number.isSafeInteger(seqLeft) && Number.isSafeInteger(seqRight) && seqLeft !== seqRight) {
+      return seqLeft - seqRight;
+    }
+  }
+  const leftTime = left.at ? Date.parse(left.at) : NaN;
+  const rightTime = right.at ? Date.parse(right.at) : NaN;
+  if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  return left.id.localeCompare(right.id);
+}
 export function reducer(state: AppState, action: AppAction): AppState {
   if (action.type === "scope/reset") {
     const next = createInitialState(action.scope);
@@ -203,7 +221,8 @@ export function reducer(state: AppState, action: AppAction): AppState {
         updated[existingIndex] = action.entry;
         return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: updated } } };
       }
-      return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: [...entries, action.entry].slice(-200) } } };
+      const nextEntries = [...entries, action.entry].sort(compareManagedHistoryEntries).slice(-200);
+      return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: nextEntries } } };
     }
     case "message/append": {
       const messages = appendConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.message).messages;
