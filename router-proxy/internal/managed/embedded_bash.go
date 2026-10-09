@@ -176,6 +176,9 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string, fresh func(s
 			case <-done:
 			case <-time.After(2 * time.Second):
 			}
+			if ctx.Err() != nil {
+				return agent.AgentToolResult{}, ctx.Err()
+			}
 			if out.truncated() {
 				return truncated()
 			}

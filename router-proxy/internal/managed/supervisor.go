@@ -162,6 +162,52 @@ type managedAgentLane struct {
 	mailAttempts             map[string]int
 	warningEpoch             int64
 	warningEmitted           bool
+	extendedTimeoutUntil     time.Time
+	defaultTimeoutOverride   time.Duration
+	extendedTimeoutOverride  time.Duration
+}
+
+func (l *managedAgentLane) toolTimeout() time.Duration {
+	if l == nil {
+		return 5 * time.Minute
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	if time.Now().Before(l.extendedTimeoutUntil) {
+		if l.extendedTimeoutOverride > 0 {
+			return l.extendedTimeoutOverride
+		}
+		return 30 * time.Minute
+	}
+	if l.defaultTimeoutOverride > 0 {
+		return l.defaultTimeoutOverride
+	}
+	return 5 * time.Minute
+}
+
+func (l *managedAgentLane) extendToolTimeout(durationMinutes int) (time.Time, int) {
+	if durationMinutes <= 0 {
+		durationMinutes = 30
+	}
+	if durationMinutes > 30 {
+		durationMinutes = 30
+	}
+	extendedUntil := time.Now().Add(time.Duration(durationMinutes) * time.Minute)
+	if l != nil {
+		l.activeMu.Lock()
+		l.extendedTimeoutUntil = extendedUntil
+		l.activeMu.Unlock()
+	}
+	return extendedUntil, durationMinutes
+}
+
+func (l *managedAgentLane) getExtendedTimeoutUntil() time.Time {
+	if l == nil {
+		return time.Time{}
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	return l.extendedTimeoutUntil
 }
 
 const (

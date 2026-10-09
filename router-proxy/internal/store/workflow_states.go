@@ -137,8 +137,12 @@ var ValidWorkflowTools = map[string]bool{
 // If allowedTools is non-empty, only tools in allowedTools are permitted,
 // treating "context_reset" and "reset" as interchangeable aliases.
 // mecha_workflow_transition and workflow_transition are implicitly allowed control tools.
+// mecha_tool_timeout and extend_tool_timeout are implicitly allowed control tools.
 func IsToolAllowedInWorkflowState(toolName string, allowedTools []string) bool {
 	if toolName == "mecha_workflow_transition" || toolName == "workflow_transition" {
+		return true
+	}
+	if toolName == "mecha_tool_timeout" || toolName == "extend_tool_timeout" {
 		return true
 	}
 	if len(allowedTools) == 0 {
