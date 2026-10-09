@@ -434,94 +434,89 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
           </div>
 
           {/* Tool Restrictions section */}
-          <div className="workflow-tools-section">
-            <div className="workflow-tools-header">
-              <span className="workflow-tools-title">
-                <i className="fa-solid fa-wrench" aria-hidden="true" /> Tool Restrictions
+          <div className="workflow-tool-section">
+            <button
+              type="button"
+              className="goal-toggle workflow-tool-master-toggle"
+              aria-pressed={formAllToolsAllowed}
+              data-testid="allow-all-tools-toggle"
+              onClick={() => {
+                const nextAllowed = !formAllToolsAllowed;
+                setFormAllToolsAllowed(nextAllowed);
+                if (nextAllowed) {
+                  setFormAllowedTools([]);
+                } else if (formAllowedTools.length === 0) {
+                  setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id));
+                }
+              }}
+            >
+              <div className="workflow-master-toggle-text">
+                <span className="goal-toggle-label">Allow all tools (unrestricted)</span>
+                <span className="workflow-toggle-subtext">Workers in this state have access to all available tools</span>
+              </div>
+              <span className="goal-toggle-track" aria-hidden="true">
+                <span className="goal-toggle-thumb">
+                  <span className="goal-toggle-state">{formAllToolsAllowed ? "ON" : "OFF"}</span>
+                </span>
               </span>
-            </div>
-            <div className="form-check" style={{ marginBottom: "0.5rem" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
-                <input
-                  type="checkbox"
-                  checked={formAllToolsAllowed}
-                  onChange={(e) => {
-                    const allowAll = e.target.checked;
-                    setFormAllToolsAllowed(allowAll);
-                    if (allowAll) {
-                      setFormAllowedTools([]);
-                    } else if (formAllowedTools.length === 0) {
-                      setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id));
-                    }
-                  }}
-                  data-testid="allow-all-tools-checkbox"
-                />
-                <strong>Allow all tools (unrestricted)</strong>
-              </label>
-            </div>
+            </button>
+
             {!formAllToolsAllowed ? (
-              <div className="workflow-tools-picker" style={{ marginTop: "0.5rem" }}>
-                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id))}
-                  >
-                    Select All
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setFormAllowedTools([])}
-                  >
-                    Deselect All
-                  </button>
+              <div className="workflow-tool-picker">
+                <div className="workflow-tool-picker-toolbar">
+                  <span className="workflow-tool-picker-title">
+                    Allowed Tools ({formAllowedTools.length} of {KNOWN_WORKFLOW_TOOLS.length})
+                  </span>
+                  <div className="workflow-tool-picker-actions">
+                    <button
+                      type="button"
+                      className="secondary workflow-tool-action-btn"
+                      onClick={() => setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id))}
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary workflow-tool-action-btn"
+                      onClick={() => setFormAllowedTools([])}
+                    >
+                      Deselect All
+                    </button>
+                  </div>
                 </div>
-                <div
-                  className="workflow-tools-grid"
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                    gap: "0.5rem",
-                    maxHeight: "220px",
-                    overflowY: "auto",
-                    padding: "0.5rem",
-                    border: "1px solid var(--border-color, #333)",
-                    borderRadius: "4px",
-                  }}
-                >
+
+                <div className="workflow-tool-grid">
                   {KNOWN_WORKFLOW_TOOLS.map((tool) => {
-                    const isChecked = formAllowedTools.includes(tool.id);
+                    const isSelected = formAllowedTools.includes(tool.id);
                     return (
-                      <label
+                      <button
+                        type="button"
                         key={tool.id}
-                        style={{
-                          display: "flex",
-                          alignItems: "flex-start",
-                          gap: "0.5rem",
-                          cursor: "pointer",
-                          fontSize: "0.85rem",
+                        className={`workflow-tool-tile ${isSelected ? "selected" : ""}`}
+                        aria-pressed={isSelected}
+                        data-testid={`tool-toggle-${tool.id}`}
+                        onClick={() => {
+                          if (isSelected) {
+                            setFormAllowedTools((prev) => prev.filter((id) => id !== tool.id));
+                          } else {
+                            setFormAllowedTools((prev) => [...prev, tool.id]);
+                          }
                         }}
                       >
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setFormAllowedTools((prev) => [...prev, tool.id]);
-                            } else {
-                              setFormAllowedTools((prev) => prev.filter((id) => id !== tool.id));
-                            }
-                          }}
-                          data-testid={`tool-checkbox-${tool.id}`}
-                        />
-                        <div>
-                          <code>{tool.name}</code>
-                          <div className="text-muted" style={{ fontSize: "0.75rem" }}>
-                            {tool.description}
-                          </div>
+                        <div className="workflow-tool-tile-header">
+                          <code className="workflow-tool-tile-name">{tool.name}</code>
+                          <span className={`workflow-tool-tile-pill ${isSelected ? "active" : ""}`}>
+                            {isSelected ? (
+                              <>
+                                <i className="fa-solid fa-check" aria-hidden="true" /> ALLOWED
+                              </>
+                            ) : (
+                              "OFF"
+                            )}
+                          </span>
                         </div>
-                      </label>
+                        <p className="workflow-tool-tile-desc">{tool.description}</p>
+                      </button>
                     );
                   })}
                 </div>

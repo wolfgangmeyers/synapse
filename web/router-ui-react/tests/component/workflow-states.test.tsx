@@ -175,19 +175,21 @@ describe("WorkflowStatesPage", () => {
     await user.type(nameInput, "Restricted Tools State");
 
     // Tool restrictions: toggle off "Allow all tools"
-    const allowAllCheckbox = screen.getByTestId("allow-all-tools-checkbox");
-    expect(allowAllCheckbox).toBeDefined();
-    await user.click(allowAllCheckbox);
+    const allowAllToggle = screen.getByTestId("allow-all-tools-toggle");
+    expect(allowAllToggle).toBeDefined();
+    expect(allowAllToggle.getAttribute("aria-pressed")).toBe("true");
+    await user.click(allowAllToggle);
+    expect(allowAllToggle.getAttribute("aria-pressed")).toBe("false");
 
     // Click Deselect All button
     const deselectBtn = screen.getByRole("button", { name: /Deselect All/i });
     await user.click(deselectBtn);
 
-    // Select read and write checkboxes
-    const readCheckbox = screen.getByTestId("tool-checkbox-read");
-    const writeCheckbox = screen.getByTestId("tool-checkbox-write");
-    await user.click(readCheckbox);
-    await user.click(writeCheckbox);
+    // Select read and write tool tiles
+    const readTile = screen.getByTestId("tool-toggle-read");
+    const writeTile = screen.getByTestId("tool-toggle-write");
+    await user.click(readTile);
+    await user.click(writeTile);
 
     // Submit form
     const submitBtn = screen.getByRole("button", { name: /Create State/i });
