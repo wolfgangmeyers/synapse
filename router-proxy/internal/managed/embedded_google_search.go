@@ -290,7 +290,7 @@ func (m *Manager) executeAntigravityGrounding(ctx context.Context, token, projec
 
 	envelope := map[string]any{
 		"project":     projectID,
-		"model":       "gemini-2.5-flash",
+		"model":       "gemini-3.8-flash-low",
 		"request":     innerReq,
 		"requestType": "agent",
 		"userAgent":   "antigravity",
