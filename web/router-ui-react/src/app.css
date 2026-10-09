@@ -2433,4 +2433,97 @@ p:empty { display: none; }
   width: min(440px, 90vw);
 }
 
+/* Workflow Exit & Transitions */
+.workflow-exit-section {
+  margin-top: 6px;
+}
+
+.workflow-transitions-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.workflow-transitions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.workflow-transitions-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-transitions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.workflow-transition-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.workflow-transition-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.workflow-transition-fields select {
+  flex: 0 0 180px;
+}
+
+.workflow-transition-fields input {
+  flex: 1;
+}
+
+.workflow-transitions-summary {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: var(--surface-raised);
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+
+.workflow-transitions-summary-title {
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-transitions-items {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text);
+}
+
+.workflow-transitions-items li {
+  margin-bottom: 4px;
+}
+
+.workflow-transitions-items .target-state-desc {
+  color: var(--muted);
+}
+
+
 

@@ -359,3 +359,121 @@ func TestWorkflowStateAllowedTools(t *testing.T) {
 	require.ErrorAs(t, err, &valErr)
 	require.Equal(t, "allowed_tools", valErr.Field)
 }
+
+func TestWorkflowStateTransitionsAndExit(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	// 1. Create target state A
+	stateA, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name:        "State A",
+		Description: "Target state A",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stateA)
+	require.Equal(t, []WorkflowTransitionConfig{}, stateA.Transitions)
+	require.True(t, stateA.AllowExit) // default allow_exit is true
+
+	// 2. Create state B with transition to State A and allow_exit = false
+	allowExitFalse := false
+	stateB, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name:        "State B",
+		Description: "State B with transition",
+		Transitions: []WorkflowTransitionConfig{
+			{
+				TargetStateID: stateA.ID,
+				Description:   "Transition from B to A",
+			},
+		},
+		AllowExit: &allowExitFalse,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stateB)
+	require.False(t, stateB.AllowExit)
+	require.Len(t, stateB.Transitions, 1)
+	require.Equal(t, stateA.ID, stateB.Transitions[0].TargetStateID)
+	require.Equal(t, "Transition from B to A", stateB.Transitions[0].Description)
+
+	// Fetch State B from store and verify
+	fetchedB, err := s.GetWorkflowState(ctx, stateB.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fetchedB)
+	require.False(t, fetchedB.AllowExit)
+	require.Len(t, fetchedB.Transitions, 1)
+	require.Equal(t, stateA.ID, fetchedB.Transitions[0].TargetStateID)
+
+	// 3. Validation: Self-transition rejected
+	_, err = s.UpdateWorkflowState(ctx, stateA.ID, WorkflowStateRequest{
+		Name:        "State A",
+		Description: "Self-transition attempt",
+		Transitions: []WorkflowTransitionConfig{
+			{
+				TargetStateID: stateA.ID,
+				Description:   "Self loop",
+			},
+		},
+	})
+	require.Error(t, err)
+	var valErr *WorkflowStateValidationError
+	require.ErrorAs(t, err, &valErr)
+
+	// Validation: Target state does not exist rejected
+	nonExistentUUID := "12345678-1234-4123-8123-123456789abc"
+	_, err = s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name: "State C",
+		Transitions: []WorkflowTransitionConfig{
+			{
+				TargetStateID: nonExistentUUID,
+				Description:   "Points to void",
+			},
+		},
+	})
+	require.Error(t, err)
+	require.ErrorAs(t, err, &valErr)
+
+	// Validation: Duplicate target rejected
+	_, err = s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name: "State D",
+		Transitions: []WorkflowTransitionConfig{
+			{
+				TargetStateID: stateA.ID,
+				Description:   "First link",
+			},
+			{
+				TargetStateID: stateA.ID,
+				Description:   "Duplicate link",
+			},
+		},
+	})
+	require.Error(t, err)
+	require.ErrorAs(t, err, &valErr)
+
+	// 4. In-use deletion protection: Attempting to delete stateA while stateB references it returns WorkflowStateInUseError
+	_, err = s.DeleteWorkflowState(ctx, stateA.ID)
+	require.Error(t, err)
+	var inUseErr *WorkflowStateInUseError
+	require.ErrorAs(t, err, &inUseErr)
+	require.Equal(t, stateA.ID, inUseErr.ID)
+	require.Equal(t, "State B", inUseErr.ReferrerState)
+
+	// Verify stateA still exists
+	stillA, err := s.GetWorkflowState(ctx, stateA.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stillA)
+
+	// 5. Update stateB to remove transitions, then delete stateA successfully
+	_, err = s.UpdateWorkflowState(ctx, stateB.ID, WorkflowStateRequest{
+		Name:        "State B",
+		Transitions: []WorkflowTransitionConfig{},
+	})
+	require.NoError(t, err)
+
+	deleted, err := s.DeleteWorkflowState(ctx, stateA.ID)
+	require.NoError(t, err)
+	require.True(t, deleted)
+
+	vanishedA, err := s.GetWorkflowState(ctx, stateA.ID)
+	require.NoError(t, err)
+	require.Nil(t, vanishedA)
+}
+

@@ -199,4 +199,80 @@ func TestWorkflowStatesHTTPAllowedTools(t *testing.T) {
 	errUpdateObj, ok := badUpdateRes["error"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "invalid_workflow_state", errUpdateObj["code"])
+
+	// 6. Test transitions and allow_exit via HTTP endpoints
+	// Create target state
+	createTargetPayload := map[string]any{
+		"name": "Target State HTTP",
+	}
+	createTargetBody, _ := json.Marshal(createTargetPayload)
+	res, err = client.Post(server.URL+"/v1/workflow-states", "application/json", bytes.NewReader(createTargetBody))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, res.StatusCode)
+	var targetCreatedRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&targetCreatedRes))
+	res.Body.Close()
+	targetStateObj := targetCreatedRes["workflow_state"].(map[string]any)
+	targetID := targetStateObj["id"].(string)
+
+	// Create source state with transition to target and allow_exit=false
+	createSourcePayload := map[string]any{
+		"name":       "Source State HTTP",
+		"allow_exit": false,
+		"transitions": []map[string]any{
+			{
+				"target_state_id": targetID,
+				"description":     "Advance to target",
+			},
+		},
+	}
+	createSourceBody, _ := json.Marshal(createSourcePayload)
+	res, err = client.Post(server.URL+"/v1/workflow-states", "application/json", bytes.NewReader(createSourceBody))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, res.StatusCode)
+	var sourceCreatedRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&sourceCreatedRes))
+	res.Body.Close()
+	sourceStateObj := sourceCreatedRes["workflow_state"].(map[string]any)
+	sourceID := sourceStateObj["id"].(string)
+	require.Equal(t, false, sourceStateObj["allow_exit"])
+	transitionsSlice := sourceStateObj["transitions"].([]any)
+	require.Len(t, transitionsSlice, 1)
+
+	// Attempt to delete targetState -> HTTP 409 Conflict (workflow_state_in_use)
+	delReq, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/workflow-states/"+targetID, nil)
+	require.NoError(t, err)
+	res, err = client.Do(delReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, res.StatusCode)
+	var delErrRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&delErrRes))
+	res.Body.Close()
+	delErrObj, ok := delErrRes["error"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "workflow_state_in_use", delErrObj["code"])
+
+	// Update sourceState to remove transitions
+	clearTransitionsPayload := map[string]any{
+		"name":        "Source State HTTP",
+		"transitions": []map[string]any{},
+		"allow_exit":  true,
+	}
+	clearBody, _ := json.Marshal(clearTransitionsPayload)
+	putReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/workflow-states/"+sourceID, bytes.NewReader(clearBody))
+	require.NoError(t, err)
+	putReq.Header.Set("Content-Type", "application/json")
+	res, err = client.Do(putReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	// Delete targetState now succeeds
+	delReq, err = http.NewRequest(http.MethodDelete, server.URL+"/v1/workflow-states/"+targetID, nil)
+	require.NoError(t, err)
+	res, err = client.Do(delReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, res.StatusCode)
+	res.Body.Close()
 }
+

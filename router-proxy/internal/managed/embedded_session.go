@@ -1224,6 +1224,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "reset"))
 		tools = append(tools, m.embeddedScratchpadTool(owner))
+		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "mecha_workflow_transition"))
+		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "workflow_transition"))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
@@ -1434,7 +1436,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if model.MaxTokens > 0 && model.MaxTokens < maxTokens {
 		maxTokens = model.MaxTokens
 	}
-	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: resolveEmbeddedWorkerSystemPrompt(role, binding.AgentID, saved.Cwd), OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
+	workerPrompt := resolveEmbeddedWorkerSystemPrompt(role, binding.AgentID, saved.Cwd)
+	if activeWorkflowState != nil {
+		if guidance := formatWorkflowStateGuidance(ctx, m.store, activeWorkflowState); guidance != "" {
+			workerPrompt = workerPrompt + "\n\n" + guidance
+		}
+	}
+	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
 		ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
 			if call.ToolCall.Name != "bash" {
 				return nil, nil

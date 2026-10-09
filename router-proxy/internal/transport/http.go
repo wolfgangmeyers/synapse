@@ -1308,6 +1308,8 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		value = &httpError{409, "workflow_state_name_conflict", 0}
 	case *store.WorkflowStateNotFoundError:
 		value = &httpError{404, "not_found", 0}
+	case *store.WorkflowStateInUseError:
+		value = &httpError{409, "workflow_state_in_use", 0}
 	default:
 		if coded, ok := err.(interface{ Code() string }); ok {
 			value = &httpError{httpCode(coded.Code()), coded.Code(), 0}

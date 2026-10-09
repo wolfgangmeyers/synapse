@@ -1482,9 +1482,43 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 
-		// Inject entry text prompt if configured and agent is embedded/running
-		if strings.TrimSpace(wfState.EntryText) != "" && agent.Runtime == "embedded" && agent.LifecycleState == "running" {
-			promptMsg := "[Workflow Activated: " + wfState.Name + "]\n\n" + wfState.EntryText
+		// Inject guidance prompt if agent is embedded/running
+		if agent.Runtime == "embedded" && agent.LifecycleState == "running" {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("[Workflow Activated: %s]\n", wfState.Name))
+			if strings.TrimSpace(wfState.Description) != "" {
+				sb.WriteString(fmt.Sprintf("%s\n\n", strings.TrimSpace(wfState.Description)))
+			} else {
+				sb.WriteString("\n")
+			}
+			if strings.TrimSpace(wfState.EntryText) != "" {
+				sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", strings.TrimSpace(wfState.EntryText)))
+			}
+			sb.WriteString("### Allowed Transitions\n")
+			if len(wfState.Transitions) == 0 {
+				sb.WriteString("None. (No forward state transitions available from this state)\n\n")
+			} else {
+				for _, tr := range wfState.Transitions {
+					targetName := tr.TargetStateID
+					if target, err := r.store.GetWorkflowState(req.Context(), tr.TargetStateID); err == nil && target != nil {
+						targetName = target.Name
+					}
+					desc := strings.TrimSpace(tr.Description)
+					if desc != "" {
+						sb.WriteString(fmt.Sprintf("- %s: %s\n", targetName, desc))
+					} else {
+						sb.WriteString(fmt.Sprintf("- %s\n", targetName))
+					}
+				}
+				sb.WriteString("(Invoke `mecha_workflow_transition` with action=\"transition\" and target_state=\"<StateName>\" to transition)\n\n")
+			}
+			sb.WriteString("### Workflow Exit\n")
+			if wfState.AllowExit {
+				sb.WriteString("Allowed: invoke `mecha_workflow_transition` with action=\"exit\" when work in this workflow is finished.\n")
+			} else {
+				sb.WriteString("Not allowed from this state. You must transition to an allowed exit state to exit the workflow.\n")
+			}
+			promptMsg := strings.TrimSpace(sb.String())
 			promptReqID, err := r.nextID()
 			if err != nil {
 				promptReqID = requestID
@@ -1492,24 +1526,23 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			go func() {
 				_ = r.managed.AdmitPromptWithRequestID(context.Background(), agentID, promptMsg, promptReqID)
 			}()
-		} else if strings.TrimSpace(wfState.EntryText) == "" {
-			eventKey := fmt.Sprintf("workflow-state:%s:%s:%s", agentID, wfState.ID, requestID)
-			r.recordCompleteHistoryWithPresentation(
-				req.Context(),
-				agentID,
-				"managed_message",
-				"info",
-				"Workflow state activated",
-				eventKey,
-				&store.ManagedHistoryPresentation{
-					Kind:    "state",
-					Outcome: "success",
-					From:    "",
-					To:      wfState.Name,
-					Summary: "Workflow activated: " + wfState.Name,
-				},
-			)
 		}
+		eventKey := fmt.Sprintf("workflow-state:%s:%s:%s", agentID, wfState.ID, requestID)
+		r.recordCompleteHistoryWithPresentation(
+			req.Context(),
+			agentID,
+			"managed_message",
+			"info",
+			"Workflow state activated",
+			eventKey,
+			&store.ManagedHistoryPresentation{
+				Kind:    "state",
+				Outcome: "success",
+				From:    "",
+				To:      wfState.Name,
+				Summary: "Workflow activated: " + wfState.Name,
+			},
+		)
 
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 			"agent_id":                 agentID,

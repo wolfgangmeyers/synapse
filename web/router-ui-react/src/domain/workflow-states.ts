@@ -1,5 +1,10 @@
 export type WorkflowReminderType = "one_shot" | "recurring";
 
+export interface WorkflowTransitionConfig {
+  target_state_id: string;
+  description: string;
+}
+
 export interface WorkflowReminderConfig {
   id: string;
   type: WorkflowReminderType;
@@ -16,6 +21,8 @@ export interface WorkflowState {
   entry_text: string;
   reminders?: WorkflowReminderConfig[];
   allowed_tools?: string[];
+  transitions?: WorkflowTransitionConfig[];
+  allow_exit?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -26,6 +33,8 @@ export interface WorkflowStateInput {
   entry_text?: string;
   reminders?: WorkflowReminderConfig[];
   allowed_tools?: string[];
+  transitions?: WorkflowTransitionConfig[];
+  allow_exit?: boolean;
 }
 
 export interface WorkflowStateResponse {
@@ -53,6 +62,7 @@ export const KNOWN_WORKFLOW_TOOLS: KnownToolDefinition[] = [
   { id: "goal_snooze", name: "goal_snooze", category: "lifecycle", description: "Snooze goal evaluations" },
   { id: "mecha_context", name: "mecha_context", category: "lifecycle", description: "Manage context compaction" },
   { id: "mecha_reminder", name: "mecha_reminder", category: "lifecycle", description: "Schedule reminders" },
+  { id: "mecha_workflow_transition", name: "mecha_workflow_transition", category: "lifecycle", description: "Transition workflow state or exit workflow" },
   { id: "context_reset", name: "context_reset", category: "lifecycle", description: "Reset agent context" },
   { id: "scratchpad", name: "scratchpad", category: "memory", description: "Persistent scratchpad memory" },
   { id: "subagent", name: "subagent", category: "subagents", description: "Launch background subagents" },
