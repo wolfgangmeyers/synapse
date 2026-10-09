@@ -1472,6 +1472,47 @@ p:empty { display: none; }
 .managed-directory-field { display: grid; gap: 6px; }
 .managed-directory-field > label { color: var(--muted); font-size: 13px; font-weight: 700; }
 .directory-picker-input-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; align-items: center; }
+.directory-picker-input-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+.directory-picker-input-group input {
+  padding-right: 36px;
+}
+.directory-picker-toggle-button {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.directory-picker-toggle-button:hover,
+.directory-picker-toggle-button:focus-visible {
+  color: var(--text);
+  background: rgba(157, 168, 255, 0.16);
+  outline: none;
+}
+.managed-directory-picker .model-menu {
+  left: 0;
+  right: 0;
+  width: 100%;
+}
+.managed-directory-picker .model-options {
+  max-height: min(40vh, 190px);
+}
 .directory-browse-button { display: inline-flex; align-items: center; justify-content: center; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; }
 .directory-picker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .managed-directory-picker ul { display: grid; grid-template-columns: 1fr; gap: 6px; margin: 0; padding: 0; list-style: none; }
@@ -2204,6 +2245,188 @@ p:empty { display: none; }
 .workflow-dialog-actions {
   justify-content: flex-end;
   margin-top: 8px;
+}
+
+/* Workflow Tool Restrictions */
+.workflow-tool-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.workflow-tool-master-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.workflow-tool-master-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.workflow-tool-master-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.workflow-master-toggle-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 3px;
+  min-width: 0;
+}
+
+.workflow-tool-master-toggle .goal-toggle-label {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.workflow-toggle-subtext {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.workflow-tool-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(16, 20, 31, 0.6);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.workflow-tool-picker-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workflow-tool-picker-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.workflow-tool-picker-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.workflow-tool-action-btn {
+  min-height: 28px;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.workflow-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.workflow-tool-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+  min-height: 72px;
+  color: var(--text);
+  font-weight: 400;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.workflow-tool-tile:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(40, 48, 70, 0.9);
+}
+
+.workflow-tool-tile:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.workflow-tool-tile.selected {
+  border-color: rgba(120, 224, 205, 0.5);
+  background: rgba(120, 224, 205, 0.08);
+}
+
+.workflow-tool-tile.selected:hover {
+  border-color: rgba(120, 224, 205, 0.75);
+  background: rgba(120, 224, 205, 0.12);
+}
+
+.workflow-tool-tile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workflow-tool-tile-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--primary);
+  background: rgba(157, 168, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.workflow-tool-tile-pill {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(181, 188, 208, 0.12);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.workflow-tool-tile-pill.active {
+  background: rgba(120, 224, 205, 0.2);
+  color: var(--secondary);
+}
+
+.workflow-tool-tile-pill i {
+  font-size: 0.65rem;
+}
+
+.workflow-tool-tile-desc {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.35;
 }
 
 .delete-confirm-dialog {
