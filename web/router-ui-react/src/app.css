@@ -563,25 +563,51 @@ p:empty { display: none; }
   font-weight: 800;
 }
 .agent-filter { margin: 0 0 12px; }
-.workflow-header-button {
-  background: var(--surface);
-  border: 1px solid var(--border-color, #444);
-  color: var(--text-muted, #aaa);
-  border-radius: 6px;
-  padding: 4px 8px;
-  cursor: pointer;
+.workflow-header-control {
+  position: relative;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+
+.workflow-header-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  max-width: 24px;
+  max-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(181, 188, 208, 0.34);
+  border-radius: 999px;
+  background: rgba(181, 188, 208, 0.12);
+  color: var(--muted);
+  line-height: 1;
+  cursor: pointer;
+  box-sizing: border-box;
   transition: all 0.15s ease-in-out;
 }
-.workflow-header-button:hover {
-  background: var(--surface-hover, #2a2a2a);
-  color: var(--text, #fff);
-  border-color: var(--primary, #3b82f6);
+
+.workflow-header-button i {
+  font-size: 11px;
+  line-height: 1;
 }
+
+.workflow-header-button:not(:disabled):hover {
+  background: rgba(181, 188, 208, 0.22);
+  color: var(--text);
+}
+
 .workflow-header-button.has-workflow {
-  background: rgba(59, 130, 246, 0.15);
   border-color: rgba(59, 130, 246, 0.5);
+  background: rgba(59, 130, 246, 0.2);
   color: #60a5fa;
 }
 .workflow-dropdown-item:hover {
@@ -876,6 +902,8 @@ p:empty { display: none; }
 .peer-heading h2 .interrupt-worker-button,
 .peer-heading h2 .header-button-interrupt,
 .peer-heading h2 .scroll-lock-button,
+.peer-heading h2 .workflow-header-control,
+.peer-heading h2 .workflow-header-button,
 .peer-heading h2 .chat-only-button { flex: 0 0 24px; }
 .inline-tools-toggle-button {
   display: inline-flex;
@@ -2555,11 +2583,42 @@ p:empty { display: none; }
 }
 
 .workflow-transition-fields select {
-  flex: 0 0 180px;
+  flex: 0 0 220px;
+  min-width: 180px;
+  height: 38px;
+  padding: 0 32px 0 12px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  background-color: #10141f;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238c9ba5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  appearance: none;
+  -webkit-appearance: none;
+  color: var(--text, #e2e8f0);
+  font: inherit;
+  font-size: 0.9rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.workflow-transition-fields select:focus {
+  border-color: var(--primary, #9da8ff);
+  box-shadow: 0 0 0 3px rgba(157, 168, 255, 0.14);
+}
+
+.workflow-transition-fields select option {
+  background-color: #10141f;
+  color: var(--text, #e2e8f0);
 }
 
 .workflow-transition-fields input {
   flex: 1;
+  height: 38px;
+  border-radius: 10px;
+  padding: 0 12px;
+  box-sizing: border-box;
 }
 
 .workflow-transitions-summary {
