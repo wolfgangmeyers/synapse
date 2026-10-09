@@ -1524,7 +1524,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: "goal snooze requires embedded root or worker"}
 				}
-				if _, err := embeddedGoalSnoozeArguments(call.ToolCall.Arguments); err != nil {
+				if call.ToolCall.Arguments == nil {
+					call.ToolCall.Arguments = make(map[string]any)
+				}
+				limitMs := m.goalSnoozeLimitMS(callCtx, binding.AgentID)
+				if _, err := embeddedGoalSnoozeArguments(call.ToolCall.Arguments, limitMs); err != nil {
 					return &agent.PolicyDenial{Reason: err.Error()}
 				}
 			}

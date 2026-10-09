@@ -207,7 +207,13 @@ func validManagedGoalSettings(value any) bool {
 	}
 	integer := func(name string, minimum int64) bool {
 		current, found := settings[name].(int64)
-		return found && current >= minimum
+		if !found || current < minimum {
+			return false
+		}
+		if name == "snooze_duration_ms" && current > store.EmbeddedGoalSnoozeMaxDurationMS {
+			return false
+		}
+		return true
 	}
 	nullableInteger := func(name string) bool {
 		current, found := settings[name]
