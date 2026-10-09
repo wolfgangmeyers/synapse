@@ -25,9 +25,10 @@ const (
 )
 
 var (
-	googleTokenURL           = "https://oauth2.googleapis.com/token"
-	googleGenerateContentURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
-	googleAuthMu             sync.Mutex
+	googleTokenURL                  = "https://oauth2.googleapis.com/token"
+	googleGenerateContentURL        = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+	googleGenerativeLanguageURLBase = "https://generativelanguage.googleapis.com"
+	googleAuthMu                    sync.Mutex
 )
 
 type googleAuthJSON struct {
@@ -217,6 +218,46 @@ func (m *Manager) embeddedGoogleAuthWithRefresh(ctx context.Context, forceRefres
 	}
 
 	return access, pID, nil
+}
+
+// resolveGoogleAPIKey resolves the Google Gemini API key from environment variables
+// (GEMINI_API_KEY, GOOGLE_API_KEY) or auth.json (allAuth["google"]["key"]).
+func (m *Manager) resolveGoogleAPIKey(ctx context.Context) (string, error) {
+	if key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); key != "" {
+		return key, nil
+	}
+	if key := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")); key != "" {
+		return key, nil
+	}
+
+	userHome, _ := os.UserHomeDir()
+	paths := []string{
+		filepath.Join(m.config.PiAgentDir, "auth.json"),
+		filepath.Join(m.config.ManagedHome, "auth.json"),
+		filepath.Join(userHome, ".pi", "agent", "auth.json"),
+		filepath.Join(os.Getenv("HOME"), ".pi", "agent", "auth.json"),
+	}
+
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var allAuth map[string]any
+		if err := json.Unmarshal(data, &allAuth); err != nil {
+			continue
+		}
+		if gRaw, ok := allAuth["google"].(map[string]any); ok && gRaw != nil {
+			if key, ok := gRaw["key"].(string); ok && strings.TrimSpace(key) != "" {
+				return strings.TrimSpace(key), nil
+			}
+		}
+	}
+
+	return "", errors.New("no Google API key found in GEMINI_API_KEY, GOOGLE_API_KEY, or auth.json")
 }
 
 func antigravityWireModel(id string) string {
@@ -1026,10 +1067,34 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 	go func() {
 		defer stream.End()
 
-		token, projectID, err := m.embeddedGoogleAuth(requestCtx)
-		if err != nil {
-			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
-			return
+		var (
+			apiKey     string
+			token      string
+			projectID  string
+			targetURL  string
+			isGoogle   = requestModel.Provider == "google"
+			authHeader string
+		)
+
+		if isGoogle {
+			key, err := m.resolveGoogleAPIKey(requestCtx)
+			if err != nil {
+				stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
+				return
+			}
+			apiKey = key
+			modelName := strings.TrimPrefix(requestModel.ID, "models/")
+			targetURL = fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", googleGenerativeLanguageURLBase, modelName, apiKey)
+		} else {
+			tok, projID, err := m.embeddedGoogleAuth(requestCtx)
+			if err != nil {
+				stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
+				return
+			}
+			token = tok
+			projectID = projID
+			authHeader = "Bearer " + token
+			targetURL = googleGenerateContentURL
 		}
 
 		wireModel := antigravityWireModel(requestModel.ID)
@@ -1090,27 +1155,38 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			reqBody["tools"] = tools
 		}
 
-		envelope := map[string]any{
-			"project": projectID,
-			"model":   wireModel,
-			"request": reqBody,
-		}
+		var payloadBytes []byte
+		var err error
+		var envelope map[string]any
 
-		payloadBytes, err := json.Marshal(envelope)
+		if isGoogle {
+			payloadBytes, err = json.Marshal(reqBody)
+		} else {
+			envelope = map[string]any{
+				"project": projectID,
+				"model":   wireModel,
+				"request": reqBody,
+			}
+			payloadBytes, err = json.Marshal(envelope)
+		}
 		if err != nil {
 			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
 			return
 		}
 
-		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, googleGenerateContentURL, bytes.NewReader(payloadBytes))
+		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, targetURL, bytes.NewReader(payloadBytes))
 		if err != nil {
 			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
 			return
 		}
 
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+		if authHeader != "" {
+			httpReq.Header.Set("Authorization", authHeader)
+		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("User-Agent", "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
+		if !isGoogle {
+			httpReq.Header.Set("User-Agent", "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
+		}
 
 		client := &http.Client{Timeout: 120 * time.Second}
 		resp, err := client.Do(httpReq)
@@ -1119,7 +1195,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			return
 		}
 
-		if resp.StatusCode == http.StatusUnauthorized {
+		if !isGoogle && resp.StatusCode == http.StatusUnauthorized {
 			_ = resp.Body.Close()
 			newToken, newProjectID, refreshErr := m.embeddedGoogleAuthWithRefresh(requestCtx, true)
 			if refreshErr == nil {
@@ -1146,7 +1222,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 					return
 				}
 			}
-		} else if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+		} else if !isGoogle && (resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests) {
 			_ = resp.Body.Close()
 			time.Sleep(1500 * time.Millisecond)
 			httpReq, err = http.NewRequestWithContext(requestCtx, http.MethodPost, googleGenerateContentURL, bytes.NewReader(payloadBytes))
@@ -1166,7 +1242,11 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		if resp.StatusCode != http.StatusOK {
 			var errBody bytes.Buffer
 			_, _ = errBody.ReadFrom(resp.Body)
-			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: fmt.Sprintf("Antigravity API error %d: %s", resp.StatusCode, errBody.String())}})
+			providerPrefix := "Antigravity"
+			if isGoogle {
+				providerPrefix = "Google Gemini"
+			}
+			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: fmt.Sprintf("%s API error %d: %s", providerPrefix, resp.StatusCode, errBody.String())}})
 			return
 		}
 
@@ -1185,6 +1265,21 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 		currentBlockIndex := -1
 		var accumulatedToolCalls []ai.ToolCall
 
+		type candidateType struct {
+			Content struct {
+				Role  string `json:"role"`
+				Parts []struct {
+					Text         string `json:"text"`
+					Thought      bool   `json:"thought"`
+					FunctionCall *struct {
+						Name string         `json:"name"`
+						Args map[string]any `json:"args"`
+					} `json:"functionCall"`
+				} `json:"parts"`
+			} `json:"content"`
+			FinishReason string `json:"finishReason"`
+		}
+
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -1196,21 +1291,9 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			}
 
 			var sse struct {
-				Response struct {
-					Candidates []struct {
-						Content struct {
-							Role  string `json:"role"`
-							Parts []struct {
-								Text         string `json:"text"`
-								Thought      bool   `json:"thought"`
-								FunctionCall *struct {
-									Name string         `json:"name"`
-									Args map[string]any `json:"args"`
-								} `json:"functionCall"`
-							} `json:"parts"`
-						} `json:"content"`
-						FinishReason string `json:"finishReason"`
-					} `json:"candidates"`
+				Candidates []candidateType `json:"candidates"`
+				Response   struct {
+					Candidates []candidateType `json:"candidates"`
 				} `json:"response"`
 				Error *struct {
 					Code    int    `json:"code"`
@@ -1227,7 +1310,12 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 				return
 			}
 
-			for _, candidate := range sse.Response.Candidates {
+			candidates := sse.Candidates
+			if len(candidates) == 0 && len(sse.Response.Candidates) > 0 {
+				candidates = sse.Response.Candidates
+			}
+
+			for _, candidate := range candidates {
 				for _, part := range candidate.Content.Parts {
 					if part.Text != "" {
 						wantKind := "text"

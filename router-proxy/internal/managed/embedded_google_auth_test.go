@@ -1654,4 +1654,154 @@ func TestGoogleAuth_WorkflowsLiveEntriesPruning(t *testing.T) {
 	}
 }
 
+func TestGoogleAuth_StreamGoogleProviderAPIKey(t *testing.T) {
+	var capturedPath string
+	var capturedQuery string
+	var capturedBody map[string]any
+
+	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedQuery = r.URL.RawQuery
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		capturedBody = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+
+		sse1 := `data: {"candidates":[{"content":{"parts":[{"text":"Thinking chunk","thought":true}],"role":"model"}}]}
+
+`
+		_, _ = w.Write([]byte(sse1))
+		flusher.Flush()
+
+		sse2 := `data: {"candidates":[{"content":{"parts":[{"text":"Final answer"}],"role":"model"}}]}
+
+`
+		_, _ = w.Write([]byte(sse2))
+		flusher.Flush()
+	}))
+	defer mockAPI.Close()
+
+	origBase := googleGenerativeLanguageURLBase
+	googleGenerativeLanguageURLBase = mockAPI.URL
+	defer func() { googleGenerativeLanguageURLBase = origBase }()
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	initialAuth := map[string]any{
+		"google": map[string]any{
+			"key": "mock-gemini-key",
+		},
+	}
+	data, _ := json.Marshal(initialAuth)
+	require.NoError(t, os.WriteFile(authPath, data, 0600))
+
+	m := &Manager{config: Config{PiAgentDir: tempDir}}
+
+	key, err := m.resolveGoogleAPIKey(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "mock-gemini-key", key)
+
+	transcript := ai.TranscriptContext{
+		Messages: []ai.Message{
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Hello Gemini"},
+				},
+			},
+		},
+	}
+
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "models/gemini-2.5-flash", Provider: "google"}, transcript, nil)
+
+	var thinkingEvents []ai.AssistantMessageEvent
+	var textEvents []ai.AssistantMessageEvent
+	var finalDone *ai.AssistantMessage
+
+	for event := range stream.Events() {
+		t.Logf("Event: type=%v, err=%+v", event.Type, event.Error)
+		switch event.Type {
+		case ai.EventThinkingStart, ai.EventThinkingDelta, ai.EventThinkingEnd:
+			thinkingEvents = append(thinkingEvents, event)
+		case ai.EventTextStart, ai.EventTextDelta, ai.EventTextEnd:
+			textEvents = append(textEvents, event)
+		case ai.EventDone:
+			finalDone = event.Message
+		}
+	}
+
+	require.Equal(t, "/v1beta/models/gemini-2.5-flash:streamGenerateContent", capturedPath)
+	require.Contains(t, capturedQuery, "alt=sse")
+	require.Contains(t, capturedQuery, "key=mock-gemini-key")
+	require.NotNil(t, capturedBody)
+	// Direct request body: contents must be at root of body (no Antigravity project/envelope)
+	require.NotContains(t, capturedBody, "project")
+	require.Contains(t, capturedBody, "contents")
+
+	require.NotEmpty(t, thinkingEvents)
+	require.NotEmpty(t, textEvents)
+	require.NotNil(t, finalDone)
+	require.Len(t, finalDone.Content, 2)
+	th, isTh := finalDone.Content[0].(ai.ThinkingContent)
+	require.True(t, isTh)
+	require.Equal(t, "Thinking chunk", th.Thinking)
+	txt, isTxt := finalDone.Content[1].(ai.TextContent)
+	require.True(t, isTxt)
+	require.Equal(t, "Final answer", txt.Text)
+
+	// Test missing key error handling
+	emptyDir := t.TempDir()
+	emptyMgr := &Manager{config: Config{PiAgentDir: emptyDir, ManagedHome: emptyDir}}
+	t.Setenv("HOME", emptyDir)
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	errStream := emptyMgr.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-2.5-flash", Provider: "google"}, ai.TranscriptContext{}, nil)
+	var errEvents []ai.AssistantMessageEvent
+	for ev := range errStream.Events() {
+		if ev.Type == ai.EventError {
+			errEvents = append(errEvents, ev)
+		}
+	}
+	require.NotEmpty(t, errEvents)
+	require.Contains(t, errEvents[0].Error.ErrorMessage, "no Google API key found")
+}
+
+func TestGoogleAuth_ResolveGoogleAPIKey_Precedence(t *testing.T) {
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	authData := map[string]any{
+		"google": map[string]any{
+			"key": "file-key",
+		},
+	}
+	raw, _ := json.Marshal(authData)
+	require.NoError(t, os.WriteFile(authPath, raw, 0600))
+
+	m := &Manager{config: Config{PiAgentDir: tempDir}}
+
+	// Env var GEMINI_API_KEY takes precedence
+	t.Setenv("GEMINI_API_KEY", "env-gemini-key")
+	t.Setenv("GOOGLE_API_KEY", "env-google-key")
+	k, err := m.resolveGoogleAPIKey(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "env-gemini-key", k)
+
+	// Next GOOGLE_API_KEY takes precedence over file
+	t.Setenv("GEMINI_API_KEY", "")
+	k, err = m.resolveGoogleAPIKey(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "env-google-key", k)
+
+	// Finally auth.json
+	t.Setenv("GOOGLE_API_KEY", "")
+	k, err = m.resolveGoogleAPIKey(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "file-key", k)
+}
+
+
 
