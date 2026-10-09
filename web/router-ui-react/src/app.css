@@ -872,10 +872,51 @@ p:empty { display: none; }
 .peer-heading h2 .inline-tool-settings-button,
 .peer-heading h2 .logs-header-button,
 .peer-heading h2 .managed-agent-header-button,
+.peer-heading h2 .inline-tools-toggle-button,
 .peer-heading h2 .interrupt-worker-button,
 .peer-heading h2 .header-button-interrupt,
 .peer-heading h2 .scroll-lock-button,
 .peer-heading h2 .chat-only-button { flex: 0 0 24px; }
+.inline-tools-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  max-width: 24px;
+  max-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  box-sizing: border-box;
+  line-height: 0;
+  transition: all 0.15s ease;
+}
+.inline-tools-toggle-button i {
+  font-size: 11px;
+}
+.inline-tools-toggle-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #eee);
+}
+.inline-tools-toggle-button.allowed {
+  color: var(--color-success, #4caf50);
+  border-color: rgba(76, 175, 80, 0.4);
+  background: rgba(76, 175, 80, 0.1);
+}
+.inline-tools-toggle-button.allowed:hover:not(:disabled) {
+  background: rgba(76, 175, 80, 0.2);
+}
+.inline-tools-toggle-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .interrupt-worker-button,
 .header-button-interrupt {
   display: inline-flex;

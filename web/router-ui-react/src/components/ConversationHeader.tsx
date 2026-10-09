@@ -84,6 +84,21 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
   const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowState[]>([]);
   const [showWorkflowDropdown, setShowWorkflowDropdown] = useState(false);
   const [workflowUpdating, setWorkflowUpdating] = useState(false);
+  const [allowInlineToolsUpdating, setAllowInlineToolsUpdating] = useState(false);
+
+  const allowInlineTools = Boolean(agent?.allow_inline_tools ?? agent?.managed_agent?.allow_inline_tools);
+
+  const handleToggleAllowInlineTools = async () => {
+    if (!client || !agent || allowInlineToolsUpdating) return;
+    setAllowInlineToolsUpdating(true);
+    try {
+      await client.setManagedAgentAllowInlineTools(agent.agent_id, !allowInlineTools);
+    } catch (e) {
+      console.error("Failed to toggle allow inline tools", e);
+    } finally {
+      setAllowInlineToolsUpdating(false);
+    }
+  };
 
   useEffect(() => {
     if (!client || typeof client.workflowStates !== "function" || !agent || agent.source !== "router-managed") return;
@@ -162,6 +177,17 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
       </div>
     ) : null}
   </div>
+) : null}{agent?.source === "router-managed" && client ? (
+  <button
+    type="button"
+    className={`inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
+    onClick={() => void handleToggleAllowInlineTools()}
+    aria-label={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
+    title={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
+    disabled={allowInlineToolsUpdating}
+  >
+    <i className="fa-solid fa-terminal" aria-hidden="true" />
+  </button>
 ) : null}{agent && onLogs ? <button type="button" className="logs-header-button" onClick={onLogs} aria-label="Logs" title={`View logs for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-file-lines" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
   <button type="button" className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`} onClick={onReminders} aria-label="Add reminder" title="Add reminder">
     <i className="fa-solid fa-clock" aria-hidden="true" />

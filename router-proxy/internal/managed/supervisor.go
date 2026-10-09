@@ -165,6 +165,9 @@ type managedAgentLane struct {
 	extendedTimeoutUntil     time.Time
 	defaultTimeoutOverride   time.Duration
 	extendedTimeoutOverride  time.Duration
+	inlineAllowances         map[string]int
+	inlinePoolRemainingMs    int64
+	inlinePoolUpdatedAt      time.Time
 }
 
 func (l *managedAgentLane) toolTimeout() time.Duration {

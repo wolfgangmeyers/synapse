@@ -485,7 +485,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" {
-			if result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" {
+			if result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
 				body, err := json.Marshal(result)
 				if err == nil {
 					_ = p.db.ObserveEmbeddedEffect(ctx, p.binding, result.ToolCallID, body)
@@ -1250,6 +1250,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "workflow_transition"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "extend_tool_timeout"))
+		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
@@ -1524,6 +1525,28 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				return &agent.BeforeToolCallResult{
 					Block:  true,
 					Reason: err.Error(),
+				}
+			}
+			toolName := call.ToolCall.Name
+			normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
+			if isInlineTool {
+				targetAgent, err := m.store.ManagedAgent(callCtx, binding.AgentID)
+				// Native subagents are exempt from the inline tool guard
+				if err == nil && targetAgent != nil && (targetAgent.ParentAgentID != "" || strings.HasPrefix(binding.AgentID, "subagent-")) {
+					return nil
+				}
+				// If allow_inline_tools is true, inline tools execute freely without credits
+				if err == nil && targetAgent != nil && targetAgent.AllowInlineTools {
+					return nil
+				}
+				// Otherwise, check allowance credits
+				lane := m.laneFor(binding.AgentID)
+				if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
+					return nil
+				}
+				return &agent.BeforeToolCallResult{
+					Block:  true,
+					Reason: InlineToolBlockReason,
 				}
 			}
 			return nil

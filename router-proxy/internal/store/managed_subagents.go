@@ -155,7 +155,15 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if kind == "" {
 			kind = "general-purpose"
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_subagents(agent_id,parent_agent_id,parent_session_id,parent_epoch,parent_generation,description,subagent_type,status,max_turns,created_at,updated_at,resume_prompt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, child.AgentID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, child.Description, kind, child.Status, child.MaxTurns, now, now, child.ResumePrompt)
+		hasResumePrompt, colErr := managedSubagentColumnTx(ctx, s.db, "resume_prompt")
+		if colErr != nil {
+			return colErr
+		}
+		if hasResumePrompt {
+			_, err = s.db.ExecContext(ctx, `INSERT INTO managed_subagents(agent_id,parent_agent_id,parent_session_id,parent_epoch,parent_generation,description,subagent_type,status,max_turns,created_at,updated_at,resume_prompt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, child.AgentID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, child.Description, kind, child.Status, child.MaxTurns, now, now, child.ResumePrompt)
+		} else {
+			_, err = s.db.ExecContext(ctx, `INSERT INTO managed_subagents(agent_id,parent_agent_id,parent_session_id,parent_epoch,parent_generation,description,subagent_type,status,max_turns,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, child.AgentID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, child.Description, kind, child.Status, child.MaxTurns, now, now)
+		}
 		if err != nil {
 			return err
 		}
@@ -371,6 +379,13 @@ func (s *Store) ResumeManagedSubagent(ctx context.Context, parent EmbeddedBindin
 // whose parents are active/running are preserved for restart resumption.
 func (s *Store) reconcileManagedSubagents(ctx context.Context) error {
 	return s.runImmediate(ctx, func() error {
+		var active int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_subagents WHERE status IN ('running','queued') AND parent_agent_id IN (SELECT agent_id FROM managed_agents WHERE desired_state='terminated') LIMIT 1`).Scan(&active); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='interrupted',error='parent agent terminated',updated_at=?,terminal_at=? WHERE status IN ('running','queued') AND parent_agent_id IN (SELECT agent_id FROM managed_agents WHERE desired_state='terminated')`, now, now)
 		if err != nil {
@@ -542,4 +557,25 @@ func (s *Store) TimeoutRunningSubagents(ctx context.Context, timeout time.Durati
 		return nil
 	})
 	return count, err
+}
+
+func managedSubagentColumnTx(ctx context.Context, db *sql.DB, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(managed_subagents)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, primary int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primary); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }

@@ -142,6 +142,8 @@ type ManagedAgentRecord struct {
 	WorktreeBasePath string
 	// WorktreeBranch is the branch name created for the worktree.
 	WorktreeBranch string
+	// AllowInlineTools indicates whether inline tools (bash, edit, write) are allowed without allowance credits.
+	AllowInlineTools bool
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -911,6 +913,14 @@ func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAge
 	if hasWorktree {
 		columns += `,worktree,worktree_base_path,worktree_branch`
 		values = append(values, boolInt(agent.Worktree), nullIfEmpty(agent.WorktreeBasePath), nullIfEmpty(agent.WorktreeBranch))
+	}
+	hasAllowInlineTools, err := managedAgentColumnTx(ctx, s.db, "allow_inline_tools")
+	if err != nil {
+		return err
+	}
+	if hasAllowInlineTools {
+		columns += `,allow_inline_tools`
+		values = append(values, boolInt(agent.AllowInlineTools))
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_agents (`+columns+`) VALUES (`+placeholders+`)`, values...)
@@ -4510,6 +4520,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedWorktreeTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedAllowInlineToolsTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4556,6 +4569,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedWorktreeTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedAllowInlineToolsTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -4629,6 +4645,45 @@ func loadManagedWorktreeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentR
 	agent.Worktree = worktree.Int64 != 0
 	agent.WorktreeBasePath = basePath.String
 	agent.WorktreeBranch = branch.String
+	return nil
+}
+
+func loadManagedAllowInlineToolsTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	hasCol, err := managedAgentColumnTx(ctx, db, "allow_inline_tools")
+	if err != nil || !hasCol || agent == nil {
+		return err
+	}
+	var allow sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT allow_inline_tools FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&allow); err != nil {
+		return err
+	}
+	agent.AllowInlineTools = allow.Int64 != 0
+	return nil
+}
+
+func (s *Store) SetManagedAgentAllowInlineTools(ctx context.Context, agentID string, allowed bool) error {
+	hasCol, err := managedAgentColumnTx(ctx, s.db, "allow_inline_tools")
+	if err != nil {
+		return err
+	}
+	if !hasCol {
+		return errors.New("allow_inline_tools column does not exist")
+	}
+	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET allow_inline_tools=?, updated_at=? WHERE agent_id=?`, boolInt(allowed), now, agentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("managed agent not found")
+	}
+	if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 func loadManagedActiveWorkflowStateIDTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
@@ -4792,6 +4847,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedWorktreeTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
+		if err := loadManagedAllowInlineToolsTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
 		if agent.Runtime == "embedded" {
 			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
 			if err != nil {
@@ -4912,6 +4970,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedWorktreeTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedAllowInlineToolsTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy

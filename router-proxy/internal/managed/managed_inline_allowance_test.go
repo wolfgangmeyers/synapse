@@ -2,9 +2,11 @@ package managed
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -158,6 +160,31 @@ func (r *nativeInlineAllowanceRPC) WaitForPolicyApplied(ctx context.Context, gen
 	}
 	r.policyMu.Unlock()
 	return r.rpcClient.WaitForPolicyApplied(ctx, generation, epoch)
+}
+
+func (r *nativeInlineAllowanceRPC) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (RootControlPersistedReceipt, error) {
+	r.policyMu.Lock()
+	nativePipe := r.useNativePipe
+	r.policyMu.Unlock()
+	if nativePipe {
+		return r.rpcClient.ReconcileRootControlResult(ctx, payload)
+	}
+	requestID, _ := payload["request_id"].(string)
+	resultID, _ := payload["result_id"].(string)
+	generation, _ := payload["runtime_generation"].(string)
+	manifest, _ := payload["manifest_sha256"].(string)
+	epoch, _ := readinessInteger(payload["target_session_epoch"])
+	canonical, _ := canonicalJSON(payload)
+	hash := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	return RootControlPersistedReceipt{
+		ReceiptID:         "native-inline-result",
+		RequestID:         requestID,
+		ResultID:          resultID,
+		PayloadSHA256:     hash,
+		RuntimeGeneration: generation,
+		SessionEpoch:      epoch,
+		ManifestSHA256:    manifest,
+	}, nil
 }
 
 func (r *nativeInlineAllowanceRPC) inlineCredit(toolName string) (int64, bool) {

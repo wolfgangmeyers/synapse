@@ -1,0 +1,320 @@
+package managed
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/agent"
+	"github.com/sky-valley/pi/ai"
+	"github.com/stretchr/testify/require"
+)
+
+func TestEmbeddedInlineAllowanceLane(t *testing.T) {
+	lane := &managedAgentLane{}
+	baseTime := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// 1. Initial grant from full pool (5 credits capacity)
+	res, err := lane.grantInlineAllowance("bash", 3, baseTime)
+	require.NoError(t, err)
+	require.Equal(t, "bash", res.ToolName)
+	require.Equal(t, 3, res.GrantedCount)
+	require.Equal(t, 3, res.Remaining)
+	require.Equal(t, 2, res.AvailableWholeCredits) // 5 - 3 = 2 left in pool
+
+	// 2. Grant remaining 2 credits to "edit"
+	res, err = lane.grantInlineAllowance("edit", 2, baseTime)
+	require.NoError(t, err)
+	require.Equal(t, "edit", res.ToolName)
+	require.Equal(t, 2, res.GrantedCount)
+	require.Equal(t, 2, res.Remaining)
+	require.Equal(t, 0, res.AvailableWholeCredits) // 0 left in pool
+
+	// 3. Requesting when pool is empty (0 available) must fail with exact abuse message
+	_, err = lane.grantInlineAllowance("write", 1, baseTime)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Insufficient inline tool credits: requested 1 credit(s), but only 0 whole credit(s) are available")
+	require.Contains(t, err.Error(), "The pool is exhausted.")
+	require.Contains(t, err.Error(), "ATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool.")
+	require.Contains(t, err.Error(), "Read that again: YOU SHOULD BE USING SUBAGENTS INSTEAD.")
+
+	// 4. Advance time by 60 seconds (1 minute = 1 replenished credit)
+	tPlus60s := baseTime.Add(60 * time.Second)
+	res, err = lane.grantInlineAllowance("write", 1, tPlus60s)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.GrantedCount)
+	require.Equal(t, 1, res.Remaining)
+	require.Equal(t, 0, res.AvailableWholeCredits)
+
+	// 5. Advance time by 10 minutes (should cap at 5 credits, not grow indefinitely)
+	tPlus10m := tPlus60s.Add(10 * time.Minute)
+	lane.activeMu.Lock()
+	lane.replenishInlinePool(tPlus10m)
+	available := int(lane.inlinePoolRemainingMs / InlineToolReplenishmentIntervalMS)
+	lane.activeMu.Unlock()
+	require.Equal(t, InlineToolPoolCapacity, available)
+
+	// 6. Test consumeInlineAllowance
+	require.Equal(t, 3, lane.getInlineAllowance("bash"))
+	require.True(t, lane.consumeInlineAllowance("bash"))
+	require.Equal(t, 2, lane.getInlineAllowance("bash"))
+	require.True(t, lane.consumeInlineAllowance("bash"))
+	require.Equal(t, 1, lane.getInlineAllowance("bash"))
+	require.True(t, lane.consumeInlineAllowance("bash"))
+	require.Equal(t, 0, lane.getInlineAllowance("bash"))
+	require.False(t, lane.consumeInlineAllowance("bash"), "must return false when credits are 0")
+
+	// edit has 2 credits
+	require.True(t, lane.consumeInlineAllowance("edit"))
+	require.True(t, lane.consumeInlineAllowance("edit"))
+	require.False(t, lane.consumeInlineAllowance("edit"))
+}
+
+func TestNormalizeInlineToolName(t *testing.T) {
+	norm, err := normalizeInlineToolName("bash")
+	require.NoError(t, err)
+	require.Equal(t, "bash", norm)
+
+	norm, err = normalizeInlineToolName("edit")
+	require.NoError(t, err)
+	require.Equal(t, "edit", norm)
+
+	norm, err = normalizeInlineToolName("write")
+	require.NoError(t, err)
+	require.Equal(t, "write", norm)
+
+	norm, err = normalizeInlineToolName("functions.bash")
+	require.NoError(t, err)
+	require.Equal(t, "bash", norm)
+
+	norm, err = normalizeInlineToolName("functions.edit")
+	require.NoError(t, err)
+	require.Equal(t, "edit", norm)
+
+	norm, err = normalizeInlineToolName("functions.write")
+	require.NoError(t, err)
+	require.Equal(t, "write", norm)
+
+	_, err = normalizeInlineToolName("read")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported inline tool name")
+
+	_, err = normalizeInlineToolName("")
+	require.Error(t, err)
+}
+
+func TestEmbeddedRequestInlineToolAllowanceTool(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+	dbPath := filepath.Join(t.TempDir(), "router.db")
+	s, err := store.Open(ctx, dbPath, store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer s.Close()
+
+	agentID := "allowance-test-agent"
+	launchRecord := store.ManagedAgentRecord{
+		AgentID:          agentID,
+		Name:             "Allowance Test Agent",
+		Cwd:              t.TempDir(),
+		SelectedModel:    store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-sha",
+		CreatedAt:        "2026-09-01T12:00:00Z",
+		UpdatedAt:        "2026-09-01T12:00:00Z",
+	}
+	op := store.ManagedOperation{
+		OperationID:       "op-launch",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "req-launch",
+		CanonicalBodyHash: "hash-launch",
+		State:             "terminal",
+		ResponseStatus:    200,
+	}
+	require.NoError(t, s.ReserveManagedLaunch(ctx, launchRecord, op))
+
+	mgr := &Manager{store: s}
+	owner := embeddedOwner{
+		binding: store.EmbeddedBinding{AgentID: agentID, SessionID: "session-1"},
+	}
+
+	tool := mgr.embeddedRequestInlineToolAllowanceTool(owner)
+	require.Equal(t, InlineToolAllowanceToolName, tool.Name)
+	require.Equal(t, InlineToolAllowanceToolDesc, tool.Description)
+	require.Contains(t, tool.PromptGuidelines, "Use mecha_request_inline_tool_allowance only for genuinely necessary top-level bash/edit/write work.")
+
+	// Test validation: missing params
+	res, err := tool.Execute(ctx, "call-1", map[string]any{}, nil)
+	require.Error(t, err)
+
+	// Test validation: usageCount out of range
+	res, err = tool.Execute(ctx, "call-2", map[string]any{"toolName": "bash", "usageCount": 6}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "usageCount must be an integer from 1 through 5")
+
+	// Test successful grant
+	res, err = tool.Execute(ctx, "call-3", map[string]any{"toolName": "bash", "usageCount": 2}, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Content, 1)
+	require.Equal(t, "Granted 2 temporary inline use(s) for bash. This allowance is an exception to the rule; subagents remain mandatory by default.", res.Content[0].(ai.TextContent).Text)
+
+	// Check lane credits
+	lane := mgr.laneFor(agentID)
+	require.Equal(t, 2, lane.getInlineAllowance("bash"))
+
+	// Test native subagent exemption
+	subagentID := "subagent-child-1"
+	subagentRecord := store.ManagedAgentRecord{
+		AgentID:          subagentID,
+		Name:             "Subagent Child",
+		ParentAgentID:    agentID,
+		Cwd:              t.TempDir(),
+		SelectedModel:    store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-sha",
+		CreatedAt:        "2026-09-01T12:00:00Z",
+		UpdatedAt:        "2026-09-01T12:00:00Z",
+	}
+	require.NoError(t, s.ReserveManagedLaunch(ctx, subagentRecord, store.ManagedOperation{
+		OperationID:       "op-launch-sub",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "req-launch-sub",
+		CanonicalBodyHash: "hash-launch-sub",
+		State:             "terminal",
+		ResponseStatus:    200,
+	}))
+
+	subOwner := embeddedOwner{
+		binding: store.EmbeddedBinding{AgentID: subagentID, SessionID: "session-sub"},
+	}
+	subTool := mgr.embeddedRequestInlineToolAllowanceTool(subOwner)
+	subRes, subErr := subTool.Execute(ctx, "call-sub", map[string]any{"toolName": "bash", "usageCount": 1}, nil)
+	require.NoError(t, subErr)
+	require.Equal(t, "Native subagents are exempt from the inline tool guard; no parent allowance was changed.", subRes.Content[0].(ai.TextContent).Text)
+}
+
+func TestInlineToolExecutionGate(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+	dbPath := filepath.Join(t.TempDir(), "router.db")
+	s, err := store.Open(ctx, dbPath, store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer s.Close()
+
+	agentID := "gate-test-agent"
+	launchRecord := store.ManagedAgentRecord{
+		AgentID:          agentID,
+		Name:             "Gate Test Agent",
+		Cwd:              t.TempDir(),
+		SelectedModel:    store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-sha",
+		CreatedAt:        "2026-09-01T12:00:00Z",
+		UpdatedAt:        "2026-09-01T12:00:00Z",
+	}
+	require.NoError(t, s.ReserveManagedLaunch(ctx, launchRecord, store.ManagedOperation{
+		OperationID:       "op-launch-gate",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "req-launch-gate",
+		CanonicalBodyHash: "hash-launch-gate",
+		State:             "terminal",
+		ResponseStatus:    200,
+	}))
+
+	mgr := &Manager{store: s}
+	lane := mgr.laneFor(agentID)
+
+	gateCheck := func(toolName string) *agent.BeforeToolCallResult {
+		normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
+		if isInlineTool {
+			targetAgent, err := mgr.store.ManagedAgent(ctx, agentID)
+			if err == nil && targetAgent != nil && (targetAgent.ParentAgentID != "" || strings.HasPrefix(agentID, "subagent-")) {
+				return nil
+			}
+			if err == nil && targetAgent != nil && targetAgent.AllowInlineTools {
+				return nil
+			}
+			if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
+				return nil
+			}
+			return &agent.BeforeToolCallResult{
+				Block:  true,
+				Reason: InlineToolBlockReason,
+			}
+		}
+		return nil
+	}
+
+	// 1. allow_inline_tools == false and 0 credits: bash is BLOCKED
+	res := gateCheck("bash")
+	require.NotNil(t, res)
+	require.True(t, res.Block)
+	require.Equal(t, InlineToolBlockReason, res.Reason)
+
+	// edit and write are also blocked
+	resEdit := gateCheck("edit")
+	require.NotNil(t, resEdit)
+	require.True(t, resEdit.Block)
+	resWrite := gateCheck("write")
+	require.NotNil(t, resWrite)
+	require.True(t, resWrite.Block)
+
+	// Non-inline tools (e.g. read, custom) are NOT blocked
+	resRead := gateCheck("read")
+	require.Nil(t, resRead)
+
+	// 2. Grant 2 credits for bash
+	_, err = lane.grantInlineAllowance("bash", 2, time.Now())
+	require.NoError(t, err)
+
+	// First bash call consumes 1 credit and succeeds
+	res1 := gateCheck("bash")
+	require.Nil(t, res1, "first call should be allowed")
+	require.Equal(t, 1, lane.getInlineAllowance("bash"))
+
+	// Second bash call consumes the last credit and succeeds
+	res2 := gateCheck("bash")
+	require.Nil(t, res2, "second call should be allowed")
+	require.Equal(t, 0, lane.getInlineAllowance("bash"))
+
+	// Third bash call is blocked because credits are exhausted
+	res3 := gateCheck("bash")
+	require.NotNil(t, res3)
+	require.True(t, res3.Block)
+
+	// 3. Dynamic Override Toggle: set allow_inline_tools = true
+	err = s.SetManagedAgentAllowInlineTools(ctx, agentID, true)
+	require.NoError(t, err)
+
+	// Now bash, edit, write execute freely without credits
+	require.Nil(t, gateCheck("bash"), "bash should be allowed when allow_inline_tools == true")
+	require.Nil(t, gateCheck("edit"), "edit should be allowed when allow_inline_tools == true")
+	require.Nil(t, gateCheck("write"), "write should be allowed when allow_inline_tools == true")
+
+	// 4. Toggle back to allow_inline_tools = false
+	err = s.SetManagedAgentAllowInlineTools(ctx, agentID, false)
+	require.NoError(t, err)
+
+	// Now blocked again since credits are 0
+	resBlockedAgain := gateCheck("bash")
+	require.NotNil(t, resBlockedAgain)
+	require.True(t, resBlockedAgain.Block)
+}
