@@ -64,8 +64,11 @@ async function localFolderFromDrop(transfer: DataTransfer): Promise<string | und
 // the separate native dialog, and selection is committed only from that dialog.
 export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, list }: ManagedDirectoryPickerProps): ReactElement {
   const inputID = useId();
-  const datalistID = `${inputID}-recent-folders`;
+  const searchID = useId();
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
   const [recentOpen, setRecentOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [dragging, setDragging] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [directories, setDirectories] = useState<ManagedDirectory[]>([]);
@@ -75,8 +78,51 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
   const [selectedPath, setSelectedPath] = useState("");
   const [error, setError] = useState("");
   const requestID = useRef(0);
-  const query = value.trim().toLowerCase();
-  const visibleRecentFolders = recentFolders.filter((folder) => folder.toLowerCase().includes(query));
+
+  const topRecentFolders = recentFolders.slice(0, 15);
+  const query = searchQuery.trim().toLowerCase();
+  const visibleRecentFolders = query === ""
+    ? topRecentFolders
+    : topRecentFolders.filter((folder) => folder.toLowerCase().includes(query));
+
+  const toggleRecent = (): void => {
+    setRecentOpen((open) => {
+      const next = !open;
+      if (next) {
+        setSearchQuery("");
+        requestAnimationFrame(() => {
+          searchRef.current?.focus();
+        });
+      }
+      return next;
+    });
+  };
+
+  const closeRecent = (): void => {
+    setRecentOpen(false);
+  };
+
+  useEffect(() => {
+    if (!recentOpen) return;
+    const handlePointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Node && !menuRef.current?.contains(target)) {
+        closeRecent();
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        closeRecent();
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [recentOpen]);
 
   const resetPicker = (): void => {
     requestID.current += 1;
@@ -128,27 +174,65 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
     <div className="managed-directory-field">
       <label htmlFor={inputID}>Working folder</label>
       <div className="directory-picker-input-row">
-        <input
-          id={inputID}
-          list={datalistID}
-          required
-          value={value}
-          onFocus={() => setRecentOpen(true)}
-          onClick={() => setRecentOpen(true)}
-          onChange={(event) => { onChange(event.currentTarget.value); setRecentOpen(true); }}
-          placeholder="~/code/project"
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <datalist id={datalistID}>
-          {recentFolders.map((folder) => <option key={folder} value={folder} />)}
-        </datalist>
+        <div className="directory-picker-input-group" ref={menuRef}>
+          <input
+            id={inputID}
+            required
+            value={value}
+            onChange={(event) => onChange(event.currentTarget.value)}
+            placeholder="~/code/project"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            className="directory-picker-toggle-button"
+            aria-label="Recent folders"
+            aria-expanded={recentOpen}
+            aria-haspopup="dialog"
+            onClick={toggleRecent}
+            title="Recent folders"
+          >
+            <i className={`fa-solid ${recentOpen ? "fa-chevron-up" : "fa-chevron-down"}`} aria-hidden="true" />
+          </button>
+          {recentOpen ? (
+            <div className="model-menu" role="dialog" aria-label="Choose working folder">
+              <input
+                ref={searchRef}
+                id={searchID}
+                className="model-search"
+                type="search"
+                aria-label="Search folders"
+                placeholder="Search folders…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              <div className="model-options" role="listbox">
+                {visibleRecentFolders.length === 0 ? (
+                  <p className="model-options-empty">No matching folders</p>
+                ) : (
+                  visibleRecentFolders.map((folder) => (
+                    <button
+                      key={folder}
+                      type="button"
+                      className="model-option"
+                      role="option"
+                      aria-label={`Select folder ${folder}`}
+                      onClick={() => { onChange(folder); setRecentOpen(false); }}
+                    >
+                      <strong>{folder}</strong>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
         <button type="button" className="secondary directory-browse-button" aria-label="Browse folders" title="Browse folders" onClick={openPicker}>
           <i className="fa-solid fa-folder-open" aria-hidden="true" />
         </button>
       </div>
     </div>
-    {recentOpen && recentFolders.length > 0 ? <ul className="managed-recent-folders" aria-label="Recent folders">{visibleRecentFolders.map((folder) => <li key={folder}><button type="button" className="secondary" onClick={() => { onChange(folder); setRecentOpen(false); }}>{folder}</button></li>)}</ul> : null}
     <p className="managed-directory-drop-hint">Drop a folder from Finder.</p>
     {error ? <p className="error" role="alert">{error}</p> : null}
     <DialogShell open={pickerOpen} title="Choose working folder" titleId="managed-directory-browser-title" description="Choose a folder, then select it to use it." onClose={resetPicker} closeLabel="Close folder browser" className="message-dialog managed-directory-browser">
