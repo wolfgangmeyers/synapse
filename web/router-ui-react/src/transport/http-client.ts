@@ -8,7 +8,7 @@ import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
 import type { WorkflowState, WorkflowStateResponse, WorkflowStatesResponse } from "../domain/workflow-states";
-import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
+import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
 export interface Capabilities extends Record<string, unknown> {}
@@ -396,10 +396,11 @@ export interface RouterHttpClient {
   managedInlineTools(id: string): Promise<ManagedInlineToolsResponse>;
   saveManagedInlineTools(id: string, enabled: boolean): Promise<ManagedInlineToolsResponse>;
   managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
-  launchManaged(payload: { name: string; cwd: string; runtime?: "rpc" | "embedded"; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
+  worktreeCheck(path: string): Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>;
+  launchManaged(payload: ManagedAgentLaunchPayload): Promise<ManagedOperationResponse>;
   restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
-  terminateManaged(id: string): Promise<ManagedOperationResponse>;
+  terminateManaged(id: string, options?: { cleanupWorktree?: boolean }): Promise<ManagedOperationResponse>;
   restartAllManaged(): Promise<ManagedOperationResponse>;
   models(): Promise<ModelsResponse>;
   providerAuth(): Promise<ProviderAuthResponse>;
@@ -496,10 +497,27 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       if (options.limit !== undefined) query.set("limit", String(options.limit));
       return managedHistory(await managedRequest(`/v1/history?${query.toString()}`, "GET"));
     },
-    launchManaged: async (payload) => managedOperation(await managedRequest("/v1/managed-agents", "POST", payload)),
+    worktreeCheck: async (path: string) => {
+      const raw = await managedRequest(`/v1/git/worktree-check?path=${encodeURIComponent(path)}`, "GET");
+      const body = recordValue(raw);
+      return {
+        is_git_repo: Boolean(body?.is_git_repo),
+        is_main_worktree: Boolean(body?.is_main_worktree),
+        has_uncommitted_changes: Boolean(body?.has_uncommitted_changes),
+      };
+    },
+    launchManaged: async (payload) => {
+      const body: Record<string, unknown> = { ...payload };
+      if (payload.worktree !== undefined) body.worktree = payload.worktree;
+      if (payload.worktree_branch !== undefined) body.worktree_branch = payload.worktree_branch;
+      return managedOperation(await managedRequest("/v1/managed-agents", "POST", body));
+    },
     restartManaged: async (id, model) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/restart`, "POST", model === undefined ? {} : { model })),
     resetManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/reset`, "POST", {})),
-    terminateManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "DELETE")),
+    terminateManaged: async (id, options) => {
+      const query = options?.cleanupWorktree !== undefined ? `?cleanup_worktree=${options.cleanupWorktree}` : "";
+      return managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}${query}`, "DELETE"));
+    },
     restartAllManaged: async () => managedOperation(await managedRequest("/v1/managed-agents/restart-all", "POST", {})),
     models: async () => models(await managedRequest("/v1/models", "GET")),
     providerAuth: async () => providerAuth(await managedRequest("/v1/provider-auth", "GET")),

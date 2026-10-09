@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -39,6 +40,8 @@ type LaunchRequest struct {
 	CanonicalPath      string
 	RequestID          string
 	CanonicalBodyHash  string
+	Worktree           bool
+	WorktreeBranch     string
 }
 type LaunchResult struct {
 	Agent    *store.ManagedAgentRecord
@@ -532,6 +535,30 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 			return LaunchResult{}, err
 		}
 	}
+	var worktreeCreatedPath string
+	if request.Worktree {
+		if strings.TrimSpace(request.WorktreeBranch) == "" {
+			return LaunchResult{}, errors.New("worktree branch is required")
+		}
+		check, checkErr := gitworktree.CheckWorktree(ctx, cwd)
+		if checkErr != nil {
+			return LaunchResult{}, fmt.Errorf("failed to check git worktree: %w", checkErr)
+		}
+		if !check.IsGitRepo {
+			return LaunchResult{}, errors.New("working directory is not a git repository")
+		}
+		if !check.IsMainWorktree {
+			return LaunchResult{}, errors.New("working directory is not the main git worktree")
+		}
+		wtPath, pathErr := gitworktree.GenerateWorktreePath(cwd, request.WorktreeBranch)
+		if pathErr != nil {
+			return LaunchResult{}, fmt.Errorf("failed to generate worktree path: %w", pathErr)
+		}
+		if createErr := gitworktree.CreateWorktree(ctx, cwd, request.WorktreeBranch, wtPath); createErr != nil {
+			return LaunchResult{}, fmt.Errorf("failed to create git worktree: %w", createErr)
+		}
+		worktreeCreatedPath = wtPath
+	}
 	sessionID, err := m.ids.Next()
 	if err != nil {
 		return LaunchResult{}, err
@@ -586,7 +613,14 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 		}
 	}
 	now := formatManagedTime(m.clock.Now())
-	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: cwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now}
+	agentCwd := cwd
+	var worktreeBasePath, worktreeBranch string
+	if request.Worktree {
+		agentCwd = worktreeCreatedPath
+		worktreeBasePath = cwd
+		worktreeBranch = request.WorktreeBranch
+	}
+	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: agentCwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now, Worktree: request.Worktree, WorktreeBasePath: worktreeBasePath, WorktreeBranch: worktreeBranch}
 	if m.config.Enabled {
 		recipe, recipeErr := m.managedLaunchRecipe(agent)
 		if recipeErr != nil {

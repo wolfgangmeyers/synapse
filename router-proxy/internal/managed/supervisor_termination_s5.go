@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -20,6 +21,7 @@ type TerminateRequest struct {
 	CanonicalPath     string
 	RequestID         string
 	CanonicalBodyHash string
+	CleanupWorktree   bool
 }
 
 type TerminateResult struct {
@@ -161,10 +163,11 @@ func (m *Manager) terminateWithEmbeddedProducer(ctx context.Context, request Ter
 			}
 		}
 	}
+	cleanupWT := request.CleanupWorktree
 	started := m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
-		m.executeTerminationInLane(admission.Action.ActionID, binding)
+		m.executeTerminationInLane(admission.Action.ActionID, binding, cleanupWT)
 	})
 	if producer != nil {
 		if !started {
@@ -175,7 +178,7 @@ func (m *Manager) terminateWithEmbeddedProducer(ctx context.Context, request Ter
 	return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 }
 
-func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBinding) {
+func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBinding, cleanupWorktree ...bool) {
 	// Every exit follows a durable lifecycle transition. Publishing afterward
 	// lets UI-live replace the terminating row only after terminal cleanup has
 	// removed it, and exposes a retained failure when cleanup cannot complete.
@@ -280,6 +283,13 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 				m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 				return
 			}
+		}
+		doCleanupWT := true
+		if len(cleanupWorktree) > 0 {
+			doCleanupWT = cleanupWorktree[0]
+		}
+		if doCleanupWT && agent.Worktree && agent.WorktreeBasePath != "" && agent.Cwd != "" {
+			_ = gitworktree.RemoveWorktree(context.Background(), agent.WorktreeBasePath, agent.Cwd, true)
 		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "cleanup", "agent_cleanup", "cleanup", "durable_write", source); err != nil {
 			return

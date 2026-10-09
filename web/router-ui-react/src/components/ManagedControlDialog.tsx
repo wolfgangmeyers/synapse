@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import type { ManagedAgent } from "../protocol/types";
 import { DialogShell } from "./DialogShell";
 
@@ -8,16 +8,55 @@ export interface ManagedControlDialogProps {
   pending?: boolean;
   error?: string;
   onClose(): void;
-  onAction(agentId: string, action: "restart" | "reset" | "terminate"): Promise<void>;
+  onAction(agentId: string, action: "restart" | "reset" | "terminate", options?: { cleanupWorktree?: boolean }): Promise<void>;
   onGoal(): void;
   onReminders(): void;
   onInlineTools(): void;
   confirmTermination: boolean;
   onConfirmTerminationChange(open: boolean): void;
+  onWorktreeCheck?(path: string): Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>;
 }
 
-export function ManagedControlDialog({ open, agent, pending = false, error, onClose, onAction, onGoal, onReminders, onInlineTools, confirmTermination, onConfirmTerminationChange }: ManagedControlDialogProps): ReactElement {
-  const runAction = (action: "restart" | "reset" | "terminate"): void => { void onAction(agent.agent_id, action); };
+export function ManagedControlDialog({ open, agent, pending = false, error, onClose, onAction, onGoal, onReminders, onInlineTools, confirmTermination, onConfirmTerminationChange, onWorktreeCheck }: ManagedControlDialogProps): ReactElement {
+  const [cleanupWorktree, setCleanupWorktree] = useState(true);
+  const [hasUncommittedChanges, setHasUncommittedChanges] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setCleanupWorktree(true);
+      setHasUncommittedChanges(false);
+      return;
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !confirmTermination || !agent.worktree || !onWorktreeCheck) {
+      setHasUncommittedChanges(false);
+      return;
+    }
+    let cancelled = false;
+    onWorktreeCheck(agent.cwd)
+      .then((result) => {
+        if (!cancelled && result.has_uncommitted_changes) {
+          setHasUncommittedChanges(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setHasUncommittedChanges(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, confirmTermination, agent.worktree, agent.cwd, onWorktreeCheck]);
+
+  const runAction = (action: "restart" | "reset" | "terminate"): void => {
+    if (action === "terminate" && agent.worktree) {
+      void onAction(agent.agent_id, action, { cleanupWorktree });
+    } else {
+      void onAction(agent.agent_id, action);
+    }
+  };
 
   return <DialogShell open={open} title={`Manage ${agent.agent_id}`} titleId="managed-control-dialog-title" description="Manage this agent's work controls or lifecycle." onClose={onClose} closeLabel="Close managed agent controls" className="message-dialog managed-control-dialog">
     <div className="managed-control-body">
@@ -40,6 +79,26 @@ export function ManagedControlDialog({ open, agent, pending = false, error, onCl
       {confirmTermination ? <section className="managed-confirmation" role="alert" aria-labelledby="managed-termination-title">
         <h3 id="managed-termination-title">Terminate {agent.agent_id}?</h3>
         <p>This stops the agent and its work.</p>
+        {agent.worktree ? <div className="worktree-cleanup-toggle">
+          <button
+            type="button"
+            className="goal-toggle"
+            aria-pressed={cleanupWorktree}
+            onClick={() => setCleanupWorktree(!cleanupWorktree)}
+          >
+            <span className="goal-toggle-label">Clean up worktree</span>
+            <span className="goal-toggle-track" aria-hidden="true">
+              <span className="goal-toggle-thumb">
+                <span className="goal-toggle-state">{cleanupWorktree ? "ON" : "OFF"}</span>
+              </span>
+            </span>
+          </button>
+          {hasUncommittedChanges ? (
+            <p className="error" role="alert">
+              Warning: This worktree has uncommitted changes that will be lost.
+            </p>
+          ) : null}
+        </div> : null}
         <div className="managed-confirmation-actions">
           <button type="button" className="secondary" disabled={pending} onClick={() => onConfirmTerminationChange(false)}>Cancel</button>
           <button type="button" className="danger-button" disabled={pending} onClick={() => runAction("terminate")}>Terminate agent</button>

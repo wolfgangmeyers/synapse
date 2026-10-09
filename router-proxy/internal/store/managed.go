@@ -136,6 +136,12 @@ type ManagedAgentRecord struct {
 	ParentAgentID string
 	// ActiveWorkflowStateID records the currently active workflow state ID if set.
 	ActiveWorkflowStateID string
+	// Worktree indicates if the agent was launched in an isolated git worktree.
+	Worktree bool
+	// WorktreeBasePath is the root git repository path when Worktree is true.
+	WorktreeBasePath string
+	// WorktreeBranch is the branch name created for the worktree.
+	WorktreeBranch string
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -897,6 +903,14 @@ func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAge
 	if hasRuntime {
 		columns += `,runtime`
 		values = append(values, agent.Runtime)
+	}
+	hasWorktree, err := managedAgentColumnTx(ctx, s.db, "worktree")
+	if err != nil {
+		return err
+	}
+	if hasWorktree {
+		columns += `,worktree,worktree_base_path,worktree_branch`
+		values = append(values, boolInt(agent.Worktree), nullIfEmpty(agent.WorktreeBasePath), nullIfEmpty(agent.WorktreeBranch))
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_agents (`+columns+`) VALUES (`+placeholders+`)`, values...)
@@ -4493,6 +4507,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedWorktreeTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4536,6 +4553,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedWorktreeTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -4595,6 +4615,22 @@ func loadManagedParentAgentIDTx(ctx context.Context, db *sql.DB, agent *ManagedA
 	return nil
 }
 
+
+func loadManagedWorktreeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	hasWorktree, err := managedAgentColumnTx(ctx, db, "worktree")
+	if err != nil || !hasWorktree || agent == nil {
+		return err
+	}
+	var worktree sql.NullInt64
+	var basePath, branch sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT worktree, worktree_base_path, worktree_branch FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&worktree, &basePath, &branch); err != nil {
+		return err
+	}
+	agent.Worktree = worktree.Int64 != 0
+	agent.WorktreeBasePath = basePath.String
+	agent.WorktreeBranch = branch.String
+	return nil
+}
 func loadManagedActiveWorkflowStateIDTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
 	hasCol, err := managedAgentColumnTx(ctx, db, "active_workflow_state_id")
 	if err != nil || !hasCol || agent == nil {
@@ -4753,6 +4789,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
+		if err := loadManagedWorktreeTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
 		if agent.Runtime == "embedded" {
 			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
 			if err != nil {
@@ -4870,6 +4909,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedActiveWorkflowStateIDTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedWorktreeTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy
