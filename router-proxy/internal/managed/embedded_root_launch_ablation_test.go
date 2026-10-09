@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,7 +128,11 @@ func TestEmbeddedRootLaunchAblationDeclaration(t *testing.T) {
 	// Addressed mailbox is Manager-owned, independent of a host external tool.
 	// Keep this literal contract independent of either captured declaration.
 	require.Nil(t, m.embeddedExternalTool)
-	wantNames := []string{"mecha_mailbox_send", "goal", "goal_snooze", "mecha_context", "mecha_reminder", "context_reset", "reset", "scratchpad", "bash", "read", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "mecha_worker"}
+	wantNames := []string{"mecha_mailbox_send", "goal", "goal_snooze", "mecha_context", "mecha_reminder", "context_reset", "reset", "scratchpad", "mecha_workflow_transition", "workflow_transition", "mecha_tool_timeout", "extend_tool_timeout", "bash", "read", "edit", "write"}
+	if m.hasGoogleSearchAuth(ctx) {
+		wantNames = append(wantNames, "google_search")
+	}
+	wantNames = append(wantNames, "subagent", "get_subagent_result", "steer_subagent", "mecha_worker")
 	require.Equal(t, wantNames, toolNames(workerTools))
 	wantRootNames := append([]string(nil), wantNames...)
 	if embeddedRootLaunchAblation {
@@ -145,6 +150,7 @@ func TestEmbeddedRootLaunchAblationDeclaration(t *testing.T) {
 		require.NotNil(t, mailbox.Properties[property])
 		require.Equal(t, "string", mailbox.Properties[property].Type)
 	}
+	workerIndex := len(workerTools) - 1
 	for _, check := range []struct {
 		index   int
 		actions []any
@@ -152,7 +158,7 @@ func TestEmbeddedRootLaunchAblationDeclaration(t *testing.T) {
 		{1, []any{"set", "status", "off"}},
 		{3, []any{"status", "compact"}},
 		{4, []any{"list", "create", "update", "delete"}},
-		{15, []any{"list", "launch", "send", "cleanup"}},
+		{workerIndex, []any{"list", "launch", "send", "cleanup"}},
 	} {
 		tool := workerTools[check.index]
 		require.NotNil(t, tool.Parameters, tool.Name)
@@ -177,8 +183,24 @@ func TestEmbeddedRootLaunchAblationDeclaration(t *testing.T) {
 	for i, message := range normalized.Messages {
 		if system, ok := message.(ai.SystemMessage); ok {
 			system.ToolsAdded = workerTools
+			if val, ok := system.Sections.Get("preamble"); ok && val != nil {
+				replaced := strings.ReplaceAll(*val, "ablation-root", "ablation-worker")
+				sections := system.Sections
+				(&sections).Set("preamble", &replaced)
+				system.Sections = sections
+			}
 			normalized.Messages = append([]ai.Message(nil), normalized.Messages...)
 			normalized.Messages[i] = system
+		}
+		if user, ok := message.(ai.UserMessage); ok {
+			user.Content = append([]ai.Content(nil), user.Content...)
+			for ci, c := range user.Content {
+				if tc, ok := c.(ai.TextContent); ok {
+					user.Content[ci] = ai.TextContent{Text: formatGenesisPrompt("ablation-worker", tc.Text)}
+				}
+			}
+			normalized.Messages = append([]ai.Message(nil), normalized.Messages...)
+			normalized.Messages[i] = user
 		}
 	}
 	require.Equal(t, canonical(t, ablationInitialTimestamps(workerCapture.history)), canonical(t, ablationInitialTimestamps(normalized)), "non-tool provider input changed")

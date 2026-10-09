@@ -485,7 +485,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" {
-			if result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" {
+			if result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" {
 				body, err := json.Marshal(result)
 				if err == nil {
 					_ = p.db.ObserveEmbeddedEffect(ctx, p.binding, result.ToolCallID, body)
@@ -1128,6 +1128,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				if execution.failure == embeddedBashOutputTruncated {
 					return errors.New("bash output truncated: outcome UNKNOWN after spawn")
 				}
+				if result.IsError {
+					for _, c := range result.Content {
+						if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "tool execution timed out") {
+							return nil
+						}
+					}
+				}
 				return errors.New("bash outcome unknown: no checked SDK result")
 			}
 			if execution.expected.IsError {
@@ -1158,6 +1165,21 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 			}
 			return nil
+		}
+		if execution.expected == nil && result.IsError {
+			for _, c := range result.Content {
+				if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "tool execution timed out") {
+					body, err := json.Marshal(result)
+					if err != nil {
+						return err
+					}
+					_ = m.store.ObserveEmbeddedEffect(resultCtx, binding, result.ToolCallID, body)
+					freshWorkerMu.Lock()
+					delete(bashExecutions, result.ToolCallID)
+					freshWorkerMu.Unlock()
+					return nil
+				}
+			}
 		}
 		if execution.expected != nil && !execution.replay {
 			body, err := json.Marshal(result)
@@ -1226,6 +1248,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedScratchpadTool(owner))
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "mecha_workflow_transition"))
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "workflow_transition"))
+		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
+		tools = append(tools, m.embeddedToolTimeoutTool(owner, "extend_tool_timeout"))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
@@ -1320,6 +1344,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 		}
 		tools = filteredTools
+	}
+	for i := range tools {
+		tools[i] = m.wrapEmbeddedToolTimeout(binding.AgentID, tools[i])
 	}
 	var appliedReceipt *store.EmbeddedGoalAppliedReceipt
 	// The SDK invokes StreamFn only when it has selected a provider request.
@@ -1578,6 +1605,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if call.ToolCall.Name == "scratchpad" {
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: "scratchpad requires embedded root or worker"}
+				}
+				return nil
+			}
+			if call.ToolCall.Name == "mecha_tool_timeout" || call.ToolCall.Name == "extend_tool_timeout" {
+				if role != "root" && role != "worker" {
+					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
 				}
 				return nil
 			}
