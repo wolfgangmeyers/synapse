@@ -35,7 +35,7 @@ type managedHTTPError struct {
 func (e *managedHTTPError) Error() string { return e.code }
 
 func managedPath(path string) bool {
-	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/") || path == "/v1/models" || path == "/v1/settings/default-model" || path == "/v1/provider-auth" || strings.HasPrefix(path, "/v1/provider-auth/") || path == "/managed-agents" || strings.HasPrefix(path, "/managed-agents/")
+	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/") || path == "/v1/models" || path == "/v1/settings/default-model" || path == "/v1/provider-auth" || strings.HasPrefix(path, "/v1/provider-auth/") || path == "/managed-agents" || strings.HasPrefix(path, "/managed-agents/") || path == "/v1/git/worktree-check"
 }
 
 // handleManagedHTTP exposes direct local worker controls. Reachability is the

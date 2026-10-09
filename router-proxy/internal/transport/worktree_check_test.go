@@ -54,4 +54,8 @@ func TestHandleGitWorktreeCheck(t *testing.T) {
 	if !result.IsGitRepo || !result.IsMainWorktree {
 		t.Fatalf("expected IsGitRepo=true and IsMainWorktree=true, got %+v", result)
 	}
+
+	if !managedPath("/v1/git/worktree-check") {
+		t.Fatalf("expected managedPath to match /v1/git/worktree-check")
+	}
 }
