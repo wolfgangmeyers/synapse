@@ -95,6 +95,12 @@ func (m *Manager) embeddedGoogleSearchTool(owner embeddedOwner) agent.AgentTool 
 				}
 			}
 
+			if update != nil {
+				update(agent.AgentToolResult{
+					Details: map[string]any{"status": "searching", "query": query},
+				})
+			}
+
 			resultText, searchErr := m.executeGoogleSearch(callCtx, query, instruction, urls)
 			if searchErr != nil {
 				return agent.AgentToolResult{
@@ -274,12 +280,6 @@ func (m *Manager) executeAntigravityGrounding(ctx context.Context, token, projec
 	innerReq := map[string]any{
 		"contents": contents,
 		"tools":    tools,
-		"generationConfig": map[string]any{
-			"thinkingConfig": map[string]any{
-				"thinkingBudget": 2048,
-				"includeThoughts": false,
-			},
-		},
 	}
 	if instruction != "" {
 		innerReq["systemInstruction"] = map[string]any{
@@ -290,7 +290,7 @@ func (m *Manager) executeAntigravityGrounding(ctx context.Context, token, projec
 
 	envelope := map[string]any{
 		"project":     projectID,
-		"model":       "gemini-3-flash",
+		"model":       "gemini-2.5-flash",
 		"request":     innerReq,
 		"requestType": "agent",
 		"userAgent":   "antigravity",

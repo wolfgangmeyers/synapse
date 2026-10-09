@@ -90,7 +90,7 @@ func TestEmbeddedGoogleSearch_AntigravityIntegration(t *testing.T) {
 	require.Contains(t, capturedUserAgent, "antigravity/cli")
 	require.NotNil(t, capturedBody)
 	require.Equal(t, "mock-project-456", capturedBody["project"])
-	require.Equal(t, "gemini-3-flash", capturedBody["model"])
+	require.Equal(t, "gemini-2.5-flash", capturedBody["model"])
 	require.Equal(t, "agent", capturedBody["requestType"])
 
 	// Check result formatting
