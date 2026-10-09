@@ -69,4 +69,78 @@ describe("ManagedControlDialog", () => {
     await user.click(screen.getByRole("button", { name: "Terminate agent" }));
     expect(onAction).toHaveBeenCalledWith("managed-alpha", "terminate");
   });
+
+  it("shows Clean up worktree toggle defaulted to ON when agent.worktree is true", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn(async () => undefined);
+    const worktreeAgent = { ...agent, worktree: true };
+    render(
+      <ManagedControlDialog
+        open
+        agent={worktreeAgent}
+        confirmTermination
+        onClose={() => undefined}
+        onAction={onAction}
+        onGoal={() => undefined}
+        onReminders={() => undefined}
+        onInlineTools={() => undefined}
+        onConfirmTerminationChange={() => undefined}
+      />
+    );
+
+    const toggle = screen.getByRole("button", { name: /Clean up worktree/i });
+    expect(toggle).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "Terminate agent" }));
+    expect(onAction).toHaveBeenCalledWith("managed-alpha", "terminate", { cleanupWorktree: true });
+  });
+
+  it("allows toggling Clean up worktree OFF before terminating", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn(async () => undefined);
+    const worktreeAgent = { ...agent, worktree: true };
+    render(
+      <ManagedControlDialog
+        open
+        agent={worktreeAgent}
+        confirmTermination
+        onClose={() => undefined}
+        onAction={onAction}
+        onGoal={() => undefined}
+        onReminders={() => undefined}
+        onInlineTools={() => undefined}
+        onConfirmTerminationChange={() => undefined}
+      />
+    );
+
+    const toggle = screen.getByRole("button", { name: /Clean up worktree/i });
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(screen.getByRole("button", { name: "Terminate agent" }));
+    expect(onAction).toHaveBeenCalledWith("managed-alpha", "terminate", { cleanupWorktree: false });
+  });
+
+  it("shows prominent red warning when worktreeCheck indicates uncommitted changes", async () => {
+    const worktreeAgent = { ...agent, worktree: true };
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: false, has_uncommitted_changes: true }));
+    render(
+      <ManagedControlDialog
+        open
+        agent={worktreeAgent}
+        confirmTermination
+        onClose={() => undefined}
+        onAction={async () => undefined}
+        onGoal={() => undefined}
+        onReminders={() => undefined}
+        onInlineTools={() => undefined}
+        onConfirmTerminationChange={() => undefined}
+        onWorktreeCheck={onWorktreeCheck}
+      />
+    );
+
+    expect(await screen.findByText(/Warning: This worktree has uncommitted changes that will be lost\./i)).toBeInTheDocument();
+    expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/project");
+  });
 });

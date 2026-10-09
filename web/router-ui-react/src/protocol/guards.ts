@@ -158,7 +158,8 @@ export function isRouterUtcTimestamp(value: unknown): value is string {
 
 export function isManagedAgent(value: unknown): value is ManagedAgent {
   const required = ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"];
-  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state", "runtime", "active_workflow_state_id"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state", "runtime", "active_workflow_state_id", "worktree"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
+  if (Object.hasOwn(value, "worktree") && typeof value.worktree !== "boolean") return false;
   if (Object.hasOwn(value, "runtime") && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
   if (Object.hasOwn(value, "active_workflow_state_id") && value.active_workflow_state_id !== null && !isSafeString(value.active_workflow_state_id, 0, 128)) return false;
   const model = value.model; const manifest = value.manifest; const lastError = value.last_error;

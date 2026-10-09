@@ -176,6 +176,60 @@ describe("ManagedAgentDialog", () => {
     expect(onLaunch).toHaveBeenCalledWith({ name: "agent-embedded", cwd: "/allowed", runtime: "embedded" });
   });
 
+  it("does not show worktree toggle when worktreeCheck returns is_main_worktree: false", async () => {
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: false, has_uncommitted_changes: false }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo/sub" } });
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo/sub"));
+    expect(screen.queryByRole("button", { name: /Create a worktree/i })).not.toBeInTheDocument();
+  });
+
+  it("shows worktree toggle when worktreeCheck returns is_main_worktree: true", async () => {
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo" } });
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo"));
+    expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+  });
+
+  it("toggling worktree on reveals branch input defaulted to slugified agent name", async () => {
+    const user = userEvent.setup();
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
+    await user.type(screen.getByLabelText("Name"), "Feature Agent Name");
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo" } });
+    const toggle = await screen.findByRole("button", { name: /Create a worktree/i });
+    expect(screen.queryByLabelText("Branch name")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    const branchInput = await screen.findByLabelText("Branch name");
+    expect(branchInput).toHaveValue("feature-agent-name");
+  });
+
+  it("editing branch name and submitting includes worktree: true and worktree_branch in launch payload", async () => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    const onWorktreeCheck = vi.fn(async () => ({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
+    await user.type(screen.getByLabelText("Name"), "my-worker");
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo" } });
+    const toggle = await screen.findByRole("button", { name: /Create a worktree/i });
+    await user.click(toggle);
+
+    const branchInput = await screen.findByLabelText("Branch name");
+    await user.clear(branchInput);
+    await user.type(branchInput, "custom-branch-name");
+
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({
+      name: "my-worker",
+      cwd: "/allowed/repo",
+      runtime: "embedded",
+      worktree: true,
+      worktree_branch: "custom-branch-name",
+    });
+  });
+
   it("requires a deliberate termination confirmation", async () => {
     const user = userEvent.setup();
     const onAction = vi.fn(async () => undefined);

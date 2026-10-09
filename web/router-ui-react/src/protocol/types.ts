@@ -863,12 +863,23 @@ export interface ManagedAgent {
   started_at: RouterTimestamp | null;
   updated_at: RouterTimestamp;
   last_error: ManagedError | null;
+  worktree?: boolean;
   goal_state?: GoalState & {
     desired_revision?: number;
     applied_revision?: number;
     projection_state?: "pending" | "applied" | "failed";
   };
   active_workflow_state_id?: string | null;
+}
+
+export interface ManagedAgentLaunchPayload {
+  name: string;
+  cwd: string;
+  runtime?: "rpc" | "embedded";
+  model?: { provider: string; id: string };
+  initial_instruction?: string;
+  worktree?: boolean;
+  worktree_branch?: string;
 }
 
 export interface ManagedArchiveDelivery {

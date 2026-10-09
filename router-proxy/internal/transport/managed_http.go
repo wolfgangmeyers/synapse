@@ -21,6 +21,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -86,6 +87,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return true
 	case managedArchiveRoute(req.URL.Path):
 		r.handleManagedArchive(w, req)
+		return true
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/git/worktree-check":
+		r.handleGitWorktreeCheck(w, req)
 		return true
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedAgentsGET(w, req)
@@ -593,6 +597,11 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
+	var worktree bool
+	if rawWT, ok := payload["worktree"]; ok {
+		_ = json.Unmarshal(rawWT, &worktree)
+	}
+	worktreeBranch, _ := managedString(payload, "worktree_branch", false)
 	canonicalPath := req.URL.Path
 	if r.managedPathCanonicalizer != nil {
 		canonicalPath = r.managedPathCanonicalizer(req)
@@ -611,7 +620,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 		return
 	}
-	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, Runtime: runtime, InitialInstruction: instruction, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, Runtime: runtime, InitialInstruction: instruction, Worktree: worktree, WorktreeBranch: worktreeBranch, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
 	if launchErr != nil {
 		log.Printf("MANAGED_LAUNCH_ERR: %v", launchErr)
 		var idempotencyConflict *store.ManagedIdempotencyConflictError
@@ -892,8 +901,12 @@ func (r *Router) handleManagedTerminate(w http.ResponseWriter, req *http.Request
 	}
 	// The empty physical body has one canonical semantic representation for
 	// replay comparison. It is not an accepted JSON request body.
+	cleanupWorktree := true
+	if strings.EqualFold(req.URL.Query().Get("cleanup_worktree"), "false") {
+		cleanupWorktree = false
+	}
 	bodyHash := sha256.Sum256(canonicalManagedBody(map[string]json.RawMessage{}))
-	result, terminateErr := r.managed.Terminate(req.Context(), managed.TerminateRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	result, terminateErr := r.managed.Terminate(req.Context(), managed.TerminateRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), CleanupWorktree: cleanupWorktree})
 	if terminateErr != nil {
 		r.writeManagedError(w, req, managedTerminationError(terminateErr))
 		return
@@ -1861,4 +1874,19 @@ func requestIDFromRequest(req *http.Request) any {
 		return value
 	}
 	return nil
+}
+
+func (r *Router) handleGitWorktreeCheck(w http.ResponseWriter, req *http.Request) {
+	path := req.URL.Query().Get("path")
+	if strings.TrimSpace(path) == "" {
+		r.writeManagedError(w, req, &managedHTTPError{400, "BAD_REQUEST", "path parameter is required"})
+		return
+	}
+	result, err := gitworktree.CheckWorktree(req.Context(), path)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", err.Error()})
+		return
+	}
+	body, _ := json.Marshal(result)
+	r.writeManagedRaw(w, req, 200, map[string]string{"Content-Type": "application/json; charset=utf-8"}, body)
 }
