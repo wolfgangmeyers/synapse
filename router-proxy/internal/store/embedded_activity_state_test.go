@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,5 +91,158 @@ func TestResetActiveEmbeddedAgentsStartupRecovery(t *testing.T) {
 	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT json_extract(presentation_json, '$.outcome'), json_extract(presentation_json, '$.summary') FROM managed_complete_history WHERE message='Ran echo'`).Scan(&completedOutcome, &completedSummary))
 	require.Equal(t, "completed", completedOutcome)
 	require.Equal(t, "Succeeded", completedSummary)
+}
+
+func TestResetActiveEmbeddedAgentsDanglingToolCallsReconciliation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	b := redBind(t, s, "dangling-worker", "session-dangling", 1, "gen-dangling", "worker")
+
+	// 1. Initial user turn
+	userMsg := ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "do something"}}}
+	userBody, err := json.Marshal(userMsg)
+	require.NoError(t, err)
+	_, err = s.AppendEmbeddedEntry(ctx, b, "user", userBody)
+	require.NoError(t, err)
+
+	// 2. Assistant message with two tool calls: call_1 and call_2
+	assistantMsg := ai.AssistantMessage{
+		Content: ai.ContentList{
+			ai.TextContent{Text: "Running tools"},
+			ai.ToolCall{
+				ID:        "call_1",
+				Name:      "bash",
+				Arguments: map[string]any{"command": "echo hello"},
+			},
+			ai.ToolCall{
+				ID:        "call_2",
+				Name:      "bash",
+				Arguments: map[string]any{"command": "sleep 10"},
+			},
+		},
+		StopReason: ai.StopToolUse,
+	}
+	assistantBody, err := json.Marshal(assistantMsg)
+	require.NoError(t, err)
+	_, err = s.AppendEmbeddedEntry(ctx, b, "assistant", assistantBody)
+	require.NoError(t, err)
+
+	// 3. Only call_1 completes before crash/restart
+	tool1Result := ai.ToolResultMessage{
+		ToolCallID: "call_1",
+		ToolName:   "bash",
+		Content:    ai.ContentList{ai.TextContent{Text: "hello"}},
+		IsError:    false,
+	}
+	tool1Body, err := json.Marshal(tool1Result)
+	require.NoError(t, err)
+	_, err = s.AppendEmbeddedEntry(ctx, b, "toolResult", tool1Body)
+	require.NoError(t, err)
+
+	// Verify head before recovery is toolResult for call_1
+	var count int
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id=?`, b.AgentID).Scan(&count))
+	require.Equal(t, 3, count) // user, assistant, toolResult(call_1)
+
+	// Set activity to active to simulate turn in progress
+	require.NoError(t, s.SetEmbeddedActivityState(ctx, b, "active"))
+
+	// Trigger restart recovery
+	require.NoError(t, s.ResetActiveEmbeddedAgents(ctx))
+
+	// call_2 should have received a synthetic toolResult
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id=?`, b.AgentID).Scan(&count))
+	require.Equal(t, 4, count) // user, assistant, toolResult(call_1), synthetic toolResult(call_2)
+
+	var lastKind, lastBody string
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT kind, CAST(body AS TEXT) FROM embedded_entries WHERE agent_id=? ORDER BY seq DESC LIMIT 1`, b.AgentID).Scan(&lastKind, &lastBody))
+	require.Equal(t, "toolResult", lastKind)
+
+	var recoveredResult ai.ToolResultMessage
+	require.NoError(t, json.Unmarshal([]byte(lastBody), &recoveredResult))
+	require.Equal(t, "call_2", recoveredResult.ToolCallID)
+	require.Equal(t, "bash", recoveredResult.ToolName)
+	require.True(t, recoveredResult.IsError)
+	require.Len(t, recoveredResult.Content, 1)
+	require.Equal(t, "Command interrupted by router restart", recoveredResult.Content[0].(ai.TextContent).Text)
+
+	// Idempotency: running recovery again should not inject another result
+	require.NoError(t, s.ResetActiveEmbeddedAgents(ctx))
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id=?`, b.AgentID).Scan(&count))
+	require.Equal(t, 4, count)
+}
+
+func TestResetActiveEmbeddedAgentsAllToolCallsDangling(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	b := redBind(t, s, "dangling-worker-all", "session-dangling-all", 1, "gen-dangling-all", "worker")
+
+	// 1. Initial user turn
+	userMsg := ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "run something"}}}
+	userBody, err := json.Marshal(userMsg)
+	require.NoError(t, err)
+	_, err = s.AppendEmbeddedEntry(ctx, b, "user", userBody)
+	require.NoError(t, err)
+
+	// 2. Assistant message with two tool calls, NEITHER has a result before restart
+	assistantMsg := ai.AssistantMessage{
+		Content: ai.ContentList{
+			ai.TextContent{Text: "Running tools"},
+			ai.ToolCall{
+				ID:        "call_a",
+				Name:      "bash",
+				Arguments: map[string]any{"command": "echo a"},
+			},
+			ai.ToolCall{
+				ID:        "call_b",
+				Name:      "read",
+				Arguments: map[string]any{"path": "file.txt"},
+			},
+		},
+		StopReason: ai.StopToolUse,
+	}
+	assistantBody, err := json.Marshal(assistantMsg)
+	require.NoError(t, err)
+	_, err = s.AppendEmbeddedEntry(ctx, b, "assistant", assistantBody)
+	require.NoError(t, err)
+
+	// Set activity to active
+	require.NoError(t, s.SetEmbeddedActivityState(ctx, b, "active"))
+
+	// Trigger restart recovery
+	require.NoError(t, s.ResetActiveEmbeddedAgents(ctx))
+
+	// Both call_a and call_b should have received synthetic toolResults in order
+	var count int
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id=?`, b.AgentID).Scan(&count))
+	require.Equal(t, 4, count) // user, assistant, synthetic(call_a), synthetic(call_b)
+
+	rows, err := s.db.QueryContext(ctx, `SELECT seq, kind, CAST(body AS TEXT) FROM embedded_entries WHERE agent_id=? AND seq > 2 ORDER BY seq ASC`, b.AgentID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var results []ai.ToolResultMessage
+	for rows.Next() {
+		var seq int64
+		var kind, body string
+		require.NoError(t, rows.Scan(&seq, &kind, &body))
+		require.Equal(t, "toolResult", kind)
+		var res ai.ToolResultMessage
+		require.NoError(t, json.Unmarshal([]byte(body), &res))
+		results = append(results, res)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, results, 2)
+	require.Equal(t, "call_a", results[0].ToolCallID)
+	require.Equal(t, "bash", results[0].ToolName)
+	require.True(t, results[0].IsError)
+	require.Equal(t, "Command interrupted by router restart", results[0].Content[0].(ai.TextContent).Text)
+
+	require.Equal(t, "call_b", results[1].ToolCallID)
+	require.Equal(t, "read", results[1].ToolName)
+	require.True(t, results[1].IsError)
+	require.Equal(t, "Command interrupted by router restart", results[1].Content[0].(ai.TextContent).Text)
 }
 
