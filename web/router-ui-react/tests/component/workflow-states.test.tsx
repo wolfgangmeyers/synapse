@@ -105,6 +105,104 @@ describe("WorkflowStatesPage", () => {
     unmount();
   });
 
+  it("renders tool restriction badges properly", async () => {
+    const statesWithToolConfigs = [
+      {
+        id: "state-unrestricted",
+        name: "Unrestricted State",
+        description: "All tools allowed",
+        entry_text: "Unrestricted",
+        allowed_tools: [],
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-01T00:00:00Z",
+      },
+      {
+        id: "state-restricted",
+        name: "Restricted State",
+        description: "Only read and bash",
+        entry_text: "Restricted",
+        allowed_tools: ["read", "bash"],
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-01T00:00:00Z",
+      },
+    ];
+
+    const mockClient = {
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: statesWithToolConfigs }),
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowStatesPage client={mockClient} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("state-tools-badge-state-unrestricted")).toBeDefined();
+      expect(screen.getByTestId("state-tools-badge-state-restricted")).toBeDefined();
+    });
+
+    expect(screen.getByTestId("state-tools-badge-state-unrestricted").textContent).toContain("All tools allowed");
+    expect(screen.getByTestId("state-tools-badge-state-restricted").textContent).toContain("Tools restricted (2 allowed)");
+
+    unmount();
+  });
+
+  it("allows configuring tool restrictions when creating a state", async () => {
+    const user = userEvent.setup();
+    const createMock = vi.fn().mockResolvedValue({
+      workflow_state: {
+        id: "new-state-id",
+        name: "Restricted Tools State",
+        description: "Custom tools",
+        entry_text: "Entry",
+        allowed_tools: ["read", "write"],
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-01T00:00:00Z",
+      },
+    });
+    const mockClient = {
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: [] }),
+      createWorkflowState: createMock,
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowStatesPage client={mockClient} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No workflow states yet.")).toBeDefined();
+    });
+
+    const newStateBtn = screen.getByRole("button", { name: /New State/i });
+    await user.click(newStateBtn);
+
+    const nameInput = screen.getByLabelText(/State Name \*/i);
+    await user.type(nameInput, "Restricted Tools State");
+
+    // Tool restrictions: toggle off "Allow all tools"
+    const allowAllCheckbox = screen.getByTestId("allow-all-tools-checkbox");
+    expect(allowAllCheckbox).toBeDefined();
+    await user.click(allowAllCheckbox);
+
+    // Click Deselect All button
+    const deselectBtn = screen.getByRole("button", { name: /Deselect All/i });
+    await user.click(deselectBtn);
+
+    // Select read and write checkboxes
+    const readCheckbox = screen.getByTestId("tool-checkbox-read");
+    const writeCheckbox = screen.getByTestId("tool-checkbox-write");
+    await user.click(readCheckbox);
+    await user.click(writeCheckbox);
+
+    // Submit form
+    const submitBtn = screen.getByRole("button", { name: /Create State/i });
+    await user.click(submitBtn);
+
+    await waitFor(() => {
+      expect(createMock).toHaveBeenCalledTimes(1);
+    });
+
+    const callArg = createMock.mock.calls[0]?.[0];
+    expect(callArg.allowed_tools).toEqual(["read", "write"]);
+
+    unmount();
+  });
+
   it("can add, edit, and configure reminders in the modal dialog", async () => {
     const user = userEvent.setup();
     const createMock = vi.fn().mockResolvedValue({

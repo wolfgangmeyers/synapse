@@ -1,6 +1,12 @@
 import { useState, useEffect, type ReactElement } from "react";
 import type { RouterHttpClient } from "../transport/http-client";
-import type { WorkflowState, WorkflowStateInput, WorkflowReminderConfig, WorkflowReminderType } from "../domain/workflow-states";
+import {
+  type WorkflowState,
+  type WorkflowStateInput,
+  type WorkflowReminderConfig,
+  type WorkflowReminderType,
+  KNOWN_WORKFLOW_TOOLS,
+} from "../domain/workflow-states";
 import { secureUuid } from "../platform/secure-uuid";
 import { DialogShell } from "./DialogShell";
 
@@ -31,6 +37,8 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
   const [formDescription, setFormDescription] = useState("");
   const [formEntryText, setFormEntryText] = useState("");
   const [formReminders, setFormReminders] = useState<WorkflowReminderConfig[]>([]);
+  const [formAllToolsAllowed, setFormAllToolsAllowed] = useState(true);
+  const [formAllowedTools, setFormAllowedTools] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | undefined>(undefined);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | undefined>(undefined);
@@ -58,6 +66,8 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormDescription("");
     setFormEntryText("");
     setFormReminders([]);
+    setFormAllToolsAllowed(true);
+    setFormAllowedTools([]);
     setFormError(undefined);
     setIsCreating(true);
   };
@@ -68,6 +78,9 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormDescription(state.description);
     setFormEntryText(state.entry_text);
     setFormReminders(state.reminders ? state.reminders.map((r) => ({ ...r })) : []);
+    const hasRestrictions = Boolean(state.allowed_tools && state.allowed_tools.length > 0);
+    setFormAllToolsAllowed(!hasRestrictions);
+    setFormAllowedTools(hasRestrictions ? [...(state.allowed_tools ?? [])] : []);
     setFormError(undefined);
     setIsCreating(false);
   };
@@ -183,6 +196,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
       name: formName.trim(),
       description: formDescription.trim(),
       entry_text: formEntryText,
+      allowed_tools: formAllToolsAllowed ? [] : formAllowedTools,
       reminders: formReminders.map((r) => ({
         id: r.id,
         type: r.type,
@@ -294,6 +308,28 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                   </div>
                 </div>
 
+                <div className="workflow-state-meta-badges">
+                  {st.allowed_tools && st.allowed_tools.length > 0 ? (
+                    <span
+                      className="workflow-tool-badge restricted"
+                      title={`Restricted tools: ${st.allowed_tools.join(", ")}`}
+                      data-testid={`state-tools-badge-${st.id}`}
+                    >
+                      <i className="fa-solid fa-wrench" aria-hidden="true" />
+                      <span>Tools restricted ({st.allowed_tools.length} allowed)</span>
+                    </span>
+                  ) : (
+                    <span
+                      className="workflow-tool-badge unrestricted"
+                      title="All tools are available to workers in this state"
+                      data-testid={`state-tools-badge-${st.id}`}
+                    >
+                      <i className="fa-solid fa-wrench" aria-hidden="true" />
+                      <span>All tools allowed</span>
+                    </span>
+                  )}
+                </div>
+
                 {st.reminders && st.reminders.length > 0 ? (
                   <div className="workflow-reminder-badges" aria-label="Configured reminders">
                     {st.reminders.map((rem) => {
@@ -395,6 +431,102 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
             <small className="form-text text-muted">
               This text will automatically post to the agent when entering this state.
             </small>
+          </div>
+
+          {/* Tool Restrictions section */}
+          <div className="workflow-tools-section">
+            <div className="workflow-tools-header">
+              <span className="workflow-tools-title">
+                <i className="fa-solid fa-wrench" aria-hidden="true" /> Tool Restrictions
+              </span>
+            </div>
+            <div className="form-check" style={{ marginBottom: "0.5rem" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={formAllToolsAllowed}
+                  onChange={(e) => {
+                    const allowAll = e.target.checked;
+                    setFormAllToolsAllowed(allowAll);
+                    if (allowAll) {
+                      setFormAllowedTools([]);
+                    } else if (formAllowedTools.length === 0) {
+                      setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id));
+                    }
+                  }}
+                  data-testid="allow-all-tools-checkbox"
+                />
+                <strong>Allow all tools (unrestricted)</strong>
+              </label>
+            </div>
+            {!formAllToolsAllowed ? (
+              <div className="workflow-tools-picker" style={{ marginTop: "0.5rem" }}>
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id))}
+                  >
+                    Select All
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setFormAllowedTools([])}
+                  >
+                    Deselect All
+                  </button>
+                </div>
+                <div
+                  className="workflow-tools-grid"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                    gap: "0.5rem",
+                    maxHeight: "220px",
+                    overflowY: "auto",
+                    padding: "0.5rem",
+                    border: "1px solid var(--border-color, #333)",
+                    borderRadius: "4px",
+                  }}
+                >
+                  {KNOWN_WORKFLOW_TOOLS.map((tool) => {
+                    const isChecked = formAllowedTools.includes(tool.id);
+                    return (
+                      <label
+                        key={tool.id}
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: "0.5rem",
+                          cursor: "pointer",
+                          fontSize: "0.85rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setFormAllowedTools((prev) => [...prev, tool.id]);
+                            } else {
+                              setFormAllowedTools((prev) => prev.filter((id) => id !== tool.id));
+                            }
+                          }}
+                          data-testid={`tool-checkbox-${tool.id}`}
+                        />
+                        <div>
+                          <code>{tool.name}</code>
+                          <div className="text-muted" style={{ fontSize: "0.75rem" }}>
+                            {tool.description}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {/* Reminders section */}

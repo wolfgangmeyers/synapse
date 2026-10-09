@@ -41,21 +41,23 @@ type WorkflowReminderConfig struct {
 }
 
 type WorkflowState struct {
-	ID          string                   `json:"id"`
-	Name        string                   `json:"name"`
-	Description string                   `json:"description"`
-	EntryText   string                   `json:"entry_text"`
-	Reminders   []WorkflowReminderConfig `json:"reminders"`
-	CreatedAt   string                   `json:"created_at"`
-	UpdatedAt   string                   `json:"updated_at"`
+	ID           string                   `json:"id"`
+	Name         string                   `json:"name"`
+	Description  string                   `json:"description"`
+	EntryText    string                   `json:"entry_text"`
+	Reminders    []WorkflowReminderConfig `json:"reminders"`
+	AllowedTools []string                 `json:"allowed_tools"`
+	CreatedAt    string                   `json:"created_at"`
+	UpdatedAt    string                   `json:"updated_at"`
 }
 
 type WorkflowStateRequest struct {
-	ID          *string                  `json:"id,omitempty"`
-	Name        string                   `json:"name"`
-	Description string                   `json:"description"`
-	EntryText   string                   `json:"entry_text"`
-	Reminders   []WorkflowReminderConfig `json:"reminders"`
+	ID           *string                  `json:"id,omitempty"`
+	Name         string                   `json:"name"`
+	Description  string                   `json:"description"`
+	EntryText    string                   `json:"entry_text"`
+	Reminders    []WorkflowReminderConfig `json:"reminders"`
+	AllowedTools []string                 `json:"allowed_tools"`
 }
 
 type WorkflowStateValidationError struct {
@@ -85,6 +87,63 @@ func (e *WorkflowStateNotFoundError) Error() string {
 	return fmt.Sprintf("workflow state %q not found", e.ID)
 }
 func (e *WorkflowStateNotFoundError) Code() string { return "workflow_state_not_found" }
+
+var ValidWorkflowTools = map[string]bool{
+	"mecha_mailbox_send":  true,
+	"goal":                true,
+	"goal_snooze":         true,
+	"mecha_context":       true,
+	"mecha_reminder":      true,
+	"context_reset":       true,
+	"reset":               true,
+	"scratchpad":          true,
+	"bash":                true,
+	"read":                true,
+	"edit":                true,
+	"write":               true,
+	"subagent":            true,
+	"get_subagent_result": true,
+	"steer_subagent":      true,
+	"mecha_worker":        true,
+}
+
+// IsToolAllowedInWorkflowState reports whether toolName is permitted under allowedTools.
+// If allowedTools is empty, all tools are permitted.
+// If allowedTools is non-empty, only tools in allowedTools are permitted,
+// treating "context_reset" and "reset" as interchangeable aliases.
+func IsToolAllowedInWorkflowState(toolName string, allowedTools []string) bool {
+	if len(allowedTools) == 0 {
+		return true
+	}
+	for _, allowed := range allowedTools {
+		if allowed == toolName {
+			return true
+		}
+		if (allowed == "context_reset" || allowed == "reset") && (toolName == "context_reset" || toolName == "reset") {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeWorkflowAllowedTools(tools []string) ([]string, error) {
+	if len(tools) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]bool, len(tools))
+	result := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		t := strings.TrimSpace(raw)
+		if !ValidWorkflowTools[t] {
+			return nil, &WorkflowStateValidationError{Field: "allowed_tools", Message: fmt.Sprintf("invalid tool %q", t)}
+		}
+		if !seen[t] {
+			seen[t] = true
+			result = append(result, t)
+		}
+	}
+	return result, nil
+}
 
 func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 	name := strings.TrimSpace(req.Name)
@@ -143,11 +202,15 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 		}
 	}
 
+	if _, err := sanitizeWorkflowAllowedTools(req.AllowedTools); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, entry_text, reminders_json, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -157,10 +220,12 @@ func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error)
 	for rows.Next() {
 		var state WorkflowState
 		var remindersJSON sql.NullString
-		if err := rows.Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		var allowedToolsJSON sql.NullString
+		if err := rows.Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
+		state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
 		states = append(states, state)
 	}
 	if err := rows.Err(); err != nil {
@@ -172,11 +237,24 @@ func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error)
 	return states, nil
 }
 
+// GetManagedAgentActiveWorkflowState returns the active workflow state for an agent, or nil if none is set.
+func (s *Store) GetManagedAgentActiveWorkflowState(ctx context.Context, agentID string) (*WorkflowState, error) {
+	agent, err := s.ManagedAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if agent == nil || agent.ActiveWorkflowStateID == "" {
+		return nil, nil
+	}
+	return s.GetWorkflowState(ctx, agent.ActiveWorkflowStateID)
+}
+
 func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState, error) {
 	var state WorkflowState
 	var remindersJSON sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-		Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &state.CreatedAt, &state.UpdatedAt)
+	var allowedToolsJSON sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+		Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &state.CreatedAt, &state.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -184,7 +262,30 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 		return nil, err
 	}
 	state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
+	state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
 	return &state, nil
+}
+
+func marshalWorkflowAllowedTools(tools []string) (string, error) {
+	if tools == nil {
+		return "[]", nil
+	}
+	data, err := json.Marshal(tools)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalWorkflowAllowedTools(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	var tools []string
+	if err := json.Unmarshal([]byte(raw), &tools); err != nil || tools == nil {
+		return []string{}
+	}
+	return tools
 }
 
 func marshalWorkflowReminders(reminders []WorkflowReminderConfig) (string, error) {
@@ -246,8 +347,17 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			return err
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, name, description, entry_text, reminders_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			id, name, desc, entryText, remindersJSON, now, now)
+		sanitizedTools, err := sanitizeWorkflowAllowedTools(req.AllowedTools)
+		if err != nil {
+			return err
+		}
+		allowedToolsJSON, err := marshalWorkflowAllowedTools(sanitizedTools)
+		if err != nil {
+			return err
+		}
+
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, name, desc, entryText, remindersJSON, allowedToolsJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -261,13 +371,14 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 		}
 
 		state = &WorkflowState{
-			ID:          id,
-			Name:        name,
-			Description: desc,
-			EntryText:   entryText,
-			Reminders:   remindersCopy,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:           id,
+			Name:         name,
+			Description:  desc,
+			EntryText:    entryText,
+			Reminders:    remindersCopy,
+			AllowedTools: sanitizedTools,
+			CreatedAt:    now,
+			UpdatedAt:    now,
 		}
 		return nil
 	})
@@ -284,8 +395,9 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 	err := s.runImmediate(ctx, func() error {
 		var existing WorkflowState
 		var existingReminders sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-			Scan(&existing.ID, &existing.Name, &existing.Description, &existing.EntryText, &existingReminders, &existing.CreatedAt, &existing.UpdatedAt)
+		var existingAllowedTools sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+			Scan(&existing.ID, &existing.Name, &existing.Description, &existing.EntryText, &existingReminders, &existingAllowedTools, &existing.CreatedAt, &existing.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowStateNotFoundError{ID: id}
 		}
@@ -312,8 +424,17 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			return err
 		}
 
-		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET name = ?, description = ?, entry_text = ?, reminders_json = ?, updated_at = ? WHERE id = ?`,
-			name, desc, entryText, remindersJSON, now, id)
+		sanitizedTools, err := sanitizeWorkflowAllowedTools(req.AllowedTools)
+		if err != nil {
+			return err
+		}
+		allowedToolsJSON, err := marshalWorkflowAllowedTools(sanitizedTools)
+		if err != nil {
+			return err
+		}
+
+		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET name = ?, description = ?, entry_text = ?, reminders_json = ?, allowed_tools_json = ?, updated_at = ? WHERE id = ?`,
+			name, desc, entryText, remindersJSON, allowedToolsJSON, now, id)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -327,13 +448,14 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 		}
 
 		state = &WorkflowState{
-			ID:          id,
-			Name:        name,
-			Description: desc,
-			EntryText:   entryText,
-			Reminders:   remindersCopy,
-			CreatedAt:   existing.CreatedAt,
-			UpdatedAt:   now,
+			ID:           id,
+			Name:         name,
+			Description:  desc,
+			EntryText:    entryText,
+			Reminders:    remindersCopy,
+			AllowedTools: sanitizedTools,
+			CreatedAt:    existing.CreatedAt,
+			UpdatedAt:    now,
 		}
 		return nil
 	})

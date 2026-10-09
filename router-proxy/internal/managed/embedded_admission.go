@@ -3,9 +3,11 @@ package managed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
 )
 
@@ -49,6 +51,28 @@ func (m *Manager) validateEmbeddedWorkingDirectory(cwd string) error {
 		if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
 			return errors.New("embedded working directory overlaps credential tree")
 		}
+	}
+	return nil
+}
+
+// admitWorkflowStateTool verifies whether the specified tool is permitted by the agent's current active workflow state.
+// If the agent has no active workflow state, or if AllowedTools is empty, all tools are permitted.
+// If AllowedTools is non-empty, only tools in AllowedTools (with alias resolution) are permitted.
+func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolName string) error {
+	if s == nil || agentID == "" {
+		return nil
+	}
+	state, err := s.GetManagedAgentActiveWorkflowState(ctx, agentID)
+	if err != nil || state == nil {
+		if agent, aerr := s.ManagedAgent(ctx, agentID); aerr == nil && agent != nil && agent.ParentAgentID != "" {
+			state, _ = s.GetManagedAgentActiveWorkflowState(ctx, agent.ParentAgentID)
+		}
+	}
+	if state == nil || len(state.AllowedTools) == 0 {
+		return nil
+	}
+	if !store.IsToolAllowedInWorkflowState(toolName, state.AllowedTools) {
+		return fmt.Errorf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)
 	}
 	return nil
 }
