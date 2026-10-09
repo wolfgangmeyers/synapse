@@ -22,6 +22,8 @@ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsT
 github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
 github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261009051925-6117e990e5c2 h1:s4A64XTv2k5lj7se4oMxSmSMMghVuagilwbWCxd8UhM=
 github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261009051925-6117e990e5c2/go.mod h1:Ks4OQItOlcj/EjCFL/uHhkwme5r4SKDYttx3nHiDVbo=
+github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261009124101-e2bce16a1a45 h1:IM051L5HrO/A7mXRhBeLCElL2KFR80H3ks+DEqzrDNw=
+github.com/wolfgangmeyers/pi-go-embedded-sdk v0.87.25-0.20261009124101-e2bce16a1a45/go.mod h1:Ks4OQItOlcj/EjCFL/uHhkwme5r4SKDYttx3nHiDVbo=
 golang.org/x/exp v0.0.0-20231108232855-2478ac86f678 h1:mchzmB1XO2pMaKFRqk/+MV3mgGG96aqaPXaMifQU47w=
 golang.org/x/exp v0.0.0-20231108232855-2478ac86f678/go.mod h1:zk2irFbV9DP96SEBUUAy67IdHUaZuSnrz1n472HUCLE=
 golang.org/x/image v0.41.0 h1:8wS72eGJMJaBxK6okTzd4WaXumUlTVlb753MlsSvTCo=

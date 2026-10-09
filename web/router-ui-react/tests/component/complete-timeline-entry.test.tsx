@@ -617,4 +617,46 @@ describe("Complete timeline entry", () => {
     expect(screen.getByRole("dialog", { name: /Subagent failed/ })).toBeInTheDocument();
     expect(screen.getByText("Process exited with code 1: command not found")).toBeInTheDocument();
   });
+
+  it("renders a clean, prominent visual divider for context reset by category and tool_name", () => {
+    const { container: catContainer } = render(
+      <CompleteTimelineEntry
+        entry={{
+          id: "complete:reset-1",
+          agent_id: "managed-worker",
+          at,
+          category: "context_reset",
+          message: "Context reset (Epoch 2)",
+        }}
+      />
+    );
+
+    const catDivider = catContainer.querySelector(".timeline-context-reset-divider");
+    expect(catDivider).toBeInTheDocument();
+    expect(catDivider).toHaveAttribute("role", "separator");
+    expect(catDivider).toHaveAttribute("aria-label", "Context Reset (Epoch 2)");
+    expect(catContainer.querySelector(".timeline-context-reset-label")?.textContent).toContain("─── Context Reset (Epoch 2) ───");
+
+    const { container: toolContainer } = render(
+      <CompleteTimelineEntry
+        entry={{
+          id: "complete:reset-2",
+          agent_id: "managed-worker",
+          at,
+          presentation: {
+            kind: "tool",
+            tool_name: "context_reset",
+            outcome: "success",
+            summary: "Context reset to epoch 3",
+          },
+        }}
+      />
+    );
+
+    const toolDivider = toolContainer.querySelector(".timeline-context-reset-divider");
+    expect(toolDivider).toBeInTheDocument();
+    expect(toolDivider).toHaveAttribute("role", "separator");
+    expect(toolDivider).toHaveAttribute("aria-label", "Context Reset (Epoch 3)");
+    expect(toolContainer.querySelector(".timeline-context-reset-label")?.textContent).toContain("─── Context Reset (Epoch 3) ───");
+  });
 });

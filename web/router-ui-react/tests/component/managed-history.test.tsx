@@ -619,4 +619,66 @@ describe("Selected-agent conversation modes", () => {
     expect(screen.getByText(thinking1)).toBeInTheDocument();
     expect(screen.getByText(thinking2)).toBeInTheDocument();
   });
+
+  it("renders an unbroken chronological timeline across context resets without hiding older history", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "worker-1", activity_state: "idle" }}
+        ownerId="wolfgang"
+        conversationView="complete"
+        messages={[
+          {
+            id: "msg-1",
+            from: "wolfgang",
+            to: "worker-1",
+            body: "First task in Epoch 1",
+            created_at: "2030-01-01T10:00:00.000Z",
+          },
+        ]}
+        activityEntries={[
+          {
+            id: "complete:1",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:00:05.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "bash",
+              outcome: "success",
+              summary: "Ran bash in Epoch 1",
+            },
+          },
+          {
+            id: "complete:2",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:00:10.000Z",
+            category: "context_reset",
+            message: "Context reset (Epoch 2)",
+          },
+          {
+            id: "complete:3",
+            agent_id: "worker-1",
+            at: "2030-01-01T10:00:15.000Z",
+            presentation: {
+              kind: "tool",
+              tool_name: "write",
+              outcome: "success",
+              summary: "Ran write in Epoch 2",
+            },
+          },
+        ]}
+      />
+    );
+
+    // Verify older Epoch 1 message and tool are still visible
+    expect(screen.getByText("First task in Epoch 1")).toBeInTheDocument();
+    expect(screen.getByText("Ran bash in Epoch 1")).toBeInTheDocument();
+
+    // Verify context reset divider is rendered prominently
+    const divider = container.querySelector(".timeline-context-reset-divider");
+    expect(divider).toBeInTheDocument();
+    expect(divider?.textContent).toContain("─── Context Reset (Epoch 2) ───");
+
+    // Verify newer Epoch 2 activity is visible after the reset
+    expect(screen.getByText("Ran write in Epoch 2")).toBeInTheDocument();
+  });
 });

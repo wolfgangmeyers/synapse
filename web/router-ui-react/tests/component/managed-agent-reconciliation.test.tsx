@@ -207,4 +207,107 @@ describe("Managed Agent Periodic Polling & Reconnect Reconciliation", () => {
     expect(result.current.state.managedHistory?.["agent-1"]?.complete).toHaveLength(1);
     expect(result.current.state.managedHistory?.["agent-1"]?.complete[0]?.message).toBe("reconnected history entry");
   }, 10_000);
+
+  it("resync() cleanly refreshes managed agents, active conversation messages, and timeline history", async () => {
+    let conversationFetched = false;
+    let historyFetched = false;
+    let agentsFetched = false;
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/capabilities")) {
+        return jsonResponse({ managed_v1: true, ui_live_v1: true });
+      }
+      if (url.endsWith("/v1/managed-agents/agent-1/children")) {
+        return jsonResponse({ agent_id: "agent-1", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+      }
+      if (url.includes("/v1/history")) {
+        historyFetched = true;
+        return jsonResponse({
+          view: "complete",
+          entries: [
+            {
+              id: "resync-hist-1",
+              agent_id: "agent-1",
+              at: "2030-01-01T00:00:00.000Z",
+              level: "info",
+              message: "resynced timeline entry",
+            },
+          ],
+          next_before: null,
+        });
+      }
+      if (url.includes("/v1/conversations/")) {
+        conversationFetched = true;
+        return jsonResponse({
+          owner: "wolfgang",
+          peer: "agent-1",
+          high_water_sequence: 1,
+          messages: [
+            {
+              id: "msg-resync-1",
+              from: "agent-1",
+              to: "wolfgang",
+              body: "hello from resynced agent",
+              created_at: "2030-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/v1/managed-agents")) {
+        agentsFetched = true;
+        return jsonResponse({
+          generated_at: "2030-01-01T00:00:00.000Z",
+          projection_version: 30,
+          agents: [{ ...baseAgent, activity_state: "settled" }],
+        });
+      }
+      if (url.endsWith("/v1/agents")) {
+        return jsonResponse({ agents: [] });
+      }
+      return jsonResponse({});
+    });
+
+    const socket = new MockSocket();
+    const liveSocket = new MockSocket();
+
+    const { result } = renderHook(() =>
+      useRouterSession({
+        routerUrl: "http://router.test:4000",
+        agentId: "wolfgang",
+        fetchImpl: mockFetch as any,
+        webSocketFactory: () => socket,
+        uiLiveWebSocketFactory: () => liveSocket,
+      })
+    );
+
+    await waitFor(() => expect(result.current.state.managedAgents).toHaveLength(1));
+
+    // Select the peer
+    act(() => {
+      result.current.dispatch({
+        type: "selection/set",
+        scope: { routerUrl: "http://router.test:4000", agentId: "wolfgang" },
+        peer: "router-managed:agent-1",
+      });
+    });
+
+    conversationFetched = false;
+    historyFetched = false;
+    agentsFetched = false;
+
+    // Call resync()
+    await act(async () => {
+      await result.current.resync();
+    });
+
+    expect(agentsFetched).toBe(true);
+    expect(historyFetched).toBe(true);
+    expect(conversationFetched).toBe(true);
+
+    // Verify state was cleanly updated
+    expect(result.current.state.managedAgents?.[0]?.activity_state).toBe("settled");
+    expect(result.current.state.managedHistory?.["agent-1"]?.complete?.[0]?.message).toBe("resynced timeline entry");
+    expect(result.current.state.messagesByPeer["agent-1"]?.[0]?.body).toBe("hello from resynced agent");
+  }, 10_000);
 });

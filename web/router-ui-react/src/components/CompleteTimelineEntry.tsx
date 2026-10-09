@@ -186,6 +186,31 @@ function normalizedToolName(toolName: string | undefined): string | undefined {
   return toolName.startsWith("functions.") ? toolName.slice("functions.".length) : toolName;
 }
 
+export function isContextResetEntry(entry: ManagedHistoryEntry): boolean {
+  const category = (entry as { category?: unknown }).category;
+  if (category === "context_reset") return true;
+  const toolName = normalizedToolName(entry.presentation?.tool_name);
+  if (toolName === "context_reset" || toolName === "reset") return true;
+  if (entry.presentation?.kind === "context_reset") return true;
+  if (typeof entry.message === "string" && /^Context reset\b/i.test(entry.message.trim())) return true;
+  return false;
+}
+
+export function extractEpoch(entry: ManagedHistoryEntry, fallbackEpoch: number | string = 2): number | string {
+  if (typeof entry.message === "string") {
+    const match = /[Ee]poch\s*(\d+)/.exec(entry.message);
+    if (match && match[1]) return Number(match[1]);
+  }
+  if (typeof entry.presentation?.summary === "string") {
+    const match = /[Ee]poch\s*(\d+)/.exec(entry.presentation.summary);
+    if (match && match[1]) return Number(match[1]);
+  }
+  if (isRecord(entry.tool_input) && (typeof entry.tool_input.epoch === "number" || typeof entry.tool_input.epoch === "string")) {
+    return entry.tool_input.epoch;
+  }
+  return fallbackEpoch;
+}
+
 function titleCase(value: string): string {
   return value.split(/[._-]/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
@@ -383,6 +408,18 @@ function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTim
 }
 
 export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTimelineVisual {
+  if (isContextResetEntry(entry)) {
+    const epoch = extractEpoch(entry);
+    const label = `Context Reset (Epoch ${epoch})`;
+    return {
+      icon: "fa-solid fa-arrows-rotate",
+      tone: "amber",
+      label,
+      dialogTitle: label,
+      detail: cleanOneLine(entry.presentation?.summary) ?? cleanOneLine(entry.message) ?? `Context reset to epoch ${epoch}`,
+      isHighValue: true,
+    };
+  }
   // A current router always supplies presentation. This conservative local
   // synthesis keeps an older router payload readable without reviving the
   // former generic “Agent activity” legacy card.
@@ -644,9 +681,29 @@ export function ThinkingTraceCard({
 export interface CompleteTimelineEntryProps {
   entry: ManagedHistoryEntry;
   suppressThinking?: boolean;
+  epoch?: number | string;
 }
 
-export function CompleteTimelineEntry({ entry, suppressThinking = false }: CompleteTimelineEntryProps): ReactElement | null {
+export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }: CompleteTimelineEntryProps): ReactElement | null {
+  if (isContextResetEntry(entry)) {
+    const epochVal = epoch ?? extractEpoch(entry);
+    return (
+      <div
+        className="timeline-context-reset-divider"
+        role="separator"
+        aria-label={`Context Reset (Epoch ${epochVal})`}
+        data-activity-id={entry.id}
+        data-event-kind="context_reset"
+      >
+        <span className="timeline-context-reset-line" aria-hidden="true" />
+        <span className="timeline-context-reset-label">
+          ─── Context Reset (Epoch {epochVal}) ───
+        </span>
+        <span className="timeline-context-reset-line" aria-hidden="true" />
+      </div>
+    );
+  }
+
   const isThinkingKind = entry.presentation?.kind === "thinking";
   if (isThinkingKind && suppressThinking) {
     return null;

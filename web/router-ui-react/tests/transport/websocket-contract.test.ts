@@ -68,4 +68,115 @@ describe("direct WebSocket transport", () => {
     first.emit("close", { code: 1011 }); vi.advanceTimersByTime(1000); const second = factory.latest; second.readyState = 1; second.emit("open", {});
     expect(stringField(sentFrame(second, 0), "instance_id")).not.toBe(stringField(firstRegister, "instance_id")); expect(client.identity.generation).toBe(2); client.close(); vi.useRealTimers();
   });
+
+  it("retries indefinitely with bounded backoff across repeated disconnects", () => {
+    vi.useFakeTimers();
+    const factory = new FakeFactory();
+    const statuses: string[] = [];
+    const client = createWebSocketClient({
+      routerUrl: "http://router.test",
+      agentId: "web",
+      webSocketFactory: factory.create,
+      retryDelayMs: 1000,
+      maxRetryDelayMs: 5000,
+      onStatus: (status) => statuses.push(status),
+    });
+    client.connect();
+    expect(factory.sockets).toHaveLength(1);
+
+    // Initial failure (attempt 0: 1000ms base delay)
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+    expect(factory.sockets).toHaveLength(1);
+
+    // Advance 999ms - should not have reconnected yet
+    vi.advanceTimersByTime(999);
+    expect(factory.sockets).toHaveLength(1);
+
+    // Advance 1ms (total 1000ms) - attempt 1 connects
+    vi.advanceTimersByTime(1);
+    expect(factory.sockets).toHaveLength(2);
+    expect(client.identity.generation).toBe(2);
+
+    // Failure on attempt 1 (delay is nominal 2000ms + jitter up to 300ms <= 2300ms)
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+
+    // After 1000ms, should NOT have connected yet (since backoff is >1000ms)
+    vi.advanceTimersByTime(1000);
+    expect(factory.sockets).toHaveLength(2);
+
+    // After another 1500ms (total 2500ms), attempt 2 must have fired
+    vi.advanceTimersByTime(1500);
+    expect(factory.sockets).toHaveLength(3);
+    expect(client.identity.generation).toBe(3);
+
+    // Verify it continues retrying indefinitely without hitting any max retry cap
+    for (let i = 0; i < 6; i++) {
+      factory.latest.emit("error", {});
+      factory.latest.emit("close", { code: 1006 });
+      // Max backoff is 5000ms, so 5000ms is always enough for next retry
+      vi.advanceTimersByTime(5000);
+      expect(factory.sockets).toHaveLength(4 + i);
+    }
+
+    client.close();
+    vi.useRealTimers();
+  });
+
+  it("forces an immediate reconnect when fallback HTTP /v1/health returns 200 OK during disconnect", async () => {
+    vi.useFakeTimers();
+    const factory = new FakeFactory();
+    let healthAvailable = false;
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/v1/health")) {
+        if (healthAvailable) {
+          return new Response(JSON.stringify({ status: "ok", version: "v1" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        throw new Error("connect ECONNREFUSED");
+      }
+      throw new Error(`unexpected url: ${urlStr}`);
+    });
+
+    const client = createWebSocketClient({
+      routerUrl: "http://router.test",
+      agentId: "web",
+      webSocketFactory: factory.create,
+      fetchImpl: fetchMock as any,
+      retryDelayMs: 1000,
+      maxRetryDelayMs: 5000,
+      healthPingIntervalMs: 1000,
+    });
+    client.connect();
+    expect(factory.sockets).toHaveLength(1);
+
+    // Socket fails
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+
+    // Health ping tick 1: router still offline
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalled();
+    // After 1000ms, attempt 1 timer fires and creates socket 2
+    expect(factory.sockets).toHaveLength(2);
+
+    // Socket 2 also fails; next backoff delay will be > 2000ms
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+
+    // Router comes back online
+    healthAvailable = true;
+
+    // Advance 1000ms for the health ping to tick
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Health ping succeeded (200 OK) -> immediately forced connect!
+    // Socket 3 is created without waiting for the full exponential backoff delay!
+    expect(factory.sockets).toHaveLength(3);
+    expect(client.identity.generation).toBe(3);
+
+    client.close();
+    vi.useRealTimers();
+  });
 });

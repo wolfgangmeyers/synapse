@@ -25,6 +25,7 @@ export interface RouterSession {
   uiLive: UILiveClient;
   reconnect(): void;
   disconnect(): void;
+  resync(): Promise<void>;
 }
 
 function lifecycleAgent(agent: { agent_id: string; subagent_count: number; subagents: Array<{ id: string; description?: string; type?: string; status?: string }>; subagent_version: number }): Agent {
@@ -72,6 +73,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   const uiLiveErrorRef = useRef(options.onUILiveError); uiLiveErrorRef.current = options.onUILiveError;
   const startManagedSurfaceRef = useRef<(() => void) | undefined>(undefined);
   const syncGroundTruthRef = useRef<((includeHistory?: boolean) => Promise<void>) | undefined>(undefined);
+  const resyncRef = useRef<(() => Promise<void>) | undefined>(undefined);
   const uiLive = useMemo(() => createUILiveClient({
     routerUrl: scope.routerUrl,
     ...(options.uiLiveWebSocketFactory === undefined ? {} : { webSocketFactory: options.uiLiveWebSocketFactory }),
@@ -140,7 +142,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           try {
             const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 200 });
             if (active) {
-              for (const entry of historyPage.entries) {
+              for (const entry of [...historyPage.entries].reverse()) {
                 dispatch({ type: "managed/history", scope: scopeRef.current, view: "complete", entry });
               }
             }
@@ -173,8 +175,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         await loadManagedSnapshot(capabilities);
       } catch {
         if (active) {
-          dispatch({ type: "managed/enabled", scope, enabled: false });
-          // Retry starting managed surface after router recovers:
+          // Do not wipe out managedAvailable during transient restart disconnects.
           if (startManagedSurfaceRetryTimer !== undefined) clearTimeout(startManagedSurfaceRetryTimer);
           startManagedSurfaceRetryTimer = setTimeout(() => {
             startManagedSurfaceRetryTimer = undefined;
@@ -222,12 +223,22 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
             try {
               const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 200 });
               if (active) {
-                for (const entry of historyPage.entries) {
+                for (const entry of [...historyPage.entries].reverse()) {
                   dispatch({ type: "managed/history", scope: currentScope, view: "complete", entry });
                 }
               }
             } catch {
               // history can be reloaded on next selection
+            }
+            try {
+              const quietPage = await transport.http.managedHistory(targetAgentId, "quiet", { limit: 200 });
+              if (active) {
+                for (const entry of [...quietPage.entries].reverse()) {
+                  dispatch({ type: "managed/history", scope: currentScope, view: "quiet", entry });
+                }
+              }
+            } catch {
+              // quiet history can be reloaded on next selection
             }
           }
         }
@@ -245,6 +256,53 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     };
     syncGroundTruthRef.current = reconcileGroundTruth;
 
+    const resync = async (): Promise<void> => {
+      if (!active) return;
+      const currentScope = scopeRef.current;
+      dispatch({ type: "managed/recover", scope: currentScope });
+      if (canConnectUILive(options)) {
+        try { uiLive.connect(); } catch { /* ignore */ }
+      }
+      try {
+        const capabilities = await transport.http.capabilities();
+        const enabled = capabilities.managed_v1 !== false;
+        if (!active) return;
+        dispatch({ type: "managed/enabled", scope: currentScope, enabled });
+      } catch {
+        // capabilities error
+      }
+      await reconcileGroundTruth(true);
+      void transport.refreshAgents().catch(() => undefined);
+      void transport.refreshReminders().catch(() => undefined);
+
+      const selected = stateRef.current.selectedPeer;
+      const peerId = selected
+        ? (selected.startsWith("router-managed:")
+            ? selected.slice("router-managed:".length)
+            : selected.startsWith("tmux:")
+              ? selected.slice("tmux:".length)
+              : selected)
+        : undefined;
+
+      if (peerId) {
+        try {
+          const conv = await transport.conversation(currentScope.agentId, peerId);
+          if (active) {
+            dispatch({
+              type: "history/reconcile",
+              scope: currentScope,
+              peer: peerId,
+              snapshot: conv.messages,
+              highWaterSequence: conv.high_water_sequence,
+            });
+          }
+        } catch {
+          // conversation can be refreshed on next selection
+        }
+      }
+    };
+    resyncRef.current = resync;
+
     const pollIntervalTimer = setInterval(() => {
       if (active && options.connect !== false) {
         void reconcileGroundTruth(false);
@@ -257,7 +315,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       if (event.type === "status") {
         if (event.status === "connected") {
           if (wasConnected) {
-            void reconcileGroundTruth(true);
+            void resync();
           }
           wasConnected = true;
         }
@@ -273,6 +331,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       active = false;
       startManagedSurfaceRef.current = undefined;
       syncGroundTruthRef.current = undefined;
+      resyncRef.current = undefined;
       clearInterval(pollIntervalTimer);
       if (managedSnapshotRetryTimer !== undefined) clearTimeout(managedSnapshotRetryTimer);
       if (startManagedSurfaceRetryTimer !== undefined) clearTimeout(startManagedSurfaceRetryTimer);
@@ -289,5 +348,20 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     : state.routerUrl === scope.routerUrl && state.selectedPeer !== undefined
       ? { ...createInitialState(scope), selectedPeer: state.selectedPeer }
       : createInitialState(scope);
-  return { state: scopedState, transport, dispatch, uiLive, reconnect: () => { transport.connect(); if (canConnectUILive(options)) uiLive.connect(); startManagedSurfaceRef.current?.(); }, disconnect: () => { transport.close(); uiLive.close(); } };
+  return {
+    state: scopedState,
+    transport,
+    dispatch,
+    uiLive,
+    reconnect: () => {
+      transport.connect();
+      if (canConnectUILive(options)) uiLive.connect();
+      startManagedSurfaceRef.current?.();
+    },
+    disconnect: () => {
+      transport.close();
+      uiLive.close();
+    },
+    resync: () => resyncRef.current?.() ?? Promise.resolve(),
+  };
 }
