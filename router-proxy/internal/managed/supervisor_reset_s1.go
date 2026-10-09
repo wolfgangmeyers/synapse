@@ -44,6 +44,9 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 	if err != nil {
 		return ResetResult{}, err
 	}
+	if agent.Runtime == "embedded" {
+		return m.reserveEmbeddedReset(ctx, request, agent)
+	}
 	// Repair the deployed pre-reconciler failure only after an exact live
 	// binding proof. This makes the old terminal action eligible for one normal
 	// retry without changing its historical idempotency response.

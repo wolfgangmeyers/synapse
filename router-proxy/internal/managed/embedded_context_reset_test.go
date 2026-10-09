@@ -810,3 +810,80 @@ func TestPreResetScratchpadWarningReminder(t *testing.T) {
 		require.True(t, lane.warningEmitted, "lane.warningEmitted must be true after reminder emitted")
 	})
 }
+
+// TestManagerResetEmbeddedAgent verifies Manager.Reset on an embedded agent:
+// 1. Returns 202 accepted with operation_id and agent
+// 2. Replays identically (idempotent)
+// 3. Executes context reset asynchronously (epoch advances, old epoch closed, wake turn dispatched)
+func TestManagerResetEmbeddedAgent(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	raw, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer raw.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+		Models: []providers.FauxModelDefinition{{
+			ID:            "port-msg-test",
+			ContextWindow: 1_000_000,
+			MaxTokens:     4096,
+			Input:         []string{"text"},
+		}},
+	})
+	defer reg.Unregister()
+
+	steps := make([]providers.FauxResponseStep, 20)
+	for i := range steps {
+		steps[i] = func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "OK"}}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(steps)
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+
+	parent := subagentTestParent(t, db, "reset-agent")
+	registerParentOwner(mgr, parent)
+
+	req := ResetRequest{
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents/reset-agent/reset",
+		RequestID:         "req-reset-1",
+		CanonicalBodyHash: "hash-reset-1",
+		AgentID:           "reset-agent",
+	}
+
+	// 1. First call: initial reservation and reset trigger
+	res, err := mgr.Reset(ctx, req)
+	require.NoError(t, err)
+	require.False(t, res.Replayed)
+	require.Equal(t, 202, res.Operation.ResponseStatus)
+	require.Equal(t, "reset-agent", res.Agent.AgentID)
+
+	// 2. Second call: idempotent replay
+	res2, err := mgr.Reset(ctx, req)
+	require.NoError(t, err)
+	require.True(t, res2.Replayed)
+	require.Equal(t, res.Operation.OperationID, res2.Operation.OperationID)
+
+	// 3. Wait for context reset to complete asynchronously
+	require.Eventually(t, func() bool {
+		agent, err := db.ManagedAgent(ctx, "reset-agent")
+		if err != nil {
+			return false
+		}
+		return agent.SessionEpoch == 2
+	}, 5*time.Second, 50*time.Millisecond, "expected session epoch to advance to 2")
+
+	// 4. Verify old session epoch is closed (current = 0)
+	var oldCurrent int
+	err = raw.QueryRowContext(ctx, `SELECT current FROM embedded_sessions WHERE agent_id=? AND epoch=1`, "reset-agent").Scan(&oldCurrent)
+	require.NoError(t, err)
+	require.Equal(t, 0, oldCurrent)
+}
+
