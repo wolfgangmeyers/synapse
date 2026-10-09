@@ -1803,5 +1803,102 @@ func TestGoogleAuth_ResolveGoogleAPIKey_Precedence(t *testing.T) {
 	require.Equal(t, "file-key", k)
 }
 
+func TestSanitizeGeminiParameters(t *testing.T) {
+	// Case 1: nil input returns nil
+	require.Nil(t, sanitizeGeminiParameters(nil))
+
+	// Case 2: raw map with additionalProperties, $schema, etc.
+	rawMap := map[string]any{
+		"$schema":              "http://json-schema.org/draft-07/schema#",
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"command": map[string]any{
+				"type":                 "string",
+				"description":          "command to run",
+				"additionalProperties": false,
+				"$schema":              "http://example.com/schema",
+				"$comment":             "internal note",
+			},
+			"items": []any{
+				map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"$defs": map[string]any{
+						"def1": "val1",
+					},
+					"properties": map[string]any{
+						"nested": map[string]any{
+							"type": "string",
+						},
+					},
+				},
+				"scalar-item",
+			},
+		},
+		"required": []any{"command"},
+	}
+
+	sanitized := sanitizeGeminiParameters(rawMap)
+	sanitizedMap, ok := sanitized.(map[string]any)
+	require.True(t, ok)
+
+	// Top level checks
+	require.NotContains(t, sanitizedMap, "$schema")
+	require.NotContains(t, sanitizedMap, "additionalProperties")
+	require.Equal(t, "object", sanitizedMap["type"])
+	require.Equal(t, []any{"command"}, sanitizedMap["required"])
+
+	// Nested property checks
+	props, ok := sanitizedMap["properties"].(map[string]any)
+	require.True(t, ok)
+	cmdProp, ok := props["command"].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, cmdProp, "additionalProperties")
+	require.NotContains(t, cmdProp, "$schema")
+	require.NotContains(t, cmdProp, "$comment")
+	require.Equal(t, "string", cmdProp["type"])
+	require.Equal(t, "command to run", cmdProp["description"])
+
+	// Slice traversal checks
+	items, ok := props["items"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 2)
+	item0, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, item0, "additionalProperties")
+	require.NotContains(t, item0, "$defs")
+	require.Equal(t, "object", item0["type"])
+	require.Equal(t, "scalar-item", items[1])
+
+	// Case 3: *ai.Schema struct input (as produced by ai.Object)
+	additionalFalse := false
+	schema := &ai.Schema{
+		Type:              "object",
+		AdditionalAllowed: &additionalFalse,
+		Properties: map[string]*ai.Schema{
+			"param1": {
+				Type:              "string",
+				Description:       "first param",
+				AdditionalAllowed: &additionalFalse,
+			},
+		},
+		Required: []string{"param1"},
+	}
+
+	sanitizedSchema := sanitizeGeminiParameters(schema)
+	schemaMap, ok := sanitizedSchema.(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, schemaMap, "additionalProperties")
+	require.NotContains(t, schemaMap, "$schema")
+	schemaProps, ok := schemaMap["properties"].(map[string]any)
+	require.True(t, ok)
+	p1, ok := schemaProps["param1"].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, p1, "additionalProperties")
+	require.Equal(t, "string", p1["type"])
+}
+
+
 
 

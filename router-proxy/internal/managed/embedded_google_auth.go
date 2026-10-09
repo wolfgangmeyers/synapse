@@ -1062,6 +1062,60 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 	return contents
 }
 
+var geminiRejectedSchemaFields = map[string]bool{
+	"additionalProperties": true,
+	"$schema":              true,
+	"$id":                  true,
+	"$anchor":              true,
+	"$dynamicAnchor":       true,
+	"$vocabulary":          true,
+	"$comment":             true,
+	"$defs":                true,
+	"definitions":          true,
+}
+
+func sanitizeGeminiParameters(v any) any {
+	if v == nil {
+		return nil
+	}
+
+	// If v is an *ai.Schema or other custom struct, marshal to JSON and unmarshal
+	// to generic map/slice so we can traverse arbitrary schema structures cleanly.
+	if _, ok := v.(map[string]any); !ok {
+		if _, ok := v.([]any); !ok {
+			raw, err := json.Marshal(v)
+			if err != nil {
+				return v
+			}
+			var generic any
+			if err := json.Unmarshal(raw, &generic); err != nil {
+				return v
+			}
+			v = generic
+		}
+	}
+
+	switch val := v.(type) {
+	case map[string]any:
+		cleaned := make(map[string]any, len(val))
+		for k, child := range val {
+			if geminiRejectedSchemaFields[k] {
+				continue
+			}
+			cleaned[k] = sanitizeGeminiParameters(child)
+		}
+		return cleaned
+	case []any:
+		cleaned := make([]any, len(val))
+		for i, child := range val {
+			cleaned[i] = sanitizeGeminiParameters(child)
+		}
+		return cleaned
+	default:
+		return v
+	}
+}
+
 func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 	stream := ai.NewAssistantMessageEventStream()
 	go func() {
@@ -1126,7 +1180,7 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 					decls = append(decls, map[string]any{
 						"name":        t.Name,
 						"description": t.Description,
-						"parameters":  t.Parameters,
+						"parameters":  sanitizeGeminiParameters(t.Parameters),
 					})
 				}
 				tools = append(tools, map[string]any{"functionDeclarations": decls})
