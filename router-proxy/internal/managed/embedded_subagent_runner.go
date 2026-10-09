@@ -288,6 +288,11 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 			MaxTokens:     8192,
 		}
 	}
+	if model != nil && record.SelectedModel.Provider != "" && model.Provider != record.SelectedModel.Provider {
+		cloned := *model
+		cloned.Provider = record.SelectedModel.Provider
+		model = &cloned
+	}
 	var stream agent.StreamFn
 	if m.embeddedModelResolver != nil {
 		resolved := m.embeddedModelResolver(record)

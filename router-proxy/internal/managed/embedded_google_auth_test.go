@@ -1899,6 +1899,45 @@ func TestSanitizeGeminiParameters(t *testing.T) {
 	require.Equal(t, "string", p1["type"])
 }
 
+func TestAntigravityModelProviderPreservation(t *testing.T) {
+	// Baseline: the Pi catalog registers gemini-3.8-flash under "google".
+	catalogGoogleModel := ai.GetModel("google", "gemini-3.8-flash")
+	require.NotNil(t, catalogGoogleModel)
+	require.Equal(t, "google", catalogGoogleModel.Provider)
+
+	m := &Manager{}
+	record := store.ManagedAgentRecord{
+		SelectedModel: store.ManagedModel{
+			Provider: "antigravity",
+			ID:       "gemini-3.8-flash",
+		},
+	}
+
+	model, stream, err := m.resolveSubagentModel(record)
+	require.NoError(t, err)
+	require.NotNil(t, model)
+	require.Equal(t, "antigravity", model.Provider, "resolved model Provider must preserve antigravity, not fall back to google")
+	require.Equal(t, "gemini-3.8-flash", model.ID)
+	require.NotNil(t, stream)
+
+	// Ensure the global catalog model was not mutated by the resolution.
+	require.Equal(t, "google", catalogGoogleModel.Provider)
+
+	// Verify standard google selection still resolves with Provider "google".
+	googleRecord := store.ManagedAgentRecord{
+		SelectedModel: store.ManagedModel{
+			Provider: "google",
+			ID:       "gemini-3.8-flash",
+		},
+	}
+	gModel, gStream, err := m.resolveSubagentModel(googleRecord)
+	require.NoError(t, err)
+	require.NotNil(t, gModel)
+	require.Equal(t, "google", gModel.Provider)
+	require.Equal(t, "gemini-3.8-flash", gModel.ID)
+	require.NotNil(t, gStream)
+}
+
 
 
 

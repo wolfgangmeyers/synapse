@@ -873,6 +873,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			MaxTokens:     8192,
 		}
 	}
+	if model != nil && saved.SelectedModel.Provider != "" && model.Provider != saved.SelectedModel.Provider {
+		cloned := *model
+		cloned.Provider = saved.SelectedModel.Provider
+		model = &cloned
+	}
 	var injectedStreamModel *ai.Model
 	if m.embeddedModelResolver != nil {
 		resolved := m.embeddedModelResolver(saved)
