@@ -493,12 +493,172 @@ func (s *Store) ResetActiveEmbeddedAgents(ctx context.Context) error {
 				return err
 			}
 		}
-		if n > 0 || histN > 0 {
+		danglingN, err := s.reconcileDanglingEmbeddedToolCallsTx(ctx)
+		if err != nil {
+			return err
+		}
+		if n > 0 || histN > 0 || danglingN > 0 {
 			_, err = s.bumpManagedProjectionVersion(ctx)
 			return err
 		}
 		return nil
 	})
+}
+
+// reconcileDanglingEmbeddedToolCallsTx checks all current embedded sessions for
+// in-flight tool calls that never received a toolResult before the router restarted.
+// It appends a synthetic error toolResult so the transcript remains valid for the model.
+func (s *Store) reconcileDanglingEmbeddedToolCallsTx(ctx context.Context) (int64, error) {
+	var sessionsExists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedded_sessions'`).Scan(&sessionsExists); err != nil {
+		return 0, err
+	}
+	var entriesExists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedded_entries'`).Scan(&entriesExists); err != nil {
+		return 0, err
+	}
+	if sessionsExists == 0 || entriesExists == 0 {
+		return 0, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id, session_id, epoch, generation FROM embedded_sessions WHERE current=1`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type currentSession struct {
+		binding EmbeddedBinding
+	}
+	var sessions []currentSession
+	for rows.Next() {
+		var cs currentSession
+		if err := rows.Scan(&cs.binding.AgentID, &cs.binding.SessionID, &cs.binding.Epoch, &cs.binding.Generation); err != nil {
+			return 0, err
+		}
+		sessions = append(sessions, cs)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	_ = rows.Close()
+
+	var totalCleaned int64
+	for _, cs := range sessions {
+		tailRows, err := s.db.QueryContext(ctx, `SELECT seq, kind, body, digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND seq >= (SELECT COALESCE(MAX(seq), 0) FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND kind != 'toolResult' AND kind != 'tool_result') ORDER BY seq ASC`, cs.binding.AgentID, cs.binding.SessionID, cs.binding.Epoch, cs.binding.AgentID, cs.binding.SessionID, cs.binding.Epoch)
+		if err != nil {
+			return totalCleaned, err
+		}
+		type tailEntry struct {
+			seq    int64
+			kind   string
+			body   []byte
+			digest string
+		}
+		var tail []tailEntry
+		for tailRows.Next() {
+			var te tailEntry
+			if err := tailRows.Scan(&te.seq, &te.kind, &te.body, &te.digest); err != nil {
+				_ = tailRows.Close()
+				return totalCleaned, err
+			}
+			tail = append(tail, te)
+		}
+		if err := tailRows.Err(); err != nil {
+			_ = tailRows.Close()
+			return totalCleaned, err
+		}
+		_ = tailRows.Close()
+
+		if len(tail) == 0 {
+			continue
+		}
+
+		first := tail[0]
+		if first.kind != "assistant" {
+			continue
+		}
+
+		msg, err := ai.UnmarshalMessage(first.body)
+		if err != nil {
+			continue
+		}
+
+		resolvedToolCallIDs := make(map[string]bool)
+		for _, entry := range tail[1:] {
+			if entry.kind == "toolResult" || entry.kind == "tool_result" {
+				resultMsg, err := ai.UnmarshalMessage(entry.body)
+				if err == nil {
+					if tr, ok := resultMsg.(ai.ToolResultMessage); ok {
+						resolvedToolCallIDs[tr.ToolCallID] = true
+					} else if tr, ok := resultMsg.(*ai.ToolResultMessage); ok && tr != nil {
+						resolvedToolCallIDs[tr.ToolCallID] = true
+					}
+				}
+			}
+		}
+
+		var danglingToolCalls []ai.ToolCall
+		switch a := msg.(type) {
+		case ai.AssistantMessage:
+			for _, part := range a.Content {
+				if tc, ok := part.(ai.ToolCall); ok {
+					if !resolvedToolCallIDs[tc.ID] {
+						danglingToolCalls = append(danglingToolCalls, tc)
+					}
+				} else if tc, ok := part.(*ai.ToolCall); ok && tc != nil {
+					if !resolvedToolCallIDs[tc.ID] {
+						danglingToolCalls = append(danglingToolCalls, *tc)
+					}
+				}
+			}
+		case *ai.AssistantMessage:
+			if a != nil {
+				for _, part := range a.Content {
+					if tc, ok := part.(ai.ToolCall); ok {
+						if !resolvedToolCallIDs[tc.ID] {
+							danglingToolCalls = append(danglingToolCalls, tc)
+						}
+					} else if tc, ok := part.(*ai.ToolCall); ok && tc != nil {
+						if !resolvedToolCallIDs[tc.ID] {
+							danglingToolCalls = append(danglingToolCalls, *tc)
+						}
+					}
+				}
+			}
+		}
+
+		if len(danglingToolCalls) == 0 {
+			continue
+		}
+
+		lastEntry := tail[len(tail)-1]
+		headSeq := lastEntry.seq
+		headDigest := lastEntry.digest
+
+		for _, tc := range danglingToolCalls {
+			synthetic := ai.ToolResultMessage{
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+				Content:    ai.ContentList{ai.TextContent{Text: "Command interrupted by router restart"}},
+				IsError:    true,
+				Timestamp:  s.clock.Now().UnixMilli(),
+			}
+			body, err := json.Marshal(synthetic)
+			if err != nil {
+				return totalCleaned, err
+			}
+			entry, err := s.appendEmbeddedTx(ctx, cs.binding, "toolResult", body, headSeq, headDigest)
+			if err != nil {
+				return totalCleaned, err
+			}
+			headSeq = entry.Sequence
+			headDigest = entry.Digest
+			totalCleaned++
+		}
+	}
+
+	return totalCleaned, nil
 }
 
 // ResetEmbeddedSession accepts only the managed row's replacement epoch. The
