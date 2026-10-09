@@ -128,7 +128,7 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
     if (onInterrupt) onInterrupt();
     else if (client && agent) void client.interruptManagedAgent(agent.agent_id).catch(() => {});
   }}><i className="fa-solid fa-square" aria-hidden="true" /></button> : null}{agent && showGoalControl ? <button type="button" className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`} onClick={onGoal} aria-label="Set goal" title="Set goal"><i className="fa-solid fa-flag" aria-hidden="true" /></button> : null}{agent?.source === "router-managed" && client ? (
-  <div className="workflow-header-control" style={{ position: "relative", display: "inline-block" }}>
+  <div className="workflow-header-control">
     <button
       type="button"
       className={`workflow-header-button ${activeWorkflowId ? "has-workflow active" : ""}`}
@@ -138,7 +138,6 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
       disabled={workflowUpdating}
     >
       <i className="fa-solid fa-diagram-project" aria-hidden="true" />
-      {activeWorkflow ? <span className="workflow-header-badge-label" style={{ marginLeft: 4, fontSize: "0.85em", fontWeight: 600 }}>{activeWorkflow.name}</span> : null}
     </button>
     {showWorkflowDropdown ? (
       <div className="workflow-header-dropdown" style={{ position: "absolute", top: "100%", right: 0, zIndex: 1000, background: "var(--bg-primary, #1e1e1e)", border: "1px solid var(--border-color, #444)", borderRadius: 6, minWidth: 200, padding: 4, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
