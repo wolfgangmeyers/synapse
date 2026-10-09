@@ -52,7 +52,7 @@ func (m *Manager) streamEmbeddedVertex(requestCtx context.Context, requestModel 
 					decls = append(decls, map[string]any{
 						"name":        t.Name,
 						"description": t.Description,
-						"parameters":  t.Parameters,
+						"parameters":  sanitizeGeminiParameters(t.Parameters),
 					})
 				}
 				tools = append(tools, map[string]any{"functionDeclarations": decls})
