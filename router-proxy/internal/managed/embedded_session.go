@@ -733,11 +733,37 @@ func (m *Manager) runEmbeddedClaimedWake(ctx context.Context, saved store.Manage
 	return err
 }
 
-func resolveEmbeddedWorkerSystemPrompt(role string) string {
-	return `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+func buildEmbeddedWorkerSystemPrompt(role, agentID, cwd string) string {
+	base := `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 ### Responsiveness & Communication
 When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.`
+
+	if agentID != "" {
+		identity := fmt.Sprintf(`# Agent Identity
+- You are an embedded worker running in the mecha router harness.
+- Your agent name / mailbox address is: `+"`%s`"+`
+- When sending or receiving mailbox messages, your identity is `+"`%s`"+`.
+- Your working directory is: `+"`%s`", agentID, agentID, cwd)
+		return base + "\n\n" + identity
+	}
+	return base
+}
+
+func resolveEmbeddedWorkerSystemPrompt(role, agentID, cwd string) string {
+	return buildEmbeddedWorkerSystemPrompt(role, agentID, cwd)
+}
+
+func formatGenesisPrompt(agentID, instruction string) string {
+	namePrefix := fmt.Sprintf("You are the '%s' agent.", agentID)
+	trimmed := strings.TrimSpace(instruction)
+	if trimmed == "" {
+		return namePrefix + " Proceed with your assigned task."
+	}
+	if strings.Contains(trimmed, fmt.Sprintf("You are the '%s' agent", agentID)) {
+		return trimmed
+	}
+	return namePrefix + "\n\n" + trimmed
 }
 
 const (
@@ -1405,7 +1431,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if model.MaxTokens > 0 && model.MaxTokens < maxTokens {
 		maxTokens = model.MaxTokens
 	}
-	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: resolveEmbeddedWorkerSystemPrompt(role), OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
+	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: resolveEmbeddedWorkerSystemPrompt(role, binding.AgentID, saved.Cwd), OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
 		ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
 			if call.ToolCall.Name != "bash" {
 				return nil, nil
@@ -1898,7 +1924,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return p.seq, nil
 	}
 	if explicitPrompt != "" {
-		_, err := session.Run(ctx, explicitPrompt)
+		promptToRun := explicitPrompt
+		if role != "root" && !hasUser && saved.PendingInitialInstruction != "" && explicitPrompt == saved.PendingInitialInstruction {
+			promptToRun = formatGenesisPrompt(saved.AgentID, explicitPrompt)
+		}
+		_, err := session.Run(ctx, promptToRun)
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}
@@ -1912,7 +1942,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return p.seq, nil
 	}
 	if !hasUser && saved.PendingInitialInstruction != "" {
-		_, err := session.Run(ctx, saved.PendingInitialInstruction)
+		instruction := saved.PendingInitialInstruction
+		if role != "root" {
+			instruction = formatGenesisPrompt(saved.AgentID, saved.PendingInitialInstruction)
+		}
+		_, err := session.Run(ctx, instruction)
 		if err != nil {
 			return 0, handleTurnErr(err)
 		}

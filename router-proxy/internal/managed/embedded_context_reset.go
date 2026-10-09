@@ -186,7 +186,12 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		genesisText = firstUserText
 	}
 	if genesisText == "" {
-		genesisText = "You are a mecha agent. Proceed with your assigned task."
+		genesisText = fmt.Sprintf("You are the '%s' agent. Proceed with your assigned task.", saved.AgentID)
+	} else if saved.PendingInitialInstruction != "" {
+		role, _ := m.store.EmbeddedSessionRole(ctx, binding)
+		if role != "root" {
+			genesisText = formatGenesisPrompt(saved.AgentID, genesisText)
+		}
 	}
 	genesisMsg := ai.UserMessage{
 		Content: ai.ContentList{
