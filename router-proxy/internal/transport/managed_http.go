@@ -1376,6 +1376,9 @@ func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, er
 	goalLock, lockOK := readBoolean("goal_lock_enabled")
 	snooze, snoozeOK := readBoolean("snooze_enabled")
 	duration, durationOK := readPositive("snooze_duration_ms")
+	if duration > store.EmbeddedGoalSnoozeMaxDurationMS {
+		durationOK = false
+	}
 	turnLimit, turnLimitOK := readNullablePositive("snooze_turn_limit")
 	if number, ok := turnLimit.(int64); ok && number > 20 {
 		turnLimitOK = false

@@ -67,7 +67,7 @@ func DefaultManagedGoalSettings() ManagedGoalSettings {
 }
 
 func validManagedGoalSettings(value ManagedGoalSettings) bool {
-	if value.SnoozeDurationMS < 1 || value.SnoozeRefillYieldMS < 1 || value.SnoozeRefillElapsedMS < 1 {
+	if value.SnoozeDurationMS < 1 || value.SnoozeDurationMS > EmbeddedGoalSnoozeMaxDurationMS || value.SnoozeRefillYieldMS < 1 || value.SnoozeRefillElapsedMS < 1 {
 		return false
 	}
 	if value.SnoozeTurnLimit != nil && (*value.SnoozeTurnLimit < 1 || *value.SnoozeTurnLimit > 20) {
@@ -583,8 +583,8 @@ func (s *Store) SnoozeManagedGoalPolicy(ctx context.Context, fence ManagedRuntim
 			return idErr
 		}
 		snoozeDuration := current.Config.Settings.SnoozeDurationMS
-		if snoozeDuration > 60_000 {
-			snoozeDuration = 60_000
+		if snoozeDuration > EmbeddedGoalSnoozeMaxDurationMS {
+			snoozeDuration = EmbeddedGoalSnoozeMaxDurationMS
 		}
 		wakeAt := formatTimestamp(now.Add(time.Duration(snoozeDuration) * time.Millisecond))
 		args := append([]any{wakeAt, wakeAt, wakeupMessageID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, formatTimestamp(now), fence.AgentID}, managedFenceValues(fence)...)

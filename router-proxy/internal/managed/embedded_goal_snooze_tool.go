@@ -20,46 +20,86 @@ func embeddedGoalSnoozeSchema() *ai.Schema {
 }
 
 // The parser runs before SDK intent admission, using the original arguments.
-func embeddedGoalSnoozeArguments(args map[string]any) ([]byte, error) {
+func embeddedGoalSnoozeArguments(args map[string]any, limitMsOpt ...int64) ([]byte, error) {
+	if args == nil {
+		args = make(map[string]any)
+	}
+	limitMs := store.DefaultManagedGoalSettings().SnoozeDurationMS
+	if len(limitMsOpt) > 0 && limitMsOpt[0] > 0 {
+		limitMs = limitMsOpt[0]
+	}
+	if limitMs > store.EmbeddedGoalSnoozeMaxDurationMS {
+		limitMs = store.EmbeddedGoalSnoozeMaxDurationMS
+	}
+
+	clampOrKeep := func(d int64) int64 {
+		if d > limitMs {
+			return limitMs
+		}
+		return d
+	}
+
 	if rawVal, ok := args["duration_ms"]; ok {
-		switch v := rawVal.(type) {
-		case float64:
-			if int64(v) > 60000 {
-				args["duration_ms"] = int64(60000)
-			}
-		case int:
-			if int64(v) > 60000 {
-				args["duration_ms"] = int64(60000)
-			}
-		case int64:
-			if v > 60000 {
-				args["duration_ms"] = int64(60000)
-			}
-		case json.Number:
-			if i, err := v.Int64(); err == nil && i > 60000 {
-				args["duration_ms"] = int64(60000)
+		if rawVal == nil {
+			args["duration_ms"] = limitMs
+		} else {
+			switch v := rawVal.(type) {
+			case float64:
+				d := int64(v)
+				if d > 0 {
+					args["duration_ms"] = clampOrKeep(d)
+				}
+			case int:
+				d := int64(v)
+				if d > 0 {
+					args["duration_ms"] = clampOrKeep(d)
+				}
+			case int64:
+				if v > 0 {
+					args["duration_ms"] = clampOrKeep(v)
+				}
+			case json.Number:
+				if i, err := v.Int64(); err == nil && i > 0 {
+					args["duration_ms"] = clampOrKeep(i)
+				}
 			}
 		}
 	} else if rawVal, ok := args["duration"]; ok {
-		switch v := rawVal.(type) {
-		case float64:
-			d := int64(v)
-			if d > 60000 {
-				d = 60000
+		delete(args, "duration")
+		if rawVal == nil {
+			args["duration_ms"] = limitMs
+		} else {
+			switch v := rawVal.(type) {
+			case float64:
+				d := int64(v)
+				if d > 0 {
+					d = clampOrKeep(d)
+				}
+				args["duration_ms"] = d
+			case int:
+				d := int64(v)
+				if d > 0 {
+					d = clampOrKeep(d)
+				}
+				args["duration_ms"] = d
+			case int64:
+				d := v
+				if d > 0 {
+					d = clampOrKeep(d)
+				}
+				args["duration_ms"] = d
+			case json.Number:
+				if i, err := v.Int64(); err == nil {
+					d := i
+					if d > 0 {
+						d = clampOrKeep(d)
+					}
+					args["duration_ms"] = d
+				}
 			}
-			args["duration_ms"] = d
-		case int:
-			d := int64(v)
-			if d > 60000 {
-				d = 60000
-			}
-			args["duration_ms"] = d
-		case int64:
-			if v > 60000 {
-				v = 60000
-			}
-			args["duration_ms"] = v
 		}
+	} else {
+		args["duration_ms"] = limitMs
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -69,6 +109,20 @@ func embeddedGoalSnoozeArguments(args map[string]any) ([]byte, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+func (m *Manager) goalSnoozeLimitMS(ctx context.Context, agentID string) int64 {
+	limitMs := store.DefaultManagedGoalSettings().SnoozeDurationMS
+	if m != nil && m.store != nil && agentID != "" {
+		policy, err := m.store.ManagedGoalPolicyFor(ctx, agentID)
+		if err == nil && policy != nil && policy.Config.Settings.SnoozeDurationMS > 0 {
+			limitMs = policy.Config.Settings.SnoozeDurationMS
+		}
+	}
+	if limitMs > store.EmbeddedGoalSnoozeMaxDurationMS {
+		limitMs = store.EmbeddedGoalSnoozeMaxDurationMS
+	}
+	return limitMs
 }
 
 func (m *Manager) embeddedGoalSnoozeTool(owner embeddedOwner, turn func() store.EmbeddedGoalSnoozeTurn, admitted func(string) *store.EmbeddedGoalInvocation, completed func(string, *store.EmbeddedGoalInvocation, ai.ToolResultMessage)) agent.AgentTool {
@@ -83,7 +137,11 @@ func (m *Manager) embeddedGoalSnoozeTool(owner embeddedOwner, turn func() store.
 		if err := m.store.CheckEmbeddedGoalInvocation(ctx, invocation); err != nil {
 			return agent.AgentToolResult{}, err
 		}
-		raw, err := embeddedGoalSnoozeArguments(args)
+		if args == nil {
+			args = make(map[string]any)
+		}
+		limitMs := m.goalSnoozeLimitMS(ctx, owner.binding.AgentID)
+		raw, err := embeddedGoalSnoozeArguments(args, limitMs)
 		if err != nil {
 			return agent.AgentToolResult{}, err
 		}
