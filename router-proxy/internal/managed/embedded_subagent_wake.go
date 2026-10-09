@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -187,9 +188,9 @@ func (m *Manager) AsyncDeliverSubagentParentWake(parent store.EmbeddedBinding, r
 }
 
 func (m *Manager) deliverSubagentMailboxNotification(parent store.EmbeddedBinding, record store.ManagedSubagentRecord) {
-	subject := fmt.Sprintf("Subagent %s Completed", record.AgentID)
+	subject := fmt.Sprintf("[System Notice] Subagent Completed: %s", record.AgentID)
 	if record.Status != "completed" && record.Status != "steered" {
-		subject = fmt.Sprintf("Subagent %s %s", record.AgentID, record.Status)
+		subject = fmt.Sprintf("[System Notice] Subagent %s: %s", strings.Title(record.Status), record.AgentID)
 	}
 	body := FormatSubagentWakePrompt(record)
 	source := protocol.MessageSource{Kind: "system"}
@@ -197,7 +198,7 @@ func (m *Manager) deliverSubagentMailboxNotification(parent store.EmbeddedBindin
 	nowText := formatManagedTime(m.clock.Now())
 	envelope := protocol.Envelope{
 		ID:        msgID,
-		From:      "supervisor",
+		From:      "system",
 		To:        parent.AgentID,
 		Subject:   &subject,
 		Body:      body,

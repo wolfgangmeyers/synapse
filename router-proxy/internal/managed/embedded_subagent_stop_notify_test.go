@@ -71,10 +71,10 @@ func TestStopSubagentNotifiesParentWorker(t *testing.T) {
 	msg, err := db.MessageFor(ctx, expectedMsgID)
 	require.NoError(t, err)
 	require.NotNil(t, msg, "mailbox message must be enqueued when subagent is stopped")
-	require.Equal(t, "supervisor", msg.From)
+	require.Equal(t, "system", msg.From)
 	require.Equal(t, parent.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
-	require.Equal(t, "Subagent Terminated", *msg.Subject)
-	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\")."
+	require.Equal(t, "[System Notice] Subagent Terminated: "+childID, *msg.Subject)
+	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step."
 	require.Equal(t, expectedBody, msg.Body)
 }

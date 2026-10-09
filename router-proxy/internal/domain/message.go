@@ -101,6 +101,12 @@ type Lease struct {
 
 // MailboxContent adds runtime reply instructions without changing the stored body.
 func MailboxContent(body, from string) string {
+	if from == "system" {
+		if strings.Contains(body, "No mailbox reply is needed") || strings.Contains(body, "Automated system notification") {
+			return body
+		}
+		return body + "\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step."
+	}
 	return body + "\n\nReply via mailbox to " + from
 }
 
@@ -109,7 +115,15 @@ func BatchItem(message Message) string {
 	if message.Subject != nil {
 		parts = append(parts, "Subject: "+*message.Subject)
 	}
-	parts = append(parts, "", message.Body, "", "[Reply via mailbox to "+message.From+".]")
+	if message.From == "system" || message.Source.Kind == "system" {
+		if strings.Contains(message.Body, "No mailbox reply is needed") || strings.Contains(message.Body, "Automated system notification") {
+			parts = append(parts, "", message.Body)
+		} else {
+			parts = append(parts, "", message.Body, "", "[Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.]")
+		}
+	} else {
+		parts = append(parts, "", message.Body, "", "[Reply via mailbox to "+message.From+".]")
+	}
 	return strings.Join(parts, "\n")
 }
 func IsBatchedBody(body string) bool { return strings.HasPrefix(body, BatchHeader+"\n\n") }

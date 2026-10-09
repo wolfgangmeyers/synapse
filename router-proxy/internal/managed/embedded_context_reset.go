@@ -331,7 +331,7 @@ func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.
 	body := FormatContextResetWarningReminder(currentTokens, contextWindow)
 	envelope := protocol.Envelope{
 		ID:        msgID,
-		From:      "supervisor",
+		From:      "system",
 		To:        binding.AgentID,
 		Subject:   &subject,
 		Body:      body,
