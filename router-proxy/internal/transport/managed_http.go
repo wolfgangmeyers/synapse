@@ -547,7 +547,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for key := range payload {
-		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" {
+		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" && key != "worktree" && key != "worktree_branch" {
 			r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
 			return
 		}
