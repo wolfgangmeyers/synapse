@@ -1141,3 +1141,57 @@ func TestRecoverManagedRootColdStartNeverSignalsMismatchedOrUnknownProcess(t *te
 		})
 	}
 }
+
+func TestRecoverManagedRootColdStartsDoesNotFailSubagents(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+
+	config, _ := managedLaunchConfigFixture(t)
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	manager, err := NewManager(ManagerOptions{
+		Store:    durable,
+		Config:   config,
+		Manifest: manifest,
+	})
+	require.NoError(t, err)
+	defer manager.Close(ctx)
+
+	parentBinding := subagentTestParent(t, durable, "parent-worker-cold-recovery")
+
+	childQueuedID := "child-subagent-queued"
+	err = durable.CreateManagedSubagent(ctx, parentBinding, store.ManagedSubagentRecord{
+		AgentID:       childQueuedID,
+		ParentAgentID: parentBinding.AgentID,
+		Description:   "queued task",
+		Status:        "queued",
+	})
+	require.NoError(t, err)
+
+	childRunningID := "child-subagent-running"
+	err = durable.CreateManagedSubagent(ctx, parentBinding, store.ManagedSubagentRecord{
+		AgentID:       childRunningID,
+		ParentAgentID: parentBinding.AgentID,
+		Description:   "running task",
+		Status:        "running",
+	})
+	require.NoError(t, err)
+
+	// RecoverManagedRootColdStarts is called periodically (e.g. in live sweep every 1 second).
+	// It must NOT fail or terminate in-flight (running or queued) subagents.
+	require.NoError(t, manager.RecoverManagedRootColdStarts(ctx))
+
+	queued, err := durable.ManagedSubagent(ctx, parentBinding, childQueuedID)
+	require.NoError(t, err)
+	require.Equal(t, "queued", queued.Status)
+	require.Empty(t, queued.Error)
+
+	running, err := durable.ManagedSubagent(ctx, parentBinding, childRunningID)
+	require.NoError(t, err)
+	require.Equal(t, "running", running.Status)
+	require.Empty(t, running.Error)
+}
+
