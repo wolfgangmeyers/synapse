@@ -5,9 +5,11 @@ import { SubagentBadge } from "./SubagentBadge";
 import { ArrivalIndicator } from "./ArrivalIndicator";
 import { AgentAvatar } from "./AgentAvatar";
 import type { Arrival } from "../domain/arrivals";
+import type { RouterHttpClient } from "../transport/http-client";
 
 export interface AgentRowProps {
   agent: Agent;
+  client?: RouterHttpClient | undefined;
   selected?: boolean | undefined;
   expanded?: boolean | undefined;
   reminderCount?: number | undefined;
@@ -26,7 +28,7 @@ function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   });
 }
 
-export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival }: AgentRowProps): ReactElement {
+export function AgentRow({ agent, client, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival }: AgentRowProps): ReactElement {
   const working = agent.activity_state === "active";
   const compacting = agent.activity_state === "compacting";
   const managed = agent.source === "router-managed";
@@ -60,7 +62,7 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
           <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? (agent.managed_agent?.runtime === "embedded" ? "Embedded" : "RPC") : "tmux"}</small>
         </span>
         {showSubagentBadge ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
-          <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} />
+          <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} client={client} agentId={agent.agent_id} />
         </span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}
         {failed ? <span className="managed-failure-indicator" role="alert" aria-label="Managed worker failed"><i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />Failed</span> : null}

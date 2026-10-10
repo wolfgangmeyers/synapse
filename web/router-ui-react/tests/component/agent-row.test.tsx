@@ -8,6 +8,7 @@ import { mergeAgentSources } from "../../src/state/agent-projection";
 import { createInitialState } from "../../src/state/app-state";
 import { reducer } from "../../src/state/reducer";
 import type { ManagedAgent } from "../../src/protocol/types";
+import type { RouterHttpClient } from "../../src/transport/http-client";
 import "../../src/app.css";
 
 afterEach(cleanup);
@@ -229,5 +230,29 @@ describe("AgentRow", () => {
 
     await user.click(openBtn);
     expect(onOpen).toHaveBeenCalledWith(arrival);
+  });
+
+  it("wires stop subagent button to client.stopManagedSubagent", () => {
+    const stopManagedSubagent = vi.fn().mockResolvedValue(undefined);
+    const mockClient = { stopManagedSubagent } as unknown as RouterHttpClient;
+
+    render(
+      <AgentRow
+        agent={{
+          agent_id: "parent-agent",
+          activity_state: "idle",
+          subagent_count: 1,
+          subagents: [{ id: "child-stop-1", description: "Subagent running task", status: "running" }],
+        }}
+        expanded={true}
+        client={mockClient}
+      />
+    );
+
+    const stopButton = screen.getByRole("button", { name: "Stop subagent" });
+    expect(stopButton).toBeInTheDocument();
+
+    fireEvent.click(stopButton);
+    expect(stopManagedSubagent).toHaveBeenCalledWith("parent-agent", "child-stop-1");
   });
 });

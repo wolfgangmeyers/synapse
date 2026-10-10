@@ -149,8 +149,7 @@ func TestManagedSubagentTransitionsRejectInvalidOrSecondTerminal(t *testing.T) {
 	require.Error(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "queued", ManagedSubagentResult{Status: "steered"}), "queued cannot settle")
 	require.NoError(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "queued", ManagedSubagentResult{Status: "running"}))
 	require.Error(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "running", ManagedSubagentResult{Status: "queued"}), "no backwards transition")
-	_, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='bogus' WHERE agent_id=?`, child.AgentID)
-	require.Error(t, err, "SQLite status constraint")
+	require.Error(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "running", ManagedSubagentResult{Status: "bogus"}), "invalid status transition")
 	require.NoError(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "running", ManagedSubagentResult{Status: "error", Error: "failed"}))
 	require.Error(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "error", ManagedSubagentResult{Status: "completed", ResultText: "late"}))
 	saved, err := s.ManagedSubagent(ctx, parent, child.AgentID)
@@ -352,3 +351,66 @@ func TestManagedSubagentRunningInterruptedOnOpen(t *testing.T) {
 	require.Equal(t, "completed", completed.Status)
 	require.Equal(t, "saved answer", completed.ResultText)
 }
+
+func TestTimeoutRunningSubagents_NoCheckConstraintFailure(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "timeout_check.db")
+	s, err := Open(ctx, path, Options{})
+	require.NoError(t, err)
+	defer s.Close()
+
+	parent := subagentParent(t, s, "parent-timeout")
+	childID := "subagent-timeout-1"
+	child := ManagedSubagentRecord{
+		AgentID:          childID,
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "timeout test",
+		SubagentType:     "general-purpose",
+		Status:           "running",
+		MaxTurns:         5,
+	}
+	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
+
+	// Backdate created_at so TimeoutRunningSubagents picks it up
+	past := formatTimestamp(s.clock.Now().Add(-2 * time.Hour))
+	_, err = s.db.ExecContext(ctx, `UPDATE managed_subagents SET created_at=? WHERE agent_id=?`, past, childID)
+	require.NoError(t, err)
+
+	// TimeoutRunningSubagents sets status='failed'
+	// This must not fail SQLite CHECK constraint
+	count, err := s.TimeoutRunningSubagents(ctx, 1*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	rec, err := s.ManagedSubagent(ctx, parent, childID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", rec.Status)
+	require.Contains(t, rec.Error, "timed out")
+
+	// Also verify MarkInFlightSubagentsFailed sets status='failed' without check constraint error
+	childID2 := "subagent-inflight-2"
+	child2 := ManagedSubagentRecord{
+		AgentID:          childID2,
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "inflight test",
+		SubagentType:     "general-purpose",
+		Status:           "running",
+		MaxTurns:         5,
+	}
+	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child2))
+
+	err = s.MarkInFlightSubagentsFailed(ctx)
+	require.NoError(t, err)
+
+	rec2, err := s.ManagedSubagent(ctx, parent, childID2)
+	require.NoError(t, err)
+	require.Equal(t, "failed", rec2.Status)
+	require.Equal(t, "interrupted", rec2.Error)
+}
+

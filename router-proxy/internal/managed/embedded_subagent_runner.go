@@ -518,47 +518,63 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 		task = m.subagentsRegistry[childID]
 	}
 	m.subagentsMu.Unlock()
-	if task == nil {
-		return errors.New("subagent not found")
-	}
-	task.mu.Lock()
-	task.stopped = true
-	if task.cancel != nil {
-		task.cancel()
-	}
-	if task.activeSession != nil {
-		task.activeSession.Abort()
-	}
-	taskStatus := task.status
-	task.mu.Unlock()
-	m.subagentsMu.Lock()
-	m.removeFromQueueLocked(childID)
-	m.subagentsMu.Unlock()
-	_ = m.store.UpdateManagedSubagentAttempt(ctx, task.parent, childID, task.attempt, taskStatus, store.ManagedSubagentResult{
-		Status:          "stopped",
-		TurnCount:       task.turnCount,
-		ToolUseCount:    task.toolUseCount,
-		TotalTokens:     task.totalTokens,
-		DurationSeconds: task.durationSeconds,
-	})
-	m.releaseSubagentSlot(task)
 
-	desc := task.description
-	if desc == "" {
-		if rec, err := m.store.ManagedSubagent(ctx, task.parent, childID); err == nil && rec != nil {
+	var desc string
+	var attempt int = 1
+	targetParentID := parentAgentID
+
+	if task != nil {
+		task.mu.Lock()
+		task.stopped = true
+		task.status = "stopped"
+		if task.cancel != nil {
+			task.cancel()
+		}
+		if task.activeSession != nil {
+			task.activeSession.Abort()
+		}
+		desc = task.description
+		attempt = task.attempt
+		if task.parent.AgentID != "" {
+			targetParentID = task.parent.AgentID
+		}
+		task.mu.Unlock()
+
+		m.subagentsMu.Lock()
+		m.removeFromQueueLocked(childID)
+		if current := m.subagentsRegistry[childID]; current == task {
+			delete(m.subagentsRegistry, childID)
+		}
+		m.subagentsMu.Unlock()
+		m.releaseSubagentSlot(task)
+	}
+
+	rec, err := m.store.StopManagedSubagent(ctx, targetParentID, childID)
+	if err != nil {
+		return err
+	}
+	if rec != nil {
+		if rec.ParentAgentID != "" {
+			targetParentID = rec.ParentAgentID
+		}
+		if desc == "" {
 			desc = rec.Description
 		}
+		if rec.Attempt > 0 {
+			attempt = rec.Attempt
+		}
 	}
-	m.recordSubagentCompletionHistory(task.parent.AgentID, childID, task.attempt, desc, "failed", "stopped", "", "Subagent stopped.")
+
+	m.recordSubagentCompletionHistory(targetParentID, childID, attempt, desc, "failed", "stopped", "", "Subagent stopped.")
 	subject := fmt.Sprintf("[System Notice] Subagent Terminated: %s", childID)
 	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", childID, desc, childID)
 	source := protocol.MessageSource{Kind: "system"}
-	msgID := fmt.Sprintf("subagent-terminated-%s-%d", childID, task.attempt)
+	msgID := fmt.Sprintf("subagent-terminated-%s-%d", childID, attempt)
 	now := formatManagedTime(m.clock.Now())
 	envelope := protocol.Envelope{
 		ID:        msgID,
 		From:      "system",
-		To:        task.parent.AgentID,
+		To:        targetParentID,
 		Subject:   &subject,
 		Body:      body,
 		CreatedAt: now,
@@ -580,7 +596,7 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 			_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
 		}
 	}
-	m.OfferDirect(task.parent.AgentID)
+	m.OfferDirect(targetParentID)
 	return nil
 }
 
