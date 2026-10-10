@@ -422,6 +422,60 @@ func (s *Store) MarkInFlightSubagentsFailed(ctx context.Context) error {
 	})
 }
 
+// StopManagedSubagent administratively marks a subagent and its managed agent stopped/terminated
+// directly in SQLite, without requiring an active parent lease or in-memory runner task.
+func (s *Store) StopManagedSubagent(ctx context.Context, parentAgentID, childID string) (*ManagedSubagentRecord, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	if childID == "" {
+		return nil, errors.New("child ID is required")
+	}
+
+	var rec *ManagedSubagentRecord
+	err := s.runImmediate(ctx, func() error {
+		var query string
+		var args []any
+		if parentAgentID != "" {
+			query = managedSubagentSelect + ` WHERE agent_id=? AND parent_agent_id=?`
+			args = []any{childID, parentAgentID}
+		} else {
+			query = managedSubagentSelect + ` WHERE agent_id=?`
+			args = []any{childID}
+		}
+		var err error
+		rec, err = scanManagedSubagent(s.db.QueryRowContext(ctx, query, args...))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) && parentAgentID != "" {
+				rec, err = scanManagedSubagent(s.db.QueryRowContext(ctx, managedSubagentSelect+` WHERE agent_id=?`, childID))
+			}
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return errors.New("subagent not found")
+				}
+				return err
+			}
+		}
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='stopped', updated_at=?, terminal_at=COALESCE(terminal_at, ?) WHERE agent_id=?`, now, now, childID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='stopped', activity_state='stopped', accepting_prompts=0, updated_at=? WHERE agent_id=?`, now, childID); err != nil {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', activity_state='stopped', accepting_prompts=0, updated_at=? WHERE agent_id=?`, now, childID); err != nil {
+				return err
+			}
+		}
+		rec.Status = "stopped"
+		rec.UpdatedAt = now
+		if rec.TerminalAt == "" {
+			rec.TerminalAt = now
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+	return rec, err
+}
+
 // ActiveManagedSubagents returns all managed subagents that are currently running or queued.
 func (s *Store) ActiveManagedSubagents(ctx context.Context) ([]*ManagedSubagentRecord, error) {
 	if ctx == nil {

@@ -549,6 +549,117 @@ func TestSubagentRunnerStopQueuedAndRunning(t *testing.T) {
 	}, 3*time.Second, 20*time.Millisecond)
 }
 
+func TestStopSubagent_PostRestartOrNotInActiveMemory(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_stop_not_in_mem.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-worker-mem")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	mgr := makeSubagentTestManager(t, db, reg, 1)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	childID := "subagent-post-restart-1"
+	child := store.ManagedSubagentRecord{
+		AgentID:          childID,
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "orphaned in SQLite task",
+		SubagentType:     "general-purpose",
+		Status:           "running",
+		MaxTurns:         10,
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, child))
+
+	// Verify it exists in SQLite as 'running'
+	rec, err := db.ManagedSubagent(ctx, parent, childID)
+	require.NoError(t, err)
+	require.Equal(t, "running", rec.Status)
+
+	// Verify task is NOT in memory in mgr
+	mgr.subagentsMu.Lock()
+	require.Nil(t, mgr.subagentsActive[childID])
+	require.Nil(t, mgr.subagentsRegistry[childID])
+	mgr.subagentsMu.Unlock()
+
+	// Administrative stop must succeed even though subagent is only in SQLite
+	err = mgr.StopSubagent(ctx, parent.AgentID, childID)
+	require.NoError(t, err)
+
+	// Verify SQLite record is marked stopped with terminal_at set
+	rec, err = db.ManagedSubagent(ctx, parent, childID)
+	require.NoError(t, err)
+	require.Equal(t, "stopped", rec.Status)
+	require.NotEmpty(t, rec.TerminalAt)
+
+	// Verify managed_agents entry is terminated
+	childAgent, err := db.ManagedAgent(ctx, childID)
+	require.NoError(t, err)
+	require.Equal(t, "terminated", childAgent.DesiredState)
+	require.Contains(t, []string{"stopped", "terminated"}, childAgent.LifecycleState)
+
+	// Verify parent received termination notice
+	stopMsg, err := db.MessageFor(ctx, "subagent-terminated-"+childID+"-1")
+	require.NoError(t, err)
+	require.NotNil(t, stopMsg)
+	require.Contains(t, stopMsg.Body, "was stopped")
+}
+
+func TestStopSubagent_StaleParentLease(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_stop_stale_lease.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-stale-lease")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	mgr := makeSubagentTestManager(t, db, reg, 1)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	childID := "subagent-stale-lease-1"
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     childID,
+		Description: "stale lease subagent",
+		Prompt:      "prompt",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Status)
+
+	// Bump the parent owner token in SQLite to invalidate parent.OwnerToken
+	// simulating hours later or a parent reconnect
+	rawDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer rawDB.Close()
+	_, err = rawDB.ExecContext(ctx, `UPDATE embedded_sessions SET owner_token=owner_token+10 WHERE agent_id=? AND current=1`, parent.AgentID)
+	require.NoError(t, err)
+
+	// StopSubagent must succeed and NOT be blocked by the stale parent lease token
+	err = mgr.StopSubagent(ctx, parent.AgentID, childID)
+	require.NoError(t, err)
+
+	// Verify SQLite record is marked stopped
+	rec, err := db.ManagedSubagent(ctx, store.EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  parent.SessionID,
+		Epoch:      parent.Epoch,
+		Generation: parent.Generation,
+	}, childID)
+	require.NoError(t, err)
+	require.Equal(t, "stopped", rec.Status)
+	require.NotEmpty(t, rec.TerminalAt)
+}
+
 func TestSubagentRunnerConfinedToolsOnly(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "subagent_tools.db")
