@@ -72,7 +72,6 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 	if err := m.RecoverManagedRootRecoveryOperators(ctx); err != nil {
 		return err
 	}
-	_ = m.ReconcileInterruptedSubagents(ctx)
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {
 		return err
