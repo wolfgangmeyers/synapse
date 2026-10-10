@@ -5,6 +5,7 @@ export const AGENT_IDS_KEY = "mecha.web.agentIds";
 export const LEGACY_AGENT_ID_KEY = "mecha.web.agentId";
 export const SELECTED_PEERS_KEY = "mecha.web.selectedPeers";
 export const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
+export const DEFAULT_AGENT_ID = "user";
 export const SCOPE_SEPARATOR = "\u001f";
 
 export interface StorageAdapter {
@@ -291,7 +292,7 @@ export function setSelectedPeer(settings: SettingsState, routerUrl: string, agen
 export function agentIdForRouter(
   settings: SettingsState,
   routerUrl: string,
-  defaultAgentId: string,
+  defaultAgentId: string = DEFAULT_AGENT_ID,
   storage?: StorageAdapter,
 ): string {
   const router = normalizeRouterUrl(routerUrl);
@@ -301,6 +302,11 @@ export function agentIdForRouter(
   // select the identity for a different saved router and hide that router's history.
   const legacy = router === settings.routers[0] ? storage?.getItem(LEGACY_AGENT_ID_KEY) : null;
   return legacy === undefined || legacy === null || legacy.trim() === "" ? defaultAgentId : legacy;
+}
+
+export function currentUsername(storage: StorageAdapter | undefined = storageOrUndefined(), routerUrl: string = DEFAULT_ROUTER_URL): string {
+  const settings = loadSettings(storage, routerUrl);
+  return agentIdForRouter(settings, routerUrl, DEFAULT_AGENT_ID, storage);
 }
 
 export function removeRouter(settings: SettingsState, routerUrl: string): SettingsState {

@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_ID } from "../persistence/settings-repository";
 import { secureUuid } from "../platform/secure-uuid";
 
 export interface SavedRouter { url: string; alias?: string; agentId: string }
@@ -10,7 +11,7 @@ export function normalizeRouterUrl(value: string): string {
 export function routerDisplayName(url: string, alias?: string): string { if (alias?.trim()) return alias.trim(); return new URL(normalizeRouterUrl(url)).host; }
 export const normalizeRouterInput = normalizeRouterUrl;
 function isRouterMap(value: readonly SavedRouter[] | Record<string, string>): value is Record<string, string> { return !Array.isArray(value); }
-export function agentIdForRouter(routers: readonly SavedRouter[] | Record<string, string>, url: string, defaultAgentId = "wolfgang"): string { const canonical = normalizeRouterUrl(url); if (!isRouterMap(routers)) return routers.find((router) => normalizeRouterUrl(router.url) === canonical)?.agentId || defaultAgentId; const value = routers[canonical]; return value || defaultAgentId; }
+export function agentIdForRouter(routers: readonly SavedRouter[] | Record<string, string>, url: string, defaultAgentId = DEFAULT_AGENT_ID): string { const canonical = normalizeRouterUrl(url); if (!isRouterMap(routers)) return routers.find((router) => normalizeRouterUrl(router.url) === canonical)?.agentId || defaultAgentId; const value = routers[canonical]; return value || defaultAgentId; }
 export function createConnectionIdentity(agentId: string): { agentId: string; instanceId: string } { return { agentId, instanceId: secureUuid() }; }
 export function normalizeSavedRouter(router: SavedRouter): SavedRouter { const url = normalizeRouterUrl(router.url); return { url, ...(router.alias?.trim() ? { alias: router.alias.trim() } : {}), agentId: router.agentId.trim() }; }
 export function ensureRouter(routers: SavedRouter[], router: SavedRouter): SavedRouter[] { const normalized = normalizeSavedRouter(router); return routers.some((candidate) => normalizeRouterUrl(candidate.url) === normalized.url) ? routers.map((candidate) => normalizeRouterUrl(candidate.url) === normalized.url ? normalized : candidate) : [...routers, normalized]; }

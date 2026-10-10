@@ -4,6 +4,7 @@ import { isRecord } from "../protocol/guards";
 import type { ManagedHistoryEntry } from "../protocol/types";
 import { shouldFollowToBottom } from "../state/conversation-projection";
 import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getMailboxSendDetails, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
+import { currentUsername } from "../persistence/settings-repository";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
 
@@ -97,7 +98,7 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
 export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked }: MessageListProps): ReactElement {
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
-  const currentUser = ownerId ?? "wolfgang";
+  const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const [announcement, setAnnouncement] = useState("");
   const announcedActivity = useRef(new Set<string>());
   const activityLiveInitialized = useRef(false);

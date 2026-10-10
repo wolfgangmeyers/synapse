@@ -2,7 +2,7 @@ import { buildLeaseRenewFrame, buildRegisterFrame } from "../protocol/frame-buil
 import { secureUuid } from "../platform/secure-uuid";
 import { isAgentId, parseServerFrame } from "../protocol/guards";
 import type { ClientFrame, RegisteredFrame, ServerFrame } from "../protocol/types";
-import { loadSettings, normalizeRouterUrl, saveSettings, setAgentId, type StorageAdapter } from "../persistence/settings-repository";
+import { currentUsername, loadSettings, normalizeRouterUrl, saveSettings, setAgentId, type StorageAdapter } from "../persistence/settings-repository";
 
 export interface SocketEvent { data?: unknown; code?: number; reason?: string }
 export interface WebSocketLike {
@@ -68,8 +68,9 @@ function eventString(value: unknown): string | undefined { return typeof value =
 export function createWebSocketClient(options: WebSocketClientOptions): WebSocketClient {
   const routerUrl = normalizeRouterUrl(options.routerUrl);
   const settings = loadSettings(options.storage, routerUrl);
-  const candidateAgentId = settings.agentIds[routerUrl] ?? options.agentId ?? options.defaultAgentId ?? "wolfgang";
-  const configuredAgentId = isAgentId(candidateAgentId) ? candidateAgentId : "wolfgang";
+  const defaultUser = currentUsername(options.storage, routerUrl);
+  const candidateAgentId = settings.agentIds[routerUrl] ?? options.agentId ?? options.defaultAgentId ?? defaultUser;
+  const configuredAgentId = isAgentId(candidateAgentId) ? candidateAgentId : defaultUser;
   const savedSettings = settings.agentIds[routerUrl] === configuredAgentId ? settings : setAgentId(settings, routerUrl, configuredAgentId);
   if (savedSettings !== settings) saveSettings(savedSettings, options.storage);
   let socket: WebSocketLike | undefined;

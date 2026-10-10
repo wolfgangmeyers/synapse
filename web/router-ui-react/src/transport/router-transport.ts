@@ -1,5 +1,5 @@
 import { secureUuid } from "../platform/secure-uuid";
-import { buildAckFrame, buildActivityFrame, buildGoalControlFrame, buildInjectionRequestedFrame, buildInlineToolControlFrame, buildModelControlFrame, buildNackFrame, buildReminderLockControlFrame, buildSubagentStateResyncFrame, buildSubagentSyncEnableFrame } from "../protocol/frame-builders";
+import { buildActivityFrame, buildGoalControlFrame, buildInlineToolControlFrame, buildModelControlFrame, buildReminderLockControlFrame, buildSubagentStateResyncFrame, buildSubagentSyncEnableFrame } from "../protocol/frame-builders";
 import { isDeliveryItem, isRecord } from "../protocol/guards";
 import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
@@ -223,11 +223,6 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     return controls.remove(controlId);
   };
   const deliveryStillActive = (identity: WebSocketIdentity): boolean => socket.identity.generation === identity.generation && socket.identity.agentId === identity.agentId && socket.identity.instanceId === identity.instanceId && socket.identity.leaseId === identity.leaseId && socket.registered;
-  const sendReceipt = (type: "injection_requested" | "ack" | "nack", delivery: PreparedDelivery, identity: WebSocketIdentity): boolean => {
-    if (type === "injection_requested") return socket.send(buildInjectionRequestedFrame({ agentId: identity.agentId, instanceId: identity.instanceId, leaseId: identity.leaseId, messageId: delivery.receipt.message_id, attemptNumber: delivery.receipt.attempt_number, deliveryItems: delivery.receipt.delivery_items }));
-    if (type === "ack") return socket.send(buildAckFrame({ agentId: identity.agentId, instanceId: identity.instanceId, leaseId: identity.leaseId, messageId: delivery.receipt.message_id, attemptNumber: delivery.receipt.attempt_number, deliveryItems: delivery.receipt.delivery_items }));
-    return socket.send(buildNackFrame({ agentId: identity.agentId, instanceId: identity.instanceId, leaseId: identity.leaseId, messageId: delivery.receipt.message_id, attemptNumber: delivery.receipt.attempt_number, deliveryItems: delivery.failure?.delivery_items, reason: delivery.failure?.reason ?? "processing_failed" }));
-  };
   const onFrame = (frame: ServerFrame, identity: WebSocketIdentity): void => {
     if (frame.type === "registered") {
       goalControlAvailable = false;
@@ -272,16 +267,12 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
         void persist.then(() => {
           if (!deliveryStillActive(identity)) return;
           for (const message of prepared.messages) emit({ type: "delivery", message: withAbsoluteAttachmentUrls(message, http.routerUrl), messages: prepared.messages, receipt: prepared.receipt });
-          sendReceipt("injection_requested", prepared, identity); sendReceipt("ack", prepared, identity); void refreshAgents();
+          void refreshAgents();
         }).catch((error: unknown) => {
           if (!deliveryStillActive(identity)) return;
-          const failed = prepareDelivery(frame, { reason: "processing_failed" });
-          sendReceipt("nack", failed, identity);
           emit({ type: "error", error: error instanceof Error ? error : new Error("Delivery persistence failed"), frame });
         });
       } catch (error) {
-        const messageId = frame.message.id; const attempt = frame.attempt_number;
-        if (Number.isSafeInteger(attempt) && attempt > 0) socket.send(buildNackFrame({ agentId: identity.agentId, instanceId: identity.instanceId, leaseId: identity.leaseId, messageId, attemptNumber: attempt, reason: "processing_failed" }));
         emit({ type: "error", error: error instanceof Error ? error : new Error("Delivery processing failed"), frame });
       }
       return;

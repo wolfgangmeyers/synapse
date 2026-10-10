@@ -6,6 +6,7 @@ import type { Arrival } from "../domain/arrivals";
 import type { ManagedHistoryEntry } from "../protocol/types";
 import type { RouterHttpClient } from "../transport/http-client";
 import { isRecord } from "../protocol/guards";
+import { currentUsername } from "../persistence/settings-repository";
 import { isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { ConversationHeader, type ConversationView } from "./ConversationHeader";
 import { MessageList } from "./MessageList";
@@ -85,7 +86,7 @@ export function Conversation({ peer, agent, client, activeReminderCount = 0, own
             entry.presentation?.tool_name === "mecha_mailbox_send" ||
             (entry.presentation?.tool_name === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send")
           ));
-        return isMsg || isMailboxSendToUser(entry, ownerId ?? "wolfgang", activityEntries) !== undefined;
+        return isMsg || isMailboxSendToUser(entry, ownerId ?? currentUsername(undefined, routerUrl), activityEntries) !== undefined;
       })
     : activityEntries;
   return <div className="conversation-content"><ConversationHeader client={client} activeReminderCount={activeReminderCount} expanded={expanded} {...(selected !== undefined ? { agent: selected } : {})} {...(arrival !== undefined ? { arrival } : {})} {...(modelControls === undefined ? {} : { modelControls })} {...(promptControls === undefined ? {} : { promptControls })} {...(effectiveConversationView === undefined ? {} : { conversationView: effectiveConversationView })} {...(isManaged || onConversationViewChange === undefined ? {} : { onConversationViewChange })} showAgentControls={showAgentControls} {...(showGoalControl === undefined ? {} : { showGoalControl })} {...(onGoal !== undefined ? { onGoal } : {})} {...(onReminders !== undefined ? { onReminders } : {})} {...(onInlineToolSettings !== undefined ? { onInlineToolSettings } : {})} {...(onLogs !== undefined ? { onLogs } : {})} {...(onManageManaged !== undefined ? { onManageManaged } : {})} {...(onOpenArrival !== undefined ? { onOpenArrival } : {})} {...(onDismissArrival !== undefined ? { onDismissArrival } : {})} {...(onToggleSubagents !== undefined ? { onToggleSubagents } : {})} scrollLocked={scrollLocked} onToggleScrollLock={onToggleScrollLock} chatOnly={chatOnly} onToggleChatOnly={onToggleChatOnly} /><MessageList id="conversation-view-panel" messages={messages} {...(isComplete ? { activityEntries: filteredActivityEntries, ...(activityHistoryReady === undefined ? {} : { activityHistoryReady }) } : {})} {...(selected !== undefined ? { peerId: selected.agent_id } : {})} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(loading !== undefined ? { loading } : {})} {...(error !== undefined ? { error } : {})} scrollLocked={scrollLocked} /><Composer enabled={composeEnabled && selected !== undefined} {...(selected === undefined ? {} : { focusKey: selected.agent_id })} {...(value === undefined ? {} : { value })} {...(onChange === undefined ? {} : { onChange })} {...(onSelectionChange === undefined ? {} : { onSelectionChange })} onSend={onSend} /></div>;

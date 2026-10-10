@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { normalizeRouterUrl, routerDisplayName, type SavedRouter } from "../domain/router-manager";
+import { DEFAULT_AGENT_ID } from "../persistence/settings-repository";
 import { DialogShell } from "./DialogShell";
 
 export interface RouterManagerDialogProps {
@@ -16,7 +17,7 @@ export interface RouterManagerDialogProps {
 
 type Editor = { mode: "add" | "edit"; previousUrl?: string };
 
-export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId = "wolfgang", onClose, onSave, onSelect, onRemove, onProviderSettings = () => undefined }: RouterManagerDialogProps) {
+export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId = DEFAULT_AGENT_ID, onClose, onSave, onSelect, onRemove, onProviderSettings = () => undefined }: RouterManagerDialogProps) {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [url, setUrl] = useState("");
   const [alias, setAlias] = useState("");

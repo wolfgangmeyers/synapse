@@ -135,7 +135,7 @@ describe("validated post-E2E reliability repairs", () => {
     await expect(repository.load(scope)).resolves.not.toMatchObject({ worker: [expect.objectContaining({ id: "local" })] });
   });
 
-  it("waits for durable delivery history before acknowledging and NACKs persistence failures", async () => {
+  it("does not acknowledge or steal deliveries as an administrative observer", async () => {
     let resolvePersistence: (() => void) | undefined;
     const persistence = new Promise<void>((resolve) => { resolvePersistence = resolve; });
     const first = fakeTransportHarness({ subagent_lifecycle_v2: false }, async () => persistence);
@@ -145,16 +145,10 @@ describe("validated post-E2E reliability repairs", () => {
     await Promise.resolve();
     expect(first.socket.sent.map((frame) => frame.type)).not.toContain("ack");
     resolvePersistence?.();
-    await waitFor(() => expect(first.socket.sent.map((frame) => frame.type)).toEqual(expect.arrayContaining(["injection_requested", "ack"])));
+    await Promise.resolve();
+    expect(first.socket.sent.map((frame) => frame.type)).not.toContain("ack");
+    expect(first.socket.sent.map((frame) => frame.type)).not.toContain("injection_requested");
     first.transport.close();
-
-    const second = fakeTransportHarness({ subagent_lifecycle_v2: false }, async () => { throw new Error("disk failed"); });
-    const secondRegister = requiredFrame(second.socket);
-    second.socket.emit("message", { data: JSON.stringify(registered(String(secondRegister.frame_id), String(secondRegister.instance_id))) });
-    second.socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "delivery-frame-2", type: "message", message: envelope, message_incarnation_id: incarnation, attempt_number: 1, delivery_expires_at: item.delivery_expires_at, delivery_items: [item] }) });
-    await waitFor(() => expect(second.socket.sent.map((frame) => frame.type)).toContain("nack"));
-    expect(second.socket.sent.map((frame) => frame.type)).not.toContain("ack");
-    second.transport.close();
   });
 
   it("resets router-scoped conversation and control state together", () => {
