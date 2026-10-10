@@ -191,10 +191,10 @@ func TestPruneExpiredSubagentsAndTimeout(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, timedOutCount)
 
-	// Verify runningID is now error
+	// Verify runningID is now failed
 	var runningStatus string
 	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT status FROM managed_subagents WHERE agent_id=?`, runningID).Scan(&runningStatus))
-	require.Equal(t, "error", runningStatus)
+	require.Equal(t, "failed", runningStatus)
 
 	// Run PruneExpiredSubagents
 	require.NoError(t, db.PruneExpiredSubagents(ctx, 1*time.Hour))

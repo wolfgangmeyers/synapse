@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,24 +14,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestEmbeddedSubagentLeaseRenewalFailureClassifiedAsError(t *testing.T) {
+func TestEmbeddedSubagentRunsWithoutOwnerLease(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "subagent_lease.db")
+	dbPath := filepath.Join(t.TempDir(), "subagent_no_lease.db")
 	db, err := store.Open(ctx, dbPath, store.Options{})
 	require.NoError(t, err)
 	defer db.Close()
 
-	parent := subagentTestParent(t, db, "parent-lease-test")
+	parent := subagentTestParent(t, db, "parent-no-lease-test")
 	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
 	defer reg.Unregister()
 
-	var running atomic.Bool
 	reg.SetResponses([]providers.FauxResponseStep{
 		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			running.Store(true)
-			// Block stream until aborted
-			time.Sleep(10 * time.Second)
-			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "unreachable"}}, ai.StopStop)
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "child completed without lease"}}, ai.StopStop)
 		},
 	})
 
@@ -40,58 +35,41 @@ func TestEmbeddedSubagentLeaseRenewalFailureClassifiedAsError(t *testing.T) {
 	defer mgr.Close(ctx)
 	registerParentOwner(mgr, parent)
 
-	childID := "subagent-lease-fail-1"
+	childID := "subagent-no-lease-1"
 	_, err = mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
 		AgentID:     childID,
-		Description: "lease test child",
-		Prompt:      "run until lease fails",
+		Description: "no lease child",
+		Prompt:      "run and complete",
 	})
 	require.NoError(t, err)
 
-	require.Eventually(t, func() bool {
-		return running.Load()
-	}, 3*time.Second, 20*time.Millisecond)
-
-	// Read actual child lease details from SQLite
-	rawDB, err := sql.Open("sqlite", dbPath)
-	require.NoError(t, err)
-	defer rawDB.Close()
-
-	var ownerID string
-	var ownerToken int64
-	require.Eventually(t, func() bool {
-		err := rawDB.QueryRowContext(ctx, `SELECT owner_id, owner_token FROM embedded_sessions WHERE agent_id=? AND current=1`, childID).Scan(&ownerID, &ownerToken)
-		return err == nil && ownerID != "" && ownerToken > 0
-	}, 3*time.Second, 20*time.Millisecond)
-
-	childBinding := store.EmbeddedBinding{
-		AgentID:    childID,
-		SessionID:  childID + "-session",
-		Epoch:      1,
-		Generation: parent.Generation,
-		OwnerToken: ownerToken,
-	}
-
-	// Release owner lease via Store API so next renewal fails
-	require.NoError(t, db.ReleaseEmbeddedOwner(ctx, childBinding, ownerID))
-
-	// Acquire competing lease to advance token
-	_, err = db.AcquireEmbeddedOwner(ctx, childBinding, "stealer-owner", time.Minute)
-	require.NoError(t, err)
-
-	// Wait for runner to fail renewal and classify status as error
 	require.Eventually(t, func() bool {
 		rec, err := db.ManagedSubagent(ctx, parent, childID)
 		if err != nil {
 			return false
 		}
-		return rec.Status == "error"
-	}, 15*time.Second, 100*time.Millisecond)
+		return rec.Status == "completed"
+	}, 5*time.Second, 50*time.Millisecond)
 
+	rawDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer rawDB.Close()
+
+	// Verify child session in embedded_sessions has no owner lease (owner_id is NULL or empty, owner_token is 0)
+	var ownerID sql.NullString
+	var ownerToken int64
+	var role string
+	err = rawDB.QueryRowContext(ctx, `SELECT owner_id, owner_token, role FROM embedded_sessions WHERE agent_id=? AND current=1`, childID).Scan(&ownerID, &ownerToken, &role)
+	require.NoError(t, err)
+	require.Equal(t, "subagent", role)
+	require.False(t, ownerID.Valid && ownerID.String != "", "child subagent must not hold an owner identity")
+	require.Zero(t, ownerToken, "child subagent must not have acquired an owner lease token")
+
+	// Verify child record completed
 	rec, err := db.ManagedSubagent(ctx, parent, childID)
 	require.NoError(t, err)
-	require.Equal(t, "error", rec.Status)
-	require.Contains(t, rec.Error, "owner lease renewal failed")
+	require.Equal(t, "completed", rec.Status)
+	require.Equal(t, "child completed without lease", rec.ResultText)
 
 	// Verify registry and active slots cleaned up
 	mgr.subagentsMu.Lock()
@@ -100,13 +78,4 @@ func TestEmbeddedSubagentLeaseRenewalFailureClassifiedAsError(t *testing.T) {
 	mgr.subagentsMu.Unlock()
 	require.False(t, inRegistry)
 	require.False(t, inActive)
-
-	// Assert old child owner append/renew is denied
-	require.Error(t, db.RenewEmbeddedOwner(ctx, childBinding, ownerID, time.Minute))
-
-	// Assert parent owner is alive and root epoch unchanged
-	require.NoError(t, db.RenewEmbeddedOwner(ctx, parent, "fixture:"+parent.AgentID, time.Minute))
-	parentAgent, err := db.ManagedAgent(ctx, parent.AgentID)
-	require.NoError(t, err)
-	require.Equal(t, parent.Epoch, parentAgent.SessionEpoch)
 }

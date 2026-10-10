@@ -126,7 +126,7 @@ func TestEmbeddedG5ProjectFileToolsRED(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer m.Close(ctx)
-			request := LaunchRequest{Name: "g5-project-root", Cwd: project, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "read the project", RequestID: "a5555555-5555-4555-8555-555555555580"}
+			request := LaunchRequest{Name: "g5-project-root", Cwd: project, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "read the project", RequestID: "a5555555-5555-4555-8555-555555555580", AllowInlineTools: true}
 			if tc.worker {
 				request.Name = "g5-project-worker"
 				request.RequestID = "a5555555-5555-4555-8555-555555555581"

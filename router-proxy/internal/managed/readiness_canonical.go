@@ -851,7 +851,7 @@ func validateChildSourceChange(name string, value any) error {
 			return err
 		}
 	case "lifecycle_state":
-		if state, ok := value.(string); !ok || (state != "queued" && state != "running" && state != "completed" && state != "steered" && state != "aborted" && state != "stopped" && state != "error") {
+		if state, ok := value.(string); !ok || (state != "queued" && state != "running" && state != "completed" && state != "failed" && state != "steered" && state != "aborted" && state != "stopped" && state != "error") {
 			return errors.New("child lifecycle state is invalid")
 		}
 	case "started_at":

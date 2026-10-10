@@ -120,7 +120,7 @@ func TestEmbeddedG5RestrictedRealBashRED(t *testing.T) {
 	}, CodexCredentialStore: testfixture.CodexAdmission(t)})
 	require.NoError(t, err)
 	defer m.Close(context.Background())
-	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "restricted-root", Cwd: projects[0], Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "verify private project", RequestID: "a5555555-5555-4555-8555-555555555598"})
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "restricted-root", Cwd: projects[0], Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "verify private project", RequestID: "a5555555-5555-4555-8555-555555555598", AllowInlineTools: true})
 	require.NoError(t, err)
 	require.Equal(t, projects[0], launched.Agent.Cwd)
 	take := func() observation {
@@ -149,7 +149,7 @@ func TestEmbeddedG5RestrictedRealBashRED(t *testing.T) {
 		}
 		require.NoFileExists(t, filepath.Join(projects[0], "PWN"))
 	}
-	worker, err := m.Launch(ctx, LaunchRequest{Name: "restricted-worker", Cwd: projects[1], Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "verify worker project", RequestID: "a5555555-5555-4555-8555-555555555599"})
+	worker, err := m.Launch(ctx, LaunchRequest{Name: "restricted-worker", Cwd: projects[1], Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "verify worker project", RequestID: "a5555555-5555-4555-8555-555555555599", AllowInlineTools: true})
 	require.NoError(t, err)
 	require.Equal(t, projects[1], worker.Agent.Cwd)
 	workerTools := take()

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -83,4 +84,52 @@ func TestPublicAgentOmitsPrivateProcessAndSessionIdentity(t *testing.T) {
 	require.False(t, hasProcess)
 	require.False(t, hasGeneration)
 	require.False(t, hasEpoch)
+}
+
+func TestResolveModelCanonical(t *testing.T) {
+	// Baseline: the catalog has "gemini-3.8-flash" under "google".
+	catalogGoogle := ai.GetModel("google", "gemini-3.8-flash")
+	require.NotNil(t, catalogGoogle)
+	require.Equal(t, "google", catalogGoogle.Provider)
+
+	// 1. Direct lookup for a standard catalog model
+	direct, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"})
+	require.NoError(t, err)
+	require.NotNil(t, direct)
+	require.Equal(t, "google", direct.Provider)
+	require.Equal(t, "gemini-3.8-flash", direct.ID)
+
+	// 2. Antigravity alias to Google catalog model: must preserve "antigravity" provider
+	agResolved, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"})
+	require.NoError(t, err)
+	require.NotNil(t, agResolved)
+	require.Equal(t, "antigravity", agResolved.Provider)
+	require.Equal(t, "gemini-3.8-flash", agResolved.ID)
+	// Must not have mutated the catalog model
+	require.Equal(t, "google", catalogGoogle.Provider)
+
+	// 3. Antigravity model not in catalog: fallback metadata provided
+	agFallback, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-custom-future"})
+	require.NoError(t, err)
+	require.NotNil(t, agFallback)
+	require.Equal(t, "antigravity", agFallback.Provider)
+	require.Equal(t, "gemini-custom-future", agFallback.ID)
+	require.Equal(t, "google-generative-ai", agFallback.Api)
+	require.Equal(t, 1048576, agFallback.ContextWindow)
+	require.Equal(t, 8192, agFallback.MaxTokens)
+
+	// 4. Missing model under non-antigravity provider: returns error, does NOT fall back to openai-codex
+	missingGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "nonexistent-model"})
+	require.Error(t, err)
+	require.Nil(t, missingGoogle)
+	require.True(t, IsModelUnavailable(err))
+
+	missingOther, err := ResolveModel(store.ManagedModel{Provider: "other-provider", ID: "custom-model"})
+	require.Error(t, err)
+	require.Nil(t, missingOther)
+
+	// 5. Empty provider or ID
+	empty, err := ResolveModel(store.ManagedModel{})
+	require.Error(t, err)
+	require.Nil(t, empty)
 }

@@ -73,28 +73,14 @@ func (m *Manager) wrapEmbeddedToolTimeout(agentID string, tool agent.AgentTool) 
 		timeoutCtx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
 
-		type execResult struct {
-			res agent.AgentToolResult
-			err error
+		res, err := original(timeoutCtx, id, args, update)
+		if errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			return agent.AgentToolResult{}, fmt.Errorf("tool execution timed out (limit: %v)", timeout)
 		}
-		resCh := make(chan execResult, 1)
-		go func() {
-			res, err := original(timeoutCtx, id, args, update)
-			resCh <- execResult{res: res, err: err}
-		}()
-
-		select {
-		case <-timeoutCtx.Done():
-			if errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
-				return agent.AgentToolResult{}, fmt.Errorf("tool execution timed out (limit: %v)", timeout)
-			}
+		if timeoutCtx.Err() != nil && err == nil {
 			return agent.AgentToolResult{}, timeoutCtx.Err()
-		case r := <-resCh:
-			if errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) || errors.Is(r.err, context.DeadlineExceeded) {
-				return agent.AgentToolResult{}, fmt.Errorf("tool execution timed out (limit: %v)", timeout)
-			}
-			return r.res, r.err
 		}
+		return res, err
 	}
 	return tool
 }

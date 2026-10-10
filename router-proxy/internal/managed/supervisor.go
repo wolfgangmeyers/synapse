@@ -12,7 +12,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -42,6 +41,7 @@ type LaunchRequest struct {
 	CanonicalBodyHash  string
 	Worktree           bool
 	WorktreeBranch     string
+	AllowInlineTools   bool
 }
 type LaunchResult struct {
 	Agent    *store.ManagedAgentRecord
@@ -310,7 +310,7 @@ type Manager struct {
 	embeddedAfterIntent        func(context.Context)
 	embeddedAfterCheckedIntent func(context.Context)
 	embeddedAfterUserAppend    func(context.Context)
-	embeddedBashAfterStart     func(int, *os.File)
+	embeddedBashAfterStart     func(int)
 	embeddedAfterGoalCommit    func(context.Context)
 	embeddedAfterWorkerLaunch  func(context.Context)
 	embeddedStartupGeneration  int64
@@ -319,7 +319,6 @@ type Manager struct {
 	embeddedOwnerTicker                        func() (<-chan time.Time, func())
 	embeddedRecovery                           map[string]store.EmbeddedBinding
 	embeddedGoalTimers                         map[string]*embeddedGoalTimer
-	embeddedFreshWrites                        map[embeddedWriteAdmission]struct{}
 	catalog                                    ModelSource
 	clock                                      deterministic.Clock
 	ids                                        deterministic.IDSource
@@ -669,7 +668,7 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 		worktreeBasePath = cwd
 		worktreeBranch = request.WorktreeBranch
 	}
-	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: agentCwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now, Worktree: request.Worktree, WorktreeBasePath: worktreeBasePath, WorktreeBranch: worktreeBranch}
+	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: agentCwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now, Worktree: request.Worktree, WorktreeBasePath: worktreeBasePath, WorktreeBranch: worktreeBranch, AllowInlineTools: request.AllowInlineTools}
 	if m.config.Enabled {
 		recipe, recipeErr := m.managedLaunchRecipe(agent)
 		if recipeErr != nil {

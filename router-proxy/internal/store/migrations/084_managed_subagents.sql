@@ -10,7 +10,7 @@ CREATE TABLE managed_subagents (
   parent_generation TEXT NOT NULL,
   description TEXT NOT NULL,
   subagent_type TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','steered','aborted','stopped','error','interrupted','cancelled')),
+  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','steered','aborted','stopped','error','interrupted','cancelled')),
   max_turns INTEGER NOT NULL CHECK(max_turns >= 0),
   turn_count INTEGER NOT NULL DEFAULT 0 CHECK(turn_count >= 0),
   tool_use_count INTEGER NOT NULL DEFAULT 0 CHECK(tool_use_count >= 0),

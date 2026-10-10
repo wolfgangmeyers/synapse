@@ -38,31 +38,7 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 		}
 	}
 
-	locked := lane.serial.TryLock()
-	if !locked {
-		for i := 0; i < 20; i++ {
-			lane.activeMu.RLock()
-			active = lane.activeSession
-			lane.activeMu.RUnlock()
-			if active != nil {
-				steeredAny := false
-				for m.trySteerActiveSession(agentID, active) {
-					steeredAny = true
-				}
-				if steeredAny {
-					return
-				}
-			}
-			if lane.serial.TryLock() {
-				locked = true
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if !locked {
-			lane.serial.Lock()
-		}
-	}
+	lane.serial.Lock()
 	defer lane.serial.Unlock()
 	for {
 		if m.runCtx.Err() != nil {

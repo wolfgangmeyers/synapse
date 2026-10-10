@@ -17,19 +17,17 @@ func SubagentWakeRequestID(childID string, attempt int) string {
 }
 
 func isTerminalSubagentStatus(status string) bool {
-	switch status {
-	case "completed", "steered", "aborted", "stopped", "error", "interrupted":
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "stopped", "steered", "aborted", "error", "interrupted", "cancelled":
 		return true
 	default:
 		return false
 	}
 }
 
-// DeliverSubagentParentWake delivers a completion notification into the parent's
-// serial lane, atomically fenced by the original parent EmbeddedBinding to prevent TOCTOU.
-// It strictly verifies that the subagent exists in durable store, has matching attempt/parent
-// lineage, and is in a terminal status. It formats the notification from the persisted child
-// record and ensures exact-once execution per child attempt using a durable prompt request ID.
+// DeliverSubagentParentWake delivers a completion notification into the parent mailbox,
+// fenced by the parent EmbeddedBinding to ensure lineage. It strictly verifies that the
+// subagent exists in durable store, has matching attempt/parent lineage, and is in a terminal status.
 func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.EmbeddedBinding, record store.ManagedSubagentRecord) error {
 	if ctx == nil {
 		ctx = m.runCtx
@@ -69,8 +67,7 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 		return fmt.Errorf("cannot deliver completion wake for non-terminal subagent status %q", record.Status)
 	}
 
-	// Strictly verify against durable child record in store before touching parent lane.
-	// Nonexistent, foreign, or unpersisted child IDs are rejected here.
+	// Strictly verify against durable child record in store
 	storedChild, err := m.store.ManagedSubagent(ctx, parent, record.AgentID)
 	if err != nil {
 		return fmt.Errorf("cannot verify subagent %q for parent wake: %w", record.AgentID, err)
@@ -88,138 +85,89 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 		return fmt.Errorf("persisted subagent %q lineage mismatch with parent binding", storedChild.AgentID)
 	}
 
-	lane := m.laneFor(parent.AgentID)
-	lane.admission.Lock()
-	defer lane.admission.Unlock()
-	lane.serial.Lock()
-	defer lane.serial.Unlock()
-
-	lane.selection.Lock()
-	selectionHeld := true
-	defer func() {
-		if selectionHeld {
-			lane.selection.Unlock()
-		}
-	}()
-
-	saved, err := m.store.ManagedAgent(ctx, parent.AgentID)
+	// Lineage verification on parent binding vs current parent in store
+	savedParent, err := m.store.ManagedAgent(ctx, parent.AgentID)
 	if err != nil {
 		return err
 	}
-	if saved.Runtime != "embedded" {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
-	}
-	if saved.LifecycleState != "running" || saved.DesiredState != "running" || !saved.AcceptingPrompts || !saved.SlotHeld {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
-	}
-	// Initial in-memory fence check against expected parent binding
-	if saved.PiSessionID != parent.SessionID || saved.SessionEpoch != parent.Epoch || saved.RuntimeGeneration != parent.Generation {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
+	if savedParent.PiSessionID != parent.SessionID || savedParent.SessionEpoch != parent.Epoch || savedParent.RuntimeGeneration != parent.Generation {
+		return fmt.Errorf("stale parent binding: epoch %d != current %d", parent.Epoch, savedParent.SessionEpoch)
 	}
 
-	m.mu.Lock()
-	owner, ok := m.embeddedOwners[parent.AgentID]
-	closed := m.closed
-	m.mu.Unlock()
-	if !ok || closed || (m.runCtx != nil && m.runCtx.Err() != nil) {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
-	}
-	if owner.binding.AgentID != parent.AgentID || owner.binding.SessionID != parent.SessionID || owner.binding.Epoch != parent.Epoch || owner.binding.Generation != parent.Generation {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
-	}
-	if parent.OwnerToken > 0 && owner.binding.OwnerToken != parent.OwnerToken {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
-	}
-
-	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-		return &store.ManagedAgentNotReadyError{AgentID: parent.AgentID}
-	}
-
-	// Deterministic barrier hook for testing race conditions (e.g. concurrent epoch reset)
-	// before the atomic store reservation commit.
 	if m.beforeSubagentWakeReservation != nil {
 		m.beforeSubagentWakeReservation(parent)
 	}
 
-	// Format notification from the authentic persisted child record, not forged caller stats
-	notification := FormatSubagentWakePrompt(*storedChild)
-	reqID := SubagentWakeRequestID(storedChild.AgentID, storedChild.Attempt)
-
-	// ReserveEmbeddedPrompt executes inside an immediate SQLite transaction, performing
-	// embeddedFence(owner.binding) against both managed_agents and embedded_sessions tables.
-	// If the parent epoch, session, or owner token changed concurrently, it fails atomically here.
-	// On replay (prompt request exists in state 'complete' with durable assistant head), it returns
-	// replay = true, allowing exact-once deduplication without executing another turn.
-	replay, err := m.store.ReserveEmbeddedPrompt(ctx, owner.binding, reqID, notification)
-	lane.selection.Unlock()
-	selectionHeld = false
+	// Re-check parent in store in case hook or concurrent event changed parent epoch/session
+	savedParent, err = m.store.ManagedAgent(ctx, parent.AgentID)
 	if err != nil {
 		return err
 	}
-	if replay {
-		// Exact-once deduplication: prompt request was already executed and completed in store.
-		return nil
+	if savedParent.PiSessionID != parent.SessionID || savedParent.SessionEpoch != parent.Epoch || savedParent.RuntimeGeneration != parent.Generation {
+		return fmt.Errorf("stale parent binding after barrier: epoch %d != current %d", parent.Epoch, savedParent.SessionEpoch)
 	}
 
-	baseCtx := m.runCtx
-	if baseCtx == nil {
-		baseCtx = ctx
-	}
-	turnCtx, cancel := context.WithCancel(baseCtx)
-	defer cancel()
-	stop := context.AfterFunc(ctx, cancel)
-	defer stop()
-
-	runCtx := context.WithValue(turnCtx, embeddedOwnerContextKey{}, owner)
-	if err := m.runEmbeddedSessionPrompt(runCtx, *saved, notification); err != nil {
-		return err
-	}
-	return m.store.CompleteEmbeddedPrompt(ctx, owner.binding, reqID)
-}
-
-// AsyncDeliverSubagentParentWake dispatches DeliverSubagentParentWake in a managed background task.
-// If the parent is restarting or not ready, it delivers the completion notification to the parent mailbox.
-func (m *Manager) AsyncDeliverSubagentParentWake(parent store.EmbeddedBinding, record store.ManagedSubagentRecord) {
-	m.startManagedTask(func() {
-		if err := m.DeliverSubagentParentWake(m.runCtx, parent, record); err != nil {
-			m.deliverSubagentMailboxNotification(parent, record)
-		}
-	})
+	return m.deliverSubagentMailboxNotificationWithContext(ctx, parent, *storedChild)
 }
 
 func (m *Manager) deliverSubagentMailboxNotification(parent store.EmbeddedBinding, record store.ManagedSubagentRecord) {
+	ctx := m.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_ = m.deliverSubagentMailboxNotificationWithContext(ctx, parent, record)
+}
+
+func (m *Manager) deliverSubagentMailboxNotificationWithContext(ctx context.Context, parent store.EmbeddedBinding, record store.ManagedSubagentRecord) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	subject := fmt.Sprintf("[System Notice] Subagent Completed: %s", record.AgentID)
-	if record.Status != "completed" && record.Status != "steered" {
+	if record.Status != "completed" {
 		subject = fmt.Sprintf("[System Notice] Subagent %s: %s", strings.Title(record.Status), record.AgentID)
 	}
 	body := FormatSubagentWakePrompt(record)
 	source := protocol.MessageSource{Kind: "system"}
 	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
-	nowText := formatManagedTime(m.clock.Now())
+	now := formatManagedTime(m.clock.Now())
 	envelope := protocol.Envelope{
 		ID:        msgID,
 		From:      "system",
 		To:        parent.AgentID,
 		Subject:   &subject,
 		Body:      body,
-		CreatedAt: nowText,
+		CreatedAt: now,
 		Source:    &source,
 	}
-	result, err := m.store.Enqueue(context.Background(), envelope, store.EnqueueOptions{
+	result, err := m.store.Enqueue(ctx, envelope, store.EnqueueOptions{
 		Conversation: &store.ConversationOptions{
 			Body:   &body,
 			Source: &source,
 		},
 	})
-	if err == nil && (result.Created || result.ConversationCreated) {
+	if err != nil {
+		if strings.Contains(err.Error(), "already belongs") || strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
+		return err
+	}
+	if result.Created || result.ConversationCreated {
 		m.mu.Lock()
 		publish := m.embeddedMailPublisher
 		m.mu.Unlock()
 		if publish != nil {
 			publish(result)
 		} else {
-			_, _ = m.store.ResolveMessageTarget(context.Background(), result.Message.ID)
+			_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
 		}
-		m.OfferDirect(parent.AgentID)
 	}
+	m.OfferDirect(parent.AgentID)
+	return nil
+}
+
+// AsyncDeliverSubagentParentWake dispatches DeliverSubagentParentWake in a managed background task.
+func (m *Manager) AsyncDeliverSubagentParentWake(parent store.EmbeddedBinding, record store.ManagedSubagentRecord) {
+	m.startManagedTask(func() {
+		_ = m.DeliverSubagentParentWake(m.runCtx, parent, record)
+	})
 }

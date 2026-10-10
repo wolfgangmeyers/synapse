@@ -50,7 +50,6 @@ type embeddedPersistence struct {
 	wakeUsed          bool
 	wakeFinal         *store.EmbeddedEntry
 	reminderResult    func(context.Context, ai.ToolResultMessage, bool) error
-	bashResult        func(context.Context, ai.ToolResultMessage, bool) error
 	goalResult        func(context.Context, ai.ToolResultMessage, bool) error
 	goalInvocation    func(string) *store.EmbeddedGoalInvocation
 	toolInvocation    func(string) *store.EmbeddedToolInvocation
@@ -315,11 +314,6 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				return err
 			}
 		}
-		if result.ToolName == "bash" && p.bashResult != nil {
-			if err := p.bashResult(ctx, result, false); err != nil {
-				return err
-			}
-		}
 		if p.goalResult != nil {
 			if err := p.goalResult(ctx, result, false); err != nil {
 				return err
@@ -473,11 +467,6 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				return observeErr
 			}
 		}
-		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName == "bash" && p.bashResult != nil {
-			if observeErr := p.bashResult(ctx, result, true); observeErr != nil {
-				return observeErr
-			}
-		}
 		if result, ok := message.(ai.ToolResultMessage); ok && p.goalResult != nil {
 			p.goalEntry = entry
 			if observeErr := p.goalResult(ctx, result, true); observeErr != nil {
@@ -485,7 +474,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" {
-			if result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
+			if result.ToolName != "read" && result.ToolName != "write" && result.ToolName != "edit" && result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
 				body, err := json.Marshal(result)
 				if err == nil {
 					_ = p.db.ObserveEmbeddedEffect(ctx, p.binding, result.ToolCallID, body)
@@ -860,23 +849,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := m.validateEmbeddedWorkingDirectory(saved.Cwd); err != nil {
 		return 0, err
 	}
-	model := ai.GetModel(saved.SelectedModel.Provider, saved.SelectedModel.ID)
-	if model == nil && (saved.SelectedModel.Provider == "antigravity" || saved.SelectedModel.Provider == "google") {
-		model = ai.GetModel("google", saved.SelectedModel.ID)
-	}
-	if model == nil && saved.SelectedModel.Provider == "antigravity" {
-		model = &ai.Model{
-			ID:            saved.SelectedModel.ID,
-			Provider:      "antigravity",
-			Api:           "google-generative-ai",
-			ContextWindow: 1048576,
-			MaxTokens:     8192,
-		}
-	}
-	if model != nil && saved.SelectedModel.Provider != "" && model.Provider != saved.SelectedModel.Provider {
-		cloned := *model
-		cloned.Provider = saved.SelectedModel.Provider
-		model = &cloned
+	model, err := ResolveModel(saved.SelectedModel)
+	if err != nil && m.embeddedModelResolver == nil {
+		return 0, err
 	}
 	var injectedStreamModel *ai.Model
 	if m.embeddedModelResolver != nil {
@@ -901,9 +876,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 			}
 			injectedStreamModel = resolved
-			copy := *model
-			copy.ContextWindow, copy.MaxTokens = resolved.ContextWindow, resolved.MaxTokens
-			model = &copy
+			if model != nil {
+				copy := *model
+				copy.ContextWindow, copy.MaxTokens = resolved.ContextWindow, resolved.MaxTokens
+				model = &copy
+			} else {
+				model = resolved
+			}
 		}
 	}
 	if model == nil {
@@ -925,7 +904,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	freshWorkerIntents := make(map[string]bool)
 	freshToolIntents := make(map[string]*store.EmbeddedToolInvocation)
 	toolExecutions := make(map[string]*store.EmbeddedToolInvocation)
-	freshBashIntents := make(map[string]bool)
 	freshGoalIntents := make(map[string]*store.EmbeddedGoalInvocation)
 	m.mu.Lock()
 	goalProcess := m.embeddedStartupGeneration
@@ -1056,12 +1034,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		uncertain bool
 	}
 	reminderExecutions := make(map[string]reminderExecution)
-	type bashExecution struct {
-		expected *ai.ToolResultMessage
-		replay   bool
-		failure  embeddedBashFailureClass
-	}
-	bashExecutions := make(map[string]bashExecution)
 	p.reminderResult = func(resultCtx context.Context, result ai.ToolResultMessage, commit bool) error {
 		freshWorkerMu.Lock()
 		execution := reminderExecutions[result.ToolCallID]
@@ -1113,91 +1085,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			delete(freshReminderIntents, result.ToolCallID)
 			freshWorkerMu.Unlock()
 		}
-		return nil
-	}
-	p.bashResult = func(resultCtx context.Context, result ai.ToolResultMessage, commit bool) error {
-		freshWorkerMu.Lock()
-		execution := bashExecutions[result.ToolCallID]
-		freshWorkerMu.Unlock()
-		if !commit {
-			if execution.expected == nil {
-				// A pre-intent policy denial may be checked. After an intent,
-				// a synthesized SDK error cannot certify the Bash outcome.
-				_, err := m.store.RecoverEmbeddedEffect(resultCtx, binding, result.ToolCallID)
-				if errors.Is(err, sql.ErrNoRows) {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				if execution.failure == embeddedBashOutputTruncated {
-					return errors.New("bash output truncated: outcome UNKNOWN after spawn")
-				}
-				if result.IsError {
-					for _, c := range result.Content {
-						if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "tool execution timed out") {
-							return nil
-						}
-					}
-				}
-				return errors.New("bash outcome unknown: no checked SDK result")
-			}
-			if execution.expected.IsError {
-				return errors.New("bash expected result is not successful")
-			}
-			actual, err := json.Marshal(result.Content)
-			if err != nil {
-				return err
-			}
-			expected, err := json.Marshal(execution.expected.Content)
-			if err != nil {
-				return err
-			}
-			if result.ToolCallID != execution.expected.ToolCallID || result.ToolName != execution.expected.ToolName || result.IsError != execution.expected.IsError || !bytes.Equal(actual, expected) {
-				return errors.New("bash SDK result differs from checked effect")
-			}
-			if execution.replay {
-				actual, err := json.Marshal(result)
-				if err != nil {
-					return err
-				}
-				expected, err := json.Marshal(execution.expected)
-				if err != nil {
-					return err
-				}
-				if !bytes.Equal(actual, expected) {
-					return errors.New("bash SDK replay differs from saved effect")
-				}
-			}
-			return nil
-		}
-		if execution.expected == nil && result.IsError {
-			for _, c := range result.Content {
-				if tc, ok := c.(ai.TextContent); ok && strings.Contains(tc.Text, "tool execution timed out") {
-					body, err := json.Marshal(result)
-					if err != nil {
-						return err
-					}
-					_ = m.store.ObserveEmbeddedEffect(resultCtx, binding, result.ToolCallID, body)
-					freshWorkerMu.Lock()
-					delete(bashExecutions, result.ToolCallID)
-					freshWorkerMu.Unlock()
-					return nil
-				}
-			}
-		}
-		if execution.expected != nil && !execution.replay {
-			body, err := json.Marshal(result)
-			if err != nil {
-				return err
-			}
-			if err := m.store.ObserveEmbeddedEffect(resultCtx, binding, result.ToolCallID, body); err != nil {
-				return err
-			}
-		}
-		freshWorkerMu.Lock()
-		delete(bashExecutions, result.ToolCallID)
-		freshWorkerMu.Unlock()
 		return nil
 	}
 	// A non-nil list, even when empty, excludes every SDK built-in.
@@ -1256,23 +1143,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "extend_tool_timeout"))
 		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))
-		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd, func(id string) bool {
-			freshWorkerMu.Lock()
-			defer freshWorkerMu.Unlock()
-			fresh := freshBashIntents[id]
-			delete(freshBashIntents, id)
-			return fresh
-		}, func(id string, expected ai.ToolResultMessage, replay bool) {
-			freshWorkerMu.Lock()
-			bashExecutions[id] = bashExecution{expected: &expected, replay: replay}
-			freshWorkerMu.Unlock()
-		}, func(id string, class embeddedBashFailureClass) {
-			freshWorkerMu.Lock()
-			execution := bashExecutions[id]
-			execution.failure = class
-			bashExecutions[id] = execution
-			freshWorkerMu.Unlock()
-		}))
+		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd))
 		readTool, err := coding.CreateTool("read", saved.Cwd)
 		if err != nil {
 			return 0, fmt.Errorf("embedded read tool: %w", err)
@@ -1477,54 +1348,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	}
 	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
 		ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
-			if call.ToolCall.Name != "bash" {
-				return nil, nil
-			}
-			if role != "root" && role != "worker" {
-				return nil, errors.New("bash replay requires embedded root or worker")
-			}
-			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-				return nil, err
-			}
-			effect, err := m.store.RecoverEmbeddedEffect(callCtx, binding, call.ToolCall.ID)
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, nil
-			}
-			if err != nil {
-				return nil, err
-			}
-			intent, err := json.Marshal(call.ToolCall)
-			if err != nil {
-				return nil, err
-			}
-			if !bytes.Equal(effect.Intent, intent) {
-				return nil, errors.New("bash replay intent mismatch")
-			}
-			if effect.State != "observed" {
-				return nil, nil
-			}
-			message, err := ai.UnmarshalMessage(effect.Result)
-			if err != nil {
-				return nil, err
-			}
-			result, ok := message.(ai.ToolResultMessage)
-			if !ok || result.MessageRole() != ai.RoleToolResult || result.ToolCallID != call.ToolCall.ID || result.ToolName != "bash" || result.IsError || len(result.Content) != 1 || result.Timestamp <= 0 {
-				return nil, errors.New("invalid observed bash replay result")
-			}
-			if _, ok := result.Content[0].(ai.TextContent); !ok {
-				return nil, errors.New("invalid observed bash replay content")
-			}
-			canonical, err := json.Marshal(result)
-			if err != nil {
-				return nil, err
-			}
-			if !bytes.Equal(canonical, effect.Result) {
-				return nil, errors.New("observed bash replay bytes differ")
-			}
-			freshWorkerMu.Lock()
-			bashExecutions[call.ToolCall.ID] = bashExecution{expected: &result, replay: true}
-			freshWorkerMu.Unlock()
-			return &result, nil
+			return nil, nil
 		}, BeforeToolCall: func(callCtx context.Context, call agent.BeforeToolCallContext) *agent.BeforeToolCallResult {
 			if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, call.ToolCall.Name); err != nil {
 				return &agent.BeforeToolCallResult{
@@ -1642,18 +1466,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 				return nil
 			}
-			if call.ToolCall.Name == "bash" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "bash requires embedded root or worker"}
-				}
-				if _, parseErr := parseEmbeddedBash(call.ToolCall.Arguments); parseErr != nil {
-					return &agent.PolicyDenial{Reason: parseErr.Error()}
-				}
-			}
-			if call.ToolCall.Name == "read" || call.ToolCall.Name == "edit" || call.ToolCall.Name == "write" {
+			if call.ToolCall.Name == "read" || call.ToolCall.Name == "edit" || call.ToolCall.Name == "write" || call.ToolCall.Name == "bash" {
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
 				}
+				if call.ToolCall.Name == "bash" {
+					if _, parseErr := parseEmbeddedBash(call.ToolCall.Arguments); parseErr != nil {
+						return &agent.PolicyDenial{Reason: parseErr.Error()}
+					}
+				}
+				return nil
 			}
 			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" {
 				if role != "root" && role != "worker" {
@@ -1690,24 +1512,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 						return errors.New("goal call ID conflicts with prior arguments")
 					}
 					return errors.New("goal call outcome unknown or already committed: no new admission")
-				}
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
-				}
-			}
-			if call.ToolCall.Name == "read" || call.ToolCall.Name == "write" || call.ToolCall.Name == "edit" || call.ToolCall.Name == "bash" {
-				prior, err := m.store.RecoverEmbeddedEffect(callCtx, binding, call.ToolCall.ID)
-				if err == nil {
-					if !bytes.Equal(prior.Intent, intent) {
-						return errors.New("file call ID conflicts with prior arguments")
-					}
-					if call.ToolCall.Name == "bash" && prior.State == "observed" {
-						return nil
-					}
-					if prior.State == "unknown" {
-						return errors.New("file outcome unknown: no committed SDK tool result")
-					}
-					return errors.New("file call ID already used")
 				}
 				if !errors.Is(err, sql.ErrNoRows) {
 					return err
@@ -1801,11 +1605,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" {
 				freshWorkerMu.Lock()
 				freshGoalIntents[call.ToolCall.ID] = goalAdmission
-				freshWorkerMu.Unlock()
-			}
-			if call.ToolCall.Name == "bash" {
-				freshWorkerMu.Lock()
-				freshBashIntents[call.ToolCall.ID] = true
 				freshWorkerMu.Unlock()
 			}
 

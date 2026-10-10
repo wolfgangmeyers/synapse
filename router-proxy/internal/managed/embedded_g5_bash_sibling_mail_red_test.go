@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -73,7 +72,7 @@ func TestEmbeddedG5RestrictedRealBashBlockedSiblingSDKMailRED(t *testing.T) {
 	}})
 	bReg.SetResponses([]providers.FauxResponseStep{
 		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("bash", map[string]any{"command": "grep -F -n -- private-b one.txt", "timeout": float64(10)}, "b-bash-1")}, ai.StopToolUse)
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("bash", map[string]any{"command": "sleep 1; grep -F -n -- private-b one.txt", "timeout": float64(10)}, "b-bash-1")}, ai.StopToolUse)
 		},
 		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 			var found *ai.ToolResultMessage
@@ -95,32 +94,18 @@ func TestEmbeddedG5RestrictedRealBashBlockedSiblingSDKMailRED(t *testing.T) {
 	}, CodexCredentialStore: testfixture.CodexAdmission(t)})
 	require.NoError(t, err)
 	defer m.Close(context.Background())
-	type gated struct {
-		pid   int
-		write *os.File
-	}
-	started := make(chan gated, 1)
-	m.embeddedBashAfterStart = func(pid int, w *os.File) {
+	started := make(chan int, 1)
+	m.embeddedBashAfterStart = func(pid int) {
 		select {
-		case started <- gated{pid, w}:
+		case started <- pid:
 		default:
 		}
 	}
-	var gate gated
-	var release sync.Once
-	releaseGate := func() {
-		release.Do(func() {
-			if gate.write != nil {
-				_, _ = gate.write.Write([]byte("\n"))
-				_ = gate.write.Close()
-			}
-		})
-	}
+	var pid int
 	completed := false
 	defer func() {
-		releaseGate()
-		if gate.pid > 0 && !completed {
-			_ = syscall.Kill(-gate.pid, syscall.SIGKILL)
+		if pid > 0 && !completed {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
 		}
 	}()
 	published := make(chan store.EmbeddedReply, 2)
@@ -147,7 +132,7 @@ func TestEmbeddedG5RestrictedRealBashBlockedSiblingSDKMailRED(t *testing.T) {
 			requestID = "a5555555-5555-4555-8555-555555555693"
 			initial = "check own file"
 		}
-		launched, launchErr := m.Launch(ctx, LaunchRequest{Name: id, Cwd: dirs[id], Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: initial, RequestID: requestID})
+		launched, launchErr := m.Launch(ctx, LaunchRequest{Name: id, Cwd: dirs[id], Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: initial, RequestID: requestID, AllowInlineTools: true})
 		require.NoError(t, launchErr)
 		require.Equal(t, dirs[id], launched.Agent.Cwd)
 		role, roleErr := db.EmbeddedSessionRole(ctx, store.EmbeddedBinding{AgentID: launched.Agent.AgentID, SessionID: launched.Agent.PiSessionID, Epoch: launched.Agent.SessionEpoch, Generation: launched.Agent.RuntimeGeneration})
@@ -155,9 +140,8 @@ func TestEmbeddedG5RestrictedRealBashBlockedSiblingSDKMailRED(t *testing.T) {
 		require.Equal(t, "worker", role)
 	}
 	select {
-	case gate = <-started:
-		require.Positive(t, gate.pid)
-		require.NotNil(t, gate.write)
+	case pid = <-started:
+		require.Positive(t, pid)
 	case <-time.After(4 * time.Second):
 		t.Fatal("fixture: B did not start real Bash")
 	}
@@ -231,7 +215,6 @@ func TestEmbeddedG5RestrictedRealBashBlockedSiblingSDKMailRED(t *testing.T) {
 		t.Fatalf("extra publication: %+v", extra)
 	default:
 	}
-	releaseGate()
 	select {
 	case result := <-bSeen:
 		require.NotNil(t, result)
@@ -246,7 +229,7 @@ func TestEmbeddedG5RestrictedRealBashBlockedSiblingSDKMailRED(t *testing.T) {
 	var resultCount int
 	require.NoError(t, check.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id='g5-disk-b' AND kind='toolResult' AND instr(body, 'b-bash-1') > 0`).Scan(&resultCount))
 	require.Equal(t, 1, resultCount, "B checked SDK result must be durable once")
-	require.Eventually(t, func() bool { return syscall.Kill(-gate.pid, 0) == syscall.ESRCH }, 3*time.Second, 10*time.Millisecond, "B process group survived completion")
+	require.Eventually(t, func() bool { return syscall.Kill(-pid, 0) == syscall.ESRCH }, 3*time.Second, 10*time.Millisecond, "B process group survived completion")
 	completed = true
 	select {
 	case extra := <-published:

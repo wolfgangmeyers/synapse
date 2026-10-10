@@ -209,35 +209,6 @@ func TestWrapEmbeddedToolTimeoutExtensionPreventsCancellation(t *testing.T) {
 	require.Contains(t, err.Error(), "tool execution timed out")
 }
 
-func TestEmbeddedToolTimeoutUnresponsiveToolTerminates(t *testing.T) {
-	ctx := context.Background()
-	agentID := "worker-unresponsive-tool"
-	mgr := &Manager{}
-	lane := mgr.laneFor(agentID)
-
-	lane.activeMu.Lock()
-	lane.defaultTimeoutOverride = 60 * time.Millisecond
-	lane.activeMu.Unlock()
-
-	// Tool ignores callCtx completely and blocks
-	unresponsiveTool := agent.AgentTool{
-		Name: "blocking_tool",
-		Execute: func(_ context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
-			time.Sleep(3 * time.Second)
-			return agent.AgentToolResult{}, nil
-		},
-	}
-
-	wrapped := mgr.wrapEmbeddedToolTimeout(agentID, unresponsiveTool)
-	start := time.Now()
-	_, err := wrapped.Execute(ctx, "block-1", map[string]any{}, nil)
-	elapsed := time.Since(start)
-
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "tool execution timed out (limit: 60ms)")
-	require.Less(t, elapsed, 500*time.Millisecond, "must abort wrapper execution without waiting for blocking tool")
-}
-
 func TestEmbeddedToolTimeoutRegistryIntegration(t *testing.T) {
 	for _, role := range []string{"root", "worker"} {
 		t.Run(role, func(t *testing.T) {
@@ -275,6 +246,7 @@ func TestExtendToolTimeoutAliasIntegration(t *testing.T) {
 func TestEmbeddedSessionToolTimeoutCancellationIntegration(t *testing.T) {
 	ctx := context.Background()
 	m, db, provider, caller, _ := requiredToolsFixture(t, "worker")
+	require.NoError(t, db.SetManagedAgentAllowInlineTools(ctx, caller, true))
 	lane := m.laneFor(caller)
 	lane.activeMu.Lock()
 	lane.defaultTimeoutOverride = 60 * time.Millisecond

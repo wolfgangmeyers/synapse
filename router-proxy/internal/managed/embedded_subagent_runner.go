@@ -60,7 +60,6 @@ type subagentTask struct {
 	wrapUpSteered   bool
 	hardAborted     bool
 	stopped         bool
-	leaseErr        error
 }
 
 func resolveSubagentSystemPrompt(subagentType string) string {
@@ -253,7 +252,7 @@ func (m *Manager) drainQueueLocked() {
 		if err != nil {
 			delete(m.subagentsActive, candidate.childID)
 			candidate.mu.Lock()
-			candidate.status = "error"
+			candidate.status = "failed"
 			candidate.mu.Unlock()
 			if current := m.subagentsRegistry[candidate.childID]; current == candidate && current.attempt == candidate.attempt {
 				delete(m.subagentsRegistry, candidate.childID)
@@ -275,23 +274,9 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 		record.SelectedModel.Provider = "antigravity"
 		record.SelectedModel.ID = "gemini-3.8-flash"
 	}
-	model := ai.GetModel(record.SelectedModel.Provider, record.SelectedModel.ID)
-	if model == nil && (record.SelectedModel.Provider == "antigravity" || record.SelectedModel.Provider == "google") {
-		model = ai.GetModel("google", record.SelectedModel.ID)
-	}
-	if model == nil && record.SelectedModel.Provider == "antigravity" {
-		model = &ai.Model{
-			ID:            record.SelectedModel.ID,
-			Provider:      "antigravity",
-			Api:           "google-generative-ai",
-			ContextWindow: 1048576,
-			MaxTokens:     8192,
-		}
-	}
-	if model != nil && record.SelectedModel.Provider != "" && model.Provider != record.SelectedModel.Provider {
-		cloned := *model
-		cloned.Provider = record.SelectedModel.Provider
-		model = &cloned
+	model, err := ResolveModel(record.SelectedModel)
+	if err != nil && m.embeddedModelResolver == nil {
+		return nil, nil, err
 	}
 	var stream agent.StreamFn
 	if m.embeddedModelResolver != nil {
@@ -639,7 +624,7 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 
 	latestRecord, err := m.store.ManagedSubagent(context.Background(), task.parent, task.childID)
 	outcome := "completed"
-	if terminalStatus != "completed" && terminalStatus != "steered" {
+	if terminalStatus != "completed" {
 		outcome = "failed"
 	}
 	desc := strings.TrimSpace(task.description)
@@ -747,20 +732,8 @@ func (m *Manager) runSubagent(task *subagentTask) {
 
 	var terminalStatus, resultText, errorMsg string
 	var childBinding store.EmbeddedBinding
-	var ownerID string
-	var cancelRenew context.CancelFunc
-	var renewDone chan struct{}
 
 	defer func() {
-		if cancelRenew != nil {
-			cancelRenew()
-		}
-		if renewDone != nil {
-			<-renewDone
-		}
-		if childBinding.OwnerToken > 0 && ownerID != "" {
-			_ = m.store.ReleaseEmbeddedOwner(context.Background(), childBinding, ownerID)
-		}
 		if m.isClosed() && !task.stopped {
 			return
 		}
@@ -771,7 +744,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 
 	childAgent, err := m.store.ManagedAgent(m.runCtx, task.childID)
 	if err != nil {
-		terminalStatus, errorMsg = "error", err.Error()
+		terminalStatus, errorMsg = "failed", err.Error()
 		return
 	}
 
@@ -786,110 +759,12 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	savedRole, err := m.store.SavedEmbeddedSessionRole(m.runCtx, childBinding)
 	if err != nil || savedRole == "" {
 		if err := m.store.BindEmbeddedSession(m.runCtx, childBinding, "subagent"); err != nil {
-			terminalStatus, errorMsg = "error", fmt.Sprintf("bind child session: %v", err)
+			terminalStatus, errorMsg = "failed", fmt.Sprintf("bind child session: %v", err)
 			return
 		}
 	}
 
-	// 2. Acquire owner lease for child using embeddedOwnerTTL
-	ownerID, err = newEmbeddedOwnerIdentity()
-	if err != nil {
-		terminalStatus, errorMsg = "error", err.Error()
-		return
-	}
-	var token int64
-	for attempt := 0; attempt < 50; attempt++ {
-		token, err = m.store.AcquireEmbeddedOwner(taskCtx, childBinding, ownerID, embeddedOwnerTTL)
-		if err == nil {
-			break
-		}
-		if taskCtx.Err() != nil {
-			task.mu.Lock()
-			isStopped := task.stopped
-			task.mu.Unlock()
-			if isStopped || taskCtx.Err() == context.Canceled {
-				terminalStatus, resultText = "stopped", "Subagent stopped."
-			} else {
-				terminalStatus, errorMsg = "error", taskCtx.Err().Error()
-			}
-			return
-		}
-		var held *store.EmbeddedOwnerLeaseHeld
-		if errors.As(err, &held) {
-			wait := held.RetryAfter + 10*time.Millisecond
-			if wait < 10*time.Millisecond {
-				wait = 10 * time.Millisecond
-			}
-			if wait > time.Second {
-				wait = time.Second
-			}
-			select {
-			case <-taskCtx.Done():
-				task.mu.Lock()
-				isStopped := task.stopped
-				task.mu.Unlock()
-				if isStopped || taskCtx.Err() == context.Canceled {
-					terminalStatus, resultText = "stopped", "Subagent stopped."
-				} else {
-					terminalStatus, errorMsg = "error", taskCtx.Err().Error()
-				}
-				return
-			case <-time.After(wait):
-				continue
-			}
-		}
-		terminalStatus, errorMsg = "error", fmt.Sprintf("acquire child owner: %v", err)
-		return
-	}
-	if token == 0 {
-		terminalStatus, errorMsg = "error", "acquire child owner lease timeout"
-		return
-	}
-	childBinding.OwnerToken = token
-
-	var renewCtx context.Context
-	renewCtx, cancelRenew = context.WithCancel(taskCtx)
-	defer cancelRenew()
-	renewDone = make(chan struct{})
-	if !m.startManagedTask(func() {
-		defer close(renewDone)
-		ticker := time.NewTicker(embeddedOwnerTTL / 3)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-renewCtx.Done():
-				return
-			case <-ticker.C:
-				if err := m.store.RenewEmbeddedOwner(renewCtx, childBinding, ownerID, embeddedOwnerTTL); err != nil {
-					if renewCtx.Err() != nil || errors.Is(err, context.Canceled) {
-						return
-					}
-					token, acqErr := m.store.AcquireEmbeddedOwner(renewCtx, childBinding, ownerID, embeddedOwnerTTL)
-					if acqErr == nil {
-						childBinding.OwnerToken = token
-					} else {
-						task.mu.Lock()
-						if task.stopped {
-							task.mu.Unlock()
-							return
-						}
-						task.leaseErr = fmt.Errorf("owner lease renewal failed: %w", err)
-						sess := task.activeSession
-						task.mu.Unlock()
-						cancel()
-						if sess != nil {
-							sess.Abort()
-						}
-						return
-					}
-				}
-			}
-		}
-	}) {
-		close(renewDone)
-	}
-
-	// 3. Checked SDK persistence
+	// 2. Checked SDK persistence
 	p := &embeddedPersistence{
 		db:              m.store,
 		binding:         childBinding,
@@ -899,17 +774,17 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		toolInputs:      make(map[string]any),
 	}
 
-	// 4. Fresh confined tools on every run (never reuse closed tools)
+	// 3. Fresh confined tools on every run (never reuse closed tools)
 	tools, toolsCleanup, err := m.EmbeddedSubagentTools(childAgent.Cwd)
 	if err != nil {
-		terminalStatus, errorMsg = "error", err.Error()
+		terminalStatus, errorMsg = "failed", err.Error()
 		return
 	}
 	defer toolsCleanup()
 
 	model, stream, err := m.resolveSubagentModel(*childAgent)
 	if err != nil {
-		terminalStatus, errorMsg = "error", err.Error()
+		terminalStatus, errorMsg = "failed", err.Error()
 		return
 	}
 
@@ -964,12 +839,12 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		},
 	})
 
-	// 6. Restore prior transcript from store if resuming or recovering
+	// 5. Restore prior transcript from store if resuming or recovering
 	if err := p.restore(taskCtx, session); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		task.mu.Lock()
 		isStopped := task.stopped
 		task.mu.Unlock()
-		status := "error"
+		status := "failed"
 		errStr := fmt.Sprintf("restore history: %v", err)
 		resText := ""
 		if isStopped || taskCtx.Err() != nil {
@@ -1026,16 +901,9 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			maxTurns := task.maxTurns
 			task.mu.Unlock()
 
-			// Failclosed progress update: abort if CAS / parent fence fails
+			// Progress telemetry: log and continue on error rather than aborting active task
 			if err := m.store.UpdateManagedSubagentProgress(taskCtx, task.parent, task.childID, task.attempt, currentProgress); err != nil {
-				task.mu.Lock()
-				task.stopped = true
-				task.mu.Unlock()
-				session.Abort()
-				if task.cancel != nil {
-					task.cancel()
-				}
-				return err
+				log.Printf("subagent %s progress telemetry update failed: %v", task.childID, err)
 			}
 
 			// Soft limit check: at maxTurns, inject wrap-up steer prompt
@@ -1090,152 +958,29 @@ func (m *Manager) runSubagent(task *subagentTask) {
 
 	task.mu.Lock()
 	resultText = session.LastAssistantText()
-	if task.leaseErr != nil {
-		terminalStatus = "error"
-		errorMsg = task.leaseErr.Error()
-		resultText = ""
-	} else if task.hardAborted {
-		terminalStatus = "aborted"
+	if task.hardAborted {
+		terminalStatus = "failed"
+		errorMsg = "hard turn limit reached: exceeded maximum turn limit and grace period without settling"
 		resultText = "Subagent aborted: exceeded maximum turn limit and grace period without settling."
 	} else if task.stopped {
 		terminalStatus = "stopped"
 		resultText = "Subagent stopped."
 		errorMsg = ""
 	} else if m.isClosed() || (m.runCtx != nil && m.runCtx.Err() != nil) || errors.Is(runErr, context.Canceled) || (runErr != nil && strings.Contains(runErr.Error(), "context canceled")) {
-		// Router is shutting down/restarting. Preserve running state for restart recovery.
-		terminalStatus = ""
+		// Router is shutting down/restarting.
+		terminalStatus = "failed"
+		errorMsg = "interrupted: router shutdown"
 	} else if taskCtx.Err() != nil {
 		terminalStatus = "stopped"
 		resultText = "Subagent stopped."
 		errorMsg = ""
 	} else if runErr != nil {
-		terminalStatus = "error"
+		terminalStatus = "failed"
 		errorMsg = runErr.Error()
 	} else {
-		if task.wrapUpSteered {
-			terminalStatus = "steered"
-		} else {
-			terminalStatus = "completed"
-		}
+		terminalStatus = "completed"
 	}
 	task.mu.Unlock()
-}
-
-// RecoverActiveSubagents queries running/queued subagents from the store and resumes them across router restart.
-func (m *Manager) RecoverActiveSubagents(ctx context.Context) error {
-	if ctx == nil {
-		ctx = m.runCtx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	records, err := m.store.ActiveManagedSubagents(ctx)
-	if err != nil {
-		return err
-	}
-	for _, rec := range records {
-		parentAgent, err := m.store.ManagedAgent(ctx, rec.ParentAgentID)
-		if err != nil || parentAgent == nil || parentAgent.DesiredState != "running" {
-			continue
-		}
-		if parentAgent.SessionEpoch != rec.ParentEpoch {
-			continue
-		}
-		parentBinding := store.EmbeddedBinding{
-			AgentID:    rec.ParentAgentID,
-			SessionID:  rec.ParentSessionID,
-			Epoch:      rec.ParentEpoch,
-			Generation: rec.ParentGeneration,
-		}
-		m.mu.Lock()
-		if owner, ok := m.embeddedOwners[rec.ParentAgentID]; ok && owner.binding.Epoch == rec.ParentEpoch {
-			parentBinding.OwnerToken = owner.binding.OwnerToken
-		}
-		m.mu.Unlock()
-
-		task := &subagentTask{
-			parent:          parentBinding,
-			childID:         rec.AgentID,
-			attempt:         rec.Attempt,
-			subagentType:    rec.SubagentType,
-			description:     rec.Description,
-			maxTurns:        rec.MaxTurns,
-			prompt:          rec.ResumePrompt,
-			status:          "queued",
-			baseTurns:       rec.TurnCount,
-			baseToolUses:    rec.ToolUseCount,
-			baseTokens:      rec.TotalTokens,
-			baseDuration:    rec.DurationSeconds,
-			durationSeconds: rec.DurationSeconds,
-		}
-
-		m.subagentsMu.Lock()
-		m.subagentsRegistry[rec.AgentID] = task
-		if len(m.subagentsActive) < m.subagentCapacity() {
-			task.status = "running"
-			m.subagentsActive[rec.AgentID] = task
-			m.subagentsMu.Unlock()
-			started := m.startManagedTask(func() { m.runSubagent(task) })
-			if !started {
-				m.subagentsMu.Lock()
-				delete(m.subagentsActive, rec.AgentID)
-				m.subagentsMu.Unlock()
-			}
-		} else {
-			m.subagentsQueue = append(m.subagentsQueue, task)
-			m.subagentsMu.Unlock()
-		}
-	}
-
-	// Also deliver any completed notifications that were missed during restart
-	completed, err := m.store.CompletedSubagentsPendingNotification(ctx)
-	if err == nil {
-		for _, rec := range completed {
-			subject := fmt.Sprintf("[System Notice] Subagent Completed: %s", rec.AgentID)
-			if rec.Status != "completed" && rec.Status != "steered" {
-				subject = fmt.Sprintf("[System Notice] Subagent %s: %s", strings.Title(rec.Status), rec.AgentID)
-			}
-			body := FormatSubagentWakePrompt(*rec)
-			source := protocol.MessageSource{Kind: "system"}
-			msgID := fmt.Sprintf("subagent-completed-%s-%d", rec.AgentID, rec.Attempt)
-			now := formatManagedTime(m.clock.Now())
-			envelope := protocol.Envelope{
-				ID:        msgID,
-				From:      "system",
-				To:        rec.ParentAgentID,
-				Subject:   &subject,
-				Body:      body,
-				CreatedAt: now,
-				Source:    &source,
-			}
-			result, err := m.store.Enqueue(ctx, envelope, store.EnqueueOptions{
-				Conversation: &store.ConversationOptions{
-					Body:   &body,
-					Source: &source,
-				},
-			})
-			if err == nil && (result.Created || result.ConversationCreated) {
-				m.mu.Lock()
-				publish := m.embeddedMailPublisher
-				m.mu.Unlock()
-				if publish != nil {
-					publish(result)
-				} else {
-					_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
-				}
-				m.OfferDirect(rec.ParentAgentID)
-			}
-			parentBinding := store.EmbeddedBinding{
-				AgentID:    rec.ParentAgentID,
-				SessionID:  rec.ParentSessionID,
-				Epoch:      rec.ParentEpoch,
-				Generation: rec.ParentGeneration,
-			}
-			m.AsyncDeliverSubagentParentWake(parentBinding, *rec)
-		}
-	}
-
-	return nil
 }
 
 // ReconcileInterruptedSubagents notifies parent workers of previously running subagents
@@ -1247,13 +992,16 @@ func (m *Manager) ReconcileInterruptedSubagents(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := m.store.MarkInFlightSubagentsFailed(ctx); err != nil {
+		log.Printf("STARTUP: mark in-flight subagents failed: %v", err)
+	}
 	records, err := m.store.InterruptedSubagentsPendingNotification(ctx)
 	if err != nil {
 		return err
 	}
 	for _, rec := range records {
 		childID := rec.AgentID
-		m.recordSubagentCompletionHistory(rec.ParentAgentID, rec.AgentID, rec.Attempt, rec.Description, "failed", "interrupted", "", "Interrupted on restart")
+		m.recordSubagentCompletionHistory(rec.ParentAgentID, rec.AgentID, rec.Attempt, rec.Description, "failed", "failed", "", "Interrupted on restart")
 		subject := fmt.Sprintf("[System Notice] Subagent Interrupted: %s", childID)
 		body := fmt.Sprintf("Subagent %s (\"%s\") was interrupted due to a router process restart. Partial progress and logs have been saved. You can inspect its results using get_subagent_result(agent_id=\"%s\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", childID, rec.Description, childID)
 		source := protocol.MessageSource{Kind: "system"}
