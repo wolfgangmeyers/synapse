@@ -43,8 +43,17 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 	}
 	if ok && owner.binding.AgentID == agentID && owner.binding.SessionID == saved.PiSessionID && owner.binding.Epoch == saved.SessionEpoch && owner.binding.Generation == saved.RuntimeGeneration {
 		binding.OwnerToken = owner.binding.OwnerToken
-		_ = m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
-		return owner, nil
+		if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err == nil {
+			return owner, nil
+		}
+		token, err := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
+		if err == nil {
+			owner.binding.OwnerToken = token
+			m.mu.Lock()
+			m.embeddedOwners[agentID] = owner
+			m.mu.Unlock()
+			return owner, nil
+		}
 	}
 	ownerID, err := newEmbeddedOwnerIdentity()
 	if err != nil {
@@ -52,9 +61,6 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 	}
 	token, err := m.store.AcquireEmbeddedOwner(ctx, binding, ownerID, embeddedOwnerTTL)
 	if err != nil {
-		if ok && owner.binding.OwnerToken > 0 {
-			return owner, nil
-		}
 		return embeddedOwner{}, fmt.Errorf("acquire embedded owner for agent %s: %w", agentID, err)
 	}
 	binding.OwnerToken = token
@@ -74,7 +80,20 @@ func (m *Manager) refreshEmbeddedOwner(ctx context.Context, owner *embeddedOwner
 	if m.store == nil || owner == nil {
 		return nil
 	}
-	_ = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
+	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err == nil {
+		return nil
+	}
+	token, err := m.store.AcquireEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
+	if err != nil {
+		return nil
+	}
+	owner.binding.OwnerToken = token
+	m.mu.Lock()
+	if cur, ok := m.embeddedOwners[owner.binding.AgentID]; ok && cur.identity == owner.identity && cur.binding.Epoch == owner.binding.Epoch {
+		cur.binding.OwnerToken = token
+		m.embeddedOwners[owner.binding.AgentID] = cur
+	}
+	m.mu.Unlock()
 	return nil
 }
 

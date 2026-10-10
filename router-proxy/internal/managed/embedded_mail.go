@@ -68,6 +68,9 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 				return false
 			}
 			attempt, err = m.store.ReserveEmbeddedMail(m.runCtx, owner.binding, id)
+			if err != nil {
+				log.Printf("[embedded:%s] ERROR reserving mail %s: %v", agentID, id, err)
+			}
 			return err == nil
 		}()
 		if !admitted {
