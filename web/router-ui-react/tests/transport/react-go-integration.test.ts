@@ -156,14 +156,14 @@ describe("React transport against an isolated Go router", () => {
     await delay(250);
   }, 60_000);
 
-  it("uses a memory-only Web UI lease to receive and acknowledge three Wolfgang deliveries", async () => {
+  it("uses a memory-only Web UI lease to observe three deliveries without stealing or acknowledging", async () => {
     const router = await startIsolatedGoRouter();
     routers.push(router);
     const outgoing: JsonRecord[] = [];
     const sockets: globalThis.WebSocket[] = [];
     const transport = createRouterTransport({
       routerUrl: router.httpUrl,
-      agentId: "wolfgang",
+      agentId: "test-user",
       webSocketFactory: instrumentedWebSocketFactory(outgoing, sockets),
     });
     transports.push(transport);
@@ -187,12 +187,12 @@ describe("React transport against an isolated Go router", () => {
     });
     transport.connect();
     await connected;
-    await Promise.all(["browser-delivery-1", "browser-delivery-2", "browser-delivery-3"].map((id) => transport.sendMessage(fixtureMessage(id, "wolfgang", { from: `sender-${id}` }))));
+    await Promise.all(["browser-delivery-1", "browser-delivery-2", "browser-delivery-3"].map((id) => transport.sendMessage(fixtureMessage(id, "test-user", { from: `sender-${id}` }))));
     await delivered;
-    const acknowledgement = await waitForOutgoing(outgoing, (frame) => frame.type === "ack" && Array.isArray(frame.delivery_items) && frame.delivery_items.length === 3);
     expect(received).toHaveLength(3);
     expect(received).toEqual(expect.arrayContaining(["browser-delivery-1", "browser-delivery-2", "browser-delivery-3"]));
-    expect(acknowledgement).toMatchObject({ agent_id: "wolfgang", type: "ack" });
+    expect(outgoing.some((frame) => frame.type === "ack")).toBe(false);
+    expect(outgoing.some((frame) => frame.type === "injection_requested")).toBe(false);
     // sendMessage starts a background projection refresh. Finish it before the
     // isolated router is torn down so this proof has no detached request.
     await transport.refreshAgents();

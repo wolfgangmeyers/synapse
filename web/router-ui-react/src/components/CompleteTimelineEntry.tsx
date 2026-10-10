@@ -1,6 +1,7 @@
 import { Fragment, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement } from "react";
 import { MarkdownBody } from "../domain/markdown";
 import { isRecord } from "../protocol/guards";
+import { currentUsername } from "../persistence/settings-repository";
 import type { JsonValue, ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
 import { ActivityDetailDialog } from "./ActivityDetailDialog";
 import { DialogShell } from "./DialogShell";
@@ -80,7 +81,7 @@ export function isMailboxSendToUser(
   }
 
   const normalizedRecipient = recipient.trim().toLowerCase();
-  const normalizedUser = (currentUserId || "wolfgang").trim().toLowerCase();
+  const normalizedUser = (currentUserId || currentUsername()).trim().toLowerCase();
 
   if (normalizedRecipient === normalizedUser || normalizedRecipient === "user") {
     const from = entry.presentation?.from ?? entry.sender_identity ?? entry.agent_id;

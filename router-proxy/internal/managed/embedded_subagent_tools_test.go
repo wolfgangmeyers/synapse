@@ -482,11 +482,11 @@ func TestEmbeddedSubagentReadDenialsEdgeCases(t *testing.T) {
 	_, err = readTool.Execute(ctx, "r-fifo", map[string]any{"path": "test_fifo"}, nil)
 	require.Error(t, err, "reading a FIFO must fail without hanging")
 
-	// 3. Read file > 64 KiB rejected
+	// 3. Read file > 512 KiB rejected
 	largeFile := filepath.Join(ws, "large.txt")
-	require.NoError(t, os.WriteFile(largeFile, []byte(strings.Repeat("a", 65536+1)), 0600))
+	require.NoError(t, os.WriteFile(largeFile, []byte(strings.Repeat("a", 524288+1)), 0600))
 	_, err = readTool.Execute(ctx, "r-large", map[string]any{"path": "large.txt"}, nil)
-	require.Error(t, err, "reading file > 64 KiB must fail")
+	require.Error(t, err, "reading file > 512 KiB must fail")
 
 	// 4. Read offset past EOF rejected
 	smallFile := filepath.Join(ws, "small.txt")
@@ -508,12 +508,12 @@ func TestEmbeddedSubagentWriteDenialsEdgeCases(t *testing.T) {
 
 	writeTool := tools[2]
 
-	// 1. Write payload > 64 KiB rejected
+	// 1. Write payload > 512 KiB rejected
 	_, err = writeTool.Execute(ctx, "w-oversize", map[string]any{
 		"path":    "oversize.txt",
-		"content": strings.Repeat("x", 65536+1),
+		"content": strings.Repeat("x", 524288+1),
 	}, nil)
-	require.Error(t, err, "write > 64 KiB must be rejected")
+	require.Error(t, err, "write > 512 KiB must be rejected")
 
 	// 2. Write to existing directory path rejected
 	subDir := filepath.Join(ws, "dir_target")
@@ -544,26 +544,26 @@ func TestEmbeddedSubagentEditDenialsEdgeCases(t *testing.T) {
 	}, nil)
 	require.Error(t, err, "editing non-regular file must be rejected")
 
-	// 2. Edit large file (> 64 KiB initial size) rejected
+	// 2. Edit large file (> 512 KiB initial size) rejected
 	largePath := filepath.Join(ws, "large_edit.txt")
-	require.NoError(t, os.WriteFile(largePath, []byte(strings.Repeat("x", 65536+1)), 0600))
+	require.NoError(t, os.WriteFile(largePath, []byte(strings.Repeat("x", 524288+1)), 0600))
 	_, err = editTool.Execute(ctx, "e-large", map[string]any{
 		"path":  "large_edit.txt",
 		"edits": []any{map[string]any{"oldText": "x", "newText": "y"}},
 	}, nil)
-	require.Error(t, err, "editing file > 64 KiB must be rejected")
+	require.Error(t, err, "editing file > 512 KiB must be rejected")
 
-	// 3. Edit expansion limit rejected (> 64 KiB after replacement)
-	baseContent := strings.Repeat("z", 60*1024) + " REPLACEME"
+	// 3. Edit expansion limit rejected (> 512 KiB after replacement)
+	baseContent := strings.Repeat("z", 500*1024) + " REPLACEME"
 	basePath := filepath.Join(ws, "expand.txt")
 	require.NoError(t, os.WriteFile(basePath, []byte(baseContent), 0600))
 
-	expansion := strings.Repeat("e", 10*1024) // 60K + 10K = 70K > 64 KiB
+	expansion := strings.Repeat("e", 30*1024) // 500K + 30K = 530K > 512 KiB
 	_, err = editTool.Execute(ctx, "e-expand", map[string]any{
 		"path":  "expand.txt",
 		"edits": []any{map[string]any{"oldText": "REPLACEME", "newText": expansion}},
 	}, nil)
-	require.ErrorContains(t, err, "limit", "edit expansion exceeding 64 KiB must be rejected")
+	require.ErrorContains(t, err, "limit", "edit expansion exceeding 512 KiB must be rejected")
 }
 
 func TestEmbeddedSubagentBashStdoutOverflowTerminatesDescendants(t *testing.T) {
@@ -576,9 +576,13 @@ func TestEmbeddedSubagentBashStdoutOverflowTerminatesDescendants(t *testing.T) {
 
 	bashTool := tools[3]
 
-	// Command generates > 64 KiB to trigger overflow
-	_, err = bashTool.Execute(ctx, "b-overflow", map[string]any{
-		"command": "head -c 70000 /dev/zero | tr '\\0' 'x'",
+	// Command generates > 512 KiB to trigger overflow
+	result, err := bashTool.Execute(ctx, "b-overflow", map[string]any{
+		"command": "head -c 600000 /dev/zero | tr '\\0' 'x'",
 	}, nil)
-	require.ErrorContains(t, err, "output truncated", "stdout overflow must terminate and return truncation error")
+	require.NoError(t, err, "stdout overflow must succeed cleanly without error or SIGKILL")
+	require.NotEmpty(t, result.Content)
+	text, ok := result.Content[0].(ai.TextContent)
+	require.True(t, ok)
+	require.Contains(t, text.Text, "Output truncated at 524288 bytes")
 }

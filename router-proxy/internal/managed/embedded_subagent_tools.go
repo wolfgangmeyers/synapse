@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	embeddedSubagentFileLimit = 64 * 1024
-	embeddedSubagentBashLimit = 64 * 1024
+	embeddedSubagentFileLimit = 512 * 1024
+	embeddedSubagentBashLimit = 512 * 1024
 	embeddedImageReadLimit    = 10 * 1024 * 1024 // 10 MiB
 )
 
@@ -156,7 +156,7 @@ func NewEmbeddedSubagentReadTool(rootFD int) agent.AgentTool {
 				return agent.AgentToolResult{}, err
 			}
 			if !st.Mode().IsRegular() {
-				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 64 KiB")
+				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 512 KiB")
 			}
 
 			mimeType, isImage := imageMimeType(p)
@@ -182,14 +182,14 @@ func NewEmbeddedSubagentReadTool(rootFD int) agent.AgentTool {
 			}
 
 			if st.Size() > embeddedSubagentFileLimit {
-				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 64 KiB")
+				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 512 KiB")
 			}
 			data, err := io.ReadAll(io.LimitReader(f, embeddedSubagentFileLimit+1))
 			if err != nil {
 				return agent.AgentToolResult{}, err
 			}
 			if len(data) > embeddedSubagentFileLimit {
-				return agent.AgentToolResult{}, errors.New("read exceeds 64 KiB limit")
+				return agent.AgentToolResult{}, errors.New("read exceeds 512 KiB limit")
 			}
 			raw := string(data)
 			offsetVal, hasOffset := args["offset"]
@@ -272,7 +272,7 @@ func NewEmbeddedSubagentWriteTool(rootFD int) agent.AgentTool {
 
 func writeEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, content []byte) error {
 	if len(content) > embeddedSubagentFileLimit {
-		return errors.New("write exceeds 64 KiB limit")
+		return errors.New("write exceeds 512 KiB limit")
 	}
 	parts := strings.Split(p, "/")
 	parent, err := unix.Openat(rootFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -479,7 +479,7 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 		return err
 	}
 	if len(data) > embeddedSubagentFileLimit {
-		return errors.New("edit file exceeds 64 KiB limit")
+		return errors.New("edit file exceeds 512 KiB limit")
 	}
 
 	// Resolve each edit against the original file content
@@ -524,7 +524,7 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 		result = append(head, append([]byte(pe.newText), tail...)...)
 	}
 	if len(result) > embeddedSubagentFileLimit {
-		return errors.New("edit result exceeds 64 KiB limit")
+		return errors.New("edit result exceeds 512 KiB limit")
 	}
 
 	// Atomic write via temp file and rename
@@ -724,16 +724,12 @@ func executeConfinedBash(ctx context.Context, bwrapPath, cwd, command string, ti
 				return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w", err)
 			}
 		}
-		result := fmt.Sprintf("exit=%d\n%s", exit, out.text())
-		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: result}}}, nil
-
-	case <-out.overflow:
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
+		resultText := out.text()
+		if out.truncated() {
+			resultText = fmt.Sprintf("%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", resultText, out.limit)
 		}
-		return agent.AgentToolResult{}, errors.New("bash output truncated: 65536 byte limit exceeded")
+		result := fmt.Sprintf("exit=%d\n%s", exit, resultText)
+		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: result}}}, nil
 
 	case <-runCtx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)

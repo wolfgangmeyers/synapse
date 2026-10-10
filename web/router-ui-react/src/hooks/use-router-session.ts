@@ -3,7 +3,7 @@ import { createInitialState, type AppState } from "../state/app-state";
 import { createArrival } from "../domain/arrivals";
 import { reducer } from "../state/reducer";
 import type { RouterScope } from "../state/scopes";
-import { normalizeRouterUrl } from "../persistence/settings-repository";
+import { currentUsername, normalizeRouterUrl } from "../persistence/settings-repository";
 import { isAgentId } from "../protocol/guards";
 import type { AppAction } from "../state/reducer";
 import type { Agent } from "../state/agent-projection";
@@ -64,7 +64,11 @@ function eventAction(event: TransportEvent, scope: RouterScope): Parameters<type
 }
 
 export function useRouterSession(options: RouterSessionOptions): RouterSession {
-  const scope = useMemo<RouterScope>(() => { const candidate = options.agentId ?? options.defaultAgentId ?? "wolfgang"; return { routerUrl: normalizeRouterUrl(options.routerUrl), agentId: isAgentId(candidate) ? candidate : "wolfgang" }; }, [options.routerUrl, options.agentId, options.defaultAgentId]);
+  const scope = useMemo<RouterScope>(() => {
+    const defaultUser = currentUsername(options.storage, options.routerUrl);
+    const candidate = options.agentId ?? options.defaultAgentId ?? defaultUser;
+    return { routerUrl: normalizeRouterUrl(options.routerUrl), agentId: isAgentId(candidate) ? candidate : defaultUser };
+  }, [options.routerUrl, options.agentId, options.defaultAgentId, options.storage]);
   const transport = useMemo(() => createRouterTransport({ ...options, routerUrl: scope.routerUrl, agentId: scope.agentId, defaultAgentId: scope.agentId }), [scope.routerUrl, scope.agentId, options.storage, options.fetchImpl, options.webSocketFactory, options.autoReconnect, options.persistDelivery]);
   const [state, dispatch] = useReducer(reducer, options.initialState ?? createInitialState(scope));
   const stateRef = useRef(state); stateRef.current = state;
