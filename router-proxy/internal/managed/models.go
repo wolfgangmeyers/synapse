@@ -7,6 +7,7 @@ import (
 	"regexp"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/ai"
 )
 
 type Model struct {
@@ -165,4 +166,36 @@ func (s StoreCatalogSource) Select(ctx context.Context, explicit *Model) (Model,
 }
 func CatalogFromModels(models ...Model) ModelSource {
 	return ModelSourceFunc(func(context.Context) (Catalog, error) { return Catalog{Models: append([]Model(nil), models...)}, nil })
+}
+
+// ResolveModel returns the ai.Model configuration matching the saved model
+// selection. It handles Antigravity/Google provider aliasing while strictly
+// preserving the configured Provider, provides fallback metadata for Antigravity
+// models not in the catalog, and returns an error without cross-provider fallback.
+func ResolveModel(saved store.ManagedModel) (*ai.Model, error) {
+	if saved.Provider == "" || saved.ID == "" {
+		return nil, &modelUnavailableError{Provider: saved.Provider, ID: saved.ID}
+	}
+	model := ai.GetModel(saved.Provider, saved.ID)
+	if model == nil && (saved.Provider == "antigravity" || saved.Provider == "google") {
+		model = ai.GetModel("google", saved.ID)
+	}
+	if model == nil && saved.Provider == "antigravity" {
+		model = &ai.Model{
+			ID:            saved.ID,
+			Provider:      "antigravity",
+			Api:           "google-generative-ai",
+			ContextWindow: 1048576,
+			MaxTokens:     8192,
+		}
+	}
+	if model == nil {
+		return nil, &modelUnavailableError{Provider: saved.Provider, ID: saved.ID}
+	}
+	if saved.Provider != "" && model.Provider != saved.Provider {
+		cloned := *model
+		cloned.Provider = saved.Provider
+		model = &cloned
+	}
+	return model, nil
 }

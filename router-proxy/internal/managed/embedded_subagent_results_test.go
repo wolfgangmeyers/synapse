@@ -229,6 +229,7 @@ func TestSubagentThrottleTerminalUnlimited(t *testing.T) {
 
 	terminalStatuses := []string{
 		"completed",
+		"failed",
 		"steered",
 		"aborted",
 		"stopped",

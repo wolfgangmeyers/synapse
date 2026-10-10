@@ -337,12 +337,12 @@ func TestSubagentRunnerSoftLimitAndGracePeriod(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return rec.Status == "steered"
+		return rec.Status == "completed"
 	}, 4*time.Second, 20*time.Millisecond)
 
 	saved, err := db.ManagedSubagent(ctx, parent, "subagent-parent-limits-1")
 	require.NoError(t, err)
-	require.Equal(t, "steered", saved.Status, "must settle with status steered when wrap-up was injected")
+	require.Equal(t, "completed", saved.Status, "must settle with status completed when wrap-up was injected")
 	require.True(t, sawWrapUpSteer.Load(), "must have received wrap-up steer prompt")
 	require.Equal(t, "Wrapped up output.", saved.ResultText)
 	require.Equal(t, 4, saved.TurnCount)
@@ -393,13 +393,14 @@ func TestSubagentRunnerExactHardStopTurn7AbortBeforeTurn8(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return rec.Status == "aborted"
+		return rec.Status == "failed"
 	}, 5*time.Second, 20*time.Millisecond)
 
 	saved, err := db.ManagedSubagent(ctx, parent, "subagent-parent-hard-1")
 	require.NoError(t, err)
-	require.Equal(t, "aborted", saved.Status)
+	require.Equal(t, "failed", saved.Status)
 	require.Contains(t, saved.ResultText, "exceeded maximum turn limit")
+	require.Contains(t, saved.Error, "hard turn limit reached")
 	require.LessOrEqual(t, int(turnCalls.Load()), 7, "must abort before turn 8")
 }
 
@@ -1247,22 +1248,22 @@ func TestParentSDKRegisteredSubagentToolEndToEnd(t *testing.T) {
 	childIDMu.Unlock()
 	require.NotEmpty(t, cid, "child ID should have been recorded from parent subagent call")
 
-	// Verify exactly one completed wake prompt receipt in SQLite store
+	// Verify exactly one completed wake notice in SQLite store
 	rawDB, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
 	defer rawDB.Close()
 
-	reqID := SubagentWakeRequestID(cid, 1)
+	msgID := fmt.Sprintf("subagent-completed-%s-1", cid)
 	require.Eventually(t, func() bool {
-		var state string
-		queryErr := rawDB.QueryRowContext(ctx, `SELECT state FROM embedded_prompt_requests WHERE request_id=?`, reqID).Scan(&state)
-		return queryErr == nil && state == "complete"
+		var count int
+		queryErr := rawDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, msgID).Scan(&count)
+		return queryErr == nil && count == 1
 	}, 5*time.Second, 20*time.Millisecond)
 
 	var completedReceipts int
-	err = rawDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_prompt_requests WHERE request_id=? AND state='complete'`, reqID).Scan(&completedReceipts)
+	err = rawDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, msgID).Scan(&completedReceipts)
 	require.NoError(t, err)
-	require.Equal(t, 1, completedReceipts, "exactly one completed wake prompt receipt must exist")
+	require.Equal(t, 1, completedReceipts, "exactly one completed wake mailbox message must exist")
 
 	// Verify actual parent ack PERSISTED SDK entries
 	parentSnap, err := db.ReopenEmbedded(ctx, parent)

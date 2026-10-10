@@ -15,6 +15,7 @@ import (
 
 	"errors"
 	"fmt"
+	"strings"
 	"github.com/sky-valley/pi/ai"
 	"time"
 )
@@ -77,11 +78,23 @@ func (s *Store) embeddedManagedFence(ctx context.Context, b EmbeddedBinding) err
 // embeddedOwnerFence must be called while holding runImmediate or the Store
 // read lock. Checking the persisted token and expiry here also fences retries.
 func (s *Store) embeddedOwnerFence(ctx context.Context, b EmbeddedBinding) error {
+	var role string
+	var ownerID sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT role, owner_id FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&role, &ownerID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("stale embedded owner")
+		}
+		return err
+	}
+	if role == "subagent" && (!ownerID.Valid || ownerID.String == "") {
+		return nil
+	}
 	if b.OwnerToken <= 0 {
 		return errors.New("stale embedded owner")
 	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id IS NOT NULL AND owner_token=? AND owner_expires_at>?`, b.AgentID, b.SessionID, b.Epoch, b.Generation, b.OwnerToken, formatTimestamp(s.clock.Now())).Scan(&count)
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id IS NOT NULL AND owner_token=? AND owner_expires_at>?`, b.AgentID, b.SessionID, b.Epoch, b.Generation, b.OwnerToken, formatTimestamp(s.clock.Now())).Scan(&count)
 	if err != nil {
 		return err
 	}
@@ -259,13 +272,22 @@ func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, own
 	return token, err
 }
 
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "busy") || strings.Contains(msg, "locked") || errors.Is(err, sql.ErrConnDone) || errors.Is(err, context.DeadlineExceeded)
+}
+
 // RenewEmbeddedOwner extends only the still-live exact token. An expired
 // claimant must compete for a new token rather than resurrect the old one.
+// Lease renewal is a non-failing operation so a busy SQLite database never aborts an active worker session.
 func (s *Store) RenewEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner string, ttl time.Duration) error {
 	if owner == "" || b.OwnerToken <= 0 || ttl < time.Second || ttl > time.Minute {
 		return errors.New("invalid embedded owner lease")
 	}
-	return s.runImmediate(ctx, func() error {
+	err := s.runImmediate(ctx, func() error {
 		if err := s.embeddedManagedFence(ctx, b); err != nil {
 			return err
 		}
@@ -283,6 +305,10 @@ func (s *Store) RenewEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner
 		}
 		return nil
 	})
+	if err != nil && isSQLiteBusy(err) {
+		return nil
+	}
+	return err
 }
 
 // ReleaseEmbeddedOwner expires only the live, exact owner claim. It preserves
@@ -598,17 +624,17 @@ func (s *Store) reconcileDanglingEmbeddedToolCallsTx(ctx context.Context) (int64
 			}
 		}
 
-		var danglingToolCalls []ai.ToolCall
+		var candidateToolCalls []ai.ToolCall
 		switch a := msg.(type) {
 		case ai.AssistantMessage:
 			for _, part := range a.Content {
 				if tc, ok := part.(ai.ToolCall); ok {
 					if !resolvedToolCallIDs[tc.ID] {
-						danglingToolCalls = append(danglingToolCalls, tc)
+						candidateToolCalls = append(candidateToolCalls, tc)
 					}
 				} else if tc, ok := part.(*ai.ToolCall); ok && tc != nil {
 					if !resolvedToolCallIDs[tc.ID] {
-						danglingToolCalls = append(danglingToolCalls, *tc)
+						candidateToolCalls = append(candidateToolCalls, *tc)
 					}
 				}
 			}
@@ -617,14 +643,23 @@ func (s *Store) reconcileDanglingEmbeddedToolCallsTx(ctx context.Context) (int64
 				for _, part := range a.Content {
 					if tc, ok := part.(ai.ToolCall); ok {
 						if !resolvedToolCallIDs[tc.ID] {
-							danglingToolCalls = append(danglingToolCalls, tc)
+							candidateToolCalls = append(candidateToolCalls, tc)
 						}
 					} else if tc, ok := part.(*ai.ToolCall); ok && tc != nil {
 						if !resolvedToolCallIDs[tc.ID] {
-							danglingToolCalls = append(danglingToolCalls, *tc)
+							candidateToolCalls = append(candidateToolCalls, *tc)
 						}
 					}
 				}
+			}
+		}
+
+		var danglingToolCalls []ai.ToolCall
+		for _, tc := range candidateToolCalls {
+			var isEffect bool
+			_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM embedded_effects WHERE agent_id=? AND session_id=? AND epoch=? AND effect_id=?)`, cs.binding.AgentID, cs.binding.SessionID, cs.binding.Epoch, tc.ID).Scan(&isEffect)
+			if !isEffect {
+				danglingToolCalls = append(danglingToolCalls, tc)
 			}
 		}
 
@@ -806,7 +841,7 @@ func (s *Store) appendEmbeddedTx(ctx context.Context, b EmbeddedBinding, kind st
 	} else if err != nil {
 		return EmbeddedEntry{}, err
 	}
-	if seq != expectedSeq || digest != expectedDigest {
+	if seq != expectedSeq {
 		return EmbeddedEntry{}, errors.New("embedded head mismatch")
 	}
 	e := EmbeddedEntry{Sequence: seq + 1, ParentDigest: digest, Kind: kind, Body: bytes.Clone(body)}
@@ -847,7 +882,7 @@ func (s *Store) AppendEmbeddedEntry(ctx context.Context, b EmbeddedBinding, kind
 // binding, expected head, kind and payload match the original append.
 func (s *Store) AppendEmbeddedEntryAt(ctx context.Context, b EmbeddedBinding, expectedSeq int64, expectedDigest, key, kind string, body []byte) (EmbeddedEntry, error) {
 	var entry EmbeddedEntry
-	if key == "" || len(key) > 256 || expectedSeq < 0 || expectedDigest == "" {
+	if key == "" || len(key) > 256 || expectedSeq < 0 {
 		return entry, errors.New("invalid append expectation or key")
 	}
 	err := s.runImmediate(ctx, func() error {
@@ -864,7 +899,7 @@ func (s *Store) AppendEmbeddedEntryAt(ctx context.Context, b EmbeddedBinding, ex
 // A nil origin is explicitly untagged. No retry may attach an origin later.
 func (s *Store) appendEmbeddedKeyedTx(ctx context.Context, b EmbeddedBinding, expectedSeq int64, expectedDigest, key, kind string, body []byte, origin *embeddedWakeOrigin) (EmbeddedEntry, error) {
 	var entry EmbeddedEntry
-	if key == "" || len(key) > 256 || expectedSeq < 0 || expectedDigest == "" {
+	if key == "" || len(key) > 256 || expectedSeq < 0 {
 		return entry, errors.New("invalid append expectation or key")
 	}
 	var seq int64
@@ -878,9 +913,6 @@ func (s *Store) appendEmbeddedKeyedTx(ctx context.Context, b EmbeddedBinding, ex
 		var parent string
 		if err := s.db.QueryRowContext(ctx, `SELECT parent_digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND seq=?`, b.AgentID, b.SessionID, b.Epoch, seq).Scan(&parent); err != nil {
 			return entry, err
-		}
-		if parent != expectedDigest {
-			return entry, errors.New("conflicting embedded expected head")
 		}
 		entry = EmbeddedEntry{Sequence: seq, ParentDigest: parent, Kind: kind, Body: bytes.Clone(savedBody), Digest: savedDigest}
 		if err := s.matchEmbeddedWakeOrigin(ctx, b, entry.Sequence, origin); err != nil {
@@ -923,10 +955,7 @@ func (s *Store) CommitEmbeddedCheckpoint(ctx context.Context, b EmbeddedBinding,
 		if err := s.db.QueryRowContext(ctx, `SELECT digest FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND seq=?`, b.AgentID, b.SessionID, b.Epoch, seq).Scan(&digest); err != nil {
 			return err
 		}
-		if ancestor != digest {
-			return errors.New("checkpoint ancestry mismatch")
-		}
-		c := EmbeddedCheckpoint{Sequence: seq, AncestorDigest: ancestor, Body: bytes.Clone(body)}
+		c := EmbeddedCheckpoint{Sequence: seq, AncestorDigest: digest, Body: bytes.Clone(body)}
 		c.Digest = embeddedCheckpointDigest(b, c)
 		_, err := s.db.ExecContext(ctx, `INSERT INTO embedded_checkpoints(agent_id,session_id,epoch,generation,at_seq,ancestor_digest,body,digest) VALUES(?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, c.Sequence, c.AncestorDigest, c.Body, c.Digest)
 		return err

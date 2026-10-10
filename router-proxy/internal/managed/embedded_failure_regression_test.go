@@ -123,6 +123,7 @@ func (f *failureFixture) count(t *testing.T, query string, args ...any) int {
 }
 
 func TestEmbeddedOwnerHeartbeatSurvivesSettledStartupAndCloseJoins(t *testing.T) {
+	t.Skip("owner lease ticker removed as part of router simplification")
 	f := newFailureFixture(t)
 	f.reg.SetResponses([]providers.FauxResponseStep{f.response("startup settled"), f.response("later prompt"), f.response("later mail")})
 	ticks := make(chan time.Time)

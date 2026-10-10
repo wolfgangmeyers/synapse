@@ -71,25 +71,7 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 		return m.steerPrompt(ctx, agentID, message, requestID, active)
 	}
 
-	locked := lane.serial.TryLock()
-	if !locked {
-		for i := 0; i < 20; i++ {
-			lane.activeMu.RLock()
-			active = lane.activeSession
-			lane.activeMu.RUnlock()
-			if active != nil {
-				return m.steerPrompt(ctx, agentID, message, requestID, active)
-			}
-			if lane.serial.TryLock() {
-				locked = true
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if !locked {
-			lane.serial.Lock()
-		}
-	}
+	lane.serial.Lock()
 	defer lane.serial.Unlock()
 	lane.selection.Lock()
 	selectionHeld := true

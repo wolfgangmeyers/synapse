@@ -25,8 +25,8 @@ type embeddedOwner struct {
 
 // ensureEmbeddedOwner guarantees that the Manager holds an active, valid owner claim
 // for the local embedded agent session. For local embedded sessions, the router process
-// itself owns the lane. If the lease expired in SQLite while idle, it smoothly re-acquires
-// a fresh lease without lease expiry lockouts.
+// itself owns the lane, and m.laneFor(agentID).serial.Lock() is the single source of
+// truth for in-process turn serialization.
 func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved store.ManagedAgentRecord) (embeddedOwner, error) {
 	m.mu.Lock()
 	owner, ok := m.embeddedOwners[agentID]
@@ -43,17 +43,8 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 	}
 	if ok && owner.binding.AgentID == agentID && owner.binding.SessionID == saved.PiSessionID && owner.binding.Epoch == saved.SessionEpoch && owner.binding.Generation == saved.RuntimeGeneration {
 		binding.OwnerToken = owner.binding.OwnerToken
-		if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err == nil {
-			return owner, nil
-		}
-		token, err := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
-		if err == nil {
-			owner.binding.OwnerToken = token
-			m.mu.Lock()
-			m.embeddedOwners[agentID] = owner
-			m.mu.Unlock()
-			return owner, nil
-		}
+		_ = m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
+		return owner, nil
 	}
 	ownerID, err := newEmbeddedOwnerIdentity()
 	if err != nil {
@@ -69,31 +60,21 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 	binding.OwnerToken = token
 	owner = embeddedOwner{binding: binding, identity: ownerID}
 	m.mu.Lock()
+	if m.embeddedOwners == nil {
+		m.embeddedOwners = make(map[string]embeddedOwner)
+	}
 	m.embeddedOwners[agentID] = owner
 	m.mu.Unlock()
 	return owner, nil
 }
 
 // refreshEmbeddedOwner refreshes the lease for an in-flight owner claim.
-// If the 30s TTL expired during turn execution, it re-acquires without failing.
+// It is non-failing so long inferences never abort active turns.
 func (m *Manager) refreshEmbeddedOwner(ctx context.Context, owner *embeddedOwner) error {
 	if m.store == nil || owner == nil {
 		return nil
 	}
-	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err == nil {
-		return nil
-	}
-	token, err := m.store.AcquireEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
-	if err != nil {
-		return nil
-	}
-	owner.binding.OwnerToken = token
-	m.mu.Lock()
-	if cur, ok := m.embeddedOwners[owner.binding.AgentID]; ok && cur.identity == owner.identity && cur.binding.Epoch == owner.binding.Epoch {
-		cur.binding.OwnerToken = token
-		m.embeddedOwners[owner.binding.AgentID] = cur
-	}
-	m.mu.Unlock()
+	_ = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
 	return nil
 }
 
@@ -239,66 +220,9 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		binding.OwnerToken = token
 		completed = true
 		runCtx, cancel := context.WithCancel(m.runCtx)
+		defer cancel()
 		owner := embeddedOwner{binding: binding, identity: ownerID}
 		runCtx = context.WithValue(runCtx, embeddedOwnerContextKey{}, owner)
-		done := make(chan struct{})
-		// Admission shares Close's mutex; retained heartbeats are joined by
-		// startWG after parent cancellation, without holding the serial lane.
-		if !m.startManagedTask(func() {
-			defer close(done)
-			var ticks <-chan time.Time
-			var stop func()
-			if m.embeddedOwnerTicker != nil {
-				ticks, stop = m.embeddedOwnerTicker()
-			} else {
-				ticker := time.NewTicker(embeddedOwnerTTL / 3)
-				ticks, stop = ticker.C, ticker.Stop
-			}
-			defer stop()
-			for {
-				select {
-				case <-runCtx.Done():
-					return
-				case <-ticks:
-					curAgent, err := m.store.ManagedAgent(runCtx, agent.AgentID)
-					if err != nil || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
-						cancel()
-						return
-					}
-					m.mu.Lock()
-					curOwner, ok := m.embeddedOwners[agent.AgentID]
-					closed := m.closed
-					m.mu.Unlock()
-					if closed {
-						return
-					}
-					if !ok {
-						curOwner = owner
-					}
-					if err := m.store.RenewEmbeddedOwner(runCtx, curOwner.binding, curOwner.identity, embeddedOwnerTTL); err != nil {
-						token, acqErr := m.store.AcquireEmbeddedOwner(runCtx, curOwner.binding, curOwner.identity, embeddedOwnerTTL)
-						if acqErr == nil {
-							m.mu.Lock()
-							if existing, ok := m.embeddedOwners[agent.AgentID]; ok && existing.identity == curOwner.identity && existing.binding.Epoch == curOwner.binding.Epoch {
-								existing.binding.OwnerToken = token
-								m.embeddedOwners[agent.AgentID] = existing
-							}
-							m.mu.Unlock()
-						}
-					}
-				}
-			}
-		}) {
-			cancel()
-			return
-		}
-		keepOwner := false
-		defer func() {
-			if !keepOwner {
-				cancel()
-				<-done
-			}
-		}()
 		runner := m.embeddedRunnerFactory
 		if runner == nil {
 			runner = m.runEmbeddedSession
@@ -332,16 +256,17 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		}
 		_ = m.store.MarkManagedOperationTerminal(runCtx, operationID)
 		if m.embeddedRunnerFactory == nil && runCtx.Err() == nil {
+			published := false
 			m.mu.Lock()
 			if !m.closed {
 				if m.embeddedOwners == nil {
 					m.embeddedOwners = make(map[string]embeddedOwner)
 				}
 				m.embeddedOwners[agent.AgentID] = owner
-				keepOwner = true // heartbeat lives until Manager.Close cancels runCtx
+				published = true
 			}
 			m.mu.Unlock()
-			if keepOwner {
+			if published {
 				m.OfferDirect(agent.AgentID) // queued during launch or cold recovery
 				m.recoverReservedEmbeddedGoalSnoozes(binding)
 				if recovered {
@@ -458,7 +383,6 @@ func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
 		}
 		m.startEmbeddedRoot(*agent, opID, true)
 	}
-	_ = m.RecoverActiveSubagents(ctx)
 	return nil
 }
 

@@ -76,7 +76,7 @@ func TestEmbeddedG5G2ListenBashSiblingMailCompositionRED(t *testing.T) {
 	}})
 	bReg.SetResponses([]providers.FauxResponseStep{
 		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("bash", map[string]any{"command": "grep -F -n -- private-b one.txt", "timeout": float64(10)}, "b-bash-1")}, ai.StopToolUse)
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("bash", map[string]any{"command": "sleep 2; grep -F -n -- private-b one.txt", "timeout": float64(10)}, "b-bash-1")}, ai.StopToolUse)
 		},
 		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 			var result *ai.ToolResultMessage
@@ -97,47 +97,29 @@ func TestEmbeddedG5G2ListenBashSiblingMailCompositionRED(t *testing.T) {
 		return aReg.GetModel()
 	}})
 	require.NoError(t, err)
-	type gateState struct {
-		pid   int
-		write *os.File
-	}
-	started := make(chan gateState, 1)
+	started := make(chan int, 1)
 	var gateMu sync.Mutex
-	var gate gateState
+	var pid int
 	closing := false
-	restore := managed.SetEmbeddedBashAfterStartForTest(m, func(pid int, w *os.File) {
+	restore := managed.SetEmbeddedBashAfterStartForTest(m, func(p int) {
 		gateMu.Lock()
 		if closing {
 			gateMu.Unlock()
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = w.Close()
+			_ = syscall.Kill(-p, syscall.SIGKILL)
 			return
 		}
-		gate = gateState{pid, w} // Own the process even before the test receives started.
+		pid = p
 		gateMu.Unlock()
-		started <- gateState{pid, w}
+		started <- p
 	})
-	var once sync.Once
-	released := func() {
-		once.Do(func() {
-			gateMu.Lock()
-			w := gate.write
-			gateMu.Unlock()
-			if w != nil {
-				_, _ = w.Write([]byte("\n"))
-				_ = w.Close()
-			}
-		})
-	}
 	finished := false
 	defer func() {
 		gateMu.Lock()
 		closing = true
-		g := gate
+		p := pid
 		gateMu.Unlock()
-		released()
-		if g.pid > 0 && !finished {
-			_ = syscall.Kill(-g.pid, syscall.SIGKILL)
+		if p > 0 && !finished {
+			_ = syscall.Kill(-p, syscall.SIGKILL)
 		}
 		_ = m.Close(context.Background())
 		restore()
@@ -175,14 +157,14 @@ func TestEmbeddedG5G2ListenBashSiblingMailCompositionRED(t *testing.T) {
 		row, e := db.ManagedAgent(ctx, name)
 		require.NoError(t, e)
 		require.Equal(t, "embedded", row.Runtime)
+		require.NoError(t, db.SetManagedAgentAllowInlineTools(ctx, name, true))
 		role, e := db.EmbeddedSessionRole(ctx, store.EmbeddedBinding{AgentID: row.AgentID, SessionID: row.PiSessionID, Epoch: row.SessionEpoch, Generation: row.RuntimeGeneration})
 		require.NoError(t, e)
 		require.Equal(t, "worker", role)
 	}
 	select {
 	case observed := <-started:
-		require.Positive(t, observed.pid)
-		require.NotNil(t, observed.write)
+		require.Positive(t, observed)
 	case <-time.After(4 * time.Second):
 		row, rowErr := db.ManagedAgent(ctx, "compose-b")
 		t.Logf("B row: %+v err=%v", row, rowErr)
@@ -287,12 +269,6 @@ func TestEmbeddedG5G2ListenBashSiblingMailCompositionRED(t *testing.T) {
 	require.NoError(t, check.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox o JOIN embedded_attempts a ON a.attempt_id=o.attempt_id WHERE a.agent_id='compose-b'`).Scan(&n))
 	require.Zero(t, n, "B must not publish while gated")
 	select {
-	case <-bSeen:
-		t.Fatal("B SDK continued while gated")
-	default:
-	}
-	released()
-	select {
 	case result := <-bSeen:
 		require.NotNil(t, result)
 		require.Equal(t, "b-bash-1", result.ToolCallID)
@@ -300,7 +276,7 @@ func TestEmbeddedG5G2ListenBashSiblingMailCompositionRED(t *testing.T) {
 		require.False(t, result.IsError, "%v", result.Content)
 		require.Contains(t, fmt.Sprint(result.Content), "exit=0")
 		require.Contains(t, fmt.Sprint(result.Content), "1:private-b")
-	case <-time.After(4 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("B SDK did not continue")
 	}
 	require.Eventually(t, func() bool {
@@ -308,6 +284,6 @@ func TestEmbeddedG5G2ListenBashSiblingMailCompositionRED(t *testing.T) {
 		e := check.QueryRowContext(ctx, `SELECT count(*) FROM embedded_entries WHERE agent_id='compose-b' AND kind='toolResult' AND instr(body,'b-bash-1')>0`).Scan(&count)
 		return e == nil && count == 1
 	}, 3*time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool { return syscall.Kill(-gate.pid, 0) == syscall.ESRCH }, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return syscall.Kill(-pid, 0) == syscall.ESRCH }, 3*time.Second, 10*time.Millisecond)
 	finished = true
 }

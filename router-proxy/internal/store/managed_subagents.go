@@ -53,7 +53,7 @@ func validSubagentDuration(value float64) bool {
 
 func subagentTerminal(status string) bool {
 	switch status {
-	case "completed", "steered", "aborted", "stopped", "error", "interrupted", "cancelled":
+	case "completed", "failed", "stopped", "steered", "aborted", "error", "interrupted", "cancelled":
 		return true
 	default:
 		return false
@@ -63,7 +63,7 @@ func subagentTerminal(status string) bool {
 func subagentTransition(old, next string) bool {
 	switch old {
 	case "queued":
-		return next == "running" || next == "stopped" || next == "interrupted" || next == "cancelled" || next == "aborted"
+		return next == "running" || next == "stopped" || next == "failed" || next == "error" || next == "interrupted" || next == "cancelled" || next == "aborted"
 	case "running":
 		return subagentTerminal(next)
 	default:
@@ -239,7 +239,7 @@ func (s *Store) ManagedSubagentTranscript(ctx context.Context, parent EmbeddedBi
  FROM managed_subagents c JOIN managed_agents a ON a.agent_id=c.agent_id
  JOIN embedded_sessions e ON e.agent_id=a.agent_id AND e.session_id=a.pi_session_id AND e.epoch=a.session_epoch AND e.generation=a.runtime_generation AND e.current=1
  WHERE c.agent_id=? AND c.parent_agent_id=? AND c.parent_session_id=? AND c.parent_epoch=? AND c.parent_generation=?
- AND c.status IN ('completed','steered','aborted','stopped','error','interrupted') AND a.runtime='embedded'`,
+ AND c.status IN ('completed','failed','stopped','steered','aborted','error','interrupted') AND a.runtime='embedded'`,
 		childID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation).Scan(&binding.AgentID, &binding.SessionID, &binding.Epoch, &binding.Generation, &role)
 	if err != nil {
 		return empty, err
@@ -387,7 +387,7 @@ func (s *Store) reconcileManagedSubagents(ctx context.Context) error {
 			return err
 		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='interrupted',error='parent agent terminated',updated_at=?,terminal_at=? WHERE status IN ('running','queued') AND parent_agent_id IN (SELECT agent_id FROM managed_agents WHERE desired_state='terminated')`, now, now)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='failed',error='parent agent terminated',updated_at=?,terminal_at=? WHERE status IN ('running','queued') AND parent_agent_id IN (SELECT agent_id FROM managed_agents WHERE desired_state='terminated')`, now, now)
 		if err != nil {
 			return err
 		}
@@ -396,6 +396,26 @@ func (s *Store) reconcileManagedSubagents(ctx context.Context) error {
 			return err
 		}
 		if affected > 0 {
+			_, err = s.bumpManagedProjectionVersion(ctx)
+		}
+		return err
+	})
+}
+
+// MarkInFlightSubagentsFailed marks in-flight subagents as failed / interrupted in a single query on router startup.
+func (s *Store) MarkInFlightSubagentsFailed(ctx context.Context) error {
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='failed', error='interrupted', updated_at=?, terminal_at=? WHERE status IN ('running','queued')`, now, now)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected > 0 {
+			_, _ = s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', activity_state='stopped', accepting_prompts=0, last_error_code='SUBAGENT_INTERRUPTED', last_error_message='subagent interrupted by process restart', last_error_at=?, updated_at=? WHERE agent_id IN (SELECT agent_id FROM managed_subagents WHERE status='failed' AND error='interrupted') AND desired_state='running'`, now, now)
 			_, err = s.bumpManagedProjectionVersion(ctx)
 		}
 		return err
@@ -439,7 +459,7 @@ func (s *Store) CompletedSubagentsPendingNotification(ctx context.Context) ([]*M
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status IN ('completed','steered','aborted','stopped','error')
+	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status IN ('completed','failed','stopped','steered','aborted','error')
 		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id LIKE 'subagent-completed-' || agent_id || '%' OR m.id LIKE 'subagent-terminated-' || agent_id || '%')
 		AND NOT EXISTS (SELECT 1 FROM conversation_messages c WHERE c.message_id LIKE 'subagent-completed-' || agent_id || '%' OR c.message_id LIKE 'subagent-terminated-' || agent_id || '%')
 		ORDER BY agent_id`)
@@ -469,7 +489,7 @@ func (s *Store) InterruptedSubagentsPendingNotification(ctx context.Context) ([]
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE status='interrupted'
+	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE ((status='failed' AND (error='interrupted' OR error LIKE '%interrupted%')) OR status='interrupted')
 		AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id LIKE 'subagent-interrupted-' || agent_id || '%')
 		AND NOT EXISTS (SELECT 1 FROM conversation_messages c WHERE c.message_id LIKE 'subagent-interrupted-' || agent_id || '%')
 		ORDER BY agent_id`)
@@ -535,7 +555,7 @@ func (s *Store) PruneExpiredSubagents(ctx context.Context, ttl time.Duration) er
 	})
 }
 
-// TimeoutRunningSubagents marks subagents running or queued longer than timeout as error.
+// TimeoutRunningSubagents marks subagents running or queued longer than timeout as failed.
 func (s *Store) TimeoutRunningSubagents(ctx context.Context, timeout time.Duration) (int, error) {
 	if timeout <= 0 {
 		timeout = 1 * time.Hour
@@ -544,7 +564,7 @@ func (s *Store) TimeoutRunningSubagents(ctx context.Context, timeout time.Durati
 	err := s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
 		cutoff := formatTimestamp(s.clock.Now().Add(-timeout))
-		res, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='error', error='subagent execution timed out (exceeded 1 hour TTL)', updated_at=?, terminal_at=? WHERE status IN ('queued', 'running') AND created_at < ?`, now, now, cutoff)
+		res, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET status='failed', error='subagent execution timed out (exceeded 1 hour TTL)', updated_at=?, terminal_at=? WHERE status IN ('queued', 'running') AND created_at < ?`, now, now, cutoff)
 		if err != nil {
 			return err
 		}

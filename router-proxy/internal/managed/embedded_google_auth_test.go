@@ -1436,6 +1436,62 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_RetainsLongTranscript(t *tes
 	require.Equal(t, "Assistant follow-up response 79", parts79[0].(map[string]any)["text"])
 }
 
+func TestGoogleAuth_TranscriptOver100MessagesNotPrunedIfUnderThreshold(t *testing.T) {
+	// Construct a transcript with 150 messages whose token usage is well below 80% of context window
+	var messages []ai.Message
+	messages = append(messages, ai.UserMessage{
+		Content: []ai.Content{
+			ai.TextContent{Text: "Initial instruction for 150-message test"},
+		},
+	})
+	for i := 1; i < 150; i++ {
+		if i%2 == 1 {
+			messages = append(messages, ai.AssistantMessage{
+				Content: []ai.Content{
+					ai.ToolCall{
+						ID:        fmt.Sprintf("call_%d", i),
+						Name:      "bash",
+						Arguments: map[string]any{"command": fmt.Sprintf("echo %d", i)},
+					},
+				},
+			})
+		} else {
+			messages = append(messages, ai.ToolResultMessage{
+				ToolCallID: fmt.Sprintf("call_%d", i-1),
+				ToolName:   "bash",
+				Content: []ai.Content{
+					ai.TextContent{Text: fmt.Sprintf("output_%d", i)},
+				},
+			})
+		}
+	}
+	require.Len(t, messages, 150)
+
+	initialTokens := estimateTranscriptTokens(messages)
+	require.Less(t, initialTokens, 50000, "150 small messages must be under 50k tokens")
+
+	// Convert with standard 1M context window
+	contents := convertMessagesToGoogleContents(messages, 1048576)
+	require.NotEmpty(t, contents)
+
+	// Verify no tool results were pruned with the omission placeholder
+	for _, turn := range contents {
+		if parts, ok := turn["parts"].([]any); ok {
+			for _, p := range parts {
+				if pMap, ok := p.(map[string]any); ok {
+					if fr, ok := pMap["functionResponse"].(map[string]any); ok {
+						if resp, ok := fr["response"].(map[string]any); ok {
+							if out, ok := resp["output"].(string); ok {
+								require.NotContains(t, out, "[Output omitted for context fitting]", "turn output should not be pruned under 80% threshold")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestGoogleAuth_LargeTranscriptPrunedRetainsAllUserMessages(t *testing.T) {
 	// Construct a transcript with 2,000 messages and > 1.5M tokens
 	var messages []ai.Message

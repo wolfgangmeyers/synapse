@@ -26,7 +26,26 @@ import (
 const (
 	embeddedSubagentFileLimit = 64 * 1024
 	embeddedSubagentBashLimit = 64 * 1024
+	embeddedImageReadLimit    = 10 * 1024 * 1024 // 10 MiB
 )
+
+func imageMimeType(p string) (string, bool) {
+	ext := strings.ToLower(filepath.Ext(p))
+	switch ext {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".webp":
+		return "image/webp", true
+	case ".gif":
+		return "image/gif", true
+	case ".bmp":
+		return "image/bmp", true
+	default:
+		return "", false
+	}
+}
 
 // validEmbeddedSubagentPath verifies that a relative path stays within the workspace
 // and contains no traversal, absolute prefixes, home expansion, or scheme components.

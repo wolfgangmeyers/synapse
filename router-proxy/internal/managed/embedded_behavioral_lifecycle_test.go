@@ -697,20 +697,16 @@ func TestBehavioral_MidTurnSteering_MultiStepTool(t *testing.T) {
 	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
 	defer reg.Unregister()
 
-	type gateState struct {
-		pid   int
-		write *os.File
-	}
-	started := make(chan gateState, 1)
+	started := make(chan int, 1)
 	var gateMu sync.Mutex
-	var gate gateState
+	var pid int
 	closing := false
 
 	var sawSteeringInTranscript atomic.Bool
 
 	step1 := func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 		return providers.FauxAssistantMessage(ai.ContentList{
-			providers.FauxToolCall("bash", map[string]any{"command": "echo 'step1 working'"}, "call-bash-steer"),
+			providers.FauxToolCall("bash", map[string]any{"command": "sleep 1; echo 'step1 working'"}, "call-bash-steer"),
 		}, ai.StopToolUse)
 	}
 
@@ -737,39 +733,35 @@ func TestBehavioral_MidTurnSteering_MultiStepTool(t *testing.T) {
 		return reg.GetModel()
 	})
 
-	restore := managed.SetEmbeddedBashAfterStartForTest(h.manager, func(pid int, w *os.File) {
+	restore := managed.SetEmbeddedBashAfterStartForTest(h.manager, func(p int) {
 		gateMu.Lock()
 		if closing {
 			gateMu.Unlock()
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = w.Close()
+			_ = syscall.Kill(-p, syscall.SIGKILL)
 			return
 		}
-		gate = gateState{pid, w}
+		pid = p
 		gateMu.Unlock()
-		started <- gateState{pid, w}
+		started <- p
 	})
 	defer func() {
 		gateMu.Lock()
 		closing = true
-		g := gate
+		p := pid
 		gateMu.Unlock()
-		if g.write != nil {
-			_, _ = g.write.Write([]byte("\n"))
-			_ = g.write.Close()
-		}
-		if g.pid > 0 {
-			_ = syscall.Kill(-g.pid, syscall.SIGKILL)
+		if p > 0 {
+			_ = syscall.Kill(-p, syscall.SIGKILL)
 		}
 		restore()
 	}()
 
 	launched, err := h.manager.Launch(h.ctx, managed.LaunchRequest{
-		Name:      "steering-worker",
-		Cwd:       h.root,
-		Runtime:   "embedded",
-		Model:     &managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
-		RequestID: "55555555-5555-4555-8555-555555555555",
+		Name:             "steering-worker",
+		Cwd:              h.root,
+		Runtime:          "embedded",
+		Model:            &managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		RequestID:        "55555555-5555-4555-8555-555555555555",
+		AllowInlineTools: true,
 	})
 	require.NoError(t, err)
 
@@ -782,10 +774,9 @@ func TestBehavioral_MidTurnSteering_MultiStepTool(t *testing.T) {
 	status := h.postMessage(t, "msg-turn-start", "user", launched.Agent.AgentID, "Start long multi-step operation")
 	require.Equal(t, http.StatusCreated, status)
 
-	// Wait for bash tool to start and block
-	var g gateState
+	// Wait for bash tool to start
 	select {
-	case g = <-started:
+	case <-started:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for bash tool to start")
 	}
@@ -800,10 +791,6 @@ func TestBehavioral_MidTurnSteering_MultiStepTool(t *testing.T) {
 		msg, err := h.db.MessageFor(h.ctx, steerMsgID)
 		return err == nil && msg != nil && msg.State == domain.MessageAcknowledged
 	}, 3*time.Second, 20*time.Millisecond, "steering message must be acknowledged mid-turn")
-
-	// Release the bash tool
-	_, _ = g.write.Write([]byte("\n"))
-	_ = g.write.Close()
 
 	// Wait for turn to complete
 	require.Eventually(t, func() bool {

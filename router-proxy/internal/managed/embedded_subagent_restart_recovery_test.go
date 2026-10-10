@@ -72,19 +72,19 @@ func TestSubagentActiveAcrossRouterRestartResumesAndCompletes(t *testing.T) {
 	reopenedMgr := makeSubagentTestManager(t, reopenedDB, reg, 4)
 	defer reopenedMgr.Close(ctx)
 
-	// Recover embedded roots - this auto-recovers active subagents
+	// Recover embedded roots - marks in-flight subagents as failed / interrupted
 	require.NoError(t, reopenedMgr.RecoverEmbeddedRoots(ctx))
 
-	// Verify the subagent finishes and transitions to completed
+	// Verify the subagent transitions to failed with error interrupted
 	var lastSt, lastErr string
 	require.Eventually(t, func() bool {
 		_ = rawDB.QueryRowContext(ctx, `SELECT status, error FROM managed_subagents WHERE agent_id=?`, childID).Scan(&lastSt, &lastErr)
 		t.Logf("poll: status=%s error=%s", lastSt, lastErr)
-		return lastSt == "completed"
+		return lastSt == "failed" && lastErr == "interrupted"
 	}, 3*time.Second, 200*time.Millisecond)
 
-	// Verify completion notification mailbox message was delivered to parent
+	// Verify interrupted notification mailbox message was delivered to parent
 	var msgCount int
-	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id LIKE ?`, "subagent-completed-"+childID+"-%").Scan(&msgCount))
-	require.GreaterOrEqual(t, msgCount, 1, "completion mailbox message must be delivered to parent")
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id LIKE ?`, "subagent-interrupted-"+childID+"-%").Scan(&msgCount))
+	require.GreaterOrEqual(t, msgCount, 1, "interrupted mailbox message must be delivered to parent")
 }

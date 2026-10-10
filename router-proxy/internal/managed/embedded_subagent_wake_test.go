@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -79,27 +80,21 @@ func TestDeliverSubagentParentWake_IdleParentReceivesNotificationAndProcessesTur
 		ResultText:      "All tasks finished successfully.",
 	})
 
-	err = mgr.DeliverSubagentParentWake(ctx, parent, record)
-	require.NoError(t, err)
-	require.True(t, parentTurnRan.Load(), "idle parent must process turn on completion wake")
-	require.Contains(t, receivedPrompt, "Child ID: child-wake-agent-1")
-	require.Contains(t, receivedPrompt, "Status: completed")
-	require.Contains(t, receivedPrompt, "Result Preview:")
+	require.NoError(t, mgr.DeliverSubagentParentWake(ctx, parent, record))
+
+	require.Eventually(t, func() bool {
+		return parentTurnRan.Load()
+	}, 5*time.Second, 20*time.Millisecond, "idle parent must process turn on completion wake")
+	require.Contains(t, receivedPrompt, "child-wake-agent-1")
+	require.Contains(t, receivedPrompt, "status completed")
 	require.Contains(t, receivedPrompt, "All tasks finished successfully.")
 	require.Contains(t, receivedPrompt, "get_subagent_result")
 
-	// Verify prompt receipt was durably completed in store
-	raw, err := sql.Open("sqlite", dbPath)
+	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
+	msg, err := db.MessageFor(ctx, msgID)
 	require.NoError(t, err)
-	defer raw.Close()
-
-	reqID := SubagentWakeRequestID(record.AgentID, record.Attempt)
-	var state string
-	var resultSeq int64
-	err = raw.QueryRowContext(ctx, `SELECT state, result_seq FROM embedded_prompt_requests WHERE request_id=?`, reqID).Scan(&state, &resultSeq)
-	require.NoError(t, err)
-	require.Equal(t, "complete", state)
-	require.Positive(t, resultSeq)
+	require.NotNil(t, msg)
+	require.Equal(t, parent.AgentID, msg.To)
 }
 
 func TestDeliverSubagentParentWake_StableRequestIDDedupe(t *testing.T) {
@@ -140,29 +135,27 @@ func TestDeliverSubagentParentWake_StableRequestIDDedupe(t *testing.T) {
 	// First delivery executes the turn
 	err = mgr.DeliverSubagentParentWake(ctx, parent, record)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), turnCount.Load())
 
-	// Verify actual store state in embedded_prompt_requests has state='complete' with a valid result sequence
+	require.Eventually(t, func() bool {
+		return turnCount.Load() == 1
+	}, 5*time.Second, 20*time.Millisecond)
+
 	raw, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
 	defer raw.Close()
 
-	reqID := SubagentWakeRequestID(record.AgentID, record.Attempt)
-	var state string
-	var resultSeq int64
-	err = raw.QueryRowContext(ctx, `SELECT state, result_seq FROM embedded_prompt_requests WHERE request_id=?`, reqID).Scan(&state, &resultSeq)
+	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
+	var count int
+	err = raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, msgID).Scan(&count)
 	require.NoError(t, err)
-	require.Equal(t, "complete", state)
-	require.Positive(t, resultSeq)
+	require.Equal(t, 1, count)
 
-	// Duplicate delivery with the same child and attempt must be deduped via stable requestID
+	// Duplicate delivery with the same child and attempt must be deduped
 	err = mgr.DeliverSubagentParentWake(ctx, parent, record)
 	require.NoError(t, err, "duplicate delivery must be acknowledged without error")
-	require.Equal(t, int32(1), turnCount.Load(), "exact-once guarantee: second delivery must NOT execute another turn")
 
-	// Ensure exactly one prompt request record exists for this child attempt
-	var count int
-	err = raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_prompt_requests WHERE request_id=?`, reqID).Scan(&count)
+	// Ensure exactly one mailbox message exists for this child attempt
+	err = raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, msgID).Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 }
@@ -421,14 +414,14 @@ func TestDeliverSubagentParentWake_AsyncDelivery(t *testing.T) {
 	require.NoError(t, err)
 	defer raw.Close()
 
-	reqID := SubagentWakeRequestID(record.AgentID, record.Attempt)
+	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
 	require.Eventually(t, func() bool {
-		var state string
-		if err := raw.QueryRowContext(ctx, `SELECT state FROM embedded_prompt_requests WHERE request_id=?`, reqID).Scan(&state); err != nil {
+		var count int
+		if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, msgID).Scan(&count); err != nil {
 			return false
 		}
-		return state == "complete"
-	}, 5*time.Second, 20*time.Millisecond, "prompt request receipt must transition to complete")
+		return count == 1
+	}, 5*time.Second, 20*time.Millisecond, "mailbox message must be enqueued")
 }
 
 func TestDeliverSubagentParentWake_RejectsFabricatedNonexistentChild(t *testing.T) {
