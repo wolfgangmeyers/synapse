@@ -202,7 +202,14 @@ export function reducer(state: AppState, action: AppAction): AppState {
       // watermark may skip private store commits, so only an older snapshot is
       // unsafe to apply.
       if (action.version !== undefined && state.managedChildrenProjectionVersion !== undefined && action.version < state.managedChildrenProjectionVersion) return state;
-      return { ...state, ...(action.version === undefined ? {} : { managedChildrenProjectionVersion: action.version }), managedChildren: Object.fromEntries(action.children.map((projection) => [projection.agent_id, projection])) };
+      return {
+        ...state,
+        ...(action.version === undefined ? {} : { managedChildrenProjectionVersion: action.version }),
+        managedChildren: {
+          ...state.managedChildren,
+          ...Object.fromEntries(action.children.map((projection) => [projection.agent_id, projection])),
+        },
+      };
     }
     case "managed/recover": {
       const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutVersions } = state;
