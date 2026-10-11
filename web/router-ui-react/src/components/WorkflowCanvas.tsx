@@ -419,9 +419,16 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
       // If workflow has no entry state yet, automatically set this as entry
       if (!workflow?.entry_state_id) {
-        await client.updateWorkflow(workflowId, {
+        const updatePayload: { name?: string; description?: string; entry_state_id?: string | null } = {
           entry_state_id: res.workflow_state.id,
-        });
+        };
+        if (workflow?.name !== undefined) {
+          updatePayload.name = workflow.name;
+        }
+        if (workflow?.description !== undefined) {
+          updatePayload.description = workflow.description;
+        }
+        await client.updateWorkflow(workflowId, updatePayload);
       }
 
       setAddStateDialogOpen(false);
@@ -524,7 +531,19 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
       {/* Global Error Banner */}
       {error ? (
-        <div className="alert alert-danger canvas-error-alert" role="alert">
+        <div
+          className="alert alert-danger canvas-error-alert"
+          role="alert"
+          style={{
+            color: "#f87171",
+            backgroundColor: "rgba(127, 29, 29, 0.4)",
+            border: "1px solid #991b1b",
+            borderRadius: "6px",
+            padding: "8px 12px",
+            fontSize: "13px",
+            marginBottom: "12px",
+          }}
+        >
           {error}
         </div>
       ) : null}
@@ -587,7 +606,22 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
           className="message-dialog"
         >
           <form onSubmit={(e) => void handleAddState(e)}>
-            {addStateError && <div className="alert alert-danger">{addStateError}</div>}
+            {addStateError && (
+              <div
+                className="alert alert-danger"
+                style={{
+                  color: "#f87171",
+                  backgroundColor: "rgba(127, 29, 29, 0.4)",
+                  border: "1px solid #991b1b",
+                  borderRadius: "6px",
+                  padding: "8px 12px",
+                  fontSize: "13px",
+                  marginBottom: "12px",
+                }}
+              >
+                {addStateError}
+              </div>
+            )}
             <div className="form-group" style={{ marginBottom: "1rem" }}>
               <label htmlFor="canvas-state-name" style={{ display: "block", marginBottom: "0.3rem", fontWeight: 600 }}>
                 State Name *
