@@ -1,9 +1,16 @@
 package transport
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -74,4 +81,63 @@ func TestManagedChildrenProjectionRendersInterruptedUnknownRecovery(t *testing.T
 	require.Equal(t, "running", children[0]["status"])
 	require.Equal(t, map[string]any{"state": "interrupted_unknown", "cause": "parent_process_lost", "observed_at": "2030-01-01T00:00:03Z"}, children[0]["recovery"])
 	require.Equal(t, "reconciled_unknown", children[0]["compaction"].(map[string]any)["last_outcome"])
+}
+
+func TestManagedChildrenGETReturnsEmptyForMissingOrArchivedAgent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: s, Config: managed.Config{Enabled: false}, Manifest: manifest})
+	require.NoError(t, err)
+
+	router, err := New(Options{Store: s, Managed: manager, Port: 0})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = router.Close(ctx) })
+
+	// Query children for a non-existent / terminating agent returns 200 OK with empty children
+	req := httptest.NewRequest(http.MethodGet, "/v1/managed-agents/deleted-agent/children", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "deleted-agent", body["agent_id"])
+	require.Equal(t, "router-managed", body["source"])
+	require.Equal(t, float64(0), body["lifecycle_version"])
+	require.Equal(t, "current", body["recovery_state"])
+	children, ok := body["children"].([]any)
+	require.True(t, ok)
+	require.Empty(t, children)
+
+	// Query children for an archived agent returns 200 OK with empty children
+	rawDB, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer rawDB.Close()
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agent_archives (
+		archive_key,agent_id,name,terminal_outcome,completed_at,disposition,total,
+		queued_never_attempted,in_flight_or_unknown,completed,released_or_failed)
+		VALUES ('123e4567-e89b-42d3-a456-426614174099','archived-agent','archived-agent','terminated','2026-10-11T00:00:00Z','completed',1,0,0,1,0)`)
+	require.NoError(t, err)
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/managed-agents/archived-agent/children", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var archivedBody map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &archivedBody))
+	require.Equal(t, "archived-agent", archivedBody["agent_id"])
+	require.Equal(t, "router-managed", archivedBody["source"])
+	require.Equal(t, float64(0), archivedBody["lifecycle_version"])
+	require.Equal(t, "current", archivedBody["recovery_state"])
+	children, ok = archivedBody["children"].([]any)
+	require.True(t, ok)
+	require.Empty(t, children)
 }

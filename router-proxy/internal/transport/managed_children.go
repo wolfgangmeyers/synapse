@@ -14,6 +14,16 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
+func emptyManagedChildrenProjection(agentID string) map[string]any {
+	return map[string]any{
+		"agent_id":          agentID,
+		"source":            "router-managed",
+		"lifecycle_version": int64(0),
+		"recovery_state":    "current",
+		"children":          []map[string]any{},
+	}
+}
+
 // managedChildrenProjection is deliberately separate from managed.PublicAgent.
 // The readiness source remains private; this boundary exposes only an
 // allowlisted child activity view after proving it belongs to the current

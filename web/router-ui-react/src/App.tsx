@@ -617,10 +617,20 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     // managed rows remain visible. Refresh the direct endpoint anyway so the
     // user can recover their retained child records without another reconnect.
     const snapshot = await session.transport.http.managedAgents();
-    const children = await Promise.all(snapshot.agents.map((agent) => session.transport.http.managedChildren(agent.agent_id)));
     session.dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
     refreshManagedGoalStates(snapshot.agents);
-    session.dispatch({ type: "managed/children", scope, children });
+    try {
+      const nonTerminating = snapshot.agents.filter(
+        (agent) => !(agent.lifecycle_state === "terminating" || agent.desired_state === "terminated")
+      );
+      const childrenSettled = await Promise.allSettled(
+        nonTerminating.map((agent) => session.transport.http.managedChildren(agent.agent_id))
+      );
+      const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      session.dispatch({ type: "managed/children", scope, children });
+    } catch {
+      // Child projection can be repaired on next pass
+    }
   };
   const changeManagedModel = async (model: ModelSummary): Promise<void> => {
     if (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts !== true) return;
@@ -636,6 +646,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     setManagedPending(true); setManagedError(undefined);
     try {
       const launched = await session.transport.http.launchManaged(input);
+      const agentId = launched.agent?.agent_id ?? input.name;
       const folder = launched.agent?.cwd ?? input.cwd;
       setManagedRecentFolders((current) => {
         const next = recordManagedRecentFolder(current, folder);
@@ -643,6 +654,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
         return next;
       });
       await refreshManaged();
+      setSelection(sourceAgentKey("router-managed", agentId));
       setDialog(undefined);
     }
     catch (cause) { setManagedError(managedRequestErrorMessage(cause, "Managed agent could not be launched.")); }
@@ -650,7 +662,18 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   };
   const manageAction = async (agentId: string, action: "restart" | "reset" | "terminate", options?: { cleanupWorktree?: boolean }): Promise<void> => {
     setManagedPending(true); setManagedError(undefined);
-    try { if (action === "restart") await session.transport.http.restartManaged(agentId); else if (action === "reset") await session.transport.http.resetManaged(agentId); else await session.transport.http.terminateManaged(agentId, options); await refreshManaged(); if (action === "terminate") { setDialog(undefined); setManagedTerminationConfirmation(false); } }
+    try {
+      if (action === "restart") {
+        await session.transport.http.restartManaged(agentId);
+      } else if (action === "reset") {
+        await session.transport.http.resetManaged(agentId);
+      } else {
+        await session.transport.http.terminateManaged(agentId, options);
+        setDialog(undefined);
+        setManagedTerminationConfirmation(false);
+      }
+      await refreshManaged();
+    }
     catch (cause) { setManagedError(managedRequestErrorMessage(cause, "Managed action could not be completed.")); }
     finally { setManagedPending(false); }
   };

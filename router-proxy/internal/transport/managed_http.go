@@ -1279,7 +1279,7 @@ func (r *Router) handleManagedAgentsGET(w http.ResponseWriter, req *http.Request
 func (r *Router) handleManagedChildrenGET(w http.ResponseWriter, req *http.Request, agentID string) {
 	projection, err := r.managedChildrenProjection(req.Context(), agentID)
 	if errors.Is(err, sql.ErrNoRows) {
-		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		r.writeManagedJSON(w, req, http.StatusOK, emptyManagedChildrenProjection(agentID), nil)
 		return
 	}
 	if err != nil {
