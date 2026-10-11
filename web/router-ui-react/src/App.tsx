@@ -43,7 +43,7 @@ import { withAbsoluteAttachmentUrls } from "./transport/attachment-urls";
 import { createHistoryThumbnail } from "./domain/images";
 import { cacheKeyForAttachment, saveCachedImage } from "./persistence/history-repository";
 import { RouterLogViewer } from "./components/RouterLogViewer";
-import { WorkflowStatesPage } from "./components/WorkflowStatesPage";
+import { WorkflowsPage } from "./components/WorkflowsPage";
 
 export interface AppProps {
   routerUrl?: string | undefined;
@@ -754,7 +754,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   if (currentRoute === "workflows") {
     return <>
       <div className="workflows-spa-container" style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
-        <WorkflowStatesPage
+        <WorkflowsPage
           client={session.transport.http}
           onBack={() => { window.location.hash = ""; }}
         />
@@ -803,4 +803,5 @@ export { ImagePreview } from "./components/ImagePreview";
 export { EmptyState } from "./components/EmptyState";
 export { StatusMessage } from "./components/StatusMessage";
 export { RouterLogViewer } from "./components/RouterLogViewer";
-export { WorkflowStatesPage, WorkflowsPage } from "./components/WorkflowStatesPage";
+export { WorkflowsPage } from "./components/WorkflowsPage";
+export { WorkflowStatesPage } from "./components/WorkflowStatesPage";
