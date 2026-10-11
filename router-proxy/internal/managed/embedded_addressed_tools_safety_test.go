@@ -38,6 +38,14 @@ func TestEmbeddedAddressedActionSchemas(t *testing.T) {
 	}
 	require.Error(t, embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "agent@example.com", "body": "mail"}))
 	require.Error(t, embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "recipient", "body": "mail", "from": "spoofed-sender"}))
+	err := embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "system", "body": "mail"})
+	require.EqualError(t, err, "cannot send message to 'system': system notifications do not accept incoming messages or replies")
+	err = embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "System", "body": "mail"})
+	require.EqualError(t, err, "cannot send message to 'system': system notifications do not accept incoming messages or replies")
+	err = embeddedAddressedArguments("mecha_worker", map[string]any{"action": "send", "name": "system", "body": "mail"})
+	require.EqualError(t, err, "cannot send message to 'system': system notifications do not accept incoming messages or replies")
+	err = embeddedAddressedArguments("mecha_worker", map[string]any{"action": "send", "name": "SYSTEM", "body": "mail"})
+	require.EqualError(t, err, "cannot send message to 'system': system notifications do not accept incoming messages or replies")
 }
 
 func TestEmbeddedAddressedToolsRejectContextOwnerBeforeAdmission(t *testing.T) {

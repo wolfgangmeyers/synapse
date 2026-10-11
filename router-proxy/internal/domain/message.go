@@ -102,10 +102,10 @@ type Lease struct {
 // MailboxContent adds runtime reply instructions without changing the stored body.
 func MailboxContent(body, from string) string {
 	if from == "system" {
-		if strings.Contains(body, "No mailbox reply is needed") || strings.Contains(body, "Automated system notification") {
+		if strings.Contains(body, "Do not reply to this message") || strings.Contains(body, "Automated notification from system") || strings.Contains(body, "No mailbox reply is needed") || strings.Contains(body, "Automated system notification") {
 			return body
 		}
-		return body + "\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step."
+		return body + "\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*"
 	}
 	return body + "\n\nReply via mailbox to " + from
 }
@@ -116,10 +116,10 @@ func BatchItem(message Message) string {
 		parts = append(parts, "Subject: "+*message.Subject)
 	}
 	if message.From == "system" || message.Source.Kind == "system" {
-		if strings.Contains(message.Body, "No mailbox reply is needed") || strings.Contains(message.Body, "Automated system notification") {
+		if strings.Contains(message.Body, "Do not reply to this message") || strings.Contains(message.Body, "Automated notification from system") || strings.Contains(message.Body, "No mailbox reply is needed") || strings.Contains(message.Body, "Automated system notification") {
 			parts = append(parts, "", message.Body)
 		} else {
-			parts = append(parts, "", message.Body, "", "[Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.]")
+			parts = append(parts, "", message.Body, "", "[---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*]")
 		}
 	} else {
 		parts = append(parts, "", message.Body, "", "[Reply via mailbox to "+message.From+".]")

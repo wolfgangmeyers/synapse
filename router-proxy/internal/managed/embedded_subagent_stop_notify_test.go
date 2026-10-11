@@ -75,6 +75,6 @@ func TestStopSubagentNotifiesParentWorker(t *testing.T) {
 	require.Equal(t, parent.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
 	require.Equal(t, "[System Notice] Subagent Terminated: "+childID, *msg.Subject)
-	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step."
+	expectedBody := "Subagent " + childID + " (\"" + childDesc + "\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"" + childID + "\").\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*"
 	require.Equal(t, expectedBody, msg.Body)
 }

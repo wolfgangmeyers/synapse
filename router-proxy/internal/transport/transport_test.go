@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,26 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
+
+func TestMailboxRejectSystem(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	payload := `{"id":"test-system-rejected","from":"sender","to":"system","body":"hello","created_at":"2026-08-29T12:00:00.000Z"}`
+	resp, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(payload))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	var result map[string]map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Equal(t, "recipient_rejected", result["error"]["code"])
+}
 
 func TestHTTPEnvelopeParityRejectsNullEscapedNewlineAndGoOnlyDedupField(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
@@ -64,6 +85,15 @@ func TestHTTPEnvelopeParityRejectsNullEscapedNewlineAndGoOnlyDedupField(t *testi
 	require.Equal(t, "escaped_newlines", escapedResult["error"]["code"])
 
 	valid := `{"id":"dedup-parity","from":"sender","to":"receiver","body":"body","created_at":"2026-08-29T12:00:00.000Z"}`
+	systemPayload := `{"id":"system-rejected","from":"sender","to":"system","body":"body","created_at":"2026-08-29T12:00:00.000Z"}`
+	systemResp, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(systemPayload))
+	require.NoError(t, err)
+	defer systemResp.Body.Close()
+	require.Equal(t, http.StatusBadRequest, systemResp.StatusCode)
+	var systemResult map[string]map[string]string
+	require.NoError(t, json.NewDecoder(systemResp.Body).Decode(&systemResult))
+	require.Equal(t, "recipient_rejected", systemResult["error"]["code"])
+
 	first, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(valid))
 	require.NoError(t, err)
 	first.Body.Close()
@@ -118,6 +148,31 @@ func TestHTTPRejectsReservedNativePolicySender(t *testing.T) {
 	message, err := durable.MessageFor(context.Background(), "spoofed-audit")
 	require.NoError(t, err)
 	require.Nil(t, message)
+}
+
+func TestHTTPRejectsMessagesToSystem(t *testing.T) {
+	for _, recipient := range []string{"system", "System", "SYSTEM"} {
+		durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+		require.NoError(t, err)
+		defer durable.Close()
+		router, err := transport.New(transport.Options{Store: durable, Port: 0})
+		require.NoError(t, err)
+		server := httptest.NewServer(router)
+		defer server.Close()
+
+		payload := fmt.Sprintf(`{"id":"send-system","from":"worker","to":%q,"body":"reply to system","created_at":"2026-08-29T12:00:00.000Z"}`, recipient)
+		response, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(payload))
+		require.NoError(t, err)
+		defer response.Body.Close()
+		require.Equal(t, http.StatusBadRequest, response.StatusCode)
+		var result map[string]map[string]string
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+		require.Equal(t, "recipient_rejected", result["error"]["code"])
+		require.Contains(t, result["error"]["message"], "'system' is an automated system notifier and does not accept incoming messages")
+		message, err := durable.MessageFor(context.Background(), "send-system")
+		require.NoError(t, err)
+		require.Nil(t, message)
+	}
 }
 
 func TestHTTPPermissiveCORSIsTransportOnlyForAnyFrontendOrigin(t *testing.T) {

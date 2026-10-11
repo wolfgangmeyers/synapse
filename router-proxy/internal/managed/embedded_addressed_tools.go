@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -118,6 +119,9 @@ func embeddedAddressedArguments(name string, args map[string]any) error {
 	recipient, _ := args["recipient"].(string)
 	if name == "mecha_worker" {
 		recipient, _ = args["name"].(string)
+	}
+	if strings.EqualFold(recipient, "system") {
+		return errors.New("cannot send message to 'system': system notifications do not accept incoming messages or replies")
 	}
 	body, _ := args["body"].(string)
 	envelope := protocol.Envelope{ID: "tool-validation", From: "tool-caller", To: recipient, Body: body, CreatedAt: "2030-01-01T00:00:00.000Z"}

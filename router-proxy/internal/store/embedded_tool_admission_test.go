@@ -73,6 +73,16 @@ func TestEmbeddedAddressedToolCheckedResultAndOriginalOnce(t *testing.T) {
 	require.Equal(t, 1, embeddedRedCount(t, s, "messages"))
 }
 
+func TestEmbeddedAddressedMailRejectsSystemRecipient(t *testing.T) {
+	for _, recipient := range []string{"system", "System", "SYSTEM"} {
+		ctx := context.Background()
+		s, _, _, _, w, _ := addressedStoreInvocation(t)
+		w.call.Arguments["recipient"] = recipient
+		_, err := s.EnqueueEmbeddedToolMail(ctx, w)
+		require.EqualError(t, err, "cannot send message to 'system': system notifications do not accept incoming messages or replies")
+	}
+}
+
 func TestEmbeddedAddressedMailKeepsDistinctAcceptedRequestOnDeliveryDedup(t *testing.T) {
 	ctx := context.Background()
 	s, b, g, call, w, producer := addressedStoreInvocation(t)
