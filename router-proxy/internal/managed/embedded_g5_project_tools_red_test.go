@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,11 +46,11 @@ func TestEmbeddedG5ProjectFileToolsRED(t *testing.T) {
 			{"edit", map[string]any{"path": "created.txt", "edits": []any{map[string]any{"oldText": "before", "newText": "after"}}}, "Successfully"},
 			{"read", map[string]any{"path": "created.txt"}, "after\n"},
 		}},
-		{name: "deny-parent-traversal", escape: "../outside.txt"},
-		{name: "deny-absolute-path", escape: "ABSOLUTE"},
-		{name: "deny-url", escape: "file:///outside.txt"},
-		{name: "deny-tilde", escape: "~/outside.txt"},
-		{name: "deny-symlink-escape", escape: "escape.txt"},
+		{name: "allow-parent-traversal", escape: "../outside.txt"},
+		{name: "allow-absolute-path", escape: "ABSOLUTE"},
+		{name: "allow-url", escape: "file:///outside.txt"},
+		{name: "allow-tilde", escape: "~/outside.txt"},
+		{name: "allow-symlink-escape", escape: "escape.txt"},
 	} {
 		if !t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -59,11 +60,22 @@ func TestEmbeddedG5ProjectFileToolsRED(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(project, "note.txt"), []byte("original\n"), 0600))
 			outside := filepath.Join(root, "outside.txt")
 			if tc.escape != "" {
-				require.NoError(t, os.WriteFile(outside, []byte("untouched\n"), 0600))
-				require.NoError(t, os.Symlink(outside, filepath.Join(project, "escape.txt")))
 				attack := tc.escape
 				if attack == "ABSOLUTE" {
 					attack = outside
+				} else if attack == "file:///outside.txt" {
+					attack = "file://" + outside
+				} else if attack == "~/outside.txt" {
+					home, err := os.UserHomeDir()
+					require.NoError(t, err)
+					tildeFileName := fmt.Sprintf(".test_tilde_g5_%d.txt", time.Now().UnixNano())
+					outside = filepath.Join(home, tildeFileName)
+					attack = "~/" + tildeFileName
+					defer os.Remove(outside)
+				}
+				require.NoError(t, os.WriteFile(outside, []byte("untouched\n"), 0600))
+				if tc.escape == "escape.txt" {
+					require.NoError(t, os.Symlink(outside, filepath.Join(project, "escape.txt")))
 				}
 				tc.calls = []struct {
 					name string
@@ -161,10 +173,10 @@ func TestEmbeddedG5ProjectFileToolsRED(t *testing.T) {
 				require.Equal(t, "project-call-"+string(rune('a'+i)), continuation.result.ToolCallID)
 				require.Equal(t, call.name, continuation.result.ToolName)
 				if tc.escape != "" {
-					require.True(t, continuation.result.IsError, "%s must be denied", tc.escape)
+					require.False(t, continuation.result.IsError, "%s must be allowed", tc.escape)
 					bytes, err := os.ReadFile(outside)
 					require.NoError(t, err)
-					require.Equal(t, "untouched\n", string(bytes))
+					require.Equal(t, "changed\n", string(bytes))
 				} else {
 					require.False(t, continuation.result.IsError)
 					require.NotEmpty(t, continuation.result.Content)

@@ -141,88 +141,117 @@ func TestEmbeddedSubagentToolsDenials(t *testing.T) {
 	writeTool := tools[2]
 	bashTool := tools[3]
 
-	// 1. Read outside absolute denial
-	_, err = readTool.Execute(ctx, "r-abs", map[string]any{"path": outsideFile}, nil)
-	require.Error(t, err)
-	_, err = readTool.Execute(ctx, "r-etc", map[string]any{"path": "/etc/passwd"}, nil)
+	// 1. Read outside absolute path succeeds
+	res, err := readTool.Execute(ctx, "r-abs", map[string]any{"path": outsideFile}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "sensitive-secret-token\n", res.Content[0].(ai.TextContent).Text)
+
+	// Read /etc/passwd succeeds
+	res, err = readTool.Execute(ctx, "r-etc", map[string]any{"path": "/etc/passwd"}, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Content[0].(ai.TextContent).Text)
+
+	// 2. Read outside traversal succeeds
+	parentDir := filepath.Dir(ws)
+	parentFile := filepath.Join(parentDir, fmt.Sprintf("parent_test_%d.txt", time.Now().UnixNano()))
+	require.NoError(t, os.WriteFile(parentFile, []byte("parent file content\n"), 0600))
+	defer os.Remove(parentFile)
+
+	res, err = readTool.Execute(ctx, "r-dotdot", map[string]any{"path": filepath.Join("..", filepath.Base(parentFile))}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "parent file content\n", res.Content[0].(ai.TextContent).Text)
+
+	// Read with ./ prefix succeeds
+	testLocalFile := filepath.Join(ws, "hello.txt")
+	require.NoError(t, os.WriteFile(testLocalFile, []byte("local content\n"), 0600))
+	res, err = readTool.Execute(ctx, "r-dot", map[string]any{"path": "./hello.txt"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "local content\n", res.Content[0].(ai.TextContent).Text)
+
+	// Read with file:// prefix succeeds
+	res, err = readTool.Execute(ctx, "r-url", map[string]any{"path": "file://" + outsideFile}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "sensitive-secret-token\n", res.Content[0].(ai.TextContent).Text)
+
+	// Empty path rejected
+	_, err = readTool.Execute(ctx, "r-empty", map[string]any{"path": ""}, nil)
 	require.Error(t, err)
 
-	// 2. Read outside traversal denial
-	for _, bad := range []string{"../secret.txt", "nested/../../secret.txt", "./hello.txt", "file:///etc/passwd", "~/secret.txt", ""} {
-		_, err = readTool.Execute(ctx, "r-bad", map[string]any{"path": bad}, nil)
-		require.Error(t, err, "expected error for path: %s", bad)
-	}
+	// 3. Read outside symlink succeeds
+	res, err = readTool.Execute(ctx, "r-sym", map[string]any{"path": "escape_symlink.txt"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "sensitive-secret-token\n", res.Content[0].(ai.TextContent).Text)
 
-	// 3. Read outside symlink denial
-	_, err = readTool.Execute(ctx, "r-sym", map[string]any{"path": "escape_symlink.txt"}, nil)
-	require.Error(t, err)
-	_, err = readTool.Execute(ctx, "r-sym-dir", map[string]any{"path": "escape_dir/secret.txt"}, nil)
-	require.Error(t, err)
+	res, err = readTool.Execute(ctx, "r-sym-dir", map[string]any{"path": "escape_dir/secret.txt"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "sensitive-secret-token\n", res.Content[0].(ai.TextContent).Text)
 
-	// 4. Write outside absolute denial
-	_, err = writeTool.Execute(ctx, "w-abs", map[string]any{"path": outsideFile, "content": "attack"}, nil)
-	require.Error(t, err)
-	_, err = writeTool.Execute(ctx, "w-etc", map[string]any{"path": "/etc/hacked.txt", "content": "attack"}, nil)
-	require.Error(t, err)
+	// 4. Write outside absolute path succeeds
+	outsideWrite := filepath.Join(outsideDir, "outside_write.txt")
+	_, err = writeTool.Execute(ctx, "w-abs", map[string]any{"path": outsideWrite, "content": "outside-write-success\n"}, nil)
+	require.NoError(t, err)
+	writtenContent, err := os.ReadFile(outsideWrite)
+	require.NoError(t, err)
+	require.Equal(t, "outside-write-success\n", string(writtenContent))
 
-	// 5. Write outside traversal denial
-	_, err = writeTool.Execute(ctx, "w-dotdot", map[string]any{"path": "../hacked.txt", "content": "attack"}, nil)
-	require.Error(t, err)
-	_, err = writeTool.Execute(ctx, "w-dotdot2", map[string]any{"path": "sub/../../hacked.txt", "content": "attack"}, nil)
-	require.Error(t, err)
+	// 5. Write outside traversal succeeds
+	parentWrite := filepath.Join(parentDir, fmt.Sprintf("parent_write_%d.txt", time.Now().UnixNano()))
+	defer os.Remove(parentWrite)
+	_, err = writeTool.Execute(ctx, "w-dotdot", map[string]any{"path": filepath.Join("..", filepath.Base(parentWrite)), "content": "traversal-write-success\n"}, nil)
+	require.NoError(t, err)
+	writtenParentContent, err := os.ReadFile(parentWrite)
+	require.NoError(t, err)
+	require.Equal(t, "traversal-write-success\n", string(writtenParentContent))
 
-	// 6. Write outside symlink denial
-	_, err = writeTool.Execute(ctx, "w-sym", map[string]any{"path": "escape_symlink.txt", "content": "attack"}, nil)
-	require.Error(t, err)
-	_, err = writeTool.Execute(ctx, "w-sym-dir", map[string]any{"path": "escape_dir/hacked.txt", "content": "attack"}, nil)
-	require.Error(t, err)
+	// 6. Write outside symlink succeeds
+	_, err = writeTool.Execute(ctx, "w-sym", map[string]any{"path": "escape_symlink.txt", "content": "symlink-write-success\n"}, nil)
+	require.NoError(t, err)
+	outsideSymContent, err := os.ReadFile(outsideFile)
+	require.NoError(t, err)
+	require.Equal(t, "symlink-write-success\n", string(outsideSymContent))
 
-	// 7. Edit outside absolute denial
+	// 7. Edit outside absolute path succeeds
 	_, err = editTool.Execute(ctx, "e-abs", map[string]any{
 		"path":  outsideFile,
-		"edits": []any{map[string]any{"oldText": "sensitive", "newText": "hacked"}},
+		"edits": []any{map[string]any{"oldText": "symlink-write-success", "newText": "edit-abs-success"}},
 	}, nil)
-	require.Error(t, err)
+	require.NoError(t, err)
+	editedContent, err := os.ReadFile(outsideFile)
+	require.NoError(t, err)
+	require.Equal(t, "edit-abs-success\n", string(editedContent))
 
-	// 8. Edit outside traversal denial
+	// 8. Edit outside traversal succeeds
 	_, err = editTool.Execute(ctx, "e-dotdot", map[string]any{
-		"path":  "../secret.txt",
-		"edits": []any{map[string]any{"oldText": "sensitive", "newText": "hacked"}},
+		"path":  filepath.Join("..", filepath.Base(parentWrite)),
+		"edits": []any{map[string]any{"oldText": "traversal-write-success", "newText": "edit-dotdot-success"}},
 	}, nil)
-	require.Error(t, err)
+	require.NoError(t, err)
+	editedParentContent, err := os.ReadFile(parentWrite)
+	require.NoError(t, err)
+	require.Equal(t, "edit-dotdot-success\n", string(editedParentContent))
 
-	// 9. Edit outside symlink denial
+	// 9. Edit outside symlink succeeds
 	_, err = editTool.Execute(ctx, "e-sym", map[string]any{
 		"path":  "escape_symlink.txt",
-		"edits": []any{map[string]any{"oldText": "sensitive", "newText": "hacked"}},
-	}, nil)
-	require.Error(t, err)
-
-	// Verify outside file remained untouched!
-	outsideContent, err := os.ReadFile(outsideFile)
-	require.NoError(t, err)
-	require.Equal(t, "sensitive-secret-token\n", string(outsideContent))
-
-	// 10. Bash outside access denial
-	// In the sandbox: /etc does not exist, host files do not exist, symlinks pointing to host data fail
-	res, err := bashTool.Execute(ctx, "b-etc", map[string]any{
-		"command": "cat /etc/passwd || echo 'cat /etc/passwd failed'",
+		"edits": []any{map[string]any{"oldText": "edit-abs-success", "newText": "edit-sym-success"}},
 	}, nil)
 	require.NoError(t, err)
-	require.Contains(t, res.Content[0].(ai.TextContent).Text, "cat /etc/passwd failed")
+	finalContent, err := os.ReadFile(outsideFile)
+	require.NoError(t, err)
+	require.Equal(t, "edit-sym-success\n", string(finalContent))
+
+	// 10. Bash outside access succeeds
+	res, err = bashTool.Execute(ctx, "b-etc", map[string]any{
+		"command": "cat /etc/passwd",
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, "root:")
 
 	res, err = bashTool.Execute(ctx, "b-sym", map[string]any{
-		"command": "cat escape_symlink.txt || echo 'cat symlink failed'",
+		"command": "cat escape_symlink.txt",
 	}, nil)
 	require.NoError(t, err)
-	require.Contains(t, res.Content[0].(ai.TextContent).Text, "cat symlink failed")
-
-	// Readonly runtime libs: cannot modify /usr
-	res, err = bashTool.Execute(ctx, "b-ro", map[string]any{
-		"command": "touch /usr/hacked || echo 'write to /usr denied'",
-	}, nil)
-	require.NoError(t, err)
-	require.Contains(t, res.Content[0].(ai.TextContent).Text, "write to /usr denied")
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, "edit-sym-success")
 }
 
 func TestEmbeddedSubagentEditEdgeCases(t *testing.T) {
@@ -291,39 +320,40 @@ func TestEmbeddedSubagentBashIsolation(t *testing.T) {
 
 	bashTool := tools[3]
 
-	// 1. Private /proc: ps aux only reveals PID 1 (bwrap) and the command itself
+	// 1. Host processes visible
 	res, err := bashTool.Execute(ctx, "b-proc", map[string]any{
 		"command": "ps aux",
 	}, nil)
 	require.NoError(t, err)
 	output := res.Content[0].(ai.TextContent).Text
-	require.NotContains(t, output, "systemd", "/proc must be private, no host systemd visible")
-	require.NotContains(t, output, "dockerd", "/proc must be private, no host dockerd visible")
+	require.Contains(t, output, "PID")
 
-	// 2. Private /tmp: create a secret in host /tmp, ensure sandbox /tmp does not see it
+	// 2. Host /tmp: create a secret in host /tmp, ensure subagent bash can see it
 	hostSecret := filepath.Join(os.TempDir(), fmt.Sprintf("host-secret-%d.txt", time.Now().UnixNano()))
 	require.NoError(t, os.WriteFile(hostSecret, []byte("host-secret-data"), 0600))
 	defer os.Remove(hostSecret)
 
 	res, err = bashTool.Execute(ctx, "b-tmp", map[string]any{
-		"command": fmt.Sprintf("cat %s || echo 'host tmp inaccessible'", hostSecret),
+		"command": fmt.Sprintf("cat %s", hostSecret),
 	}, nil)
 	require.NoError(t, err)
-	require.Contains(t, res.Content[0].(ai.TextContent).Text, "host tmp inaccessible")
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, "host-secret-data")
 
-	// 3. No host /home data: verify that host user home files are not exposed
+	// 3. Host /home data: verify that host user home can be accessed
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
 	res, err = bashTool.Execute(ctx, "b-home", map[string]any{
-		"command": "ls /home/wolfgang/.bashrc || echo 'host home inaccessible'",
+		"command": fmt.Sprintf("ls -d %s", home),
 	}, nil)
 	require.NoError(t, err)
-	require.Contains(t, res.Content[0].(ai.TextContent).Text, "host home inaccessible")
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, home)
 }
 
 func TestEmbeddedSubagentBashClearenvSentinel(t *testing.T) {
 	ctx := context.Background()
 	ws := t.TempDir()
 
-	sentinel := "router-secret-token-leak-probe-998877"
+	sentinel := "router-secret-token-probe-998877"
 	t.Setenv("ROUTER_TEST_SECRET_SENTINEL", sentinel)
 
 	tools, cleanup, err := NewEmbeddedSubagentTools(ws)
@@ -332,12 +362,11 @@ func TestEmbeddedSubagentBashClearenvSentinel(t *testing.T) {
 
 	bashTool := tools[3]
 	res, err := bashTool.Execute(ctx, "b-sentinel", map[string]any{
-		"command": `echo "LEAKED=$ROUTER_TEST_SECRET_SENTINEL"`,
+		"command": `echo "TOKEN=$ROUTER_TEST_SECRET_SENTINEL"`,
 	}, nil)
 	require.NoError(t, err)
 	output := res.Content[0].(ai.TextContent).Text
-	require.Contains(t, output, "LEAKED=")
-	require.NotContains(t, output, sentinel, "host inherited tokens must not leak into subagent bash")
+	require.Contains(t, output, "TOKEN="+sentinel, "subagent bash inherits environment")
 }
 
 func TestEmbeddedSubagentBashTmpRootPreservation(t *testing.T) {
@@ -345,17 +374,20 @@ func TestEmbeddedSubagentBashTmpRootPreservation(t *testing.T) {
 	// Test bash execution when cwd is /tmp
 	tool := NewEmbeddedSubagentBashTool("/tmp")
 
+	probeFile := filepath.Join(os.TempDir(), fmt.Sprintf("subagent_probe_tmp_%d.txt", time.Now().UnixNano()))
+	defer os.Remove(probeFile)
+
 	res, err := tool.Execute(ctx, "b-tmp-root", map[string]any{
-		"command": "pwd; touch /tmp/subagent_probe_tmp.txt && ls /tmp/subagent_probe_tmp.txt",
+		"command": fmt.Sprintf("pwd; touch %s && ls %s", probeFile, probeFile),
 	}, nil)
 	require.NoError(t, err)
 	output := res.Content[0].(ai.TextContent).Text
-	require.Contains(t, output, "/workspace")
-	require.Contains(t, output, "/tmp/subagent_probe_tmp.txt")
+	require.Contains(t, output, "/tmp")
+	require.Contains(t, output, probeFile)
 
-	// Ensure private tmpfs did not touch host /tmp
-	_, err = os.Stat("/tmp/subagent_probe_tmp.txt")
-	require.ErrorIs(t, err, os.ErrNotExist, "private tmpfs must not pollute host /tmp")
+	// Ensure file was created in host /tmp
+	_, err = os.Stat(probeFile)
+	require.NoError(t, err, "file must be created in host /tmp")
 }
 
 func TestEmbeddedSubagentBashCancellationVsTimeout(t *testing.T) {

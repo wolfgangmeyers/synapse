@@ -115,6 +115,7 @@ func TestEmbeddedToolsAllowAbsoluteAndOutsidePaths(t *testing.T) {
 		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
 		InitialInstruction: "test unjailed tools",
 		RequestID:          "test-unjailed-launch",
+		AllowInlineTools:   true,
 	})
 	require.NoError(t, err)
 
