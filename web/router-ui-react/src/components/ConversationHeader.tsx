@@ -43,6 +43,7 @@ export interface ConversationHeaderProps {
 function activeManagedSubagents(agent: Agent): NonNullable<Agent["subagents"]> {
   return (agent.managed_children ?? []).flatMap((child) => {
     if (child.status !== "queued" && child.status !== "running") return [];
+    if (child.recovery?.state === "interrupted_unknown") return [];
     return [{ id: child.id, description: child.description || "Subagent", status: child.status }];
   });
 }
