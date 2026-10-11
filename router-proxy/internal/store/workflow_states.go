@@ -48,6 +48,7 @@ type WorkflowReminderConfig struct {
 
 type WorkflowState struct {
 	ID           string                   `json:"id"`
+	WorkflowID   *string                  `json:"workflow_id,omitempty"`
 	Name         string                   `json:"name"`
 	Description  string                   `json:"description"`
 	EntryText    string                   `json:"entry_text"`
@@ -55,12 +56,15 @@ type WorkflowState struct {
 	AllowedTools []string                 `json:"allowed_tools"`
 	Transitions  []WorkflowTransitionConfig `json:"transitions"`
 	AllowExit    bool                     `json:"allow_exit"`
+	UIPosX       float64                  `json:"ui_pos_x"`
+	UIPosY       float64                  `json:"ui_pos_y"`
 	CreatedAt    string                   `json:"created_at"`
 	UpdatedAt    string                   `json:"updated_at"`
 }
 
 type WorkflowStateRequest struct {
 	ID           *string                  `json:"id,omitempty"`
+	WorkflowID   *string                  `json:"workflow_id,omitempty"`
 	Name         string                   `json:"name"`
 	Description  string                   `json:"description"`
 	EntryText    string                   `json:"entry_text"`
@@ -68,6 +72,8 @@ type WorkflowStateRequest struct {
 	AllowedTools []string                 `json:"allowed_tools"`
 	Transitions  []WorkflowTransitionConfig `json:"transitions"`
 	AllowExit    *bool                    `json:"allow_exit,omitempty"`
+	UIPosX       *float64                 `json:"ui_pos_x,omitempty"`
+	UIPosY       *float64                 `json:"ui_pos_y,omitempty"`
 }
 
 type WorkflowStateValidationError struct {
@@ -280,7 +286,7 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 }
 
 func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -289,12 +295,16 @@ func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error)
 	var states []WorkflowState
 	for rows.Next() {
 		var state WorkflowState
+		var workflowID sql.NullString
 		var remindersJSON sql.NullString
 		var allowedToolsJSON sql.NullString
 		var transitionsJSON sql.NullString
 		var allowExitInt int
-		if err := rows.Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if workflowID.Valid {
+			state.WorkflowID = &workflowID.String
 		}
 		state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
 		state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
@@ -325,17 +335,21 @@ func (s *Store) GetManagedAgentActiveWorkflowState(ctx context.Context, agentID 
 
 func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState, error) {
 	var state WorkflowState
+	var workflowID sql.NullString
 	var remindersJSON sql.NullString
 	var allowedToolsJSON sql.NullString
 	var transitionsJSON sql.NullString
 	var allowExitInt int
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-		Scan(&state.ID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.CreatedAt, &state.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+		Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if workflowID.Valid {
+		state.WorkflowID = &workflowID.String
 	}
 	state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
 	state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
@@ -481,8 +495,22 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			allowExitInt = 0
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, name, desc, entryText, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, now, now)
+		var workflowIDVal *string
+		if req.WorkflowID != nil && strings.TrimSpace(*req.WorkflowID) != "" {
+			wID := strings.TrimSpace(*req.WorkflowID)
+			workflowIDVal = &wID
+		}
+
+		var uiPosX, uiPosY float64
+		if req.UIPosX != nil {
+			uiPosX = *req.UIPosX
+		}
+		if req.UIPosY != nil {
+			uiPosY = *req.UIPosY
+		}
+
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, workflowIDVal, name, desc, entryText, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -501,6 +529,7 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 
 		state = &WorkflowState{
 			ID:           id,
+			WorkflowID:   workflowIDVal,
 			Name:         name,
 			Description:  desc,
 			EntryText:    entryText,
@@ -508,6 +537,8 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			AllowedTools: sanitizedTools,
 			Transitions:  transitionsCopy,
 			AllowExit:    (allowExitInt == 1),
+			UIPosX:       uiPosX,
+			UIPosY:       uiPosY,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}
@@ -525,15 +556,21 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 	var state *WorkflowState
 	err := s.runImmediate(ctx, func() error {
 		var existing WorkflowState
+		var existingWorkflowID sql.NullString
 		var existingReminders sql.NullString
 		var existingAllowedTools sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_text, reminders_json, allowed_tools_json, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-			Scan(&existing.ID, &existing.Name, &existing.Description, &existing.EntryText, &existingReminders, &existingAllowedTools, &existing.CreatedAt, &existing.UpdatedAt)
+		var existingTransitions sql.NullString
+		var existingAllowExitInt int
+		err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+			Scan(&existing.ID, &existingWorkflowID, &existing.Name, &existing.Description, &existing.EntryText, &existingReminders, &existingAllowedTools, &existingTransitions, &existingAllowExitInt, &existing.UIPosX, &existing.UIPosY, &existing.CreatedAt, &existing.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowStateNotFoundError{ID: id}
 		}
 		if err != nil {
 			return err
+		}
+		if existingWorkflowID.Valid {
+			existing.WorkflowID = &existingWorkflowID.String
 		}
 
 		name := strings.TrimSpace(req.Name)
@@ -595,10 +632,31 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			if !*req.AllowExit {
 				allowExitInt = 0
 			}
+		} else {
+			allowExitInt = existingAllowExitInt
 		}
 
-		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET name = ?, description = ?, entry_text = ?, reminders_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, updated_at = ? WHERE id = ?`,
-			name, desc, entryText, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, now, id)
+		workflowIDVal := existing.WorkflowID
+		if req.WorkflowID != nil {
+			if strings.TrimSpace(*req.WorkflowID) != "" {
+				wID := strings.TrimSpace(*req.WorkflowID)
+				workflowIDVal = &wID
+			} else {
+				workflowIDVal = nil
+			}
+		}
+
+		uiPosX := existing.UIPosX
+		if req.UIPosX != nil {
+			uiPosX = *req.UIPosX
+		}
+		uiPosY := existing.UIPosY
+		if req.UIPosY != nil {
+			uiPosY = *req.UIPosY
+		}
+
+		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET workflow_id = ?, name = ?, description = ?, entry_text = ?, reminders_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, ui_pos_x = ?, ui_pos_y = ?, updated_at = ? WHERE id = ?`,
+			workflowIDVal, name, desc, entryText, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, id)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -617,6 +675,7 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 
 		state = &WorkflowState{
 			ID:           id,
+			WorkflowID:   workflowIDVal,
 			Name:         name,
 			Description:  desc,
 			EntryText:    entryText,
@@ -624,6 +683,8 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			AllowedTools: sanitizedTools,
 			Transitions:  transitionsCopy,
 			AllowExit:    (allowExitInt == 1),
+			UIPosX:       uiPosX,
+			UIPosY:       uiPosY,
 			CreatedAt:    existing.CreatedAt,
 			UpdatedAt:    now,
 		}

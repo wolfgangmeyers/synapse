@@ -16,6 +16,7 @@ export interface WorkflowReminderConfig {
 
 export interface WorkflowState {
   id: string;
+  workflow_id?: string | null;
   name: string;
   description: string;
   entry_text: string;
@@ -23,11 +24,35 @@ export interface WorkflowState {
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
   allow_exit?: boolean;
+  ui_pos_x?: number;
+  ui_pos_y?: number;
   created_at: string;
   updated_at: string;
 }
 
+export interface WorkflowStatePosition {
+  state_id: string;
+  ui_pos_x: number;
+  ui_pos_y: number;
+}
+
+export interface Workflow {
+  id: string;
+  name: string;
+  description: string;
+  entry_state_id: string | null;
+  created_at: string;
+  updated_at: string;
+  state_count?: number;
+}
+
+export interface WorkflowWithStates {
+  workflow: Workflow;
+  states: WorkflowState[];
+}
+
 export interface WorkflowStateInput {
+  workflow_id?: string | null;
   name: string;
   description?: string;
   entry_text?: string;
@@ -35,6 +60,8 @@ export interface WorkflowStateInput {
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
   allow_exit?: boolean;
+  ui_pos_x?: number;
+  ui_pos_y?: number;
 }
 
 export interface WorkflowStateResponse {

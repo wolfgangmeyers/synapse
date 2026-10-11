@@ -1,2 +1,396 @@
-export * from "./WorkflowStatesPage";
-export { WorkflowStatesPage as default } from "./WorkflowStatesPage";
+import { useState, useEffect, type ReactElement } from "react";
+import type { RouterHttpClient } from "../transport/http-client";
+import type { Workflow } from "../domain/workflow-states";
+import { DialogShell } from "./DialogShell";
+import { WorkflowCanvas } from "./WorkflowCanvas";
+
+export interface WorkflowsPageProps {
+  client: RouterHttpClient;
+  onNavigateHome?: () => void;
+  onBack?: () => void;
+}
+
+export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageProps): ReactElement {
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+
+  // Modal states for Workflow CRUD
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [newWorkflowName, setNewWorkflowName] = useState("");
+  const [newWorkflowDesc, setNewWorkflowDesc] = useState("");
+  const [createError, setCreateError] = useState<string | undefined>(undefined);
+  const [creating, setCreating] = useState(false);
+
+  const [renameWorkflow, setRenameWorkflow] = useState<Workflow | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameDesc, setRenameDesc] = useState("");
+  const [renameError, setRenameError] = useState<string | undefined>(undefined);
+  const [renaming, setRenaming] = useState(false);
+
+  const [deleteWorkflowId, setDeleteWorkflowId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const fetchWorkflows = async () => {
+    try {
+      setLoading(true);
+      setError(undefined);
+      const list = await client.listWorkflows();
+      setWorkflows(list);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load workflows");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchWorkflows();
+  }, []);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newWorkflowName.trim()) {
+      setCreateError("Workflow name is required");
+      return;
+    }
+    setCreating(true);
+    setCreateError(undefined);
+    try {
+      const created = await client.createWorkflow({
+        name: newWorkflowName.trim(),
+        description: newWorkflowDesc.trim(),
+      });
+      setCreateDialogOpen(false);
+      setNewWorkflowName("");
+      setNewWorkflowDesc("");
+      await fetchWorkflows();
+      setSelectedWorkflowId(created.id);
+    } catch (err: unknown) {
+      setCreateError(err instanceof Error ? err.message : "Failed to create workflow");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!renameWorkflow) return;
+    if (!renameName.trim()) {
+      setRenameError("Workflow name is required");
+      return;
+    }
+    setRenaming(true);
+    setRenameError(undefined);
+    try {
+      await client.updateWorkflow(renameWorkflow.id, {
+        name: renameName.trim(),
+        description: renameDesc.trim(),
+      });
+      setRenameWorkflow(null);
+      await fetchWorkflows();
+    } catch (err: unknown) {
+      setRenameError(err instanceof Error ? err.message : "Failed to rename workflow");
+    } finally {
+      setRenaming(false);
+    }
+  };
+
+  const handleDuplicate = async (wf: Workflow) => {
+    try {
+      setError(undefined);
+      const dup = await client.duplicateWorkflow(wf.id);
+      await fetchWorkflows();
+      setSelectedWorkflowId(dup.id);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to duplicate workflow");
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteWorkflowId) return;
+    setDeleting(true);
+    try {
+      await client.deleteWorkflow(deleteWorkflowId);
+      setDeleteWorkflowId(null);
+      await fetchWorkflows();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to delete workflow");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleBack = () => {
+    if (onBack) {
+      onBack();
+    } else if (onNavigateHome) {
+      onNavigateHome();
+    }
+  };
+
+  if (selectedWorkflowId) {
+    return (
+      <WorkflowCanvas
+        workflowId={selectedWorkflowId}
+        client={client}
+        onBack={() => {
+          setSelectedWorkflowId(null);
+          void fetchWorkflows();
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="workflows-page">
+      <header className="workflows-header">
+        <div className="workflows-nav">
+          <button type="button" className="workflows-back-btn" onClick={handleBack}>
+            <i className="fa-solid fa-arrow-left" aria-hidden="true" /> Dashboard
+          </button>
+          <div className="workflows-title">
+            <h2>Workflows</h2>
+            <span className="badge">{workflows.length}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => {
+            setNewWorkflowName("");
+            setNewWorkflowDesc("");
+            setCreateError(undefined);
+            setCreateDialogOpen(true);
+          }}
+        >
+          <i className="fa-solid fa-plus" aria-hidden="true" /> New Workflow
+        </button>
+      </header>
+
+      {error ? (
+        <div className="alert alert-danger" role="alert">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="workflows-content">
+        {loading ? (
+          <div className="workflows-loading">Loading workflows...</div>
+        ) : workflows.length === 0 ? (
+          <div className="workflows-empty">
+            <i className="fa-solid fa-diagram-project fa-3x" aria-hidden="true" />
+            <p>No workflows yet.</p>
+            <p className="text-muted">Create a workflow to model agent states and transitions visually.</p>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                setNewWorkflowName("");
+                setNewWorkflowDesc("");
+                setCreateError(undefined);
+                setCreateDialogOpen(true);
+              }}
+            >
+              Create Workflow
+            </button>
+          </div>
+        ) : (
+          <div className="workflows-grid">
+            {workflows.map((wf) => (
+              <div
+                key={wf.id}
+                className="workflow-card"
+                onClick={() => setSelectedWorkflowId(wf.id)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    setSelectedWorkflowId(wf.id);
+                  }
+                }}
+              >
+                <div className="workflow-card-header">
+                  <div className="workflow-card-title-group">
+                    <span className="workflow-card-name">{wf.name}</span>
+                    {wf.description ? <p className="workflow-card-desc">{wf.description}</p> : null}
+                  </div>
+                  <div className="workflow-card-actions" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      title="Edit / Rename"
+                      aria-label="Edit or rename workflow"
+                      onClick={() => {
+                        setRenameWorkflow(wf);
+                        setRenameName(wf.name);
+                        setRenameDesc(wf.description ?? "");
+                        setRenameError(undefined);
+                      }}
+                    >
+                      <i className="fa-solid fa-pen-to-square" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      title="Duplicate workflow"
+                      aria-label="Duplicate workflow"
+                      onClick={() => void handleDuplicate(wf)}
+                    >
+                      <i className="fa-solid fa-copy" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-icon btn-danger"
+                      title="Delete workflow"
+                      aria-label="Delete workflow"
+                      onClick={() => setDeleteWorkflowId(wf.id)}
+                    >
+                      <i className="fa-solid fa-trash" aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="workflow-card-meta">
+                  <span className="workflow-state-count-badge">
+                    <i className="fa-solid fa-circle-nodes" aria-hidden="true" />{" "}
+                    {wf.state_count ?? 0} {wf.state_count === 1 ? "state" : "states"}
+                  </span>
+                  <span className="workflow-updated-at">
+                    Updated {new Date(wf.updated_at).toLocaleDateString()}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {createDialogOpen ? (
+        <DialogShell
+          open={true}
+          title="New Workflow"
+          titleId="create-workflow-dialog-title"
+          description="Create a new workflow canvas for modeling state transitions."
+          onClose={() => setCreateDialogOpen(false)}
+          closeLabel="Close create workflow dialog"
+          className="message-dialog"
+        >
+          <form onSubmit={(e) => void handleCreate(e)}>
+            {createError ? <div className="alert alert-danger">{createError}</div> : null}
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label htmlFor="workflow-name-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Workflow Name *
+              </label>
+              <input
+                id="workflow-name-input"
+                type="text"
+                className="form-control"
+                placeholder="e.g. Code Review Pipeline"
+                value={newWorkflowName}
+                onChange={(e) => setNewWorkflowName(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label htmlFor="workflow-desc-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Description (optional)
+              </label>
+              <input
+                id="workflow-desc-input"
+                type="text"
+                className="form-control"
+                placeholder="Brief summary of workflow goals"
+                value={newWorkflowDesc}
+                onChange={(e) => setNewWorkflowDesc(e.target.value)}
+              />
+            </div>
+            <div className="dialog-actions workflow-dialog-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setCreateDialogOpen(false)}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={creating}>
+                {creating ? "Creating..." : "Create & Open Canvas"}
+              </button>
+            </div>
+          </form>
+        </DialogShell>
+      ) : null}
+
+      {renameWorkflow ? (
+        <DialogShell
+          open={true}
+          title="Edit Workflow Details"
+          titleId="rename-workflow-dialog-title"
+          description="Update workflow name and description."
+          onClose={() => setRenameWorkflow(null)}
+          closeLabel="Close rename workflow dialog"
+          className="message-dialog"
+        >
+          <form onSubmit={(e) => void handleRename(e)}>
+            {renameError ? <div className="alert alert-danger">{renameError}</div> : null}
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label htmlFor="rename-name-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Workflow Name *
+              </label>
+              <input
+                id="rename-name-input"
+                type="text"
+                className="form-control"
+                value={renameName}
+                onChange={(e) => setRenameName(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label htmlFor="rename-desc-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Description
+              </label>
+              <input
+                id="rename-desc-input"
+                type="text"
+                className="form-control"
+                value={renameDesc}
+                onChange={(e) => setRenameDesc(e.target.value)}
+              />
+            </div>
+            <div className="dialog-actions workflow-dialog-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setRenameWorkflow(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={renaming}>
+                {renaming ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </form>
+        </DialogShell>
+      ) : null}
+
+      {deleteWorkflowId ? (
+        <DialogShell
+          open={true}
+          title="Delete Workflow"
+          titleId="delete-workflow-dialog-title"
+          description="Are you sure you want to delete this workflow and all its states? This cannot be undone."
+          onClose={() => setDeleteWorkflowId(null)}
+          closeLabel="Close delete workflow dialog"
+          className="message-dialog delete-confirm-dialog"
+        >
+          <div className="dialog-actions workflow-dialog-actions">
+            <button type="button" className="btn btn-secondary" onClick={() => setDeleteWorkflowId(null)}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-danger" disabled={deleting} onClick={() => void handleDelete()}>
+              {deleting ? "Deleting..." : "Delete Workflow"}
+            </button>
+          </div>
+        </DialogShell>
+      ) : null}
+    </div>
+  );
+}
+
+export default WorkflowsPage;

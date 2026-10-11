@@ -74,6 +74,9 @@ var errorMessages = map[string]string{
 	"invalid_prompt_template":                 "Prompt template request is invalid.",
 	"invalid_workflow_state":                  "Workflow state request is invalid.",
 	"workflow_state_name_conflict":            "Workflow state name already exists.",
+	"invalid_workflow":                        "Workflow request is invalid.",
+	"workflow_name_conflict":                  "Workflow name already exists.",
+	"workflow_not_found":                      "Workflow was not found.",
 	"reminder_idempotency_conflict":           "Reminder ID already belongs to a different request.",
 	"reminder_not_cancelable":                 "Reminder is already linked to a delivery.",
 	"reminder_target_unavailable":             "Reminder target has never connected.",
@@ -201,6 +204,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/prompt-templates":
 		r.handlePromptCollection(w, req)
 		return
+	case path == "/v1/workflows":
+		r.handleWorkflowsCollection(w, req)
+		return
 	case path == "/v1/workflow-states":
 		r.handleWorkflowStatesCollection(w, req)
 		return
@@ -245,6 +251,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleWorkflowStateItem(w, req, id)
 		return
 	}
+	if id, action, ok := routeID(req.URL.EscapedPath(), "/v1/workflows/"); ok {
+		r.handleWorkflowItem(w, req, id, action)
+		return
+	}
 	if id, action, ok := routeID(path, "/v1/messages/"); ok {
 		r.handleMessageItem(w, req, id, action)
 		return
@@ -257,7 +267,7 @@ func routeID(path, prefix string) (string, string, bool) {
 		return "", "", false
 	}
 	raw := strings.TrimPrefix(path, prefix)
-	if raw == "" || strings.Contains(raw, "/") && !strings.HasSuffix(prefix, "messages/") {
+	if raw == "" || (strings.Contains(raw, "/") && !strings.HasSuffix(prefix, "messages/") && !strings.HasSuffix(prefix, "workflows/")) {
 		return "", "", false
 	}
 	parts := strings.Split(raw, "/")
@@ -1342,6 +1352,12 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		value = &httpError{404, "not_found", 0}
 	case *store.WorkflowStateInUseError:
 		value = &httpError{409, "workflow_state_in_use", 0}
+	case *store.WorkflowValidationError:
+		value = &httpError{400, "invalid_workflow", 0}
+	case *store.WorkflowNameConflictError:
+		value = &httpError{409, "workflow_name_conflict", 0}
+	case *store.WorkflowNotFoundError:
+		value = &httpError{404, "workflow_not_found", 0}
 	default:
 		if coded, ok := err.(interface{ Code() string }); ok {
 			value = &httpError{httpCode(coded.Code()), coded.Code(), 0}

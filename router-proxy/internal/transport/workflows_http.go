@@ -1,0 +1,201 @@
+package transport
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+)
+
+func (r *Router) handleWorkflowsCollection(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		workflows, err := r.store.ListWorkflows(req.Context())
+		if err != nil {
+			r.writeError(w, &httpError{status: 500, code: "internal_error"})
+			return
+		}
+		r.writeJSON(w, http.StatusOK, workflows)
+	case http.MethodPost:
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		reqData, err := parseWorkflowRequest(payload)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		wf, err := r.store.CreateWorkflow(req.Context(), reqData)
+		if err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+		r.writeJSON(w, http.StatusCreated, wf)
+	default:
+		r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+	}
+}
+
+func (r *Router) handleWorkflowItem(w http.ResponseWriter, req *http.Request, id, action string) {
+	if id == "" {
+		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+		return
+	}
+
+	switch action {
+	case "":
+		switch req.Method {
+		case http.MethodGet:
+			wf, err := r.store.GetWorkflow(req.Context(), id)
+			if err != nil {
+				r.writeError(w, storeError(err))
+				return
+			}
+			if wf == nil {
+				r.writeError(w, &httpError{status: 404, code: "workflow_not_found"})
+				return
+			}
+			states, err := r.store.ListWorkflowStatesByWorkflow(req.Context(), id)
+			if err != nil {
+				r.writeError(w, storeError(err))
+				return
+			}
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"workflow": wf,
+				"states":   states,
+			})
+		case http.MethodPut:
+			payload, err := r.readJSON(req)
+			if err != nil {
+				r.writeError(w, err)
+				return
+			}
+			reqData, err := parseWorkflowRequest(payload)
+			if err != nil {
+				r.writeError(w, err)
+				return
+			}
+			wf, err := r.store.UpdateWorkflow(req.Context(), id, reqData)
+			if err != nil {
+				r.writeError(w, storeError(err))
+				return
+			}
+			r.writeJSON(w, http.StatusOK, wf)
+		case http.MethodDelete:
+			deleted, err := r.store.DeleteWorkflow(req.Context(), id)
+			if err != nil {
+				r.writeError(w, storeError(err))
+				return
+			}
+			if !deleted {
+				r.writeError(w, &httpError{status: 404, code: "workflow_not_found"})
+				return
+			}
+			r.writeNoContent(w)
+		default:
+			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+		}
+
+	case "duplicate":
+		if req.Method != http.MethodPost {
+			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+			return
+		}
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		var name string
+		if raw, exists := payload["name"]; exists && len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &name); err != nil {
+				r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+				return
+			}
+		}
+		wf, err := r.store.DuplicateWorkflow(req.Context(), id, name)
+		if err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+		r.writeJSON(w, http.StatusCreated, wf)
+
+	case "layout":
+		if req.Method != http.MethodPut {
+			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+			return
+		}
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		positions, err := parseWorkflowStatePositions(payload)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		if err := r.store.UpdateWorkflowStatePositions(req.Context(), id, positions); err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+		r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+	default:
+		r.writeError(w, &httpError{status: 404, code: "not_found"})
+	}
+}
+
+func parseWorkflowRequest(payload map[string]json.RawMessage) (store.WorkflowRequest, error) {
+	name, err := rawString(payload, "name", false)
+	if err != nil {
+		return store.WorkflowRequest{}, &httpError{status: 400, code: "invalid_request"}
+	}
+	desc, _ := rawString(payload, "description", false)
+
+	var entryStateID *string
+	if raw, exists := payload["entry_state_id"]; exists && len(raw) > 0 && string(raw) != "null" {
+		var entryID string
+		if err := json.Unmarshal(raw, &entryID); err != nil {
+			return store.WorkflowRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		entryStateID = &entryID
+	}
+
+	return store.WorkflowRequest{
+		Name:         name,
+		Description:  desc,
+		EntryStateID: entryStateID,
+	}, nil
+}
+
+func parseWorkflowStatePositions(payload map[string]json.RawMessage) ([]store.WorkflowStatePosition, error) {
+	raw, ok := payload["positions"]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil, &httpError{status: 400, code: "invalid_request"}
+	}
+
+	var rawPositions []struct {
+		StateID *string  `json:"state_id"`
+		UIPosX  *float64 `json:"ui_pos_x"`
+		UIPosY  *float64 `json:"ui_pos_y"`
+	}
+	if err := json.Unmarshal(raw, &rawPositions); err != nil {
+		return nil, &httpError{status: 400, code: "invalid_request"}
+	}
+
+	positions := make([]store.WorkflowStatePosition, 0, len(rawPositions))
+	for _, p := range rawPositions {
+		if p.StateID == nil || p.UIPosX == nil || p.UIPosY == nil {
+			return nil, &httpError{status: 400, code: "invalid_request"}
+		}
+		positions = append(positions, store.WorkflowStatePosition{
+			StateID: *p.StateID,
+			UIPosX:  *p.UIPosX,
+			UIPosY:  *p.UIPosY,
+		})
+	}
+	return positions, nil
+}

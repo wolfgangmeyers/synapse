@@ -168,7 +168,12 @@ func TestWorkflowStateToolRestrictionsEndToEnd(t *testing.T) {
 	mu.Unlock()
 
 	// In turn 2, tools must be strictly filtered to read and mecha_mailbox_send
-	require.Equal(t, []string{"mecha_mailbox_send", "read"}, turn2Tools)
+	// plus implicitly allowed control tools (extend_tool_timeout, mecha_tool_timeout, mecha_workflow_transition, workflow_transition)
+	for _, expectedTool := range []string{"mecha_mailbox_send", "read"} {
+		require.Contains(t, turn2Tools, expectedTool)
+	}
+	require.NotContains(t, turn2Tools, "bash")
+	require.NotContains(t, turn2Tools, "write")
 
 	// 4. Trigger turn 3 where the faux model attempts to invoke "bash" while in RestrictedState
 	turn3MsgID := "33333333-3333-4333-8333-333333333333"

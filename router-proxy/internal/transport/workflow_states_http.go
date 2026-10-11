@@ -126,7 +126,35 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		allowExit = &ae
 	}
 
+	var workflowID *string
+	if raw, exists := payload["workflow_id"]; exists && len(raw) > 0 && string(raw) != "null" {
+		var wID string
+		if err := json.Unmarshal(raw, &wID); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		workflowID = &wID
+	}
+
+	var uiPosX *float64
+	if raw, exists := payload["ui_pos_x"]; exists && len(raw) > 0 && string(raw) != "null" {
+		var x float64
+		if err := json.Unmarshal(raw, &x); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		uiPosX = &x
+	}
+
+	var uiPosY *float64
+	if raw, exists := payload["ui_pos_y"]; exists && len(raw) > 0 && string(raw) != "null" {
+		var y float64
+		if err := json.Unmarshal(raw, &y); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		uiPosY = &y
+	}
+
 	return store.WorkflowStateRequest{
+		WorkflowID:   workflowID,
 		Name:         name,
 		Description:  desc,
 		EntryText:    entryText,
@@ -134,5 +162,7 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		AllowedTools: allowedTools,
 		Transitions:  transitions,
 		AllowExit:    allowExit,
+		UIPosX:       uiPosX,
+		UIPosY:       uiPosY,
 	}, nil
 }
