@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -397,6 +398,9 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	config.normalize()
 	if err := ValidateManagedLaunchConfig(config); err != nil {
 		return nil, err
+	}
+	if config.SessionRoot == "" {
+		config.SessionRoot = filepath.Join(os.TempDir(), "managed-sessions")
 	}
 	manifest := options.Manifest
 	if manifest.Protocol == "" {

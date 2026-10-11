@@ -3,15 +3,12 @@ package managed
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,64 +44,73 @@ func imageMimeType(p string) (string, bool) {
 	}
 }
 
-// validEmbeddedSubagentPath verifies that a relative path stays within the workspace
-// and contains no traversal, absolute prefixes, home expansion, or scheme components.
-func validEmbeddedSubagentPath(p string) bool {
-	if p == "" || p == "." || strings.HasPrefix(p, "~") || strings.Contains(p, ":") || path.IsAbs(p) || strings.Contains(p, "\\") || path.Clean(p) != p {
-		return false
+// resolveSubagentPath resolves a path argument.
+// Relative paths resolve relative to cwd. Absolute paths and ~ expansions
+// are preserved and allowed to access anywhere in the filesystem.
+func resolveSubagentPath(cwd, p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", errors.New("path cannot be empty")
 	}
-	for _, part := range strings.Split(p, "/") {
-		if part == "" || part == "." || part == ".." {
-			return false
+	if p == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = os.Getenv("HOME")
 		}
+		if home == "" {
+			return "", errors.New("cannot determine home directory")
+		}
+		return filepath.Clean(home), nil
 	}
-	return true
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = os.Getenv("HOME")
+		}
+		if home == "" {
+			return "", errors.New("cannot determine home directory")
+		}
+		return filepath.Clean(filepath.Join(home, p[2:])), nil
+	}
+	if strings.HasPrefix(p, "file://") {
+		p = strings.TrimPrefix(p, "file://")
+	}
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p), nil
+	}
+	return filepath.Clean(filepath.Join(cwd, p)), nil
 }
 
-// pinEmbeddedChildWorkspace opens and pins an O_PATH descriptor to the workspace root.
-// Fails closed if the path is not absolute or not a directory owned by the current EUID.
-func pinEmbeddedChildWorkspace(cwd string) (int, string, error) {
+func validateSubagentCwd(cwd string) (string, error) {
 	if !filepath.IsAbs(cwd) {
-		return -1, "", errors.New("workspace root must be absolute")
+		return "", errors.New("workspace root must be absolute")
 	}
 	canonical, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
-		return -1, "", fmt.Errorf("failed to evaluate workspace symlinks: %w", err)
+		return "", fmt.Errorf("failed to evaluate workspace symlinks: %w", err)
 	}
-	fd, err := openRootDirectory(canonical)
+	st, err := os.Stat(canonical)
 	if err != nil {
-		return -1, "", fmt.Errorf("failed to pin child workspace: %w", err)
+		return "", fmt.Errorf("workspace directory inaccessible: %w", err)
 	}
-	var st unix.Stat_t
-	if err = unix.Fstat(fd, &st); err != nil {
-		unix.Close(fd)
-		return -1, "", err
+	if !st.IsDir() {
+		return "", errors.New("workspace root must be a directory")
 	}
-	if st.Uid != uint32(os.Geteuid()) || st.Mode&unix.S_IFMT != unix.S_IFDIR {
-		unix.Close(fd)
-		return -1, "", errors.New("workspace root must be a directory owned by the active process UID")
-	}
-	return fd, canonical, nil
+	return canonical, nil
 }
 
-// NewEmbeddedSubagentTools constructs the 4 required confined child tools:
-// read, edit, write, and bash. Returns the tools, a cleanup function that closes
-// the pinned workspace descriptor, and any setup error.
+// NewEmbeddedSubagentTools constructs the 4 child tools:
+// read, edit, write, and bash. Returns the tools, a cleanup function, and any setup error.
 func NewEmbeddedSubagentTools(cwd string) ([]agent.AgentTool, func(), error) {
-	rootFD, canonical, err := pinEmbeddedChildWorkspace(cwd)
+	canonical, err := validateSubagentCwd(cwd)
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := func() {
-		if rootFD >= 0 {
-			_ = unix.Close(rootFD)
-			rootFD = -1
-		}
-	}
+	cleanup := func() {}
 	tools := []agent.AgentTool{
-		NewEmbeddedSubagentReadTool(rootFD),
-		NewEmbeddedSubagentEditTool(rootFD),
-		NewEmbeddedSubagentWriteTool(rootFD),
+		NewEmbeddedSubagentReadTool(canonical),
+		NewEmbeddedSubagentEditTool(canonical),
+		NewEmbeddedSubagentWriteTool(canonical),
 		NewEmbeddedSubagentBashTool(canonical),
 	}
 	return tools, cleanup, nil
@@ -130,36 +136,43 @@ func embeddedSubagentReadSchema() *ai.Schema {
 	return s
 }
 
-// NewEmbeddedSubagentReadTool builds a descriptor-rooted read tool.
-func NewEmbeddedSubagentReadTool(rootFD int) agent.AgentTool {
+// NewEmbeddedSubagentReadTool builds a read tool rooted at cwd.
+func NewEmbeddedSubagentReadTool(cwd string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "read",
-		Description: "Read the contents of a bounded file inside the approved child workspace.",
+		Description: "Read the contents of a file. Supports text files and images.",
 		Parameters:  embeddedSubagentReadSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := ctx.Err(); err != nil {
 				return agent.AgentToolResult{}, err
 			}
 			p, ok := args["path"].(string)
-			if !ok || len(p) > 4096 || !validEmbeddedSubagentPath(p) {
+			if !ok || len(p) > 4096 || strings.TrimSpace(p) == "" {
 				return agent.AgentToolResult{}, errors.New("invalid or denied read path")
 			}
-			fd, err := openBeneath(rootFD, p)
+			target, err := resolveSubagentPath(cwd, p)
+			if err != nil {
+				return agent.AgentToolResult{}, fmt.Errorf("invalid read path: %w", err)
+			}
+			// Use O_NONBLOCK to prevent hanging on FIFOs
+			f, err := os.OpenFile(target, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 			if err != nil {
 				return agent.AgentToolResult{}, fmt.Errorf("read denied: %w", err)
 			}
-			f := os.NewFile(uintptr(fd), "subagent-read")
 			defer f.Close()
 
 			st, err := f.Stat()
 			if err != nil {
 				return agent.AgentToolResult{}, err
 			}
+			if st.IsDir() {
+				return agent.AgentToolResult{}, errors.New("reading a directory must fail")
+			}
 			if !st.Mode().IsRegular() {
 				return agent.AgentToolResult{}, errors.New("read requires regular file of at most 512 KiB")
 			}
 
-			mimeType, isImage := imageMimeType(p)
+			mimeType, isImage := imageMimeType(target)
 			if isImage {
 				if st.Size() > embeddedImageReadLimit {
 					return agent.AgentToolResult{}, errors.New("read requires regular file of at most 10 MiB")
@@ -246,12 +259,12 @@ func embeddedSubagentWriteSchema() *ai.Schema {
 	return s
 }
 
-// NewEmbeddedSubagentWriteTool builds a descriptor-rooted write tool that allows
-// both file creation and overwriting within the child workspace.
-func NewEmbeddedSubagentWriteTool(rootFD int) agent.AgentTool {
+// NewEmbeddedSubagentWriteTool builds a write tool rooted at cwd that allows
+// file creation and overwriting.
+func NewEmbeddedSubagentWriteTool(cwd string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "write",
-		Description: "Write content to a file inside the approved child workspace. Overwrites existing files.",
+		Description: "Write content to a file. Overwrites existing files.",
 		Parameters:  embeddedSubagentWriteSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := ctx.Err(); err != nil {
@@ -259,10 +272,14 @@ func NewEmbeddedSubagentWriteTool(rootFD int) agent.AgentTool {
 			}
 			p, pathOK := args["path"].(string)
 			content, contentOK := args["content"].(string)
-			if !pathOK || len(p) > 4096 || !validEmbeddedSubagentPath(p) || !contentOK || len(content) > embeddedSubagentFileLimit {
+			if !pathOK || len(p) > 4096 || strings.TrimSpace(p) == "" || !contentOK || len(content) > embeddedSubagentFileLimit {
 				return agent.AgentToolResult{}, errors.New("invalid or denied write arguments")
 			}
-			if err := writeEmbeddedSubagentFile(ctx, rootFD, p, []byte(content)); err != nil {
+			target, err := resolveSubagentPath(cwd, p)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			if err := writeEmbeddedSubagentFile(ctx, target, []byte(content)); err != nil {
 				return agent.AgentToolResult{}, err
 			}
 			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: "Successfully wrote to " + p}}}, nil
@@ -270,106 +287,71 @@ func NewEmbeddedSubagentWriteTool(rootFD int) agent.AgentTool {
 	}
 }
 
-func writeEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, content []byte) error {
+func writeEmbeddedSubagentFile(ctx context.Context, target string, content []byte) error {
 	if len(content) > embeddedSubagentFileLimit {
 		return errors.New("write exceeds 512 KiB limit")
 	}
-	parts := strings.Split(p, "/")
-	parent, err := unix.Openat(rootFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return err
+	resolvedTarget := target
+	if real, err := filepath.EvalSymlinks(target); err == nil {
+		resolvedTarget = real
 	}
-	defer func() {
-		if parent >= 0 {
-			_ = unix.Close(parent)
-		}
-	}()
-
-	for _, component := range parts[:len(parts)-1] {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		fd, openErr := unix.Openat(parent, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if errors.Is(openErr, unix.ENOENT) {
-			if err := unix.Mkdirat(parent, component, 0700); err != nil && !errors.Is(err, unix.EEXIST) {
-				return fmt.Errorf("write parent mkdir denied: %w", err)
-			}
-			fd, openErr = unix.Openat(parent, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-			if openErr == nil {
-				_ = unix.Fsync(parent)
-			}
-		}
-		if openErr != nil {
-			return fmt.Errorf("write parent directory denied: %w", openErr)
-		}
-		_ = unix.Close(parent)
-		parent = fd
+	parent := filepath.Dir(resolvedTarget)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return fmt.Errorf("write parent mkdir denied: %w", err)
 	}
 
-	fileName := parts[len(parts)-1]
-	// Check if target already exists as a symlink before writing; symlinks are forbidden targets.
-	var st unix.Stat_t
-	targetMode := uint32(0600)
-	if err := unix.Fstatat(parent, fileName, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
-		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
-			return errors.New("write denied: target is a symlink")
+	targetMode := os.FileMode(0600)
+	if st, err := os.Stat(resolvedTarget); err == nil {
+		if st.IsDir() {
+			return errors.New("cannot overwrite directory")
 		}
-		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			return errors.New("write denied: target is a directory")
-		}
-		if st.Mode&unix.S_IFMT == unix.S_IFREG {
-			// Preserve existing regular destination permission bits safely (ordinary 0777, stripping setuid/setgid)
-			targetMode = uint32(st.Mode & 0777)
+		if st.Mode().IsRegular() {
+			// Strip setuid/setgid bits safely
+			targetMode = st.Mode().Perm() & 0777
 		}
 	}
 
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return err
-	}
-	tmp := ".mecha-subagent-write-" + hex.EncodeToString(nonce[:])
-	fd, err := unix.Openat(parent, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	tmpFile, err := os.CreateTemp(parent, ".mecha-subagent-write-*")
 	if err != nil {
 		return fmt.Errorf("write temporary create denied: %w", err)
 	}
-	defer func() { _ = unix.Unlinkat(parent, tmp, 0) }()
+	tmpName := tmpFile.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
 
 	if targetMode != 0600 {
-		if err := unix.Fchmod(fd, targetMode); err != nil {
-			_ = unix.Close(fd)
+		if err := tmpFile.Chmod(targetMode); err != nil {
+			_ = tmpFile.Close()
 			return err
 		}
 	}
 
-	f := os.NewFile(uintptr(fd), "subagent-write-tmp")
 	for len(content) > 0 {
 		if err := ctx.Err(); err != nil {
-			_ = f.Close()
+			_ = tmpFile.Close()
 			return err
 		}
-		n, writeErr := f.Write(content)
+		n, writeErr := tmpFile.Write(content)
 		if writeErr != nil {
-			_ = f.Close()
+			_ = tmpFile.Close()
 			return writeErr
 		}
 		content = content[n:]
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err := tmpFile.Close(); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	// Rename into place: overwrites existing regular files atomically without RENAME_NOREPLACE limitation.
-	if err := unix.Renameat(parent, tmp, parent, fileName); err != nil {
+	if err := os.Rename(tmpName, resolvedTarget); err != nil {
 		return fmt.Errorf("write rename denied: %w", err)
 	}
-	_ = unix.Fsync(parent)
 	return nil
 }
 
@@ -398,12 +380,12 @@ type subagentParsedEdit struct {
 	endIndex   int
 }
 
-// NewEmbeddedSubagentEditTool builds a descriptor-rooted edit tool that supports
+// NewEmbeddedSubagentEditTool builds an edit tool rooted at cwd that supports
 // multiple disjoint edits in a single call.
-func NewEmbeddedSubagentEditTool(rootFD int) agent.AgentTool {
+func NewEmbeddedSubagentEditTool(cwd string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "edit",
-		Description: "Edit a file inside the approved child workspace using exact text replacement. Supports multiple non-overlapping edits.",
+		Description: "Edit a file using exact text replacement. Supports multiple non-overlapping edits.",
 		Parameters:  embeddedSubagentEditSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := ctx.Err(); err != nil {
@@ -411,7 +393,7 @@ func NewEmbeddedSubagentEditTool(rootFD int) agent.AgentTool {
 			}
 			p, pathOK := args["path"].(string)
 			editsRaw, editsOK := args["edits"].([]any)
-			if !pathOK || len(p) > 4096 || !validEmbeddedSubagentPath(p) || !editsOK || len(editsRaw) == 0 {
+			if !pathOK || len(p) > 4096 || strings.TrimSpace(p) == "" || !editsOK || len(editsRaw) == 0 {
 				return agent.AgentToolResult{}, errors.New("invalid or denied edit arguments")
 			}
 
@@ -429,7 +411,12 @@ func NewEmbeddedSubagentEditTool(rootFD int) agent.AgentTool {
 				pairs[i] = subagentEditPair{oldText: oldText, newText: newText}
 			}
 
-			if err := editEmbeddedSubagentFile(ctx, rootFD, p, pairs); err != nil {
+			target, err := resolveSubagentPath(cwd, p)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			if err := editEmbeddedSubagentFile(ctx, target, pairs); err != nil {
 				return agent.AgentToolResult{}, err
 			}
 			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: "Successfully edited " + p}}}, nil
@@ -437,41 +424,29 @@ func NewEmbeddedSubagentEditTool(rootFD int) agent.AgentTool {
 	}
 }
 
-func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits []subagentEditPair) error {
-	parts := strings.Split(p, "/")
-	parent, err := unix.Openat(rootFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return err
+func editEmbeddedSubagentFile(ctx context.Context, target string, edits []subagentEditPair) error {
+	resolvedTarget := target
+	if real, err := filepath.EvalSymlinks(target); err == nil {
+		resolvedTarget = real
 	}
-	defer func() {
-		if parent >= 0 {
-			_ = unix.Close(parent)
-		}
-	}()
-
-	for _, part := range parts[:len(parts)-1] {
-		next, err := unix.Openat(parent, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return fmt.Errorf("edit parent denied: %w", err)
-		}
-		_ = unix.Close(parent)
-		parent = next
-	}
-
-	fileName := parts[len(parts)-1]
-	fd, err := unix.Openat(parent, fileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	file, err := os.OpenFile(resolvedTarget, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return fmt.Errorf("edit target denied: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), "subagent-edit-target")
 	defer file.Close()
 
-	var initial unix.Stat_t
-	if err := unix.Fstat(fd, &initial); err != nil {
+	initial, err := file.Stat()
+	if err != nil {
 		return err
 	}
-	if initial.Mode&unix.S_IFMT != unix.S_IFREG || initial.Size > embeddedSubagentFileLimit {
-		return errors.New("edit requires bounded regular file")
+	if initial.IsDir() {
+		return errors.New("editing a directory must be rejected")
+	}
+	if !initial.Mode().IsRegular() {
+		return errors.New("editing non-regular file must be rejected")
+	}
+	if initial.Size() > embeddedSubagentFileLimit {
+		return errors.New("editing file > 512 KiB must be rejected")
 	}
 
 	data, err := io.ReadAll(io.LimitReader(file, embeddedSubagentFileLimit+1))
@@ -482,7 +457,7 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 		return errors.New("edit file exceeds 512 KiB limit")
 	}
 
-	// Resolve each edit against the original file content
+	// Resolve each edit against original content
 	parsed := make([]subagentParsedEdit, len(edits))
 	for i, e := range edits {
 		count := bytes.Count(data, []byte(e.oldText))
@@ -501,7 +476,7 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 		}
 	}
 
-	// Check for overlap between edits
+	// Check for overlap
 	sortedAsc := make([]subagentParsedEdit, len(parsed))
 	copy(sortedAsc, parsed)
 	sort.Slice(sortedAsc, func(i, j int) bool {
@@ -513,7 +488,7 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 		}
 	}
 
-	// Apply edits from right to left so indices remain intact
+	// Apply edits from right to left
 	sort.Slice(parsed, func(i, j int) bool {
 		return parsed[i].startIndex > parsed[j].startIndex
 	})
@@ -524,50 +499,43 @@ func editEmbeddedSubagentFile(ctx context.Context, rootFD int, p string, edits [
 		result = append(head, append([]byte(pe.newText), tail...)...)
 	}
 	if len(result) > embeddedSubagentFileLimit {
-		return errors.New("edit result exceeds 512 KiB limit")
+		return errors.New("edit expansion exceeds 512 KiB limit")
 	}
 
-	// Atomic write via temp file and rename
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return err
-	}
-	tmp := ".mecha-subagent-edit-" + hex.EncodeToString(nonce[:])
-	tempFD, err := unix.Openat(parent, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	parent := filepath.Dir(resolvedTarget)
+	tmpFile, err := os.CreateTemp(parent, ".mecha-subagent-edit-*")
 	if err != nil {
 		return err
 	}
-	defer unix.Unlinkat(parent, tmp, 0)
+	tmpName := tmpFile.Name()
+	defer os.Remove(tmpName)
 
-	temp := os.NewFile(uintptr(tempFD), "subagent-edit-temp")
-	if err := unix.Fchmod(tempFD, uint32(initial.Mode&0777)); err != nil {
-		_ = temp.Close()
+	if err := tmpFile.Chmod(initial.Mode().Perm() & 0777); err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
-	if _, err := temp.Write(result); err != nil {
-		_ = temp.Close()
+	if _, err := tmpFile.Write(result); err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
 		return err
 	}
-	if err := temp.Close(); err != nil {
+	if err := tmpFile.Close(); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	if err := unix.Renameat(parent, tmp, parent, fileName); err != nil {
+	if err := os.Rename(tmpName, resolvedTarget); err != nil {
 		return fmt.Errorf("edit rename denied: %w", err)
 	}
-	_ = unix.Fsync(parent)
 	return nil
 }
 
 // ---------------------------------------------------------------------------
-// bash tool (confined via bubblewrap)
+// bash tool
 // ---------------------------------------------------------------------------
 
 func embeddedSubagentBashSchema() *ai.Schema {
@@ -580,17 +548,11 @@ func embeddedSubagentBashSchema() *ai.Schema {
 	return s
 }
 
-// NewEmbeddedSubagentBashTool builds a bwrap-confined bash tool.
-// Confines the subprocess to:
-//   - workspace directory writable (--bind <cwd> <cwd>)
-//   - runtime libraries and binaries readonly (/usr, /bin, /lib, /lib64, /sbin)
-//   - private /tmp, /dev, /proc (via --unshare-pid)
-//   - no host /home or /etc host data mounted
-//   - fails closed if bwrap is missing or fails.
+// NewEmbeddedSubagentBashTool builds an unconfined bash tool rooted at cwd.
 func NewEmbeddedSubagentBashTool(cwd string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "bash",
-		Description: "Run a bash command confined to the child workspace.",
+		Description: "Run a bash command in the current working directory.",
 		Parameters:  embeddedSubagentBashSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			command, ok := args["command"].(string)
@@ -613,10 +575,6 @@ func NewEmbeddedSubagentBashTool(cwd string) agent.AgentTool {
 				}
 			}
 
-			bwrapPath, err := findBwrap()
-			if err != nil {
-				return agent.AgentToolResult{}, fmt.Errorf("sandbox unavailable: %w", err)
-			}
 			if !filepath.IsAbs(cwd) {
 				return agent.AgentToolResult{}, errors.New("workspace directory must be absolute")
 			}
@@ -629,76 +587,18 @@ func NewEmbeddedSubagentBashTool(cwd string) agent.AgentTool {
 				return agent.AgentToolResult{}, fmt.Errorf("workspace directory inaccessible: %w", err)
 			}
 
-			return executeConfinedBash(ctx, bwrapPath, canonicalCwd, command, timeout)
+			return executeSubagentBash(ctx, canonicalCwd, command, timeout)
 		},
 	}
 }
 
-func findBwrap() (string, error) {
-	for _, candidate := range []string{"/usr/bin/bwrap", "/bin/bwrap"} {
-		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() && fi.Mode()&0111 != 0 {
-			return candidate, nil
-		}
-	}
-	p, err := exec.LookPath("bwrap")
-	if err != nil {
-		return "", errors.New("bwrap executable not found")
-	}
-	return p, nil
-}
-
-func executeConfinedBash(ctx context.Context, bwrapPath, cwd, command string, timeout time.Duration) (agent.AgentToolResult, error) {
+func executeSubagentBash(ctx context.Context, cwd, command string, timeout time.Duration) (agent.AgentToolResult, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	bwrapArgs := []string{
-		"--clearenv",
-		"--die-with-parent",
-		"--unshare-pid",
-		"--ro-bind", "/usr", "/usr",
-	}
-
-	for _, p := range []string{"/bin", "/lib", "/lib64", "/sbin"} {
-		fi, err := os.Lstat(p)
-		if err != nil {
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err == nil {
-				bwrapArgs = append(bwrapArgs, "--symlink", target, p)
-			}
-		} else if fi.IsDir() {
-			bwrapArgs = append(bwrapArgs, "--ro-bind", p, p)
-		}
-	}
-
-	bwrapArgs = append(bwrapArgs,
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--tmpfs", "/tmp",
-	)
-
-	targetDir := cwd
-	if cwd == "/tmp" {
-		targetDir = "/workspace"
-		bwrapArgs = append(bwrapArgs, "--bind", cwd, "/workspace", "--chdir", "/workspace")
-	} else {
-		bwrapArgs = append(bwrapArgs, "--bind", cwd, cwd, "--chdir", cwd)
-	}
-
-	bwrapArgs = append(bwrapArgs,
-		"--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
-		"--setenv", "HOME", targetDir,
-		"--setenv", "TMPDIR", "/tmp",
-		"--setenv", "TERM", "dumb",
-		"--setenv", "LANG", "C.UTF-8",
-		"/bin/bash", "-c", command,
-	)
-
-	cmd := exec.CommandContext(runCtx, bwrapPath, bwrapArgs...)
+	cmd := exec.CommandContext(runCtx, "bash", "-c", command)
 	cmd.Dir = cwd
-	cmd.Env = []string{}
+	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	out := &limitedBashWriter{limit: embeddedSubagentBashLimit, overflow: make(chan struct{})}
@@ -707,7 +607,7 @@ func executeConfinedBash(ctx context.Context, bwrapPath, cwd, command string, ti
 	cmd.WaitDelay = time.Second
 
 	if err := cmd.Start(); err != nil {
-		return agent.AgentToolResult{}, fmt.Errorf("failed to spawn confined bash: %w", err)
+		return agent.AgentToolResult{}, fmt.Errorf("failed to spawn bash: %w", err)
 	}
 
 	done := make(chan error, 1)
@@ -729,6 +629,16 @@ func executeConfinedBash(ctx context.Context, bwrapPath, cwd, command string, ti
 			resultText = fmt.Sprintf("%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", resultText, out.limit)
 		}
 		result := fmt.Sprintf("exit=%d\n%s", exit, resultText)
+		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: result}}}, nil
+
+	case <-out.overflow:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		resultText := out.text()
+		result := fmt.Sprintf("exit=0\n%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", resultText, out.limit)
 		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: result}}}, nil
 
 	case <-runCtx.Done():
