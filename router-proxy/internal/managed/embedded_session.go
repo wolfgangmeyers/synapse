@@ -1124,6 +1124,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "reset"))
 		tools = append(tools, m.embeddedScratchpadTool(owner))
+		tools = append(tools, m.embeddedKBSearchTool(owner))
+		tools = append(tools, m.embeddedKBReadTool(owner))
+		tools = append(tools, m.embeddedKBWriteTool(owner))
+		tools = append(tools, m.embeddedKBListTool(owner))
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "mecha_workflow_transition"))
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "workflow_transition"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
@@ -1436,6 +1440,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if call.ToolCall.Name == "scratchpad" {
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: "scratchpad requires embedded root or worker"}
+				}
+				return nil
+			}
+			if call.ToolCall.Name == "kb_search" || call.ToolCall.Name == "kb_read" || call.ToolCall.Name == "kb_write" || call.ToolCall.Name == "kb_list" {
+				if role != "root" && role != "worker" {
+					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
 				}
 				return nil
 			}
