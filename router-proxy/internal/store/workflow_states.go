@@ -431,14 +431,25 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 
 	var state *WorkflowState
 	err := s.runImmediate(ctx, func() error {
+		var workflowIDVal *string
+		if req.WorkflowID != nil && strings.TrimSpace(*req.WorkflowID) != "" {
+			wID := strings.TrimSpace(*req.WorkflowID)
+			workflowIDVal = &wID
+		}
+
 		name := strings.TrimSpace(req.Name)
 		var existingID string
-		err := s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ?`, name).Scan(&existingID)
-		if err == nil {
+		var checkErr error
+		if workflowIDVal != nil {
+			checkErr = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ? AND workflow_id = ?`, name, *workflowIDVal).Scan(&existingID)
+		} else {
+			checkErr = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ? AND workflow_id IS NULL`, name).Scan(&existingID)
+		}
+		if checkErr == nil {
 			return &WorkflowStateNameConflictError{Name: name}
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
+		if !errors.Is(checkErr, sql.ErrNoRows) {
+			return checkErr
 		}
 
 		var id string
@@ -493,12 +504,6 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 		allowExitInt := 1
 		if req.AllowExit != nil && !*req.AllowExit {
 			allowExitInt = 0
-		}
-
-		var workflowIDVal *string
-		if req.WorkflowID != nil && strings.TrimSpace(*req.WorkflowID) != "" {
-			wID := strings.TrimSpace(*req.WorkflowID)
-			workflowIDVal = &wID
 		}
 
 		var uiPosX, uiPosY float64
@@ -573,14 +578,29 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			existing.WorkflowID = &existingWorkflowID.String
 		}
 
+		var workflowIDVal *string
+		if req.WorkflowID != nil {
+			if strings.TrimSpace(*req.WorkflowID) != "" {
+				wID := strings.TrimSpace(*req.WorkflowID)
+				workflowIDVal = &wID
+			}
+		} else {
+			workflowIDVal = existing.WorkflowID
+		}
+
 		name := strings.TrimSpace(req.Name)
 		var conflictID string
-		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ? AND id != ?`, name, id).Scan(&conflictID)
-		if err == nil {
+		var checkErr error
+		if workflowIDVal != nil {
+			checkErr = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ? AND workflow_id = ? AND id != ?`, name, *workflowIDVal, id).Scan(&conflictID)
+		} else {
+			checkErr = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ? AND workflow_id IS NULL AND id != ?`, name, id).Scan(&conflictID)
+		}
+		if checkErr == nil {
 			return &WorkflowStateNameConflictError{Name: name}
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
+		if !errors.Is(checkErr, sql.ErrNoRows) {
+			return checkErr
 		}
 
 		now := formatTimestamp(s.clock.Now())
@@ -636,7 +656,6 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			allowExitInt = existingAllowExitInt
 		}
 
-		workflowIDVal := existing.WorkflowID
 		if req.WorkflowID != nil {
 			if strings.TrimSpace(*req.WorkflowID) != "" {
 				wID := strings.TrimSpace(*req.WorkflowID)

@@ -325,7 +325,12 @@ func TestWorkflowDuplicate(t *testing.T) {
 	var nameConflict *WorkflowNameConflictError
 	require.ErrorAs(t, err, &nameConflict)
 
+	// Verify states in duplicated workflow retain their original names (scoped uniqueness)
+	require.Equal(t, "stage-one", clonedState1.Name)
+	require.Equal(t, "stage-two", clonedState2.Name)
+
 	// Duplicate non-existent workflow
+
 	_, err = s.DuplicateWorkflow(ctx, "non-existent", "another-wf")
 	require.Error(t, err)
 	var notFound *WorkflowNotFoundError
