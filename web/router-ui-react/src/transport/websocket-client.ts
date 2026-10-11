@@ -25,6 +25,7 @@ export interface WebSocketClientOptions {
   retryDelayMs?: number;
   maxRetryDelayMs?: number;
   healthPingIntervalMs?: number;
+  connectTimeoutMs?: number;
   renewIntervalMs?: number;
   autoReconnect?: boolean;
   onStatus?: (status: WebSocketStatus, identity: WebSocketIdentity) => void;
@@ -65,6 +66,23 @@ function wsUrl(routerUrl: string): string {
 function freshId(): string { return secureUuid(); }
 function eventString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 
+async function checkRouterReady(response: Response): Promise<boolean> {
+  if (!response.ok || response.status !== 200) return false;
+  try {
+    const clone = typeof response.clone === "function" ? response.clone() : response;
+    const data: unknown = await clone.json();
+    if (data && typeof data === "object") {
+      const rec = data as Record<string, unknown>;
+      if (rec.readiness === "starting" || rec.status === "starting") {
+        return false;
+      }
+    }
+  } catch {
+    // If JSON parsing fails or response clone is unavailable, treat status 200 as ok
+  }
+  return true;
+}
+
 export function createWebSocketClient(options: WebSocketClientOptions): WebSocketClient {
   const routerUrl = normalizeRouterUrl(options.routerUrl);
   const settings = loadSettings(options.storage, routerUrl);
@@ -77,6 +95,8 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let renewTimer: ReturnType<typeof setInterval> | undefined;
   let healthPingTimer: ReturnType<typeof setInterval> | undefined;
+  let connectTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  let connectingStartedAt = 0;
   let retryAttempts = 0;
   let generation = 0;
   let closed = false;
@@ -87,22 +107,28 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
   let identity: WebSocketIdentity = { agentId: configuredAgentId, instanceId: "", leaseId: "", generation: 0 };
   const factory = options.webSocketFactory ?? defaultFactory;
   const baseRetryDelay = options.retryDelayMs ?? 1_000;
-  const maxRetryDelay = options.maxRetryDelayMs ?? 5_000;
+  const maxRetryDelay = options.maxRetryDelayMs ?? 2_000;
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
   const healthPingInterval = options.healthPingIntervalMs ?? 1_000;
   const healthUrl = new URL("/v1/health", routerUrl).toString();
   const renewInterval = options.renewIntervalMs ?? 10_000;
   const report = (status: WebSocketStatus): void => options.onStatus?.(status, { ...identity });
   const invalidate = (): void => { isRegistered = false; pendingRenewalRequestIds.clear(); identity = { ...identity, leaseId: "" }; options.onInvalidate?.({ ...identity }); };
   const clearRenewTimer = (): void => { if (renewTimer !== undefined) clearInterval(renewTimer); renewTimer = undefined; };
-  const clearTimers = (): void => { if (reconnectTimer !== undefined) clearTimeout(reconnectTimer); reconnectTimer = undefined; clearRenewTimer(); };
+  const clearConnectTimeout = (): void => { if (connectTimeoutTimer !== undefined) { clearTimeout(connectTimeoutTimer); connectTimeoutTimer = undefined; } };
+  const clearTimers = (): void => {
+    if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    clearRenewTimer();
+    clearConnectTimeout();
+  };
   const stopHealthPing = (): void => { if (healthPingTimer !== undefined) clearInterval(healthPingTimer); healthPingTimer = undefined; };
   const computeNextDelay = (): number => {
     if (retryAttempts === 0) {
       retryAttempts += 1;
       return baseRetryDelay;
     }
-    const multiplier = 1 + retryAttempts;
-    const nominal = Math.min(maxRetryDelay, baseRetryDelay * multiplier);
+    const nominal = Math.min(maxRetryDelay, baseRetryDelay * Math.pow(2, retryAttempts));
     const jitter = Math.random() * Math.min(300, nominal * 0.15);
     retryAttempts += 1;
     return Math.min(maxRetryDelay, Math.round(nominal + jitter));
@@ -117,11 +143,13 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
         stopHealthPing();
         return;
       }
-      if (isConnecting) return;
       try {
         const response = await fetchFn(healthUrl, { method: "GET", headers: { Accept: "application/json" } });
-        if (response && response.ok && response.status === 200) {
-          if (shouldAutoReconnect() && !isRegistered && !isConnecting) {
+        if (response && await checkRouterReady(response)) {
+          if (shouldAutoReconnect() && !isRegistered) {
+            if (isConnecting && Date.now() - connectingStartedAt < 1000) {
+              return;
+            }
             stopHealthPing();
             scheduleReconnect(true);
           }
@@ -136,6 +164,7 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
     startHealthPing();
     if (forceImmediate) {
       if (reconnectTimer !== undefined) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+      clearConnectTimeout();
       connect();
       return;
     }
@@ -167,6 +196,7 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
         options.onProtocolError?.(new Error("Router registration did not match this connection"), { ...identity }); return;
       }
       if (renewal) return;
+      clearConnectTimeout();
       identity = { ...identity, leaseId: frame.lease_id }; isRegistered = true;
       isConnecting = false;
       retryAttempts = 0;
@@ -175,18 +205,29 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
       renewTimer = setInterval(renew, renewInterval);
       report("connected");
     }
-    if (frame.type === "lease_rejected") { invalidate(); isConnecting = false; report("error"); try { socket?.close(4009, frame.code); } catch { /* ignore */ } scheduleReconnect(); return; }
+    if (frame.type === "lease_rejected") { clearConnectTimeout(); invalidate(); isConnecting = false; report("error"); try { socket?.close(4009, frame.code); } catch { /* ignore */ } scheduleReconnect(); return; }
     options.onFrame?.(frame, { ...identity });
   };
   const connect = (): void => {
     closed = false; clearTimers(); invalidate();
     isConnecting = true;
+    connectingStartedAt = Date.now();
     generation += 1;
     const nextInstanceId = `${freshId()}-${generation}`;
     identity = { agentId: identity.agentId, instanceId: nextInstanceId, leaseId: "", generation };
     const activeGeneration = generation;
     report("connecting");
     try { socket?.close(1000, "reconnecting"); } catch { /* ignore */ }
+    connectTimeoutTimer = setTimeout(() => {
+      connectTimeoutTimer = undefined;
+      if (activeGeneration !== generation || isRegistered) return;
+      isConnecting = false;
+      try { socket?.close(1000, "connect_timeout"); } catch { /* ignore */ }
+      clearRenewTimer();
+      invalidate();
+      report("error");
+      scheduleReconnect();
+    }, connectTimeoutMs);
     try {
       const next = factory(wsUrl(routerUrl)); socket = next;
       next.addEventListener("open", () => {
@@ -202,15 +243,18 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
       });
       next.addEventListener("close", () => {
         if (activeGeneration !== generation) return;
+        clearConnectTimeout();
         isConnecting = false;
         clearRenewTimer(); invalidate(); report("reconnecting"); scheduleReconnect();
       });
       next.addEventListener("error", () => {
         if (activeGeneration !== generation) return;
+        clearConnectTimeout();
         isConnecting = false;
         clearRenewTimer(); invalidate(); report("error"); scheduleReconnect();
       });
     } catch {
+      clearConnectTimeout();
       isConnecting = false;
       clearRenewTimer(); invalidate(); report("error"); scheduleReconnect();
     }

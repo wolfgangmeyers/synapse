@@ -245,4 +245,55 @@ describe("direct UI-live transport", () => {
     client.close();
     vi.useRealTimers();
   });
+
+  it("retries indefinitely with exponential backoff capped at maxRetryDelayMs", () => {
+    vi.useFakeTimers();
+    const sockets: UILiveSocket[] = [];
+    const client = createUILiveClient({
+      routerUrl: "http://router.test",
+      retryDelayMs: 200,
+      maxRetryDelayMs: 1000,
+      webSocketFactory: () => {
+        const socket = new UILiveSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      onFrame: () => {},
+    });
+    client.connect();
+    expect(sockets).toHaveLength(1);
+
+    // Initial failure: attempt 0 -> 200ms
+    sockets[0]?.emit("error", {});
+    expect(sockets).toHaveLength(1);
+
+    vi.advanceTimersByTime(199);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(2);
+
+    // Attempt 1 failure -> nominal 400ms (+ jitter up to 40ms)
+    sockets[1]?.emit("error", {});
+    vi.advanceTimersByTime(200);
+    expect(sockets).toHaveLength(2);
+    vi.advanceTimersByTime(250);
+    expect(sockets).toHaveLength(3);
+
+    // Attempt 2 failure -> nominal 800ms
+    sockets[2]?.emit("error", {});
+    vi.advanceTimersByTime(400);
+    expect(sockets).toHaveLength(3);
+    vi.advanceTimersByTime(500);
+    expect(sockets).toHaveLength(4);
+
+    // Further failures are capped at maxRetryDelayMs (1000ms)
+    for (let i = 0; i < 4; i++) {
+      sockets[3 + i]?.emit("error", {});
+      vi.advanceTimersByTime(1100);
+      expect(sockets).toHaveLength(5 + i);
+    }
+
+    client.close();
+    vi.useRealTimers();
+  });
 });
