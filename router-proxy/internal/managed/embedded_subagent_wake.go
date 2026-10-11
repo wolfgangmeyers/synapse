@@ -52,19 +52,30 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 	if record.ParentAgentID != "" && record.ParentAgentID != parent.AgentID {
 		return fmt.Errorf("subagent parent agent ID mismatch: %q != %q", record.ParentAgentID, parent.AgentID)
 	}
-	if record.ParentSessionID != "" && record.ParentSessionID != parent.SessionID {
-		return fmt.Errorf("subagent parent session ID mismatch: %q != %q", record.ParentSessionID, parent.SessionID)
-	}
-	if record.ParentEpoch > 0 && record.ParentEpoch != parent.Epoch {
-		return fmt.Errorf("subagent parent epoch mismatch: %d != %d", record.ParentEpoch, parent.Epoch)
-	}
-	if record.ParentGeneration != "" && record.ParentGeneration != parent.Generation {
-		return fmt.Errorf("subagent parent generation mismatch: %q != %q", record.ParentGeneration, parent.Generation)
+	if record.ParentEpoch > 0 && record.ParentEpoch > parent.Epoch {
+		return fmt.Errorf("subagent parent epoch mismatch: %d > %d", record.ParentEpoch, parent.Epoch)
 	}
 
 	// Caller's record status must be terminal; non-terminal records are rejected
 	if !isTerminalSubagentStatus(record.Status) {
 		return fmt.Errorf("cannot deliver completion wake for non-terminal subagent status %q", record.Status)
+	}
+
+	// Lineage verification on parent binding vs current parent in store.
+	// Context resets must never drop subagent completion wakes.
+	savedParent, err := m.store.ManagedAgent(ctx, parent.AgentID)
+	if err != nil {
+		return err
+	}
+	if parent.Epoch > savedParent.SessionEpoch {
+		return fmt.Errorf("stale parent binding: epoch %d > current %d", parent.Epoch, savedParent.SessionEpoch)
+	}
+	if savedParent.SessionEpoch != parent.Epoch || savedParent.PiSessionID != parent.SessionID {
+		parent.SessionID = savedParent.PiSessionID
+		parent.Epoch = savedParent.SessionEpoch
+		parent.Generation = savedParent.RuntimeGeneration
+	} else if savedParent.RuntimeGeneration != parent.Generation {
+		parent.Generation = savedParent.RuntimeGeneration
 	}
 
 	// Strictly verify against durable child record in store
@@ -81,17 +92,8 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 	if storedChild.Attempt != record.Attempt {
 		return fmt.Errorf("subagent %q attempt mismatch: persisted %d != record %d", storedChild.AgentID, storedChild.Attempt, record.Attempt)
 	}
-	if storedChild.ParentAgentID != parent.AgentID || storedChild.ParentSessionID != parent.SessionID || storedChild.ParentEpoch != parent.Epoch || storedChild.ParentGeneration != parent.Generation {
+	if storedChild.ParentAgentID != parent.AgentID {
 		return fmt.Errorf("persisted subagent %q lineage mismatch with parent binding", storedChild.AgentID)
-	}
-
-	// Lineage verification on parent binding vs current parent in store
-	savedParent, err := m.store.ManagedAgent(ctx, parent.AgentID)
-	if err != nil {
-		return err
-	}
-	if savedParent.PiSessionID != parent.SessionID || savedParent.SessionEpoch != parent.Epoch || savedParent.RuntimeGeneration != parent.Generation {
-		return fmt.Errorf("stale parent binding: epoch %d != current %d", parent.Epoch, savedParent.SessionEpoch)
 	}
 
 	if m.beforeSubagentWakeReservation != nil {
@@ -103,8 +105,15 @@ func (m *Manager) DeliverSubagentParentWake(ctx context.Context, parent store.Em
 	if err != nil {
 		return err
 	}
-	if savedParent.PiSessionID != parent.SessionID || savedParent.SessionEpoch != parent.Epoch || savedParent.RuntimeGeneration != parent.Generation {
-		return fmt.Errorf("stale parent binding after barrier: epoch %d != current %d", parent.Epoch, savedParent.SessionEpoch)
+	if parent.Epoch > savedParent.SessionEpoch {
+		return fmt.Errorf("stale parent binding after barrier: epoch %d > current %d", parent.Epoch, savedParent.SessionEpoch)
+	}
+	if savedParent.SessionEpoch != parent.Epoch || savedParent.PiSessionID != parent.SessionID {
+		parent.SessionID = savedParent.PiSessionID
+		parent.Epoch = savedParent.SessionEpoch
+		parent.Generation = savedParent.RuntimeGeneration
+	} else if savedParent.RuntimeGeneration != parent.Generation {
+		parent.Generation = savedParent.RuntimeGeneration
 	}
 
 	return m.deliverSubagentMailboxNotificationWithContext(ctx, parent, *storedChild)

@@ -322,7 +322,7 @@ func TestDeliverSubagentParentWake_ConcurrentResetBarrierBeforeCommitRejects(t *
 
 	// DeliverSubagentParentWake called with original parent binding (epoch 1)
 	err = mgr.DeliverSubagentParentWake(ctx, parent, record)
-	require.Error(t, err, "atomic store check must reject old parent binding after concurrent reset")
+	require.NoError(t, err, "subagent wake must succeed after concurrent reset")
 
 	select {
 	case <-barrierFired:
@@ -330,18 +330,69 @@ func TestDeliverSubagentParentWake_ConcurrentResetBarrierBeforeCommitRejects(t *
 		t.Fatal("deterministic barrier hook did not fire")
 	}
 
-	// Verify parent was NOT invoked
-	require.False(t, parentTurnRan.Load(), "parent must NOT run a turn for stale epoch completion wake")
-
-	// Verify nothing was injected into new conversation in embedded_prompt_requests
-	reqID := SubagentWakeRequestID(record.AgentID, record.Attempt)
-	var newSessionRequests int
+	// Verify mailbox notification was delivered to parent
+	var msgCount int
 	err = raw.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM embedded_prompt_requests WHERE request_id=? AND session_id=?`,
-		reqID, newSessionID,
-	).Scan(&newSessionRequests)
+		`SELECT COUNT(*) FROM messages WHERE recipient=? AND id LIKE 'subagent-completed-%'`,
+		parent.AgentID,
+	).Scan(&msgCount)
 	require.NoError(t, err)
-	require.Equal(t, 0, newSessionRequests, "stale wake must never be injected into new conversation")
+	require.Equal(t, 1, msgCount, "completion wake must be delivered to parent mailbox")
+}
+
+func TestDeliverSubagentParentWake_SucceedsWhenParentTransitionedToEpoch2(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "wake_epoch2.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-epoch2-test")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	record := createTerminalSubagentFixture(t, db, parent, "child-wake-epoch2", 1, "completed", store.ManagedSubagentResult{
+		ResultText: "done epoch 1",
+	})
+
+	// Transition parent to epoch 2
+	newSessionID := parent.AgentID + "-epoch-2-session"
+	newEpoch := parent.Epoch + 1
+	newBinding := store.EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  newSessionID,
+		Epoch:      newEpoch,
+		Generation: parent.Generation,
+	}
+	require.NoError(t, db.ResetEmbeddedSessionEpoch(ctx, parent, newBinding, "worker"))
+	newToken, err := db.AcquireEmbeddedOwner(ctx, newBinding, "fixture:"+parent.AgentID, time.Minute)
+	require.NoError(t, err)
+	newBinding.OwnerToken = newToken
+
+	mgr.mu.Lock()
+	mgr.embeddedOwners[parent.AgentID] = embeddedOwner{
+		binding:  newBinding,
+		identity: "fixture:" + parent.AgentID,
+	}
+	mgr.mu.Unlock()
+
+	// DeliverSubagentParentWake called with original parent binding (epoch 1)
+	err = mgr.DeliverSubagentParentWake(ctx, parent, record)
+	require.NoError(t, err, "subagent wake must succeed when parent has transitioned to epoch 2")
+
+	// Verify mailbox notification was delivered to parent
+	raw, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer raw.Close()
+
+	var msgCount int
+	err = raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE recipient=? AND id LIKE 'subagent-completed-%'`, parent.AgentID).Scan(&msgCount)
+	require.NoError(t, err)
+	require.Equal(t, 1, msgCount, "wake notification message must be delivered to parent")
 }
 
 func TestDeliverSubagentParentWake_StaleMemoryBindingRejects(t *testing.T) {

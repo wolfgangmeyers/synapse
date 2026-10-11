@@ -210,7 +210,7 @@ func TestNativeSubagentTerminalHidesBadge(t *testing.T) {
 	require.Empty(t, active, "completed child must not appear as active in UI badge")
 }
 
-func TestNativeSubagentEpochAndGenerationFenced(t *testing.T) {
+func TestNativeSubagentRemainsVisibleAcrossParentEpoch(t *testing.T) {
 	ctx := context.Background()
 	s, dbPath, parent := setupTestStoreWithParent(t, "fenced-parent")
 	router, err := New(Options{Store: s, Port: 0})
@@ -239,11 +239,12 @@ func TestNativeSubagentEpochAndGenerationFenced(t *testing.T) {
 	_, err = raw.Exec("UPDATE managed_agents SET session_epoch = session_epoch + 1 WHERE agent_id = ?", parent.AgentID)
 	require.NoError(t, err)
 
-	// Query projection for parent under new epoch
+	// Query projection for parent under new epoch: child must remain visible
 	projectionNew, err := router.managedChildrenProjection(ctx, parent.AgentID)
 	require.NoError(t, err)
 	childrenNew, _ := projectionNew["children"].([]map[string]any)
-	require.Empty(t, childrenNew, "epoch 1 child must be fenced out under epoch 2")
+	require.Len(t, childrenNew, 1, "epoch 1 child must remain visible under epoch 2")
+	require.Equal(t, "native-child-epoch1", childrenNew[0]["id"])
 }
 
 func TestNativeSubagentErrorPathDistinguishesStaleVsDBFailure(t *testing.T) {

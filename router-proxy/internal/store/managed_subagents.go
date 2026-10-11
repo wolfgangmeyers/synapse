@@ -75,11 +75,22 @@ func subagentTransition(old, next string) bool {
 // completed or interrupted result stays available after process restart while
 // its parent session/epoch/generation is still the current one.
 func (s *Store) subagentReadFenceTx(ctx context.Context, parent EmbeddedBinding) error {
-	if err := validateEmbedded(parent); err != nil {
-		return err
+	if parent.AgentID == "" {
+		return errors.New("invalid embedded binding")
+	}
+	if parent.Epoch > 0 && parent.SessionID != "" && parent.Generation != "" {
+		var count int
+		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=? AND runtime='embedded' AND pi_session_id=? AND session_epoch=? AND runtime_generation=?`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation).Scan(&count)
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("stale subagent parent binding")
+		}
+		return nil
 	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=? AND runtime='embedded' AND pi_session_id=? AND session_epoch=? AND runtime_generation=?`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=? AND runtime='embedded'`, parent.AgentID).Scan(&count)
 	if err != nil {
 		return err
 	}
@@ -165,7 +176,7 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 	})
 }
 
-// ManagedSubagent permits only the same current parent session to read its
+// ManagedSubagent permits only the same parent to read its
 // child. No live owner token is needed to retrieve a committed terminal result.
 func (s *Store) ManagedSubagent(ctx context.Context, parent EmbeddedBinding, childID string) (*ManagedSubagentRecord, error) {
 	if ctx == nil {
@@ -179,7 +190,7 @@ func (s *Store) ManagedSubagent(ctx context.Context, parent EmbeddedBinding, chi
 	if err := s.subagentReadFenceTx(ctx, parent); err != nil {
 		return nil, err
 	}
-	return scanManagedSubagent(s.db.QueryRowContext(ctx, managedSubagentSelect+` WHERE agent_id=? AND parent_agent_id=? AND parent_session_id=? AND parent_epoch=? AND parent_generation=?`, childID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation))
+	return scanManagedSubagent(s.db.QueryRowContext(ctx, managedSubagentSelect+` WHERE agent_id=? AND parent_agent_id=?`, childID, parent.AgentID))
 }
 
 func (s *Store) ManagedSubagents(ctx context.Context, parent EmbeddedBinding) ([]*ManagedSubagentRecord, error) {
@@ -194,7 +205,7 @@ func (s *Store) ManagedSubagents(ctx context.Context, parent EmbeddedBinding) ([
 	if err := s.subagentReadFenceTx(ctx, parent); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE parent_agent_id=? AND parent_session_id=? AND parent_epoch=? AND parent_generation=? ORDER BY agent_id`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation)
+	rows, err := s.db.QueryContext(ctx, managedSubagentSelect+` WHERE parent_agent_id=? ORDER BY created_at ASC, agent_id ASC`, parent.AgentID)
 	if err != nil {
 		return nil, err
 	}
@@ -231,9 +242,9 @@ func (s *Store) ManagedSubagentTranscript(ctx context.Context, parent EmbeddedBi
 	err := s.db.QueryRowContext(ctx, `SELECT e.agent_id,e.session_id,e.epoch,e.generation,e.role
  FROM managed_subagents c JOIN managed_agents a ON a.agent_id=c.agent_id
  JOIN embedded_sessions e ON e.agent_id=a.agent_id AND e.session_id=a.pi_session_id AND e.epoch=a.session_epoch AND e.generation=a.runtime_generation AND e.current=1
- WHERE c.agent_id=? AND c.parent_agent_id=? AND c.parent_session_id=? AND c.parent_epoch=? AND c.parent_generation=?
+ WHERE c.agent_id=? AND c.parent_agent_id=?
  AND c.status IN ('completed','failed','stopped','steered','aborted','error','interrupted') AND a.runtime='embedded'`,
-		childID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation).Scan(&binding.AgentID, &binding.SessionID, &binding.Epoch, &binding.Generation, &role)
+		childID, parent.AgentID).Scan(&binding.AgentID, &binding.SessionID, &binding.Epoch, &binding.Generation, &role)
 	if err != nil {
 		return empty, err
 	}
