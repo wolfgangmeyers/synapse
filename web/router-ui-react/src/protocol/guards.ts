@@ -329,7 +329,7 @@ export function isUILiveFrame(value: unknown): value is UILiveFrame {
 function isAgentRole(value: unknown): value is "agent" | "user_interaction" { return value === "agent" || value === "user_interaction"; }
 function isClientActivityState(value: unknown): value is ActivityFrame["activity_state"] { return value === "active" || value === "settled" || value === "compacting"; }
 function isObservableActivityState(value: unknown): value is AgentActivityFrame["activity_state"] { return value === "active" || value === "idle" || value === "compacting"; }
-function isChildStatus(value: unknown): value is LifecycleChild["status"] { return value === "queued" || value === "running" || value === "completed" || value === "steered" || value === "aborted" || value === "stopped" || value === "error" || value === "cancelled"; }
+function isChildStatus(value: unknown): value is LifecycleChild["status"] { return value === "queued" || value === "running" || value === "completed" || value === "failed" || value === "interrupted" || value === "steered" || value === "aborted" || value === "stopped" || value === "error" || value === "cancelled"; }
 function isSourceKind(value: unknown): boolean { return value === "agent" || value === "web_ui" || value === "android" || value === "discord" || value === "reminder" || value === "system" || value === "unknown"; }
 function isArrivalSourceKind(value: unknown): boolean { return value === "agent" || value === "discord" || value === "reminder"; }
 

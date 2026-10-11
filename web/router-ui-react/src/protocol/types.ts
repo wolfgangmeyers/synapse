@@ -15,7 +15,7 @@ export type ClientActivityState = "active" | "settled" | "compacting";
 export type ObservableActivityState = "active" | "idle" | "compacting";
 export type MessageSourceKind = "agent" | "web_ui" | "android" | "discord" | "reminder" | "system" | "unknown";
 export type DeliveryReceiptMode = "delivery_items_v1";
-export type LifecycleChildStatus = "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "cancelled";
+export type LifecycleChildStatus = "queued" | "running" | "completed" | "failed" | "interrupted" | "steered" | "aborted" | "stopped" | "error" | "cancelled";
 export type FailureReason = string;
 
 export interface MessageSource {

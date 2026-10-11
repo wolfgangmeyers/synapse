@@ -127,9 +127,10 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         // The managed-agent list is enough to launch and talk to agents. Child
         // details and live updates must not make that working surface disappear.
         try {
-          const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
+          const childrenSettled = await Promise.allSettled(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
+          const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
           if (!active) return;
-          dispatch({ type: "managed/children", scope, children });
+          if (children.length > 0) dispatch({ type: "managed/children", scope, children });
         } catch {
           // A child projection can be repaired by the next refresh or live frame.
         }
@@ -219,8 +220,9 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
 
         if (includeHistory) {
           try {
-            const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
-            if (active) dispatch({ type: "managed/children", scope: currentScope, children });
+            const childrenSettled = await Promise.allSettled(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
+            const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+            if (active && children.length > 0) dispatch({ type: "managed/children", scope: currentScope, children });
           } catch {
             // child projection can be repaired on next pass
           }
