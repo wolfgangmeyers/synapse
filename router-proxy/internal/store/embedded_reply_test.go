@@ -235,7 +235,7 @@ func TestEmbeddedReplySystemMessageRecordsHistoryWithoutOutbox(t *testing.T) {
 	b := redBind(t, s, "reply-worker-system", "reply-session-system", 1, "reply-generation-1", "worker")
 
 	// 1. Inbound system message from "system" with source_kind="system"
-	mail := testEnvelope("system-msg-1", "[Subagent Completed] Task subagent-1 (test) finished with status completed: done.\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
+	mail := testEnvelope("system-msg-1", "[Subagent Completed] Task subagent-1 (test) finished with status completed: done.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
 	mail.From = "system"
 	mail.To = b.AgentID
 	_, err = s.Enqueue(ctx, mail)

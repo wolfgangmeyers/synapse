@@ -58,7 +58,7 @@ func TestMailboxContentSystemNotice(t *testing.T) {
 	// Without existing footer
 	body := "Subagent subagent-1 finished with status completed: done."
 	result := MailboxContent(body, "system")
-	require.Equal(t, body+"\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", result)
+	require.Equal(t, body+"\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*", result)
 
 	// With existing footer - should not duplicate
 	result2 := MailboxContent(result, "system")
@@ -81,7 +81,7 @@ func TestBatchItemSystemNotice(t *testing.T) {
 	item := BatchItem(msg)
 	require.Contains(t, item, "From: system")
 	require.Contains(t, item, "Subject: [System Notice] Subagent Completed: subagent-1")
-	require.Contains(t, item, "[Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.]")
+	require.Contains(t, item, "[---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*]")
 	require.NotContains(t, item, "Reply via mailbox to system")
 }
 

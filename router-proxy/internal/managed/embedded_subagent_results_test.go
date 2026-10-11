@@ -51,7 +51,7 @@ func TestSubagentNotificationFormatting(t *testing.T) {
 	assert.Contains(t, notification, "subagent-worker-42")
 
 	wakePrompt := FormatSubagentWakePrompt(childRecord)
-	assert.Equal(t, "[Subagent Completed] Task subagent-worker-42 (Run database migration checks) finished with status completed: All 15 schema migrations verified successfully without errors.\n\nCall get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", wakePrompt)
+	assert.Equal(t, "[Subagent Completed] Task subagent-worker-42 (Run database migration checks) finished with status completed: All 15 schema migrations verified successfully without errors.\n\nCall get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*", wakePrompt)
 
 	// Verify truncation for long result text (> 500 Unicode characters)
 	// Create 800 runes of Japanese text to verify Unicode rune (not byte) boundary handling

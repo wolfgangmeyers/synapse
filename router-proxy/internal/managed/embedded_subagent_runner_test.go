@@ -535,7 +535,7 @@ func TestSubagentRunnerStopQueuedAndRunning(t *testing.T) {
 	require.NotNil(t, stopMsg)
 	require.Equal(t, "system", stopMsg.From)
 	require.Equal(t, "[System Notice] Subagent Terminated: subagent-parent-stop-2", *stopMsg.Subject)
-	require.Contains(t, stopMsg.Body, "Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
+	require.Contains(t, stopMsg.Body, "Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.")
 
 	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, "subagent-parent-stop-1"))
 	require.Eventually(t, func() bool {
@@ -1025,7 +1025,7 @@ func TestSubagentRunnerParentIdleWake(t *testing.T) {
 	require.Contains(t, receivedPromptText, childID)
 	require.Contains(t, receivedPromptText, "finished with status completed")
 	require.Contains(t, receivedPromptText, "get_subagent_result")
-	require.Contains(t, receivedPromptText, "Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
+	require.Contains(t, receivedPromptText, "Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.")
 }
 
 func TestSubagentRunnerParentEpochChangeBlocksWake(t *testing.T) {
@@ -1745,7 +1745,7 @@ func TestSubagentCompletionMailboxNotificationSenderIsSystem(t *testing.T) {
 	require.Equal(t, parent.AgentID, msg.To)
 	require.NotNil(t, msg.Subject)
 	require.Equal(t, "[System Notice] Subagent Completed: subagent-system-test-1", *msg.Subject)
-	require.Contains(t, msg.Body, "Automated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.")
+	require.Contains(t, msg.Body, "Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.")
 
 	select {
 	case <-turnDone:

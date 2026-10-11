@@ -59,6 +59,7 @@ var recallPolicy = map[string]any{
 
 var errorMessages = map[string]string{
 	"invalid_request":                         "Request does not match the mailbox protocol.",
+	"recipient_rejected":                      "'system' is an automated system notifier and does not accept incoming messages.",
 	"escaped_newlines":                        "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
 	"payload_too_large":                       "Request exceeds local mailbox limits.",
 	"queue_full":                              "Recipient queue is full.",
@@ -572,6 +573,9 @@ func (r *Router) parseMessage(payload map[string]json.RawMessage) (protocol.Enve
 	to, err := rawString(payload, "to", true)
 	if err != nil {
 		return protocol.Envelope{}, parsedConversation{}, nil, err
+	}
+	if strings.EqualFold(to, "system") {
+		return protocol.Envelope{}, parsedConversation{}, nil, &httpError{status: http.StatusBadRequest, code: "recipient_rejected"}
 	}
 	body, err := rawString(payload, "body", true)
 	if err != nil {
