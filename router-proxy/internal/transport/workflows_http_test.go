@@ -131,6 +131,40 @@ func TestWorkflowHTTP(t *testing.T) {
 	require.Equal(t, "Renamed Workflow", updatedWf["name"])
 	require.Equal(t, stateID, updatedWf["entry_state_id"])
 
+	// 8b. PUT /v1/workflows/{id} partial update with only entry_state_id
+	partialPayload := map[string]any{
+		"entry_state_id": nil,
+	}
+	body, _ = json.Marshal(partialPayload)
+	partialReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/workflows/"+wfID, bytes.NewReader(body))
+	require.NoError(t, err)
+	partialReq.Header.Set("Content-Type", "application/json")
+	res, err = client.Do(partialReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var clearedWf map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&clearedWf))
+	res.Body.Close()
+	require.Equal(t, "Renamed Workflow", clearedWf["name"])
+	require.Nil(t, clearedWf["entry_state_id"])
+
+	// Restore entry_state_id with only entry_state_id in payload
+	partialPayload2 := map[string]any{
+		"entry_state_id": stateID,
+	}
+	body, _ = json.Marshal(partialPayload2)
+	partialReq2, err := http.NewRequest(http.MethodPut, server.URL+"/v1/workflows/"+wfID, bytes.NewReader(body))
+	require.NoError(t, err)
+	partialReq2.Header.Set("Content-Type", "application/json")
+	res, err = client.Do(partialReq2)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var restoredWf map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&restoredWf))
+	res.Body.Close()
+	require.Equal(t, "Renamed Workflow", restoredWf["name"])
+	require.Equal(t, stateID, restoredWf["entry_state_id"])
+
 	// 9. PUT /v1/workflows/{id}/layout -> batch update state node positions
 	layoutPayload := map[string]any{
 		"positions": []map[string]any{

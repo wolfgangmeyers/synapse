@@ -77,6 +77,35 @@ func (r *Router) handleWorkflowItem(w http.ResponseWriter, req *http.Request, id
 				r.writeError(w, err)
 				return
 			}
+
+			// If name is omitted or empty in PUT payload, keep existing workflow's name and description if omitted
+			if reqData.Name == "" {
+				existingWf, err := r.store.GetWorkflow(req.Context(), id)
+				if err != nil {
+					r.writeError(w, storeError(err))
+					return
+				}
+				if existingWf == nil {
+					r.writeError(w, &httpError{status: 404, code: "workflow_not_found"})
+					return
+				}
+				reqData.Name = existingWf.Name
+				if reqData.Description == "" {
+					reqData.Description = existingWf.Description
+				}
+			}
+
+			// If entry_state_id is explicitly passed in payload (even if empty string or null),
+			// handle setting or clearing it. Note: parseWorkflowRequest sets EntryStateID to nil
+			// if omitted or explicit null; but if key was explicitly present as null or empty string,
+			// we want to ensure EntryStateID can be explicitly cleared or set.
+			if raw, exists := payload["entry_state_id"]; exists {
+				if len(raw) == 0 || string(raw) == "null" {
+					empty := ""
+					reqData.EntryStateID = &empty
+				}
+			}
+
 			wf, err := r.store.UpdateWorkflow(req.Context(), id, reqData)
 			if err != nil {
 				r.writeError(w, storeError(err))

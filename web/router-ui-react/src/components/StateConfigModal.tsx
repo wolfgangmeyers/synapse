@@ -152,7 +152,22 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
       className="message-dialog state-config-dialog"
     >
       <form onSubmit={(e) => void handleSubmit(e)} className="state-config-form">
-        {error ? <div className="alert alert-danger">{error}</div> : null}
+        {error ? (
+          <div
+            className="alert alert-danger"
+            style={{
+              color: "#f87171",
+              backgroundColor: "rgba(127, 29, 29, 0.4)",
+              border: "1px solid #991b1b",
+              borderRadius: "6px",
+              padding: "8px 12px",
+              fontSize: "13px",
+              marginBottom: "12px",
+            }}
+          >
+            {error}
+          </div>
+        ) : null}
 
         {/* State identity */}
         <div className="form-group" style={{ marginBottom: "0.85rem" }}>
@@ -315,7 +330,22 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
             <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>
               {editingReminderIdx !== null ? "Edit Reminder" : "New Reminder"}
             </div>
-            {reminderError ? <div className="alert alert-danger" style={{ padding: "4px 8px", fontSize: "0.85em" }}>{reminderError}</div> : null}
+            {reminderError ? (
+              <div
+                className="alert alert-danger"
+                style={{
+                  color: "#f87171",
+                  backgroundColor: "rgba(127, 29, 29, 0.4)",
+                  border: "1px solid #991b1b",
+                  borderRadius: "6px",
+                  padding: "8px 12px",
+                  fontSize: "13px",
+                  marginBottom: "12px",
+                }}
+              >
+                {reminderError}
+              </div>
+            ) : null}
             <div style={{ display: "flex", gap: "0.75rem", marginBottom: "0.5rem" }}>
               <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
                 <input
