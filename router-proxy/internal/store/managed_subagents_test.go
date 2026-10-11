@@ -81,8 +81,9 @@ func TestManagedSubagentRejectsForeignAndStaleParent(t *testing.T) {
 	stale = parent
 	stale.Generation = "previous-generation"
 	require.Error(t, s.UpdateManagedSubagent(ctx, stale, child.AgentID, "queued", ManagedSubagentResult{Status: "running"}))
+	// Reading succeeds because subagents belong to parent_agent_id alone across epoch/generation changes.
 	_, err = s.ManagedSubagent(ctx, stale, child.AgentID)
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestManagedSubagentExcludedFromTopLevelProjection(t *testing.T) {
@@ -112,12 +113,14 @@ func TestManagedSubagentExcludedFromTopLevelProjection(t *testing.T) {
 	require.Zero(t, childSource, "child must not become an independent recipient")
 	stale := parent
 	stale.Epoch++
-	_, err = s.ManagedSubagents(ctx, stale)
-	require.Error(t, err)
+	children, err = s.ManagedSubagents(ctx, stale)
+	require.NoError(t, err)
+	require.Len(t, children, 1)
 	stale = parent
 	stale.Generation = "stale-generation"
-	_, err = s.ManagedSubagents(ctx, stale)
-	require.Error(t, err)
+	children, err = s.ManagedSubagents(ctx, stale)
+	require.NoError(t, err)
+	require.Len(t, children, 1)
 }
 
 func TestManagedSubagentRoleCannotEscalateOrNest(t *testing.T) {
@@ -318,11 +321,11 @@ func TestManagedSubagentTranscriptReadAfterReopenWithoutChildLease(t *testing.T)
 	stale := parent
 	stale.Epoch++
 	_, err = reopened.ManagedSubagentTranscript(ctx, stale, id)
-	require.Error(t, err)
+	require.NoError(t, err)
 	stale = parent
 	stale.Generation = "old-generation"
 	_, err = reopened.ManagedSubagentTranscript(ctx, stale, id)
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestManagedSubagentRunningInterruptedOnOpen(t *testing.T) {

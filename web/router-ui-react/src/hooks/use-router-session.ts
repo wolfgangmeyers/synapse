@@ -256,16 +256,9 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
             }
           }
         } else {
-          const selected = stateRef.current.selectedPeer;
-          const peerId = selected
-            ? (selected.startsWith("router-managed:") ? selected.slice("router-managed:".length) : selected.startsWith("tmux:") ? selected.slice("tmux:".length) : selected)
-            : undefined;
           const agentsToPoll = snapshot.agents.filter((agent) => {
             if (agent.lifecycle_state === "terminating" || agent.desired_state === "terminated") return false;
-            if (peerId && agent.agent_id === peerId) return true;
-            if (agent.activity_state === "active") return true;
-            const existingChildren = stateRef.current.managedChildren[agent.agent_id]?.children ?? [];
-            return existingChildren.some((c) => c.status === "queued" || c.status === "running");
+            return true;
           });
           if (agentsToPoll.length > 0) {
             try {

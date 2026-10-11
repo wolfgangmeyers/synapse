@@ -79,7 +79,7 @@ func TestEmbeddedAddressedMailRejectsSystemRecipient(t *testing.T) {
 		s, _, _, _, w, _ := addressedStoreInvocation(t)
 		w.call.Arguments["recipient"] = recipient
 		_, err := s.EnqueueEmbeddedToolMail(ctx, w)
-		require.EqualError(t, err, "cannot send message to 'system': system notifications do not accept incoming messages or replies")
+		require.EqualError(t, err, "failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
 	}
 }
 

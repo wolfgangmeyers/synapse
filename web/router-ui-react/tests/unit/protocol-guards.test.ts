@@ -7,6 +7,7 @@ import {
   isInlineToolControlResultFrame,
   isInlineToolStateFrame,
   isManagedAgent,
+  isManagedChildrenProjection,
   isManagedCompleteHistoryEntry,
   isManagedHistoryEntry,
   isUILiveFrame,
@@ -368,6 +369,46 @@ describe("protocol guards", () => {
         extra_key: 123,
       };
       expect(isConversationMessage(aliasMsg)).toBe(true);
+    });
+
+    it("accepts managed children projections with Postel resilience (extra fields on projection, child, recovery, compaction, model)", () => {
+      const projectionWithExtraFields = {
+        agent_id: "kb-helper",
+        source: "router-managed",
+        lifecycle_version: 1,
+        recovery_state: "current",
+        children: [
+          {
+            id: "subagent-1",
+            parent_entry_id: "entry-1",
+            task_id: "task-1",
+            run_id: "run-1",
+            sequence: 0,
+            recovery: {
+              state: "confirmed",
+              cause: null,
+              observed_at: "2026-08-30T12:00:00.000Z",
+              extra_recovery_field: "allowed",
+            },
+            description: "Research kb items",
+            model: {
+              provider: "openai-codex",
+              id: "gpt-5.6-terra",
+              extra_model_field: "allowed",
+            },
+            status: "running",
+            compaction: {
+              state: "idle",
+              count: 0,
+              extra_compaction_field: true,
+            },
+            compaction_state: "none",
+            extra_child_field: "allowed",
+          },
+        ],
+        extra_projection_field: "allowed",
+      };
+      expect(isManagedChildrenProjection(projectionWithExtraFields)).toBe(true);
     });
 
     it("rejects messages missing required fields (id, sender, recipient, body)", () => {

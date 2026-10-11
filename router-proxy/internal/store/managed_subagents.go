@@ -78,19 +78,8 @@ func (s *Store) subagentReadFenceTx(ctx context.Context, parent EmbeddedBinding)
 	if parent.AgentID == "" {
 		return errors.New("invalid embedded binding")
 	}
-	if parent.Epoch > 0 && parent.SessionID != "" && parent.Generation != "" {
-		var count int
-		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=? AND runtime='embedded' AND pi_session_id=? AND session_epoch=? AND runtime_generation=?`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation).Scan(&count)
-		if err != nil {
-			return err
-		}
-		if count != 1 {
-			return errors.New("stale subagent parent binding")
-		}
-		return nil
-	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=? AND runtime='embedded'`, parent.AgentID).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=?`, parent.AgentID).Scan(&count)
 	if err != nil {
 		return err
 	}

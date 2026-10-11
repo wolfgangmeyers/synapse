@@ -339,7 +339,7 @@ func (s *Store) EnqueueEmbeddedToolMail(ctx context.Context, w *EmbeddedToolInvo
 		recipient, _ = w.call.Arguments["name"].(string)
 	}
 	if strings.EqualFold(recipient, "system") {
-		return EnqueueResult{}, errors.New("cannot send message to 'system': system notifications do not accept incoming messages or replies")
+		return EnqueueResult{}, errors.New("failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
 	}
 	body, _ := w.call.Arguments["body"].(string)
 	envelope := protocol.Envelope{ID: "embedded-mail-" + embeddedHash([]byte(w.origin.binding.AgentID), []byte(w.origin.binding.SessionID), []byte(strconv.FormatInt(w.origin.binding.Epoch, 10)), []byte(w.origin.binding.Generation), []byte(w.origin.userDigest), []byte(w.producerDigest), w.origin.intent), From: w.origin.binding.AgentID, To: recipient, Body: body, CreatedAt: formatTimestamp(s.clock.Now())}
