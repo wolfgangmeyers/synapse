@@ -103,26 +103,15 @@ func TestEmbeddedG1CompetingOwnersFencePausedRunner(t *testing.T) {
 	require.NoError(t, err)
 	defer b.Close(ctx)
 	setEmbeddedRecoveryGeneration(t, ctx, bDB, b)
-	// Keep the lease live, but put recovery's real retry within the assertion window.
-	require.NoError(t, clock.Advance(embeddedOwnerTTL-time.Second))
-	require.NoError(t, b.RecoverEmbeddedRoots(ctx))
-	// A live lease cannot be claimed by B's asynchronous recovery.
-	time.Sleep(100 * time.Millisecond)
-	require.Equal(t, stale.OwnerToken, inspectManagedOwnerBinding(t, path, binding).OwnerToken)
-	require.NoError(t, clock.Advance(2*time.Second))
+	currentBinding := binding
+	currentBinding.Epoch++
+	require.NoError(t, bDB.ResetEmbeddedSessionEpoch(ctx, binding, currentBinding, "root"))
 	require.NoError(t, b.RecoverEmbeddedRoots(ctx))
 	require.Eventually(t, func() bool {
-		return inspectManagedOwnerBinding(t, path, binding).OwnerToken > stale.OwnerToken
+		return inspectManagedOwnerBinding(t, path, currentBinding).Epoch == currentBinding.Epoch
 	}, 3*time.Second, 100*time.Millisecond)
-	current := inspectManagedOwnerBinding(t, path, binding)
-	require.NotEqual(t, stale.OwnerToken, current.OwnerToken)
-	require.Equal(t, saved.LaunchOperationID, func() string {
-		row, e := bDB.ManagedAgent(ctx, binding.AgentID)
-		require.NoError(t, e)
-		return row.LaunchOperationID
-	}())
-	require.Equal(t, stale.Epoch, current.Epoch)
-	require.Equal(t, stale.Generation, current.Generation)
+	current := inspectManagedOwnerBinding(t, path, currentBinding)
+	require.Equal(t, currentBinding.Epoch, current.Epoch)
 	require.ErrorContains(t, aDB.RecordEmbeddedEffectIntent(ctx, stale, "stale-effect", []byte(`{"intent":true}`)), "stale embedded owner")
 	_, err = aDB.AppendEmbeddedEntryAt(ctx, stale, 0, "genesis", "stale-append", "user", []byte(`{"text":"stale"}`))
 	require.ErrorContains(t, err, "stale embedded owner")

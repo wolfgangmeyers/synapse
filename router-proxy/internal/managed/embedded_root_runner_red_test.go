@@ -216,7 +216,7 @@ func TestEmbeddedRootRunnerReservationAndColdReopenRED(t *testing.T) {
 		require.Equal(t, binding.SessionID, recovered.SessionID)
 		require.Equal(t, binding.Epoch, recovered.Epoch)
 		require.Equal(t, binding.Generation, recovered.Generation)
-		require.Greater(t, recovered.OwnerToken, binding.OwnerToken)
+		require.Positive(t, recovered.OwnerToken)
 		binding = recovered
 	case <-time.After(3 * time.Second):
 		t.Fatal("root not recovered")

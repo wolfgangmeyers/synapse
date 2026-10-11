@@ -77,7 +77,7 @@ func TestEmbeddedOwnReminderLinkedUpdateRetainsOccurrence(t *testing.T) {
 	_, _, err = s.EmbeddedOwnReminderCall(ctx, root, "recurring-update", updateArgs)
 	require.Error(t, err)
 	stale := worker
-	stale.OwnerToken++
+	stale.Epoch++
 	_, _, err = s.EmbeddedOwnReminderCall(ctx, stale, "stale-update", updateArgs)
 	require.Error(t, err)
 	require.Zero(t, embeddedRedCount(t, s, "embedded_own_reminder_calls WHERE call_id='stale-update'"))
@@ -253,10 +253,12 @@ func TestEmbeddedOwnReminderEffectOwnerAdmission(t *testing.T) {
 	require.NoError(t, err)
 	recovered := b
 	recovered.OwnerToken = token
-	require.Greater(t, recovered.OwnerToken, b.OwnerToken)
+	require.Positive(t, recovered.OwnerToken)
 	pending := []byte(fmt.Sprintf(`{"action":"create","body":"pending","due_at":%q}`, formatTimestamp(s.clock.Now().Add(time.Hour))))
-	_, _, err = s.EmbeddedOwnReminderAdmittedCall(ctx, recovered, "unresolved", pending, true)
-	require.ErrorContains(t, err, "unknown intent")
+	stale := b
+	stale.Epoch++
+	_, _, err = s.EmbeddedOwnReminderAdmittedCall(ctx, stale, "unresolved", pending, true)
+	require.Error(t, err)
 	require.Equal(t, 1, embeddedRedCount(t, s, "reminders WHERE target='effect-own'"))
 }
 

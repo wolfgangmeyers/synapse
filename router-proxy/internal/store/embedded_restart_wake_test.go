@@ -132,6 +132,7 @@ func TestEmbeddedRestartWakeCrashWindowsAndOwnerFence(t *testing.T) {
 	token, err := s.AcquireEmbeddedOwner(ctx, binding, "after-restart", 60_000_000_000)
 	require.NoError(t, err)
 	stale := binding
+	stale.Epoch++
 	binding.OwnerToken = token
 	require.Error(t, s.ClaimEmbeddedRestartWake(ctx, stale, g, "wake-a"))
 	require.NoError(t, s.ClaimEmbeddedRestartWake(ctx, binding, g, "wake-a"))

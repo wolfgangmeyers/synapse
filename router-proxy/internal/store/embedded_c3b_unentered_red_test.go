@@ -39,7 +39,7 @@ func TestEmbeddedPendingOriginalRequiresUntouchedAuthority(t *testing.T) {
 				_, err = s.db.Exec(`UPDATE managed_agents SET initial_instruction_sent=1 WHERE agent_id=?`, b.AgentID)
 				require.NoError(t, err)
 			case "stale-owner":
-				b.OwnerToken++
+				b.Epoch++
 			case "stale-process":
 				_, err = s.MintEmbeddedProcessGeneration(ctx, "new-bound-process")
 				require.NoError(t, err)

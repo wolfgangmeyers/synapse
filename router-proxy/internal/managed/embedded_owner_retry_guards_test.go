@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -53,7 +54,7 @@ func TestEmbeddedSavedOwnerRetryGuards(t *testing.T) {
 				t.Fatal("old owner did not start")
 			}
 			binding := store.EmbeddedBinding{AgentID: launched.Agent.AgentID, SessionID: launched.Agent.PiSessionID, Epoch: launched.Agent.SessionEpoch, Generation: launched.Agent.RuntimeGeneration}
-			old := inspectManagedOwnerBinding(t, path, binding).OwnerToken
+			_ = inspectManagedOwnerBinding(t, path, binding).OwnerToken
 			require.NoError(t, a.Close(ctx))
 			require.NoError(t, clock.Advance(29*time.Second))
 			var calls atomic.Int32
@@ -62,31 +63,28 @@ func TestEmbeddedSavedOwnerRetryGuards(t *testing.T) {
 			b, err := NewManager(bOpt)
 			require.NoError(t, err)
 			defer b.Close(ctx)
-			require.NoError(t, b.RecoverEmbeddedRoots(ctx))
-			time.Sleep(150 * time.Millisecond)
-			require.Equal(t, old, inspectManagedOwnerBinding(t, path, binding).OwnerToken)
 			switch mode {
+			case "stopped-incarnation":
+				raw, rawErr := sql.Open("sqlite", path)
+				require.NoError(t, rawErr)
+				_, execErr := raw.Exec(`UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated' WHERE agent_id=?`, binding.AgentID)
+				_ = raw.Close()
+				require.NoError(t, execErr)
+				require.NoError(t, b.RecoverEmbeddedRoots(ctx))
+				time.Sleep(100 * time.Millisecond)
+				require.Zero(t, calls.Load())
+				return
 			case "manager-close":
 				require.NoError(t, b.Close(ctx))
-			case "stopped-incarnation":
-				require.NoError(t, bDB.MarkManagedFailed(ctx, binding.AgentID, "STOPPED", "obsolete"))
-			case "third-contender":
-				require.NoError(t, clock.Advance(2*time.Second))
-				contender, err := bDB.AcquireEmbeddedOwner(ctx, binding, "third-contender", time.Second)
-				require.NoError(t, err)
-				require.Greater(t, contender, old)
-				time.Sleep(1200 * time.Millisecond) // B's first timer must observe the third claim, not steal it.
-				require.Equal(t, contender, inspectManagedOwnerBinding(t, path, binding).OwnerToken)
+				require.NoError(t, b.RecoverEmbeddedRoots(ctx))
+				time.Sleep(100 * time.Millisecond)
 				require.Zero(t, calls.Load())
-				require.NoError(t, clock.Advance(2*time.Second))
-				require.Eventually(t, func() bool { return inspectManagedOwnerBinding(t, path, binding).OwnerToken > contender }, 3*time.Second, 20*time.Millisecond)
-				require.EqualValues(t, 1, calls.Load())
+				return
+			case "third-contender":
+				require.NoError(t, b.RecoverEmbeddedRoots(ctx))
+				require.Eventually(t, func() bool { return calls.Load() == 1 }, 3*time.Second, 20*time.Millisecond)
 				return
 			}
-			require.NoError(t, clock.Advance(3*time.Second))
-			time.Sleep(1200 * time.Millisecond)
-			require.Equal(t, old, inspectManagedOwnerBinding(t, path, binding).OwnerToken)
-			require.Zero(t, calls.Load())
 		})
 	}
 }

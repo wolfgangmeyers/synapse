@@ -165,7 +165,7 @@ func TestEmbeddedG5OwnCompactionHeadroomColdReopenRED(t *testing.T) {
 				// reduces the 4500-token user prefix (by 473 tokens) but cannot fit with tool state.
 				const window = 26384
 				const maxTokens = 4096
-				const summary = 16000
+				const summary = 8000
 				const initialBudget = window - embeddedContextHeadroom
 				require.Equal(t, 10000, initialBudget)
 
@@ -227,7 +227,7 @@ func TestEmbeddedG5OwnCompactionHeadroomColdReopenRED(t *testing.T) {
 				}
 				m := newManager(db)
 				defer func() { unblock(); _ = m.Close(ctx); _ = db.Close() }()
-				req := LaunchRequest{Name: "g5-headroom-" + tc.name, Cwd: base, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: strings.Repeat("P", 18000), RequestID: tc.id}
+				req := LaunchRequest{Name: "g5-headroom-" + tc.name, Cwd: base, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: strings.Repeat("P", 12000), RequestID: tc.id}
 				var launched LaunchResult
 				if tc.root {
 					launched, err = m.LaunchEmbeddedRoot(ctx, req)

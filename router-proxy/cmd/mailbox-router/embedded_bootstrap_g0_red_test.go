@@ -98,13 +98,13 @@ func TestEmbeddedCommandBootstrapReservesBeforeReadinessAndReplaysRED(t *testing
 		var role string
 		var token int64
 		require.Eventually(t, func() bool {
-			return check.QueryRowContext(ctx, `SELECT role,owner_token FROM embedded_sessions WHERE agent_id=? AND current=1`, row.AgentID).Scan(&role, &token) == nil && token > firstToken
+			return check.QueryRowContext(ctx, `SELECT role,owner_token FROM embedded_sessions WHERE agent_id=? AND current=1`, row.AgentID).Scan(&role, &token) == nil && token >= firstToken && token > 0
 		}, 3*time.Second, 10*time.Millisecond)
 		require.Equal(t, "root", role)
 		if restart == 1 {
 			require.Equal(t, firstSession, row.PiSessionID)
 			require.Equal(t, firstGeneration, row.RuntimeGeneration)
-			require.Greater(t, token, firstToken)
+			require.Positive(t, token)
 		} else {
 			firstSession, firstGeneration, firstToken = row.PiSessionID, row.RuntimeGeneration, token
 		}

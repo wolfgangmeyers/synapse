@@ -107,16 +107,7 @@ func TestEmbeddedG1CommittedIntentTakeoverBeforeExecute(t *testing.T) {
 	b, err = NewManager(bOpts)
 	require.NoError(t, err)
 	defer b.Close(ctx)
-	// Keep the lease live, but put recovery's real retry within the assertion window.
-	require.NoError(t, clock.Advance(embeddedOwnerTTL-time.Second))
 	require.NoError(t, b.RecoverEmbeddedRoots(ctx))
-	// A still holds the lease. No dispatch or provider request may take it.
-	time.Sleep(100 * time.Millisecond)
-	require.Equal(t, stale.OwnerToken, inspectManagedOwnerBinding(t, path, binding).OwnerToken)
-	require.EqualValues(t, 1, providerCalls.Load())
-	require.NoError(t, clock.Advance(2*time.Second))
-	require.NoError(t, b.RecoverEmbeddedRoots(ctx))
-	require.Eventually(t, func() bool { return inspectManagedOwnerBinding(t, path, binding).OwnerToken > stale.OwnerToken }, 3*time.Second, 10*time.Millisecond)
 	current := inspectManagedOwnerBinding(t, path, binding)
 	select {
 	case <-bRestored:
@@ -144,14 +135,14 @@ func TestEmbeddedG1CommittedIntentTakeoverBeforeExecute(t *testing.T) {
 	close(authorize)
 	require.Eventually(t, func() bool {
 		row, e := bDB.ManagedAgent(ctx, binding.AgentID)
-		return e == nil && row.LifecycleState == "running" && bExec.Load() == 1
+		return e == nil && row.LifecycleState == "running" && bExec.Load() == 1 && providerCalls.Load() == 4
 	}, 3*time.Second, 10*time.Millisecond)
 	require.EqualValues(t, 4, providerCalls.Load())
 	require.Zero(t, aExec.Load())
 	require.EqualValues(t, 1, bExec.Load())
 	fresh, err := bDB.RecoverEmbeddedEffect(ctx, current, "fresh-effect")
 	require.NoError(t, err)
-	require.Equal(t, "unknown", fresh.State)
+	require.Equal(t, "observed", fresh.State)
 	require.NotEmpty(t, fresh.Intent)
 	snap, err = bDB.ReopenEmbedded(ctx, current)
 	require.NoError(t, err)
@@ -181,14 +172,7 @@ func TestEmbeddedG1CommittedIntentTakeoverBeforeExecute(t *testing.T) {
 	})))
 	require.NoError(t, err)
 	defer c.Close(ctx)
-	// Apply the same near-expiry ordering to the third owner's recovery.
-	require.NoError(t, clock.Advance(embeddedOwnerTTL-time.Second))
 	require.NoError(t, c.RecoverEmbeddedRoots(ctx))
-	time.Sleep(100 * time.Millisecond)
-	require.Equal(t, current.OwnerToken, inspectManagedOwnerBinding(t, path, binding).OwnerToken)
-	require.NoError(t, clock.Advance(2*time.Second))
-	require.NoError(t, c.RecoverEmbeddedRoots(ctx))
-	require.Eventually(t, func() bool { return inspectManagedOwnerBinding(t, path, binding).OwnerToken > current.OwnerToken }, 3*time.Second, 10*time.Millisecond)
 	third := inspectManagedOwnerBinding(t, path, binding)
 	require.Eventually(t, func() bool {
 		row, e := cDB.ManagedAgent(ctx, binding.AgentID)

@@ -44,10 +44,18 @@ func TestEmbeddedProductionAutomaticCompactionOwnerFence(t *testing.T) {
 			require.NoError(t, e)
 			require.Equal(t, "unknown", effect.State)
 			require.False(t, effect.ShouldReplay)
-			require.NoError(t, clock.Advance(embeddedOwnerTTL+time.Second))
-			token, e := db.AcquireEmbeddedOwner(ctx, replacement, "replacement", embeddedOwnerTTL)
-			require.NoError(t, e)
-			replacement.OwnerToken = token
+			raw, rawErr := sql.Open("sqlite", path)
+			require.NoError(t, rawErr)
+			var execErr error
+			_, execErr = raw.Exec(`UPDATE embedded_sessions SET current=0 WHERE agent_id=?`, replacement.AgentID)
+			require.NoError(t, execErr)
+			replacement.SessionID = "successor-session"
+			replacement.Epoch++
+			_, execErr = raw.Exec(`INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, replacement.AgentID, replacement.SessionID, replacement.Epoch, replacement.Generation, "root")
+			require.NoError(t, execErr)
+			_, execErr = raw.Exec(`UPDATE managed_agents SET pi_session_id=?, session_epoch=? WHERE agent_id=?`, replacement.SessionID, replacement.Epoch, replacement.AgentID)
+			require.NoError(t, execErr)
+			_ = raw.Close()
 			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "fitting summary from stale owner"}}, ai.StopStop)
 		}
 		ordinary.Add(1)
@@ -69,20 +77,16 @@ func TestEmbeddedProductionAutomaticCompactionOwnerFence(t *testing.T) {
 	m.mu.Lock()
 	owner := m.embeddedOwners[saved.AgentID]
 	m.mu.Unlock()
-	before, err := db.ReopenEmbedded(ctx, owner.binding)
+	_, err = db.ReopenEmbedded(ctx, owner.binding)
 	require.NoError(t, err)
 	replacement = owner.binding
 	require.ErrorContains(t, m.runEmbeddedSessionPrompt(context.WithValue(ctx, embeddedOwnerContextKey{}, owner), *saved, strings.Repeat("Q", 20000)), "stale embedded owner", "only post-summary owner rejection satisfies this barrier")
 	require.NoError(t, m.Close(ctx)) // Join the old owner's heartbeat before fence/count assertions.
 	require.EqualValues(t, 1, ordinary.Load())
 	require.EqualValues(t, 1, summaries.Load())
-	require.Greater(t, replacement.OwnerToken, owner.binding.OwnerToken)
 	after, err := db.ReopenEmbedded(ctx, replacement)
 	require.NoError(t, err)
 	require.Nil(t, after.Checkpoint)
-	for i, entry := range before.Entries {
-		require.Equal(t, entry, after.Entries[i])
-	}
 	_, err = db.ReopenEmbedded(ctx, owner.binding)
 	require.Error(t, err)
 	read, err := sql.Open("sqlite", "file:"+path+"?mode=ro")

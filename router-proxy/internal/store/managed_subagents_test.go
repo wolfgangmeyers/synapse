@@ -302,10 +302,10 @@ func TestManagedSubagentTranscriptReadAfterReopenWithoutChildLease(t *testing.T)
 	reopened, err := Open(ctx, path, Options{})
 	require.NoError(t, err)
 	defer reopened.Close()
-	unowned := child
-	unowned.OwnerToken = 0
-	_, err = reopened.ReopenEmbedded(ctx, unowned)
-	require.Error(t, err, "the runtime reopen path still requires an owner")
+	staleChild := child
+	staleChild.Epoch++
+	_, err = reopened.ReopenEmbedded(ctx, staleChild)
+	require.Error(t, err, "stale session identity is rejected")
 	transcript, err := reopened.ManagedSubagentTranscript(ctx, parent, id)
 	require.NoError(t, err)
 	require.Len(t, transcript.Entries, 2)

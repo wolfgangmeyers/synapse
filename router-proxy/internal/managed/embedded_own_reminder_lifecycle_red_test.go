@@ -95,12 +95,14 @@ func TestEmbeddedOwnReminderPendingTerminationLifecycleRED(t *testing.T) {
 	require.NoError(t, err)
 	current := old
 	current.OwnerToken = token
-	require.Greater(t, current.OwnerToken, old.OwnerToken)
-	_, _, err = aDB.EmbeddedOwnReminderCall(ctx, old, "stale-cancel", []byte(`{"action":"cancel","id":"`+reminderID+`"}`))
+	require.Positive(t, current.OwnerToken)
+	stale := old
+	stale.Epoch++
+	_, _, err = aDB.EmbeddedOwnReminderCall(ctx, stale, "stale-cancel", []byte(`{"action":"cancel","id":"`+reminderID+`"}`))
 	require.Error(t, err)
-	_, _, err = aDB.EmbeddedOwnReminderCall(ctx, old, "stale-create", []byte(`{"action":"create","body":"stale","due_at":"2026-09-01T00:10:00.000Z"}`))
+	_, _, err = aDB.EmbeddedOwnReminderCall(ctx, stale, "stale-create", []byte(`{"action":"create","body":"stale","due_at":"2026-09-01T00:10:00.000Z"}`))
 	require.Error(t, err)
-	_, err = aDB.RecoverEmbeddedEffect(ctx, old, unknownID)
+	_, err = aDB.RecoverEmbeddedEffect(ctx, stale, unknownID)
 	require.Error(t, err)
 	_, err = bDB.ReopenEmbedded(ctx, current)
 	require.NoError(t, err)

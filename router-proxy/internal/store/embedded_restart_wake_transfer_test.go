@@ -36,7 +36,9 @@ func TestEmbeddedRestartWakeInterruptedPlannedTransfersAcrossProcessGenerations(
 				g, err := s.MintEmbeddedProcessGeneration(ctx, key)
 				require.NoError(t, err)
 				if previous != 0 {
-					_, err = s.ReserveEmbeddedRestartWake(ctx, oldOwner, g, notice.ID, "interrupted", "checked-projection")
+					staleOld := oldOwner
+					staleOld.Epoch++
+					_, err = s.ReserveEmbeddedRestartWake(ctx, staleOld, g, notice.ID, "interrupted", "checked-projection")
 					require.Error(t, err, "old owner cannot transfer the plan")
 					_, err = s.ReserveEmbeddedRestartWake(ctx, b, g, notice.ID, "interrupted", "different-projection")
 					require.Error(t, err, "different checked projection cannot transfer the plan")

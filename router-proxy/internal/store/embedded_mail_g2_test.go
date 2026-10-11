@@ -74,7 +74,7 @@ func TestEmbeddedMailStoreReservationAndAtomicACK(t *testing.T) {
 	duplicate, err := other.ReserveEmbeddedMail(ctx, b, "embedded-mail-g2")
 	require.NoError(t, err)
 	require.Equal(t, first, duplicate)
-	for _, wrong := range []EmbeddedBinding{{AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: "wrong", OwnerToken: b.OwnerToken}, {AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, OwnerToken: b.OwnerToken + 1}} {
+	for _, wrong := range []EmbeddedBinding{{AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: "wrong", OwnerToken: b.OwnerToken}, {AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch + 1, Generation: b.Generation, OwnerToken: b.OwnerToken}} {
 		require.Error(t, other.AppendEmbeddedMailAndACK(ctx, wrong, first.AttemptID, []byte(first.Body)))
 	}
 	for _, table := range []string{"embedded_entries", "embedded_acks", "embedded_append_keys"} {

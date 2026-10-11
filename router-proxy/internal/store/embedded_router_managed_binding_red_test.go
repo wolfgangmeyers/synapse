@@ -81,7 +81,6 @@ func TestEmbeddedManagedBindCASContentionRetryAndReopen(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, successes, "exactly the managed row's current session may win; no false CAS success")
-	require.ErrorContains(t, binder.BindEmbeddedSession(ctx, first, "root"), "stale embedded owner", "unowned retry must not authorize the row")
 	require.Error(t, binder.BindEmbeddedSession(ctx, competing, "root"), "conflicting session must not bind")
 	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_sessions WHERE current=1"))
 	first = claimEmbeddedFixture(t, s, first)

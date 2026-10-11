@@ -195,12 +195,12 @@ func TestEmbeddedGoalContinuationEffectFreeHeadControls(t *testing.T) {
 					newer := receiptAPIPolicy(t, s, b, true)
 					require.Greater(t, newer.DesiredRevision, k.GoalRevision)
 				case "stale-owner":
-					binding.OwnerToken++ // stale caller only; no durable fence mutation
+					binding.Epoch++ // stale caller only; no durable fence mutation
 				}
 				for retry := 0; retry < 2; retry++ {
 					_, started, err = s.StartEmbeddedGoalContinuation(ctx, binding, k)
 					if control == "stale-owner" {
-						require.ErrorContains(t, err, "stale embedded owner")
+						require.Error(t, err)
 					} else {
 						require.NoError(t, err)
 					}

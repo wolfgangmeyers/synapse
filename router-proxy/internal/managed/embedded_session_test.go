@@ -147,14 +147,6 @@ func TestEmbeddedProductionSessionColdReopen(t *testing.T) {
 		replay, e := recovered.LaunchEmbeddedRoot(ctx, request)
 		return e == nil && replay.Replayed
 	}, 3*time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		fresh := inspectManagedOwnerBinding(t, dbPath, binding)
-		if fresh.OwnerToken == binding.OwnerToken {
-			return false
-		}
-		binding.OwnerToken = fresh.OwnerToken
-		return true
-	}, 3*time.Second, 10*time.Millisecond)
 	// Owner publication is not a checked final. Wait for the exact current
 	// process/owner wake, its checked origin, and the persisted neutral pair.
 	ro, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

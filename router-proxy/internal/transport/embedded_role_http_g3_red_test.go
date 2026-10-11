@@ -11,6 +11,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
 	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
 )
@@ -84,6 +85,7 @@ func TestEmbeddedHTTPWorkerRoleReplayAndColdRestoreRED(t *testing.T) {
 		Config:                managed.Config{SessionRoot: filepath.Join(f.root, "sessions"), AllowedWorkingDirectoryRoots: []string{f.root}},
 		CatalogSource:         managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return f.model },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
 	})
 	require.NoError(t, err)
 	defer next.Close(ctx)
@@ -92,7 +94,7 @@ func TestEmbeddedHTTPWorkerRoleReplayAndColdRestoreRED(t *testing.T) {
 	for _, prior := range rows {
 		require.Eventually(t, func() bool {
 			role, token, e := readRole(check, prior.agent)
-			return e == nil && role == "worker" && token > prior.token
+			return e == nil && role == "worker" && token >= prior.token
 		}, 3*time.Second, 10*time.Millisecond, "cold recovery must claim the saved worker role")
 		row, e := reopened.ManagedAgent(ctx, prior.agent.AgentID)
 		require.NoError(t, e)

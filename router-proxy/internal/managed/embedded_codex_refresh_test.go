@@ -152,9 +152,10 @@ func TestEmbeddedCodexStaleOwnerCannotSendAfterRefresh(t *testing.T) {
 	}
 	require.Empty(t, requests, "SDK must not send before blocked refresh")
 	require.NoError(t, clock.Advance(embeddedOwnerTTL+time.Second))
-	token, err := bDB.AcquireEmbeddedOwner(ctx, owner.binding, "new-independent-owner", embeddedOwnerTTL)
-	require.NoError(t, err)
-	require.Greater(t, token, owner.binding.OwnerToken)
+	nextBinding := owner.binding
+	nextBinding.SessionID = "new-independent-session"
+	nextBinding.Epoch++
+	require.NoError(t, bDB.ResetEmbeddedSessionEpoch(ctx, owner.binding, nextBinding, "root"))
 	close(release)
 	select {
 	case <-runnerDone:
@@ -162,8 +163,7 @@ func TestEmbeddedCodexStaleOwnerCannotSendAfterRefresh(t *testing.T) {
 		t.Fatal("stale runner did not finish")
 	}
 	require.Empty(t, requests, "stale owner sent a provider request after takeover")
-	require.Equal(t, token, inspectManagedOwnerBinding(t, path, owner.binding).OwnerToken)
-	snap, err := bDB.ReopenEmbedded(ctx, store.EmbeddedBinding{AgentID: owner.binding.AgentID, SessionID: owner.binding.SessionID, Epoch: owner.binding.Epoch, Generation: owner.binding.Generation, OwnerToken: token})
+	snap, err := bDB.ReopenEmbedded(ctx, nextBinding)
 	require.NoError(t, err)
 	for _, entry := range snap.Entries {
 		require.NotEqual(t, "assistant", entry.Kind, "stale provider completion must not be persisted")

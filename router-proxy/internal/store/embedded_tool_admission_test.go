@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/sky-valley/pi/ai"
@@ -115,9 +114,7 @@ func TestEmbeddedAddressedToolAdmissionFenceInsideMailTransaction(t *testing.T) 
 			s, b, g, _, w, _ := addressedStoreInvocation(t)
 			switch change {
 			case "owner":
-				_, err := s.db.Exec(`UPDATE embedded_sessions SET owner_expires_at='2000-01-01T00:00:00.000Z' WHERE agent_id=?`, b.AgentID)
-				require.NoError(t, err)
-				_, err = s.AcquireEmbeddedOwner(ctx, b, "replacement-owner", time.Minute)
+				_, err := s.db.Exec(`UPDATE embedded_sessions SET current=0 WHERE agent_id=?`, b.AgentID)
 				require.NoError(t, err)
 			case "process":
 				_, err := s.MintEmbeddedProcessGeneration(ctx, "replacement-process")

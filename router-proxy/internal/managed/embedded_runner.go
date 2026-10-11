@@ -42,18 +42,7 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 		Generation: saved.RuntimeGeneration,
 	}
 	if ok && owner.binding.AgentID == agentID && owner.binding.SessionID == saved.PiSessionID && owner.binding.Epoch == saved.SessionEpoch && owner.binding.Generation == saved.RuntimeGeneration {
-		binding.OwnerToken = owner.binding.OwnerToken
-		if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err == nil {
-			return owner, nil
-		}
-		token, err := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
-		if err == nil {
-			owner.binding.OwnerToken = token
-			m.mu.Lock()
-			m.embeddedOwners[agentID] = owner
-			m.mu.Unlock()
-			return owner, nil
-		}
+		return owner, nil
 	}
 	ownerID, err := newEmbeddedOwnerIdentity()
 	if err != nil {
@@ -75,25 +64,8 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 }
 
 // refreshEmbeddedOwner refreshes the lease for an in-flight owner claim.
-// It is non-failing so long inferences never abort active turns.
+// Under Stage 2 lease elimination, this is a no-op.
 func (m *Manager) refreshEmbeddedOwner(ctx context.Context, owner *embeddedOwner) error {
-	if m.store == nil || owner == nil {
-		return nil
-	}
-	if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err == nil {
-		return nil
-	}
-	token, err := m.store.AcquireEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
-	if err != nil {
-		return nil
-	}
-	owner.binding.OwnerToken = token
-	m.mu.Lock()
-	if cur, ok := m.embeddedOwners[owner.binding.AgentID]; ok && cur.identity == owner.identity && cur.binding.Epoch == owner.binding.Epoch {
-		cur.binding.OwnerToken = token
-		m.embeddedOwners[owner.binding.AgentID] = cur
-	}
-	m.mu.Unlock()
 	return nil
 }
 
@@ -203,38 +175,12 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		if err != nil {
 			return
 		}
-		var token int64
-		for {
-			if m.runCtx.Err() != nil || !valid() {
-				return
-			}
-			token, err = m.store.AcquireEmbeddedOwner(m.runCtx, binding, ownerID, embeddedOwnerTTL)
-			if err == nil {
-				break
-			}
-			var held *store.EmbeddedOwnerLeaseHeld
-			if !recovered || !errors.As(err, &held) {
-				return
-			}
-			// One cancellable timer per saved agent. The persisted deadline is
-			// millisecond precision, so leave a small margin before competing.
-			wait := held.RetryAfter + 10*time.Millisecond
-			if wait < 10*time.Millisecond {
-				wait = 10 * time.Millisecond
-			}
-			if wait > embeddedOwnerTTL+time.Second {
-				wait = embeddedOwnerTTL + time.Second
-			}
-			lane.serial.Unlock()
-			timer := time.NewTimer(wait)
-			select {
-			case <-m.runCtx.Done():
-				timer.Stop()
-				lane.serial.Lock()
-				return
-			case <-timer.C:
-			}
-			lane.serial.Lock()
+		if m.runCtx.Err() != nil || !valid() {
+			return
+		}
+		token, err := m.store.AcquireEmbeddedOwner(m.runCtx, binding, ownerID, embeddedOwnerTTL)
+		if err != nil {
+			return
 		}
 		binding.OwnerToken = token
 		completed = true
@@ -387,8 +333,7 @@ func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
 		}
 
 		if agent.LifecycleState != "starting" && agent.LifecycleState != "running" {
-			_ = m.store.RestartFailedManagedAgent(ctx, agent.AgentID)
-			agent.LifecycleState = "running"
+			continue
 		}
 
 		opID := agent.LaunchOperationID
