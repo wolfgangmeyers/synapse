@@ -112,7 +112,7 @@ func TestEmbeddedSupportedResetClearsOldNoticeAndWake(t *testing.T) {
 	_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?,session_epoch=?,runtime_generation=? WHERE agent_id=?`, next.SessionID, next.Epoch, next.Generation, b.AgentID)
 	require.NoError(t, err)
 	stale := b
-	stale.OwnerToken++
+	stale.Epoch++
 	require.Error(t, s.ResetEmbeddedSession(ctx, stale, next, "root"))
 	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_restart_wake_checked_origins"))
 	require.NoError(t, s.ResetEmbeddedSession(ctx, b, next, "root"))

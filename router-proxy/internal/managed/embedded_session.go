@@ -474,7 +474,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" {
-			if result.ToolName != "read" && result.ToolName != "write" && result.ToolName != "edit" && result.ToolName != "mecha_reminder" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
+			if result.ToolName != "read" && result.ToolName != "write" && result.ToolName != "edit" && result.ToolName != "mecha_reminder" && result.ToolName != "mecha_context" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
 				body, err := json.Marshal(result)
 				if err == nil {
 					_ = p.db.ObserveEmbeddedEffect(ctx, p.binding, result.ToolCallID, body)
@@ -647,9 +647,7 @@ type embeddedOwnerSendDoer struct {
 
 func (d embeddedOwnerSendDoer) Do(req *http.Request) (*http.Response, error) {
 	if err := d.store.RenewEmbeddedOwner(req.Context(), d.binding, d.identity, embeddedOwnerTTL); err != nil {
-		if token, acqErr := d.store.AcquireEmbeddedOwner(req.Context(), d.binding, d.identity, embeddedOwnerTTL); acqErr == nil {
-			d.binding.OwnerToken = token
-		}
+		return nil, errors.New("embedded owner unavailable before provider send")
 	}
 	// Count only sends that crossed the owner fence, including the one possible
 	// SDK 401 rotation. Nil observers incur no telemetry or stored trace.
@@ -777,19 +775,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, errors.New("embedded runner requires claimed owner")
 	}
 	binding := owner.binding
-	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-		token, acqErr := m.store.AcquireEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
-		if acqErr == nil {
-			binding.OwnerToken = token
-			owner.binding.OwnerToken = token
-			m.mu.Lock()
-			if existing, ok := m.embeddedOwners[saved.AgentID]; ok && existing.identity == owner.identity && existing.binding.Epoch == owner.binding.Epoch {
-				existing.binding.OwnerToken = token
-				m.embeddedOwners[saved.AgentID] = existing
-			}
-			m.mu.Unlock()
-		}
-	}
+	_ = m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
 	source := "prompt"
 	msgID := ""
 	if mail != nil {
@@ -1161,9 +1147,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			original := tool.Execute
 			tool.Execute = func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 				if err := m.store.RenewEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-					if token, acqErr := m.store.AcquireEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
-						owner.binding.OwnerToken = token
-					}
+					return agent.AgentToolResult{}, err
 				}
 				role, err := m.store.EmbeddedSessionRole(callCtx, owner.binding)
 				if err != nil {
@@ -1204,9 +1188,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			// The checked SDK admission commits intent before this point. Renew
 			// again at the final boundary: failure cannot authorize Execute.
 			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-				if token, acqErr := m.store.AcquireEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
-					binding.OwnerToken = token
-				}
+				return agent.AgentToolResult{}, err
 			}
 			return original(callCtx, id, args, update)
 		}
@@ -1238,10 +1220,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			p.noticeStart = false
 		}
 		if err := m.store.RenewEmbeddedOwner(requestCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-			if token, acqErr := m.store.AcquireEmbeddedOwner(requestCtx, binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
-				binding.OwnerToken = token
-				owner.binding.OwnerToken = token
-			}
+			return fail(err)
 		}
 		auxiliary, _ := requestCtx.Value(embeddedAuxiliaryRequestKey{}).(bool)
 		if !auxiliary && (requestModel == nil || requestModel.ContextWindow <= embeddedContextHeadroom || embeddedProjectedTokens(transcript.Messages) > requestModel.ContextWindow-embeddedContextHeadroom) {
@@ -1644,7 +1623,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	}
 	var recoveryNotice *store.EmbeddedInterruptedNotice
 	var resumeUnentered bool
-	if wake == nil && mail == nil && explicitPrompt == "" && continuation == nil && binding.OwnerToken > 1 {
+	if wake == nil && mail == nil && explicitPrompt == "" && continuation == nil {
 		snap, err := m.store.ReopenEmbedded(ctx, binding)
 		if err != nil {
 			return 0, err
@@ -1766,7 +1745,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	// user prompt is still due. Once a user is durable, never silently
 	// reissue a provider request after an ambiguous interruption.
 	if mail != nil {
-		if mail.Binding.AgentID != binding.AgentID || mail.Binding.SessionID != binding.SessionID || mail.Binding.Epoch != binding.Epoch || mail.Binding.Generation != binding.Generation || mail.Binding.OwnerToken != binding.OwnerToken {
+		if mail.Binding.AgentID != binding.AgentID || mail.Binding.SessionID != binding.SessionID || mail.Binding.Epoch != binding.Epoch || mail.Binding.Generation != binding.Generation {
 			return 0, errors.New("embedded mail owner mismatch")
 		}
 		message, err := store.EmbeddedMailUserMessage(mail, m.clock.Now().UnixMilli())

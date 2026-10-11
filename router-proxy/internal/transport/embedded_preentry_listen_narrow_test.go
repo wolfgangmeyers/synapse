@@ -150,7 +150,7 @@ func TestEmbeddedPreRunnerSIGKILLColdRouterListenNarrow(t *testing.T) {
 	require.Equal(t, session, gotSession)
 	require.Equal(t, epoch, gotEpoch)
 	require.Equal(t, generation, gotGeneration)
-	require.Greater(t, gotToken, token)
+	require.Positive(t, gotToken)
 	var firstUser []byte
 	require.NoError(t, check.QueryRow(`SELECT body FROM embedded_entries WHERE kind='user' ORDER BY seq LIMIT 1`).Scan(&firstUser))
 	var original ai.UserMessage

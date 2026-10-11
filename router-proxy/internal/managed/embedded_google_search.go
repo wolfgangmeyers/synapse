@@ -58,9 +58,7 @@ func (m *Manager) embeddedGoogleSearchTool(owner embeddedOwner) agent.AgentTool 
 		Parameters:  embeddedGoogleSearchSchema(),
 		Execute: func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := m.store.RenewEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-				if token, acqErr := m.store.AcquireEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); acqErr == nil {
-					owner.binding.OwnerToken = token
-				}
+				return agent.AgentToolResult{}, err
 			}
 			role, err := m.store.EmbeddedSessionRole(callCtx, owner.binding)
 			if err != nil {

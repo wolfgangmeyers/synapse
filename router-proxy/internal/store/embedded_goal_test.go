@@ -77,9 +77,9 @@ func TestEmbeddedGoalCheckedSDKResult(t *testing.T) {
 	require.NoError(t, s.CheckEmbeddedGoalResult(ctx, b, "goal-result-id", payload))
 	require.Error(t, s.CheckEmbeddedGoalResult(ctx, other, "goal-result-id", payload))
 	require.Error(t, s.CheckEmbeddedGoalResult(ctx, b, "goal-result-id", []byte(`{}`)))
-	_, err = s.db.Exec(`UPDATE embedded_sessions SET owner_expires_at='2000-01-01T00:00:00Z' WHERE agent_id=?`, b.AgentID)
-	require.NoError(t, err)
-	require.ErrorContains(t, s.CheckEmbeddedGoalResult(ctx, b, "goal-result-id", payload), "stale embedded owner")
+	stale := b
+	stale.Epoch++
+	require.Error(t, s.CheckEmbeddedGoalResult(ctx, stale, "goal-result-id", payload))
 }
 
 func TestEmbeddedGoalResultFaultRollsBackPolicy(t *testing.T) {
@@ -102,7 +102,7 @@ func TestEmbeddedGoalFenceAndUnknownIntent(t *testing.T) {
 	s, _ := embeddedRedStore(t)
 	b := goalBind(t, s, "goal-owner", "session", 1, "gen", "worker")
 	cmd := EmbeddedGoalCommand{Action: "set", Goal: "one", Settings: DefaultManagedGoalSettings()}
-	_, _, err := s.ApplyEmbeddedGoalCall(ctx, EmbeddedBinding{AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation}, "unowned", cmd)
+	_, _, err := s.ApplyEmbeddedGoalCall(ctx, EmbeddedBinding{AgentID: b.AgentID, SessionID: "wrong-session", Epoch: b.Epoch, Generation: b.Generation}, "unowned", cmd)
 	require.Error(t, err)
 	_, err = s.db.Exec(`INSERT INTO embedded_goal_calls(call_id,agent_id,session_id,epoch,generation,role,action,args_json,state) VALUES(?,?,?,?,?,?,'set',?,'unknown')`, "uncertain", b.AgentID, b.SessionID, b.Epoch, b.Generation, "worker", `{"action":"set","goal":"one","settings":{"goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`)
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestEmbeddedGoalFenceAndUnknownIntent(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.db.Exec(`UPDATE embedded_goal_calls SET result_json='{}' WHERE call_id='good'`)
 	require.ErrorContains(t, err, "immutable")
-	_, err = s.db.Exec(`UPDATE embedded_sessions SET owner_expires_at='2000-01-01T00:00:00Z' WHERE agent_id=?`, b.AgentID)
+	_, err = s.db.Exec(`UPDATE embedded_sessions SET current=0 WHERE agent_id=?`, b.AgentID)
 	require.NoError(t, err)
 	_, _, err = s.ApplyEmbeddedGoalCall(ctx, b, "good", cmd)
 	require.ErrorContains(t, err, "stale embedded owner")

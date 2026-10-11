@@ -144,8 +144,10 @@ func TestEmbeddedGoalAppliedReceiptOffAndFences(t *testing.T) {
 	invalid.TurnEntrySeq = turn.Sequence + 1
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, b, invalid)
 	require.Error(t, err)
-	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, EmbeddedBinding{AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation}, args)
-	require.ErrorContains(t, err, "stale embedded owner")
+	wrongBinding := b
+	wrongBinding.Epoch++
+	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, wrongBinding, args)
+	require.Error(t, err)
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, b, args)
 	require.NoError(t, err)
 	var enabled int
@@ -164,7 +166,7 @@ func TestEmbeddedGoalAppliedReceiptOffAndFences(t *testing.T) {
 	wrongEpoch.Epoch++
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, wrongEpoch, stale)
 	require.Error(t, err, "old or invented epoch cannot apply")
-	_, err = s.db.Exec(`UPDATE embedded_sessions SET owner_expires_at='2000-01-01T00:00:00Z' WHERE agent_id=?`, b.AgentID)
+	_, err = s.db.Exec(`UPDATE embedded_sessions SET current=0 WHERE agent_id=?`, b.AgentID)
 	require.NoError(t, err)
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, b, stale)
 	require.ErrorContains(t, err, "stale embedded owner")

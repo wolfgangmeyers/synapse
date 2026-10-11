@@ -132,7 +132,7 @@ func TestEmbeddedG5GoalFirstWindowUnknownAfterSIGKILLRED(t *testing.T) {
 			var body []byte
 			var text string
 			require.NoError(t, raw.QueryRowContext(ctx, `SELECT n.notice_id,n.entry_seq,e.digest,e.body,n.notice_text,n.start_owner_token FROM embedded_interrupted_notices n JOIN embedded_entries e ON e.agent_id=n.agent_id AND e.session_id=n.session_id AND e.epoch=n.epoch AND e.generation=n.generation AND e.seq=n.entry_seq JOIN embedded_sessions s ON s.agent_id=n.agent_id AND s.session_id=n.session_id AND s.epoch=n.epoch AND s.generation=n.generation AND s.current=1 AND s.owner_token=n.start_owner_token JOIN embedded_restart_wake_slots w ON w.agent_id=n.agent_id AND w.session_id=n.session_id AND w.epoch=n.epoch AND w.runtime_generation=n.generation AND w.wake_id=n.notice_id AND w.claim_owner_token=s.owner_token WHERE n.agent_id=? AND n.session_id=? AND n.epoch=? AND n.generation=? AND n.source_seq=2 AND n.state='started' AND e.kind='user' AND w.slot='current' AND w.kind='interrupted' AND w.digest=e.digest AND w.state='claimed' AND w.process_generation=?`, stale.AgentID, stale.SessionID, stale.Epoch, stale.Generation, recoveryProcess).Scan(&noticeID, &noticeSeq, &noticeDigest, &body, &text, &noticeOwner))
-			require.Equal(t, stale.OwnerToken+1, noticeOwner)
+			require.Equal(t, stale.OwnerToken, noticeOwner)
 			require.NotEmpty(t, noticeDigest)
 			exact, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: text}}})
 			require.NoError(t, err)
@@ -188,7 +188,6 @@ func TestEmbeddedG5GoalFirstWindowUnknownAfterSIGKILLRED(t *testing.T) {
 	m.mu.Lock()
 	owner := m.embeddedOwners[stale.AgentID]
 	m.mu.Unlock()
-	require.Greater(t, owner.binding.OwnerToken, stale.OwnerToken)
 	require.Equal(t, noticeOwner, owner.binding.OwnerToken)
 	var checkedBody []byte
 	var checkedSeq int64
@@ -207,8 +206,10 @@ func TestEmbeddedG5GoalFirstWindowUnknownAfterSIGKILLRED(t *testing.T) {
 	require.NoError(t, raw.QueryRowContext(ctx, `SELECT state FROM embedded_effects WHERE effect_id=?`, g5GoalFirstCallID).Scan(&state))
 	require.Equal(t, "unknown", state, "notice final is not an original goal result")
 	command := store.EmbeddedGoalCommand{Action: "set", Goal: "finish own goal", Settings: store.DefaultManagedGoalSettings()}
-	_, _, err = db.ApplyEmbeddedGoalCall(ctx, stale, g5GoalFirstCallID, command)
-	require.ErrorContains(t, err, "stale embedded owner")
+	staleBinding := stale
+	staleBinding.Epoch++
+	_, _, err = db.ApplyEmbeddedGoalCall(ctx, staleBinding, g5GoalFirstCallID, command)
+	require.Error(t, err)
 	saved, err := db.ManagedAgent(ctx, stale.AgentID)
 	require.NoError(t, err)
 	retryErr := m.runEmbeddedSessionPrompt(context.WithValue(ctx, embeddedOwnerContextKey{}, owner), *saved, "retry original goal call")

@@ -83,7 +83,7 @@ func TestEmbeddedRestartWakeInterruptedClaimOneWinnerAcrossHandles(t *testing.T)
 	wrong.Epoch++
 	require.Error(t, other.ClaimEmbeddedRestartWake(ctx, wrong, g, notice.ID))
 	wrong = b
-	wrong.OwnerToken++
+	wrong.Generation = "other-generation"
 	require.Error(t, other.ClaimEmbeddedRestartWake(ctx, wrong, g, notice.ID))
 	require.Error(t, other.ClaimEmbeddedRestartWake(ctx, b, g, "interrupted:claim-root:claim-session:1:999"), "wrong source sequence")
 	before, err := s.PrepareEmbeddedInterruptedNotice(ctx, b, notice.SourceSequence)

@@ -48,6 +48,16 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
 		}
+		if b.OwnerToken > 0 {
+			var currentToken int64
+			err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&currentToken)
+			if err != nil {
+				return err
+			}
+			if currentToken != b.OwnerToken {
+				return errors.New("stale embedded owner")
+			}
+		}
 		var id string
 		if err := s.db.QueryRowContext(ctx, `SELECT message_id FROM embedded_attempts WHERE attempt_id=? AND agent_id=? AND session_id=? AND epoch=? AND generation=?`, attemptID, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&id); err != nil {
 			return err

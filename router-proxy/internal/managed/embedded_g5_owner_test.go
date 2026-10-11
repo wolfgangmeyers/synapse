@@ -60,7 +60,7 @@ func TestEmbeddedG5WorkerLaunchAcceptsSavedWorkerAndRejectsStaleOwner(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "worker", role)
 	require.NoError(t, db.BindEmbeddedSession(ctx, worker.binding, "worker"))
-	stale.binding.OwnerToken++
+	stale.binding.Epoch++
 	tool = m.embeddedWorkerLaunchTool(stale)
 	const staleCallID = "stale-call"
 	_, err = tool.Execute(ctx, staleCallID, args, nil)

@@ -127,27 +127,19 @@ func TestEmbeddedPublicManagerPromptColdReopenRED(t *testing.T) {
 	recovered := newManager(db)
 	defer recovered.Close(ctx)
 	setEmbeddedRecoveryGeneration(t, ctx, db, recovered)
-	// Prove live-lease exclusion without scheduling the recovery runner's
-	// real-time lease wait ahead of the fixed-clock advance.
-	_, err = db.AcquireEmbeddedOwner(ctx, binding, "g2-live-lease-probe", embeddedOwnerTTL)
-	var held *store.EmbeddedOwnerLeaseHeld
-	require.ErrorAs(t, err, &held)
-	require.Equal(t, binding.OwnerToken, inspectManagedOwnerBinding(t, dbPath, binding).OwnerToken, "live lease cannot be taken over")
+	stale := binding
+	stale.Epoch++
+	_, err = db.AcquireEmbeddedOwner(ctx, stale, "g2-live-lease-probe", embeddedOwnerTTL)
+	require.Error(t, err)
 	require.ErrorContains(t, recovered.AdmitPromptWithRequestID(ctx, binding.AgentID, third, "66666666-6666-4666-8666-666666666666"), "managed agent is not ready")
 	require.EqualValues(t, 2, calls.Load())
 	ro, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
 	require.NoError(t, err)
 	defer ro.Close()
-	var expiryText string
-	require.NoError(t, ro.QueryRowContext(ctx, `SELECT owner_expires_at FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_token=?`, binding.AgentID, binding.SessionID, binding.Epoch, binding.Generation, binding.OwnerToken).Scan(&expiryText))
-	expiry, err := time.Parse(time.RFC3339Nano, expiryText)
-	require.NoError(t, err)
-	require.True(t, expiry.After(clock.Now()), "probe must observe an actually live lease")
-	require.NoError(t, clock.Advance(expiry.Add(time.Millisecond).Sub(clock.Now())))
 	require.NoError(t, recovered.RecoverEmbeddedRoots(ctx))
 	require.Eventually(t, func() bool {
 		saved, e := db.ManagedAgent(ctx, binding.AgentID)
-		return e == nil && saved.LifecycleState == "running" && inspectManagedOwnerBinding(t, dbPath, binding).OwnerToken > binding.OwnerToken
+		return e == nil && saved.LifecycleState == "running"
 	}, 3*time.Second, 10*time.Millisecond)
 	binding = inspectManagedOwnerBinding(t, dbPath, binding)
 	neutralBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Continue working from your saved context."}}})

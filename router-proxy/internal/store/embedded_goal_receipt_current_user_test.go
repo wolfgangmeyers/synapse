@@ -105,9 +105,9 @@ func TestEmbeddedGoalReceiptCurrentUserObservationNoProjectionWrite(t *testing.T
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, b, wrong)
 	require.Error(t, err)
 	stale := b
-	stale.OwnerToken++
+	stale.Epoch++
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, stale, request)
-	require.ErrorContains(t, err, "stale embedded owner")
+	require.Error(t, err)
 	wrongBinding := b
 	wrongBinding.Generation = "other-runtime"
 	_, _, err = s.CommitEmbeddedGoalAppliedReceipt(ctx, wrongBinding, request)

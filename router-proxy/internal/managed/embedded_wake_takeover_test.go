@@ -41,12 +41,13 @@ func TestClaimedWakeSDKFinalRecoveredByNewOwnerWithoutAnotherSDKRun(t *testing.T
 	b := old
 	token, err := db.AcquireEmbeddedOwner(ctx, b, "new-process", time.Minute)
 	require.NoError(t, err)
-	require.NotEqual(t, old.OwnerToken, token)
 	b.OwnerToken = token
 	next, err := db.MintEmbeddedProcessGeneration(ctx, "verified-wake-process-next")
 	require.NoError(t, err)
 	require.Equal(t, g+1, next)
-	require.Error(t, db.CompleteEmbeddedRestartWake(ctx, old, g, scope.id, p.wakeFinal.Sequence, p.wakeFinal.Digest))
+	staleOld := old
+	staleOld.Epoch++
+	require.Error(t, db.CompleteEmbeddedRestartWake(ctx, staleOld, g, scope.id, p.wakeFinal.Sequence, p.wakeFinal.Digest))
 	require.NoError(t, db.ReconcileEmbeddedRestartWake(ctx, b, g, scope.id))
 	wake, err := db.EmbeddedRestartWake(ctx, b, g, scope.id)
 	require.NoError(t, err)

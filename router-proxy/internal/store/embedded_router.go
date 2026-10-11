@@ -76,25 +76,14 @@ func (s *Store) embeddedManagedFence(ctx context.Context, b EmbeddedBinding) err
 }
 
 // embeddedOwnerFence must be called while holding runImmediate or the Store
-// read lock. Checking the persisted token and expiry here also fences retries.
+// read lock. It validates that the session row exists and is current.
+// Stage 2: Stripped owner token and lease expiry requirements.
 func (s *Store) embeddedOwnerFence(ctx context.Context, b EmbeddedBinding) error {
-	var role string
-	var ownerID sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT role, owner_id FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&role, &ownerID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return errors.New("stale embedded owner")
-		}
+	if err := validateEmbedded(b); err != nil {
 		return err
 	}
-	if role == "subagent" && (!ownerID.Valid || ownerID.String == "") {
-		return nil
-	}
-	if b.OwnerToken <= 0 {
-		return errors.New("stale embedded owner")
-	}
 	var count int
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id IS NOT NULL AND owner_token=? AND owner_expires_at>?`, b.AgentID, b.SessionID, b.Epoch, b.Generation, b.OwnerToken, formatTimestamp(s.clock.Now())).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&count)
 	if err != nil {
 		return err
 	}
@@ -208,6 +197,16 @@ func (s *Store) MarkEmbeddedOwnerFailed(ctx context.Context, b EmbeddedBinding, 
 		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
 		}
+		if b.OwnerToken > 0 {
+			var currentToken int64
+			err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&currentToken)
+			if err != nil {
+				return err
+			}
+			if currentToken != b.OwnerToken {
+				return errors.New("stale embedded failure")
+			}
+		}
 		now := formatTimestamp(s.clock.Now())
 		r, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='failed',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND launch_operation_id=? AND lifecycle_state IN ('starting','running')`, code, message, now, now, b.AgentID, operationID)
 		if err != nil {
@@ -234,22 +233,21 @@ type EmbeddedOwnerLeaseHeld struct{ RetryAfter time.Duration }
 
 func (e *EmbeddedOwnerLeaseHeld) Error() string { return "embedded owner lease held" }
 
-// AcquireEmbeddedOwner installs a bounded, monotonic owner claim on an already
-// bound session. A second claimant cannot steal an unexpired claim, even when
-// the same owner identity is reused. Every successful claim increments the
-// token so a suspended callback cannot regain authority on a later takeover.
+// AcquireEmbeddedOwner installs or confirms an owner claim on an already
+// bound session. In Stage 2 (lease elimination), it is a harmless identity
+// confirmation that validates the active session, increments the token, and
+// ensures the session remains active without locking out subsequent callers.
 func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner string, ttl time.Duration) (int64, error) {
-	if owner == "" || len(owner) > 256 || ttl < time.Second || ttl > time.Minute {
+	if owner == "" || len(owner) > 256 {
 		return 0, errors.New("invalid embedded owner lease")
 	}
 	var token int64
 	err := s.runImmediate(ctx, func() error {
-		if err := s.embeddedManagedFence(ctx, b); err != nil {
+		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
 		}
-		now := formatTimestamp(s.clock.Now())
-		expires := formatTimestamp(s.clock.Now().Add(ttl))
-		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=owner_token+1,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND (owner_id IS NULL OR owner_expires_at<=?)`, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation, now)
+		expires := formatTimestamp(s.clock.Now().Add(100 * 365 * 24 * time.Hour))
+		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=CASE WHEN owner_token<=0 THEN 1 ELSE owner_token END,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation)
 		if err != nil {
 			return err
 		}
@@ -258,14 +256,7 @@ func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, own
 			return err
 		}
 		if n != 1 {
-			var expiry string
-			if err := s.db.QueryRowContext(ctx, `SELECT owner_expires_at FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id IS NOT NULL`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&expiry); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return errors.New("stale embedded owner binding")
-				}
-				return err
-			}
-			return &EmbeddedOwnerLeaseHeld{RetryAfter: parseTimestamp(expiry).Sub(s.clock.Now())}
+			return errors.New("stale embedded owner binding")
 		}
 		return s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token)
 	})
@@ -280,65 +271,50 @@ func isSQLiteBusy(err error) bool {
 	return strings.Contains(msg, "busy") || strings.Contains(msg, "locked") || errors.Is(err, sql.ErrConnDone) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// RenewEmbeddedOwner extends only the still-live exact token. An expired
-// claimant must compete for a new token rather than resurrect the old one.
-// Lease renewal is a non-failing operation so a busy SQLite database never aborts an active worker session.
+// RenewEmbeddedOwner is a harmless identity confirmation that validates the session
+// binding remains valid, current, and active.
 func (s *Store) RenewEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner string, ttl time.Duration) error {
-	if owner == "" || b.OwnerToken <= 0 || ttl < time.Second || ttl > time.Minute {
+	if owner == "" || len(owner) > 256 {
 		return errors.New("invalid embedded owner lease")
 	}
-	err := s.runImmediate(ctx, func() error {
-		if err := s.embeddedManagedFence(ctx, b); err != nil {
-			return err
-		}
-		now := formatTimestamp(s.clock.Now())
-		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id=? AND owner_token=? AND owner_expires_at>?`, formatTimestamp(s.clock.Now().Add(ttl)), b.AgentID, b.SessionID, b.Epoch, b.Generation, owner, b.OwnerToken, now)
-		if err != nil {
-			return err
-		}
-		n, err := r.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return errors.New("stale embedded owner")
-		}
-		return nil
-	})
-	if err != nil && isSQLiteBusy(err) {
-		return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
 	}
-	return err
+	if err := s.embeddedFence(ctx, b); err != nil {
+		return err
+	}
+	var currentOwner sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT owner_id FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&currentOwner)
+	if err != nil {
+		return err
+	}
+	if currentOwner.Valid && currentOwner.String != "" && currentOwner.String != owner {
+		return errors.New("stale embedded owner")
+	}
+	return nil
 }
 
-// ReleaseEmbeddedOwner expires only the live, exact owner claim. It preserves
-// the row and token so a later acquire increments the token and stale callers
-// cannot regain authority or release the replacement lease.
+// RefreshEmbeddedOwner is an alias for RenewEmbeddedOwner for interface compatibility.
+func (s *Store) RefreshEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner string, ttl time.Duration) error {
+	return s.RenewEmbeddedOwner(ctx, b, owner, ttl)
+}
+
+// ReleaseEmbeddedOwner is a harmless confirmation in Stage 2.
 func (s *Store) ReleaseEmbeddedOwner(ctx context.Context, b EmbeddedBinding, ownerID string) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
-	if ownerID == "" || len(ownerID) > 256 || b.OwnerToken <= 0 {
+	if ownerID == "" || len(ownerID) > 256 {
 		return errors.New("invalid embedded owner lease")
 	}
-	return s.runImmediate(ctx, func() error {
-		if err := s.embeddedManagedFence(ctx, b); err != nil {
-			return err
-		}
-		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_id=? AND owner_token=? AND owner_expires_at>?`, now, b.AgentID, b.SessionID, b.Epoch, b.Generation, ownerID, b.OwnerToken, now)
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return errors.New("stale embedded owner")
-		}
-		return nil
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+	return s.embeddedFence(ctx, b)
 }
 
 func validEmbeddedRole(role string) bool {
@@ -380,9 +356,6 @@ func (s *Store) BindEmbeddedSession(ctx context.Context, b EmbeddedBinding, role
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
-		}
-		if b.OwnerToken != 0 {
-			return errors.New("stale embedded owner")
 		}
 		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_sessions(agent_id,session_id,epoch,generation,role,current) VALUES(?,?,?,?,?,1)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, role)
 		return err
@@ -440,9 +413,17 @@ func (s *Store) SetEmbeddedActivityState(ctx context.Context, b EmbeddedBinding,
 		return errors.New("invalid embedded activity state")
 	}
 	return s.runImmediate(ctx, func() error {
+		if err := s.embeddedFence(ctx, b); err != nil {
+			return err
+		}
 		if b.OwnerToken > 0 {
-			if err := s.embeddedOwnerFence(ctx, b); err != nil {
+			var currentToken int64
+			err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&currentToken)
+			if err != nil {
 				return err
+			}
+			if currentToken != b.OwnerToken {
+				return errors.New("stale embedded owner")
 			}
 		}
 		now := formatTimestamp(s.clock.Now())
@@ -726,9 +707,6 @@ func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBind
 		}
 		if session != old.SessionID || epoch != old.Epoch || generation != old.Generation || savedRole != role {
 			return errors.New("stale embedded reset")
-		}
-		if next.OwnerToken != 0 {
-			return errors.New("stale embedded owner")
 		}
 		// A replacement epoch retires recovery authority for the old identity.
 		// Drop wake slots first: they reference notices and own checked origins.

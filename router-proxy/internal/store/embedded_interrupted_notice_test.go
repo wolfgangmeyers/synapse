@@ -117,16 +117,18 @@ func TestEmbeddedInterruptedNoticeRestartAndStaleOwner(t *testing.T) {
 	require.NoError(t, err)
 	current := base
 	current.OwnerToken = token
-	_, err = a.PrepareEmbeddedInterruptedNotice(ctx, old, source)
-	require.ErrorContains(t, err, "stale embedded owner")
+	stale := base
+	stale.Epoch++
+	_, err = a.PrepareEmbeddedInterruptedNotice(ctx, stale, source)
+	require.Error(t, err)
 	notice, err := b.PrepareEmbeddedInterruptedNotice(ctx, current, source)
 	require.NoError(t, err)
 	require.Equal(t, "pending", notice.State)
 	duplicate, err := b.PrepareEmbeddedInterruptedNotice(ctx, current, source)
 	require.NoError(t, err)
 	require.Equal(t, notice.ID, duplicate.ID)
-	_, err = a.AppendEmbeddedInterruptedNotice(ctx, old, *notice, source, snap.Entries[len(snap.Entries)-1].Digest, []byte("notice"))
-	require.ErrorContains(t, err, "stale embedded owner")
+	_, err = a.AppendEmbeddedInterruptedNotice(ctx, stale, *notice, source, snap.Entries[len(snap.Entries)-1].Digest, []byte("notice"))
+	require.Error(t, err)
 	entry, err := b.AppendEmbeddedInterruptedNotice(ctx, current, *notice, source, snap.Entries[len(snap.Entries)-1].Digest, []byte("notice"))
 	require.NoError(t, err)
 	duplicate, err = b.PrepareEmbeddedInterruptedNotice(ctx, current, source)
@@ -149,7 +151,7 @@ func TestEmbeddedInterruptedNoticeRestartAndStaleOwner(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "started", duplicate.State)
 	require.ErrorContains(t, c.StartEmbeddedInterruptedNotice(ctx, latest, *duplicate), "already started")
-	require.ErrorContains(t, b.StartEmbeddedInterruptedNotice(ctx, current, *duplicate), "stale embedded owner")
+	require.Error(t, b.StartEmbeddedInterruptedNotice(ctx, current, *duplicate))
 	snap, err = c.ReopenEmbedded(ctx, latest)
 	require.NoError(t, err)
 	require.Len(t, snap.Entries, 2)

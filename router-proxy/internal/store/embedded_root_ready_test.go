@@ -56,7 +56,7 @@ func TestEmbeddedRootStartingBoundReadyCASAndCrashReopen(t *testing.T) {
 	require.NoError(t, fresh.db.QueryRow(`SELECT state FROM managed_http_operations WHERE operation_id=?`, op.OperationID).Scan(&operationState))
 	require.Equal(t, "pending", operationState)
 	staleOwner := b
-	staleOwner.OwnerToken--
+	staleOwner.Epoch++
 	require.Error(t, fresh.BindEmbeddedSession(ctx, staleOwner, "root"))
 	require.Error(t, fresh.ReadyEmbeddedRoot(ctx, staleOwner, op.OperationID))
 	require.Error(t, fresh.ReadyEmbeddedRoot(ctx, wrong, op.OperationID))

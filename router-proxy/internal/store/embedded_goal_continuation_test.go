@@ -79,7 +79,7 @@ func TestEmbeddedGoalContinuationDoneAndStartOnce(t *testing.T) {
 				return
 			}
 			stale := b
-			stale.OwnerToken++
+			stale.Epoch++
 			_, started, err := s.StartEmbeddedGoalContinuation(ctx, stale, k)
 			require.Error(t, err)
 			require.False(t, started)
@@ -125,7 +125,7 @@ func TestEmbeddedGoalContinuationReopenUnknownNeverReplays(t *testing.T) {
 	require.False(t, started)
 	require.Equal(t, "unknown", c.Disposition)
 	stale := b
-	stale.OwnerToken++
+	stale.Epoch++
 	_, started, err = s.StartEmbeddedGoalContinuation(ctx, stale, k)
 	require.Error(t, err)
 	require.False(t, started)

@@ -77,9 +77,9 @@ func TestEmbeddedOwnCompactionDeferredRequestFence(t *testing.T) {
 		require.NoError(t, err)
 		recovered := b
 		recovered.OwnerToken = token
-		_, err = s.RequestEmbeddedOwnCompaction(ctx, recovered, id+"-unknown", entry.Sequence, entry.Digest, true)
-		require.ErrorContains(t, err, "fresh")
-		_, err = s.RequestEmbeddedOwnCompaction(ctx, b, id+"-unknown", entry.Sequence, entry.Digest, true)
+		stale := b
+		stale.Epoch++
+		_, err = s.RequestEmbeddedOwnCompaction(ctx, stale, id+"-unknown", entry.Sequence, entry.Digest, true)
 		require.Error(t, err)
 	}
 }

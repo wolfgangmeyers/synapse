@@ -90,8 +90,10 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	if saved.LifecycleState != "running" || saved.DesiredState != "running" || !saved.AcceptingPrompts || !saved.SlotHeld {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
-	owner, err := m.ensureEmbeddedOwner(ctx, agentID, *saved)
-	if err != nil {
+	m.mu.Lock()
+	owner, ok := m.embeddedOwners[agentID]
+	m.mu.Unlock()
+	if !ok {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
 	replay, err := m.store.ReserveEmbeddedPrompt(ctx, owner.binding, requestID, message)

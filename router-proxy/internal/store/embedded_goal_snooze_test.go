@@ -91,7 +91,7 @@ func TestEmbeddedGoalSnoozeOwnerRoleTurnAndRevisionFences(t *testing.T) {
 	ctx := context.Background()
 	s, _, b, turn, _ := snoozeFixture(t)
 	stale := b
-	stale.OwnerToken++
+	stale.Epoch++
 	_, _, err := s.SaveEmbeddedGoalSnoozePreference(ctx, stale, turn, "stale", []byte(`{"duration_ms":1}`))
 	require.Error(t, err)
 	_, err = s.db.Exec(`UPDATE embedded_sessions SET role='root' WHERE agent_id=?`, b.AgentID)

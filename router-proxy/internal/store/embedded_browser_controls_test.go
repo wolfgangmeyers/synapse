@@ -74,7 +74,7 @@ func TestEmbeddedBrowserControlsRejectStaleOwnerAndPolicyCAS(t *testing.T) {
 	_, err := s.db.Exec(`INSERT INTO managed_readiness_sources(agent_id,desired_policy_canonical,desired_policy_sha256) VALUES(?,?,?)`, b.AgentID, previous.Canonical, previous.SHA256)
 	require.NoError(t, err)
 	stale := b
-	stale.OwnerToken++
+	stale.Epoch++
 	_, err = s.UpdateEmbeddedBrowserGoal(ctx, stale, ManagedGoalConfig{Enabled: true, Goal: "denied", Settings: DefaultManagedGoalSettings()}, browserOperation("stale-browser-goal"), browserGoalResponse)
 	require.Error(t, err)
 	require.Error(t, s.UpdateEmbeddedBrowserPolicy(ctx, stale, previous, previous, browserOperation("stale-browser-inline")))

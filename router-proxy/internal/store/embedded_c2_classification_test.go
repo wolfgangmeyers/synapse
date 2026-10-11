@@ -33,7 +33,6 @@ func TestEmbeddedC2ClassifiesSavedRolesAcrossIncarnations(t *testing.T) {
 	for i, key := range []string{"second", "third"} {
 		s, err = Open(ctx, path, Options{Clock: clock})
 		require.NoError(t, err)
-		old := []EmbeddedBinding{root, idle, active}
 		bindings := []*EmbeddedBinding{&root, &idle, &active}
 		for _, b := range bindings {
 			token, e := s.AcquireEmbeddedOwner(ctx, *b, key, time.Minute)
@@ -62,7 +61,9 @@ func TestEmbeddedC2ClassifiesSavedRolesAcrossIncarnations(t *testing.T) {
 				require.Equal(t, "appended", decision.Notice.State)
 				require.Equal(t, "interrupted:c2-active:active-session:1:1", decision.Notice.ID)
 			}
-			_, e = s.ClassifyEmbeddedRestart(ctx, old[j], gen)
+			stale := *b
+			stale.Epoch++
+			_, e = s.ClassifyEmbeddedRestart(ctx, stale, gen)
 			require.Error(t, e)
 		}
 		require.Zero(t, embeddedRedCount(t, s, "embedded_acks"))

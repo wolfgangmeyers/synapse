@@ -82,6 +82,10 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 		finalSeq, err := m.runEmbeddedMail(ctx, *saved, attempt)
 		if err != nil {
 			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", binding.AgentID, "mail", attempt.MessageID, err)
+			if strings.Contains(err.Error(), "Codex auth unavailable") {
+				m.failEmbeddedOwner(owner.binding, saved.LaunchOperationID, "EMBEDDED_MAIL_FAILED", err)
+				return
+			}
 			lane.mailAttempts[attempt.MessageID]++
 			attempts := lane.mailAttempts[attempt.MessageID]
 

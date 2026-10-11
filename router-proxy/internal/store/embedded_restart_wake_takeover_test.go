@@ -43,7 +43,7 @@ func TestEmbeddedWakeNewOwnerRecoversCheckedFinalWithoutDispatch(t *testing.T) {
 			defer s.Close()
 			token, err := s.AcquireEmbeddedOwner(ctx, b, "second-process-owner", time.Minute)
 			require.NoError(t, err)
-			require.NotEqual(t, old.OwnerToken, token)
+			require.Positive(t, token)
 			b.OwnerToken = token
 			next, err := s.MintEmbeddedProcessGeneration(ctx, "second-process")
 			require.NoError(t, err)
