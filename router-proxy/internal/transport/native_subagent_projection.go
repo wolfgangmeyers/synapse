@@ -23,7 +23,7 @@ func isStaleParentBinding(err error) bool {
 }
 
 func nativeSubagentBinding(agent *store.ManagedAgentRecord) (store.EmbeddedBinding, bool) {
-	if agent == nil || agent.Runtime != "embedded" || agent.PiSessionID == "" || agent.SessionEpoch <= 0 || agent.RuntimeGeneration == "" {
+	if agent == nil || agent.Runtime != "embedded" || agent.AgentID == "" {
 		return store.EmbeddedBinding{}, false
 	}
 	return store.EmbeddedBinding{

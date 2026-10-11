@@ -458,4 +458,51 @@ func TestManagedSubagentSettlementAndProgressSucceedWhenParentLeaseExpires(t *te
 	require.Equal(t, "completed successfully while parent idle", saved.ResultText)
 }
 
+func TestManagedSubagentsAcrossParentEpochReset(t *testing.T) {
+	ctx := context.Background()
+	s, _ := embeddedRedStore(t)
+	parent := subagentParent(t, s, "epoch-reset-parent")
+	require.Equal(t, int64(1), parent.Epoch)
+
+	child := ManagedSubagentRecord{
+		AgentID:       "subagent-epoch1-child",
+		ParentAgentID: parent.AgentID,
+		Description:   "launched in epoch 1",
+		SubagentType:  "general-purpose",
+		Status:        "queued",
+		MaxTurns:      5,
+	}
+	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
+
+	// Verify visible in epoch 1
+	children1, err := s.ManagedSubagents(ctx, parent)
+	require.NoError(t, err)
+	require.Len(t, children1, 1)
+	require.Equal(t, child.AgentID, children1[0].AgentID)
+
+	// Transition parent to epoch 2 (simulate context reset / restart)
+	parentEpoch2 := EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  parent.AgentID + "-session-epoch-2",
+		Epoch:      2,
+		Generation: parent.Generation,
+	}
+	require.NoError(t, s.ResetEmbeddedSessionEpoch(ctx, parent, parentEpoch2, "worker"))
+	parentEpoch2 = claimEmbeddedFixture(t, s, parentEpoch2)
+
+	// Verify child remains visible in ManagedSubagents when parent is queried in epoch 2
+	children2, err := s.ManagedSubagents(ctx, parentEpoch2)
+	require.NoError(t, err)
+	require.Len(t, children2, 1)
+	require.Equal(t, child.AgentID, children2[0].AgentID)
+	require.Equal(t, "subagent-epoch1-child", children2[0].AgentID)
+
+	// Also verify ManagedSubagent retrieves child in epoch 2
+	saved, err := s.ManagedSubagent(ctx, parentEpoch2, child.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, child.AgentID, saved.AgentID)
+	require.Equal(t, int64(1), saved.ParentEpoch)
+}
+
+
 
