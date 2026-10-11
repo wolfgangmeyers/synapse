@@ -151,6 +151,7 @@ func (m *Manager) finalizeQueuedTask(task *subagentTask, status, resultText stri
 			m.AsyncDeliverSubagentParentWake(task.parent, *latestRecord)
 		}
 	}
+	m.publishProjection()
 	m.resumeParentGoalIfIdle(task.parent)
 }
 
@@ -268,6 +269,7 @@ func (m *Manager) drainQueueLocked() {
 			m.finalizeQueuedTask(candidate, "stopped", "Subagent stopped on router close.")
 			return
 		}
+		m.publishProjection()
 	}
 }
 
@@ -404,10 +406,12 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 				m.finalizeQueuedTask(task, "stopped", "Subagent stopped on router close.")
 				return nil, errors.New("manager is closing")
 			}
+			m.publishProjection()
 			return &SubagentSpawnResult{AgentID: childID, Status: "running"}, nil
 		}
 
 		m.subagentsQueue = append(m.subagentsQueue, task)
+		m.publishProjection()
 		return &SubagentSpawnResult{AgentID: childID, Status: "queued"}, nil
 	}
 
@@ -470,10 +474,12 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 			m.finalizeQueuedTask(task, "stopped", "Subagent stopped on router close.")
 			return nil, errors.New("manager is closing")
 		}
+		m.publishProjection()
 		return &SubagentSpawnResult{AgentID: childID, Status: "running"}, nil
 	}
 
 	m.subagentsQueue = append(m.subagentsQueue, task)
+	m.publishProjection()
 	return &SubagentSpawnResult{AgentID: childID, Status: "queued"}, nil
 }
 
@@ -568,6 +574,7 @@ func (m *Manager) StopSubagent(ctx context.Context, parentAgentID, childID strin
 	}
 
 	m.recordSubagentCompletionHistory(targetParentID, childID, attempt, desc, "failed", "stopped", "", "Subagent stopped.")
+	m.publishProjection()
 	subject := fmt.Sprintf("[System Notice] Subagent Terminated: %s", childID)
 	body := fmt.Sprintf("Subagent %s (\"%s\") was stopped. You can fetch its latest state and findings using get_subagent_result(agent_id=\"%s\").\n\nAutomated system notification. No mailbox reply is needed or expected. Proceed directly with your next step.", childID, desc, childID)
 	source := protocol.MessageSource{Kind: "system"}
@@ -651,6 +658,7 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 		desc = strings.TrimSpace(latestRecord.Description)
 	}
 	m.recordSubagentCompletionHistory(task.parent.AgentID, task.childID, task.attempt, desc, outcome, terminalStatus, resultText, errorMsg)
+	m.publishProjection()
 
 	if err == nil && latestRecord != nil {
 		rec := *latestRecord

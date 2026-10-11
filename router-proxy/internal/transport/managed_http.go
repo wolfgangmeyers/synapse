@@ -1902,6 +1902,9 @@ func managedSubagentStopPath(path string) (string, string) {
 	middle := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), suffix)
 	parts := strings.Split(middle, "/subagents/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[0], "/") || strings.Contains(parts[1], "/") {
+		parts = strings.Split(middle, "/children/")
+	}
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[0], "/") || strings.Contains(parts[1], "/") {
 		return "", ""
 	}
 	return parts[0], parts[1]
@@ -1927,7 +1930,7 @@ func (r *Router) handleManagedSubagentStop(w http.ResponseWriter, req *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"ok": true}, nil)
 }
 
 type Handler struct {

@@ -245,6 +245,31 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
               // quiet history can be reloaded on next selection
             }
           }
+        } else {
+          const selected = stateRef.current.selectedPeer;
+          const peerId = selected
+            ? (selected.startsWith("router-managed:") ? selected.slice("router-managed:".length) : selected.startsWith("tmux:") ? selected.slice("tmux:".length) : selected)
+            : undefined;
+          const agentsToPoll = snapshot.agents.filter((agent) => {
+            if (agent.lifecycle_state === "terminating" || agent.desired_state === "terminated") return false;
+            if (peerId && agent.agent_id === peerId) return true;
+            if (agent.activity_state === "active") return true;
+            const existingChildren = stateRef.current.managedChildren[agent.agent_id]?.children ?? [];
+            return existingChildren.some((c) => c.status === "queued" || c.status === "running");
+          });
+          if (agentsToPoll.length > 0) {
+            try {
+              const childrenSettled = await Promise.allSettled(
+                agentsToPoll.map((agent) => transport.http.managedChildren(agent.agent_id))
+              );
+              const children = childrenSettled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+              if (active && children.length > 0) {
+                dispatch({ type: "managed/children", scope: currentScope, children });
+              }
+            } catch {
+              // child projection can be repaired on next pass
+            }
+          }
         }
       } catch {
         // Router startup or temporary blip

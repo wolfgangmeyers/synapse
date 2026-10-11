@@ -312,4 +312,79 @@ describe("Managed Agent Periodic Polling & Reconnect Reconciliation", () => {
     expect(result.current.state.managedHistory?.["agent-1"]?.complete?.[0]?.message).toBe("resynced timeline entry");
     expect(result.current.state.messagesByPeer["agent-1"]?.[0]?.body).toBe("hello from resynced agent");
   }, 2000);
+
+  it("polls /children for active or selected managed agent during periodic polling so subagent completion/stop is detected", async () => {
+    let childrenFetched = false;
+    let pollCount = 0;
+    let subagentStatus: "running" | "stopped" = "running";
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/capabilities")) {
+        return jsonResponse({ managed_v1: true, ui_live_v1: true });
+      }
+      if (url.endsWith("/v1/managed-agents/agent-1/children")) {
+        childrenFetched = true;
+        return jsonResponse({
+          agent_id: "agent-1",
+          source: "router-managed",
+          lifecycle_version: 1,
+          recovery_state: "current",
+          children: [
+            {
+              id: "sub-1",
+              status: subagentStatus,
+              sequence: 1,
+              parent_entry_id: "entry-1",
+              task_id: "task-1",
+              run_id: "run-1",
+              description: "Long workflow task",
+              recovery: { state: "confirmed", observed_at: "2030-01-01T00:00:00.000Z", cause: null },
+              compaction_state: "none",
+              compaction: { state: "idle", count: 0 },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/v1/managed-agents")) {
+        pollCount++;
+        return jsonResponse({
+          generated_at: "2030-01-01T00:00:00.000Z",
+          projection_version: 20 + pollCount,
+          agents: [baseAgent],
+        });
+      }
+      if (url.endsWith("/v1/agents")) {
+        return jsonResponse({ agents: [] });
+      }
+      return jsonResponse({});
+    });
+
+    const socket = new MockSocket();
+    const liveSocket = new MockSocket();
+    const wsFactory = () => socket;
+    const uiLiveWsFactory = () => liveSocket;
+
+    const { result } = renderHook(() =>
+      useRouterSession({
+        routerUrl: "http://router.test:4000",
+        agentId: "wolfgang",
+        fetchImpl: mockFetch as any,
+        webSocketFactory: wsFactory,
+        uiLiveWebSocketFactory: uiLiveWsFactory,
+      })
+    );
+
+    // Initial load: 1 subagent running
+    await waitFor(() => expect(result.current.state.managedChildren["agent-1"]?.children).toHaveLength(1));
+    expect(result.current.state.managedChildren["agent-1"]?.children[0]?.status).toBe("running");
+
+    // Subagent completes or is stopped on the backend
+    subagentStatus = "stopped";
+    childrenFetched = false;
+
+    // Wait for the periodic poll (which runs every 3s) to poll /children and update status
+    await waitFor(() => expect(result.current.state.managedChildren["agent-1"]?.children[0]?.status).toBe("stopped"), { timeout: 5000 });
+    expect(childrenFetched).toBe(true);
+  }, 10_000);
 });
