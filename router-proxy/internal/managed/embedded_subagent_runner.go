@@ -143,7 +143,9 @@ func (m *Manager) finalizeQueuedTask(task *subagentTask, status, resultText stri
 	}
 	m.subagentsMu.Unlock()
 
-	if err == nil {
+	if err != nil {
+		log.Printf("subagent %s settle error: %v", task.childID, err)
+	} else {
 		latestRecord, err := m.store.ManagedSubagent(context.Background(), task.parent, task.childID)
 		if err == nil && latestRecord != nil {
 			m.AsyncDeliverSubagentParentWake(task.parent, *latestRecord)
@@ -628,6 +630,7 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 	})
 	if err != nil {
 		// CAS failed or stale parent fence; fail closed: do not notify
+		log.Printf("subagent %s settle error: %v", task.childID, err)
 		return
 	}
 

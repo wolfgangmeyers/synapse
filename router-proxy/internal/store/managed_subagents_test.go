@@ -414,3 +414,48 @@ func TestTimeoutRunningSubagents_NoCheckConstraintFailure(t *testing.T) {
 	require.Equal(t, "interrupted", rec2.Error)
 }
 
+func TestManagedSubagentSettlementAndProgressSucceedWhenParentLeaseExpires(t *testing.T) {
+	ctx := context.Background()
+	s, _ := embeddedRedStore(t)
+	parent := subagentParent(t, s, "lease-expired-parent")
+	child := ManagedSubagentRecord{
+		AgentID:       "subagent-lease-expired-child",
+		ParentAgentID: parent.AgentID,
+		Description:   "runs while parent idle",
+		SubagentType:  "general-purpose",
+		Status:        "queued",
+		MaxTurns:      5,
+	}
+	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
+	require.NoError(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "queued", ManagedSubagentResult{Status: "running"}))
+
+	// Expire the parent's owner lease to simulate parent going idle for > 30 seconds
+	pastTime := formatTimestamp(s.clock.Now().Add(-1 * time.Hour))
+	_, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_expires_at=? WHERE agent_id=?`, pastTime, parent.AgentID)
+	require.NoError(t, err)
+
+	progressErr := s.UpdateManagedSubagentProgress(ctx, parent, child.AgentID, 1, ManagedSubagentProgress{
+		TurnCount:       1,
+		ToolUseCount:    2,
+		TotalTokens:     50,
+		DurationSeconds: 10.0,
+	})
+	require.NoError(t, progressErr)
+
+	settleErr := s.UpdateManagedSubagentAttempt(ctx, parent, child.AgentID, 1, "running", ManagedSubagentResult{
+		Status:          "completed",
+		TurnCount:       1,
+		ToolUseCount:    2,
+		TotalTokens:     50,
+		DurationSeconds: 10.0,
+		ResultText:      "completed successfully while parent idle",
+	})
+	require.NoError(t, settleErr)
+
+	saved, err := s.ManagedSubagent(ctx, parent, child.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "completed", saved.Status)
+	require.Equal(t, "completed successfully while parent idle", saved.ResultText)
+}
+
+
