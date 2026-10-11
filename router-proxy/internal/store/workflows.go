@@ -468,19 +468,10 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			return err
 		}
 
-		// Check name conflicts for new states and make unique names if needed, or keep uniqueness scoped
-		// Note: workflow_states table has a UNIQUE constraint on `name`.
-		// Let's generate state names: e.g., fmt.Sprintf("%s (copy)", st.Name) or suffix with a unique string if needed.
-		// If st.Name exists, find a unique name.
+		// State names are unique per workflow. In the new workflow (newWfID), original names can be preserved.
 		for _, st := range states {
 			newStateID := oldToNewID[st.ID]
 			candidateName := st.Name
-			var nameExists int
-			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_states WHERE name = ?`, candidateName).Scan(&nameExists)
-			if err == nil {
-				// Name exists, find a candidate
-				candidateName = fmt.Sprintf("%s-copy-%s", st.Name, newStateID[:8])
-			}
 
 			// Remap transitions
 			newTransitions := make([]WorkflowTransitionConfig, 0, len(st.Transitions))
