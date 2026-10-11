@@ -7,7 +7,7 @@ import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
-import type { WorkflowState, WorkflowStateResponse, WorkflowStatesResponse } from "../domain/workflow-states";
+import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowWithStates } from "../domain/workflow-states";
 import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
@@ -385,6 +385,13 @@ export interface RouterHttpClient {
   createWorkflowState(payload: unknown): Promise<WorkflowStateResponse>;
   updateWorkflowState(id: string, payload: unknown): Promise<WorkflowStateResponse>;
   deleteWorkflowState(id: string): Promise<unknown>;
+  listWorkflows(): Promise<Workflow[]>;
+  getWorkflow(id: string): Promise<WorkflowWithStates>;
+  createWorkflow(req: { name: string; description?: string }): Promise<Workflow>;
+  updateWorkflow(id: string, req: { name?: string; description?: string; entry_state_id?: string | null }): Promise<Workflow>;
+  deleteWorkflow(id: string): Promise<void>;
+  duplicateWorkflow(id: string, req?: { name?: string }): Promise<Workflow>;
+  updateWorkflowLayout(id: string, positions: WorkflowStatePosition[]): Promise<void>;
   setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null): Promise<unknown>;
   setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
   attachmentUrl(reference: string): string;
@@ -482,6 +489,13 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     createWorkflowState: async (payload) => jsonRequest("/v1/workflow-states", "POST", payload) as Promise<WorkflowStateResponse>,
     updateWorkflowState: async (id, payload) => jsonRequest(`/v1/workflow-states/${encodeURIComponent(id)}`, "PUT", payload) as Promise<WorkflowStateResponse>,
     deleteWorkflowState: (id) => request(`/v1/workflow-states/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    listWorkflows: async () => request("/v1/workflows") as Promise<Workflow[]>,
+    getWorkflow: async (id) => request(`/v1/workflows/${encodeURIComponent(id)}`) as Promise<WorkflowWithStates>,
+    createWorkflow: async (req) => jsonRequest("/v1/workflows", "POST", req) as Promise<Workflow>,
+    updateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}`, "PUT", req) as Promise<Workflow>,
+    deleteWorkflow: async (id) => { await request(`/v1/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }); },
+    duplicateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/duplicate`, "POST", req ?? {}) as Promise<Workflow>,
+    updateWorkflowLayout: async (id, positions) => { await jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/layout`, "PUT", { positions }); },
     setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null) =>
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", workflowStateId ? { action: "activate", workflow_state_id: workflowStateId } : { action: "deactivate" }),
     setManagedAgentAllowInlineTools: async (agentId: string, allowed: boolean) =>

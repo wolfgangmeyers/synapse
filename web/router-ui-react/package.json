@@ -15,15 +15,18 @@
     "test:acceptance:bcb": "node tests/acceptance/bcb-runner.mjs"
   },
   "dependencies": {
+    "@xyflow/react": "^12.12.0",
+    "dagre": "^0.8.5",
     "markdown-it": "14.3.0",
     "react": "19.1.1",
     "react-dom": "19.1.1"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.2",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.3.0",
     "@testing-library/user-event": "14.6.1",
-    "@eslint/js": "9.39.2",
+    "@types/dagre": "^0.7.54",
     "@types/react": "19.1.10",
     "@types/react-dom": "19.1.7",
     "@vitejs/plugin-react": "5.0.4",
