@@ -190,7 +190,7 @@ describe("App integration", () => {
     expect(sendCall).toBeDefined();
     const request = sendCall?.[1];
     expect(request?.body).toBeTypeOf("string");
-    expect(JSON.parse(String(request?.body))).toMatchObject({ from: "wolfgang", to: "managed-direct", body: "Direct managed message" });
+    expect(JSON.parse(String(request?.body))).toMatchObject({ from: "web-ui", to: "managed-direct", body: "Direct managed message" });
     await waitFor(() => expect(screen.getByText("Direct managed message")).toBeInTheDocument());
   });
 
@@ -458,7 +458,7 @@ describe("App integration", () => {
 
     expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe("http://second-router.test:43124");
     expect(JSON.parse(storage.getItem(ROUTERS_KEY) ?? "[]")).toEqual(["http://first-router.test:43123", "http://second-router.test:43124"]);
-    expect(JSON.parse(storage.getItem(AGENT_IDS_KEY) ?? "{}")).toEqual({ "http://first-router.test:43123": "wolfgang", "http://second-router.test:43124": "backup-web" });
+    expect(JSON.parse(storage.getItem(AGENT_IDS_KEY) ?? "{}")).toEqual({ "http://first-router.test:43123": "user", "http://second-router.test:43124": "backup-web" });
     expect((await new HistoryRepository(undefined, storage).load({ routerUrl: firstRouter, agentId: "wolfgang-web" }))["worker-one"]).toEqual([expect.objectContaining({ body: "History survives router setup" })]);
     expect((await new HistoryRepository(undefined, storage).load({ routerUrl: firstRouter, agentId: "backup-web" }))["worker-one"]).toBeUndefined();
     await waitFor(() => expect(screen.getByRole("button", { name: /Router second-router.test:43124/ })).toBeInTheDocument());
@@ -691,6 +691,7 @@ describe("App integration", () => {
       throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
     });
     const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "wolfgang" });
+    state.connection = "connected";
     state.agents = [peer];
     state.selectedPeer = peer.agent_id;
 

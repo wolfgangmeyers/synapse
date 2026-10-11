@@ -44,3 +44,5 @@ router-proxy/router-proxy
 .cache/
 .config/
 go/
+.mecha-developer/
+*.jpg
