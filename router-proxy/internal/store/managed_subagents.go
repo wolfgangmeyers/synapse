@@ -90,14 +90,7 @@ func (s *Store) subagentReadFenceTx(ctx context.Context, parent EmbeddedBinding)
 }
 
 func (s *Store) subagentWriteFenceTx(ctx context.Context, parent EmbeddedBinding) error {
-	if parent.OwnerToken <= 0 {
-		var token int64
-		_ = s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1 AND owner_expires_at > ?`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, formatTimestamp(s.clock.Now())).Scan(&token)
-		if token > 0 {
-			parent.OwnerToken = token
-		}
-	}
-	if err := s.embeddedFence(ctx, parent); err != nil {
+	if err := s.embeddedManagedFence(ctx, parent); err != nil {
 		return err
 	}
 	var role string
