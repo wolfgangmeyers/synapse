@@ -86,16 +86,16 @@ describe("AppShell", () => {
     expect(settings.querySelector(".fa-gear")).toBeInTheDocument();
   });
 
-  it("keeps the agent-scoped Logs action in the conversation header", () => {
-    const onLogs = vi.fn();
+  it("keeps the agent-scoped Scratchpad action in the conversation header", () => {
+    const onScratchpad = vi.fn();
     const agent: Agent = { agent_id: "rpc-test", activity_state: "idle", subagent_count: 0, subagents: [] };
-    render(<ConversationHeader agent={agent} onLogs={onLogs} />);
-    const button = screen.getByRole("button", { name: "Logs" });
-    expect(button).toHaveAttribute("title", "View logs for Rpc Test");
-    expect(button).toHaveClass("logs-header-button");
-    expect(button.querySelector(".fa-file-lines")).toBeInTheDocument();
+    render(<ConversationHeader agent={agent} onScratchpad={onScratchpad} />);
+    const button = screen.getByRole("button", { name: "Scratchpad" });
+    expect(button).toHaveAttribute("title", "View scratchpad for Rpc Test");
+    expect(button).toHaveClass("scratchpad-header-button");
+    expect(button.querySelector(".fa-note-sticky")).toBeInTheDocument();
     fireEvent.click(button);
-    expect(onLogs).toHaveBeenCalledOnce();
+    expect(onScratchpad).toHaveBeenCalledOnce();
   });
 
   it("keeps the managed-worker control in the header action row", () => {

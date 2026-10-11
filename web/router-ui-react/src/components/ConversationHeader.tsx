@@ -27,7 +27,7 @@ export interface ConversationHeaderProps {
   onGoal?: (() => void) | undefined;
   onReminders?: (() => void) | undefined;
   onInlineToolSettings?: (() => void) | undefined;
-  onLogs?: (() => void) | undefined;
+  onScratchpad?: (() => void) | undefined;
   onManageManaged?: (() => void) | undefined;
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
@@ -73,7 +73,7 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onLogs, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
   const managedFailure = failedManagedAgent(agent);
@@ -190,7 +190,7 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
   >
     <i className="fa-solid fa-terminal" aria-hidden="true" />
   </button>
-) : null}{agent && onLogs ? <button type="button" className="logs-header-button" onClick={onLogs} aria-label="Logs" title={`View logs for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-file-lines" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
+) : null}{agent && onScratchpad ? <button type="button" className="scratchpad-header-button" onClick={onScratchpad} aria-label="Scratchpad" title={`View scratchpad for ${humanName(agent.agent_id)}`}><i className="fa-solid fa-note-sticky" aria-hidden="true" /></button> : null}{agent && (onReminders !== undefined || showAgentControls) ? (
   <button type="button" className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`} onClick={onReminders} aria-label="Add reminder" title="Add reminder">
     <i className="fa-solid fa-clock" aria-hidden="true" />
   </button>

@@ -24,6 +24,18 @@ export interface ManagedOperationResponse { operation_id: string; agent?: Manage
 export interface ManagedDirectoriesResponse { path: string; parent: string; breadcrumbs?: Array<{ name: string; path: string }>; directories: Array<{ name: string; path: string }> }
 export interface ManagedChildrenResponse extends ManagedChildrenProjection {}
 export interface ManagedHistoryResponse { view: "quiet" | "complete"; entries: ManagedHistoryEntry[]; next_before: number | null }
+export interface ScratchpadEntry {
+  id: string;
+  agent_id: string;
+  content: string;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+}
+export interface ScratchpadResponse {
+  entries: ScratchpadEntry[];
+  total_count: number;
+}
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
 export interface ProviderModel { provider: ManagedProvider; id: string; name: string; available: boolean }
@@ -422,6 +434,7 @@ export interface RouterHttpClient {
   restartRouter(): Promise<{ ok: boolean; restarting: boolean }>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
+  scratchpadForAgent(agentId: string, limit?: number): Promise<ScratchpadResponse>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
   stopManagedSubagent(agentId: string, childId: string): Promise<void>;
@@ -587,6 +600,21 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     },
     routerLog: async (query) => { if (!routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
     routerLogForAgent: async (agentId, query) => { if (!isAgentId(agentId) || !routerLogQuery(query)) throw new Error("Router-log query is invalid"); const params = new URLSearchParams(); params.set("query", query.query); if (query.from !== null) params.set("from", query.from); if (query.to !== null) params.set("to", query.to); if (query.cursor !== null) params.set("cursor", query.cursor); return routerLogResponse(await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/router-log?${params.toString()}`, { method: "GET", credentials: "omit" }, 48 * 1024 * 1024)); },
+    scratchpadForAgent: async (agentId: string, limit?: number) => {
+      const params = new URLSearchParams();
+      if (typeof limit === "number" && limit > 0) params.set("limit", String(limit));
+      const queryString = params.toString();
+      const path = `/v1/managed-agents/${encodeURIComponent(agentId)}/scratchpad${queryString ? `?${queryString}` : ""}`;
+      const res = await request(path, { method: "GET", credentials: "omit" });
+      const body = recordValue(res);
+      if (!body || !Array.isArray(body.entries) || typeof body.total_count !== "number") {
+        throw invalidResponse("Router returned an invalid scratchpad response", body);
+      }
+      return {
+        entries: body.entries as ScratchpadEntry[],
+        total_count: body.total_count,
+      };
+    },
   };
 }
 
