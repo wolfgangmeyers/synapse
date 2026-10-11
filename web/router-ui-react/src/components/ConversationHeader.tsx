@@ -42,8 +42,8 @@ export interface ConversationHeaderProps {
 
 function activeManagedSubagents(agent: Agent): NonNullable<Agent["subagents"]> {
   return (agent.managed_children ?? []).flatMap((child) => {
-    if (child.recovery.state !== "confirmed" || (child.status !== "queued" && child.status !== "running") || child.description === undefined) return [];
-    return [{ id: child.id, description: child.description, status: child.status }];
+    if (child.status !== "queued" && child.status !== "running") return [];
+    return [{ id: child.id, description: child.description || "Subagent", status: child.status }];
   });
 }
 

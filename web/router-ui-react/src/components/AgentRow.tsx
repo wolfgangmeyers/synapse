@@ -24,8 +24,8 @@ export interface AgentRowProps {
 }
 function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   return (agent.managed_children ?? []).flatMap((child) => {
-    if (child.recovery.state !== "confirmed" || (child.status !== "queued" && child.status !== "running")) return [];
-    return [{ id: child.id, description: child.description ?? "Subagent", status: child.status }];
+    if (child.status !== "queued" && child.status !== "running") return [];
+    return [{ id: child.id, description: child.description || "Subagent", status: child.status }];
   });
 }
 

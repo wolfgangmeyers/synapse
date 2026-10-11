@@ -121,7 +121,7 @@ func embeddedAddressedArguments(name string, args map[string]any) error {
 		recipient, _ = args["name"].(string)
 	}
 	if strings.EqualFold(recipient, "system") {
-		return errors.New("cannot send message to 'system': system notifications do not accept incoming messages or replies")
+		return errors.New("failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
 	}
 	body, _ := args["body"].(string)
 	envelope := protocol.Envelope{ID: "tool-validation", From: "tool-caller", To: recipient, Body: body, CreatedAt: "2030-01-01T00:00:00.000Z"}

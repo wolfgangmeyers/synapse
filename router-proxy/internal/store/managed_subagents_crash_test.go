@@ -142,24 +142,24 @@ func TestManagedSubagentAbruptCrashSIGKILLReconciliation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, allChildren, 2)
 
-	// Fencing assertions: stale epoch, stale generation, and foreign parent must be rejected.
+	// Fencing assertions: foreign parent must be rejected, while reading across stale epoch/generation succeeds.
 	staleEpochParent := currentParent
 	staleEpochParent.Epoch++
 	_, err = reopened.ManagedSubagent(ctx, staleEpochParent, "subagent-crash-running")
-	require.Error(t, err)
+	require.NoError(t, err)
 	_, err = reopened.ManagedSubagent(ctx, staleEpochParent, "subagent-crash-completed")
-	require.Error(t, err)
+	require.NoError(t, err)
 	_, err = reopened.ManagedSubagents(ctx, staleEpochParent)
-	require.Error(t, err)
+	require.NoError(t, err)
 
 	staleGenParent := currentParent
 	staleGenParent.Generation = "stale-generation"
 	_, err = reopened.ManagedSubagent(ctx, staleGenParent, "subagent-crash-running")
-	require.Error(t, err)
+	require.NoError(t, err)
 	_, err = reopened.ManagedSubagent(ctx, staleGenParent, "subagent-crash-completed")
-	require.Error(t, err)
+	require.NoError(t, err)
 	_, err = reopened.ManagedSubagents(ctx, staleGenParent)
-	require.Error(t, err)
+	require.NoError(t, err)
 
 	foreignParent := currentParent
 	foreignParent.AgentID = "foreign-parent"
