@@ -139,6 +139,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodGet && managedChildrenPath(req.URL.Path) != "":
 		r.handleManagedChildrenGET(w, req, managedChildrenPath(req.URL.Path))
 		return true
+	case req.Method == http.MethodGet && managedScratchpadPath(req.URL.Path) != "":
+		r.handleManagedScratchpadGET(w, req, managedScratchpadPath(req.URL.Path))
+		return true
 	case req.Method == http.MethodPost && managedInterruptPath(req.URL.Path) != "":
 		r.handleManagedAgentInterrupt(w, req)
 		return true
@@ -1310,6 +1313,47 @@ func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request)
 	}
 	r.writeManagedJSON(w, req, 200, managed.ProjectionEnvelope(snapshot), nil)
 }
+
+func (r *Router) handleManagedScratchpadGET(w http.ResponseWriter, req *http.Request, agentID string) {
+	limit := 20
+	if rawLimit := req.URL.Query().Get("limit"); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	offset := 0
+	hasOffset := false
+	if rawOffset := req.URL.Query().Get("offset"); rawOffset != "" {
+		if parsed, err := strconv.Atoi(rawOffset); err == nil && parsed >= 0 {
+			offset = parsed
+			hasOffset = true
+		}
+	}
+
+	var (
+		entries    []store.ScratchpadEntry
+		totalCount int
+		err        error
+	)
+	if hasOffset && offset > 0 {
+		entries, totalCount, err = r.store.PaginateScratchpad(req.Context(), agentID, limit, offset)
+	} else {
+		entries, totalCount, err = r.store.FetchScratchpadRecent(req.Context(), agentID, limit)
+	}
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read scratchpad entries"})
+		return
+	}
+
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
+		"entries":     entries,
+		"total_count": totalCount,
+	}, nil)
+}
 func managedWorkflowStatePath(path string) string {
 	const prefix = "/v1/managed-agents/"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/workflow-state") {
@@ -1340,6 +1384,18 @@ func managedInlineToolsPath(path string) string {
 		return ""
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/inline-tools")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func managedScratchpadPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/scratchpad") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/scratchpad")
 	if id == "" || strings.Contains(id, "/") {
 		return ""
 	}
