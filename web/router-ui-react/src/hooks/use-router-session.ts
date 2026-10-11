@@ -207,6 +207,16 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         dispatch({ type: "managed/reconcile", scope: currentScope, version: snapshot.projection_version, agents: snapshot.agents });
         refreshManagedGoalProjection(transport, dispatch, currentScope, snapshot.agents);
 
+        if (!transport.socket.registered) {
+          transport.connect();
+          if (canConnectUILive(options)) {
+            try { uiLive.connect(); } catch { /* ignore */ }
+          }
+        }
+        if (!stateRef.current.managedAvailable) {
+          startManagedSurfaceRef.current?.();
+        }
+
         if (includeHistory) {
           try {
             const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));

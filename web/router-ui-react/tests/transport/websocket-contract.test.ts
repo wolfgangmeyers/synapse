@@ -179,4 +179,113 @@ describe("direct WebSocket transport", () => {
     client.close();
     vi.useRealTimers();
   });
+
+  it("does not prematurely force reconnect while router health reports starting, and connects once ready", async () => {
+    vi.useFakeTimers();
+    const factory = new FakeFactory();
+    let healthState: "offline" | "starting" | "ok" = "offline";
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/v1/health")) {
+        if (healthState === "starting") {
+          return new Response(JSON.stringify({ status: "starting", readiness: "starting", version: "v1" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (healthState === "ok") {
+          return new Response(JSON.stringify({ status: "ok", readiness: "ok", version: "v1" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        throw new Error("connect ECONNREFUSED");
+      }
+      throw new Error(`unexpected url: ${urlStr}`);
+    });
+
+    const client = createWebSocketClient({
+      routerUrl: "http://router.test",
+      agentId: "web",
+      webSocketFactory: factory.create,
+      fetchImpl: fetchMock as any,
+      retryDelayMs: 1000,
+      maxRetryDelayMs: 5000,
+      healthPingIntervalMs: 1000,
+    });
+    client.connect();
+    expect(factory.sockets).toHaveLength(1);
+
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+
+    // Router enters 'starting' state
+    healthState = "starting";
+
+    // Health ping tick: router reports status: 200, but readiness: starting
+    await vi.advanceTimersByTimeAsync(1000);
+    // Timer attempt 1 (1000ms) creates socket 2
+    expect(factory.sockets).toHaveLength(2);
+    // Socket 2 fails with 503 upgrade rejection during startup
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+
+    // Health ping ticks again while still 'starting' -> should NOT trigger immediate reconnect
+    // (Next backoff delay for socket 2 was nominal 2000ms, so 1000ms advance won't trigger either)
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(factory.sockets).toHaveLength(2);
+
+    // Router transitions to 'ok'
+    healthState = "ok";
+    await vi.advanceTimersByTimeAsync(1000);
+    // Health ping saw 'ok' -> triggers immediate reconnect!
+    expect(factory.sockets).toHaveLength(3);
+    expect(client.identity.generation).toBe(3);
+
+    client.close();
+    vi.useRealTimers();
+  });
+
+  it("forces reconnect via health ping even if previous socket was stuck in isConnecting", async () => {
+    vi.useFakeTimers();
+    const factory = new FakeFactory();
+    let healthAvailable = false;
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/v1/health")) {
+        if (healthAvailable) {
+          return new Response(JSON.stringify({ status: "ok", version: "v1" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        throw new Error("connect ECONNREFUSED");
+      }
+      throw new Error(`unexpected url: ${urlStr}`);
+    });
+
+    const client = createWebSocketClient({
+      routerUrl: "http://router.test",
+      agentId: "web",
+      webSocketFactory: factory.create,
+      fetchImpl: fetchMock as any,
+      retryDelayMs: 1000,
+      maxRetryDelayMs: 5000,
+      healthPingIntervalMs: 1000,
+    });
+    client.connect();
+    expect(factory.sockets).toHaveLength(1);
+
+    // Socket 1 fails
+    factory.latest.emit("error", {});
+    factory.latest.emit("close", { code: 1006 });
+
+    // After 1000ms, socket 2 is created
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(factory.sockets).toHaveLength(2);
+
+    // Socket 2 is now stuck in connecting (simulates hung TCP/proxy)
+    healthAvailable = true;
+
+    // Advance 1000ms for health ping to tick while socket 2 has been connecting for >= 1000ms
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Health ping forces reconnect! Old hung socket replaced with socket 3!
+    expect(factory.sockets).toHaveLength(3);
+    expect(client.identity.generation).toBe(3);
+
+    client.close();
+    vi.useRealTimers();
+  });
 });

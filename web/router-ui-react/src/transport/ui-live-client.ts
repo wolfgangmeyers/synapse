@@ -7,6 +7,8 @@ export interface UILiveClientOptions {
   routerUrl: string;
   webSocketFactory?: WebSocketFactory;
   retryDelayMs?: number;
+  maxRetryDelayMs?: number;
+  connectTimeoutMs?: number;
   onConnect?: () => void;
   onFrame: (frame: UILiveFrame) => void;
   onRecovery?: () => void;
@@ -72,9 +74,13 @@ function withoutLegacyRecordKey(frame: UILiveFrame): UILiveFrame {
 export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
   const url = directUILiveURL(options.routerUrl);
   const factory = options.webSocketFactory ?? defaultFactory;
-  const retryDelay = options.retryDelayMs ?? 50;
+  const baseRetryDelay = options.retryDelayMs ?? 250;
+  const maxRetryDelay = options.maxRetryDelayMs ?? 2_000;
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
   let socket: WebSocketLike | undefined;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let connectTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryAttempts = 0;
   let stopped = false;
   let version: number | undefined;
   let childrenVersion: number | undefined;
@@ -86,16 +92,46 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     agentSnapshotAccepted = false;
     childSnapshotAccepted = false;
   };
-  const scheduleReconnect = (): void => {
-    if (!stopped && reconnectTimer === undefined) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect(); }, retryDelay);
+  const clearConnectTimeout = (): void => {
+    if (connectTimeoutTimer !== undefined) {
+      clearTimeout(connectTimeoutTimer);
+      connectTimeoutTimer = undefined;
+    }
+  };
+  const computeDelay = (): number => {
+    if (retryAttempts === 0) {
+      retryAttempts += 1;
+      return baseRetryDelay;
+    }
+    const nominal = Math.min(maxRetryDelay, baseRetryDelay * Math.pow(2, retryAttempts));
+    const jitter = Math.random() * Math.min(200, nominal * 0.1);
+    retryAttempts += 1;
+    return Math.min(maxRetryDelay, Math.round(nominal + jitter));
+  };
+  const scheduleReconnect = (immediate = false): void => {
+    if (stopped) return;
+    if (reconnectTimer !== undefined) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+    if (immediate) {
+      connect();
+      return;
+    }
+    const delay = computeDelay();
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, delay);
   };
   const recover = (error?: Error): void => {
+    clearConnectTimeout();
     if (error !== undefined) options.onError?.(error);
     resetProjection();
     options.onRecovery?.();
     const active = socket;
     socket = undefined;
-    active?.close(1000, "projection recovery");
+    try { active?.close(1000, "projection recovery"); } catch { /* ignore */ }
     scheduleReconnect();
   };
   const protocolError = (cause: string): UILiveTransportError => new UILiveTransportError("UI_LIVE_PROTOCOL_INVALID", cause);
@@ -145,14 +181,33 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     options.onFrame(frame);
   };
   const connect = (): void => {
-    if (stopped || socket !== undefined) return;
+    if (stopped) return;
+    if (socket !== undefined) {
+      if (socket.readyState === 0 || socket.readyState === 1) return;
+      try { socket.close(); } catch { /* ignore */ }
+      socket = undefined;
+    }
+    if (reconnectTimer !== undefined) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+    clearConnectTimeout();
     const candidate = factory(url);
     socket = candidate;
+    connectTimeoutTimer = setTimeout(() => {
+      connectTimeoutTimer = undefined;
+      if (socket === candidate && candidate.readyState === 0) {
+        recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", "websocket_connect_timeout"));
+      }
+    }, connectTimeoutMs);
     candidate.addEventListener("open", () => {
+      clearConnectTimeout();
+      retryAttempts = 0;
       options.onConnect?.();
     });
     candidate.addEventListener("message", (event) => onMessage(event.data));
     candidate.addEventListener("close", () => {
+      clearConnectTimeout();
       if (socket !== candidate) return;
       socket = undefined;
       if (stopped) return;
@@ -160,7 +215,10 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
       options.onRecovery?.();
       scheduleReconnect();
     });
-    candidate.addEventListener("error", () => recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", "websocket_transport_failed")));
+    candidate.addEventListener("error", () => {
+      clearConnectTimeout();
+      recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", "websocket_transport_failed"));
+    });
   };
   return {
     url,
@@ -168,11 +226,12 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     connect,
     close() {
       stopped = true;
+      clearConnectTimeout();
       if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
       const active = socket;
       socket = undefined;
-      active?.close(1000, "UI-live closed");
+      try { active?.close(1000, "UI-live closed"); } catch { /* ignore */ }
     },
   };
 }
