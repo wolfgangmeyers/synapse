@@ -258,6 +258,10 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 func (m *Manager) registerEmbeddedTools(owner embeddedOwner) []agent.AgentTool {
 	return []agent.AgentTool{
 		m.embeddedScratchpadTool(owner),
+		m.embeddedKBSearchTool(owner),
+		m.embeddedKBReadTool(owner),
+		m.embeddedKBWriteTool(owner),
+		m.embeddedKBListTool(owner),
 	}
 }
 
