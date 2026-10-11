@@ -237,7 +237,7 @@ describe("Managed Agent Periodic Polling & Reconnect Reconciliation", () => {
           next_before: null,
         });
       }
-      if (url.includes("/v1/conversations/")) {
+      if (url.includes("/v1/conversations")) {
         conversationFetched = true;
         return jsonResponse({
           owner: "wolfgang",
@@ -270,14 +270,16 @@ describe("Managed Agent Periodic Polling & Reconnect Reconciliation", () => {
 
     const socket = new MockSocket();
     const liveSocket = new MockSocket();
+    const wsFactory = () => socket;
+    const uiLiveWsFactory = () => liveSocket;
 
     const { result } = renderHook(() =>
       useRouterSession({
         routerUrl: "http://router.test:4000",
         agentId: "wolfgang",
         fetchImpl: mockFetch as any,
-        webSocketFactory: () => socket,
-        uiLiveWebSocketFactory: () => liveSocket,
+        webSocketFactory: wsFactory,
+        uiLiveWebSocketFactory: uiLiveWsFactory,
       })
     );
 
@@ -309,5 +311,5 @@ describe("Managed Agent Periodic Polling & Reconnect Reconciliation", () => {
     expect(result.current.state.managedAgents?.[0]?.activity_state).toBe("settled");
     expect(result.current.state.managedHistory?.["agent-1"]?.complete?.[0]?.message).toBe("resynced timeline entry");
     expect(result.current.state.messagesByPeer["agent-1"]?.[0]?.body).toBe("hello from resynced agent");
-  }, 10_000);
+  }, 2000);
 });

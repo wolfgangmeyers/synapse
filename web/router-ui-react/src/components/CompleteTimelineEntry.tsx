@@ -1,10 +1,11 @@
-import { Fragment, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement } from "react";
+import { Fragment, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactElement } from "react";
 import { MarkdownBody } from "../domain/markdown";
 import { isRecord } from "../protocol/guards";
 import { currentUsername } from "../persistence/settings-repository";
 import type { JsonValue, ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
 import { ActivityDetailDialog } from "./ActivityDetailDialog";
 import { DialogShell } from "./DialogShell";
+import { colorForAction } from "../utils/alienText";
 
 export type CompleteTimelineTone = "blue" | "green" | "purple" | "teal" | "yellow" | "amber" | "danger";
 
@@ -763,9 +764,14 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
   };
   // Keep the builtin tool tone as a compatibility hook while terminal classes provide the solid outcome treatment.
   const terminalCompatibilityTone = terminalSuccess && presentation?.kind === "tool" && presentation.tool_name === "bash" ? " activity-entry--teal" : "";
+  const actionSeed = presentation?.kind === "tool" && presentation.tool_name ? presentation.tool_name : presentation?.kind ?? (entry.level === "error" ? "error" : "message");
+  const actionColor = colorForAction(actionSeed);
+  const articleStyle = (!isFailure && !active && presentation?.kind !== "error") ? {
+    "--activity-accent-rgb": actionColor.rgb,
+  } as CSSProperties : undefined;
   return <Fragment>
     {thinkingText && !isThinkingKind ? <ThinkingTraceCard thinking={thinkingText} time={time} agentId={entry.agent_id} entry={entry} /> : null}
-    <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} data-tool={presentation?.kind === "tool" && presentation.tool_name ? normalizedToolName(presentation.tool_name) : undefined} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
+    <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} style={articleStyle} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} data-tool={presentation?.kind === "tool" && presentation.tool_name ? normalizedToolName(presentation.tool_name) : undefined} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
       {isCompactRoutine ? <div className="activity-entry-content activity-entry-content--compact">
         <div className="activity-entry-compact-row">

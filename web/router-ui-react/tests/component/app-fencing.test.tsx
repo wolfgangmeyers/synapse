@@ -112,9 +112,12 @@ function renderManaged(actionResponse: Response | undefined = undefined, options
     throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
   });
   const socket = new ControlledSocket();
+  const webSocketFactory = (): WebSocketLike => {
+    queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+    return socket;
+  };
   const storage = new MemoryStorage();
-  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory: () => socket, autoReconnect: false, storage }} />);
-  queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory, autoReconnect: false, storage }} />);
   return { fetchImpl, socket, resolveAction };
 }
 

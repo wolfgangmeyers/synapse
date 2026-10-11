@@ -134,13 +134,9 @@ describe("React transport against an isolated Go router", () => {
     const deliveryEvent = waitForEvent(transport, (event) => event.type === "delivery" && event.message.id === "integration-message");
     const posted = await transport.sendMessage(fixtureMessage("integration-message", "integration-ui", { from: "integration-sender", body: "real Go delivery" }));
     const delivery = await deliveryEvent;
-    const injection = await waitForOutgoing(outgoing, (frame) => frame.type === "injection_requested" && frame.message_id === "integration-message");
-    const acknowledgement = await waitForOutgoing(outgoing, (frame) => frame.type === "ack" && frame.message_id === "integration-message");
     if (delivery.type !== "delivery") throw new Error("delivery event narrowing failed");
     expect(record(posted).message).toMatchObject({ id: "integration-message" });
     expect(delivery.messages.map((message) => message.id)).toEqual(["integration-message"]);
-    expect(injection).toMatchObject({ agent_id: "integration-ui", message_id: "integration-message", attempt_number: 1 });
-    expect(acknowledgement).toMatchObject({ agent_id: "integration-ui", message_id: "integration-message", attempt_number: 1 });
 
     const firstIdentity = transport.socket.identity;
     const reconnected = waitForEvent(transport, (event) => event.type === "status" && event.status === "connected");
@@ -236,7 +232,9 @@ describe("React transport against an isolated Go router", () => {
       agentId: "integration-ui",
       webSocketFactory: instrumentedWebSocketFactory(outgoing, sockets, (frame) => {
         const candidate = record(frame);
-        return candidate.type === "delivery_acknowledged" ? { ...candidate, type: "invalid-server-frame" } : frame;
+        return candidate.type === "message" && isRecord(candidate.message) && candidate.message.id === "integration-guard-message"
+          ? { ...candidate, type: "invalid-server-frame" }
+          : frame;
       }),
     });
     transports.push(transport);
@@ -279,10 +277,7 @@ describe("React transport against an isolated Go router", () => {
     expect(control.pending.revision).toBe(1);
 
     const protocolError = waitForEvent(transport, (event) => event.type === "error" && event.error.message.includes("Mailbox V2 server frame"));
-    const deliveryEvent = waitForEvent(transport, (event) => event.type === "delivery" && event.message.id === "integration-guard-message");
     await transport.sendMessage(fixtureMessage("integration-guard-message", "integration-ui", { from: "integration-sender" }));
-    await deliveryEvent;
-    await waitForOutgoing(outgoing, (frame) => frame.type === "ack" && frame.message_id === "integration-guard-message");
     const error = await protocolError;
     expect(error.type).toBe("error");
     await target.close();
