@@ -707,6 +707,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     setManagedPending(true); setInlineToolError(undefined);
     void session.transport.http.saveManagedInlineTools(selectedManagedAgent.agent_id, enabled).then((result) => {
       setManagedInlineToolsEnabled(result.enabled); setDialog(undefined);
+      void session.resync().catch(() => undefined);
     }).catch((cause: unknown) => {
       setInlineToolError(managedRequestErrorMessage(cause, "Managed inline-tool settings could not be saved."));
     }).finally(() => setManagedPending(false));

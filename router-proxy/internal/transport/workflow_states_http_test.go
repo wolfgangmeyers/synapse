@@ -381,4 +381,41 @@ func TestWorkflowStatesHTTPGoal(t *testing.T) {
 	res.Body.Close()
 }
 
+func TestWorkflowToolsHTTP(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+
+	router, err := transport.New(transport.Options{Store: durable})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	client := server.Client()
+
+	res, err := client.Get(server.URL + "/v1/workflow-tools")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	var payload struct {
+		Tools []store.WorkflowToolDefinition `json:"tools"`
+	}
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&payload))
+	res.Body.Close()
+
+	require.NotEmpty(t, payload.Tools)
+
+	var foundGoogleSearch bool
+	for _, tool := range payload.Tools {
+		if tool.ID == "google_search" {
+			foundGoogleSearch = true
+			require.Equal(t, "google_search", tool.Name)
+			require.Equal(t, "system", tool.Category)
+			require.Equal(t, "Search the web using Google Search via Grounding", tool.Description)
+		}
+	}
+	require.True(t, foundGoogleSearch, "expected google_search to be in workflow tools list")
+}
+
 

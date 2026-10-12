@@ -211,6 +211,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/workflow-states":
 		r.handleWorkflowStatesCollection(w, req)
 		return
+	case path == "/v1/workflow-tools":
+		r.handleWorkflowTools(w, req)
+		return
 	case req.Method == http.MethodGet && path == "/v1/settings/systemone":
 		r.handleSystemOneConfigGET(w, req)
 		return

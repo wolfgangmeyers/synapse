@@ -217,6 +217,22 @@ func (m *Manager) embeddedRequestInlineToolAllowanceTool(owner embeddedOwner) ag
 				}, err
 			}
 
+			if m != nil && m.IsInlineToolsAllowed(ctx, owner.binding.AgentID) {
+				return agent.AgentToolResult{
+					Content: ai.ContentList{
+						ai.TextContent{Text: fmt.Sprintf("Inline tools are unrestricted for this agent; calls to %s are permitted freely without requiring an allowance.", normalized)},
+					},
+					Details: InlineAllowanceDetails{
+						ToolName:              normalized,
+						UsageCount:            usageCount,
+						GrantedCount:          usageCount,
+						Remaining:             999999,
+						AvailableWholeCredits: InlineToolPoolCapacity,
+						RemainingPool:         float64(InlineToolPoolCapacity),
+					},
+				}, nil
+			}
+
 			lane := m.laneFor(owner.binding.AgentID)
 			grant, err := lane.grantInlineAllowance(normalized, usageCount, time.Now())
 			if err != nil {

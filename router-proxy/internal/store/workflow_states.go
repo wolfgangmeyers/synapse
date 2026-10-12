@@ -120,27 +120,6 @@ func (e *WorkflowStateInUseError) Error() string {
 }
 func (e *WorkflowStateInUseError) Code() string { return "workflow_state_in_use" }
 
-var ValidWorkflowTools = map[string]bool{
-	"mecha_mailbox_send":  true,
-	"goal":                true,
-	"goal_snooze":         true,
-	"mecha_context":       true,
-	"mecha_reminder":      true,
-	"context_reset":       true,
-	"reset":               true,
-	"scratchpad":          true,
-	"bash":                true,
-	"read":                true,
-	"edit":                true,
-	"write":               true,
-	"subagent":            true,
-	"get_subagent_result": true,
-	"steer_subagent":      true,
-	"mecha_worker":        true,
-	"mecha_workflow_transition": true,
-	"workflow_transition":       true,
-}
-
 // IsToolAllowedInWorkflowState reports whether toolName is permitted under allowedTools.
 // If allowedTools is empty, all tools are permitted.
 // If allowedTools is non-empty, only tools in allowedTools are permitted,

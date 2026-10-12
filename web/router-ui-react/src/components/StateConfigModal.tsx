@@ -1,4 +1,4 @@
-import { useState, type ReactElement, type FormEvent } from "react";
+import { useState, useEffect, type ReactElement, type FormEvent } from "react";
 import type { WorkflowState, WorkflowReminderConfig, KnownToolDefinition } from "../domain/workflow-states";
 import { KNOWN_WORKFLOW_TOOLS } from "../domain/workflow-states";
 import { DEFAULT_GOAL_STATE, type GoalState, type goalControlPayload } from "../domain/goals";
@@ -9,11 +9,20 @@ import { GoalEditorDialog } from "./GoalEditorDialog";
 export interface StateConfigModalProps {
   state: WorkflowState;
   isEntry: boolean;
+  tools?: KnownToolDefinition[] | undefined;
   onClose: () => void;
   onSave: (updatedState: WorkflowState, makeEntry: boolean) => Promise<void>;
 }
 
-export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfigModalProps): ReactElement {
+export function StateConfigModal({ state, isEntry, tools: propTools, onClose, onSave }: StateConfigModalProps): ReactElement {
+  const [availableTools, setAvailableTools] = useState<KnownToolDefinition[]>(propTools ?? KNOWN_WORKFLOW_TOOLS);
+
+  useEffect(() => {
+    if (propTools && propTools.length > 0) {
+      setAvailableTools(propTools);
+    }
+  }, [propTools]);
+
   const [name, setName] = useState(state.name);
   const [description, setDescription] = useState(state.description ?? "");
   const [entryText, setEntryText] = useState(state.entry_text ?? "");
@@ -265,7 +274,7 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
               if (nextAllowAll) {
                 setSelectedTools(new Set());
               } else if (selectedTools.size === 0) {
-                setSelectedTools(new Set(KNOWN_WORKFLOW_TOOLS.map((t) => t.id)));
+                setSelectedTools(new Set(availableTools.map((t) => t.id)));
               }
             }}
           >
@@ -284,13 +293,13 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
             <div className="workflow-tool-picker">
               <div className="workflow-tool-picker-toolbar">
                 <span className="workflow-tool-picker-title">
-                  Allowed Tools ({selectedTools.size} of {KNOWN_WORKFLOW_TOOLS.length})
+                  Allowed Tools ({selectedTools.size} of {availableTools.length})
                 </span>
                 <div className="workflow-tool-picker-actions">
                   <button
                     type="button"
                     className="secondary workflow-tool-action-btn"
-                    onClick={() => setSelectedTools(new Set(KNOWN_WORKFLOW_TOOLS.map((t) => t.id)))}
+                    onClick={() => setSelectedTools(new Set(availableTools.map((t) => t.id)))}
                   >
                     Select All
                   </button>
@@ -305,7 +314,7 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
               </div>
 
               <div className="workflow-tool-grid">
-                {KNOWN_WORKFLOW_TOOLS.map((tool) => {
+                {availableTools.map((tool) => {
                   const isSelected = selectedTools.has(tool.id);
                   return (
                     <button

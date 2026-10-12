@@ -2,6 +2,9 @@ package managed
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -245,11 +248,7 @@ func TestInlineToolExecutionGate(t *testing.T) {
 	gateCheck := func(toolName string) *agent.BeforeToolCallResult {
 		normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
 		if isInlineTool {
-			targetAgent, err := mgr.store.ManagedAgent(ctx, agentID)
-			if err == nil && targetAgent != nil && (targetAgent.ParentAgentID != "" || strings.HasPrefix(agentID, "subagent-")) {
-				return nil
-			}
-			if err == nil && targetAgent != nil && targetAgent.AllowInlineTools {
+			if mgr.IsInlineToolsAllowed(ctx, agentID) {
 				return nil
 			}
 			if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
@@ -317,4 +316,106 @@ func TestInlineToolExecutionGate(t *testing.T) {
 	resBlockedAgain := gateCheck("bash")
 	require.NotNil(t, resBlockedAgain)
 	require.True(t, resBlockedAgain.Block)
+}
+
+func TestUnrestrictedInlineToolsReproduction(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test-unrestricted.db")
+	s, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer s.Close()
+
+	agentID := "context-helper-repro"
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Launch agent with allow_inline_tools = false in SQLite
+	launchRecord := store.ManagedAgentRecord{
+		AgentID:          agentID,
+		Name:             agentID,
+		Cwd:              t.TempDir(),
+		SelectedModel:    store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		AcceptingPrompts: true,
+		SessionEpoch:     1,
+		ManifestRevision: 1,
+		ManifestHash:     strings.Repeat("a", 64),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	require.NoError(t, s.ReserveManagedLaunch(ctx, launchRecord, store.ManagedOperation{
+		OperationID:       "op-launch-repro",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "req-launch-repro",
+		CanonicalBodyHash: "hash-launch-repro",
+		State:             "terminal",
+		ResponseStatus:    200,
+	}))
+
+	// Set desired policy to have inline.enabled = true (exactly what happened to Context-helper when configured via UI dialog)
+	rawDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer rawDB.Close()
+	policyJSON := []byte(`{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
+	h := sha256.Sum256(policyJSON)
+	policyHash := hex.EncodeToString(h[:])
+	_, err = rawDB.ExecContext(ctx, `UPDATE managed_readiness_sources SET desired_policy_canonical=?, desired_policy_sha256=? WHERE agent_id=?`, policyJSON, policyHash, agentID)
+	require.NoError(t, err)
+
+	mgr := &Manager{store: s}
+	defaultManagerInstance = mgr
+	defer func() { defaultManagerInstance = nil }()
+
+	// 1. Verify ManagedInlineToolsEnabled reports true from desired policy
+	enabled, err := mgr.ManagedInlineToolsEnabled(ctx, agentID)
+	require.NoError(t, err)
+	require.True(t, enabled, "ManagedInlineToolsEnabled must return true when desired policy has inline.enabled=true")
+
+	// 2. Verify IsInlineToolsAllowed reports true and heals allow_inline_tools in SQLite
+	require.True(t, mgr.IsInlineToolsAllowed(ctx, agentID), "IsInlineToolsAllowed must return true")
+
+	// Check DB row was healed
+	reloaded, err := s.ManagedAgent(ctx, agentID)
+	require.NoError(t, err)
+	require.True(t, reloaded.AllowInlineTools, "allow_inline_tools must be healed to true in database")
+
+	// 3. Verify PublicAgent projects allow_inline_tools = true
+	publicProjection := PublicAgent(reloaded)
+	require.Equal(t, true, publicProjection["allow_inline_tools"], "PublicAgent must project allow_inline_tools as true")
+
+	// 4. Verify gateCheck allows bash, edit, write unrestricted without credits
+	lane := mgr.laneFor(agentID)
+	gateCheck := func(toolName string) *agent.BeforeToolCallResult {
+		normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
+		if isInlineTool {
+			if mgr.IsInlineToolsAllowed(ctx, agentID) {
+				return nil
+			}
+			if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
+				return nil
+			}
+			return &agent.BeforeToolCallResult{
+				Block:  true,
+				Reason: InlineToolBlockReason,
+			}
+		}
+		return nil
+	}
+
+	for i := 0; i < 20; i++ {
+		require.Nil(t, gateCheck("bash"), "bash call %d must be allowed unrestricted", i)
+		require.Nil(t, gateCheck("edit"), "edit call %d must be allowed unrestricted", i)
+		require.Nil(t, gateCheck("write"), "write call %d must be allowed unrestricted", i)
+	}
+
+	// 5. Verify mecha_request_inline_tool_allowance succeeds without error when unrestricted
+	owner := embeddedOwner{binding: store.EmbeddedBinding{AgentID: agentID, SessionID: "sess-1", Epoch: 1, Generation: "gen-1"}}
+	allowanceTool := mgr.embeddedRequestInlineToolAllowanceTool(owner)
+	res, err := allowanceTool.Execute(ctx, "call_1", map[string]any{"toolName": "bash", "usageCount": 5}, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Content)
+	require.Contains(t, res.Content[0].(ai.TextContent).Text, "unrestricted")
 }
