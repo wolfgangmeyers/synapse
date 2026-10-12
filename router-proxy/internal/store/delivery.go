@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,6 +145,9 @@ func (s *Store) Enqueue(ctx context.Context, envelope protocol.Envelope, options
 }
 
 func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option *EnqueueOptions, producer *EmbeddedToolInvocation) (EnqueueResult, error) {
+	if strings.EqualFold(envelope.To, "system") {
+		return EnqueueResult{}, errors.New("cannot send message to 'system': system notifications do not accept incoming messages or replies")
+	}
 	if err := protocol.ValidateEnvelope(envelope, s.maxBodyBytes); err != nil {
 		return EnqueueResult{}, err
 	}

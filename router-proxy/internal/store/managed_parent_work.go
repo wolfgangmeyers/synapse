@@ -77,6 +77,14 @@ func (s *Store) QueueManagedFinalDelivery(ctx context.Context, attempt ManagedDi
 	if ctx == nil || !validManagedFinalReply(entryID, body) {
 		return nil, errors.New("managed final delivery is invalid")
 	}
+	if strings.EqualFold(attempt.Message.From, "system") {
+		human := s.lastHumanRecipientTx(ctx, attempt.Fence.AgentID)
+		if human != "" && !strings.EqualFold(human, "system") {
+			attempt.Message.From = human
+		} else {
+			attempt.Message.From = "user"
+		}
+	}
 	var delivery *ManagedFinalDelivery
 	err := s.runImmediate(ctx, func() error {
 		if !validManagedRuntimeFence(attempt.Fence) || !managedParentFenceCurrentTx(ctx, s.db, attempt.Fence) {

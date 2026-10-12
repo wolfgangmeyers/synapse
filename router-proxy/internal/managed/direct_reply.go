@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -22,6 +23,14 @@ func (m *Manager) SetDirectReplyPublisher(publish DirectReplyPublisher) {
 // conversation-store delivery receipt. Its deterministic message identity makes
 // recovery after a post-write crash idempotent; the protocol has no browser ACK.
 func (m *Manager) publishDirectReply(attempt store.ManagedDirectAttempt, reply DirectMailboxReply) {
+	if strings.EqualFold(attempt.Message.From, "system") {
+		human, _ := m.store.LastHumanRecipient(context.Background(), attempt.Fence.AgentID)
+		if human != "" && !strings.EqualFold(human, "system") {
+			attempt.Message.From = human
+		} else {
+			attempt.Message.From = "user"
+		}
+	}
 	delivery, err := m.store.QueueManagedFinalDelivery(context.Background(), attempt, reply.EntryIdentity, reply.Body)
 	if err != nil || delivery == nil {
 		if err != nil {
