@@ -354,3 +354,49 @@ func TestEmbeddedReplySystemMessageRoutesToLastHumanRecipient(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedReplyOnAssistantStopErrorEmitsErrorReply(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	path := filepath.Join(t.TempDir(), "reply-error.db")
+	s, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, err)
+	defer s.Close()
+
+	b := redBind(t, s, "reply-worker-error", "reply-session-error", 1, "reply-generation-1", "worker")
+
+	mail := testEnvelope("mail-for-error-reply", "do work")
+	mail.From = "sender"
+	mail.To = b.AgentID
+	_, err = s.Enqueue(ctx, mail)
+	require.NoError(t, err)
+
+	attempt := reserveEmbeddedMailTest(t, s, b, mail.ID)
+	require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, b, attempt.AttemptID, []byte(attempt.Body)))
+
+	snap, err := s.ReopenEmbedded(ctx, b)
+	require.NoError(t, err)
+	require.Len(t, snap.Entries, 1)
+
+	finalMsg, err := json.Marshal(ai.AssistantMessage{
+		StopReason:   ai.StopError,
+		ErrorMessage: "vertex api error (status 404): model not found",
+	})
+	require.NoError(t, err)
+
+	finalEntry, historyEntry, err := s.AppendEmbeddedFinalAndReplyWithHistory(ctx, b, attempt.AttemptID, snap.Entries[0].Sequence, snap.Entries[0].Digest, finalMsg)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), finalEntry.Sequence)
+	require.Equal(t, "assistant", finalEntry.Kind)
+
+	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"))
+	var outboxRecipient, outboxBody string
+	err = s.db.QueryRowContext(ctx, `SELECT recipient, body FROM embedded_reply_outbox WHERE attempt_id=?`, attempt.AttemptID).Scan(&outboxRecipient, &outboxBody)
+	require.NoError(t, err)
+	require.Equal(t, "sender", outboxRecipient)
+	require.Equal(t, "Turn failed: vertex api error (status 404): model not found", outboxBody)
+
+	require.NotEmpty(t, historyEntry.ID)
+	require.Equal(t, "error", historyEntry.Presentation.Outcome)
+	require.Equal(t, "Turn failed: vertex api error (status 404): model not found", historyEntry.Message)
+}

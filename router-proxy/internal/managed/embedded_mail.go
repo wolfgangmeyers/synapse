@@ -95,6 +95,7 @@ func (m *Manager) dispatchEmbeddedMail(agentID string) {
 				_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), owner.binding.AgentID)
 				m.publishProjection()
 			}
+			m.flushEmbeddedReplies(m.runCtx, agentID)
 
 			if attempts >= 3 {
 				log.Printf("[embedded:%s] POISON PILL: message %s failed 3 times; dead-lettering to prevent spin loop: %v", agentID, attempt.MessageID, err)

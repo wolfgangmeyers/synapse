@@ -24,8 +24,20 @@ import (
 var (
 	vertexAuthMu sync.Mutex
 	// vertexGenerateContentURLTemplate can be overridden in tests
-	vertexGenerateContentURLTemplate = "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:streamGenerateContent?alt=sse"
+	vertexGenerateContentURLTemplate = "https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s:streamGenerateContent?alt=sse"
 )
+
+func vertexHost(location string) string {
+	if location == "" || location == "global" {
+		return "aiplatform.googleapis.com"
+	}
+	return location + "-aiplatform.googleapis.com"
+}
+
+func vertexModelRequiresGlobal(modelID string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	return strings.Contains(m, "3.8") || strings.Contains(m, "gemini-3")
+}
 
 type vertexTokenCache struct {
 	accessToken string
@@ -49,7 +61,11 @@ type vertexADCFile struct {
 }
 
 // resolveVertexADCInfo locates ADC credentials path, project, and location.
-func (m *Manager) resolveVertexADCInfo() (adcPath, projectID, location string, err error) {
+func (m *Manager) resolveVertexADCInfo(modelID ...string) (adcPath, projectID, location string, err error) {
+	model := ""
+	if len(modelID) > 0 {
+		model = modelID[0]
+	}
 	userHome, _ := os.UserHomeDir()
 	paths := []string{
 		filepath.Join(m.config.PiAgentDir, "auth.json"),
@@ -111,20 +127,25 @@ func (m *Manager) resolveVertexADCInfo() (adcPath, projectID, location string, e
 
 	if location == "" {
 		location = os.Getenv("GOOGLE_CLOUD_LOCATION")
-		if location == "" {
-			location = "us-central1"
-		}
+	}
+	if vertexModelRequiresGlobal(model) || location == "" {
+		location = "global"
 	}
 
 	return adcPath, projectID, location, nil
 }
 
 // embeddedVertexAuth loads or refreshes an access token for Google Vertex AI using ADC.
-func (m *Manager) embeddedVertexAuth(ctx context.Context, forceRefresh bool) (token, projectID, location string, err error) {
+func (m *Manager) embeddedVertexAuth(ctx context.Context, forceRefresh bool, modelID ...string) (token, projectID, location string, err error) {
 	vertexAuthMu.Lock()
 	defer vertexAuthMu.Unlock()
 
-	adcPath, resolvedProj, resolvedLoc, err := m.resolveVertexADCInfo()
+	model := ""
+	if len(modelID) > 0 {
+		model = modelID[0]
+	}
+
+	adcPath, resolvedProj, resolvedLoc, err := m.resolveVertexADCInfo(modelID...)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -136,6 +157,9 @@ func (m *Manager) embeddedVertexAuth(ctx context.Context, forceRefresh bool) (to
 		}
 		if resolvedLoc == "" {
 			resolvedLoc = currentVertexToken.location
+		}
+		if vertexModelRequiresGlobal(model) || resolvedLoc == "" {
+			resolvedLoc = "global"
 		}
 		return currentVertexToken.accessToken, resolvedProj, resolvedLoc, nil
 	}
@@ -191,8 +215,8 @@ func (m *Manager) embeddedVertexAuth(ctx context.Context, forceRefresh bool) (to
 	if resolvedProj == "" {
 		resolvedProj = "default-project"
 	}
-	if resolvedLoc == "" {
-		resolvedLoc = "us-central1"
+	if vertexModelRequiresGlobal(model) || resolvedLoc == "" {
+		resolvedLoc = "global"
 	}
 
 	currentVertexToken = vertexTokenCache{
