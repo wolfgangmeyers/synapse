@@ -215,6 +215,26 @@ func (m *Manager) MaybeResumeEmbeddedGoal(agentID string) {
 	})
 }
 
+// ResumeIdleEmbeddedGoals scans for idle embedded agents where goal policy is enabled,
+// and resumes work if idle with no active subagents.
+func (m *Manager) ResumeIdleEmbeddedGoals(ctx context.Context) error {
+	agents, err := m.store.ManagedAgents(ctx)
+	if err != nil {
+		return err
+	}
+	for _, agent := range agents {
+		if agent == nil || agent.Runtime != "embedded" || agent.DesiredState != "running" || agent.LifecycleState != "running" || agent.ActivityState != "idle" {
+			continue
+		}
+		policy, err := m.store.ManagedGoalPolicyFor(ctx, agent.AgentID)
+		if err != nil || policy == nil || !policy.Config.Enabled {
+			continue
+		}
+		m.MaybeResumeEmbeddedGoal(agent.AgentID)
+	}
+	return nil
+}
+
 
 const (
 	managedInitialReplayTranscriptPoll = 25 * time.Millisecond

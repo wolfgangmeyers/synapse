@@ -246,31 +246,7 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 	agentID := binding.AgentID
-	var owner embeddedOwner
-	var ok bool
-	for i := 0; i < 50; i++ {
-		m.mu.Lock()
-		owner, ok = m.embeddedOwners[agentID]
-		m.mu.Unlock()
-		if ok {
-			break
-		}
-		select {
-		case <-m.runCtx.Done():
-			return
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-	if !ok {
-		log.Printf("kickoffIdleGoalContinuation: no owner for %s after waiting", agentID)
-		return
-	}
-	if binding.SessionID != "" && owner.binding.SessionID != binding.SessionID {
-		log.Printf("kickoffIdleGoalContinuation: session mismatch for %s", agentID)
-		return
-	}
-	if binding.Epoch != 0 && owner.binding.Epoch != binding.Epoch {
-		log.Printf("kickoffIdleGoalContinuation: epoch mismatch for %s", agentID)
+	if agentID == "" {
 		return
 	}
 
@@ -296,8 +272,11 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		log.Printf("kickoffIdleGoalContinuation: agent %s not idle/running: err=%v", agentID, err)
 		return
 	}
-	if curAgent.PiSessionID != owner.binding.SessionID || curAgent.SessionEpoch != owner.binding.Epoch || curAgent.RuntimeGeneration != owner.binding.Generation {
-		log.Printf("kickoffIdleGoalContinuation: generation mismatch for %s", agentID)
+
+	// If there is pending mail, let mail delivery handle waking up the agent first.
+	nextMail, err := m.store.NextEmbeddedMail(m.runCtx, agentID)
+	if err == nil && nextMail != "" {
+		m.startManagedTask(func() { m.dispatchEmbeddedMail(agentID) })
 		return
 	}
 
@@ -322,6 +301,12 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	now := formatManagedTime(m.clock.Now())
 	if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
 		log.Printf("kickoffIdleGoalContinuation: agent %s goal snoozed until %s", agentID, policy.SnoozedUntil)
+		return
+	}
+
+	owner, err := m.ensureEmbeddedOwner(m.runCtx, agentID, *curAgent)
+	if err != nil {
+		log.Printf("kickoffIdleGoalContinuation: ensureEmbeddedOwner for %s: %v", agentID, err)
 		return
 	}
 
