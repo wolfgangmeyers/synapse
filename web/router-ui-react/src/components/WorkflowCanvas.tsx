@@ -159,7 +159,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             id: `edge-${st.id}-${tr.target_state_id}-${trIdx}`,
             source: st.id,
             target: tr.target_state_id,
-            label: tr.description || undefined,
+            label: undefined,
             type: "smoothstep",
             interactionWidth: 20,
             markerEnd: {
@@ -326,18 +326,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
         await loadWorkflowData();
         setStatusMessage("Transition added");
         setTimeout(() => setStatusMessage(null), 2000);
-
-        // Automatically open the edge modal for this new transition so user can specify description/condition
-        const newEdgeId = `edge-${connection.source}-${connection.target}-${existingTransitions.length}`;
-        setSelectedEdge({
-          id: newEdgeId,
-          source: connection.source,
-          target: connection.target,
-          label: undefined,
-          type: "smoothstep",
-          interactionWidth: 20,
-          data: { description: "" },
-        });
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Failed to add transition");
       }
