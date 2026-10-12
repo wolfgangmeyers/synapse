@@ -169,6 +169,25 @@ type managedAgentLane struct {
 	inlineAllowances         map[string]int
 	inlinePoolRemainingMs    int64
 	inlinePoolUpdatedAt      time.Time
+	contextUsage             *ContextUsage
+}
+
+func (l *managedAgentLane) getContextUsage() *ContextUsage {
+	if l == nil {
+		return nil
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	return l.contextUsage
+}
+
+func (l *managedAgentLane) setContextUsage(u *ContextUsage) {
+	if l == nil {
+		return
+	}
+	l.activeMu.Lock()
+	defer l.activeMu.Unlock()
+	l.contextUsage = u
 }
 
 func (l *managedAgentLane) toolTimeout() time.Duration {
@@ -490,6 +509,22 @@ func (managerIDs) Next() (string, error) {
 	value[6] = (value[6] & 15) | 64
 	value[8] = (value[8] & 63) | 128
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:]), nil
+}
+
+func (m *Manager) updateAgentContextUsage(agentID string, tokens *int, contextWindow int) *ContextUsage {
+	usage := CalculateContextUsage(tokens, contextWindow)
+	lane := m.laneFor(agentID)
+	lane.setContextUsage(usage)
+	SetAgentContextUsage(agentID, usage)
+	return usage
+}
+
+func (m *Manager) GetContextUsage(agentID string) *ContextUsage {
+	lane := m.laneFor(agentID)
+	if u := lane.getContextUsage(); u != nil {
+		return u
+	}
+	return GetAgentContextUsage(agentID)
 }
 
 func (m *Manager) InterruptAgent(ctx context.Context, agentID string) error {

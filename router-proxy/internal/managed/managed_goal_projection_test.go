@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,6 +206,25 @@ func (r *managedGoalStatusRootControlRPC) SubmitRootControlResult(_ context.Cont
 	receipts <- RootControlResultReceipt{Event: map[string]any{"id": "goal-status-result", "customType": "mecha.control.result.v1", "display": false, "content": payload["content"], "details": details}, Watermark: 1}
 	close(receipts)
 	return receipts, nil
+}
+
+func (r *managedGoalStatusRootControlRPC) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (RootControlPersistedReceipt, error) {
+	requestID, _ := payload["request_id"].(string)
+	resultID, _ := payload["result_id"].(string)
+	generation, _ := payload["runtime_generation"].(string)
+	manifest, _ := payload["manifest_sha256"].(string)
+	epoch, _ := readinessInteger(payload["target_session_epoch"])
+	canonical, _ := canonicalJSON(payload)
+	hash := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	return RootControlPersistedReceipt{
+		ReceiptID:         "goal-status-receipt",
+		RequestID:         requestID,
+		ResultID:          resultID,
+		PayloadSHA256:     hash,
+		RuntimeGeneration: generation,
+		SessionEpoch:      epoch,
+		ManifestSHA256:    manifest,
+	}, nil
 }
 
 func (r *managedGoalStatusRootControlRPC) GetRootControlEntry(context.Context, string) (map[string]any, error) {
@@ -492,7 +512,12 @@ func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t 
 	})
 	require.NoError(t, err)
 
-	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(1), "state": "idle"})
+	_, err = durable.ApplyManagedParentActivity(ctx, fence, store.ManagedParentActivityEvent{Sequence: 1, State: "active"})
+	require.NoError(t, err)
+	require.NoError(t, manager.AdmitPrompt(ctx, fence.AgentID, "new prompt"))
+
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(2), "state": "active"})
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(3), "state": "idle"})
 	require.Eventually(t, func() bool {
 		policy, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
 		return lookupErr == nil && policy.LastOutcome == store.ManagedGoalEvaluationNotDone && policy.NotDoneWakeups == 1
@@ -629,7 +654,13 @@ func TestManagedGoalNotDoneWakeupCannotRetargetReplacement(t *testing.T) {
 	}
 	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174006", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence})
 	require.NoError(t, err)
-	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(1), "state": "idle"})
+
+	_, err = durable.ApplyManagedParentActivity(ctx, fence, store.ManagedParentActivityEvent{Sequence: 1, State: "active"})
+	require.NoError(t, err)
+	require.NoError(t, manager.AdmitPrompt(ctx, fence.AgentID, "new prompt"))
+
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(2), "state": "active"})
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(3), "state": "idle"})
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -785,4 +816,136 @@ func TestManagedGoalProjectionAppliesCurrentRevisionAndKeepsFailurePending(t *te
 		current, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
 		return lookupErr == nil && current.DesiredRevision == 2 && current.AppliedRevision == 2 && current.ProjectionState == "applied"
 	}, 3*time.Second, 10*time.Millisecond)
+}
+
+func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, _ := readyGoalProjectionFixture(t)
+
+	// 1. Worker goal(action="set") permitted when no workflow state
+	resSet, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID:   "123e4567-e89b-42d3-a456-426614174080",
+		OperationID: "goal.control",
+		Arguments:   map[string]any{"action": "set", "goal": "initial freeform goal"},
+		Fence:       fence,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resSet.Status)
+
+	// 2. Create workflow states:
+	// - StateWithGoal: has goal "State locked goal"
+	// - StateWithoutGoal: has empty goal ""
+	stateWithGoal, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		Name:        "LockedPhase",
+		Description: "Phase with locked goal",
+		Goal:        "State locked goal",
+	})
+	require.NoError(t, err)
+
+	stateWithoutGoal, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		Name:        "FreePhase",
+		Description: "Phase without goal",
+		Goal:        "",
+	})
+	require.NoError(t, err)
+
+	// 3. Set active workflow state to StateWithGoal and verify synchronization + lock
+	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, &stateWithGoal.ID))
+	goalSettings := store.DefaultManagedGoalSettings()
+	goalSettings.GoalLockEnabled = true
+	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
+		Enabled:  true,
+		Goal:     stateWithGoal.Goal,
+		Settings: goalSettings,
+	})
+	require.NoError(t, err)
+
+	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.True(t, policy.Config.Enabled)
+	require.Equal(t, "State locked goal", policy.Config.Goal)
+	require.True(t, policy.Config.Settings.GoalLockEnabled)
+
+	// 4. Worker goal(action="set") rejected with lock error when state has goal
+	_, err = manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID:   "123e4567-e89b-42d3-a456-426614174081",
+		OperationID: "goal.control",
+		Arguments:   map[string]any{"action": "set", "goal": "overriding goal"},
+		Fence:       fence,
+	})
+	require.Error(t, err)
+	require.Equal(t, fmt.Sprintf("goal is locked by active workflow state %q", stateWithGoal.Name), err.Error())
+
+	// 5. Worker goal(action="off") rejected with lock error when state has goal
+	_, err = manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID:   "123e4567-e89b-42d3-a456-426614174082",
+		OperationID: "goal.control",
+		Arguments:   map[string]any{"action": "off"},
+		Fence:       fence,
+	})
+	require.Error(t, err)
+	require.Equal(t, fmt.Sprintf("goal is locked by active workflow state %q", stateWithGoal.Name), err.Error())
+
+	// 6. Worker goal(action="status") permitted when state has goal
+	resStatus, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID:   "123e4567-e89b-42d3-a456-426614174083",
+		OperationID: "goal.control",
+		Arguments:   map[string]any{"action": "status"},
+		Fence:       fence,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resStatus.Status)
+	require.Equal(t, "Goal is active.", resStatus.Content)
+
+	// 7. Transition to state with empty goal clears agent goal and unlocks it
+	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, &stateWithoutGoal.ID))
+	goalSettingsUnlocked := store.DefaultManagedGoalSettings()
+	goalSettingsUnlocked.GoalLockEnabled = false
+	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
+		Enabled:  false,
+		Goal:     "",
+		Settings: goalSettingsUnlocked,
+	})
+	require.NoError(t, err)
+
+	policy, err = durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.False(t, policy.Config.Enabled)
+	require.Empty(t, policy.Config.Goal)
+	require.False(t, policy.Config.Settings.GoalLockEnabled)
+
+	// 8. Worker goal(action="set") permitted when state has empty goal
+	resSetEmptyState, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID:   "123e4567-e89b-42d3-a456-426614174084",
+		OperationID: "goal.control",
+		Arguments:   map[string]any{"action": "set", "goal": "worker goal in free state"},
+		Fence:       fence,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resSetEmptyState.Status)
+
+	// 9. Clear workflow state completely (exit)
+	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, nil))
+	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
+		Enabled:  false,
+		Goal:     "",
+		Settings: goalSettingsUnlocked,
+	})
+	require.NoError(t, err)
+
+	policy, err = durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.False(t, policy.Config.Enabled)
+	require.Empty(t, policy.Config.Goal)
+	require.False(t, policy.Config.Settings.GoalLockEnabled)
+
+	// 10. Worker goal(action="set") permitted when no workflow state
+	resSetNoState, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID:   "123e4567-e89b-42d3-a456-426614174085",
+		OperationID: "goal.control",
+		Arguments:   map[string]any{"action": "set", "goal": "worker goal after exit"},
+		Fence:       fence,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resSetNoState.Status)
 }

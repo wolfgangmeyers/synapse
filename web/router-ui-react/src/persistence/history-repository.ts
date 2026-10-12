@@ -23,6 +23,7 @@ import {
 } from "./retention";
 import { secureUuid } from "../platform/secure-uuid";
 import {
+  DEFAULT_ROUTER_URL,
   normalizeRouterUrl,
   ownerScope,
   peerScope,
@@ -199,7 +200,13 @@ export class HistoryRepository {
   public async load(scope: HistoryScope, now = Date.now()): Promise<HistoryByPeer> {
     const routerUrl = normalizeRouterUrl(scope.routerUrl);
     const db = await openHistoryDb(this.factory);
-    const values = await getAllByIndex(db, HISTORY_STORE_NAME, OWNER_SCOPE_INDEX, ownerScope(routerUrl, scope.agentId));
+    let values = await getAllByIndex(db, HISTORY_STORE_NAME, OWNER_SCOPE_INDEX, ownerScope(routerUrl, scope.agentId));
+    if (values.length === 0 && routerUrl === DEFAULT_ROUTER_URL) {
+      const legacy8787 = await getAllByIndex(db, HISTORY_STORE_NAME, OWNER_SCOPE_INDEX, ownerScope("http://127.0.0.1:8787", scope.agentId));
+      if (legacy8787.length > 0) {
+        values = legacy8787;
+      }
+    }
     const messages: HistoryByPeer = {};
     for (const value of values) {
       const parsed = historyRecord(value);

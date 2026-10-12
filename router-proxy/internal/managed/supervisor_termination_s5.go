@@ -188,6 +188,7 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 		return
 	}
 	m.cascadeAbortSubagents(action.AgentID)
+	ClearAgentContextUsage(action.AgentID)
 	_ = m.store.CascadeTerminateSubagents(context.Background(), action.AgentID)
 	agent, err := m.store.ManagedAgent(context.Background(), action.AgentID)
 	if err != nil || agent.DesiredState != "terminated" {

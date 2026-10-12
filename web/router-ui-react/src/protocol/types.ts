@@ -848,6 +848,12 @@ export interface ManagedChild {
   compaction: ManagedChildCompaction;
   compaction_state: "none" | "compacting" | "completed" | "unknown";
 }
+export interface ContextUsage {
+  tokens: number | null;
+  context_window: number;
+  percent: number | null;
+}
+
 export interface ManagedAgent {
   agent_id: AgentId;
   source: "router-managed";
@@ -865,6 +871,7 @@ export interface ManagedAgent {
   last_error: ManagedError | null;
   worktree?: boolean;
   allow_inline_tools?: boolean | undefined;
+  context_usage?: ContextUsage;
   goal_state?: GoalState & {
     desired_revision?: number;
     applied_revision?: number;

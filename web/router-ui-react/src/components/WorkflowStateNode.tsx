@@ -87,6 +87,12 @@ function WorkflowStateNodeComponent({ data, selected }: NodeProps) {
           </span>
         )}
 
+        {Boolean(state.goal) && (
+          <span className="node-badge badge-goal" title={state.goal}>
+            <i className="fa-solid fa-flag" aria-hidden="true" /> Goal
+          </span>
+        )}
+
         {hasReminders && (
           <span className="node-badge badge-reminders" title={`${reminderCount} scheduled reminder(s)`}>
             <i className="fa-solid fa-clock" aria-hidden="true" /> {reminderCount} {reminderCount === 1 ? "Reminder" : "Reminders"}

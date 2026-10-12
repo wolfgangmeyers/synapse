@@ -1,135 +1,181 @@
-# Specification: Workflow State Tool Restrictions
+# Specification: Workflow State Goal Integration and Goal Locking
 
 ## 1. Problem Statement
-Currently, embedded workers running in router-proxy have access to all registered tools for their role across their entire lifecycle. When operators configure workflow states (e.g., "Reviewing", "Specifying", "Triage", "Auditing"), they cannot constrain which tools an embedded agent can invoke while in that state. For example, a "Reviewing" state may require read-only inspection (`read`, `bash` or `read` only) while strictly forbidding file mutations (`write`, `edit`) or external delegation (`subagent`, `mecha_worker`). Without enforcement at both the prompt/session declaration boundary and the runtime execution admission boundary, workers can hallucinate or attempt destructive actions that violate the intended workflow phase contract.
+Workflow states currently configure agent instructions (`entry_text`), tool restrictions (`allowed_tools`), state transitions (`transitions`), exit flags (`allow_exit`), and scheduled reminders (`reminders`). However, workflow states do not support binding a persistent goal to a workflow state. When an agent transitions through structured workflow phases (e.g., from "Specification" to "Implementation" to "Review"), operators must either rely on transient entry prompts or manually reconfigure the agent's goal at each phase.
 
-## 2. Requirements & Boundaries
+Furthermore, when an agent is bound to a workflow state with an assigned goal, the agent (or a worker calling the `goal` tool) must not be able to arbitrarily overwrite or disable that state-mandated goal. The goal must remain locked to the active workflow state until the workflow transitions or exits.
 
-### 2.1 Backward Compatibility & Default Behavior
-- Tool restrictions are opt-in per workflow state.
-- If a workflow state has `allowed_tools` set to `null`, `[]`, or omitted, all tools remain available to the embedded worker (existing behavior).
-- When `allowed_tools` contains one or more tool names, only those specified tools are provided to the agent and admitted for execution while that state is active.
+This feature introduces:
+1. Schema migration adding `goal` to `workflow_states`.
+2. Store CRUD and HTTP transport support for `goal` on workflow states.
+3. Runtime goal synchronization upon entering, transitioning, or exiting workflow states with explicit goal locking.
+4. Goal locking enforcement that denies worker attempts to mutate or clear the goal while in a workflow state that has a non-empty goal.
+5. Web UI enhancements in `StateConfigModal.tsx`, `WorkflowStateNode.tsx`, and `WorkflowStatesPage.tsx` using `GoalEditorDialog`.
 
-### 2.2 Canonical Tool Identifier Whitelist
-Tool names configured in `allowed_tools` must be validated against the set of known embedded worker tools:
-- `mecha_mailbox_send`
-- `goal`
-- `goal_snooze`
-- `mecha_context`
-- `mecha_reminder`
-- `context_reset` (alias: `reset`)
-- `scratchpad`
-- `bash`
-- `read`
-- `edit`
-- `write`
-- `subagent`
-- `get_subagent_result`
-- `steer_subagent`
-- `mecha_worker`
+---
 
-Validation rules:
-- Tool names must be non-empty, trimmed, and belong to the whitelist.
-- `context_reset` and `reset` are aliased: allowing either allows both `context_reset` and `reset` in the runtime session.
-- Duplicates are de-duplicated on save.
-- Unknown tool names produce a 400 Bad Request error on state creation or update.
+## 2. Database & Store Schema
 
-### 2.3 Dynamic Tool Filtering on State Entry & Turn Execution
-When an embedded session prepares a turn in `router-proxy/internal/managed/embedded_session.go`:
-1. If the agent has an `active_workflow_state_id`, the manager inspects the active `WorkflowState`.
-2. If `AllowedTools` is non-empty:
-   - Tool list construction filters out any tool whose name is not in the allowed list (accounting for `context_reset`/`reset` aliasing).
-   - Only allowed tools are passed to `coding.NewSession(coding.SessionOptions{Tools: filteredTools, ...})`.
-3. If no state is active, or `AllowedTools` is empty/null, the full standard tool set is passed to `coding.Session`.
+### 2.1 Schema Migration (`099_workflow_state_goal.sql`)
+- Add migration file `router-proxy/internal/store/migrations/099_workflow_state_goal.sql`:
+  ```sql
+  ALTER TABLE workflow_states ADD COLUMN goal TEXT NOT NULL DEFAULT '' CHECK (length(goal) <= 4000);
+  ```
+- Harmonized to 4000 characters to match `client_frames.go` and `GoalEditorDialog`.
+- Registered in `router-proxy/internal/store/store.go` migrations list.
 
-### 2.4 Tool Execution Admission Fence
-In `embedded_session.go` `BeforeToolCall`:
-- If an agent is in an active workflow state with `AllowedTools` configured, and attempts to invoke a tool that is not allowed (e.g. through prompt hallucination or direct tool injection):
-  - The router denies execution cleanly before durable intent or effect execution.
-  - Return `&agent.PolicyDenial{Reason: fmt.Sprintf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)}`.
-  - The denial is recorded in tool history as a cleanly rejected tool outcome without crashing the runner or terminating the session.
+### 2.2 Store & Domain Model
+- Validation constant in `router-proxy/internal/store/workflow_states.go`:
+  ```go
+  const maxWorkflowStateGoalBytes = 4000
+  ```
+- `WorkflowState` struct in `router-proxy/internal/store/workflow_states.go`:
+  - Add field `Goal string `json:"goal"``
+- `WorkflowStateRequest` struct in `router-proxy/internal/store/workflow_states.go`:
+  - Add field `Goal string `json:"goal"``
+- Validation in `validateWorkflowStateRequest`:
+  - Check `len([]byte(req.Goal)) <= maxWorkflowStateGoalBytes` (return `WorkflowStateValidationError` on field `"goal"` if exceeded).
+- Store CRUD in `router-proxy/internal/store/workflow_states.go` & `workflows.go`:
+  - Query, insert, and update `goal` across all `workflow_states` SQL statements:
+    - `CreateWorkflowState`
+    - `UpdateWorkflowState`
+    - `GetWorkflowState`
+    - `ListWorkflowStates`
+    - `ListWorkflowStatesByWorkflow`
+    - `GetWorkflowWithStates`
+- TypeScript domain model (`web/router-ui-react/src/domain/workflow-states.ts`):
+  - Add `goal?: string;` to `WorkflowState` and `WorkflowStateInput`.
 
-### 2.5 Dynamic State Transitions
-- State transitions take effect immediately on the next prompt/turn.
-- When an agent transitions from state A (`allowed_tools: ["read"]`) to state B (`allowed_tools: null` or `["read", "write"]`), the next turn instantiates `coding.Session` with the newly active state's tool set.
-- Deactivating the active state restores full tool availability.
+### 2.3 HTTP Transport Handlers
+- In `router-proxy/internal/transport/workflow_states_http.go` and `workflows_http.go`:
+  - Parse `goal` from incoming JSON request body.
+  - Return `goal` in JSON responses for `GET`, `POST`, and `PUT` `/v1/workflow-states` and `/v1/workflows`.
 
-## 3. Data Storage & Schema Migration
+---
 
-### 3.1 Migration 093
-File: `router-proxy/internal/store/migrations/093_workflow_state_allowed_tools.sql`
-```sql
-ALTER TABLE workflow_states ADD COLUMN allowed_tools_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(allowed_tools_json));
+## 3. Runtime Activation & Lifecycle
+
+When a managed agent's active workflow state changes, the router automatically synchronizes the agent's goal configuration.
+
+### 3.1 State Entry & Activation
+When activating a workflow state on an agent (via `SetManagedAgentActiveWorkflowState` in `router-proxy/internal/managed/`, HTTP `/v1/managed-agents/{id}/workflow-state`, or state transition in `embedded_workflow_transition.go`):
+1. Load the target `WorkflowState`.
+2. If `state.Goal != ""`:
+   - Set the agent's goal to `state.Goal`.
+   - The applied `ManagedGoalConfig` must explicitly set:
+     ```go
+     Enabled: true,
+     Goal:    state.Goal,
+     Settings: store.ManagedGoalSettings{
+         GoalLockEnabled: true,
+         // ... default or existing snooze settings preserved
+     },
+     ```
+   - Project the updated policy to the active embedded session or RPC worker.
+3. If `state.Goal == ""`:
+   - Deactivate the agent's goal:
+     ```go
+     Enabled: false,
+     Goal:    "",
+     Settings: store.ManagedGoalSettings{
+         GoalLockEnabled: false,
+     },
+     ```
+   - Project the deactivated policy to the active embedded session or RPC worker.
+
+### 3.2 State Exit & Deactivation
+When exiting or deactivating an active workflow state (via `action="exit"` in `embedded_workflow_transition.go` or workflow deactivation via HTTP):
+1. Disable the goal:
+   ```go
+   Enabled: false,
+   Goal:    "",
+   Settings: store.ManagedGoalSettings{
+       GoalLockEnabled: false,
+   },
+   ```
+2. Project the deactivated goal policy to the active agent session.
+
+### 3.3 Implementation Locations
+- `router-proxy/internal/store/managed.go` (`SetManagedAgentActiveWorkflowState` / manager orchestration layer):
+  - Coordinate goal policy updates alongside workflow state ID persistence.
+- `router-proxy/internal/managed/embedded_workflow_transition.go`:
+  - When executing `"transition"` action: apply target state's goal policy (`GoalLockEnabled = true` if `state.Goal != ""`, or disabled if `""`).
+  - When executing `"exit"` action: deactivate the goal policy (`Enabled: false, Goal: "", Settings.GoalLockEnabled = false`).
+- `router-proxy/internal/transport/managed_http.go`:
+  - Trigger goal synchronization on manual workflow state assignment or clearing.
+
+---
+
+## 4. Goal Locking Semantics
+
+When an agent is executing within a workflow state that defines a non-empty `goal`:
+
+### 4.1 Rejection of Worker Goal Changes
+In `executeManagedGoalControl` (`router-proxy/internal/managed/managed_goal_projection.go`):
+- Check whether the agent has an active workflow state with `state.Goal != ""`.
+- Worker attempts to mutate or clear the goal (`action == "set"` or `action == "off"`) while in a workflow state that has a non-empty goal are denied with:
+  ```go
+  fmt.Errorf("goal is locked by active workflow state %q", state.Name)
+  ```
+- Action `"status"`: PERMITTED. Returns the current goal status and evaluation details without modification.
+
+### 4.2 Administrative & Workflow Transitions
+- Workflow transitions and administrative APIs apply state-mandated goal updates directly through the manager lifecycle path.
+- Worker tool calls (`goal` / `goal.control`) from the LLM turn remain locked and cannot override or turn off the workflow state goal.
+
+---
+
+## 5. Web UI & Frontend
+
+### 5.1 `WorkflowStateNode.tsx`
+When `state.goal` is non-empty (`Boolean(state.goal)`), render a goal badge:
+```tsx
+{Boolean(state.goal) && (
+  <span className="node-badge badge-goal" title={state.goal}>
+    <i className="fa-solid fa-flag" aria-hidden="true" /> Goal
+  </span>
+)}
 ```
 
-### 3.2 Store Layer (`router-proxy/internal/store/workflow_states.go`)
-- Update `WorkflowState` struct:
-  ```go
-  type WorkflowState struct {
-      ID           string          `json:"id"`
-      Name         string          `json:"name"`
-      Description  string          `json:"description"`
-      EntryText    string          `json:"entry_text"`
-      Reminders    []StateReminder `json:"reminders"`
-      AllowedTools []string        `json:"allowed_tools"`
-      CreatedAt    string          `json:"created_at"`
-      UpdatedAt    string          `json:"updated_at"`
-  }
-  ```
-- Update `CreateWorkflowState`, `UpdateWorkflowState`, `GetWorkflowState`, and `ListWorkflowStates`:
-  - Serialize/deserialize `allowed_tools_json`.
-  - Validate tool names against the whitelist on insert/update.
-  - Guarantee `AllowedTools` defaults to `nil` or `[]string{}` when stored as `[]`.
+### 5.2 `StateConfigModal.tsx`
+Directly reuse `GoalEditorDialog`:
+- State holds local draft `goal: string` initialized from `state.goal ?? ""`.
+- **Goal Section**:
+  - When no goal is configured (`!goal`):
+    - Display a section header "Workflow State Goal" and a button "Configure Goal".
+    - Clicking "Configure Goal" opens `GoalEditorDialog`.
+  - When a goal is configured (`Boolean(goal)`):
+    - Display a clean preview box showing the goal text (matching how reminders are previewed and managed).
+    - Provide an "Edit Goal" button (opens `GoalEditorDialog`) and a "Clear Goal" button (clears `goal` to `""`).
+- **`GoalEditorDialog` Integration**:
+  - Initializes with the state's current `goal` string:
+    - Pass `goalState` (or `value`) constructed from the state: `{ ...DEFAULT_GOAL_STATE, enabled: Boolean(goal), goal: goal || "" }`.
+    - Set `peer` to state name (e.g. `peer={`State: ${name}`}`).
+  - On save (`onSave`):
+    - Extract `payload.goal` (if payload action is `"set"` and enabled, or `""` if `"off"`).
+    - Update the state's `goal` property and close `GoalEditorDialog`.
+- Include `goal` in the `updated` state passed to `onSave(updated, makeEntry)` on submit.
 
-## 4. HTTP API Endpoints
+### 5.3 `WorkflowStatesPage.tsx`
+- Ensure table/list state summaries and state creation forms display and preserve `goal`.
+- Display a goal indicator or badge when a state defines a goal.
 
-### 4.1 Request & Response Contracts
-- `GET /v1/workflow-states`: Each item includes `"allowed_tools": ["read", "write"]` or `[]`.
-- `POST /v1/workflow-states`:
-  ```json
-  {
-    "name": "Reviewing",
-    "description": "Read-only inspection phase",
-    "entry_text": "Please review the proposed diff.",
-    "allowed_tools": ["read", "bash"],
-    "reminders": []
-  }
-  ```
-- `PUT /v1/workflow-states/{id}`:
-  Accepts updated `allowed_tools: string[] | null`.
-- Invalid tool names return HTTP 400 with `{ "error": "INVALID_TOOL_NAME", "message": "unknown tool: ..." }`.
+---
 
-## 5. Web UI
+## 6. Testing Strategy
 
-### 5.1 Domain Models (`web/router-ui-react/src/domain/workflow-states.ts`)
-- Add `allowed_tools?: string[] | null` to `WorkflowState`, `CreateWorkflowStateInput`, and `UpdateWorkflowStateInput`.
-- Export constant `KNOWN_WORKFLOW_TOOLS` containing the 14 valid tool identifiers with human-friendly descriptions.
-
-### 5.2 WorkflowStatesPage Component (`web/router-ui-react/src/components/WorkflowStatesPage.tsx`)
-- Display allowed tools badge/list on each state card:
-  - "All tools allowed" tag when empty or null.
-  - Comma-separated or tag list of allowed tools when restricted (e.g., "Allowed tools: read, bash").
-- Create / Edit Workflow State Modal:
-  - Add "Tool Restrictions" section.
-  - Checkbox / Toggle: "All tools allowed (unrestricted)" enabled by default.
-  - When unchecked, render multi-select or checkbox list for each known tool.
-  - Helper actions: "Select All", "Clear All", or common presets ("Read-only", "Code authoring").
-
-## 6. Verification & Automated Tests
-1. **Store Migration & CRUD Unit Tests**:
-   - `router-proxy/internal/store/workflow_states_test.go`:
-     - Test storing, retrieving, updating `allowed_tools`.
-     - Test validation rejects invalid tool names.
-     - Test round-trip serialization of empty vs non-empty tool lists.
-2. **Managed Embedded Session Integration Test**:
-   - `router-proxy/internal/managed/embedded_workflow_tool_restrictions_test.go`:
-     - Launch embedded agent in default state -> verify all tools passed.
-     - Activate workflow state with restricted tools (`read` only) -> verify model receives only `read`, and attempting to call `bash` or `write` returns `PolicyDenial`.
-     - Deactivate or switch to unrestricted state -> verify full tool set restored.
-3. **HTTP Transport Tests**:
-   - Verify GET/POST/PUT `/v1/workflow-states` with `allowed_tools` and invalid tool payload validation.
-4. **Web UI Component Tests**:
-   - `web/router-ui-react/tests/component/workflow-states.test.tsx`:
-     - Verify card displays "All tools allowed" vs restricted badges.
-     - Verify modal allows selecting specific tools and submitting `allowed_tools`.
-     - Verify editing preserves or updates `allowed_tools`.
+1. **Store & Migration Tests (`workflow_states_test.go`, `migrations_test.go`)**:
+   - Verify migration 099 applies cleanly with `CHECK (length(goal) <= 4000)`.
+   - Verify CRUD operations persist and return `goal`.
+   - Verify validation fails when `goal` exceeds 4000 bytes.
+2. **Runtime Lifecycle Tests (`embedded_workflow_activation_test.go`, `embedded_workflow_transition_test.go`)**:
+   - Verify entering a state with `goal` sets `Enabled: true`, `Goal: state.Goal`, and `Settings.GoalLockEnabled = true`.
+   - Verify entering a state with `goal == ""` disables goal (`Enabled: false, Goal: "", Settings.GoalLockEnabled = false`).
+   - Verify exiting a workflow deactivates goal (`Enabled: false, Goal: "", Settings.GoalLockEnabled = false`).
+3. **Goal Lock Tests (`managed_goal_projection_test.go`)**:
+   - Verify worker calling `goal(action="set")` or `goal(action="off")` while in a state with a goal is rejected with:
+     `goal is locked by active workflow state "<StateName>"`
+   - Verify worker calling `goal(action="status")` succeeds.
+4. **Web UI Tests (`WorkflowStateNode.test.tsx`, `StateConfigModal.test.tsx`)**:
+   - Verify node badge renders `<i className="fa-solid fa-flag" ... /> Goal` with `title={state.goal}` when `state.goal` is present.
+   - Verify opening `GoalEditorDialog` from `StateConfigModal` initializes draft goal text, saves back to state, and preview box renders with Edit and Clear buttons.

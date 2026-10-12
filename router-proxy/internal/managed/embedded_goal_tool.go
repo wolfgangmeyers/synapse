@@ -79,6 +79,10 @@ func (m *Manager) embeddedGoalTool(owner embeddedOwner, admitted func(string) *s
 		if invocation == nil {
 			return agent.AgentToolResult{}, errors.New("goal call was not freshly admitted")
 		}
+		activeWorkflowState, sErr := m.store.GetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID)
+		if sErr == nil && activeWorkflowState != nil && activeWorkflowState.Goal != "" {
+			return agent.AgentToolResult{}, fmt.Errorf("goal is locked by active workflow state %q", activeWorkflowState.Name)
+		}
 		if err := m.store.CheckEmbeddedGoalInvocation(ctx, invocation); err != nil {
 			return agent.AgentToolResult{}, err
 		}

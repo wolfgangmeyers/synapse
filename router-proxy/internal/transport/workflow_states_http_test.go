@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -275,4 +276,109 @@ func TestWorkflowStatesHTTPAllowedTools(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 	res.Body.Close()
 }
+
+func TestWorkflowStatesHTTPGoal(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+
+	router, err := transport.New(transport.Options{Store: durable})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	client := server.Client()
+
+	// 1. POST /v1/workflow-states with {"goal": "Test goal..."} returns the goal
+	createPayload := map[string]any{
+		"name":        "goal-state",
+		"description": "State with a goal",
+		"entry_text":  "Begin goal-directed work.",
+		"goal":        "Test goal: complete all tasks.",
+	}
+	body, _ := json.Marshal(createPayload)
+	res, err := client.Post(server.URL+"/v1/workflow-states", "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, res.StatusCode)
+	var createRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&createRes))
+	res.Body.Close()
+
+	createdState, ok := createRes["workflow_state"].(map[string]any)
+	require.True(t, ok)
+	stateID := createdState["id"].(string)
+	require.Equal(t, "Test goal: complete all tasks.", createdState["goal"])
+
+	// 2. GET /v1/workflow-states/{id} returns goal
+	res, err = client.Get(server.URL + "/v1/workflow-states/" + stateID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var getRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&getRes))
+	res.Body.Close()
+	fetchedState, ok := getRes["workflow_state"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "Test goal: complete all tasks.", fetchedState["goal"])
+
+	// 3. PUT /v1/workflow-states/{id} updates goal
+	updatePayload := map[string]any{
+		"name": "goal-state",
+		"goal": "Updated goal: all tasks verified.",
+	}
+	updateBody, _ := json.Marshal(updatePayload)
+	putReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/workflow-states/"+stateID, bytes.NewReader(updateBody))
+	require.NoError(t, err)
+	putReq.Header.Set("Content-Type", "application/json")
+	res, err = client.Do(putReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var updateRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&updateRes))
+	res.Body.Close()
+	updatedState, ok := updateRes["workflow_state"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "Updated goal: all tasks verified.", updatedState["goal"])
+
+	// Verify GET returns the updated goal
+	res, err = client.Get(server.URL + "/v1/workflow-states/" + stateID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var getUpdatedRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&getUpdatedRes))
+	res.Body.Close()
+	require.Equal(t, "Updated goal: all tasks verified.", getUpdatedRes["workflow_state"].(map[string]any)["goal"])
+
+	// 4. Test validation error (goal > 4000 bytes) returns HTTP 400
+	longGoal := strings.Repeat("x", 4001)
+	badPayload := map[string]any{
+		"name": "too-long-goal",
+		"goal": longGoal,
+	}
+	badBody, _ := json.Marshal(badPayload)
+	res, err = client.Post(server.URL+"/v1/workflow-states", "application/json", bytes.NewReader(badBody))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, res.StatusCode)
+	var badRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&badRes))
+	res.Body.Close()
+	errObj, ok := badRes["error"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "invalid_workflow_state", errObj["code"])
+
+	// Test PUT validation error (goal > 4000 bytes) returns HTTP 400
+	badPutPayload := map[string]any{
+		"name": "goal-state",
+		"goal": longGoal,
+	}
+	badPutBody, _ := json.Marshal(badPutPayload)
+	badPutReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/workflow-states/"+stateID, bytes.NewReader(badPutBody))
+	require.NoError(t, err)
+	badPutReq.Header.Set("Content-Type", "application/json")
+	res, err = client.Do(badPutReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, res.StatusCode)
+	res.Body.Close()
+}
+
 

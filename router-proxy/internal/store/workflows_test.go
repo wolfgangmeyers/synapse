@@ -245,6 +245,7 @@ func TestWorkflowDuplicate(t *testing.T) {
 		Name:         "stage-one",
 		Description:  "First stage",
 		EntryText:    "Entering stage one",
+		Goal:         "Draft spec and tests",
 		AllowedTools: []string{"read", "edit"},
 		UIPosX:       &x1,
 		UIPosY:       &y1,
@@ -328,6 +329,10 @@ func TestWorkflowDuplicate(t *testing.T) {
 	// Verify states in duplicated workflow retain their original names (scoped uniqueness)
 	require.Equal(t, "stage-one", clonedState1.Name)
 	require.Equal(t, "stage-two", clonedState2.Name)
+
+	// Verify copied goal on duplicated workflow states
+	require.Equal(t, "Draft spec and tests", clonedState1.Goal)
+	require.Equal(t, "", clonedState2.Goal)
 
 	// Duplicate non-existent workflow
 

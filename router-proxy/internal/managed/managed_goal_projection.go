@@ -31,6 +31,10 @@ func (m *Manager) executeManagedGoalControl(ctx context.Context, binding *manage
 	if action != "set" && action != "off" {
 		return RootControlHandlerResult{}, errors.New("managed goal action is invalid")
 	}
+	activeWorkflowState, err := m.store.GetManagedAgentActiveWorkflowState(ctx, invocation.Fence.AgentID)
+	if err == nil && activeWorkflowState != nil && activeWorkflowState.Goal != "" {
+		return RootControlHandlerResult{}, fmt.Errorf("goal is locked by active workflow state %q", activeWorkflowState.Name)
+	}
 	current, err := m.store.ManagedGoalPolicyFor(ctx, invocation.Fence.AgentID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return RootControlHandlerResult{}, err

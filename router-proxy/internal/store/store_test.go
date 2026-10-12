@@ -316,6 +316,46 @@ func openTestStore(t *testing.T) *Store {
 	return openTestStoreWithOptions(t, Options{})
 }
 
+func TestConversationHistoryPostelHumanFallback(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := formatTimestamp(time.Now().UTC())
+
+	// Insert human conversation messages between "operator" and "worker"
+	require.NoError(t, execTestData(s, `
+		INSERT INTO conversation_messages (message_id, message_incarnation_id, delivery_message_id, sender, recipient, participant_a, participant_b, body, source_kind, created_at, recorded_at)
+		VALUES ('msg-1', 'inc-1', 'del-1', 'operator', 'worker', 'operator', 'worker', 'Hello from operator', 'web_ui', ?, ?)`, now, now))
+	require.NoError(t, execTestData(s, `
+		INSERT INTO conversation_messages (message_id, message_incarnation_id, delivery_message_id, sender, recipient, participant_a, participant_b, body, source_kind, created_at, recorded_at)
+		VALUES ('msg-2', 'inc-2', 'del-2', 'worker', 'operator', 'operator', 'worker', 'Hello back to operator', 'agent', ?, ?)`, now, now))
+
+	// Querying with owner="operator" returns both messages
+	history, err := s.ConversationHistory(ctx, "operator", "worker")
+	require.NoError(t, err)
+	require.Len(t, history, 2)
+	require.Equal(t, "Hello from operator", history[0].Body)
+
+	// Querying with owner="user" (generic UI default) falls back to the human operator's history
+	userHistory, err := s.ConversationHistory(ctx, "user", "worker")
+	require.NoError(t, err)
+	require.Len(t, userHistory, 2)
+	require.Equal(t, "Hello from operator", userHistory[0].Body)
+	require.Equal(t, "Hello back to operator", userHistory[1].Body)
+
+	// If user sends a subsequent message, both are merged and returned in sequence
+	later := formatTimestamp(time.Now().UTC().Add(time.Second))
+	require.NoError(t, execTestData(s, `
+		INSERT INTO conversation_messages (message_id, message_incarnation_id, delivery_message_id, sender, recipient, participant_a, participant_b, body, source_kind, created_at, recorded_at)
+		VALUES ('msg-3', 'inc-3', 'del-3', 'user', 'worker', 'user', 'worker', 'Follow up from user', 'web_ui', ?, ?)`, later, later))
+
+	mergedHistory, err := s.ConversationHistory(ctx, "user", "worker")
+	require.NoError(t, err)
+	require.Len(t, mergedHistory, 3)
+	require.Equal(t, "Hello from operator", mergedHistory[0].Body)
+	require.Equal(t, "Hello back to operator", mergedHistory[1].Body)
+	require.Equal(t, "Follow up from user", mergedHistory[2].Body)
+}
+
 func openTestStoreWithOptions(t *testing.T, options Options) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "router.db")

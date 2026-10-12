@@ -167,7 +167,13 @@ func (s *Store) ensureManagedGoalPolicyTx(ctx context.Context, agentID, createdA
 	}
 	scope, err := s.managedGoalHistoryScopeTx(ctx, agentID)
 	if err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table: managed_history_boundaries") {
+			scope = "scope-" + agentID
+			// In case foreign keys are enabled and managed_history_incarnations exists, ensure the scope row exists
+			_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO managed_history_incarnations(incarnation_id,agent_id,start_sequence,created_at) VALUES (?,?,0,?)`, scope, agentID, createdAt)
+		} else {
+			return err
+		}
 	}
 	settings, err := managedGoalSettingsJSON(DefaultManagedGoalSettings())
 	if err != nil {
@@ -176,6 +182,34 @@ func (s *Store) ensureManagedGoalPolicyTx(ctx context.Context, agentID, createdA
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_agent_policies(agent_id,history_scope_id,settings_json,created_at,updated_at)
 		VALUES (?,?,?,?,?) ON CONFLICT(agent_id) DO NOTHING`, agentID, scope, settings, createdAt, createdAt)
 	return err
+}
+
+// UpdateManagedGoalConfig updates an agent's goal configuration directly without requiring an active runtime fence.
+func (s *Store) UpdateManagedGoalConfig(ctx context.Context, agentID string, config ManagedGoalConfig) (*ManagedGoalPolicy, error) {
+	if !validManagedGoalConfig(config) {
+		return nil, errors.New("managed goal policy is invalid")
+	}
+	settings, err := managedGoalSettingsJSON(config.Settings)
+	if err != nil {
+		return nil, err
+	}
+	var result *ManagedGoalPolicy
+	err = s.runImmediate(ctx, func() error {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE agent_id=?`, agentID).Scan(&present); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return &ManagedReadinessSourceStaleError{AgentID: agentID}
+			}
+			return err
+		}
+		result, err = s.updateManagedGoalPolicyTx(ctx, agentID, config, settings)
+		if err != nil {
+			return err
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+	return result, err
 }
 
 // UpdateManagedGoalPolicy is the atomic desired-state transition. Pi delivery

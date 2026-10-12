@@ -1595,6 +1595,25 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			return
 		}
 
+		// Synchronize goal with workflow state
+		if wfState.Goal != "" {
+			goalSettings := store.DefaultManagedGoalSettings()
+			goalSettings.GoalLockEnabled = true
+			_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
+				Enabled:  true,
+				Goal:     wfState.Goal,
+				Settings: goalSettings,
+			})
+		} else {
+			goalSettings := store.DefaultManagedGoalSettings()
+			goalSettings.GoalLockEnabled = false
+			_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
+				Enabled:  false,
+				Goal:     "",
+				Settings: goalSettings,
+			})
+		}
+
 		_ = r.store.SpawnWorkflowStateReminders(req.Context(), agentID, wfState)
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
@@ -1673,6 +1692,14 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
 			return
 		}
+		// Deactivate goal on workflow state deactivation
+		goalSettings := store.DefaultManagedGoalSettings()
+		goalSettings.GoalLockEnabled = false
+		_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
+			Enabled:  false,
+			Goal:     "",
+			Settings: goalSettings,
+		})
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
