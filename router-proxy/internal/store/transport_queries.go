@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -81,10 +82,7 @@ func (s *Store) AdmissionLimits() AdmissionLimits {
 	return AdmissionLimits{MaxBodyBytes: s.maxBodyBytes, MaxQueuedMessages: s.maxQueuedMessages, MaxQueuedBytes: s.maxQueuedBytes, MaxBatchBodyChars: s.maxBatchBodyChars}
 }
 
-func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
-	if owner == "" || peer == "" {
-		return nil, errors.New("owner and peer are required")
-	}
+func (s *Store) conversationHistoryForPair(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
 	a, b := owner, peer
 	if b < a {
 		a, b = b, a
@@ -118,6 +116,47 @@ func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]
 		result = append(result, message)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
+	if owner == "" || peer == "" {
+		return nil, errors.New("owner and peer are required")
+	}
+	result, err := s.conversationHistoryForPair(ctx, owner, peer)
+	if err != nil {
+		return nil, err
+	}
+	// Postel's Law: If the requester connected as generic "user" or has an empty history with peer,
+	// check if the primary human operator has conversation history with this peer.
+	// The router is the authoritative source of record for conversation history.
+	if owner == "user" || len(result) == 0 {
+		human, humanErr := s.LastHumanRecipient(ctx, peer)
+		if humanErr == nil && human != "" && human != "user" && human != owner {
+			humanResult, hErr := s.conversationHistoryForPair(ctx, human, peer)
+			if hErr == nil && len(humanResult) > 0 {
+				if len(result) == 0 {
+					return humanResult, nil
+				}
+				seen := make(map[int64]bool, len(result)+len(humanResult))
+				var merged []domain.ConversationMessage
+				for _, m := range result {
+					seen[m.Sequence] = true
+					merged = append(merged, m)
+				}
+				for _, m := range humanResult {
+					if !seen[m.Sequence] {
+						seen[m.Sequence] = true
+						merged = append(merged, m)
+					}
+				}
+				sort.Slice(merged, func(i, j int) bool {
+					return merged[i].Sequence < merged[j].Sequence
+				})
+				return merged, nil
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) ConversationHighWaterSequence(ctx context.Context) (int64, error) {

@@ -1,4 +1,4 @@
-import { SCOPE_SEPARATOR, type StorageAdapter } from "./settings-repository";
+import { DEFAULT_ROUTER_URL, SCOPE_SEPARATOR, type StorageAdapter } from "./settings-repository";
 
 export const RECENT_AGENTS_KEY = "mecha.web.recentAgents";
 export const RECENT_AGENTS_LIMIT = 10;
@@ -23,8 +23,12 @@ function loadScopes(storage: StorageAdapter | undefined): Record<string, string[
     const entries: [string, unknown][] = Object.entries(parsed);
     return Object.fromEntries(entries.flatMap<[string, string[]]>(([scope, values]) => {
       const parts = scope.split(SCOPE_SEPARATOR);
-      return parts.length === 2 && parts.every(Boolean) && Array.isArray(values)
-        ? [[scope, normalizeRecentAgents(values)]] : [];
+      if (parts.length !== 2 || !parts.every(Boolean) || !Array.isArray(values)) return [];
+      let router = parts[0] ?? "";
+      if (router.includes(":8787")) {
+        router = DEFAULT_ROUTER_URL;
+      }
+      return [[`${router}${SCOPE_SEPARATOR}${parts[1]}`, normalizeRecentAgents(values)]];
     }).slice(-RECENT_AGENT_SCOPES_LIMIT));
   } catch {
     return {};

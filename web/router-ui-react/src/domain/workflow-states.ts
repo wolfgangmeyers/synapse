@@ -20,6 +20,7 @@ export interface WorkflowState {
   name: string;
   description: string;
   entry_text: string;
+  goal?: string | undefined;
   reminders?: WorkflowReminderConfig[];
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
@@ -56,6 +57,7 @@ export interface WorkflowStateInput {
   name: string;
   description?: string;
   entry_text?: string;
+  goal?: string | undefined;
   reminders?: WorkflowReminderConfig[];
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];

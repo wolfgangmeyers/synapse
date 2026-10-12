@@ -317,37 +317,37 @@ func (s *Store) lastHumanRecipientTx(ctx context.Context, agentID string) string
 	var recipient string
 
 	// 1. Most recent inbound message to this agent from a human UI client (web_ui, android, discord)
-	err := s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE recipient=? AND source_kind IN ('web_ui','android','discord') AND sender NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	err := s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE recipient=? AND source_kind IN ('web_ui','android','discord') AND sender NOT IN ('system','reminders','router','user') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
 	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
 		return recipient
 	}
 
 	// 2. Most recent outbound message from this agent to a recipient who sent a human UI message
-	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM conversation_messages WHERE sender=? AND recipient IN (SELECT sender FROM conversation_messages WHERE source_kind IN ('web_ui','android','discord')) AND recipient NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM conversation_messages WHERE sender=? AND recipient IN (SELECT sender FROM conversation_messages WHERE source_kind IN ('web_ui','android','discord')) AND recipient NOT IN ('system','reminders','router','user') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
 	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
 		return recipient
 	}
 
 	// 3. Most recent human message across the entire router in conversation_messages
-	err = s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE source_kind IN ('web_ui','android','discord') AND sender NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`).Scan(&recipient)
+	err = s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE source_kind IN ('web_ui','android','discord') AND sender NOT IN ('system','reminders','router','user') ORDER BY conversation_sequence DESC LIMIT 1`).Scan(&recipient)
 	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
 		return recipient
 	}
 
 	// 4. Any inbound message to this agent from any non-system sender
-	err = s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE recipient=? AND sender NOT IN ('system','reminders','router') AND source_kind NOT IN ('system','reminder') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	err = s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE recipient=? AND sender NOT IN ('system','reminders','router','user') AND source_kind NOT IN ('system','reminder') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
 	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
 		return recipient
 	}
 
 	// 5. Any outbound message from this agent to any non-system recipient
-	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM conversation_messages WHERE sender=? AND recipient NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM conversation_messages WHERE sender=? AND recipient NOT IN ('system','reminders','router','user') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
 	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
 		return recipient
 	}
 
-	// 6. Active human/tmux recipient in recipient_sources (e.g. wolfgang)
-	err = s.db.QueryRowContext(ctx, `SELECT recipient_name FROM recipient_sources WHERE source_kind IN ('tmux','web_ui') AND recipient_name NOT IN ('system','reminders','router','managed-runtime-readiness','reflex-router-proxy-launcher') AND state='active' ORDER BY updated_at DESC LIMIT 1`).Scan(&recipient)
+	// 6. Active human/tmux recipient in recipient_sources (e.g. named human operator)
+	err = s.db.QueryRowContext(ctx, `SELECT recipient_name FROM recipient_sources WHERE source_kind IN ('tmux','web_ui') AND recipient_name NOT IN ('system','reminders','router','user','managed-runtime-readiness','reflex-router-proxy-launcher') AND state='active' ORDER BY updated_at DESC LIMIT 1`).Scan(&recipient)
 	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
 		return recipient
 	}

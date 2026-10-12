@@ -798,9 +798,21 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		log.Printf("[embedded:%s] Turn started (source: %s, message: %s)", binding.AgentID, source, msgID)
 	}
 	var p *embeddedPersistence
+	var session *coding.Session
+	var model *ai.Model
 	_ = m.store.SetEmbeddedActivityState(ctx, binding, "active")
 	m.publishProjection()
 	defer func() {
+		if session != nil {
+			tokens := embeddedProjectedTokens(session.History())
+			window := 0
+			if model != nil && model.ContextWindow > 0 {
+				window = model.ContextWindow
+			} else if session.Model != nil {
+				window = session.Model.ContextWindow
+			}
+			m.updateAgentContextUsage(binding.AgentID, &tokens, window)
+		}
 		if turnErr != nil {
 			if mail == nil {
 				log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", binding.AgentID, source, msgID, turnErr)
@@ -835,7 +847,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := m.validateEmbeddedWorkingDirectory(saved.Cwd); err != nil {
 		return 0, err
 	}
-	model, err := ResolveModel(saved.SelectedModel)
+	var err error
+	model, err = ResolveModel(saved.SelectedModel)
 	if err != nil && m.embeddedModelResolver == nil {
 		return 0, err
 	}
@@ -1329,7 +1342,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			workerPrompt = workerPrompt + "\n\n" + guidance
 		}
 	}
-	session := coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
+	session = coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
 		ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
 			return nil, nil
 		}, BeforeToolCall: func(callCtx context.Context, call agent.BeforeToolCallContext) *agent.BeforeToolCallResult {

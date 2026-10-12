@@ -144,6 +144,8 @@ type ManagedAgentRecord struct {
 	WorktreeBranch string
 	// AllowInlineTools indicates whether inline tools (bash, edit, write) are allowed without allowance credits.
 	AllowInlineTools bool
+	// ContextUsage optionally holds in-memory context usage info attached at projection time.
+	ContextUsage any
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private

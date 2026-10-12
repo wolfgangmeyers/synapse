@@ -89,6 +89,12 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "review-mode", activeMap["name"])
 
+	// Verify goal is deactivated since review-mode has empty goal
+	policy, err := durable.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.False(t, policy.Config.Enabled)
+	require.False(t, policy.Config.Settings.GoalLockEnabled)
+
 	// Verify persistence via GET
 	res, err = client.Get(server.URL + "/v1/managed-agents/" + agentID + "/workflow-state")
 	require.NoError(t, err)
@@ -97,6 +103,33 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	require.NoError(t, json.NewDecoder(res.Body).Decode(&getResp2))
 	res.Body.Close()
 	require.Equal(t, ws.ID, getResp2["active_workflow_state_id"])
+
+	// Activate a state with a goal -> verify agent goal updated and locked
+	wsWithGoal, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		Name:        "goal-workflow-state",
+		Description: "State with locked goal",
+		Goal:        "Implement all required functional tests",
+	})
+	require.NoError(t, err)
+	activateGoalBody, err := json.Marshal(map[string]any{
+		"action":            "activate",
+		"workflow_state_id": wsWithGoal.ID,
+	})
+	require.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(activateGoalBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", uuid.NewString())
+	res, err = client.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	policy, err = durable.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.True(t, policy.Config.Enabled)
+	require.Equal(t, "Implement all required functional tests", policy.Config.Goal)
+	require.True(t, policy.Config.Settings.GoalLockEnabled)
 
 	// 3. Deactivate workflow state
 	deactivateBody, err := json.Marshal(map[string]any{
@@ -116,6 +149,13 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	res.Body.Close()
 	require.Equal(t, "", deactivateResp["active_workflow_state_id"])
 	require.Nil(t, deactivateResp["active_workflow_state"])
+
+	// Verify goal deactivated and unlocked on state deactivation
+	policy, err = durable.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.False(t, policy.Config.Enabled)
+	require.Empty(t, policy.Config.Goal)
+	require.False(t, policy.Config.Settings.GoalLockEnabled)
 
 	// Verify persistence after deactivation via GET
 	res, err = client.Get(server.URL + "/v1/managed-agents/" + agentID + "/workflow-state")

@@ -161,7 +161,13 @@ export function loadSettings(storage: StorageAdapter | undefined = storageOrUnde
   const agentIds: Record<string, string> = {};
   for (const [key, agentId] of Object.entries(stringRecord(parseJson(storage.getItem(AGENT_IDS_KEY))))) {
     try {
-      agentIds[normalizeRouterUrl(key)] = agentId;
+      let router = normalizeRouterUrl(key);
+      if (router.includes(":8787")) {
+        router = DEFAULT_ROUTER_URL;
+      }
+      if (!agentIds[router]) {
+        agentIds[router] = agentId;
+      }
     } catch {
       // Ignore IDs whose router key is invalid.
     }
@@ -171,7 +177,11 @@ export function loadSettings(storage: StorageAdapter | undefined = storageOrUnde
     const parts = key.split(SCOPE_SEPARATOR);
     if (parts.length !== 2 || peer.length === 0) continue;
     try {
-      selectedPeers[ownerScope(parts[0] ?? "", parts[1] ?? "")] = peer;
+      let router = normalizeRouterUrl(parts[0] ?? "");
+      if (router.includes(":8787")) {
+        router = DEFAULT_ROUTER_URL;
+      }
+      selectedPeers[ownerScope(router, parts[1] ?? "")] = peer;
     } catch {
       // Ignore malformed scope keys.
     }
@@ -200,7 +210,11 @@ export function saveSettings(settings: SettingsState, storage: StorageAdapter | 
   const agentIds: Record<string, string> = {};
   for (const [key, value] of Object.entries(settings.agentIds)) {
     try {
-      agentIds[normalizeRouterUrl(key)] = value;
+      let router = normalizeRouterUrl(key);
+      if (router.includes(":8787")) {
+        router = DEFAULT_ROUTER_URL;
+      }
+      agentIds[router] = value;
     } catch {
       // Ignore malformed keys when serializing settings.
     }
@@ -298,6 +312,12 @@ export function agentIdForRouter(
   const router = normalizeRouterUrl(routerUrl);
   const configured = settings.agentIds[router];
   if (configured !== undefined && configured !== "") return configured;
+  // If the caller requested an explicit custom defaultAgentId (other than DEFAULT_AGENT_ID), use it
+  if (defaultAgentId !== DEFAULT_AGENT_ID) return defaultAgentId;
+  // Check if there is any previously configured non-default username in settings.agentIds
+  // (e.g. the user configured an identity on any router or before port migration)
+  const existing = Object.values(settings.agentIds).find((id) => id && id.trim() !== "" && id.trim() !== DEFAULT_AGENT_ID);
+  if (existing) return existing;
   // The legacy key represents the first configured router only. It must not
   // select the identity for a different saved router and hide that router's history.
   const legacy = router === settings.routers[0] ? storage?.getItem(LEGACY_AGENT_ID_KEY) : null;

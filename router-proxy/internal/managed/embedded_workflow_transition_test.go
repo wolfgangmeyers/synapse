@@ -107,6 +107,7 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 		Name:        "Implement",
 		Description: "Writing code",
 		EntryText:   "Follow TDD and write unit tests.",
+		Goal:        "Implement the planned feature",
 		AllowExit:   ptr(false),
 		Transitions: []store.WorkflowTransitionConfig{
 			{TargetStateID: doneState.ID, Description: "Transition here once tests pass"},
@@ -179,6 +180,13 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NotNil(t, currState)
 	require.Equal(t, implementState.ID, currState.ID)
 
+	// Verify goal was synchronized to target state's goal and locked
+	goalPolicy, err := db.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.True(t, goalPolicy.Config.Enabled)
+	require.Equal(t, "Implement the planned feature", goalPolicy.Config.Goal)
+	require.True(t, goalPolicy.Config.Settings.GoalLockEnabled)
+
 	// 6. Transition from Implement to Done using aliasTool and TargetStateID
 	resAlias, err := aliasTool.Execute(ctx, "call-4", map[string]any{
 		"action":       "transition",
@@ -193,6 +201,13 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, doneState.ID, currState.ID)
 
+	// Done state has empty goal -> agent goal should be deactivated and unlocked
+	goalPolicy, err = db.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.False(t, goalPolicy.Config.Enabled)
+	require.Empty(t, goalPolicy.Config.Goal)
+	require.False(t, goalPolicy.Config.Settings.GoalLockEnabled)
+
 	// 7. Done state has allow_exit == true -> Successful exit
 	resExit, err := tool.Execute(ctx, "call-5", map[string]any{
 		"action": "exit",
@@ -205,6 +220,13 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	currState, err = db.GetManagedAgentActiveWorkflowState(ctx, agentID)
 	require.NoError(t, err)
 	require.Nil(t, currState)
+
+	// Verify goal remains deactivated and unlocked after exit
+	goalPolicy, err = db.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.False(t, goalPolicy.Config.Enabled)
+	require.Empty(t, goalPolicy.Config.Goal)
+	require.False(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
 	// 8. Test subagent invocation rejection
 	subagentID := "subagent-transitions-1"

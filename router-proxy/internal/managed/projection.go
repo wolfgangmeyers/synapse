@@ -2,11 +2,65 @@ package managed
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
+
+type ContextUsage struct {
+	Tokens        *int     `json:"tokens"`
+	ContextWindow int      `json:"context_window"`
+	Percent       *float64 `json:"percent"`
+}
+
+func CalculateContextUsage(tokens *int, contextWindow int) *ContextUsage {
+	if contextWindow < 0 {
+		contextWindow = 0
+	}
+	if tokens == nil || *tokens < 0 || contextWindow <= 0 {
+		return &ContextUsage{
+			Tokens:        tokens,
+			ContextWindow: contextWindow,
+			Percent:       nil,
+		}
+	}
+	pct := math.Round((float64(*tokens)/float64(contextWindow)*100.0)*10) / 10
+	return &ContextUsage{
+		Tokens:        tokens,
+		ContextWindow: contextWindow,
+		Percent:       &pct,
+	}
+}
+
+var (
+	globalContextUsageMu sync.RWMutex
+	globalContextUsage   = make(map[string]*ContextUsage)
+)
+
+func SetAgentContextUsage(agentID string, usage *ContextUsage) {
+	globalContextUsageMu.Lock()
+	defer globalContextUsageMu.Unlock()
+	if usage == nil {
+		delete(globalContextUsage, agentID)
+	} else {
+		globalContextUsage[agentID] = usage
+	}
+}
+
+func GetAgentContextUsage(agentID string) *ContextUsage {
+	globalContextUsageMu.RLock()
+	defer globalContextUsageMu.RUnlock()
+	return globalContextUsage[agentID]
+}
+
+func ClearAgentContextUsage(agentID string) {
+	globalContextUsageMu.Lock()
+	defer globalContextUsageMu.Unlock()
+	delete(globalContextUsage, agentID)
+}
 
 func installedToolCount(manifestRevision int) int {
 	if manifestRevision == managedManifestRevision {
@@ -41,6 +95,47 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		// Durable rows can outlive a redaction change. Sanitize the bounded local
 		// cause again at the public boundary before the Web UI can render it.
 		result["last_error"] = map[string]any{"code": agent.LastErrorCode, "message": store.RedactedManagedDiagnostic(agent.LastErrorMessage), "at": agent.LastErrorAt}
+	}
+	if agent.Runtime == "embedded" {
+		var usage *ContextUsage
+		if agent.ContextUsage != nil {
+			if u, ok := agent.ContextUsage.(*ContextUsage); ok {
+				usage = u
+			} else if u, ok := agent.ContextUsage.(ContextUsage); ok {
+				usage = &u
+			} else if m, ok := agent.ContextUsage.(map[string]any); ok {
+				result["context_usage"] = m
+			}
+		}
+		if result["context_usage"] == nil {
+			if usage == nil {
+				usage = GetAgentContextUsage(agent.AgentID)
+			}
+			if usage == nil && defaultManagerInstance != nil {
+				usage = defaultManagerInstance.GetContextUsage(agent.AgentID)
+			}
+			if usage == nil && defaultManagerInstance != nil {
+				defaultManagerInstance.activeSessionsMu.Lock()
+				sess := defaultManagerInstance.activeEmbeddedSessions[agent.AgentID]
+				defaultManagerInstance.activeSessionsMu.Unlock()
+				if sess != nil {
+					tokens := embeddedProjectedTokens(sess.History())
+					window := 0
+					if sess.Model != nil {
+						window = sess.Model.ContextWindow
+					}
+					usage = CalculateContextUsage(&tokens, window)
+				}
+			}
+			if usage == nil {
+				if resolved, err := ResolveModel(agent.SelectedModel); err == nil && resolved != nil && resolved.ContextWindow > 0 {
+					usage = CalculateContextUsage(nil, resolved.ContextWindow)
+				}
+			}
+			if usage != nil {
+				result["context_usage"] = usage
+			}
+		}
 	}
 	return result
 }

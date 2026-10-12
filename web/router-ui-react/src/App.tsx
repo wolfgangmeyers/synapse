@@ -75,6 +75,7 @@ interface RouterConfiguration {
 
 function shouldUseBootstrapProxy(persistedRouterUrl: string, bootstrapRouterUrl: string): boolean {
   try {
+    if (bootstrapRouterUrl.includes(":8787")) return false;
     const persisted = new URL(normalizeRouterUrl(persistedRouterUrl));
     const bootstrap = new URL(normalizeRouterUrl(bootstrapRouterUrl));
     return persisted.hostname === bootstrap.hostname && persisted.origin !== bootstrap.origin;
@@ -88,7 +89,8 @@ function configuredRouterUrl(props: AppProps): RouterConfiguration | undefined {
   if (typeof explicit === "string" && explicit.trim() !== "") return { routerUrl: explicit };
 
   const configuredBootstrapRouterUrl: unknown = import.meta.env.VITE_ROUTER_URL;
-  const bootstrapRouterUrl = typeof configuredBootstrapRouterUrl === "string" && configuredBootstrapRouterUrl.trim() !== "" ? configuredBootstrapRouterUrl : undefined;
+  const rawBootstrap = typeof configuredBootstrapRouterUrl === "string" && configuredBootstrapRouterUrl.trim() !== "" ? configuredBootstrapRouterUrl : undefined;
+  const bootstrapRouterUrl = rawBootstrap && !rawBootstrap.includes(":8787") ? rawBootstrap : undefined;
   const persisted = persistedActiveRouter(props.storage, bootstrapRouterUrl);
   if (persisted !== undefined) {
     // A prior direct router setting on this host bypasses the Web UI proxy and

@@ -1,8 +1,10 @@
 import { useState, type ReactElement, type FormEvent } from "react";
 import type { WorkflowState, WorkflowReminderConfig, KnownToolDefinition } from "../domain/workflow-states";
 import { KNOWN_WORKFLOW_TOOLS } from "../domain/workflow-states";
+import { DEFAULT_GOAL_STATE, type GoalState, type goalControlPayload } from "../domain/goals";
 import { secureUuid } from "../platform/secure-uuid";
 import { DialogShell } from "./DialogShell";
+import { GoalEditorDialog } from "./GoalEditorDialog";
 
 export interface StateConfigModalProps {
   state: WorkflowState;
@@ -27,6 +29,9 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
   const [reminders, setReminders] = useState<WorkflowReminderConfig[]>(
     state.reminders ? state.reminders.map((r) => ({ ...r })) : []
   );
+
+  const [goal, setGoal] = useState<string>(state.goal ?? "");
+  const [showGoalEditor, setShowGoalEditor] = useState(false);
 
   // Sub-reminder dialog or inline editing
   const [editingReminderIdx, setEditingReminderIdx] = useState<number | null>(null);
@@ -128,6 +133,7 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
         name: name.trim(),
         description: description.trim(),
         entry_text: entryText,
+        goal: goal.trim(),
         allowed_tools: restrictTools ? Array.from(selectedTools) : [],
         reminders,
         allow_exit: allowExit,
@@ -246,43 +252,135 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
           </label>
         </div>
 
-        {/* Allowed Tools */}
-        <div className="form-section" style={{ marginBottom: "1.25rem", borderTop: "1px solid var(--border-color, #333)", paddingTop: "0.75rem" }}>
-          <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>Tool Restrictions</div>
-          <div style={{ marginBottom: "0.75rem" }}>
-            <div className="segmented-toggle-group" role="group" aria-label="Tool Restrictions">
-              <button
-                type="button"
-                className={`segmented-toggle-btn ${!restrictTools ? "active" : ""}`}
-                onClick={() => setRestrictTools(false)}
-              >
-                Allow all tools
-              </button>
-              <button
-                type="button"
-                className={`segmented-toggle-btn ${restrictTools ? "active" : ""}`}
-                onClick={() => setRestrictTools(true)}
-              >
-                Restrict tools
-              </button>
+        {/* Tool Restrictions section */}
+        <div className="workflow-tool-section" style={{ marginBottom: "1.25rem", borderTop: "1px solid var(--border-color, #333)", paddingTop: "0.75rem" }}>
+          <button
+            type="button"
+            className="goal-toggle workflow-tool-master-toggle"
+            aria-pressed={!restrictTools}
+            data-testid="allow-all-tools-toggle"
+            onClick={() => {
+              const nextAllowAll = restrictTools; // if restrictTools is true, next is allow all
+              setRestrictTools(!nextAllowAll);
+              if (nextAllowAll) {
+                setSelectedTools(new Set());
+              } else if (selectedTools.size === 0) {
+                setSelectedTools(new Set(KNOWN_WORKFLOW_TOOLS.map((t) => t.id)));
+              }
+            }}
+          >
+            <div className="workflow-master-toggle-text">
+              <span className="goal-toggle-label">Allow all tools (unrestricted)</span>
+              <span className="workflow-toggle-subtext">Workers in this state have access to all available tools</span>
             </div>
-          </div>
+            <span className="goal-toggle-track" aria-hidden="true">
+              <span className="goal-toggle-thumb">
+                <span className="goal-toggle-state">{!restrictTools ? "ON" : "OFF"}</span>
+              </span>
+            </span>
+          </button>
 
           {restrictTools ? (
-            <div className="tools-picker-grid" style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid var(--border-color, #444)", borderRadius: "4px", padding: "0.5rem" }}>
-              {KNOWN_WORKFLOW_TOOLS.map((t: KnownToolDefinition) => (
-                <label key={t.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "3px 0", cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedTools.has(t.id)}
-                    onChange={() => toggleTool(t.id)}
-                  />
-                  <span style={{ fontFamily: "monospace", fontSize: "0.9em" }}>{t.name}</span>
-                  <span className="text-muted" style={{ fontSize: "0.8em" }}>— {t.description}</span>
-                </label>
-              ))}
+            <div className="workflow-tool-picker">
+              <div className="workflow-tool-picker-toolbar">
+                <span className="workflow-tool-picker-title">
+                  Allowed Tools ({selectedTools.size} of {KNOWN_WORKFLOW_TOOLS.length})
+                </span>
+                <div className="workflow-tool-picker-actions">
+                  <button
+                    type="button"
+                    className="secondary workflow-tool-action-btn"
+                    onClick={() => setSelectedTools(new Set(KNOWN_WORKFLOW_TOOLS.map((t) => t.id)))}
+                  >
+                    Select All
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary workflow-tool-action-btn"
+                    onClick={() => setSelectedTools(new Set())}
+                  >
+                    Deselect All
+                  </button>
+                </div>
+              </div>
+
+              <div className="workflow-tool-grid">
+                {KNOWN_WORKFLOW_TOOLS.map((tool) => {
+                  const isSelected = selectedTools.has(tool.id);
+                  return (
+                    <button
+                      type="button"
+                      key={tool.id}
+                      className={`workflow-tool-tile ${isSelected ? "selected" : ""}`}
+                      aria-pressed={isSelected}
+                      data-testid={`tool-toggle-${tool.id}`}
+                      onClick={() => toggleTool(tool.id)}
+                    >
+                      <div className="workflow-tool-tile-header">
+                        <code className="workflow-tool-tile-name">{tool.name}</code>
+                        <span className={`workflow-tool-tile-pill ${isSelected ? "active" : ""}`}>
+                          {isSelected ? (
+                            <>
+                              <i className="fa-solid fa-check" aria-hidden="true" /> ALLOWED
+                            </>
+                          ) : (
+                            "OFF"
+                          )}
+                        </span>
+                      </div>
+                      <p className="workflow-tool-tile-desc">{tool.description}</p>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           ) : null}
+        </div>
+
+        {/* Workflow State Goal section */}
+        <div className="form-section" style={{ marginBottom: "1.25rem", borderTop: "1px solid var(--border-color, #333)", paddingTop: "0.75rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <div style={{ fontWeight: 600 }}>Workflow State Goal</div>
+            {!goal ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowGoalEditor(true)}
+              >
+                <i className="fa-solid fa-flag" aria-hidden="true" /> Configure Goal
+              </button>
+            ) : null}
+          </div>
+
+          {!goal ? (
+            <p className="text-muted" style={{ fontSize: "0.85em", margin: "0" }}>
+              No persistent goal configured. Workers in this state will operate without a locked workflow goal.
+            </p>
+          ) : (
+            <div className="state-goal-preview-box" style={{ padding: "8px 12px", background: "rgba(255,255,255,0.04)", border: "1px solid var(--border-color, #444)", borderRadius: "4px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px" }}>
+                <div style={{ flex: 1, whiteSpace: "pre-wrap", fontSize: "0.85em", lineHeight: 1.4 }}>
+                  {goal}
+                </div>
+                <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setShowGoalEditor(true)}
+                  >
+                    <i className="fa-solid fa-pen" aria-hidden="true" /> Edit Goal
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm"
+                    onClick={() => setGoal("")}
+                  >
+                    <i className="fa-solid fa-trash" aria-hidden="true" /> Clear Goal
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Reminders section */}
@@ -430,6 +528,28 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
           </button>
         </div>
       </form>
+
+      {/* Goal Editor Dialog */}
+      {showGoalEditor ? (
+        <GoalEditorDialog
+          open={showGoalEditor}
+          peer={`State: ${name || state.name}`}
+          goalState={{
+            ...DEFAULT_GOAL_STATE,
+            enabled: Boolean(goal),
+            goal: goal || "",
+          }}
+          onClose={() => setShowGoalEditor(false)}
+          onSave={(payload) => {
+            if (payload.action === "set" && payload.goal) {
+              setGoal(payload.goal);
+            } else {
+              setGoal("");
+            }
+            setShowGoalEditor(false);
+          }}
+        />
+      ) : null}
     </DialogShell>
   );
 }

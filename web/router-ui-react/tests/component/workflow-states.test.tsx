@@ -61,6 +61,47 @@ describe("WorkflowStatesPage", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
     unmount();
   });
+  it("renders goal badge when state has a goal configured", async () => {
+    const statesWithGoal = [
+      {
+        id: "state-with-goal",
+        name: "Goal-Oriented State",
+        description: "State with persistent goal",
+        entry_text: "Entry instructions",
+        goal: "Finish all test coverage",
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-01T00:00:00Z",
+      },
+      {
+        id: "state-without-goal",
+        name: "No-Goal State",
+        description: "State without goal",
+        entry_text: "Entry instructions",
+        goal: "",
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-01T00:00:00Z",
+      },
+    ];
+
+    const mockClient = {
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: statesWithGoal }),
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowStatesPage client={mockClient} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Goal-Oriented State")).toBeDefined();
+    });
+
+    const goalBadge = screen.getByTestId("state-goal-badge-state-with-goal");
+    expect(goalBadge).toBeDefined();
+    expect(goalBadge.textContent).toContain("Goal configured");
+    expect(goalBadge.getAttribute("title")).toBe("Finish all test coverage");
+    expect(screen.queryByTestId("state-goal-badge-state-without-goal")).toBeNull();
+
+    unmount();
+  });
+
   it("renders reminder badges on state card", async () => {
     const statesWithReminders = [
       {

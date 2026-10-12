@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -271,6 +272,110 @@ func TestManagedAgentWorkflowRemindersLifecycle(t *testing.T) {
 	reminders, err = s.Reminders(ctx)
 	require.NoError(t, err)
 	require.Empty(t, reminders)
+}
+
+func TestWorkflowStateValidationGoal(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	// Goal exceeding 4000 bytes rejected
+	tooLongGoal := strings.Repeat("g", 4001)
+	_, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name: "test-goal-too-long",
+		Goal: tooLongGoal,
+	})
+	require.Error(t, err)
+	var valErr *WorkflowStateValidationError
+	require.ErrorAs(t, err, &valErr)
+	require.Equal(t, "goal", valErr.Field)
+
+	// Goal of exactly 4000 bytes accepted
+	validGoal := strings.Repeat("g", 4000)
+	st, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name: "test-goal-max",
+		Goal: validGoal,
+	})
+	require.NoError(t, err)
+	require.Equal(t, validGoal, st.Goal)
+
+	// Update exceeding 4000 bytes rejected
+	_, err = s.UpdateWorkflowState(ctx, st.ID, WorkflowStateRequest{
+		Name: "test-goal-max",
+		Goal: tooLongGoal,
+	})
+	require.Error(t, err)
+	require.ErrorAs(t, err, &valErr)
+	require.Equal(t, "goal", valErr.Field)
+}
+
+func TestWorkflowStateGoalCRUD(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	// 1. Create with non-empty goal and verify persistence and retrieval
+	goal1 := "Ship Phase 1 of Workflow State Goals"
+	st1, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		Name: "implementing-goals",
+		Goal: goal1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, goal1, st1.Goal)
+
+	fetched, err := s.GetWorkflowState(ctx, st1.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fetched)
+	require.Equal(t, goal1, fetched.Goal)
+
+	// 2. UpdateWorkflowState updating goal from non-empty to empty
+	st1Updated, err := s.UpdateWorkflowState(ctx, st1.ID, WorkflowStateRequest{
+		Name: "implementing-goals",
+		Goal: "",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "", st1Updated.Goal)
+
+	fetched, err = s.GetWorkflowState(ctx, st1.ID)
+	require.NoError(t, err)
+	require.Equal(t, "", fetched.Goal)
+
+	// UpdateWorkflowState updating goal from empty to non-empty
+	goal2 := "Refactored goal for state"
+	st1Updated2, err := s.UpdateWorkflowState(ctx, st1.ID, WorkflowStateRequest{
+		Name: "implementing-goals",
+		Goal: goal2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, goal2, st1Updated2.Goal)
+
+	fetched, err = s.GetWorkflowState(ctx, st1.ID)
+	require.NoError(t, err)
+	require.Equal(t, goal2, fetched.Goal)
+
+	// 3. ListWorkflowStates returns Goal
+	allStates, err := s.ListWorkflowStates(ctx)
+	require.NoError(t, err)
+	require.Len(t, allStates, 1)
+	require.Equal(t, goal2, allStates[0].Goal)
+
+	// 4. ListWorkflowStatesByWorkflow returns Goal
+	wf, err := s.CreateWorkflow(ctx, WorkflowRequest{
+		Name: "goal-workflow",
+	})
+	require.NoError(t, err)
+
+	goal3 := "Constituent state goal"
+	stInWf, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
+		WorkflowID: &wf.ID,
+		Name:       "wf-state-goal",
+		Goal:       goal3,
+	})
+	require.NoError(t, err)
+	require.Equal(t, goal3, stInWf.Goal)
+
+	wfStates, err := s.ListWorkflowStatesByWorkflow(ctx, wf.ID)
+	require.NoError(t, err)
+	require.Len(t, wfStates, 1)
+	require.Equal(t, goal3, wfStates[0].Goal)
 }
 
 func TestWorkflowStateAllowedTools(t *testing.T) {

@@ -10,7 +10,7 @@ import {
   type IndexedDbFactory,
 } from "../../src/persistence/indexed-db";
 import { initializePersistence } from "../../src/persistence/history-repository";
-import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, DEFAULT_ROUTER_URL, LEGACY_AGENT_ID_KEY, ROUTERS_KEY, createSettingsRepository, migrateBootstrapRouter, setActiveRouter } from "../../src/persistence/settings-repository";
+import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, DEFAULT_ROUTER_URL, LEGACY_AGENT_ID_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, createSettingsRepository, migrateBootstrapRouter, setActiveRouter } from "../../src/persistence/settings-repository";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -103,6 +103,22 @@ describe("settings identity persistence", () => {
     expect(settings.routers).not.toContain("http://127.0.0.1:8787");
     expect(settings.activeRouter).toBe(DEFAULT_ROUTER_URL);
     expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(DEFAULT_ROUTER_URL);
+  });
+
+  it("migrates port 8787 in agentIds and selectedPeers to DEFAULT_ROUTER_URL so identity and history are preserved", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(ROUTERS_KEY, JSON.stringify(["http://127.0.0.1:8787"]));
+    storage.setItem(ACTIVE_ROUTER_KEY, "http://127.0.0.1:8787");
+    storage.setItem(AGENT_IDS_KEY, JSON.stringify({ "http://127.0.0.1:8787": "wolfgang" }));
+    storage.setItem(SELECTED_PEERS_KEY, JSON.stringify({ "http://127.0.0.1:8787\u001fwolfgang": "pi-go" }));
+
+    const repository = createSettingsRepository(storage);
+    const settings = repository.load();
+
+    expect(settings.activeRouter).toBe(DEFAULT_ROUTER_URL);
+    expect(repository.agentId(settings, DEFAULT_ROUTER_URL, "user")).toBe("wolfgang");
+    expect(settings.agentIds[DEFAULT_ROUTER_URL]).toBe("wolfgang");
+    expect(settings.selectedPeers[`${DEFAULT_ROUTER_URL}\u001fwolfgang`]).toBe("pi-go");
   });
 });
 

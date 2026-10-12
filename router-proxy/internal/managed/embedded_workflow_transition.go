@@ -148,6 +148,25 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					return agent.AgentToolResult{}, fmt.Errorf("failed to transition workflow state: %w", err)
 				}
 
+				// Synchronize goal with target state
+				if targetState.Goal != "" {
+					goalSettings := store.DefaultManagedGoalSettings()
+					goalSettings.GoalLockEnabled = true
+					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
+						Enabled:  true,
+						Goal:     targetState.Goal,
+						Settings: goalSettings,
+					})
+				} else {
+					goalSettings := store.DefaultManagedGoalSettings()
+					goalSettings.GoalLockEnabled = false
+					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
+						Enabled:  false,
+						Goal:     "",
+						Settings: goalSettings,
+					})
+				}
+
 				// Spawn new reminders
 				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState)
 
@@ -199,6 +218,15 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, nil); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to exit workflow state: %w", err)
 				}
+
+				// Deactivate goal on exit
+				goalSettings := store.DefaultManagedGoalSettings()
+				goalSettings.GoalLockEnabled = false
+				_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
+					Enabled:  false,
+					Goal:     "",
+					Settings: goalSettings,
+				})
 
 				// Record history presentation
 				eventKey := fmt.Sprintf("workflow-exit:%s:%s:%s", owner.binding.AgentID, currentState.ID, id)
