@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -52,6 +53,10 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 		return RootControlHandlerResult{}, err
 	}
 	if action != "status" {
+		activeWorkflowState, sErr := m.store.GetManagedAgentActiveWorkflowState(ctx, agentID)
+		if sErr == nil && activeWorkflowState != nil && activeWorkflowState.Goal != "" {
+			return RootControlHandlerResult{}, fmt.Errorf("goal is locked by active workflow state %q", activeWorkflowState.Name)
+		}
 		config := store.ManagedGoalConfig{Settings: store.DefaultManagedGoalSettings()}
 		var revision int64
 		if policy != nil {

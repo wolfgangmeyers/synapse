@@ -1108,31 +1108,7 @@ func (m *Manager) resumeParentGoalIfIdle(parent store.EmbeddedBinding) {
 		}
 	}
 
-	parentAgent, err := m.store.ManagedAgent(ctx, parent.AgentID)
-	if err != nil || parentAgent == nil || parentAgent.ActivityState != "idle" || parentAgent.LifecycleState != "running" || parentAgent.DesiredState != "running" {
-		return
-	}
-
-	policy, err := m.store.ManagedGoalPolicyFor(ctx, parent.AgentID)
-	if err != nil || policy == nil || !policy.Config.Enabled {
-		return
-	}
-
-	if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(ctx, parent); err == nil && found {
-		m.startManagedTask(func() {
-			m.startEmbeddedGoalContinuation(parent, key)
-		})
-		return
-	}
-
-	m.mu.Lock()
-	owner, ok := m.embeddedOwners[parent.AgentID]
-	m.mu.Unlock()
-	if ok && owner.binding == parent {
-		m.startManagedTask(func() {
-			runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-			prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding, nil)
-			_ = m.runEmbeddedSessionTurn(runCtx, *parentAgent, prompt, nil)
-		})
-	}
+	m.startManagedTask(func() {
+		m.kickoffIdleGoalContinuation(parent)
+	})
 }

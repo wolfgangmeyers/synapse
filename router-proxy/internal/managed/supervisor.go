@@ -2776,7 +2776,10 @@ func (m *Manager) OfferDirect(agentID string) {
 		return
 	}
 	if agent, err := m.store.ManagedAgent(context.Background(), agentID); err == nil && agent.Runtime == "embedded" {
-		m.startManagedTask(func() { m.dispatchEmbeddedMail(agentID) })
+		m.startManagedTask(func() {
+			m.dispatchEmbeddedMail(agentID)
+			m.kickoffIdleGoalContinuation(store.EmbeddedBinding{AgentID: agentID})
+		})
 		return
 	}
 	m.startManagedTask(func() {

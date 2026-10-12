@@ -511,6 +511,7 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 			return store.SweepResult{}, err
 		}
 		r.managed.TimeoutExpiredSubagents(1 * time.Hour)
+		_ = r.managed.ResumeIdleEmbeddedGoals(ctx)
 	}
 	_, _ = r.store.TimeoutRunningSubagents(ctx, 1*time.Hour)
 	_ = r.store.PruneExpiredSubagents(ctx, 1*time.Hour)
