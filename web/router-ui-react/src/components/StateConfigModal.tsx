@@ -199,19 +199,20 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
           />
         </div>
 
-        {/* Entry state checkbox */}
-        <div className="form-check-group" style={{ marginBottom: "1rem" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontWeight: 500 }}>
+        {/* Entry state switch */}
+        <div className="toggle-switch-row">
+          <div className="toggle-switch-label">
+            <span className="toggle-switch-title">Designate as Entry State (Workflow Start)</span>
+            <span className="toggle-switch-sub">The entry state is where agents begin executing this workflow.</span>
+          </div>
+          <label className="switch-toggle" aria-label="Designate as Entry State (Workflow Start)">
             <input
               type="checkbox"
               checked={makeEntry}
               onChange={(e) => setMakeEntry(e.target.checked)}
             />
-            <span>Designate as Entry State (Workflow Start)</span>
+            <span className="switch-slider" />
           </label>
-          <small className="text-muted" style={{ display: "block", marginLeft: "1.5rem" }}>
-            The entry state is where agents begin executing this workflow.
-          </small>
         </div>
 
         {/* Entry Text */}
@@ -229,43 +230,42 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
           />
         </div>
 
-        {/* Exit Permission */}
-        <div className="form-check-group" style={{ marginBottom: "1rem" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontWeight: 500 }}>
+        {/* Exit Permission switch */}
+        <div className="toggle-switch-row">
+          <div className="toggle-switch-label">
+            <span className="toggle-switch-title">Allow Exit / Terminal State</span>
+            <span className="toggle-switch-sub">When enabled, the agent is allowed to complete or finish the workflow from this state.</span>
+          </div>
+          <label className="switch-toggle" aria-label="Allow Exit / Terminal State">
             <input
               type="checkbox"
               checked={allowExit}
               onChange={(e) => setAllowExit(e.target.checked)}
             />
-            <span>Allow Exit / Terminal State</span>
+            <span className="switch-slider" />
           </label>
-          <small className="text-muted" style={{ display: "block", marginLeft: "1.5rem" }}>
-            When enabled, the agent is allowed to complete or finish the workflow from this state.
-          </small>
         </div>
 
         {/* Allowed Tools */}
         <div className="form-section" style={{ marginBottom: "1.25rem", borderTop: "1px solid var(--border-color, #333)", paddingTop: "0.75rem" }}>
           <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>Tool Restrictions</div>
-          <div style={{ display: "flex", gap: "1rem", marginBottom: "0.75rem" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
-              <input
-                type="radio"
-                name="tool-mode"
-                checked={!restrictTools}
-                onChange={() => setRestrictTools(false)}
-              />
-              <span>Allow all tools</span>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
-              <input
-                type="radio"
-                name="tool-mode"
-                checked={restrictTools}
-                onChange={() => setRestrictTools(true)}
-              />
-              <span>Restrict tools</span>
-            </label>
+          <div style={{ marginBottom: "0.75rem" }}>
+            <div className="segmented-toggle-group" role="group" aria-label="Tool Restrictions">
+              <button
+                type="button"
+                className={`segmented-toggle-btn ${!restrictTools ? "active" : ""}`}
+                onClick={() => setRestrictTools(false)}
+              >
+                Allow all tools
+              </button>
+              <button
+                type="button"
+                className={`segmented-toggle-btn ${restrictTools ? "active" : ""}`}
+                onClick={() => setRestrictTools(true)}
+              >
+                Restrict tools
+              </button>
+            </div>
           </div>
 
           {restrictTools ? (
@@ -346,25 +346,23 @@ export function StateConfigModal({ state, isEntry, onClose, onSave }: StateConfi
                 {reminderError}
               </div>
             ) : null}
-            <div style={{ display: "flex", gap: "0.75rem", marginBottom: "0.5rem" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                <input
-                  type="radio"
-                  name="rem-type"
-                  checked={reminderType === "one_shot"}
-                  onChange={() => setReminderType("one_shot")}
-                />
-                <span>One-shot</span>
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                <input
-                  type="radio"
-                  name="rem-type"
-                  checked={reminderType === "recurring"}
-                  onChange={() => setReminderType("recurring")}
-                />
-                <span>Recurring</span>
-              </label>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <div className="segmented-toggle-group" role="group" aria-label="Reminder Type">
+                <button
+                  type="button"
+                  className={`segmented-toggle-btn ${reminderType === "one_shot" ? "active" : ""}`}
+                  onClick={() => setReminderType("one_shot")}
+                >
+                  One-shot
+                </button>
+                <button
+                  type="button"
+                  className={`segmented-toggle-btn ${reminderType === "recurring" ? "active" : ""}`}
+                  onClick={() => setReminderType("recurring")}
+                >
+                  Recurring
+                </button>
+              </div>
             </div>
             <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
               <div style={{ flex: 1 }}>
