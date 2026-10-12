@@ -66,6 +66,8 @@ type embeddedPersistence struct {
 	toolExecuted      bool
 	thinkingGenerated bool
 	toolCallReceived  bool
+	lastStopReason    ai.StopReason
+	lastErrorMessage  string
 	source            string
 	msgID             string
 }
@@ -426,9 +428,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		final := false
 		switch assistant := message.(type) {
 		case ai.AssistantMessage:
-			final = assistant.StopReason == ai.StopStop
+			final = assistant.StopReason == ai.StopStop || assistant.StopReason == ai.StopError
 		case *ai.AssistantMessage:
-			final = assistant.StopReason == ai.StopStop
+			if assistant != nil {
+				final = assistant.StopReason == ai.StopStop || assistant.StopReason == ai.StopError
+			}
 		}
 		if final {
 			entry, replyHistoryEntry, err := p.db.AppendEmbeddedFinalAndReplyWithHistory(ctx, p.binding, p.mailAttempt, p.seq, p.digest, body)
@@ -491,9 +495,15 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			final := false
 			var text strings.Builder
 			var thinking strings.Builder
+			var errMsg string
+			var stopReason ai.StopReason
 			switch assistant := message.(type) {
 			case ai.AssistantMessage:
-				final = assistant.StopReason == ai.StopStop
+				stopReason = assistant.StopReason
+				p.lastStopReason = assistant.StopReason
+				p.lastErrorMessage = assistant.ErrorMessage
+				final = stopReason == ai.StopStop || stopReason == ai.StopError
+				errMsg = assistant.ErrorMessage
 				for _, c := range assistant.Content {
 					if t, ok := c.(ai.TextContent); ok {
 						text.WriteString(t.Text)
@@ -507,7 +517,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				}
 			case *ai.AssistantMessage:
 				if assistant != nil {
-					final = assistant.StopReason == ai.StopStop
+					stopReason = assistant.StopReason
+					p.lastStopReason = assistant.StopReason
+					p.lastErrorMessage = assistant.ErrorMessage
+					final = stopReason == ai.StopStop || stopReason == ai.StopError
+					errMsg = assistant.ErrorMessage
 					for _, c := range assistant.Content {
 						if t, ok := c.(ai.TextContent); ok {
 							text.WriteString(t.Text)
@@ -521,12 +535,26 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					}
 				}
 			}
-			if final && len(strings.TrimSpace(text.String())) > 0 {
-				replyBodyText := text.String()
+			replyBodyText := text.String()
+			outcome := "success"
+			msgText := "Message sent"
+			if stopReason == ai.StopError {
+				outcome = "error"
+				if errMsg == "" {
+					errMsg = "turn failed"
+				}
+				msgText = fmt.Sprintf("Turn failed: %s", errMsg)
+				if len(strings.TrimSpace(replyBodyText)) == 0 {
+					replyBodyText = fmt.Sprintf("Turn failed: %s", errMsg)
+				} else {
+					replyBodyText = fmt.Sprintf("%s\n\nTurn failed: %s", replyBodyText, errMsg)
+				}
+			}
+			if final && len(strings.TrimSpace(replyBodyText)) > 0 {
 				eventKey := fmt.Sprintf("embedded-assistant:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
 				presentation := &store.ManagedHistoryPresentation{
 					Kind:     "message",
-					Outcome:  "success",
+					Outcome:  outcome,
 					From:     p.binding.AgentID,
 					To:       "user",
 					Thinking: thinking.String(),
@@ -536,7 +564,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					p.binding.AgentID,
 					"managed_message",
 					"info",
-					"Message sent",
+					msgText,
 					eventKey,
 					presentation,
 					nil,
@@ -1753,10 +1781,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if explicitPrompt != "" {
 			promptText = explicitPrompt
 		}
-		_, err := session.RunMessages(ctx, []agent.AgentMessage{ai.UserMessage{
+		runRes, err := session.RunMessages(ctx, []agent.AgentMessage{ai.UserMessage{
 			Content: ai.ContentList{ai.TextContent{Text: promptText}},
 		}})
 		if err != nil {
+			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
+				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				m.checkContextResetAfterTurn(ctx, binding, model, session)
+				return p.seq, nil
+			}
 			return 0, handleTurnErr(err)
 		}
 		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
@@ -1782,13 +1815,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, err
 		}
 		p.mail = mail
-		_, err = session.RunMessages(ctx, []agent.AgentMessage{message})
+		runRes, err := session.RunMessages(ctx, []agent.AgentMessage{message})
 		// The SDK may turn a rejected checked append into a local synthetic
 		// error. Preserve the Store's transaction outcome, not its error text.
 		if p.mailAppendErr != nil {
 			return 0, handleTurnErr(p.mailAppendErr)
 		}
 		if err != nil {
+			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
+				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				m.checkContextResetAfterTurn(ctx, binding, model, session)
+				return p.seq, nil
+			}
 			return 0, handleTurnErr(err)
 		}
 		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
@@ -1803,8 +1841,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if role != "root" && !hasUser && saved.PendingInitialInstruction != "" && explicitPrompt == saved.PendingInitialInstruction {
 			promptToRun = formatGenesisPrompt(saved.AgentID, explicitPrompt)
 		}
-		_, err := session.Run(ctx, promptToRun)
+		runRes, err := session.Run(ctx, promptToRun)
 		if err != nil {
+			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
+				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				if explicitPrompt != ContextResetWakePrompt {
+					m.checkContextResetAfterTurn(ctx, binding, model, session)
+				}
+				return p.seq, nil
+			}
 			return 0, handleTurnErr(err)
 		}
 		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
@@ -1821,8 +1866,13 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if role != "root" {
 			instruction = formatGenesisPrompt(saved.AgentID, saved.PendingInitialInstruction)
 		}
-		_, err := session.Run(ctx, instruction)
+		runRes, err := session.Run(ctx, instruction)
 		if err != nil {
+			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
+				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				m.checkContextResetAfterTurn(ctx, binding, model, session)
+				return p.seq, nil
+			}
 			return 0, handleTurnErr(err)
 		}
 		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)

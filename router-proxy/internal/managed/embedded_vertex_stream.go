@@ -18,7 +18,7 @@ func (m *Manager) streamEmbeddedVertex(requestCtx context.Context, requestModel 
 	go func() {
 		defer stream.End()
 
-		token, projectID, location, err := m.embeddedVertexAuth(requestCtx, false)
+		token, projectID, location, err := m.embeddedVertexAuth(requestCtx, false, requestModel.ID)
 		if err != nil {
 			stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})
 			return
@@ -86,7 +86,7 @@ func (m *Manager) streamEmbeddedVertex(requestCtx context.Context, requestModel 
 			return
 		}
 
-		targetURL := fmt.Sprintf(vertexGenerateContentURLTemplate, location, projectID, location, requestModel.ID)
+		targetURL := fmt.Sprintf(vertexGenerateContentURLTemplate, vertexHost(location), projectID, location, requestModel.ID)
 
 		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, targetURL, bytes.NewReader(payloadBytes))
 		if err != nil {
@@ -106,7 +106,7 @@ func (m *Manager) streamEmbeddedVertex(requestCtx context.Context, requestModel 
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			_ = resp.Body.Close()
-			newToken, newProjectID, newLocation, refreshErr := m.embeddedVertexAuth(requestCtx, true)
+			newToken, newProjectID, newLocation, refreshErr := m.embeddedVertexAuth(requestCtx, true, requestModel.ID)
 			if refreshErr == nil {
 				token = newToken
 				if newProjectID != "" {
@@ -115,7 +115,7 @@ func (m *Manager) streamEmbeddedVertex(requestCtx context.Context, requestModel 
 				if newLocation != "" {
 					location = newLocation
 				}
-				targetURL = fmt.Sprintf(vertexGenerateContentURLTemplate, location, projectID, location, requestModel.ID)
+				targetURL = fmt.Sprintf(vertexGenerateContentURLTemplate, vertexHost(location), projectID, location, requestModel.ID)
 				httpReq, err = http.NewRequestWithContext(requestCtx, http.MethodPost, targetURL, bytes.NewReader(payloadBytes))
 				if err != nil {
 					stream.Push(ai.AssistantMessageEvent{Type: ai.EventError, Error: &ai.AssistantMessage{ErrorMessage: err.Error()}})

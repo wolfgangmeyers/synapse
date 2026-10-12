@@ -97,7 +97,7 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 			return err
 		}
 		assistant, ok := msg.(ai.AssistantMessage)
-		if !ok || assistant.StopReason != ai.StopStop {
+		if !ok || (assistant.StopReason != ai.StopStop && assistant.StopReason != ai.StopError) {
 			return errors.New("embedded reply requires completed assistant")
 		}
 		var text strings.Builder
@@ -209,7 +209,17 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		if len(strings.TrimSpace(replyBodyText)) == 0 && len(strings.TrimSpace(thinking.String())) > 0 {
 			replyBodyText = thinking.String()
 		}
-		if len(strings.TrimSpace(replyBodyText)) == 0 {
+		if assistant.StopReason == ai.StopError {
+			errMsg := assistant.ErrorMessage
+			if errMsg == "" {
+				errMsg = "model request encountered an error"
+			}
+			if len(strings.TrimSpace(replyBodyText)) == 0 {
+				replyBodyText = fmt.Sprintf("Turn failed: %s", errMsg)
+			} else {
+				replyBodyText = fmt.Sprintf("%s\n\nTurn failed: %s", replyBodyText, errMsg)
+			}
+		} else if len(strings.TrimSpace(replyBodyText)) == 0 {
 			return nil
 		}
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
@@ -223,7 +233,16 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		replyBody := replyBodyText
 		category := "managed_message"
 		messageText := "Message sent"
-		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: targetRecipient, Thinking: thinking.String()}
+		outcome := "success"
+		if assistant.StopReason == ai.StopError {
+			outcome = "error"
+			errMsg := assistant.ErrorMessage
+			if errMsg == "" {
+				errMsg = "turn failed"
+			}
+			messageText = fmt.Sprintf("Turn failed: %s", errMsg)
+		}
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: outcome, From: b.AgentID, To: targetRecipient, Thinking: thinking.String()}
 		presentationJSON, err := managedHistoryPresentationJSON(presentation)
 		if err != nil {
 			return err
