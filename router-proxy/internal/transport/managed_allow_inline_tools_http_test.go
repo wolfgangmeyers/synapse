@@ -137,4 +137,23 @@ func TestManagedAgentAllowInlineToolsHTTP(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, noAgentRes.StatusCode)
 	noAgentRes.Body.Close()
+
+	// 8. Desired policy sync when desired policy has inline.enabled=true but allow_inline_tools=false in SQLite
+	helperID := "agent-" + uuid.NewString()
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,allow_inline_tools,created_at,updated_at) VALUES(?,?,'/tmp','google','gemini-3.8-flash','running','running','idle','embedded','session-1',1,'gen-1',1,'hash',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, helperID, "context-helper-style")
+	require.NoError(t, err)
+
+	policyJSON := []byte(`{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
+	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_readiness_sources (agent_id, desired_policy_canonical, desired_policy_sha256) VALUES (?, ?, ?)`, helperID, policyJSON, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	require.NoError(t, err)
+
+	// GET /v1/managed-agents/:id must project allow_inline_tools: true because desired policy has inline.enabled=true
+	helperRes, err := client.Get(server.URL + "/v1/managed-agents/" + helperID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, helperRes.StatusCode)
+	var helperRespData map[string]any
+	require.NoError(t, json.NewDecoder(helperRes.Body).Decode(&helperRespData))
+	helperRes.Body.Close()
+	helperAgentData := helperRespData["agent"].(map[string]any)
+	require.Equal(t, true, helperAgentData["allow_inline_tools"], "agent with inline.enabled=true in desired policy must project allow_inline_tools: true")
 }

@@ -6,6 +6,7 @@ import {
   type WorkflowReminderConfig,
   type WorkflowReminderType,
   type WorkflowTransitionConfig,
+  type KnownToolDefinition,
   KNOWN_WORKFLOW_TOOLS,
 } from "../domain/workflow-states";
 import { secureUuid } from "../platform/secure-uuid";
@@ -46,13 +47,20 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | undefined>(undefined);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | undefined>(undefined);
+  const [tools, setTools] = useState<KnownToolDefinition[]>(KNOWN_WORKFLOW_TOOLS);
 
   const fetchStates = async () => {
     try {
       setLoading(true);
       setError(undefined);
-      const res = await client.workflowStates();
-      setStates(res.workflow_states);
+      const [resStates, resTools] = await Promise.all([
+        client.workflowStates(),
+        typeof client.workflowTools === "function" ? client.workflowTools().catch(() => null) : Promise.resolve(null),
+      ]);
+      setStates(resStates.workflow_states);
+      if (resTools?.tools && Array.isArray(resTools.tools)) {
+        setTools(resTools.tools);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load workflow states");
     } finally {
@@ -580,7 +588,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                 if (nextAllowed) {
                   setFormAllowedTools([]);
                 } else if (formAllowedTools.length === 0) {
-                  setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id));
+                  setFormAllowedTools(tools.map((t) => t.id));
                 }
               }}
             >
@@ -599,13 +607,13 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
               <div className="workflow-tool-picker">
                 <div className="workflow-tool-picker-toolbar">
                   <span className="workflow-tool-picker-title">
-                    Allowed Tools ({formAllowedTools.length} of {KNOWN_WORKFLOW_TOOLS.length})
+                    Allowed Tools ({formAllowedTools.length} of {tools.length})
                   </span>
                   <div className="workflow-tool-picker-actions">
                     <button
                       type="button"
                       className="secondary workflow-tool-action-btn"
-                      onClick={() => setFormAllowedTools(KNOWN_WORKFLOW_TOOLS.map((t) => t.id))}
+                      onClick={() => setFormAllowedTools(tools.map((t) => t.id))}
                     >
                       Select All
                     </button>
@@ -620,7 +628,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                 </div>
 
                 <div className="workflow-tool-grid">
-                  {KNOWN_WORKFLOW_TOOLS.map((tool) => {
+                  {tools.map((tool) => {
                     const isSelected = formAllowedTools.includes(tool.id);
                     return (
                       <button

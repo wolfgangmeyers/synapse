@@ -7,7 +7,7 @@ import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
-import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowWithStates } from "../domain/workflow-states";
+import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates } from "../domain/workflow-states";
 import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
@@ -393,6 +393,7 @@ export interface RouterHttpClient {
   updatePromptTemplate(id: string, payload: unknown): Promise<unknown>;
   deletePromptTemplate(id: string): Promise<unknown>;
   workflowStates(): Promise<WorkflowStatesResponse>;
+  workflowTools(): Promise<WorkflowToolsResponse>;
   getWorkflowState(id: string): Promise<WorkflowStateResponse>;
   createWorkflowState(payload: unknown): Promise<WorkflowStateResponse>;
   updateWorkflowState(id: string, payload: unknown): Promise<WorkflowStateResponse>;
@@ -498,6 +499,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     updatePromptTemplate: async (id, payload) => templateWrite(await jsonRequest(`/v1/prompt-templates/${encodeURIComponent(id)}`, "PATCH", payload)),
     deletePromptTemplate: (id) => request(`/v1/prompt-templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
     workflowStates: async () => request("/v1/workflow-states") as Promise<WorkflowStatesResponse>,
+    workflowTools: async () => request("/v1/workflow-tools") as Promise<WorkflowToolsResponse>,
     getWorkflowState: async (id) => request(`/v1/workflow-states/${encodeURIComponent(id)}`) as Promise<WorkflowStateResponse>,
     createWorkflowState: async (payload) => jsonRequest("/v1/workflow-states", "POST", payload) as Promise<WorkflowStateResponse>,
     updateWorkflowState: async (id, payload) => jsonRequest(`/v1/workflow-states/${encodeURIComponent(id)}`, "PUT", payload) as Promise<WorkflowStateResponse>,

@@ -7,6 +7,14 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
+func (r *Router) handleWorkflowTools(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+		return
+	}
+	r.writeJSON(w, http.StatusOK, map[string]any{"tools": store.CanonicalWorkflowTools})
+}
+
 func (r *Router) handleWorkflowStatesCollection(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodGet:

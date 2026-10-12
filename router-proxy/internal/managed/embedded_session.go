@@ -804,14 +804,22 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	m.publishProjection()
 	defer func() {
 		if session != nil {
-			tokens := embeddedProjectedTokens(session.History())
-			window := 0
-			if model != nil && model.ContextWindow > 0 {
-				window = model.ContextWindow
-			} else if session.Model != nil {
-				window = session.Model.ContextWindow
+			isStaleEpoch := false
+			if m.store != nil {
+				if currentAgent, err := m.store.ManagedAgent(context.Background(), binding.AgentID); err == nil && currentAgent != nil && currentAgent.SessionEpoch > binding.Epoch {
+					isStaleEpoch = true
+				}
 			}
-			m.updateAgentContextUsage(binding.AgentID, &tokens, window)
+			if !isStaleEpoch {
+				tokens := embeddedProjectedTokens(session.History())
+				window := 0
+				if model != nil && model.ContextWindow > 0 {
+					window = model.ContextWindow
+				} else if session.Model != nil {
+					window = session.Model.ContextWindow
+				}
+				m.updateAgentContextUsage(binding.AgentID, &tokens, window)
+			}
 		}
 		if turnErr != nil {
 			if mail == nil {
@@ -1355,13 +1363,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			toolName := call.ToolCall.Name
 			normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
 			if isInlineTool {
-				targetAgent, err := m.store.ManagedAgent(callCtx, binding.AgentID)
-				// Native subagents are exempt from the inline tool guard
-				if err == nil && targetAgent != nil && (targetAgent.ParentAgentID != "" || strings.HasPrefix(binding.AgentID, "subagent-")) {
-					return nil
-				}
-				// If allow_inline_tools is true, inline tools execute freely without credits
-				if err == nil && targetAgent != nil && targetAgent.AllowInlineTools {
+				if m.IsInlineToolsAllowed(callCtx, binding.AgentID) {
 					return nil
 				}
 				// Otherwise, check allowance credits

@@ -1,6 +1,7 @@
 package managed
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"strings"
@@ -77,6 +78,12 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 	if agent == nil {
 		return nil
 	}
+	allowInline := agent.AllowInlineTools
+	if !allowInline && defaultManagerInstance != nil {
+		if enabled, err := defaultManagerInstance.ManagedInlineToolsEnabled(context.Background(), agent.AgentID); err == nil && enabled {
+			allowInline = true
+		}
+	}
 	result := map[string]any{
 		"agent_id": agent.AgentID, "source": "router-managed", "cwd": agent.Cwd, "runtime": agent.Runtime,
 		"model":         map[string]any{"provider": agent.SelectedModel.Provider, "id": agent.SelectedModel.ID},
@@ -84,7 +91,7 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"accepting_prompts": agent.AcceptingPrompts,
 		"active_workflow_state_id": agent.ActiveWorkflowStateID,
 		"worktree": agent.Worktree,
-		"allow_inline_tools": agent.AllowInlineTools,
+		"allow_inline_tools": allowInline,
 		"manifest":          map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":        agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
 	}
@@ -110,22 +117,6 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		if result["context_usage"] == nil {
 			if usage == nil {
 				usage = GetAgentContextUsage(agent.AgentID)
-			}
-			if usage == nil && defaultManagerInstance != nil {
-				usage = defaultManagerInstance.GetContextUsage(agent.AgentID)
-			}
-			if usage == nil && defaultManagerInstance != nil {
-				defaultManagerInstance.activeSessionsMu.Lock()
-				sess := defaultManagerInstance.activeEmbeddedSessions[agent.AgentID]
-				defaultManagerInstance.activeSessionsMu.Unlock()
-				if sess != nil {
-					tokens := embeddedProjectedTokens(sess.History())
-					window := 0
-					if sess.Model != nil {
-						window = sess.Model.ContextWindow
-					}
-					usage = CalculateContextUsage(&tokens, window)
-				}
 			}
 			if usage == nil {
 				if resolved, err := ResolveModel(agent.SelectedModel); err == nil && resolved != nil && resolved.ContextWindow > 0 {

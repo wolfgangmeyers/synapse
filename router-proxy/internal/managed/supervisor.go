@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -514,16 +515,19 @@ func (managerIDs) Next() (string, error) {
 func (m *Manager) updateAgentContextUsage(agentID string, tokens *int, contextWindow int) *ContextUsage {
 	usage := CalculateContextUsage(tokens, contextWindow)
 	lane := m.laneFor(agentID)
+	prior := lane.getContextUsage()
 	lane.setContextUsage(usage)
 	SetAgentContextUsage(agentID, usage)
+	if !reflect.DeepEqual(prior, usage) {
+		if m.store != nil {
+			_, _ = m.store.ReserveProjectionVersion(context.Background())
+		}
+		m.publishProjection()
+	}
 	return usage
 }
 
 func (m *Manager) GetContextUsage(agentID string) *ContextUsage {
-	lane := m.laneFor(agentID)
-	if u := lane.getContextUsage(); u != nil {
-		return u
-	}
 	return GetAgentContextUsage(agentID)
 }
 

@@ -4,7 +4,6 @@ export function formatCompactTokens(tokens: number): string {
   if (tokens <= 0) return "0";
   if (tokens >= 1_000_000) {
     const m = tokens / 1_000_000;
-    // e.g. 1_048_576 -> 1M, 1_500_000 -> 1.5M, 2_000_000 -> 2M
     return Number.isInteger(m) || tokens === 1_048_576 ? `${Math.round(m)}M` : `${Number(m.toFixed(1))}M`;
   }
   if (tokens >= 1_000) {

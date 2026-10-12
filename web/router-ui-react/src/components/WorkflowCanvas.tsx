@@ -23,6 +23,7 @@ import type {
   WorkflowWithStates,
   WorkflowStatePosition,
   WorkflowTransitionConfig,
+  KnownToolDefinition,
 } from "../domain/workflow-states";
 import { WorkflowStateNode, type WorkflowStateNodeData } from "./WorkflowStateNode";
 import { StateConfigModal } from "./StateConfigModal";
@@ -86,6 +87,22 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
   const [configState, setConfigState] = useState<WorkflowState | null>(null);
   const [deleteConfirmState, setDeleteConfirmState] = useState<WorkflowState | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
+  const [workflowTools, setWorkflowTools] = useState<KnownToolDefinition[] | undefined>(undefined);
+
+  // Fetch tools from backend
+  useEffect(() => {
+    if (client && typeof client.workflowTools === "function") {
+      client.workflowTools()
+        .then((res) => {
+          if (res?.tools && Array.isArray(res.tools)) {
+            setWorkflowTools(res.tools);
+          }
+        })
+        .catch((err) => {
+          console.warn("Failed to fetch workflow tools, falling back to defaults", err);
+        });
+    }
+  }, [client]);
 
   // Add state dialog
   const [addStateDialogOpen, setAddStateDialogOpen] = useState(false);
@@ -671,6 +688,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
         <StateConfigModal
           state={configState}
           isEntry={workflow?.entry_state_id === configState.id}
+          tools={workflowTools}
           onClose={() => setConfigState(null)}
           onSave={handleSaveStateConfig}
         />

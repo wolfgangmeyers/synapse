@@ -556,8 +556,15 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for key := range payload {
-		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" && key != "worktree" && key != "worktree_branch" {
+		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" && key != "worktree" && key != "worktree_branch" && key != "allow_inline_tools" {
 			r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+			return
+		}
+	}
+	var allowInlineTools bool
+	if raw, ok := payload["allow_inline_tools"]; ok {
+		if json.Unmarshal(raw, &allowInlineTools) != nil {
+			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "allow_inline_tools must be a boolean"})
 			return
 		}
 	}
@@ -629,7 +636,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 		return
 	}
-	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, Runtime: runtime, InitialInstruction: instruction, Worktree: worktree, WorktreeBranch: worktreeBranch, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, Runtime: runtime, InitialInstruction: instruction, Worktree: worktree, WorktreeBranch: worktreeBranch, AllowInlineTools: allowInlineTools, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
 	if launchErr != nil {
 		log.Printf("MANAGED_LAUNCH_ERR: %v", launchErr)
 		var idempotencyConflict *store.ManagedIdempotencyConflictError
@@ -1450,6 +1457,9 @@ func (r *Router) handleManagedAgentAllowInlineTools(w http.ResponseWriter, req *
 	if err := r.store.SetManagedAgentAllowInlineTools(req.Context(), agentID, allow); err != nil {
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update allow_inline_tools"})
 		return
+	}
+	if r.managed != nil {
+		_ = r.managed.SyncDesiredInlinePolicy(req.Context(), agentID, allow)
 	}
 	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 		"agent_id":           agentID,

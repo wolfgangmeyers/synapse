@@ -56,7 +56,7 @@ func TestDirectControlReconcilesUnownedReadyBindingWithoutWaitSignal(t *testing.
 
 			after, err := manager.store.GetProjectionVersion(ctx)
 			require.NoError(t, err)
-			require.Equal(t, before+1, after)
+			require.Equal(t, before+2, after)
 			select {
 			case <-published:
 			case <-time.After(time.Second):

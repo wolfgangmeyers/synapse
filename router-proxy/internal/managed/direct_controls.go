@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -65,6 +66,14 @@ func (m *Manager) DirectRootControl(ctx context.Context, agentID, requestID, ope
 // ManagedInlineToolsEnabled reads the durable desired policy. The router owns
 // this setting so a restart reapplies the same local Pi guard behavior.
 func (m *Manager) ManagedInlineToolsEnabled(ctx context.Context, agentID string) (bool, error) {
+	if m == nil || m.store == nil || agentID == "" {
+		return false, errors.New("manager or agent is invalid")
+	}
+	if targetAgent, err := m.store.ManagedAgent(ctx, agentID); err == nil && targetAgent != nil {
+		if targetAgent.AllowInlineTools {
+			return true, nil
+		}
+	}
 	desired, err := m.store.LoadManagedDesiredPolicy(ctx, agentID)
 	if err != nil {
 		return false, err
@@ -84,6 +93,97 @@ func (m *Manager) ManagedInlineToolsEnabled(ctx context.Context, agentID string)
 	return enabled, nil
 }
 
+// IsInlineToolsAllowed returns true if the agent is permitted to execute inline tools
+// (bash, edit, write) without restrictions or allowance credits.
+func (m *Manager) IsInlineToolsAllowed(ctx context.Context, agentID string) bool {
+	if m == nil || agentID == "" {
+		return false
+	}
+	if strings.HasPrefix(agentID, "subagent-") {
+		return true
+	}
+	if m.store == nil {
+		return false
+	}
+	targetAgent, err := m.store.ManagedAgent(ctx, agentID)
+	if err == nil && targetAgent != nil {
+		if targetAgent.ParentAgentID != "" || targetAgent.AllowInlineTools {
+			return true
+		}
+	}
+	if enabled, err := m.ManagedInlineToolsEnabled(ctx, agentID); err == nil && enabled {
+		if targetAgent != nil && !targetAgent.AllowInlineTools {
+			_ = m.store.SetManagedAgentAllowInlineTools(context.Background(), agentID, true)
+		}
+		return true
+	}
+	return false
+}
+
+// SyncDesiredInlinePolicy updates the desired policy's inline tool enablement
+// to match the durable allow_inline_tools setting.
+func (m *Manager) SyncDesiredInlinePolicy(ctx context.Context, agentID string, enabled bool) error {
+	agent, err := m.store.ManagedAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		return err
+	}
+	if agent.Runtime == "embedded" {
+		owner, err := m.currentEmbeddedBrowserOwner(ctx, agentID)
+		if err == nil {
+			previous, err := m.store.LoadManagedDesiredPolicy(ctx, agentID)
+			if err == nil {
+				policy, err := readinessPolicyValue(previous)
+				if err == nil {
+					inline, ok := policy["inline"].(map[string]any)
+					if ok {
+						inline["enabled"] = enabled
+						if canonical, hash, err := HashReadinessCanonicalJSON(policy); err == nil {
+							_ = m.store.UpdateEmbeddedBrowserPolicy(ctx, owner.binding, previous, store.ManagedDesiredPolicy{Canonical: canonical, SHA256: hash}, nil)
+						}
+					}
+				}
+			}
+		}
+		m.publishProjection()
+		return nil
+	}
+	binding, fence, err := m.currentDirectControlBinding(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	binding.serial.Lock()
+	defer binding.serial.Unlock()
+	if !m.rootBindingCurrent(ctx, binding, fence) {
+		return errManagedControlsUnavailable
+	}
+	desired, err := m.store.LoadManagedDesiredPolicy(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	policy, err := readinessPolicyValue(desired)
+	if err != nil {
+		return err
+	}
+	inline, ok := policy["inline"].(map[string]any)
+	if !ok {
+		return errors.New("managed inline policy is invalid")
+	}
+	inline["enabled"] = enabled
+	canonical, hash, err := HashReadinessCanonicalJSON(policy)
+	if err != nil {
+		return err
+	}
+	next := store.ManagedDesiredPolicy{Canonical: canonical, SHA256: hash}
+	if err := m.store.UpdateManagedDesiredPolicy(ctx, fence, next); err != nil {
+		return err
+	}
+	if err := m.applyCurrentManagedPolicy(ctx, binding, fence, next); err != nil {
+		return err
+	}
+	m.publishProjection()
+	return nil
+}
+
 // SetManagedInlineTools changes the router-owned policy and waits for the
 // active managed Pi process to confirm the new guard projection before
 // reporting success to the UI.
@@ -97,7 +197,14 @@ func (m *Manager) SetManagedInlineTools(ctx context.Context, agentID string, ena
 		if len(receipt) > 0 {
 			operation = receipt[0]
 		}
-		return m.setEmbeddedBrowserInline(ctx, agentID, enabled, operation)
+		if err := m.setEmbeddedBrowserInline(ctx, agentID, enabled, operation); err != nil {
+			return err
+		}
+		if err := m.store.SetManagedAgentAllowInlineTools(ctx, agentID, enabled); err != nil {
+			return err
+		}
+		m.publishProjection()
+		return nil
 	}
 	binding, fence, err := m.currentDirectControlBinding(ctx, agentID)
 	if err != nil {
@@ -131,7 +238,14 @@ func (m *Manager) SetManagedInlineTools(ctx context.Context, agentID string, ena
 	if err := m.store.UpdateManagedDesiredPolicy(ctx, fence, next); err != nil {
 		return err
 	}
-	return m.applyCurrentManagedPolicy(ctx, binding, fence, next)
+	if err := m.applyCurrentManagedPolicy(ctx, binding, fence, next); err != nil {
+		return err
+	}
+	if err := m.store.SetManagedAgentAllowInlineTools(ctx, agentID, enabled); err != nil {
+		return err
+	}
+	m.publishProjection()
+	return nil
 }
 
 func (m *Manager) currentDirectControlBinding(ctx context.Context, agentID string) (*managedBinding, store.ManagedRuntimeFence, error) {

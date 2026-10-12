@@ -207,6 +207,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	}
 
 	// Append scratchpad entries (if any)
+	var scratchpadMsg *ai.UserMessage
 	scratchpadEntries, totalCount, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 10)
 	if err == nil && len(scratchpadEntries) > 0 {
 		var sb strings.Builder
@@ -219,16 +220,17 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 			sb.WriteString(fmt.Sprintf("- [%s] %s\n", status, e.Content))
 		}
 		sb.WriteString("\nProceed with your work.")
-		scratchpadMsg := ai.UserMessage{
+		msg := ai.UserMessage{
 			Content: ai.ContentList{
 				ai.TextContent{Text: strings.TrimRight(sb.String(), "\n")},
 			},
 		}
-		scratchpadBody, err := json.Marshal(scratchpadMsg)
+		scratchpadBody, err := json.Marshal(msg)
 		if err == nil {
 			if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, "user", scratchpadBody); err != nil {
 				return fmt.Errorf("append scratchpad handoff: %w", err)
 			}
+			scratchpadMsg = &msg
 		}
 	}
 
@@ -252,6 +254,20 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	if err != nil {
 		return fmt.Errorf("read updated agent: %w", err)
 	}
+
+	// Immediately update context usage for the reset agent so the UI immediately sees the reset tokens.
+	var resetMessages []agent.AgentMessage
+	resetMessages = append(resetMessages, genesisMsg)
+	if scratchpadMsg != nil {
+		resetMessages = append(resetMessages, *scratchpadMsg)
+	}
+	resetMessages = append(resetMessages, portedMessages...)
+	resetTokens := embeddedProjectedTokens(resetMessages)
+	resetWindow := 0
+	if resolvedModel, err := ResolveModel(updatedAgent.SelectedModel); err == nil && resolvedModel != nil && resolvedModel.ContextWindow > 0 {
+		resetWindow = resolvedModel.ContextWindow
+	}
+	m.updateAgentContextUsage(nextBinding.AgentID, &resetTokens, resetWindow)
 
 	owner := embeddedOwner{binding: nextBinding, identity: identity}
 	runCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)

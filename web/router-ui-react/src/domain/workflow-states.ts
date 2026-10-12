@@ -74,6 +74,10 @@ export interface WorkflowStatesResponse {
   workflow_states: WorkflowState[];
 }
 
+export interface WorkflowToolsResponse {
+  tools: KnownToolDefinition[];
+}
+
 export interface KnownToolDefinition {
   id: string;
   name: string;
@@ -86,6 +90,7 @@ export const KNOWN_WORKFLOW_TOOLS: KnownToolDefinition[] = [
   { id: "edit", name: "edit", category: "system", description: "Make targeted edits to files" },
   { id: "write", name: "write", category: "system", description: "Write or overwrite files" },
   { id: "bash", name: "bash", category: "system", description: "Execute shell commands" },
+  { id: "google_search", name: "google_search", category: "system", description: "Search the web using Google Search via Grounding" },
   { id: "mecha_mailbox_send", name: "mecha_mailbox_send", category: "lifecycle", description: "Send async mailbox messages" },
   { id: "goal", name: "goal", category: "lifecycle", description: "Inspect or control goals" },
   { id: "goal_snooze", name: "goal_snooze", category: "lifecycle", description: "Snooze goal evaluations" },
