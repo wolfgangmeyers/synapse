@@ -719,8 +719,17 @@ func attachmentBody(body string, pending []attachments.Pending) string {
 // persistEmbeddedReply uses the same ordinary conversation and delivery path.
 // The outbox owns all envelope fields; never mint an ID or timestamp here.
 func (r *Router) persistEmbeddedReply(ctx context.Context, reply store.EmbeddedReply) error {
+	to := reply.To
+	if strings.EqualFold(to, "system") {
+		human, err := r.store.LastHumanRecipient(ctx, reply.From)
+		if err == nil && human != "" && !strings.EqualFold(human, "system") {
+			to = human
+		} else {
+			to = "user"
+		}
+	}
 	source := protocol.MessageSource{Kind: "agent"}
-	envelope := protocol.Envelope{ID: reply.ReplyID, From: reply.From, To: reply.To, Body: reply.Body, CreatedAt: reply.CreatedAt, Source: &source}
+	envelope := protocol.Envelope{ID: reply.ReplyID, From: reply.From, To: to, Body: reply.Body, CreatedAt: reply.CreatedAt, Source: &source}
 	releaseConversation := r.lockConversation(envelope.From, envelope.To)
 	defer releaseConversation()
 	result, err := r.store.Enqueue(ctx, envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &reply.Body, Source: &source}})
@@ -737,6 +746,15 @@ func (r *Router) persistEmbeddedReply(ctx context.Context, reply store.EmbeddedR
 // turn into a normal conversation message. The stable ID makes a retry safe
 // without allowing the managed process to choose a recipient or message ID.
 func (r *Router) persistManagedDirectReply(ctx context.Context, attempt store.ManagedDirectAttempt, reply managed.DirectMailboxReply) error {
+	to := attempt.Message.From
+	if strings.EqualFold(to, "system") {
+		human, err := r.store.LastHumanRecipient(ctx, attempt.Fence.AgentID)
+		if err == nil && human != "" && !strings.EqualFold(human, "system") {
+			to = human
+		} else {
+			to = "user"
+		}
+	}
 	if reply.EntryIdentity == "" || reply.Body == "" {
 		return errors.New("managed direct reply is incomplete")
 	}
@@ -745,7 +763,7 @@ func (r *Router) persistManagedDirectReply(ctx context.Context, attempt store.Ma
 	envelope := protocol.Envelope{
 		ID:        "managed-reply-" + hex.EncodeToString(digest[:]),
 		From:      attempt.Fence.AgentID,
-		To:        attempt.Message.From,
+		To:        to,
 		Body:      reply.Body,
 		CreatedAt: r.clock.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		Source:    &source,

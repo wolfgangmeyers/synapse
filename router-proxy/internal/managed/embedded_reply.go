@@ -51,6 +51,14 @@ func (m *Manager) deliverEmbeddedReplies(ctx context.Context, agentID string) er
 		return fmt.Errorf("embedded reply publisher unavailable")
 	}
 	for _, reply := range replies {
+		if strings.EqualFold(reply.To, "system") {
+			human, _ := m.store.LastHumanRecipient(ctx, agentID)
+			if human != "" && !strings.EqualFold(human, "system") {
+				reply.To = human
+			} else {
+				reply.To = "user"
+			}
+		}
 		if err := publish(ctx, reply); err != nil {
 			var valErr *protocol.ValidationError
 			if errors.As(err, &valErr) || strings.Contains(err.Error(), "payload_too_large") || strings.Contains(err.Error(), "invalid") {

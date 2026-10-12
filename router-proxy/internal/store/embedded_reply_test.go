@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
 )
@@ -264,31 +265,92 @@ func TestEmbeddedReplySystemMessageRecordsHistoryWithoutOutbox(t *testing.T) {
 	require.NoError(t, err, "assistant reply to system notification must succeed")
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	// 3. Verify reply outbox is ZERO (no outbound mailbox message queued for "system")
-	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "system turn must not insert into embedded_reply_outbox")
+	// 3. Verify reply outbox does NOT target "system", but is routed to default user
+	var outboxRecipient string
+	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM embedded_reply_outbox WHERE attempt_id=?`, attempt.AttemptID).Scan(&outboxRecipient)
+	require.NoError(t, err)
+	require.Equal(t, "user", outboxRecipient, "system turn must route to default user when no prior human message")
 
-	// 4. Verify managed_complete_history DOES contain the assistant's reply
+	// 4. Verify managed_complete_history targets "user", NOT "system"
 	require.NotEmpty(t, historyEntry.ID, "historyEntry must have an ID")
-	require.Equal(t, "Message sent", historyEntry.Message)
-	require.NotNil(t, historyEntry.Presentation)
-	require.Equal(t, "system", historyEntry.Presentation.To)
+	require.Equal(t, "user", historyEntry.Presentation.To)
 	require.Equal(t, b.AgentID, historyEntry.Presentation.From)
-	require.Equal(t, "message", historyEntry.Presentation.Kind)
-	require.NotNil(t, historyEntry.MessageContent)
-	require.Equal(t, replyText, *historyEntry.MessageContent)
 
 	page, err := s.ManagedHistoryPage(ctx, b.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
-	require.NotEmpty(t, page.Entries)
-	found := false
 	for _, h := range page.Entries {
-		if h.Presentation != nil && h.Presentation.To == "system" && h.MessageContent != nil && *h.MessageContent == replyText {
-			found = true
-			break
+		if h.Presentation != nil {
+			require.NotEqual(t, "system", h.Presentation.To, "no history entry may target system")
 		}
 	}
-	require.True(t, found, "assistant response to system notice must be recorded in complete history")
 }
 
+func TestEmbeddedReplySystemMessageRoutesToLastHumanRecipient(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	path := filepath.Join(t.TempDir(), "reply-system-human.db")
+	s, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, err)
+	defer s.Close()
 
+	b := redBind(t, s, "reply-worker-human", "reply-session-human", 1, "reply-generation-1", "worker")
 
+	// 1. Prior human message from "wolfgang" via web_ui
+	humanMail := testEnvelope("human-msg-1", "Hello worker, please do something.")
+	humanMail.From = "wolfgang"
+	humanMail.To = b.AgentID
+	source := protocol.MessageSource{Kind: "web_ui"}
+	humanMail.Source = &source
+	humanBody := humanMail.Body
+	_, err = s.Enqueue(ctx, humanMail, EnqueueOptions{Conversation: &ConversationOptions{Body: &humanBody, Source: &source}})
+	require.NoError(t, err)
+
+	// 2. Inbound system message from "system" with source_kind="system"
+	sysMail := testEnvelope("system-msg-2", "[Subagent Completed] Task subagent-1 finished with status completed: done.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
+	sysMail.From = "system"
+	sysMail.To = b.AgentID
+	_, err = s.Enqueue(ctx, sysMail)
+	require.NoError(t, err)
+	_, err = s.db.ExecContext(ctx, `UPDATE messages SET source_kind='system' WHERE id=?`, sysMail.ID)
+	require.NoError(t, err)
+
+	attempt := reserveEmbeddedMailTest(t, s, b, sysMail.ID)
+	require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, b, attempt.AttemptID, []byte(attempt.Body)))
+
+	snap, err := s.ReopenEmbedded(ctx, b)
+	require.NoError(t, err)
+
+	// 3. Assistant finishes turn responding to system notice
+	replyText := "Subagent finished and I have verified the toggle buttons."
+	finalMsg, err := json.Marshal(ai.AssistantMessage{
+		StopReason: ai.StopStop,
+		Content: ai.ContentList{
+			ai.TextContent{Text: replyText},
+		},
+	})
+	require.NoError(t, err)
+
+	finalEntry, historyEntry, err := s.AppendEmbeddedFinalAndReplyWithHistory(ctx, b, attempt.AttemptID, snap.Entries[0].Sequence, snap.Entries[0].Digest, finalMsg)
+	require.NoError(t, err)
+	require.Equal(t, "assistant", finalEntry.Kind)
+
+	// 4. Verify reply outbox is routed to "wolfgang", NOT "system"
+	var outboxRecipient, outboxBody string
+	err = s.db.QueryRowContext(ctx, `SELECT recipient, body FROM embedded_reply_outbox WHERE attempt_id=?`, attempt.AttemptID).Scan(&outboxRecipient, &outboxBody)
+	require.NoError(t, err)
+	require.Equal(t, "wolfgang", outboxRecipient, "system turn must route to last human recipient")
+	require.Equal(t, replyText, outboxBody)
+
+	// 5. Verify managed_complete_history targets "wolfgang", NOT "system"
+	require.NotEmpty(t, historyEntry.ID)
+	require.Equal(t, "wolfgang", historyEntry.Presentation.To)
+	require.Equal(t, b.AgentID, historyEntry.Presentation.From)
+
+	page, err := s.ManagedHistoryPage(ctx, b.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	for _, h := range page.Entries {
+		if h.Presentation != nil {
+			require.NotEqual(t, "system", h.Presentation.To, "no history entry may target system")
+		}
+	}
+}

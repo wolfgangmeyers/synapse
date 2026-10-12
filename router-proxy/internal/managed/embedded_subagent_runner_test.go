@@ -1753,10 +1753,13 @@ func TestSubagentCompletionMailboxNotificationSenderIsSystem(t *testing.T) {
 		t.Fatal("timed out waiting for parent turn to process mailbox message")
 	}
 
-	// Verify no outgoing reply to system was placed in embedded_reply_outbox
-	var outboxCount int
-	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox`).Scan(&outboxCount))
-	require.Zero(t, outboxCount, "no outgoing mailbox reply should be dispatched to system")
+	// Verify no outgoing reply to system was placed in embedded_reply_outbox;
+	// it should be routed to the human user instead.
+	var systemOutboxCount int
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox WHERE recipient='system'`).Scan(&systemOutboxCount))
+	require.Zero(t, systemOutboxCount, "no outgoing mailbox reply should be dispatched to system")
+
+	var userOutboxCount int
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox WHERE recipient!='system'`).Scan(&userOutboxCount))
+	require.Equal(t, 1, userOutboxCount, "turn reply should be routed to default human user")
 }
-
-

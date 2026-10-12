@@ -128,6 +128,17 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		if _, err = s.db.ExecContext(ctx, `INSERT INTO embedded_append_keys(append_key,agent_id,session_id,epoch,generation,entry_seq) VALUES(?,?,?,?,?,?)`, key, b.AgentID, b.SessionID, b.Epoch, b.Generation, entry.Sequence); err != nil {
 			return err
 		}
+		// If the incoming message was from "system" or an automated system sender,
+		// the worker's turn reply must NOT be sent to "system". Instead, route it
+		// by default to the last human recipient / active user.
+		targetRecipient := a.Sender
+		if strings.EqualFold(targetRecipient, "system") || sourceKind == "system" {
+			targetRecipient = s.lastHumanRecipientTx(ctx, b.AgentID)
+			if strings.EqualFold(targetRecipient, "system") || targetRecipient == "" {
+				targetRecipient = "user"
+			}
+		}
+
 		// If the agent already sent a message to the original sender during this turn,
 		// suppress automatic reply outbox insertion to avoid duplicate replies.
 		entryRows, err := s.db.QueryContext(ctx, `SELECT body FROM embedded_entries WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND seq > ? AND seq <= ? AND kind='assistant'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, ackSeq, expectedSeq)
@@ -166,11 +177,11 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 					if call != nil {
 						isMailSend := false
 						if call.Name == "mecha_mailbox_send" {
-							if recipient, ok := call.Arguments["recipient"].(string); ok && recipient == a.Sender {
+							if recipient, ok := call.Arguments["recipient"].(string); ok && (recipient == a.Sender || recipient == targetRecipient) {
 								isMailSend = true
 							}
 						} else if call.Name == "mecha_worker" && call.Arguments["action"] == "send" {
-							if name, ok := call.Arguments["name"].(string); ok && name == a.Sender {
+							if name, ok := call.Arguments["name"].(string); ok && (name == a.Sender || name == targetRecipient) {
 								isMailSend = true
 							}
 						}
@@ -203,8 +214,8 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		}
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
-		if sourceKind != "reminder" && sourceKind != "system" && a.Sender != "system" {
-			_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, a.Sender, replyBodyText, formatTimestamp(s.clock.Now()))
+		if sourceKind != "reminder" {
+			_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, targetRecipient, replyBodyText, formatTimestamp(s.clock.Now()))
 			if err != nil {
 				return err
 			}
@@ -212,7 +223,7 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		replyBody := replyBodyText
 		category := "managed_message"
 		messageText := "Message sent"
-		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: a.Sender, Thinking: thinking.String()}
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success", From: b.AgentID, To: targetRecipient, Thinking: thinking.String()}
 		presentationJSON, err := managedHistoryPresentationJSON(presentation)
 		if err != nil {
 			return err
@@ -290,4 +301,56 @@ func (s *Store) SettleEmbeddedReply(ctx context.Context, r EmbeddedReply) error 
 		_, err = s.db.ExecContext(ctx, `UPDATE embedded_reply_outbox SET state='delivered' WHERE attempt_id=? AND state='pending'`, r.AttemptID)
 		return err
 	})
+}
+
+// LastHumanRecipient returns the last known human recipient or active user for an agent.
+func (s *Store) LastHumanRecipient(ctx context.Context, agentID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", errors.New("store is closed")
+	}
+	return s.lastHumanRecipientTx(ctx, agentID), nil
+}
+
+func (s *Store) lastHumanRecipientTx(ctx context.Context, agentID string) string {
+	var recipient string
+
+	// 1. Most recent inbound message to this agent from a human UI client (web_ui, android, discord)
+	err := s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE recipient=? AND source_kind IN ('web_ui','android','discord') AND sender NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
+		return recipient
+	}
+
+	// 2. Most recent outbound message from this agent to a recipient who sent a human UI message
+	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM conversation_messages WHERE sender=? AND recipient IN (SELECT sender FROM conversation_messages WHERE source_kind IN ('web_ui','android','discord')) AND recipient NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
+		return recipient
+	}
+
+	// 3. Most recent human message across the entire router in conversation_messages
+	err = s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE source_kind IN ('web_ui','android','discord') AND sender NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`).Scan(&recipient)
+	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
+		return recipient
+	}
+
+	// 4. Any inbound message to this agent from any non-system sender
+	err = s.db.QueryRowContext(ctx, `SELECT sender FROM conversation_messages WHERE recipient=? AND sender NOT IN ('system','reminders','router') AND source_kind NOT IN ('system','reminder') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
+		return recipient
+	}
+
+	// 5. Any outbound message from this agent to any non-system recipient
+	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM conversation_messages WHERE sender=? AND recipient NOT IN ('system','reminders','router') ORDER BY conversation_sequence DESC LIMIT 1`, agentID).Scan(&recipient)
+	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
+		return recipient
+	}
+
+	// 6. Active human/tmux recipient in recipient_sources (e.g. wolfgang)
+	err = s.db.QueryRowContext(ctx, `SELECT recipient_name FROM recipient_sources WHERE source_kind IN ('tmux','web_ui') AND recipient_name NOT IN ('system','reminders','router','managed-runtime-readiness','reflex-router-proxy-launcher') AND state='active' ORDER BY updated_at DESC LIMIT 1`).Scan(&recipient)
+	if err == nil && recipient != "" && !strings.EqualFold(recipient, "system") {
+		return recipient
+	}
+
+	return "user"
 }
