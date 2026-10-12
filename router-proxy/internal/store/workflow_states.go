@@ -271,9 +271,6 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 		seenTargets[targetID] = true
 
 		desc := strings.TrimSpace(tr.Description)
-		if desc == "" {
-			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].description", i), Message: "description must not be empty"}
-		}
 		if len([]byte(desc)) > maxWorkflowTransitionDescriptionBytes {
 			return &WorkflowStateValidationError{Field: fmt.Sprintf("transitions[%d].description", i), Message: "description exceeds maximum byte length"}
 		}
