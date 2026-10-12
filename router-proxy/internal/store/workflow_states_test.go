@@ -374,7 +374,7 @@ func TestWorkflowStateTransitionsAndExit(t *testing.T) {
 	require.Equal(t, []WorkflowTransitionConfig{}, stateA.Transitions)
 	require.True(t, stateA.AllowExit) // default allow_exit is true
 
-	// 2. Create state B with transition to State A and allow_exit = false
+	// 2. Create state B with transition to State A and allow_exit = false (test empty description is allowed)
 	allowExitFalse := false
 	stateB, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
 		Name:        "State B",
@@ -382,7 +382,7 @@ func TestWorkflowStateTransitionsAndExit(t *testing.T) {
 		Transitions: []WorkflowTransitionConfig{
 			{
 				TargetStateID: stateA.ID,
-				Description:   "Transition from B to A",
+				Description:   "",
 			},
 		},
 		AllowExit: &allowExitFalse,
@@ -392,7 +392,7 @@ func TestWorkflowStateTransitionsAndExit(t *testing.T) {
 	require.False(t, stateB.AllowExit)
 	require.Len(t, stateB.Transitions, 1)
 	require.Equal(t, stateA.ID, stateB.Transitions[0].TargetStateID)
-	require.Equal(t, "Transition from B to A", stateB.Transitions[0].Description)
+	require.Equal(t, "", stateB.Transitions[0].Description)
 
 	// Fetch State B from store and verify
 	fetchedB, err := s.GetWorkflowState(ctx, stateB.ID)
