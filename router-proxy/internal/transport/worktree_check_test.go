@@ -2,6 +2,7 @@ package transport
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -88,4 +89,36 @@ func TestHandleManagedLaunchWorktreeFieldsAccepted(t *testing.T) {
 		t.Fatalf("expected 422 VALIDATION_FAILED, got %d: %s", goodRR.Code, goodRR.Body.String())
 	}
 }
+
+func TestManagedLaunchGitWorktreeErrorHTTPResponse(t *testing.T) {
+	r := &Router{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/managed-agents", nil)
+	req.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174000")
+	rr := httptest.NewRecorder()
+
+	wtErr := fmt.Errorf("failed to create git worktree: git worktree add failed: exit status 128: fatal: 'main' is already used by worktree at '/foo/bar'")
+	r.writeManagedError(rr, req, managedLaunchError(wtErr))
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", rr.Code)
+	}
+
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if payload.Error.Code != "VALIDATION_FAILED" {
+		t.Errorf("expected code VALIDATION_FAILED, got %s", payload.Error.Code)
+	}
+	expected := "Git worktree error: 'main' is already used by worktree at '/foo/bar'"
+	if payload.Error.Message != expected {
+		t.Errorf("expected clean message %q, got %q", expected, payload.Error.Message)
+	}
+}
+
 
