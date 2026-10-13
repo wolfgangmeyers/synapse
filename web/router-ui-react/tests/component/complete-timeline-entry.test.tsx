@@ -491,6 +491,26 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(".activity-entry--green")).toBeInTheDocument();
   });
 
+  it("renders goal evaluation card with flag icon for COMPLETED and opens detail dialog", async () => {
+    const user = userEvent.setup();
+    const reason = "Directly looked up five distinct cookie recipes using Google search.";
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:goal-eval-completed", agent_id: "workflows", at,
+      message: "Goal Evaluation • COMPLETED",
+      message_content: reason,
+      presentation: { kind: "goal_evaluation", outcome: "completed", summary: reason },
+    }} />);
+
+    expect(container.querySelector(".fa-flag")).toBeInTheDocument();
+    expect(screen.getByText("Goal Evaluation • COMPLETED")).toBeInTheDocument();
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(container.querySelector(".activity-entry--green")).toBeInTheDocument();
+
+    await user.click(container.querySelector(".activity-entry")!);
+    expect(screen.getByRole("heading", { level: 2, name: "Goal Evaluation • COMPLETED" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Goal Evaluation" })).toBeInTheDocument();
+  });
+
   it("renders workflow activation prompt with purple tone, bolt icon, and prompt preview", async () => {
     const user = userEvent.setup();
     const { container } = render(<CompleteTimelineEntry entry={{

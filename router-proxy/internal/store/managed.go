@@ -4501,6 +4501,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 		return nil, errors.New("store is closed")
 	}
 	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, agentID), nil)
+	if errors.Is(err, sql.ErrNoRows) {
+		agent, err = scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ? COLLATE NOCASE`, agentID), nil)
+	}
 	if err != nil {
 		return nil, err
 	}

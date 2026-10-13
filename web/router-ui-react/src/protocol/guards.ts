@@ -85,7 +85,7 @@ const utcMillisPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const routerUtcTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 const lifecycleEpochPattern = /^[0-9a-fA-F-]{36}$/;
 const failureReasonPattern = /^[a-z][a-z0-9_]*$/;
-const managedHistorySensitivePattern = /token|secret|password|authorization|cookie|credential|argument|request body|stdout|stderr|environment|session_|session id|process_|process id|runtime_generation|\/users\/|\/home\/|\/tmp\//i;
+const managedHistorySensitivePattern = /token=|token:|secret=|secret:|password=|password:|authorization:|cookie=|cookie:|set-cookie:|credential=|credential:|--argument|arguments:|request body|stdout:|stderr:|environment:|session_|session id|process_|process id|runtime_generation|\/users\/|\/home\/|\/tmp\//i;
 
 const invalid = (path: string, message: string): ProtocolError => ({ code: "invalid_protocol_value", path, message });
 
@@ -191,11 +191,11 @@ export function isManagedAgent(value: unknown): value is ManagedAgent {
 function isManagedAgentGoalState(value: unknown): boolean {
   if (isGoalState(value)) return true;
   if (!isRecord(value)) return false;
-  const { desired_revision, applied_revision, projection_state, ...browserState } = value;
-  return isSafeInteger(desired_revision, 0) && isSafeInteger(applied_revision, 0)
-    && applied_revision <= desired_revision
-    && (projection_state === "pending" || projection_state === "applied" || projection_state === "failed")
-    && isGoalState(browserState);
+  if (Object.hasOwn(value, "desired_revision") || Object.hasOwn(value, "applied_revision") || Object.hasOwn(value, "projection_state")) {
+    if (!isSafeInteger(value.desired_revision, 0) || !isSafeInteger(value.applied_revision, 0) || (value.applied_revision as number) > (value.desired_revision as number)) return false;
+    if (value.projection_state !== "pending" && value.projection_state !== "applied" && value.projection_state !== "failed") return false;
+  }
+  return isGoalState(value);
 }
 
 function isManagedArchiveDelivery(value: unknown): boolean {
@@ -274,7 +274,7 @@ function isManagedHistoryError(value: unknown): boolean {
     && isPatternString(value.code, /^[A-Za-z][A-Za-z0-9_]*$/, 1, 128) && typeof value.retryable === "boolean" && typeof value.detail_available === "boolean";
 }
 function isManagedHistoryPresentation(value: unknown): boolean {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "tool_name", "outcome", "from", "to", "child_label", "child_state", "summary", "error", "thinking", "occurred_at"]) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth", "thinking", "goal_evaluation", "subagent_complete", "subagent", "context_reset"].includes(value.kind)) return false;
+  if (!isRecord(value) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth", "thinking", "goal_evaluation", "subagent_complete", "subagent", "context_reset"].includes(value.kind)) return false;
   if (value.tool_name !== undefined && !isPatternString(value.tool_name, /^[A-Za-z][A-Za-z0-9_.-]*$/, 1, 128)) return false;
   if (value.outcome !== undefined && (typeof value.outcome !== "string" || !["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown", "done", "not_done"].includes(value.outcome))) return false;
   if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 48)) return false;
@@ -283,7 +283,9 @@ function isManagedHistoryPresentation(value: unknown): boolean {
   if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown", "cancelled"].includes(value.child_state))) return false;
   if (value.thinking !== undefined && typeof value.thinking !== "string") return false;
   if (value.occurred_at !== undefined && (typeof value.occurred_at !== "string" || !isRouterUtcTimestamp(value.occurred_at))) return false;
-  return (value.summary === undefined || isSafeManagedHistoryString(value.summary, 1, 512)) && (value.error === undefined || isManagedHistoryError(value.error));
+  const isGoalEval = value.kind === "goal_evaluation";
+  const isSummarySafe = value.summary === undefined || (isGoalEval ? isSafeString(value.summary, 1, 512) : isSafeManagedHistoryString(value.summary, 1, 512));
+  return isSummarySafe && (value.error === undefined || isManagedHistoryError(value.error));
 }
 function isJsonValue(value: unknown, ancestors = new Set<object>(), depth = 0): value is JsonValue {
   if (value === null || typeof value === "boolean" || typeof value === "string") return true;
@@ -367,21 +369,23 @@ export function isModelSummary(value: unknown): value is ModelSummary {
 }
 
 export function isGoalProjection(value: unknown): value is GoalProjection {
-  return isRecord(value) && hasOnlyKeys(value, ["enabled", "goal"]) && typeof value.enabled === "boolean" && isSafeString(value.goal, value.enabled ? 1 : 0, 4000) && (value.enabled || value.goal === "");
+  return isRecord(value) && typeof value.enabled === "boolean" && isSafeString(value.goal, value.enabled ? 1 : 0, 4000);
 }
 
 export function isGoalSettings(value: unknown): value is GoalControlSettings {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"])) return false;
+  if (!isRecord(value)) return false;
   return typeof value.goal_lock_enabled === "boolean" && typeof value.snooze_enabled === "boolean" && isSafeInteger(value.snooze_duration_ms, 1) && (value.snooze_turn_limit === null || isSafeInteger(value.snooze_turn_limit, 1, 20)) && (value.snooze_budget_cap_ms === null || isSafeInteger(value.snooze_budget_cap_ms, 1)) && isSafeInteger(value.snooze_refill_yield_ms, 1) && isSafeInteger(value.snooze_refill_elapsed_ms, 1);
 }
 
 export function isGoalOutcomeCounts(value: unknown): value is GoalOutcomeCounts {
-  return isRecord(value) && hasOnlyKeys(value, ["COMPLETED", "NOT_DONE"]) && isSafeInteger(value.COMPLETED, 0, 1_000_000) && isSafeInteger(value.NOT_DONE, 0, 1_000_000);
+  return isRecord(value) && isSafeInteger(value.COMPLETED, 0, 1_000_000) && isSafeInteger(value.NOT_DONE, 0, 1_000_000);
 }
 
 export function isGoalState(value: unknown): value is GoalState {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["enabled", "goal", "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms", "outcome_counts"]) || typeof value.enabled !== "boolean" || !isSafeString(value.goal, value.enabled ? 1 : 0, 4000) || (value.enabled === false && value.goal !== "")) return false;
-  return isGoalSettings(value) || (typeof value.goal_lock_enabled === "boolean" && typeof value.snooze_enabled === "boolean" && isSafeInteger(value.snooze_duration_ms, 1) && (value.snooze_turn_limit === null || isSafeInteger(value.snooze_turn_limit, 1, 20)) && (value.snooze_budget_cap_ms === null || isSafeInteger(value.snooze_budget_cap_ms, 1)) && isSafeInteger(value.snooze_refill_yield_ms, 1) && isSafeInteger(value.snooze_refill_elapsed_ms, 1) && isGoalOutcomeCounts(value.outcome_counts));
+  if (!isRecord(value) || typeof value.enabled !== "boolean" || typeof value.goal !== "string" || value.goal.length > 4000) return false;
+  if (!isGoalSettings(value)) return false;
+  if (!isRecord(value.outcome_counts) || !isSafeInteger(value.outcome_counts.COMPLETED, 0, 1_000_000) || !isSafeInteger(value.outcome_counts.NOT_DONE, 0, 1_000_000)) return false;
+  return true;
 }
 
 export function isSubagentSummary(value: unknown): value is SubagentSummary {

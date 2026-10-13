@@ -52,6 +52,7 @@ type managedHistoryDetails struct {
 	MessageContent *string
 	SenderIdentity *string
 	ToolInputJSON  string
+	OccurredAt     string
 }
 
 type ManagedHistoryPage struct {
@@ -80,7 +81,7 @@ func managedHistoryText(value string, maximum int, allowEmpty bool) bool {
 		return false
 	}
 	lower := strings.ToLower(value)
-	for _, sensitive := range []string{"token", "secret", "password", "authorization", "cookie", "credential", "argument", "request body", "stdout", "stderr", "environment", "session_", "session id", "process_", "process id", "runtime_generation", "/users/", "/home/", "/tmp/"} {
+	for _, sensitive := range []string{"token=", "token:", "secret=", "secret:", "password=", "password:", "authorization:", "cookie=", "cookie:", "set-cookie:", "credential=", "credential:", "--argument", "arguments:", "request body", "stdout:", "stderr:", "environment:", "session_", "session id", "process_", "process id", "runtime_generation", "/users/", "/home/", "/tmp/"} {
 		if strings.Contains(lower, sensitive) {
 			return false
 		}
@@ -99,8 +100,17 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true, "subagent_complete": true, "subagent": true}[value.Kind] {
 		return false
 	}
-	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || !managedHistoryText(value.Summary, 512, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) {
+	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) {
 		return false
+	}
+	if value.Kind == "goal_evaluation" {
+		if !utf8.ValidString(value.Summary) || len([]byte(value.Summary)) > 512 {
+			return false
+		}
+	} else {
+		if !managedHistoryText(value.Summary, 512, true) {
+			return false
+		}
 	}
 	if value.ToolName != "" && strings.ContainsAny(value.ToolName, " \t\r\n\x00") {
 		return false
@@ -393,6 +403,9 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 		}
 	}
 	occurredAt := formatTimestamp(s.clock.Now())
+	if detail.OccurredAt != "" {
+		occurredAt = detail.OccurredAt
+	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json,message_content,sender_identity,tool_input_json) VALUES (?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),?,?,NULLIF(?,''))`, nullableString(agentID), category, level, message, occurredAt, eventKey, presentationJSON, detail.MessageContent, detail.SenderIdentity, detail.ToolInputJSON)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
@@ -475,3 +488,77 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	}
 	return page, nil
 }
+
+// BackfillEmbeddedGoalEvaluations ensures that completed evaluations stored in
+// embedded_goal_evaluations have corresponding rows in managed_complete_history.
+func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT agent_id, user_seq, final_seq, state, reason, COALESCE(completed_at, '')
+		FROM embedded_goal_evaluations
+		WHERE state IN ('DONE', 'NOT_DONE', 'COMPLETED')
+		ORDER BY completed_at ASC
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type evalRecord struct {
+		agentID     string
+		userSeq     int64
+		finalSeq    int64
+		state       string
+		reason      string
+		completedAt string
+	}
+	var records []evalRecord
+	for rows.Next() {
+		var r evalRecord
+		if err := rows.Scan(&r.agentID, &r.userSeq, &r.finalSeq, &r.state, &r.reason, &r.completedAt); err != nil {
+			return err
+		}
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, r := range records {
+		eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", r.agentID, r.userSeq, r.finalSeq, r.state)
+		summary := r.reason
+		if summary == "" {
+			if r.state == "NOT_DONE" {
+				summary = "Actionable steps remain"
+			} else {
+				summary = "COMPLETED"
+			}
+		}
+		if len(summary) > 500 {
+			summary = summary[:497] + "..."
+		}
+		outcome := strings.ToLower(r.state)
+		pres := &ManagedHistoryPresentation{
+			Kind:    "goal_evaluation",
+			Outcome: outcome,
+			Summary: summary,
+		}
+		presentationJSON, err := managedHistoryPresentationJSON(pres)
+		if err != nil {
+			continue
+		}
+		msg := "Goal Evaluation • " + r.state
+		reasonCopy := r.reason
+		detail := managedHistoryDetails{
+			MessageContent: &reasonCopy,
+			OccurredAt:     r.completedAt,
+		}
+		_, _ = s.recordManagedCompleteHistoryTx(ctx, r.agentID, "managed_goal_evaluation", "info", msg, eventKey, presentationJSON, pres, detail)
+	}
+	return nil
+}
+

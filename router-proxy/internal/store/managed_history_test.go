@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -183,4 +184,88 @@ func TestManagedHistoryRejectsInvalidInputs(t *testing.T) {
 	require.Error(t, err)
 	_, err = durable.ManagedHistoryPage(context.Background(), "worker", "quiet", 0, maxManagedHistoryEntries+1)
 	require.Error(t, err)
+}
+
+func TestGoalEvaluationWithSensitiveKeywordsRecordedAndReturned(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	// Reasons containing words like "cookie", "token", "argument", "environment"
+	reasons := []string{
+		"Looked up 5 distinct cookie recipes and selected the best one.",
+		"Validated authorization token and refreshed session.",
+		"Checked all function arguments and confirmed correct syntax.",
+		"Configured local development environment and ran tests.",
+	}
+
+	for i, reason := range reasons {
+		outcome := "completed"
+		if i%2 == 1 {
+			outcome = "not_done"
+		}
+		summary := reason
+		eventKey := fmt.Sprintf("goal-evaluation:worker:%d:%d:%s", i+1, i+2, outcome)
+		pres := &ManagedHistoryPresentation{
+			Kind:    "goal_evaluation",
+			Outcome: outcome,
+			Summary: summary,
+		}
+		msg := "Goal Evaluation • " + strings.ToUpper(outcome)
+		entry, err := durable.RecordManagedCompleteHistoryWithDetails(ctx, "worker", "managed_goal_evaluation", "info", msg, eventKey, pres, nil, &reason)
+		require.NoError(t, err, "goal evaluation presentation must not be rejected for keywords in summary or reason")
+		require.Equal(t, pres, entry.Presentation)
+		require.NotNil(t, entry.MessageContent)
+		require.Equal(t, reason, *entry.MessageContent)
+	}
+
+	page, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, len(reasons))
+	for _, entry := range page.Entries {
+		require.Equal(t, "goal_evaluation", entry.Presentation.Kind)
+		require.NotEmpty(t, entry.Presentation.Summary)
+		require.NotNil(t, entry.MessageContent)
+	}
+}
+
+func TestManagedAgentCaseInsensitiveLookup(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	rec := ManagedAgentRecord{
+		AgentID:          "workflows",
+		Name:             "workflows",
+		Cwd:              t.TempDir(),
+		SelectedModel:    ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		Runtime:          "embedded",
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		ManifestRevision: 1,
+		ManifestHash:     "manifest-sha",
+		CreatedAt:        "2026-10-01T12:00:00Z",
+		UpdatedAt:        "2026-10-01T12:00:00Z",
+	}
+	op := ManagedOperation{
+		OperationID:       "op-workflows",
+		Method:            "POST",
+		CanonicalPath:     "/v1/managed-agents",
+		RequestID:         "req-workflows",
+		CanonicalBodyHash: "hash-workflows",
+		State:             "terminal",
+		ResponseStatus:    200,
+	}
+	require.NoError(t, durable.ReserveManagedLaunch(ctx, rec, op))
+
+	exact, err := durable.ManagedAgent(ctx, "workflows")
+	require.NoError(t, err)
+	require.Equal(t, "workflows", exact.AgentID)
+
+	upper, err := durable.ManagedAgent(ctx, "Workflows")
+	require.NoError(t, err, "lookup with Workflows must find workflows")
+	require.Equal(t, "workflows", upper.AgentID)
+
+	mixed, err := durable.ManagedAgent(ctx, "WORKFLOWS")
+	require.NoError(t, err)
+	require.Equal(t, "workflows", mixed.AgentID)
 }

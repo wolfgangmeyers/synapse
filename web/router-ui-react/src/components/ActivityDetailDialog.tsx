@@ -143,7 +143,7 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
   const summaryText = !isRedundantSummary(presentation?.summary) ? presentation?.summary : undefined;
   const thinkingText = entry.thinking ?? presentation?.thinking;
   const isThinking = presentation?.kind === "thinking";
-  const hasOriginalMessage = !isTool && !isMailboxSend && !isThinking && entry.message_content !== undefined;
+  const hasOriginalMessage = !isTool && !isMailboxSend && !isThinking && (entry.message_content !== undefined || (presentation?.kind === "goal_evaluation" && Boolean(presentation?.summary)));
 
   return <DialogShell open={open} title={visual.dialogTitle ?? visual.label} titleId="activity-detail-dialog-title" description={`${entry.agent_id} · ${displayTime(entry.at)}`} onClose={onClose} {...(onClosed === undefined ? {} : { onClosed })} closeLabel="Close activity details" {...(returnFocus === undefined ? {} : { returnFocus })} className="message-dialog activity-detail-dialog">
     <div className="activity-detail-body">
@@ -169,7 +169,7 @@ export function ActivityDetailDialog({ entry, open = entry !== undefined, return
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
       </> : <>
         {thinkingText ? <section><h3>Reasoning Trace</h3><div className="message-dialog-body activity-detail-message activity-detail-thinking"><MarkdownBody body={thinkingText} /></div></section> : null}
-        {hasOriginalMessage ? <section><h3>{presentation?.kind === "goal_evaluation" ? "Goal Evaluation" : isOutbound ? "Message" : "Original message"}</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? ""} /></div></section> : null}
+        {hasOriginalMessage ? <section><h3>{presentation?.kind === "goal_evaluation" ? "Goal Evaluation" : isOutbound ? "Message" : "Original message"}</h3><div className="message-dialog-body activity-detail-message"><MarkdownBody body={entry.message_content ?? presentation?.summary ?? ""} /></div></section> : null}
         {errorText ? <section><h3>Error</h3><pre className="activity-detail-payload">{errorText}</pre></section> : null}
         {!hasOriginalMessage && !errorText && entry.message && entry.message !== visual.label ? <section><p className="activity-detail-payload">{entry.message}</p></section> : null}
         {!hasOriginalMessage && !errorText && summaryText && summaryText !== entry.message ? <section><p className="activity-detail-payload">{summaryText}</p></section> : null}

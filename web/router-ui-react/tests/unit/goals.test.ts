@@ -78,4 +78,26 @@ describe("goals", () => {
       },
     })).toBeUndefined();
   });
+
+  it("normalizes goal state with COMPLETED verdict and open schema fields", () => {
+    const valid = normalizeGoalState({
+      enabled: true,
+      goal: "Search 5 cookie recipes",
+      ...settings,
+      extra_metadata: "extra value",
+      outcome_counts: { COMPLETED: 7, NOT_DONE: 493, OTHER: 1 },
+      last_evaluation: {
+        verdict: "COMPLETED",
+        reason: "Found 5 cookie recipes",
+        completed_at: "2026-10-12T23:55:37.115Z",
+        goal_revision: 30,
+        extra_eval_field: true,
+      },
+    });
+    expect(valid).toBeDefined();
+    expect(valid?.last_evaluation?.verdict).toBe("COMPLETED");
+    expect(valid?.last_evaluation?.reason).toBe("Found 5 cookie recipes");
+    expect(valid?.outcome_counts.COMPLETED).toBe(7);
+    expect(valid?.outcome_counts.NOT_DONE).toBe(493);
+  });
 });

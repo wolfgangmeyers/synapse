@@ -266,7 +266,9 @@ function managedChildren(value: unknown): ManagedChildrenResponse {
   return value;
 }
 function managedGoal(value: unknown): ManagedGoalResponse {
-  const root = recordValue(value); const state = normalizeGoalState(root?.goal_state);
+  const root = recordValue(value);
+  const rawState = root && Object.hasOwn(root, "goal_state") ? root.goal_state : root;
+  const state = normalizeGoalState(rawState);
   if (!root || state === undefined) throw invalidResponse("Router returned invalid managed goal state", value);
   return { goal_state: state };
 }

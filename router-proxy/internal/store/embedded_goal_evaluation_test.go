@@ -194,4 +194,40 @@ func TestEmbeddedEvaluationCompletedMarksPolicyDone(t *testing.T) {
 	require.Equal(t, EmbeddedGoalEvaluationCompleted, last.Verdict)
 }
 
+func TestBackfillEmbeddedGoalEvaluations(t *testing.T) {
+	s, b, k := evaluationFixture(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	receiptForEvaluation(t, s, b, &k)
+	_, claimed, err := s.ClaimEmbeddedGoalEvaluation(ctx, b, k)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	verdict, changed, err := s.CompleteEmbeddedGoalEvaluation(ctx, b, k, EmbeddedGoalEvaluationCompleted, "Found top 5 cookie recipes")
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "Found top 5 cookie recipes", verdict.Reason)
+
+	// Before backfill: 0 rows in managed_complete_history
+	var countBefore int
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM managed_complete_history WHERE agent_id=?`, b.AgentID).Scan(&countBefore))
+	require.Equal(t, 0, countBefore)
+
+	// Run backfill
+	require.NoError(t, s.BackfillEmbeddedGoalEvaluations(ctx))
+
+	// After backfill: 1 row in managed_complete_history
+	var countAfter int
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM managed_complete_history WHERE agent_id=?`, b.AgentID).Scan(&countAfter))
+	require.Equal(t, 1, countAfter)
+
+	page, err := s.ManagedHistoryPage(ctx, b.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "goal_evaluation", page.Entries[0].Presentation.Kind)
+	require.Equal(t, "Found top 5 cookie recipes", *page.Entries[0].MessageContent)
+}
+
+
 
