@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -400,7 +401,24 @@ func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
 		return
 	}
-	messages, err := r.store.ConversationHistory(req.Context(), owner, peer)
+	before := int64(0)
+	if raw := req.URL.Query().Get("before"); raw != "" {
+		if val, err := strconv.ParseInt(raw, 10, 64); err == nil && val > 0 {
+			before = val
+		}
+	}
+	limit := 100
+	if raw := req.URL.Query().Get("limit"); raw != "" {
+		if val, err := strconv.Atoi(raw); err == nil && val > 0 {
+			if val > 500 {
+				val = 500
+			}
+			limit = val
+		} else if raw == "all" || raw == "0" {
+			limit = 0
+		}
+	}
+	messages, nextBefore, err := r.store.ConversationHistoryPaged(req.Context(), owner, peer, before, limit)
 	if err != nil {
 		r.writeError(w, &httpError{status: 500, code: "internal_error"})
 		return
@@ -409,7 +427,18 @@ func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 	if messages == nil {
 		messages = []domain.ConversationMessage{}
 	}
-	r.writeJSON(w, 200, map[string]any{"owner": owner, "peer": peer, "high_water_sequence": high, "messages": messages})
+	resp := map[string]any{
+		"owner":               owner,
+		"peer":                peer,
+		"high_water_sequence": high,
+		"messages":            messages,
+	}
+	if nextBefore != nil {
+		resp["next_before"] = *nextBefore
+	} else {
+		resp["next_before"] = nil
+	}
+	r.writeJSON(w, 200, resp)
 }
 
 func (r *Router) handleMemory(w http.ResponseWriter, req *http.Request) {

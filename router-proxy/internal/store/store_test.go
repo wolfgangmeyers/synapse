@@ -356,6 +356,47 @@ func TestConversationHistoryPostelHumanFallback(t *testing.T) {
 	require.Equal(t, "Follow up from user", mergedHistory[2].Body)
 }
 
+func TestConversationHistoryPagedMostRecentAndCursor(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := formatTimestamp(time.Now().UTC())
+
+	// Insert 10 conversation messages between alice and bob
+	for i := 1; i <= 10; i++ {
+		require.NoError(t, execTestData(s, fmt.Sprintf(`
+			INSERT INTO conversation_messages (message_id, message_incarnation_id, delivery_message_id, sender, recipient, participant_a, participant_b, body, source_kind, created_at, recorded_at)
+			VALUES ('msg-%d', 'inc-%d', 'del-%d', 'alice', 'bob', 'alice', 'bob', 'Message %d', 'web_ui', '%s', '%s')`, i, i, i, i, now, now)))
+	}
+
+	// 1. Initial page with limit=3 should return the 3 MOST RECENT messages (8, 9, 10) in chronological ASC order
+	recentPage, nextBefore, err := s.ConversationHistoryPaged(ctx, "alice", "bob", 0, 3)
+	require.NoError(t, err)
+	require.Len(t, recentPage, 3)
+	require.Equal(t, "Message 8", recentPage[0].Body)
+	require.Equal(t, "Message 9", recentPage[1].Body)
+	require.Equal(t, "Message 10", recentPage[2].Body)
+	require.NotNil(t, nextBefore)
+	require.Equal(t, recentPage[0].Sequence, *nextBefore)
+
+	// 2. Paginate backwards using nextBefore to fetch the previous 3 messages (5, 6, 7) in chronological ASC order
+	olderPage, olderNextBefore, err := s.ConversationHistoryPaged(ctx, "alice", "bob", *nextBefore, 3)
+	require.NoError(t, err)
+	require.Len(t, olderPage, 3)
+	require.Equal(t, "Message 5", olderPage[0].Body)
+	require.Equal(t, "Message 6", olderPage[1].Body)
+	require.Equal(t, "Message 7", olderPage[2].Body)
+	require.NotNil(t, olderNextBefore)
+	require.Equal(t, olderPage[0].Sequence, *olderNextBefore)
+
+	// 3. Paging with limit=0 returns all messages in chronological ASC order
+	allMessages, allCursor, err := s.ConversationHistoryPaged(ctx, "alice", "bob", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, allMessages, 10)
+	require.Equal(t, "Message 1", allMessages[0].Body)
+	require.Equal(t, "Message 10", allMessages[9].Body)
+	require.Nil(t, allCursor)
+}
+
 func openTestStoreWithOptions(t *testing.T, options Options) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "router.db")

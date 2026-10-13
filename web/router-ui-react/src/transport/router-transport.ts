@@ -108,7 +108,7 @@ export interface RouterTransport {
   close(): void;
   refreshAgents(): Promise<void>;
   refreshReminders(): Promise<void>;
-  conversation(owner: string, peer: string): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[] }>;
+  conversation(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }>;
   sendMessage(message: unknown): Promise<Record<string, unknown>>;
   sendActivity(activityState: "active" | "settled" | "compacting", details?: Pick<Agent, "subagent_count" | "subagents" | "goal" | "current_model">): boolean;
   sendModelControl(targetAgentId: string, targetInstanceId: string, model: ModelSummary, controlId?: string): boolean;
@@ -322,7 +322,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     close() { clearInterval(refreshTimer); clearRefreshScheduling(); goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
     refreshReminders,
-    conversation: (owner, peer) => http.conversations(owner, peer),
+    conversation: (owner, peer, options) => http.conversations(owner, peer, options),
     async sendMessage(message) { const result = await http.sendMessage(message); void refreshAgents(); return result; },
     sendActivity(activityState, details = {}) { if (!socket.registered) return false; return socket.send(buildActivityFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, activityState, ...details })); },
     sendModelControl(targetAgentId, targetInstanceId, model, requestedControlId = controlId()) { if (!socket.registered) return false; const frame = buildModelControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: requestedControlId, model }); return sendControl(frame, controlFor("model", requestedControlId, targetAgentId, targetInstanceId, socket.identity)); },

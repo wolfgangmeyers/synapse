@@ -191,6 +191,11 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 	if len(summary) > 500 {
 		summary = summary[:497] + "..."
 	}
+
+	if should, _ := m.store.ShouldRecordGoalEvaluation(m.runCtx, binding.AgentID, outcome, preview); !should {
+		return
+	}
+
 	eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", binding.AgentID, key.UserSeq, key.FinalSeq, outcome)
 	pres := &store.ManagedHistoryPresentation{
 		Kind:    "goal_evaluation",

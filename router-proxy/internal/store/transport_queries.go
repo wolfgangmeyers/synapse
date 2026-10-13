@@ -83,14 +83,27 @@ func (s *Store) AdmissionLimits() AdmissionLimits {
 }
 
 func (s *Store) conversationHistoryForPair(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
+	messages, _, err := s.conversationHistoryForPairPaged(ctx, owner, peer, 0, 0)
+	return messages, err
+}
+
+func (s *Store) conversationHistoryForPairPaged(ctx context.Context, owner, peer string, before int64, limit int) ([]domain.ConversationMessage, *int64, error) {
 	a, b := owner, peer
 	if b < a {
 		a, b = b, a
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
-		FROM conversation_messages WHERE participant_a = ? AND participant_b = ? ORDER BY conversation_sequence ASC`, a, b)
+	var rows *sql.Rows
+	var err error
+	if limit <= 0 {
+		rows, err = s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
+			FROM conversation_messages WHERE participant_a = ? AND participant_b = ? AND (? = 0 OR conversation_sequence < ?) ORDER BY conversation_sequence ASC`, a, b, before, before)
+	} else {
+		// Fetch limit + 1 in DESC order so we always load the most recent window first, then reverse to ASC.
+		rows, err = s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
+			FROM conversation_messages WHERE participant_a = ? AND participant_b = ? AND (? = 0 OR conversation_sequence < ?) ORDER BY conversation_sequence DESC LIMIT ?`, a, b, before, before, limit+1)
+	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var result []domain.ConversationMessage
@@ -98,7 +111,7 @@ func (s *Store) conversationHistoryForPair(ctx context.Context, owner, peer stri
 		var message domain.ConversationMessage
 		var subject, attachments, source sql.NullString
 		if err := rows.Scan(&message.Sequence, &message.ID, &message.MessageIncarnationID, &message.From, &message.To, &subject, &message.Body, &message.CreatedAt, &message.RecordedAt, &attachments, &source); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if subject.Valid {
 			message.Subject = &subject.String
@@ -106,7 +119,7 @@ func (s *Store) conversationHistoryForPair(ctx context.Context, owner, peer stri
 		message.Attachments = []json.RawMessage{}
 		if attachments.Valid && attachments.String != "" {
 			if err := json.Unmarshal([]byte(attachments.String), &message.Attachments); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		message.Source = protocol.MessageSource{Kind: "unknown"}
@@ -115,16 +128,36 @@ func (s *Store) conversationHistoryForPair(ctx context.Context, owner, peer stri
 		}
 		result = append(result, message)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	var nextBefore *int64
+	if limit > 0 && len(result) > limit {
+		next := result[limit-1].Sequence
+		nextBefore = &next
+		result = result[:limit]
+	}
+	if limit > 0 {
+		// Reverse from DESC (query order) to chronological ASC for display
+		for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+			result[i], result[j] = result[j], result[i]
+		}
+	}
+	return result, nextBefore, nil
 }
 
 func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
+	messages, _, err := s.ConversationHistoryPaged(ctx, owner, peer, 0, 0)
+	return messages, err
+}
+
+func (s *Store) ConversationHistoryPaged(ctx context.Context, owner, peer string, before int64, limit int) ([]domain.ConversationMessage, *int64, error) {
 	if owner == "" || peer == "" {
-		return nil, errors.New("owner and peer are required")
+		return nil, nil, errors.New("owner and peer are required")
 	}
-	result, err := s.conversationHistoryForPair(ctx, owner, peer)
+	result, nextBefore, err := s.conversationHistoryForPairPaged(ctx, owner, peer, before, limit)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Postel's Law: If the requester connected as generic "user" or has an empty history with peer,
 	// check if the primary human operator has conversation history with this peer.
@@ -132,10 +165,10 @@ func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]
 	if owner == "user" || len(result) == 0 {
 		human, humanErr := s.LastHumanRecipient(ctx, peer)
 		if humanErr == nil && human != "" && human != "user" && human != owner {
-			humanResult, hErr := s.conversationHistoryForPair(ctx, human, peer)
+			humanResult, humanNextBefore, hErr := s.conversationHistoryForPairPaged(ctx, human, peer, before, limit)
 			if hErr == nil && len(humanResult) > 0 {
 				if len(result) == 0 {
-					return humanResult, nil
+					return humanResult, humanNextBefore, nil
 				}
 				seen := make(map[int64]bool, len(result)+len(humanResult))
 				var merged []domain.ConversationMessage
@@ -152,11 +185,14 @@ func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]
 				sort.Slice(merged, func(i, j int) bool {
 					return merged[i].Sequence < merged[j].Sequence
 				})
-				return merged, nil
+				if limit > 0 && len(merged) > limit {
+					merged = merged[len(merged)-limit:]
+				}
+				return merged, nextBefore, nil
 			}
 		}
 	}
-	return result, nil
+	return result, nextBefore, nil
 }
 
 func (s *Store) ConversationHighWaterSequence(ctx context.Context) (int64, error) {

@@ -14,7 +14,7 @@ import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-u
 export interface Capabilities extends Record<string, unknown> {}
 export interface HealthResponse { status: string; version: string; schema_migrations?: string[] }
 export interface AgentListResponse { agents: Agent[]; generated_at?: string; activity_snapshot_version?: number }
-export interface ConversationResponse { owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[] }
+export interface ConversationResponse { owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }
 export interface ReminderResponse { reminders: Reminder[] }
 export interface ReminderWriteResponse { reminder: Reminder }
 export interface PromptTemplateResponse { prompt_templates: PromptTemplate[] }
@@ -227,7 +227,8 @@ function conversation(value: unknown, routerUrl: string): ConversationResponse {
     const to = candidate.to ?? candidate.recipient;
     messages.push(withAbsoluteAttachmentUrls({ ...candidate, id: candidate.id, ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }, routerUrl));
   }
-  return { owner: root.owner, peer: root.peer, high_water_sequence: root.high_water_sequence, messages };
+  const nextBefore = typeof root.next_before === "number" && Number.isSafeInteger(root.next_before) && root.next_before > 0 ? root.next_before : null;
+  return { owner: root.owner, peer: root.peer, high_water_sequence: root.high_water_sequence, messages, next_before: nextBefore };
 }
 function reminders(value: unknown): ReminderResponse {
   const root = recordValue(value); const rawReminders = root?.reminders;
@@ -257,9 +258,12 @@ function managedAgent(value: unknown): ManagedAgentResponse {
   return { generated_at: root.generated_at, projection_version: root.projection_version, agent: root.agent };
 }
 function managedHistory(value: unknown): ManagedHistoryResponse {
-  const root = recordValue(value); const entries = root?.entries;
-  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(entries) || !entries.every(root.view === "complete" ? isManagedCompleteHistoryEntry : isManagedHistoryEntry) || (root.next_before !== null && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
-  return { view: root.view, entries, next_before: root.next_before };
+  const root = recordValue(value); const rawEntries = root?.entries;
+  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(rawEntries) || (root.next_before !== null && root.next_before !== undefined && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
+  const isMatch = root.view === "complete" ? isManagedCompleteHistoryEntry : isManagedHistoryEntry;
+  const entries = rawEntries.filter(isMatch);
+  const nextBefore = typeof root.next_before === "number" && Number.isSafeInteger(root.next_before) && root.next_before > 0 ? root.next_before : null;
+  return { view: root.view, entries, next_before: nextBefore };
 }
 function managedChildren(value: unknown): ManagedChildrenResponse {
   if (!isManagedChildrenProjection(value)) throw invalidResponse("Router returned invalid managed children", value);
@@ -378,7 +382,7 @@ export interface RouterHttpClient {
   health(): Promise<HealthResponse>;
   capabilities(): Promise<Capabilities>;
   agents(options?: { includeModels?: boolean } | boolean): Promise<AgentListResponse>;
-  conversations(owner: string, peer: string): Promise<ConversationResponse>;
+  conversations(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<ConversationResponse>;
   sendMessage(message: unknown): Promise<Record<string, unknown>>;
   message(id: string): Promise<unknown>;
   retryMessage(id: string): Promise<unknown>;
@@ -484,7 +488,12 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       return body;
     },
     agents: async (options = {}) => { const includeModels = typeof options === "boolean" ? options : options.includeModels !== false; return agentList(await request(includeModels ? "/v1/agents" : "/v1/agents?models=omit"), includeModels); },
-    conversations: async (owner, peer) => conversation(await request(`/v1/conversations?owner=${encodeURIComponent(owner)}&peer=${encodeURIComponent(peer)}`), base),
+    conversations: async (owner, peer, options = {}) => {
+      const params = new URLSearchParams({ owner, peer });
+      if (options.before !== undefined && options.before > 0) params.set("before", String(options.before));
+      if (options.limit !== undefined && options.limit > 0) params.set("limit", String(options.limit));
+      return conversation(await request(`/v1/conversations?${params.toString()}`), base);
+    },
     sendMessage: async (message) => messageWrite(await jsonRequest("/v1/messages", "POST", message)),
     message: (id) => request(`/v1/messages/${encodeURIComponent(id)}`),
     retryMessage: (id) => jsonRequest(`/v1/messages/${encodeURIComponent(id)}/retry`, "POST"),

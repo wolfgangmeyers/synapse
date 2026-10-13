@@ -20,6 +20,9 @@ export interface MessageListProps {
   error?: string | undefined;
   onNearBottomChange?: ((nearBottom: boolean) => void) | undefined;
   scrollLocked?: boolean | undefined;
+  onLoadOlder?: (() => void) | undefined;
+  hasOlder?: boolean | undefined;
+  loadingOlder?: boolean | undefined;
 }
 
 type FeedItem = { type: "message"; id: string; timestamp: number; sequence: number; message: HistoryMessage } | { type: "activity"; id: string; timestamp: number; sequence: number; entry: ManagedHistoryEntry };
@@ -95,7 +98,7 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
   });
 }
 
-export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked }: MessageListProps): ReactElement {
+export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
   const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
@@ -241,7 +244,7 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   const hasItems = renderedItems.length > 0;
   const hasActivity = activityEntries !== undefined;
   let previousDate: string | undefined;
-  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{renderedItems.map(({ item, suppressThinking, epoch }) => {
+  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{hasOlder && <li key="pagination:load-older" className="timeline-load-older-item"><button type="button" className="load-older-button" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? "Loading older history…" : "Load older history"}</button></li>}{renderedItems.map(({ item, suppressThinking, epoch }) => {
     const currentDate = dateLabel(item.timestamp);
     const separator = currentDate !== undefined && currentDate !== previousDate ? <li key={`date:${currentDate}:${item.id}`} className="timeline-date" aria-hidden="true">{currentDate}</li> : null;
     previousDate = currentDate ?? previousDate;

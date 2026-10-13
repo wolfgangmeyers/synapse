@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -489,14 +490,64 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	return page, nil
 }
 
+// ShouldRecordGoalEvaluation checks whether a goal evaluation should be recorded
+// or if it is a redundant consecutive NOT_DONE evaluation that would flood history.
+func (s *Store) ShouldRecordGoalEvaluation(ctx context.Context, agentID, outcome, summary string) (bool, error) {
+	if strings.ToUpper(outcome) != "NOT_DONE" {
+		return true, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, errors.New("store is closed")
+	}
+	var lastMessage, lastSummary string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT message, COALESCE(message_content, '')
+		FROM managed_complete_history
+		WHERE agent_id = ? AND category = 'managed_goal_evaluation'
+		ORDER BY sequence DESC LIMIT 1
+	`, agentID).Scan(&lastMessage, &lastSummary)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	if lastMessage == "Goal Evaluation • NOT_DONE" && lastSummary == summary {
+		return false, nil
+	}
+	return true, nil
+}
+
 // BackfillEmbeddedGoalEvaluations ensures that completed evaluations stored in
 // embedded_goal_evaluations have corresponding rows in managed_complete_history.
+// Redundant repeated NOT_DONE evaluations are pruned/deduplicated so they never flood history.
 func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return errors.New("store is closed")
 	}
+
+	// First, prune existing redundant NOT_DONE goal evaluation spam from managed_complete_history
+	// so each agent keeps at most 5 most recent NOT_DONE evaluations, preserving room for all other events.
+	_, _ = s.db.ExecContext(ctx, `
+		DELETE FROM managed_complete_history
+		WHERE category = 'managed_goal_evaluation'
+		  AND (message = 'Goal Evaluation • NOT_DONE' OR message LIKE '%NOT_DONE%')
+		  AND sequence NOT IN (
+		    SELECT sequence FROM managed_complete_history
+		    WHERE category = 'managed_goal_evaluation' AND (message = 'Goal Evaluation • NOT_DONE' OR message LIKE '%NOT_DONE%')
+		    ORDER BY sequence DESC LIMIT 5
+		  )
+	`)
+
+	var tableExists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedded_goal_evaluations'`).Scan(&tableExists); err != nil || tableExists == 0 {
+		return nil
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT agent_id, user_seq, final_seq, state, reason, COALESCE(completed_at, '')
 		FROM embedded_goal_evaluations
@@ -516,48 +567,169 @@ func (s *Store) BackfillEmbeddedGoalEvaluations(ctx context.Context) error {
 		reason      string
 		completedAt string
 	}
-	var records []evalRecord
+	agentRecords := make(map[string][]evalRecord)
 	for rows.Next() {
 		var r evalRecord
 		if err := rows.Scan(&r.agentID, &r.userSeq, &r.finalSeq, &r.state, &r.reason, &r.completedAt); err != nil {
 			return err
 		}
-		records = append(records, r)
+		agentRecords[r.agentID] = append(agentRecords[r.agentID], r)
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	for _, r := range records {
-		eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", r.agentID, r.userSeq, r.finalSeq, r.state)
-		summary := r.reason
-		if summary == "" {
+	for _, records := range agentRecords {
+		var notDone []evalRecord
+		var done []evalRecord
+		for _, r := range records {
 			if r.state == "NOT_DONE" {
-				summary = "Actionable steps remain"
+				notDone = append(notDone, r)
 			} else {
-				summary = "COMPLETED"
+				done = append(done, r)
 			}
 		}
-		if len(summary) > 500 {
-			summary = summary[:497] + "..."
+		// Keep at most the 5 most recent notDone evaluations
+		if len(notDone) > 5 {
+			notDone = notDone[len(notDone)-5:]
 		}
-		outcome := strings.ToLower(r.state)
+		var toInsert []evalRecord
+		toInsert = append(toInsert, done...)
+		toInsert = append(toInsert, notDone...)
+		sort.Slice(toInsert, func(i, j int) bool {
+			return toInsert[i].completedAt < toInsert[j].completedAt
+		})
+
+		for _, r := range toInsert {
+			eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", r.agentID, r.userSeq, r.finalSeq, r.state)
+			summary := r.reason
+			if summary == "" {
+				if r.state == "NOT_DONE" {
+					summary = "Actionable steps remain"
+				} else {
+					summary = "COMPLETED"
+				}
+			}
+			if len(summary) > 500 {
+				summary = summary[:497] + "..."
+			}
+			outcome := strings.ToLower(r.state)
+			pres := &ManagedHistoryPresentation{
+				Kind:    "goal_evaluation",
+				Outcome: outcome,
+				Summary: summary,
+			}
+			presentationJSON, err := managedHistoryPresentationJSON(pres)
+			if err != nil {
+				continue
+			}
+			msg := "Goal Evaluation • " + r.state
+			reasonCopy := r.reason
+			detail := managedHistoryDetails{
+				MessageContent: &reasonCopy,
+				OccurredAt:     r.completedAt,
+			}
+			_, _ = s.recordManagedCompleteHistoryTx(ctx, r.agentID, "managed_goal_evaluation", "info", msg, eventKey, presentationJSON, pres, detail)
+		}
+	}
+	return nil
+}
+
+// BackfillEmbeddedRecentToolCalls restores recent tool calls from embedded_entries into managed_complete_history
+// so agents whose complete history was truncated or missing tool calls display their full operational timeline.
+func (s *Store) BackfillEmbeddedRecentToolCalls(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+
+	var tableExists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='embedded_entries'`).Scan(&tableExists); err != nil || tableExists == 0 {
+		return nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT agent_id, body
+		FROM embedded_entries
+		WHERE kind = 'assistant' AND body LIKE '%toolCall%'
+		ORDER BY rowid DESC LIMIT 150
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type rawToolItem struct {
+		agentID   string
+		callID    string
+		name      string
+		arguments json.RawMessage
+	}
+	var items []rawToolItem
+
+	for rows.Next() {
+		var agentID, bodyStr string
+		if err := rows.Scan(&agentID, &bodyStr); err != nil {
+			return err
+		}
+		var parsed struct {
+			Content []struct {
+				Type      string          `json:"type"`
+				ID        string          `json:"id"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(bodyStr), &parsed); err != nil {
+			continue
+		}
+		for _, c := range parsed.Content {
+			if c.Type == "toolCall" && c.ID != "" && c.Name != "" {
+				items = append(items, rawToolItem{
+					agentID:   agentID,
+					callID:    c.ID,
+					name:      c.Name,
+					arguments: c.Arguments,
+				})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Reverse to chronological order (older first)
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
+	}
+
+	for _, item := range items {
+		eventKey := fmt.Sprintf("tool:%s:%s", item.agentID, item.callID)
+		var exists int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_complete_history WHERE event_key=?`, eventKey).Scan(&exists)
+		if err == nil && exists == 1 {
+			continue
+		}
 		pres := &ManagedHistoryPresentation{
-			Kind:    "goal_evaluation",
-			Outcome: outcome,
-			Summary: summary,
+			Kind:     "tool",
+			ToolName: item.name,
+			Outcome:  "completed",
+			Summary:  "Ran " + item.name,
 		}
 		presentationJSON, err := managedHistoryPresentationJSON(pres)
 		if err != nil {
 			continue
 		}
-		msg := "Goal Evaluation • " + r.state
-		reasonCopy := r.reason
-		detail := managedHistoryDetails{
-			MessageContent: &reasonCopy,
-			OccurredAt:     r.completedAt,
+		var toolInput any
+		if len(item.arguments) > 0 {
+			_ = json.Unmarshal(item.arguments, &toolInput)
 		}
-		_, _ = s.recordManagedCompleteHistoryTx(ctx, r.agentID, "managed_goal_evaluation", "info", msg, eventKey, presentationJSON, pres, detail)
+		detail := managedHistoryDetails{
+			ToolInputJSON: string(item.arguments),
+		}
+		msg := "Ran " + item.name
+		_, _ = s.recordManagedCompleteHistoryTx(ctx, item.agentID, "managed_tool", "info", msg, eventKey, presentationJSON, pres, detail)
 	}
 	return nil
 }
