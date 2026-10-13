@@ -55,6 +55,14 @@ func managedOperationName(req *http.Request) string {
 		return "managed_agent_reset"
 	case strings.HasSuffix(path, "/children"):
 		return "managed_children_read"
+	case strings.HasSuffix(path, "/goal") && req.Method == http.MethodPut:
+		return "managed_goal_update"
+	case strings.HasSuffix(path, "/goal"):
+		return "managed_goal_read"
+	case strings.HasSuffix(path, "/inline-tools") && req.Method == http.MethodPut:
+		return "managed_inline_tools_update"
+	case strings.HasSuffix(path, "/inline-tools"):
+		return "managed_inline_tools_read"
 	case strings.HasPrefix(path, "/v1/managed-agents/") && req.Method == http.MethodDelete:
 		return "managed_agent_terminate"
 	case strings.HasPrefix(path, "/v1/managed-agents/"):
