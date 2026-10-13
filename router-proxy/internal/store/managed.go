@@ -813,6 +813,39 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 		if count >= maxAgents {
 			return &ManagedSlotLimitError{}
 		}
+		var existingID, existingState, existingCreated string
+		checkErr := s.db.QueryRowContext(ctx, `SELECT agent_id, lifecycle_state, created_at FROM managed_agents WHERE name = ? OR agent_id = ?`, agent.Name, agent.AgentID).Scan(&existingID, &existingState, &existingCreated)
+		if checkErr == nil {
+			isStuck := false
+			if existingState == "starting" {
+				if createdTime, parseErr := time.Parse(time.RFC3339Nano, existingCreated); parseErr == nil {
+					if s.clock.Now().Sub(createdTime) > 2*time.Minute {
+						isStuck = true
+					}
+				} else if createdTime, parseErr2 := time.Parse("2006-01-02T15:04:05.000Z", existingCreated); parseErr2 == nil {
+					if s.clock.Now().Sub(createdTime) > 2*time.Minute {
+						isStuck = true
+					}
+				}
+			}
+			if existingState == "failed" || isStuck {
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_readiness_sources WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_diagnostics WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_stock_pi_session_reservations WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_actions WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM embedded_sessions WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agent_policies WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_launch_recipes WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_crash_recovery WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_history_boundaries WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `UPDATE recipient_sources SET state='retired' WHERE recipient_name = ?`, agent.Name)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id = ?`, existingID)
+			}
+		} else if !errors.Is(checkErr, sql.ErrNoRows) {
+			return checkErr
+		}
 		// Post-027 rows retain this pending operation as a reverse protection
 		// edge. Inserting it first lets the parent link be FK-valid in the same
 		// transaction; historical migration fixtures still use the old shape.
@@ -4568,9 +4601,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 	}
 	var whereClause string
 	if hasParent {
-		whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%' `
+		whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') `
 	} else {
-		whereClause = ` WHERE agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
+		whereClause = ` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
 	}
 	rows, err := s.db.QueryContext(ctx, managedAgentSelect+whereClause+`ORDER BY name ASC`)
 	if err != nil {
@@ -4911,9 +4944,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	}
 	var whereClause string
 	if hasParent {
-		whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%' `
+		whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') `
 	} else {
-		whereClause = ` WHERE agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
+		whereClause = ` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
 	}
 	rows, err := s.db.QueryContext(ctx, managedAgentSelect+whereClause+`ORDER BY name ASC`)
 	if err != nil {
@@ -5049,9 +5082,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 	}
 	var whereClause string
 	if hasParent {
-		whereClause = ` WHERE agent_id = ? AND (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%'`
+		whereClause = ` WHERE agent_id = ? AND (parent_agent_id IS NULL OR parent_agent_id = '')`
 	} else {
-		whereClause = ` WHERE agent_id = ? AND agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id)`
+		whereClause = ` WHERE agent_id = ? AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id)`
 	}
 	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+whereClause, agentID), nil)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -5707,9 +5740,9 @@ func (s *Store) ReconcileManagedRecipientSources(ctx context.Context) error {
 		}
 		var whereClause string
 		if hasParent {
-			whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') AND agent_id NOT LIKE 'subagent-%' `
+			whereClause = ` WHERE (parent_agent_id IS NULL OR parent_agent_id = '') `
 		} else {
-			whereClause = ` WHERE agent_id NOT LIKE 'subagent-%' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
+			whereClause = ` WHERE NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) `
 		}
 		rows, err := s.db.QueryContext(ctx, `SELECT name,agent_id,lifecycle_state FROM managed_agents`+whereClause+`ORDER BY name ASC`)
 		if err != nil {
@@ -5769,14 +5802,14 @@ func (s *Store) CascadeTerminateSubagents(ctx context.Context, parentAgentID str
 			return err
 		}
 		if hasParent {
-			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', accepting_prompts=0 WHERE parent_agent_id=? OR agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID, parentAgentID); err != nil {
-				if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', accepting_prompts=0 WHERE parent_agent_id=? OR agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID, parentAgentID); err2 != nil {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', accepting_prompts=0 WHERE parent_agent_id=?`, parentAgentID); err != nil {
+				if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', accepting_prompts=0 WHERE parent_agent_id=?`, parentAgentID); err2 != nil {
 					return err
 				}
 			}
 		} else {
-			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', accepting_prompts=0 WHERE agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID); err != nil {
-				if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', accepting_prompts=0 WHERE agent_id LIKE 'subagent-' || ? || '-%'`, parentAgentID); err2 != nil {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='terminated', accepting_prompts=0 WHERE agent_id IN (SELECT agent_id FROM managed_subagents WHERE parent_agent_id=?)`, parentAgentID); err != nil {
+				if _, err2 := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated', lifecycle_state='failed', accepting_prompts=0 WHERE agent_id IN (SELECT agent_id FROM managed_subagents WHERE parent_agent_id=?)`, parentAgentID); err2 != nil {
 					return err
 				}
 			}
@@ -5789,6 +5822,62 @@ func (s *Store) CascadeTerminateSubagents(ctx context.Context, parentAgentID str
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
+}
+
+// TimeoutStuckLaunches marks top-level launches stuck in starting longer than timeout as failed.
+func (s *Store) TimeoutStuckLaunches(ctx context.Context, timeout time.Duration) (int, error) {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	cutoff := formatTimestamp(s.clock.Now().Add(-timeout))
+	now := formatTimestamp(s.clock.Now())
+	var count int
+	err := s.runImmediate(ctx, func() error {
+		hasParent, colErr := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+		if colErr != nil {
+			return colErr
+		}
+		var whereClause string
+		if hasParent {
+			whereClause = ` WHERE desired_state='running' AND lifecycle_state='starting' AND (parent_agent_id IS NULL OR parent_agent_id = '') AND created_at < ? `
+		} else {
+			whereClause = ` WHERE desired_state='running' AND lifecycle_state='starting' AND NOT EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) AND created_at < ? `
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT agent_id, launch_operation_id FROM managed_agents`+whereClause, cutoff)
+		if err != nil {
+			return err
+		}
+		type stuckLaunch struct {
+			agentID string
+			opID    string
+		}
+		var stuck []stuckLaunch
+		for rows.Next() {
+			var item stuckLaunch
+			var opID sql.NullString
+			if err := rows.Scan(&item.agentID, &opID); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			item.opID = opID.String
+			stuck = append(stuck, item)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, item := range stuck {
+			_, _ = s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed', activity_state='failed', slot_held=0, last_error_code='LAUNCH_TIMEOUT', last_error_message='managed launch timed out before reaching readiness', last_error_at=?, updated_at=? WHERE agent_id=? AND lifecycle_state='starting'`, now, now, item.agentID)
+			if item.opID != "" {
+				_, _ = s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal', terminal_at=?, expires_at=?, terminal_code='LAUNCH_TIMEOUT', terminal_message='managed launch timed out before reaching readiness' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), item.opID)
+			}
+			count++
+		}
+		if count > 0 {
+			_, _ = s.bumpManagedProjectionVersion(ctx)
+		}
+		return nil
+	})
+	return count, err
 }
 
 var _ = fmt.Sprintf

@@ -404,7 +404,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
 
   const visibleAgents = useMemo(
     () => mergeAgentSources(session.state.agents, session.state.managedAgents ?? [], session.state.managedChildren)
-      .filter((agent) => !agent.agent_id.startsWith("subagent-") && !(agent as { parent_agent_id?: string }).parent_agent_id),
+      .filter((agent) => !(agent as { parent_agent_id?: string }).parent_agent_id && !(agent.managed_agent as { parent_agent_id?: string } | undefined)?.parent_agent_id),
     [session.state.agents, session.state.managedAgents, session.state.managedChildren]
   );
   // Saved selections from before source-qualified rows are legacy tmux IDs.

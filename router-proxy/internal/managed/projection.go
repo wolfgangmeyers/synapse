@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -217,7 +216,7 @@ func ProjectionArchiveEnvelope(archive *store.ManagedAgentArchive, generatedAt t
 func ProjectionListEnvelope(snapshot store.ManagedAgentsSnapshot) map[string]any {
 	agents := make([]map[string]any, 0, len(snapshot.Agents))
 	for _, agent := range snapshot.Agents {
-		if agent == nil || strings.HasPrefix(agent.AgentID, "subagent-") || agent.ParentAgentID != "" {
+		if agent == nil || agent.ParentAgentID != "" {
 			continue
 		}
 		agents = append(agents, PublicAgentWithGoal(agent, snapshot.GoalPolicies[agent.AgentID]))
