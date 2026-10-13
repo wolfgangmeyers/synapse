@@ -94,7 +94,7 @@ describe("agent projections", () => { it("uses connected agents as authority and
     expect(reducer(state, { type: "managed/removed", scope, version: 9, baseVersion: 8, agentId: "missing" })).toBe(state);
     expect(reducer(state, { type: "managed/removed", scope, version: 6, baseVersion: 5, agentId: "alpha" })).toBe(state);
   });
-  it("filters out any subagents by prefix or parent_agent_id in mergeAgentSources", () => {
+  it("filters out any subagents with parent_agent_id in mergeAgentSources", () => {
     const tmuxAgents: Agent[] = [
       { agent_id: "worker-1" },
       { agent_id: "subagent-child-1" },
@@ -106,7 +106,7 @@ describe("agent projections", () => { it("uses connected agents as authority and
     ];
     const result = mergeAgentSources(tmuxAgents, managedAgents);
     const ids = result.map((r) => r.agent_id);
-    expect(ids).toEqual(["managed-1", "worker-1"]);
+    expect(ids).toEqual(["managed-1", "subagent-child-1", "subagent-managed-child", "worker-1"]);
   });
   it("reconciles individual agent states smoothly without flickering or resetting", () => {
     const scope = { routerUrl: "http://router.test:4000", agentId: "web" };

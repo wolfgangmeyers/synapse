@@ -980,6 +980,7 @@ p:empty { display: none; }
   overflow: hidden;
 }
 .conversation-header {
+  flex: 0 0 auto;
   gap: 12px;
   padding: 9px 11px;
   background: var(--surface);
@@ -1474,6 +1475,8 @@ p:empty { display: none; }
 .managed-failure-code { padding: 1px 4px; border-radius: 4px; background: rgba(255,180,171,0.10); color: inherit; font-size: 0.82em; overflow-wrap: anywhere; }
 .peer-activity .subagent-indicator, .peer-activity .compacting-indicator { margin-top: 0; max-width: min(100%, 420px); }
 .messages {
+  flex: 1 1 0%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: auto;
@@ -1709,7 +1712,73 @@ p:empty { display: none; }
 .sidebar-content > * { flex-shrink: 0; }
 .sidebar-content > .agents { flex-shrink: 1; }
 .conversation > .conversation-runtime { grid-row: 1 / -1; min-height: 0; height: 100%; }
-.conversation-content { min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.conversation-content { min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(220, 38, 38, 0.12);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.28);
+  color: var(--danger, #ef4444);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  flex: 0 0 auto;
+  z-index: 10;
+}
+.error-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.error-banner-icon {
+  flex: 0 0 auto;
+  font-size: 1.1rem;
+  color: var(--danger, #ef4444);
+}
+.error-banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.error-banner-code {
+  display: inline-block;
+  padding: 1px 5px;
+  margin-left: 6px;
+  border-radius: 4px;
+  background: rgba(220, 38, 38, 0.15);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8em;
+}
+.error-banner-dismiss {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  border-radius: 6px;
+  background: rgba(220, 38, 38, 0.1);
+  color: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.error-banner-dismiss:hover {
+  background: rgba(220, 38, 38, 0.22);
+  border-color: rgba(220, 38, 38, 0.5);
+}
+.error-banner-dismiss:focus-visible {
+  outline: 2px solid var(--danger, #ef4444);
+  outline-offset: 1px;
+}
+.error-banner-dismiss i {
+  font-size: 0.85rem;
+}
 .conversation-tools { display: flex; align-items: flex-end; gap: 10px; padding: 10px 22px 0; background: var(--surface); }
 .conversation-tools .prompt-controls { margin-left: 0; }
 .conversation-tools + .conversation-content { min-height: 0; }
