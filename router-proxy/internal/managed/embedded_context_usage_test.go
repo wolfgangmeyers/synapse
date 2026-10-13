@@ -75,6 +75,25 @@ func TestPublicAgentContextUsageProjection(t *testing.T) {
 	require.Equal(t, 100000, usage.ContextWindow)
 	require.Equal(t, 50.0, *usage.Percent)
 
+	// 1b. Embedded agent with ContextTokens/ContextWindow/ContextPercent populated on record directly
+	directAgent := &store.ManagedAgentRecord{
+		AgentID:        "worker-direct",
+		Name:           "worker-direct",
+		Runtime:        "embedded",
+		Cwd:            "/tmp",
+		SelectedModel:  store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
+		ContextTokens:  &tokens,
+		ContextWindow:  window,
+		ContextPercent: &expectedPct,
+	}
+	projDirect := managed.PublicAgent(directAgent)
+	require.NotNil(t, projDirect["context_usage"])
+	directUsage, ok := projDirect["context_usage"].(*managed.ContextUsage)
+	require.True(t, ok)
+	require.Equal(t, 50000, *directUsage.Tokens)
+	require.Equal(t, 100000, directUsage.ContextWindow)
+	require.Equal(t, 50.0, *directUsage.Percent)
+
 	// Also verify PublicAgentWithGoal preserves it
 	withGoal := managed.PublicAgentWithGoal(embeddedAgent, nil)
 	require.NotNil(t, withGoal["context_usage"])

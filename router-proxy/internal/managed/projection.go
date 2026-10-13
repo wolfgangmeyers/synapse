@@ -105,7 +105,13 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 	}
 	if agent.Runtime == "embedded" {
 		var usage *ContextUsage
-		if agent.ContextUsage != nil {
+		if agent.ContextTokens != nil || agent.ContextWindow > 0 {
+			usage = &ContextUsage{
+				Tokens:        agent.ContextTokens,
+				ContextWindow: agent.ContextWindow,
+				Percent:       agent.ContextPercent,
+			}
+		} else if agent.ContextUsage != nil {
 			if u, ok := agent.ContextUsage.(*ContextUsage); ok {
 				usage = u
 			} else if u, ok := agent.ContextUsage.(ContextUsage); ok {
