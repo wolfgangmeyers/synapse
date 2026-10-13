@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
@@ -1075,6 +1076,61 @@ var managedNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var canonicalUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func canonicalUUID(value string) bool { return canonicalUUIDRE.MatchString(value) }
+
+func cleanGitWorktreeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(err.Error())
+	if !strings.Contains(raw, "worktree") && !strings.Contains(raw, "git repository") {
+		return ""
+	}
+
+	// 1. If git command output contains fatal or error lines, extract the specific git message.
+	for _, marker := range []string{"fatal: ", "error: "} {
+		if idx := strings.Index(raw, marker); idx != -1 {
+			detail := strings.TrimSpace(raw[idx+len(marker):])
+			if line, _, ok := strings.Cut(detail, "\n"); ok {
+				detail = strings.TrimSpace(line)
+			}
+			if detail != "" {
+				return fmt.Sprintf("Git worktree error: %s", detail)
+			}
+		}
+	}
+
+	// 2. High-level errors from supervisor or gitworktree package
+	msg := raw
+	isGitExecFail := strings.Contains(raw, "git worktree add failed")
+	for {
+		prev := msg
+		msg = strings.TrimPrefix(msg, "failed to create git worktree: ")
+		msg = strings.TrimPrefix(msg, "git worktree add failed: ")
+		if msg == prev {
+			break
+		}
+		msg = strings.TrimSpace(msg)
+	}
+
+	if strings.HasPrefix(msg, "exit status ") {
+		if colonIdx := strings.Index(msg, ": "); colonIdx != -1 {
+			msg = strings.TrimSpace(msg[colonIdx+2:])
+		}
+	}
+
+	if msg == "" {
+		return "Git worktree operation failed"
+	}
+
+	if isGitExecFail {
+		return fmt.Sprintf("Git worktree error: %s", msg)
+	}
+
+	runes := []rune(msg)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
+}
+
 func managedLaunchError(err error) error {
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
@@ -1090,6 +1146,10 @@ func managedLaunchError(err error) error {
 	}
 	if strings.Contains(err.Error(), "invalid model") || strings.Contains(err.Error(), "model is not available") {
 		return &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"}
+	}
+	if wtMsg := cleanGitWorktreeError(err); wtMsg != "" {
+		log.Printf("MANAGED_LAUNCH_ERROR_DETAIL: %v", err)
+		return &managedHTTPError{422, "VALIDATION_FAILED", wtMsg}
 	}
 	if strings.Contains(err.Error(), "working directory") || strings.Contains(err.Error(), "outside allowed") {
 		return &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"}

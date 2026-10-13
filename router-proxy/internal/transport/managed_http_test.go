@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -942,6 +943,60 @@ func TestManagedLaunchErrorsDescribeNameCollisionsForEveryReservationLayer(t *te
 		require.Equal(t, http.StatusConflict, candidate.status)
 		require.Equal(t, "NAME_IN_USE", candidate.code)
 		require.Equal(t, "That name is in use by an active or launching agent. Choose another name or wait for it to stop.", candidate.message)
+	}
+}
+
+func TestManagedLaunchErrorsDescribeGitWorktreeErrors(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		expectedMessage string
+	}{
+		{
+			name:            "already used by worktree",
+			err:             fmt.Errorf("failed to create git worktree: git worktree add failed: exit status 128: fatal: 'main' is already used by worktree at '/foo/bar'"),
+			expectedMessage: "Git worktree error: 'main' is already used by worktree at '/foo/bar'",
+		},
+		{
+			name:            "already exists",
+			err:             fmt.Errorf("failed to create git worktree: git worktree add failed: exit status 255: Preparing worktree (new branch 'live-domains')\nfatal: a branch named 'live-domains' already exists"),
+			expectedMessage: "Git worktree error: a branch named 'live-domains' already exists",
+		},
+		{
+			name:            "worktree branch is required",
+			err:             errors.New("worktree branch is required"),
+			expectedMessage: "Worktree branch is required",
+		},
+		{
+			name:            "not a git repository",
+			err:             errors.New("working directory is not a git repository"),
+			expectedMessage: "Working directory is not a git repository",
+		},
+		{
+			name:            "not main git worktree",
+			err:             errors.New("working directory is not the main git worktree"),
+			expectedMessage: "Working directory is not the main git worktree",
+		},
+		{
+			name:            "failed to generate worktree path",
+			err:             fmt.Errorf("failed to generate worktree path: baseRepoPath cannot be empty"),
+			expectedMessage: "Failed to generate worktree path: baseRepoPath cannot be empty",
+		},
+		{
+			name:            "git worktree add failed generic",
+			err:             fmt.Errorf("failed to create git worktree: git worktree add failed: exit status 1: permission denied"),
+			expectedMessage: "Git worktree error: permission denied",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate, ok := managedLaunchError(tc.err).(*managedHTTPError)
+			require.True(t, ok)
+			require.Equal(t, http.StatusUnprocessableEntity, candidate.status)
+			require.Equal(t, "VALIDATION_FAILED", candidate.code)
+			require.Equal(t, tc.expectedMessage, candidate.message)
+		})
 	}
 }
 

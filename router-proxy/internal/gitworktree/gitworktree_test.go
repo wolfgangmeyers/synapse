@@ -138,3 +138,113 @@ func TestCreateAndRemoveWorktree(t *testing.T) {
 		t.Errorf("expected worktree path to be removed")
 	}
 }
+
+func TestCreateWorktree_NewBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitRepo(t)
+
+	wtPath, err := GenerateWorktreePath(repo, "feat/brand-new-branch")
+	if err != nil {
+		t.Fatalf("GenerateWorktreePath error: %v", err)
+	}
+	defer os.RemoveAll(wtPath)
+
+	err = CreateWorktree(ctx, repo, "feat/brand-new-branch", wtPath)
+	if err != nil {
+		t.Fatalf("CreateWorktree failed for new branch: %v", err)
+	}
+
+	// Verify the worktree is on the new branch
+	branch := runGit(t, wtPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if branch != "feat/brand-new-branch" {
+		t.Errorf("expected branch feat/brand-new-branch, got %s", branch)
+	}
+
+	// Clean up
+	if err := RemoveWorktree(ctx, repo, wtPath, true); err != nil {
+		t.Fatalf("RemoveWorktree failed: %v", err)
+	}
+}
+
+func TestCreateWorktree_ExistingBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitRepo(t)
+
+	// Create the branch in the repo beforehand
+	runGit(t, repo, "branch", "feat/existing-branch")
+
+	wtPath, err := GenerateWorktreePath(repo, "feat/existing-branch")
+	if err != nil {
+		t.Fatalf("GenerateWorktreePath error: %v", err)
+	}
+	defer os.RemoveAll(wtPath)
+
+	// CreateWorktree should detect the existing branch and checkout without -b
+	err = CreateWorktree(ctx, repo, "feat/existing-branch", wtPath)
+	if err != nil {
+		t.Fatalf("CreateWorktree failed for existing branch: %v", err)
+	}
+
+	// Verify the worktree is on the existing branch
+	branch := runGit(t, wtPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if branch != "feat/existing-branch" {
+		t.Errorf("expected branch feat/existing-branch, got %s", branch)
+	}
+
+	// Clean up
+	if err := RemoveWorktree(ctx, repo, wtPath, true); err != nil {
+		t.Fatalf("RemoveWorktree failed: %v", err)
+	}
+}
+
+func TestCreateWorktree_ExistingRemoteTrackingBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitRepo(t)
+
+	// Configure remote origin and create remote-tracking ref
+	runGit(t, repo, "config", "remote.origin.url", "https://example.com/repo.git")
+	runGit(t, repo, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	runGit(t, repo, "update-ref", "refs/remotes/origin/feat/remote-branch", "HEAD")
+
+	wtPath, err := GenerateWorktreePath(repo, "feat/remote-branch")
+	if err != nil {
+		t.Fatalf("GenerateWorktreePath error: %v", err)
+	}
+	defer os.RemoveAll(wtPath)
+
+	// CreateWorktree should detect remote-tracking branch and succeed
+	err = CreateWorktree(ctx, repo, "feat/remote-branch", wtPath)
+	if err != nil {
+		t.Fatalf("CreateWorktree failed for remote tracking branch: %v", err)
+	}
+
+	branch := runGit(t, wtPath, "rev-parse", "--abbrev-ref", "HEAD")
+	if branch != "feat/remote-branch" {
+		t.Errorf("expected branch feat/remote-branch, got %s", branch)
+	}
+
+	// Clean up
+	if err := RemoveWorktree(ctx, repo, wtPath, true); err != nil {
+		t.Fatalf("RemoveWorktree failed: %v", err)
+	}
+}
+
+func TestCreateWorktree_ExistingBranch_AlreadyCheckedOut(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitRepo(t)
+
+	// "main" is already checked out in repo
+	wtPath, err := GenerateWorktreePath(repo, "main")
+	if err != nil {
+		t.Fatalf("GenerateWorktreePath error: %v", err)
+	}
+	defer os.RemoveAll(wtPath)
+
+	err = CreateWorktree(ctx, repo, "main", wtPath)
+	if err == nil {
+		t.Fatalf("expected error when checking out already checked-out branch 'main'")
+	}
+	if !strings.Contains(err.Error(), "already used by worktree") && !strings.Contains(err.Error(), "already checked out") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
