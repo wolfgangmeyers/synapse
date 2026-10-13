@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -53,10 +52,6 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 		return RootControlHandlerResult{}, err
 	}
 	if action != "status" {
-		activeWorkflowState, sErr := m.store.GetManagedAgentActiveWorkflowState(ctx, agentID)
-		if sErr == nil && activeWorkflowState != nil && activeWorkflowState.Goal != "" {
-			return RootControlHandlerResult{}, fmt.Errorf("goal is locked by active workflow state %q", activeWorkflowState.Name)
-		}
 		config := store.ManagedGoalConfig{Settings: store.DefaultManagedGoalSettings()}
 		var revision int64
 		if policy != nil {
@@ -66,6 +61,10 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 		if action == "set" {
 			config.Enabled = true
 			config.Goal, _ = arguments["goal"].(string)
+		} else {
+			config.Enabled = false
+			config.Goal = ""
+			config.Settings.GoalLockEnabled = false
 		}
 		if settings, ok := arguments["settings"]; ok {
 			var valid bool
@@ -74,9 +73,20 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 				return RootControlHandlerResult{}, errors.New("invalid embedded goal settings")
 			}
 		}
-		policy, err = m.store.UpdateEmbeddedBrowserGoal(ctx, owner.binding, config, operation, func(p *store.ManagedGoalPolicy) ([]byte, error) {
-			return json.Marshal(map[string]any{"goal_state": embeddedBrowserGoalState(p)})
-		}, revision)
+		owner, ownerErr := m.currentEmbeddedBrowserOwner(ctx, agentID)
+		if ownerErr == nil {
+			policy, err = m.store.UpdateEmbeddedBrowserGoal(ctx, owner.binding, config, operation, func(p *store.ManagedGoalPolicy) ([]byte, error) {
+				return json.Marshal(map[string]any{"goal_state": embeddedBrowserGoalState(p)})
+			}, revision)
+			if err != nil {
+				var notReady *store.ManagedAgentNotReadyError
+				if errors.As(err, &notReady) {
+					policy, err = m.store.UpdateManagedGoalConfig(ctx, agentID, config)
+				}
+			}
+		} else {
+			policy, err = m.store.UpdateManagedGoalConfig(ctx, agentID, config)
+		}
 	} else if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}

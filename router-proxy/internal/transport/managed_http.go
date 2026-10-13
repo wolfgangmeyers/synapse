@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -1783,22 +1784,59 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 	}
 }
 
+func goalSettingsFromMap(settings map[string]any, base store.ManagedGoalSettings) store.ManagedGoalSettings {
+	res := base
+	if val, ok := settings["goal_lock_enabled"].(bool); ok {
+		res.GoalLockEnabled = val
+	}
+	if val, ok := settings["snooze_enabled"].(bool); ok {
+		res.SnoozeEnabled = val
+	}
+	if val, ok := settings["snooze_duration_ms"].(int64); ok {
+		res.SnoozeDurationMS = val
+	}
+	if val, ok := settings["snooze_turn_limit"]; ok {
+		if val == nil {
+			res.SnoozeTurnLimit = nil
+		} else if num, ok := val.(int64); ok {
+			res.SnoozeTurnLimit = &num
+		}
+	}
+	if val, ok := settings["snooze_budget_cap_ms"]; ok {
+		if val == nil {
+			res.SnoozeBudgetCapMS = nil
+		} else if num, ok := val.(int64); ok {
+			res.SnoozeBudgetCapMS = &num
+		}
+	}
+	if val, ok := settings["snooze_refill_yield_ms"].(int64); ok {
+		res.SnoozeRefillYieldMS = val
+	}
+	if val, ok := settings["snooze_refill_elapsed_ms"].(int64); ok {
+		res.SnoozeRefillElapsedMS = val
+	}
+	return res
+}
+
 func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, agentID string) {
 	agent, lookupErr := r.store.ManagedAgent(req.Context(), agentID)
-	if lookupErr == nil && agent.Runtime == "embedded" {
-		binding := store.EmbeddedBinding{AgentID: agent.AgentID, SessionID: agent.PiSessionID, Epoch: agent.SessionEpoch, Generation: agent.RuntimeGeneration}
-		role, roleErr := r.store.SavedEmbeddedSessionRole(req.Context(), binding)
-		if roleErr != nil || (role != "root" && role != "worker") {
-			r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
+	if lookupErr != nil {
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
 			return
 		}
-		policy, policyErr := r.store.ManagedGoalPolicyFor(req.Context(), agent.AgentID)
-		if policyErr != nil {
-			r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
-			return
-		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agent"})
+		return
+	}
+	policy, policyErr := r.store.ManagedGoalPolicyFor(req.Context(), agent.AgentID)
+	if policyErr != nil && !errors.Is(policyErr, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed goal policy"})
+		return
+	}
+	var state map[string]any
+	if policy != nil {
 		settings := policy.Config.Settings
-		state := managedGoalState(map[string]any{"goal_state": map[string]any{
+		state = managedGoalState(map[string]any{"goal_state": map[string]any{
 			"enabled": policy.Config.Enabled, "goal": policy.Config.Goal,
 			"goal_lock_enabled": settings.GoalLockEnabled, "snooze_enabled": settings.SnoozeEnabled,
 			"snooze_duration_ms": settings.SnoozeDurationMS, "snooze_turn_limit": settings.SnoozeTurnLimit,
@@ -1809,30 +1847,28 @@ func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, 
 		state["desired_revision"] = policy.DesiredRevision
 		state["applied_revision"] = policy.AppliedRevision
 		state["projection_state"] = policy.ProjectionState
-		counts, lastEval, diagErr := r.store.EmbeddedGoalDiagnostics(req.Context(), agent.AgentID)
-		if diagErr == nil {
-			state["outcome_counts"] = map[string]any{
-				"COMPLETED": counts["COMPLETED"],
-				"NOT_DONE":  counts["NOT_DONE"],
-			}
-			if lastEval != nil {
-				state["last_evaluation"] = map[string]any{
-					"verdict":       lastEval.Verdict,
-					"reason":        lastEval.Reason,
-					"completed_at":  lastEval.CompletedAt,
-					"goal_revision": lastEval.GoalRevision,
-				}
+	} else {
+		state = managedGoalState(nil)
+		state["desired_revision"] = int64(0)
+		state["applied_revision"] = int64(0)
+		state["projection_state"] = "applied"
+	}
+	counts, lastEval, diagErr := r.store.EmbeddedGoalDiagnostics(req.Context(), agent.AgentID)
+	if diagErr == nil {
+		state["outcome_counts"] = map[string]any{
+			"COMPLETED": counts["COMPLETED"],
+			"NOT_DONE":  counts["NOT_DONE"],
+		}
+		if lastEval != nil {
+			state["last_evaluation"] = map[string]any{
+				"verdict":       lastEval.Verdict,
+				"reason":        lastEval.Reason,
+				"completed_at":  lastEval.CompletedAt,
+				"goal_revision": lastEval.GoalRevision,
 			}
 		}
-		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"goal_state": state}, nil)
-		return
 	}
-	result, err := r.managed.DirectRootControl(req.Context(), agentID, "", "goal.control", map[string]any{"action": "status"})
-	if err != nil || result.Status != "ok" {
-		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
-		return
-	}
-	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"goal_state": managedGoalState(result.Details)}, nil)
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"goal_state": state}, nil)
 }
 
 func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, agentID string) {
@@ -1878,36 +1914,85 @@ func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, 
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
 		return
 	}
-	arguments := map[string]any{"action": action}
+	agent, agentErr := r.store.ManagedAgent(req.Context(), agentID)
+	if agentErr != nil {
+		if errors.Is(agentErr, sql.ErrNoRows) {
+			r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agent"})
+		return
+	}
+
+	currentPolicy, _ := r.store.ManagedGoalPolicyFor(req.Context(), agentID)
+	config := store.ManagedGoalConfig{Settings: store.DefaultManagedGoalSettings()}
+	if currentPolicy != nil {
+		config.Settings = currentPolicy.Config.Settings
+	}
 	if action == "set" {
-		arguments["goal"] = goal
+		config.Enabled = true
+		config.Goal = goal
+	} else {
+		config.Enabled = false
+		config.Goal = ""
+		config.Settings.GoalLockEnabled = false
 	}
 	if settings != nil {
-		arguments["settings"] = settings
+		config.Settings = goalSettingsFromMap(settings, config.Settings)
 	}
-	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}}
-	agent, agentErr := r.store.ManagedAgent(req.Context(), agentID)
-	embedded := agentErr == nil && agent.Runtime == "embedded"
-	var receipt *store.ManagedOperation
-	if embedded {
-		receipt = &operation
-	}
-	result, controlErr := r.managed.DirectRootControl(req.Context(), agentID, requestID, "goal.control", arguments, receipt)
-	var conflict *store.ManagedIdempotencyConflictError
-	if errors.As(controlErr, &conflict) {
-		r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+
+	policy, err := r.store.UpdateManagedGoalConfig(req.Context(), agentID, config)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Managed goal could not be updated"})
 		return
 	}
-	if controlErr != nil || result.Status != "ok" {
-		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed goal could not be updated"})
-		return
+
+	settingsData := policy.Config.Settings
+	state := managedGoalState(map[string]any{"goal_state": map[string]any{
+		"enabled": policy.Config.Enabled, "goal": policy.Config.Goal,
+		"goal_lock_enabled": settingsData.GoalLockEnabled, "snooze_enabled": settingsData.SnoozeEnabled,
+		"snooze_duration_ms": settingsData.SnoozeDurationMS, "snooze_turn_limit": settingsData.SnoozeTurnLimit,
+		"snooze_budget_cap_ms":     settingsData.SnoozeBudgetCapMS,
+		"snooze_refill_yield_ms":   settingsData.SnoozeRefillYieldMS,
+		"snooze_refill_elapsed_ms": settingsData.SnoozeRefillElapsedMS,
+	}})
+	state["desired_revision"] = policy.DesiredRevision
+	state["applied_revision"] = policy.AppliedRevision
+	state["projection_state"] = policy.ProjectionState
+	counts, lastEval, diagErr := r.store.EmbeddedGoalDiagnostics(req.Context(), agent.AgentID)
+	if diagErr == nil {
+		state["outcome_counts"] = map[string]any{
+			"COMPLETED": counts["COMPLETED"],
+			"NOT_DONE":  counts["NOT_DONE"],
+		}
+		if lastEval != nil {
+			state["last_evaluation"] = map[string]any{
+				"verdict":       lastEval.Verdict,
+				"reason":        lastEval.Reason,
+				"completed_at":  lastEval.CompletedAt,
+				"goal_revision": lastEval.GoalRevision,
+			}
+		}
 	}
-	body, _ := json.Marshal(map[string]any{"goal_state": managedGoalState(result.Details)})
-	if embedded {
-		r.writeManagedRaw(w, req, operation.ResponseStatus, operation.ResponseHeaders, operation.ResponseBody)
-		return
+	body, _ := json.Marshal(map[string]any{"goal_state": state})
+
+	now := time.Now().UTC()
+	nowStr := now.Format("2006-01-02T15:04:05.000Z")
+	expStr := now.Add(24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+	operation := store.ManagedOperation{
+		OperationID:       requestID,
+		Method:            req.Method,
+		CanonicalPath:     canonicalPath,
+		RequestID:         requestID,
+		CanonicalBodyHash: hex.EncodeToString(bodyHash[:]),
+		State:             "terminal",
+		ResponseStatus:    http.StatusOK,
+		ResponseHeaders:   map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID},
+		ResponseBody:      body,
+		CreatedAt:         nowStr,
+		TerminalAt:        nowStr,
+		ExpiresAt:         expStr,
 	}
-	operation.ResponseBody = body
 	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
 		var conflict *store.ManagedIdempotencyConflictError
 		if errors.As(err, &conflict) {
@@ -1917,6 +2002,14 @@ func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, 
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Managed goal could not be saved"})
 		return
 	}
+
+	if r.managed != nil {
+		if agent.Runtime == "embedded" && config.Enabled {
+			r.managed.MaybeResumeEmbeddedGoal(agentID)
+		}
+		r.managed.PublishProjection()
+	}
+
 	r.writeManagedRaw(w, req, http.StatusOK, operation.ResponseHeaders, body)
 }
 
