@@ -91,6 +91,32 @@ describe("direct HTTP transport", () => {
     await expect(createHttpClient("http://router.test", fetchImpl).managedHistory("managed-alpha", "complete", { limit: 50 })).resolves.toMatchObject({ entries: [{ agent_id: "managed-alpha" }] });
   });
 
+  it("requests conversation history with pagination options and parses next_before", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("http://router.test/v1/conversations?owner=alice&peer=bob&before=100&limit=50");
+      return response({
+        owner: "alice",
+        peer: "bob",
+        high_water_sequence: 120,
+        messages: [{
+          id: "msg-1",
+          sequence: 95,
+          from: "bob",
+          to: "alice",
+          body: "Hello world",
+          created_at: "2030-01-01T00:00:00.000Z",
+          recorded_at: "2030-01-01T00:00:00.000Z",
+          attachments: [],
+        }],
+        next_before: 95,
+      });
+    });
+    const result = await createHttpClient("http://router.test", fetchImpl).conversations("alice", "bob", { before: 100, limit: 50 });
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.body).toBe("Hello world");
+    expect(result.next_before).toBe(95);
+  });
+
   it("uses the provider-auth routes without cookies and rejects incomplete provider state", async () => {
     const providerState = { auth_revision: 1, providers: [
       { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: "2030-01-01T00:00:00.123456789Z" },

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/sky-valley/pi/ai"
@@ -227,6 +228,48 @@ func TestBackfillEmbeddedGoalEvaluations(t *testing.T) {
 	require.Len(t, page.Entries, 1)
 	require.Equal(t, "goal_evaluation", page.Entries[0].Presentation.Kind)
 	require.Equal(t, "Found top 5 cookie recipes", *page.Entries[0].MessageContent)
+}
+
+func TestBackfillEmbeddedGoalEvaluationsDeduplicatesAndCapsSpam(t *testing.T) {
+	s, b, _ := evaluationFixture(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`)
+
+	// Insert 20 NOT_DONE evaluations and 2 DONE evaluations into embedded_goal_evaluations
+	for i := int64(1); i <= 20; i++ {
+		state := "NOT_DONE"
+		if i == 5 || i == 15 {
+			state = "DONE"
+		}
+		completedAt := fmt.Sprintf("2026-10-12T10:%02d:00.000Z", i)
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO embedded_goal_evaluations (agent_id, session_id, epoch, generation, user_seq, user_digest, goal_revision, final_seq, final_digest, owner_token, state, reason, claimed_at, completed_at)
+			VALUES (?, ?, ?, ?, ?, 'd', 1, ?, 'fd', 1, ?, ?, ?, ?)
+		`, b.AgentID, b.SessionID, b.Epoch, b.Generation, i, i+1, state, fmt.Sprintf("Eval reason %d", i), completedAt, completedAt)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, s.BackfillEmbeddedGoalEvaluations(ctx))
+
+	// NOT_DONE should be capped at 5 most recent, plus 2 completed = at most 7 rows
+	var countAfter int
+	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT count(*) FROM managed_complete_history WHERE agent_id=?`, b.AgentID).Scan(&countAfter))
+	require.Equal(t, 7, countAfter)
+
+	// Verify ShouldRecordGoalEvaluation deduplication
+	shouldRecord, err := s.ShouldRecordGoalEvaluation(ctx, b.AgentID, "NOT_DONE", "Eval reason 20")
+	require.NoError(t, err)
+	require.False(t, shouldRecord, "consecutive identical NOT_DONE evaluation must not be recorded")
+
+	shouldRecordDiff, err := s.ShouldRecordGoalEvaluation(ctx, b.AgentID, "NOT_DONE", "New different reason")
+	require.NoError(t, err)
+	require.True(t, shouldRecordDiff, "NOT_DONE with new reason should be recorded")
+
+	shouldRecordDone, err := s.ShouldRecordGoalEvaluation(ctx, b.AgentID, "DONE", "Eval reason 20")
+	require.NoError(t, err)
+	require.True(t, shouldRecordDone, "DONE evaluation must always be recorded")
 }
 
 
