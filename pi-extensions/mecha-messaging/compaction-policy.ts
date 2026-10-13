@@ -73,6 +73,7 @@ export const DEFAULT_COMPACTION_POLICY: CompactionPolicyInput = Object.freeze({
     "anthropic/claude-opus-5": Object.freeze({ levels: OPUS_CONTEXT_LEVELS }),
     "claude-opus-5": Object.freeze({ levels: OPUS_CONTEXT_LEVELS }),
     "antigravity/gemini-3.8-flash": Object.freeze({ levels: GEMINI_FLASH_CONTEXT_LEVELS }),
+    "google-vertex/gemini-3.8-flash": Object.freeze({ levels: GEMINI_FLASH_CONTEXT_LEVELS }),
     "google/gemini-3.8-flash": Object.freeze({ levels: GEMINI_FLASH_CONTEXT_LEVELS }),
     "gemini-3.8-flash": Object.freeze({ levels: GEMINI_FLASH_CONTEXT_LEVELS }),
   }),
