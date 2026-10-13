@@ -51,7 +51,7 @@ func newCodexCredentialParent(t *testing.T) string {
 		if !ok {
 			t.Fatalf("credential fixture %s: stat type %T, want *syscall.Stat_t", path, info.Sys())
 		}
-		if kind, gotMode := st.Mode&syscall.S_IFMT, st.Mode&0o7777; kind != syscall.S_IFDIR || st.Uid != owner || gotMode != mode {
+		if kind, gotMode := st.Mode&syscall.S_IFMT, st.Mode&0o7777; uint32(kind) != uint32(syscall.S_IFDIR) || st.Uid != owner || uint32(gotMode) != mode {
 			t.Fatalf("credential fixture %s: type=%#o uid=%d mode=%#o; want type=%#o uid=%d mode=%#o", path, kind, st.Uid, gotMode, uint32(syscall.S_IFDIR), owner, mode)
 		}
 	}

@@ -7,8 +7,10 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { parseRequest, parseResponse, projectCatalog, promptEvent, terminalResult } from "./protocol.mjs";
 
+import os from "node:os";
+
 const DEFAULT_PRELOAD = join(import.meta.dirname, "test-preload-mock-fetch.mjs");
-const CANONICAL_ANTIGRAVITY_PATH = "/home/wolfgang/.pi/agent/npm/node_modules/pi-antigravity/src/index.ts";
+const CANONICAL_ANTIGRAVITY_PATH = join(os.homedir(), ".pi/agent/npm/node_modules/pi-antigravity/src/index.ts");
 
 async function runHelper(input, env = {}) {
   const child = spawn(process.execPath, [join(import.meta.dirname, "index.mjs")], {
