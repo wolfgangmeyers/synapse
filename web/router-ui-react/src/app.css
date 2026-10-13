@@ -773,6 +773,7 @@ p:empty { display: none; }
 .agent-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arrival-indicator,
 .compacting-indicator,
+.starting-indicator,
 .subagent-indicator {
   display: inline-flex;
   align-items: center;
@@ -830,11 +831,14 @@ p:empty { display: none; }
 }
 .compacting-indicator { color: #f2e8ff; background: rgba(126,34,206,0.28); border-color: rgba(192,132,252,0.44); cursor: default; }
 .compacting-indicator.inline { margin-top: 0; font-size: 12px; }
+.starting-indicator { color: #ffd166; background: rgba(255,209,102,0.18); border-color: rgba(255,209,102,0.34); cursor: default; }
+.starting-indicator.inline { margin-top: 0; font-size: 12px; }
 .subagent-indicator.expanded { align-items: flex-start; max-width: min(100%, 360px); padding: 7px 10px 9px; border-radius: 12px; }
 .subagent-indicator.expandable { min-width: 0; min-height: 0; height: auto; padding: 3px 7px; appearance: none; }
 .subagent-indicator.expandable::after { content: "▾"; font-size: 9px; opacity: 0.8; transform: translateY(-1px); flex: 0 0 auto; }
 .agent-row.expanded .subagent-indicator.expandable::after { content: "▴"; transform: translateY(2px); }
 .compacting-dot,
+.starting-dot,
 .subagent-dot {
   width: 7px;
   height: 7px;
@@ -845,6 +849,7 @@ p:empty { display: none; }
   flex: 0 0 7px;
 }
 .compacting-dot { background: var(--purple); box-shadow: 0 0 0 0 rgba(192,132,252,0.72); animation-name: compacting-pulse; }
+.starting-dot { background: var(--yellow); box-shadow: 0 0 0 0 rgba(255,209,102,0.72); animation-name: subagent-pulse; }
 .subagent-badge-content { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-indicator.expanded .subagent-badge-content { overflow: visible; }
 .subagent-expanded { min-width: 0; display: grid; gap: 6px; padding-left: 8px; }

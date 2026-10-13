@@ -165,7 +165,7 @@ func (m *Manager) embeddedRequestInlineToolAllowanceTool(owner embeddedOwner) ag
 			// Native subagents are exempt from the inline tool guard; no parent allowance was changed.
 			if m != nil && m.store != nil && owner.binding.AgentID != "" {
 				if storedAgent, err := m.store.ManagedAgent(ctx, owner.binding.AgentID); err == nil && storedAgent != nil {
-					if storedAgent.ParentAgentID != "" || strings.HasPrefix(owner.binding.AgentID, "subagent-") {
+					if storedAgent.ParentAgentID != "" {
 						return agent.AgentToolResult{
 							Content: ai.ContentList{
 								ai.TextContent{Text: "Native subagents are exempt from the inline tool guard; no parent allowance was changed."},

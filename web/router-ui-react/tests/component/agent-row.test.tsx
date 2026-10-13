@@ -42,6 +42,31 @@ describe("AgentRow", () => {
     expect(screen.queryByRole("button", { name: "Restart failed worker" })).not.toBeInTheDocument();
   });
 
+  it("renders a starting managed worker with Starting… status indicator", () => {
+    const managedAgent: ManagedAgent = {
+      agent_id: "subagent-max-age",
+      source: "router-managed",
+      cwd: "/tmp/project",
+      model: { provider: "antigravity", id: "gemini-3.8-flash" },
+      desired_state: "running",
+      lifecycle_state: "starting",
+      activity_state: "starting",
+      accepting_prompts: false,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+      created_at: "2030-01-01T00:00:00.000Z",
+      started_at: null,
+      updated_at: "2030-01-01T00:00:00.000Z",
+      last_error: null,
+    };
+    const [row] = mergeAgentSources([], [managedAgent]);
+    expect(row).toBeDefined();
+
+    const { container } = render(<AgentRow agent={row!} />);
+    const startingIndicator = container.querySelector(".starting-indicator");
+    expect(startingIndicator).toBeInTheDocument();
+    expect(startingIndicator).toHaveTextContent("Starting…");
+  });
+
   it("keeps private managed runtime identity out of DOM output", () => {
     const managedAgent = {
       agent_id: "managed-build", source: "router-managed" as const, cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "ready", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null,

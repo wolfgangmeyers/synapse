@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -98,9 +97,6 @@ func (m *Manager) ManagedInlineToolsEnabled(ctx context.Context, agentID string)
 func (m *Manager) IsInlineToolsAllowed(ctx context.Context, agentID string) bool {
 	if m == nil || agentID == "" {
 		return false
-	}
-	if strings.HasPrefix(agentID, "subagent-") {
-		return true
 	}
 	if m.store == nil {
 		return false

@@ -325,7 +325,7 @@ func (m *Manager) RecoverEmbeddedRoots(ctx context.Context) error {
 		return err
 	}
 	for _, agent := range agents {
-		if agent.ParentAgentID != "" || strings.HasPrefix(agent.AgentID, "subagent-") {
+		if agent.ParentAgentID != "" {
 			continue
 		}
 		if agent.Runtime != "embedded" || agent.DesiredState != "running" {

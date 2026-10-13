@@ -35,6 +35,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
   const compacting = agent.activity_state === "compacting";
   const managed = agent.source === "router-managed";
   const failed = (agent.activity_state === "failed" || (agent as { status?: string }).status === "failed") || (managed && (agent.managed_agent?.lifecycle_state === "failed" || agent.managed_agent?.activity_state === "failed"));
+  const starting = (agent.managed_agent?.lifecycle_state === "starting" || agent.activity_state === "starting") && !failed;
   // Managed snapshots retain terminal runs for recovery/audit purposes. The
   // shared live-child disclosure must only represent work that is still queued
   // or running, just as the tmux subagent projection does.
@@ -66,6 +67,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
         {showSubagentBadge ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
           <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} onStopSubagent={onStopSubagent} client={client} agentId={agent.agent_id} />
         </span> : null}
+        {starting ? <span className="starting-indicator"><span className="starting-dot" aria-hidden="true" />Starting…</span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}
         {failed ? <span className="managed-failure-indicator" role="alert" aria-label="Managed worker failed"><i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />Failed</span> : null}
       </span>

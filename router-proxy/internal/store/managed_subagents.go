@@ -590,9 +590,9 @@ func (s *Store) PruneExpiredSubagents(ctx context.Context, ttl time.Duration) er
 		}
 		hasParent, _ := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
 		if hasParent {
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE (agent_id LIKE 'subagent-%' OR (parent_agent_id IS NOT NULL AND parent_agent_id != '')) AND desired_state='terminated' AND updated_at < ?`, cutoff)
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE (parent_agent_id IS NOT NULL AND parent_agent_id != '') AND desired_state='terminated' AND updated_at < ?`, cutoff)
 		} else {
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id LIKE 'subagent-%' AND desired_state='terminated' AND updated_at < ?`, cutoff)
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE EXISTS (SELECT 1 FROM managed_subagents WHERE managed_subagents.agent_id=managed_agents.agent_id) AND desired_state='terminated' AND updated_at < ?`, cutoff)
 		}
 		n, _ := res.RowsAffected()
 		if n > 0 {
