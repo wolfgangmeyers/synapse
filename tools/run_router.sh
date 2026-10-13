@@ -84,10 +84,10 @@ case "${1:-}" in
       mkdir -p "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
       chmod 700 "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
     fi
-    ROUTER_RESTART_EXIT_CODE=75
     EXIT_FILE="$(mktemp -t router_exit.XXXXXX)"
     export ROUTER_EXIT_FILE="$EXIT_FILE"
-    trap 'rm -f "$EXIT_FILE"' EXIT INT TERM
+    trap 'rm -f "$EXIT_FILE"' EXIT
+    trap 'exit 0' INT TERM
     while true; do
       set +e
       make -C "$ROOT_DIR/router-proxy" run-router \
@@ -122,12 +122,12 @@ case "${1:-}" in
         rm -f "$EXIT_FILE"
       fi
       set -e
-      if [[ "$exit_code" -eq "$ROUTER_RESTART_EXIT_CODE" ]]; then
-        printf '%s\n' "run_router.sh: router requested restart (exit code 75); relaunching..." >&2
-        sleep 0.5
-        continue
+      if [[ "$exit_code" -eq 0 ]]; then
+        exit 0
       fi
-      exit "$exit_code"
+      printf '%s\n' "run_router.sh: router exited with code $exit_code; restarting in 1s..." >&2
+      sleep 1
+      continue
     done
     ;;
   *)

@@ -2110,7 +2110,10 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted || outcome == store.EmbeddedGoalEvaluationNotDone) {
 			m.recordGoalEvaluationActivity(binding, key, outcome, reason)
 		}
-		if outcome == store.EmbeddedGoalEvaluationNotDone {
+		if outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted {
+			lane.consecutiveContinuations = 0
+			lane.goalAttempt = 0
+		} else if outcome == store.EmbeddedGoalEvaluationNotDone {
 			lane.goalAttempt++
 			if lane.goalAttempt > 20 {
 				lane.goalAttempt = 20

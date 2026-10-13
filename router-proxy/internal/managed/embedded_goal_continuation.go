@@ -269,7 +269,6 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
 	if err != nil || curAgent == nil || curAgent.ActivityState != "idle" || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
-		log.Printf("kickoffIdleGoalContinuation: agent %s not idle/running: err=%v", agentID, err)
 		return
 	}
 
@@ -281,26 +280,15 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	}
 
 	if m.hasActiveSubagents(agentID) {
-		log.Printf("kickoffIdleGoalContinuation: agent %s has active subagents", agentID)
 		return
 	}
 
 	policy, err := m.store.ManagedGoalPolicyFor(m.runCtx, agentID)
-	if err != nil || policy == nil || !policy.Config.Enabled {
-		log.Printf("kickoffIdleGoalContinuation: agent %s policy disabled: %v", agentID, err)
-		return
-	}
-	if policy.EvaluatorState == "done" || policy.LastOutcome == store.EmbeddedGoalEvaluationDone || policy.LastOutcome == store.EmbeddedGoalEvaluationCompleted {
-		log.Printf("kickoffIdleGoalContinuation: agent %s goal done", agentID)
-		return
-	}
-	if policy.EvaluatorState == "evaluating" {
-		log.Printf("kickoffIdleGoalContinuation: agent %s goal evaluating", agentID)
+	if err != nil {
 		return
 	}
 	now := formatManagedTime(m.clock.Now())
-	if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
-		log.Printf("kickoffIdleGoalContinuation: agent %s goal snoozed until %s", agentID, policy.SnoozedUntil)
+	if !isEmbeddedGoalActive(policy, now) {
 		return
 	}
 

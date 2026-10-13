@@ -183,18 +183,22 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 }
 
 // RecoverBootTimeGoalContinuations scans for agents where goal policy is enabled,
-// and if idle with no active subagents, resumes work automatically on router restart.
+// and if idle with no active subagents and goal is not yet completed, resumes work automatically on router restart.
 func (m *Manager) RecoverBootTimeGoalContinuations(ctx context.Context) error {
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {
 		return err
 	}
+	now := formatManagedTime(m.clock.Now())
 	for _, agent := range agents {
 		if agent == nil || agent.DesiredState != "running" {
 			continue
 		}
+		if m.hasActiveSubagents(agent.AgentID) {
+			continue
+		}
 		policy, err := m.store.ManagedGoalPolicyFor(ctx, agent.AgentID)
-		if err != nil || policy == nil || !policy.Config.Enabled {
+		if err != nil || !isEmbeddedGoalActive(policy, now) {
 			continue
 		}
 		if agent.Runtime != "embedded" {
@@ -208,26 +212,65 @@ func (m *Manager) RecoverBootTimeGoalContinuations(ctx context.Context) error {
 	return nil
 }
 
-// MaybeResumeEmbeddedGoal resumes an idle embedded agent's standing goal if enabled.
+// isEmbeddedGoalActive returns true if the policy is enabled, not completed/done, not evaluating, and not snoozed.
+func isEmbeddedGoalActive(policy *store.ManagedGoalPolicy, now string) bool {
+	if policy == nil || !policy.Config.Enabled {
+		return false
+	}
+	if policy.EvaluatorState == "done" || policy.LastOutcome == store.EmbeddedGoalEvaluationDone || policy.LastOutcome == store.EmbeddedGoalEvaluationCompleted {
+		return false
+	}
+	if policy.EvaluatorState == "evaluating" {
+		return false
+	}
+	if policy.SnoozedUntil != "" && policy.SnoozedUntil > now {
+		return false
+	}
+	return true
+}
+
+// MaybeResumeEmbeddedGoal resumes an idle embedded agent's standing goal if enabled and active.
 func (m *Manager) MaybeResumeEmbeddedGoal(agentID string) {
+	if m.isClosed() || agentID == "" {
+		return
+	}
+	curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
+	if err != nil || curAgent == nil || curAgent.ActivityState != "idle" || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
+		return
+	}
+	if m.hasActiveSubagents(agentID) {
+		return
+	}
+	policy, err := m.store.ManagedGoalPolicyFor(m.runCtx, agentID)
+	if err != nil {
+		return
+	}
+	now := formatManagedTime(m.clock.Now())
+	if !isEmbeddedGoalActive(policy, now) {
+		return
+	}
 	m.startManagedTask(func() {
 		m.kickoffIdleGoalContinuation(store.EmbeddedBinding{AgentID: agentID})
 	})
 }
 
 // ResumeIdleEmbeddedGoals scans for idle embedded agents where goal policy is enabled,
-// and resumes work if idle with no active subagents.
+// and resumes work if idle with no active subagents and not already done or snoozed.
 func (m *Manager) ResumeIdleEmbeddedGoals(ctx context.Context) error {
 	agents, err := m.store.ManagedAgents(ctx)
 	if err != nil {
 		return err
 	}
+	now := formatManagedTime(m.clock.Now())
 	for _, agent := range agents {
 		if agent == nil || agent.Runtime != "embedded" || agent.DesiredState != "running" || agent.LifecycleState != "running" || agent.ActivityState != "idle" {
 			continue
 		}
+		if m.hasActiveSubagents(agent.AgentID) {
+			continue
+		}
 		policy, err := m.store.ManagedGoalPolicyFor(ctx, agent.AgentID)
-		if err != nil || policy == nil || !policy.Config.Enabled {
+		if err != nil || !isEmbeddedGoalActive(policy, now) {
 			continue
 		}
 		m.MaybeResumeEmbeddedGoal(agent.AgentID)
