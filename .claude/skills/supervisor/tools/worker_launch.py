@@ -832,6 +832,8 @@ def main():
                     f"{shlex.quote(args.notify_on_settled)} && "
                 )
             pi_exports += f"export {PI_MODEL_KEY_ENV}={shlex.quote(f'{pi_provider}/{pi_model}')} && "
+            if "NODE_OPTIONS" in os.environ:
+                pi_exports += f"export NODE_OPTIONS={shlex.quote(os.environ['NODE_OPTIONS'])} && "
             if compaction_policy is not None:
                 pi_exports += (
                     f"export {PI_COMPACTION_POLICY_ENV}="
