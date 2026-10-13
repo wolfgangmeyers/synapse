@@ -428,10 +428,11 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 	// Because:
 	// Turn 1: user "Please read hello.txt"
 	// Turn 2: model "I will check the file." (no [Invoked read]!)
-	// Turn 3: user tool response with functionResponse merged with user "Now tell me what it said"
-	// There should be exactly 3 turns alternating user -> model -> user!
-	if len(contents) != 3 {
-		t.Fatalf("expected 3 turns after merging consecutive user turns, got %d: %+v", len(contents), contents)
+	// Turn 3: user tool response with functionResponse
+	// Turn 4: user text "Now tell me what it said" (distinct from turn 3 because Gemini rejects functionResponse + text in same user turn)
+	// There should be exactly 4 turns: user -> model -> user (tool result) -> user (text)!
+	if len(contents) != 4 {
+		t.Fatalf("expected 4 turns after preserving separate functionResponse and text user turns, got %d: %+v", len(contents), contents)
 	}
 
 	turn1 := contents[0].(map[string]any)
@@ -467,8 +468,8 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 		t.Errorf("turn 3 role expected user, got %v", turn3["role"])
 	}
 	parts3 := turn3["parts"].([]any)
-	if len(parts3) != 2 {
-		t.Fatalf("turn 3 expected 2 merged parts, got %d: %+v", len(parts3), parts3)
+	if len(parts3) != 1 {
+		t.Fatalf("turn 3 expected 1 part (functionResponse), got %d: %+v", len(parts3), parts3)
 	}
 	part3_1 := parts3[0].(map[string]any)
 	fr, ok := part3_1["functionResponse"].(map[string]any)
@@ -487,9 +488,18 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 	if strings.Contains(fmt.Sprintf("%v", part3_1), "[Invoked") {
 		t.Errorf("turn 3 part 1 must NOT contain [Invoked], got %v", part3_1)
 	}
-	part3_2 := parts3[1].(map[string]any)
-	if part3_2["text"] != "Now tell me what it said" {
-		t.Errorf("turn 3 part 2 expected text, got %v", part3_2["text"])
+
+	turn4 := contents[3].(map[string]any)
+	if turn4["role"] != "user" {
+		t.Errorf("turn 4 role expected user, got %v", turn4["role"])
+	}
+	parts4 := turn4["parts"].([]any)
+	if len(parts4) != 1 {
+		t.Fatalf("turn 4 expected 1 part (text), got %d: %+v", len(parts4), parts4)
+	}
+	part4_1 := parts4[0].(map[string]any)
+	if part4_1["text"] != "Now tell me what it said" {
+		t.Errorf("turn 4 part 1 expected text 'Now tell me what it said', got %v", part4_1["text"])
 	}
 
 	// Verify model parts never contain [Invoked ...] across any turn
@@ -604,8 +614,9 @@ func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
 		t.Fatalf("expected contents slice, got %T", capturedReqBody["contents"])
 	}
 
-	// Assistant turn had NO text, so no model turn is produced.
-	// Consecutive user turns (original user message + observation + follow-up user message) merge into 1 user turn.
+	// Assistant turn had NO text, but had a toolCall, so a model turn with functionCall is produced.
+	// Tool response (functionResponse) and follow-up user text message are NOT merged into 1 user turn,
+	// because Gemini requires functionResponse and user text to remain in separate turns.
 	for i, turnAny := range contents {
 		turnMap := turnAny.(map[string]any)
 		if turnMap["role"] == "model" {
@@ -618,8 +629,8 @@ func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
 		}
 	}
 
-	if len(contents) != 3 {
-		t.Fatalf("expected 3 alternating turns, got %d: %+v", len(contents), contents)
+	if len(contents) != 4 {
+		t.Fatalf("expected 4 turns, got %d: %+v", len(contents), contents)
 	}
 	userTurn1 := contents[0].(map[string]any)
 	if userTurn1["role"] != "user" {
@@ -640,6 +651,10 @@ func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
 	userTurn2 := contents[2].(map[string]any)
 	if userTurn2["role"] != "user" {
 		t.Fatalf("expected turn 3 role 'user', got %v", userTurn2["role"])
+	}
+	userTurn3 := contents[3].(map[string]any)
+	if userTurn3["role"] != "user" {
+		t.Fatalf("expected turn 4 role 'user', got %v", userTurn3["role"])
 	}
 }
 
@@ -1116,11 +1131,13 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	}
 
 	contents2 := convertMessagesToGoogleContents(messages2)
-	// Must produce 3 turns: user -> model ("Calling tool") -> user (tool result + prompt)
-	require.Len(t, contents2, 3)
+	// Must produce 4 turns: user -> model ("Calling tool") -> user (tool result) -> user (prompt)
+	// functionResponse and user text must not be merged into the same user turn.
+	require.Len(t, contents2, 4)
 	require.Equal(t, "user", contents2[0]["role"])
 	require.Equal(t, "model", contents2[1]["role"])
 	require.Equal(t, "user", contents2[2]["role"])
+	require.Equal(t, "user", contents2[3]["role"])
 
 	// Case 3: assistant with "(empty response)" text or whitespace-only is also omitted
 	messages3 := []ai.Message{
@@ -1148,6 +1165,103 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	contents3 := convertMessagesToGoogleContents(messages3)
 	require.Len(t, contents3, 1)
 	require.Equal(t, "user", contents3[0]["role"])
+}
+
+func TestGoogleAuth_ConvertMessagesToGoogleContents_ConsecutiveTurns(t *testing.T) {
+	// 1. Consecutive text user messages (should merge)
+	textMsgs := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "First line"},
+			},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Second line"},
+			},
+		},
+	}
+	contentsText := convertMessagesToGoogleContents(textMsgs)
+	require.Len(t, contentsText, 1)
+	require.Equal(t, "user", contentsText[0]["role"])
+	textParts := contentsText[0]["parts"].([]any)
+	require.Len(t, textParts, 2)
+	require.Equal(t, "First line", textParts[0].(map[string]any)["text"])
+	require.Equal(t, "Second line", textParts[1].(map[string]any)["text"])
+
+	// 2. Consecutive tool responses (should merge into same tool response turn if multiple calls)
+	toolMsgs := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Run tools"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.ToolCall{ID: "call-1", Name: "bash", Arguments: map[string]any{"command": "ls"}},
+				ai.ToolCall{ID: "call-2", Name: "read", Arguments: map[string]any{"path": "foo.txt"}},
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-1",
+			ToolName:   "bash",
+			Content:    []ai.Content{ai.TextContent{Text: "file1"}},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-2",
+			ToolName:   "read",
+			Content:    []ai.Content{ai.TextContent{Text: "file content"}},
+		},
+	}
+	contentsTools := convertMessagesToGoogleContents(toolMsgs)
+	require.Len(t, contentsTools, 3)
+	require.Equal(t, "user", contentsTools[0]["role"])
+	require.Equal(t, "model", contentsTools[1]["role"])
+	require.Equal(t, "user", contentsTools[2]["role"])
+	toolParts := contentsTools[2]["parts"].([]any)
+	require.Len(t, toolParts, 2)
+	fr1 := toolParts[0].(map[string]any)["functionResponse"].(map[string]any)
+	fr2 := toolParts[1].(map[string]any)["functionResponse"].(map[string]any)
+	require.Equal(t, "bash", fr1["name"])
+	require.Equal(t, "read", fr2["name"])
+
+	// 3. Tool response followed by user text message (must NOT merge into the functionResponse turn)
+	mixedMsgs := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Run tool"},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.ToolCall{ID: "call-1", Name: "bash", Arguments: map[string]any{"command": "ls"}},
+			},
+		},
+		ai.ToolResultMessage{
+			ToolCallID: "call-1",
+			ToolName:   "bash",
+			Content:    []ai.Content{ai.TextContent{Text: "file1"}},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Now do something else"},
+			},
+		},
+	}
+	contentsMixed := convertMessagesToGoogleContents(mixedMsgs)
+	require.Len(t, contentsMixed, 4)
+	require.Equal(t, "user", contentsMixed[0]["role"])
+	require.Equal(t, "model", contentsMixed[1]["role"])
+	require.Equal(t, "user", contentsMixed[2]["role"])
+	require.Equal(t, "user", contentsMixed[3]["role"])
+
+	frParts := contentsMixed[2]["parts"].([]any)
+	require.Len(t, frParts, 1)
+	require.Contains(t, frParts[0].(map[string]any), "functionResponse")
+
+	txtParts := contentsMixed[3]["parts"].([]any)
+	require.Len(t, txtParts, 1)
+	require.Equal(t, "Now do something else", txtParts[0].(map[string]any)["text"])
 }
 
 
