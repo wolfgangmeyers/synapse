@@ -59,8 +59,21 @@ async function loadAntigravityModules(extensionPath) {
     return null;
   }
 
-  const loaderUrl = new URL("./core/extensions/jiti-static-loader.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
-  const { createJiti } = await import(loaderUrl.href);
+  let createJiti;
+  try {
+    const loaderUrl = new URL("./core/extensions/jiti-static-loader.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const mod = await import(loaderUrl.href);
+    createJiti = mod.createJiti;
+  } catch {
+    try {
+      const jitiUrl = new URL("../node_modules/jiti/lib/jiti.mjs", import.meta.resolve("@earendil-works/pi-coding-agent"));
+      const mod = await import(jitiUrl.href);
+      createJiti = mod.createJiti;
+    } catch {
+      const { createJiti: jitiFn } = await import("jiti");
+      createJiti = jitiFn;
+    }
+  }
 
   const piAiPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
   const piAiCompatPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/compat"));
