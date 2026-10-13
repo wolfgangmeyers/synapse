@@ -309,6 +309,21 @@ func ValidateWorkingDirectory(path string, roots []string) (string, error) {
 		} else {
 			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
 		}
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		username := filepath.Base(home)
+		// Transparently map between macOS (/Users/<user>) and Linux (/home/<user>)
+		// when switching machines with shared browser history/recent folders.
+		if strings.HasPrefix(path, "/home/"+username+"/") || path == "/home/"+username {
+			candidate := filepath.Join(home, strings.TrimPrefix(path, "/home/"+username))
+			if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+				path = candidate
+			}
+		} else if strings.HasPrefix(path, "/Users/"+username+"/") || path == "/Users/"+username {
+			candidate := filepath.Join(home, strings.TrimPrefix(path, "/Users/"+username))
+			if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+				path = candidate
+			}
+		}
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {

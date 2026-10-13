@@ -109,6 +109,29 @@ func TestValidateWorkingDirectoryExpandsHomeRelativePaths(t *testing.T) {
 	require.Equal(t, expected, resolved)
 }
 
+func TestValidateWorkingDirectoryTranslatesCrossPlatformHome(t *testing.T) {
+	home := t.TempDir()
+	username := filepath.Base(home)
+	project := filepath.Join(home, "code", "project")
+	require.NoError(t, os.MkdirAll(project, 0o700))
+	t.Setenv("HOME", home)
+
+	// If on macOS/other, simulated Linux path /home/<user>/code/project
+	linuxPath := filepath.Join("/home", username, "code", "project")
+	resolved, err := ValidateWorkingDirectory(linuxPath, []string{home})
+	expected, expectedErr := filepath.EvalSymlinks(project)
+
+	require.NoError(t, err)
+	require.NoError(t, expectedErr)
+	require.Equal(t, expected, resolved)
+
+	// Simulated macOS path /Users/<user>/code/project
+	macPath := filepath.Join("/Users", username, "code", "project")
+	resolvedMac, errMac := ValidateWorkingDirectory(macPath, []string{home})
+	require.NoError(t, errMac)
+	require.Equal(t, expected, resolvedMac)
+}
+
 func TestValidateWorkingDirectoryRejectsDirectoriesOutsideConfiguredRoots(t *testing.T) {
 	home := t.TempDir()
 	workspace := filepath.Join(home, "code", "project")
