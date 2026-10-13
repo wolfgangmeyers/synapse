@@ -196,4 +196,68 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
     });
     unmount();
   });
+
+  it("includes goal in updateWorkflowState payload when saving state config via modal", async () => {
+    const user = userEvent.setup();
+    const updateWorkflowStateMock = vi.fn().mockResolvedValue({
+      workflow_state: {
+        ...mockStates[0],
+        goal: "Finish phase 1 and verify tests",
+      },
+    });
+
+    const mockClient = {
+      getWorkflow: vi.fn().mockResolvedValue({
+        workflow: mockWorkflows[0],
+        states: [
+          {
+            ...mockStates[0],
+            goal: "Initial goal",
+          },
+          mockStates[1],
+        ],
+      }),
+      updateWorkflowState: updateWorkflowStateMock,
+      updateWorkflow: vi.fn().mockResolvedValue(undefined),
+      updateWorkflowLayout: vi.fn().mockResolvedValue(undefined),
+      workflowTools: vi.fn().mockResolvedValue({ tools: [] }),
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowCanvas workflowId="wf-1" client={mockClient} onBack={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("config-btn-st-1")).toBeDefined();
+    });
+
+    // Open config modal for st-1
+    await user.click(screen.getByTestId("config-btn-st-1"));
+
+    // Verify modal is open and goal preview or configure button is present
+    await waitFor(() => {
+      expect(screen.getByText("Configure State: Planning")).toBeDefined();
+      expect(screen.getByText("Initial goal")).toBeDefined();
+    });
+
+    // Save changes via the modal's submit button
+    const saveBtn = screen.getByRole("button", { name: "Save State Settings" });
+    await user.click(saveBtn);
+
+    await waitFor(() => {
+      expect(updateWorkflowStateMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(updateWorkflowStateMock).toHaveBeenCalledWith(
+      "st-1",
+      expect.objectContaining({
+        name: "Planning",
+        description: "Write specification",
+        entry_text: "Plan carefully.",
+        goal: "Initial goal",
+        allow_exit: false,
+      })
+    );
+
+    unmount();
+  });
 });
+

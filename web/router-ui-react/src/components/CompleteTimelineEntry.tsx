@@ -518,10 +518,10 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   if (presentation.kind === "model") return { icon: "fa-solid fa-microchip", tone: presentation.outcome === "error" ? "danger" : "blue", label: entry.message || "Model changed", detail: cleanOneLine(presentation.summary), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "auth") return { icon: "fa-solid fa-key", tone: presentation.outcome === "error" ? "danger" : "yellow", label: entry.message || "Authentication required", detail: cleanOneLine(presentation.summary), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "goal_evaluation") {
-    const isDone = presentation.outcome === "done" || presentation.outcome === "success" || (entry.message !== undefined && entry.message.includes("DONE") && !entry.message.includes("NOT_DONE"));
-    const verdict = isDone ? "DONE" : "NOT_DONE";
+    const isDone = presentation.outcome === "done" || presentation.outcome === "completed" || presentation.outcome === "success" || (entry.message !== undefined && (entry.message.includes("DONE") || entry.message.includes("COMPLETED")) && !entry.message.includes("NOT_DONE"));
+    const verdict = isDone ? (presentation.outcome === "completed" || entry.message?.includes("COMPLETED") ? "COMPLETED" : "DONE") : "NOT_DONE";
     const label = `Goal Evaluation • ${verdict}`;
-    const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary) ?? (isDone ? "DONE" : "Continue working on the current goal.");
+    const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary) ?? (isDone ? verdict : "Continue working on the current goal.");
     return {
       icon: "fa-solid fa-flag",
       tone: isDone ? "green" : "blue",
@@ -564,7 +564,7 @@ export function isActiveManagedSubagentLifecycle(entry: Pick<ManagedHistoryEntry
 function isTerminalSuccessPresentation(presentation: ManagedHistoryPresentation | undefined): boolean {
   if (presentation?.kind === "compaction") return presentation.outcome === "completed";
   if (presentation?.kind === "tool") return presentation.outcome === "success";
-  if (presentation?.kind === "goal_evaluation") return presentation.outcome === "done" || presentation.outcome === "success";
+  if (presentation?.kind === "goal_evaluation") return presentation.outcome === "done" || presentation.outcome === "completed" || presentation.outcome === "success";
   if (presentation?.kind === "subagent_complete" || presentation?.kind === "subagent") {
     return presentation.outcome === "completed" || presentation.outcome === "success";
   }

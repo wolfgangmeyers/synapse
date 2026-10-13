@@ -187,15 +187,21 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 			preview = "COMPLETED"
 		}
 	}
+	summary := preview
+	if len(summary) > 500 {
+		summary = summary[:497] + "..."
+	}
 	eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", binding.AgentID, key.UserSeq, key.FinalSeq, outcome)
 	pres := &store.ManagedHistoryPresentation{
 		Kind:    "goal_evaluation",
 		Outcome: strings.ToLower(outcome),
-		Summary: preview,
+		Summary: summary,
 	}
 	msg := "Goal Evaluation • " + outcome
 	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(m.runCtx, binding.AgentID, "managed_goal_evaluation", "info", msg, eventKey, pres, nil, &preview)
-	if err == nil {
+	if err != nil {
+		log.Printf("[embedded:%s] Failed to record goal evaluation history (%s): %v", binding.AgentID, eventKey, err)
+	} else {
 		m.publishCompleteHistory(entry)
 	}
 }

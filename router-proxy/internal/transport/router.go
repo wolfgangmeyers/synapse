@@ -900,6 +900,10 @@ func (r *Router) runStartup(ctx context.Context) error {
 		if err := r.managed.RecoverBootTimeGoalContinuations(ctx); err != nil {
 			return err
 		}
+		log.Printf("STARTUP: BackfillEmbeddedGoalEvaluations")
+		if err := r.store.BackfillEmbeddedGoalEvaluations(ctx); err != nil {
+			log.Printf("STARTUP: BackfillEmbeddedGoalEvaluations error: %v", err)
+		}
 	}
 	log.Printf("STARTUP: ReconcileManagedRecipientSources")
 	if err := r.store.ReconcileManagedRecipientSources(ctx); err != nil {
