@@ -83,6 +83,13 @@ case "${1:-}" in
     if [[ "$MANAGED" == "true" ]]; then
       mkdir -p "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
       chmod 700 "$MANAGED_HOME" "$MANAGED_SESSION_ROOT"
+      if [[ ! -f "$ROOT_DIR/auth-helper/node_modules/@earendil-works/pi-coding-agent/package.json" ]]; then
+        printf '%s\n' "run_router.sh: installing auth-helper dependencies..." >&2
+        npm --prefix "$ROOT_DIR/auth-helper" ci
+      fi
+      if [[ -z "$MANAGED_CURSOR_EXTENSION" && -f "$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js" ]]; then
+        MANAGED_CURSOR_EXTENSION="$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js"
+      fi
     fi
     EXIT_FILE="$(mktemp -t router_exit.XXXXXX)"
     export ROUTER_EXIT_FILE="$EXIT_FILE"
