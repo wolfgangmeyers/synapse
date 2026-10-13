@@ -144,6 +144,12 @@ type ManagedAgentRecord struct {
 	WorktreeBranch string
 	// AllowInlineTools indicates whether inline tools (bash, edit, write) are allowed without allowance credits.
 	AllowInlineTools bool
+	// ContextTokens is the estimated context token usage.
+	ContextTokens *int
+	// ContextWindow is the model context window.
+	ContextWindow int
+	// ContextPercent is the percentage of context window used (0.0 to 100.0).
+	ContextPercent *float64
 	// ContextUsage optionally holds in-memory context usage info attached at projection time.
 	ContextUsage any
 }
@@ -923,6 +929,22 @@ func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAge
 	if hasAllowInlineTools {
 		columns += `,allow_inline_tools`
 		values = append(values, boolInt(agent.AllowInlineTools))
+	}
+	hasContextUsage, err := managedAgentColumnTx(ctx, s.db, "context_tokens")
+	if err != nil {
+		return err
+	}
+	if hasContextUsage {
+		columns += `,context_tokens,context_window,context_percent`
+		var tokensVal any
+		if agent.ContextTokens != nil {
+			tokensVal = *agent.ContextTokens
+		}
+		var percentVal any
+		if agent.ContextPercent != nil {
+			percentVal = *agent.ContextPercent
+		}
+		values = append(values, tokensVal, agent.ContextWindow, percentVal)
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_agents (`+columns+`) VALUES (`+placeholders+`)`, values...)
@@ -4528,6 +4550,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedAllowInlineToolsTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedContextUsageTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4577,6 +4602,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedAllowInlineToolsTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedContextUsageTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -4663,6 +4691,71 @@ func loadManagedAllowInlineToolsTx(ctx context.Context, db *sql.DB, agent *Manag
 		return err
 	}
 	agent.AllowInlineTools = allow.Int64 != 0
+	return nil
+}
+
+func loadManagedContextUsageTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	hasCol, err := managedAgentColumnTx(ctx, db, "context_tokens")
+	if err != nil || !hasCol || agent == nil {
+		return err
+	}
+	var tokens, window sql.NullInt64
+	var percent sql.NullFloat64
+	if err := db.QueryRowContext(ctx, `SELECT context_tokens, context_window, context_percent FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&tokens, &window, &percent); err != nil {
+		return err
+	}
+	if tokens.Valid {
+		tok := int(tokens.Int64)
+		agent.ContextTokens = &tok
+	} else {
+		agent.ContextTokens = nil
+	}
+	agent.ContextWindow = int(window.Int64)
+	if percent.Valid {
+		p := percent.Float64
+		agent.ContextPercent = &p
+	} else {
+		agent.ContextPercent = nil
+	}
+	return nil
+}
+
+func (s *Store) UpdateManagedAgentContextUsage(ctx context.Context, agentID string, tokens *int, contextWindow int, percent *float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+	hasCol, err := managedAgentColumnTx(ctx, s.db, "context_tokens")
+	if err != nil {
+		return err
+	}
+	if !hasCol {
+		return errors.New("context_tokens column does not exist")
+	}
+	var tokensVal any
+	if tokens != nil {
+		tokensVal = *tokens
+	}
+	var percentVal any
+	if percent != nil {
+		percentVal = *percent
+	}
+	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET context_tokens=?, context_window=?, context_percent=?, updated_at=? WHERE agent_id=?`, tokensVal, contextWindow, percentVal, now, agentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("managed agent not found")
+	}
+	if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -4855,6 +4948,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedAllowInlineToolsTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
+		if err := loadManagedContextUsageTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
 		if agent.Runtime == "embedded" {
 			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
 			if err != nil {
@@ -4978,6 +5074,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedAllowInlineToolsTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedContextUsageTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy

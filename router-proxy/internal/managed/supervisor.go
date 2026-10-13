@@ -518,10 +518,18 @@ func (m *Manager) updateAgentContextUsage(agentID string, tokens *int, contextWi
 	prior := lane.getContextUsage()
 	lane.setContextUsage(usage)
 	SetAgentContextUsage(agentID, usage)
-	if !reflect.DeepEqual(prior, usage) {
-		if m.store != nil {
-			_, _ = m.store.ReserveProjectionVersion(context.Background())
+	if m.store != nil {
+		var tok *int
+		var win int
+		var pct *float64
+		if usage != nil {
+			tok = usage.Tokens
+			win = usage.ContextWindow
+			pct = usage.Percent
 		}
+		_ = m.store.UpdateManagedAgentContextUsage(context.Background(), agentID, tok, win, pct)
+	}
+	if !reflect.DeepEqual(prior, usage) {
 		m.publishProjection()
 	}
 	return usage
