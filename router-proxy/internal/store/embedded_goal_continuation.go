@@ -75,8 +75,19 @@ func (s *Store) RestartFailedManagedAgent(ctx context.Context, agentID string) e
 			return err
 		}
 		now := formatTimestamp(s.clock.Now())
-		_, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state='idle', lifecycle_state='running', last_error_code=NULL, last_error_message=NULL, last_error_at=NULL, updated_at=? WHERE agent_id=?`, now, agentID)
-		return err
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state='idle', lifecycle_state='running', accepting_prompts=1, slot_held=1, last_error_code=NULL, last_error_message=NULL, last_error_at=NULL, updated_at=? WHERE agent_id=?`, now, agentID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			_, err = s.bumpManagedProjectionVersion(ctx)
+			return err
+		}
+		return nil
 	})
 }
 

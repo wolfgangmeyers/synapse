@@ -710,6 +710,28 @@ func pruneTranscriptMessages(messages []ai.Message, targetTokens int) []ai.Messa
 	return collectPruned(pruned, omitted)
 }
 
+func partsHaveFunctionResponse(parts []any) bool {
+	for _, p := range parts {
+		if pMap, ok := p.(map[string]any); ok {
+			if _, ok := pMap["functionResponse"]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func partsHaveText(parts []any) bool {
+	for _, p := range parts {
+		if pMap, ok := p.(map[string]any); ok {
+			if _, ok := pMap["text"]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[string]any {
 	contextWindow, droppedToolCalls := parseConvertOptions(args)
 	triggerTokens := contextWindow * 80 / 100
@@ -990,8 +1012,24 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 			lastTurn := contents[len(contents)-1]
 			if lastTurn["role"] == role {
 				if lastParts, ok := lastTurn["parts"].([]any); ok {
-					lastTurn["parts"] = append(lastParts, parts...)
-					continue
+					// Gemini protocol requirement: functionResponse parts must NOT be mixed
+					// with normal user text parts in the same turn.
+					// If lastTurn has functionResponse and incoming parts have text (or vice versa),
+					// do NOT merge them into lastTurn; keep them as distinct turns.
+					canMerge := true
+					if role == "user" {
+						lastHasFR := partsHaveFunctionResponse(lastParts)
+						currHasFR := partsHaveFunctionResponse(parts)
+						lastHasText := partsHaveText(lastParts)
+						currHasText := partsHaveText(parts)
+						if (lastHasFR && currHasText) || (lastHasText && currHasFR) {
+							canMerge = false
+						}
+					}
+					if canMerge {
+						lastTurn["parts"] = append(lastParts, parts...)
+						continue
+					}
 				}
 			}
 		}
