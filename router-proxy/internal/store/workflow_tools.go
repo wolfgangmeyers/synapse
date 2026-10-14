@@ -26,6 +26,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "subagent", Name: "subagent", Category: "subagents", Description: "Launch background subagents"},
 	{ID: "get_subagent_result", Name: "get_subagent_result", Category: "subagents", Description: "Snapshot subagent outputs"},
 	{ID: "steer_subagent", Name: "steer_subagent", Category: "subagents", Description: "Send steering messages to subagents"},
+	{ID: "list_subagents", Name: "list_subagents", Category: "subagents", Description: "List background subagents"},
 	{ID: "mecha_worker", Name: "mecha_worker", Category: "subagents", Description: "Launch independent workers"},
 }
 

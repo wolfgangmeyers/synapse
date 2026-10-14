@@ -87,6 +87,27 @@ func TestSubagentNotificationFormatting(t *testing.T) {
 	errNotification := FormatSubagentNotification(errRecord)
 	assert.Contains(t, errNotification, "error")
 	assert.Contains(t, errNotification, "tool execution timed out after 30s")
+
+	// Verify enriched wake prompt with active siblings
+	siblings := []store.ManagedSubagentRecord{
+		{
+			AgentID:         "subagent-sibling-1",
+			Description:     "run integration tests",
+			Status:          "running",
+			DurationSeconds: 42.0,
+		},
+		{
+			AgentID:         "subagent-sibling-2",
+			Description:     "update documentation",
+			Status:          "queued",
+			DurationSeconds: 0,
+		},
+	}
+	enrichedWake := FormatSubagentWakePromptWithActiveSiblings(childRecord, siblings)
+	assert.Contains(t, enrichedWake, "Active subagents still running (2):")
+	assert.Contains(t, enrichedWake, "- subagent-sibling-1 (run integration tests): running (42.00s)")
+	assert.Contains(t, enrichedWake, "- subagent-sibling-2 (update documentation): queued (0.00s)")
+	assert.Contains(t, enrichedWake, "Call get_subagent_result if you need the full output")
 }
 
 func TestSubagentResultReportFormatting(t *testing.T) {

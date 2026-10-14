@@ -115,6 +115,12 @@ func FormatSubagentNotification(record store.ManagedSubagentRecord) string {
 
 // FormatSubagentWakePrompt formats an actionable completion wake prompt for the parent agent.
 func FormatSubagentWakePrompt(record store.ManagedSubagentRecord) string {
+	return FormatSubagentWakePromptWithActiveSiblings(record, nil)
+}
+
+// FormatSubagentWakePromptWithActiveSiblings formats an actionable completion wake prompt for the parent agent,
+// including a summary of any active sibling subagents currently running or queued.
+func FormatSubagentWakePromptWithActiveSiblings(record store.ManagedSubagentRecord, activeSiblings []store.ManagedSubagentRecord) string {
 	previewText := record.ResultText
 	if previewText == "" && record.Error != "" {
 		previewText = record.Error
@@ -130,8 +136,29 @@ func FormatSubagentWakePrompt(record store.ManagedSubagentRecord) string {
 	if desc == "" {
 		desc = "subagent"
 	}
-	return fmt.Sprintf("[Subagent Completed] Task %s (%s) finished with status %s: %s\n\nCall get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*",
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Subagent Completed] Task %s (%s) finished with status %s: %s\n\n",
 		record.AgentID, desc, record.Status, preview)
+
+	if len(activeSiblings) > 0 {
+		fmt.Fprintf(&b, "Active subagents still running (%d):\n", len(activeSiblings))
+		for _, sib := range activeSiblings {
+			sibDesc := sib.Description
+			if sibDesc == "" {
+				sibDesc = sib.SubagentType
+			}
+			if sibDesc == "" {
+				sibDesc = "subagent"
+			}
+			durStr := FormatSubagentDurationSeconds(sib.DurationSeconds)
+			fmt.Fprintf(&b, "- %s (%s): %s (%s)\n", sib.AgentID, sibDesc, sib.Status, durStr)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
+	return b.String()
 }
 
 // FormatSubagentNotificationWithOptions formats a structured task notification with options.

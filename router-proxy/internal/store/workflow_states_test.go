@@ -437,10 +437,10 @@ func TestWorkflowStateAllowedTools(t *testing.T) {
 	// Test trimming and deduplication
 	stateDedupe, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{
 		Name:         "dedupe-tools",
-		AllowedTools: []string{" read ", "bash", "read", " write "},
+		AllowedTools: []string{" read ", "bash", "read", " write ", "list_subagents"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"read", "bash", "write"}, stateDedupe.AllowedTools)
+	require.Equal(t, []string{"read", "bash", "write", "list_subagents"}, stateDedupe.AllowedTools)
 
 	// 4. Test updating allowed_tools
 	updated, err := s.UpdateWorkflowState(ctx, stateCustom.ID, WorkflowStateRequest{

@@ -577,3 +577,95 @@ func TestDeliverSubagentParentWake_RejectsForeignChildOwnedByOtherParent(t *test
 	require.NoError(t, err)
 	require.Equal(t, 0, promptRequests, "zero embedded_prompt_requests must be persisted for foreign child on parent B")
 }
+
+func TestDeliverSubagentParentWake_WithAndWithoutActiveSiblings_Integration(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "wake_siblings_integration.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-siblings-integration")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	raw, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer raw.Close()
+
+	// Case 1: Multiple subagents under parent (Child 1 terminal, Child 2 running, Child 3 queued)
+	child1 := createTerminalSubagentFixture(t, db, parent, "child-1", 1, "completed", store.ManagedSubagentResult{
+		ResultText: "child 1 done",
+	})
+
+	child2Init := store.ManagedSubagentRecord{
+		AgentID:          "child-2",
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "child 2 running task",
+		SubagentType:     "general-purpose",
+		Status:           "running",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, child2Init))
+	require.NoError(t, db.UpdateManagedSubagentProgress(ctx, parent, "child-2", 1, store.ManagedSubagentProgress{
+		DurationSeconds: 15.5,
+	}))
+
+	child3Init := store.ManagedSubagentRecord{
+		AgentID:          "child-3",
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "child 3 queued task",
+		SubagentType:     "general-purpose",
+		Status:           "queued",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, child3Init))
+
+	err = mgr.DeliverSubagentParentWake(ctx, parent, child1)
+	require.NoError(t, err)
+
+	msgID1 := fmt.Sprintf("subagent-completed-%s-%d", child1.AgentID, child1.Attempt)
+	var body1 string
+	err = raw.QueryRowContext(ctx, `SELECT body FROM messages WHERE id=?`, msgID1).Scan(&body1)
+	require.NoError(t, err)
+
+	require.Contains(t, body1, "[Subagent Completed] Task child-1")
+	require.Contains(t, body1, "Active subagents still running (2):")
+	require.Contains(t, body1, "- child-2 (child 2 running task): running (15.50s)")
+	require.Contains(t, body1, "- child-3 (child 3 queued task): queued (0.00s)")
+	require.NotContains(t, body1, "- child-1")
+
+	// Case 2: Complete child 2 and child 3, then deliver wake for child 2
+	require.NoError(t, db.UpdateManagedSubagentAttempt(ctx, parent, "child-2", 1, "running", store.ManagedSubagentResult{
+		Status:          "completed",
+		DurationSeconds: 15.5,
+		ResultText:      "child 2 done",
+	}))
+	require.NoError(t, db.UpdateManagedSubagentAttempt(ctx, parent, "child-3", 1, "queued", store.ManagedSubagentResult{
+		Status:     "stopped",
+		ResultText: "child 3 stopped",
+	}))
+
+	child2Persisted, err := db.ManagedSubagent(ctx, parent, "child-2")
+	require.NoError(t, err)
+
+	err = mgr.DeliverSubagentParentWake(ctx, parent, *child2Persisted)
+	require.NoError(t, err)
+
+	msgID2 := fmt.Sprintf("subagent-completed-%s-%d", child2Persisted.AgentID, child2Persisted.Attempt)
+	var body2 string
+	err = raw.QueryRowContext(ctx, `SELECT body FROM messages WHERE id=?`, msgID2).Scan(&body2)
+	require.NoError(t, err)
+
+	require.Contains(t, body2, "[Subagent Completed] Task child-2")
+	require.NotContains(t, body2, "Active subagents still running")
+}
+

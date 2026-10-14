@@ -135,7 +135,24 @@ func (m *Manager) deliverSubagentMailboxNotificationWithContext(ctx context.Cont
 	if record.Status != "completed" {
 		subject = fmt.Sprintf("[System Notice] Subagent %s: %s", strings.Title(record.Status), record.AgentID)
 	}
-	body := FormatSubagentWakePrompt(record)
+
+	var activeSiblings []store.ManagedSubagentRecord
+	allChildren, err := m.store.ManagedSubagents(ctx, parent)
+	if err == nil {
+		for _, child := range allChildren {
+			if child == nil {
+				continue
+			}
+			if child.AgentID == record.AgentID {
+				continue
+			}
+			if child.Status == "running" || child.Status == "queued" {
+				activeSiblings = append(activeSiblings, *child)
+			}
+		}
+	}
+
+	body := FormatSubagentWakePromptWithActiveSiblings(record, activeSiblings)
 	source := protocol.MessageSource{Kind: "system"}
 	msgID := fmt.Sprintf("subagent-completed-%s-%d", record.AgentID, record.Attempt)
 	now := formatManagedTime(m.clock.Now())

@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,12 +47,13 @@ func TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion(t *test
 	defer mgr.Close(ctx)
 	registerParentOwner(mgr, parent)
 
-	// 1. Primary constructor returns exactly the 3 public tools
+	// 1. Primary constructor returns exactly the 4 public tools
 	tools := mgr.EmbeddedSubagentPublicTools(parent)
-	require.Len(t, tools, 3)
+	require.Len(t, tools, 4)
 	require.Equal(t, "subagent", tools[0].Name)
 	require.Equal(t, "get_subagent_result", tools[1].Name)
 	require.Equal(t, "steer_subagent", tools[2].Name)
+	require.Equal(t, "list_subagents", tools[3].Name)
 
 	// Verify parameter schema contains only S3-specified parameters:
 	// prompt, description, subagent_type, max_turns, resume.
@@ -68,9 +70,14 @@ func TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion(t *test
 	require.NotContains(t, subSchema.Properties, "inherit_context")
 	require.NotContains(t, subSchema.Properties, "run_in_background")
 
+	listSchema := tools[3].Parameters
+	require.NotNil(t, listSchema)
+	require.Contains(t, listSchema.Properties, "status")
+	require.Contains(t, listSchema.Properties, "limit")
+
 	// 2. Child nested surface strictly excluded:
 	// The child subagent toolset (NewEmbeddedSubagentTools) must ONLY contain confined read, edit, write, bash.
-	// It must NOT contain subagent, get_subagent_result, or steer_subagent.
+	// It must NOT contain subagent, get_subagent_result, steer_subagent, or list_subagents.
 	childTools, cleanup, err := mgr.EmbeddedSubagentTools(t.TempDir())
 	require.NoError(t, err)
 	defer cleanup()
@@ -79,6 +86,7 @@ func TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion(t *test
 		require.NotEqual(t, "subagent", ct.Name, "child must not have subagent tool")
 		require.NotEqual(t, "get_subagent_result", ct.Name, "child must not have get_subagent_result tool")
 		require.NotEqual(t, "steer_subagent", ct.Name, "child must not have steer_subagent tool")
+		require.NotEqual(t, "list_subagents", ct.Name, "child must not have list_subagents tool")
 		require.NotEqual(t, "mecha_worker", ct.Name, "child must not have supervisor tools")
 		require.NotEqual(t, "mecha_mailbox_send", ct.Name, "child must not have supervisor tools")
 	}
@@ -792,5 +800,123 @@ func TestFetchSubagentTranscriptActiveStatusPropagatesClosedDBError(t *testing.T
 		assert.Contains(t, err.Error(), "store is closed")
 	}
 }
+
+func TestListSubagentsTool_ExecutionAndFiltering(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_list_tool.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parentA := subagentTestParent(t, db, "parent-list-a")
+	parentB := subagentTestParent(t, db, "parent-list-b")
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parentA)
+	registerParentOwner(mgr, parentB)
+
+	// Seed Parent A subagents: 1 running, 1 queued, 1 completed, 1 failed
+	childA1 := store.ManagedSubagentRecord{
+		AgentID:          "child-a-1-run",
+		ParentAgentID:    parentA.AgentID,
+		ParentSessionID:  parentA.SessionID,
+		ParentEpoch:      parentA.Epoch,
+		ParentGeneration: parentA.Generation,
+		Description:      "running unit task",
+		SubagentType:     "general-purpose",
+		Status:           "running",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parentA, childA1))
+
+	childA2 := store.ManagedSubagentRecord{
+		AgentID:          "child-a-2-queue",
+		ParentAgentID:    parentA.AgentID,
+		ParentSessionID:  parentA.SessionID,
+		ParentEpoch:      parentA.Epoch,
+		ParentGeneration: parentA.Generation,
+		Description:      "queued unit task",
+		SubagentType:     "Plan",
+		Status:           "queued",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parentA, childA2))
+
+	childA3 := createTerminalSubagentFixture(t, db, parentA, "child-a-3-done", 1, "completed", store.ManagedSubagentResult{
+		ResultText: "a3 done",
+	})
+	_ = childA3
+
+	childA4 := createTerminalSubagentFixture(t, db, parentA, "child-a-4-fail", 1, "failed", store.ManagedSubagentResult{
+		Error: "a4 error",
+	})
+	_ = childA4
+
+	// Seed Parent B subagent: ensure isolation across parents
+	childB1 := store.ManagedSubagentRecord{
+		AgentID:          "child-b-1-run",
+		ParentAgentID:    parentB.AgentID,
+		ParentSessionID:  parentB.SessionID,
+		ParentEpoch:      parentB.Epoch,
+		ParentGeneration: parentB.Generation,
+		Description:      "parent b task",
+		SubagentType:     "general-purpose",
+		Status:           "running",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parentB, childB1))
+
+	toolsA := mgr.EmbeddedSubagentPublicTools(parentA)
+	listToolA := lookupTool(t, toolsA, "list_subagents")
+
+	// 1. Default status ("active") -> returns running + queued for Parent A only
+	resActive, err := listToolA.Execute(ctx, "call-list-1", map[string]any{}, nil)
+	require.NoError(t, err)
+	var activeResp listSubagentsResponse
+	err = json.Unmarshal([]byte(resActive.Content[0].(ai.TextContent).Text), &activeResp)
+	require.NoError(t, err)
+	assert.Equal(t, 2, activeResp.Summary.TotalMatching)
+	assert.Equal(t, 2, activeResp.Summary.TotalActive)
+	assert.Equal(t, 1, activeResp.Summary.RunningCount)
+	assert.Equal(t, 1, activeResp.Summary.QueuedCount)
+	require.Len(t, activeResp.Subagents, 2)
+	assert.Equal(t, "child-a-1-run", activeResp.Subagents[0].AgentID)
+	assert.Equal(t, "child-a-2-queue", activeResp.Subagents[1].AgentID)
+
+	// 2. Status "all" -> returns all 4 subagents for Parent A, zero from Parent B
+	resAll, err := listToolA.Execute(ctx, "call-list-2", map[string]any{"status": "all"}, nil)
+	require.NoError(t, err)
+	var allResp listSubagentsResponse
+	err = json.Unmarshal([]byte(resAll.Content[0].(ai.TextContent).Text), &allResp)
+	require.NoError(t, err)
+	assert.Equal(t, 4, allResp.Summary.TotalMatching)
+	assert.Equal(t, 2, allResp.Summary.TotalActive)
+	require.Len(t, allResp.Subagents, 4)
+	for _, item := range allResp.Subagents {
+		assert.NotEqual(t, "child-b-1-run", item.AgentID, "Parent A must never see Parent B subagents")
+	}
+
+	// 3. Status "completed" -> returns only completed subagents
+	resCompleted, err := listToolA.Execute(ctx, "call-list-3", map[string]any{"status": "completed"}, nil)
+	require.NoError(t, err)
+	var compResp listSubagentsResponse
+	err = json.Unmarshal([]byte(resCompleted.Content[0].(ai.TextContent).Text), &compResp)
+	require.NoError(t, err)
+	assert.Equal(t, 1, compResp.Summary.TotalMatching)
+	require.Len(t, compResp.Subagents, 1)
+	assert.Equal(t, "child-a-3-done", compResp.Subagents[0].AgentID)
+	assert.Equal(t, "completed", compResp.Subagents[0].Status)
+
+	// 4. Limit testing -> limit: 1 returns only 1 item while total_matching reflects actual
+	resLimit, err := listToolA.Execute(ctx, "call-list-4", map[string]any{"status": "all", "limit": 1}, nil)
+	require.NoError(t, err)
+	var limitResp listSubagentsResponse
+	err = json.Unmarshal([]byte(resLimit.Content[0].(ai.TextContent).Text), &limitResp)
+	require.NoError(t, err)
+	assert.Equal(t, 4, limitResp.Summary.TotalMatching)
+	require.Len(t, limitResp.Subagents, 1)
+}
+
 
 

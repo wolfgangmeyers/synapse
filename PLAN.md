@@ -1,265 +1,226 @@
-# Implementation Plan: Workflow State Goals & Goal Locking
+# Implementation Plan: Subagent Visibility and Enriched Completion Notifications
 
-## 1. Architecture & Component Summary
+## 1. Overview & Context
 
-Workflow State Goals bind persistent goals to specific workflow states, automatically synchronizing agent goals as agents enter, transition, or exit workflow states. While an agent is bound to a workflow state with an active non-empty goal, worker attempts to overwrite or turn off the goal via worker tool controls (`goal` / `goal.control`) are locked and rejected.
-
-```
-                          ┌──────────────────────────┐
-                          │   Store / DB (SQLite)    │
-                          │   Migration 099          │
-                          │   workflow_states.goal   │
-                          └────────────┬─────────────┘
-                                       │
-                    ┌──────────────────┴──────────────────┐
-                    ▼                                     ▼
-        ┌───────────────────────┐             ┌───────────────────────┐
-        │  HTTP Transport Layer │             │ Runtime Manager Layer │
-        │  /v1/workflow-states  │             │ embedded_workflow_    │
-        │  /v1/workflows        │             │ transition.go &       │
-        └───────────┬───────────┘             │ managed_http.go       │
-                    │                         └───────────┬───────────┘
-                    ▼                                     ▼
-        ┌───────────────────────┐             ┌───────────────────────┐
-        │    React Web UI       │             │ Goal Lock Enforcement │
-        │ StateConfigModal      │             │ executeManagedGoal-   │
-        │ WorkflowStateNode     │             │ Control: reject worker│
-        │ WorkflowStatesPage    │             │ changes while locked  │
-        └───────────────────────┘             └───────────────────────┘
-```
-
-### Components Impacted
-1. **Database & Store (`router-proxy/internal/store/`)**:
-   - Migration `099_workflow_state_goal.sql` adding `goal TEXT NOT NULL DEFAULT '' CHECK (length(goal) <= 4000)`.
-   - Domain struct `WorkflowState` and `WorkflowStateRequest` field `Goal string`.
-   - SQL queries and CRUD methods in `workflow_states.go` and `workflows.go`.
-   - Request validation enforcing `<= 4000` bytes.
-2. **HTTP Transport (`router-proxy/internal/transport/`)**:
-   - `workflow_states_http.go`: Request parsing and response rendering for state `goal`.
-   - `workflows_http.go`: Preserving state `goal` across workflow bundle CRUD.
-   - `managed_http.go`: Goal synchronization when manually assigning or clearing workflow states on managed agents.
-3. **Runtime & Lifecycle (`router-proxy/internal/managed/`)**:
-   - `embedded_workflow_transition.go`: Applying target state's goal policy (`GoalLockEnabled = true`, `Enabled = true`) on `"transition"`, and deactivating goal (`Enabled = false`, `Goal = ""`, `GoalLockEnabled = false`) on `"exit"`.
-   - Lifecycle orchestration (`SetManagedAgentActiveWorkflowState` integration) to coordinate goal projection with state persistence.
-4. **Goal Locking (`router-proxy/internal/managed/`)**:
-   - `managed_goal_projection.go` (`executeManagedGoalControl`): Denying worker `set` or `off` actions with `"goal is locked by active workflow state <Name>"` when active state has non-empty goal. `status` remains permitted.
-5. **Web UI (`web/router-ui-react/`)**:
-   - `src/domain/workflow-states.ts`: Adding `goal?: string` to `WorkflowState` and `WorkflowStateInput`.
-   - `src/components/StateConfigModal.tsx`: Integrating `GoalEditorDialog`, preview box, "Configure Goal", "Edit Goal", and "Clear Goal" controls.
-   - `src/components/WorkflowStateNode.tsx`: Rendering `<span className="node-badge badge-goal" title={state.goal}><i className="fa-solid fa-flag" aria-hidden="true" /> Goal</span>`.
-   - `src/components/WorkflowStatesPage.tsx`: Ensuring goal is displayed in state lists/summaries and preserved in state forms.
+This plan implements the features specified in `SPEC.md`:
+1. **`list_subagents` embedded tool**: A new embedded tool registered on parent worker sessions in `router-proxy` allowing workers to inspect running, queued, and historical subagents under their binding fence.
+2. **Enriched completion wake notification**: When any subagent terminates, `DeliverSubagentParentWake` inspects whether active sibling subagents (queued or running) remain under the parent binding. If siblings remain, it appends an explicit summary block `Active subagents still running (N):` to the parent wake prompt, giving the parent full awareness of concurrent tasks without guessing or polling.
+3. **Child subagent containment & isolation**: Subagents themselves must not receive `list_subagents` in their toolset (alongside existing exclusion of `subagent`, `get_subagent_result`, `steer_subagent`, etc.).
+4. **Integration regression tests**: Full within-service integration tests proving parent execution, child tool exclusion, wake formatting with siblings and without siblings, and durability across sessions/epochs.
 
 ---
 
-## 2. Phased Implementation Breakdown
+## 2. Delegation & Delegate Seam Analysis (`pi-subagents` vs `router-proxy`)
 
-### Phase 1: DB Migration 099 & Store Layer
-*Goal*: Add `goal` column to `workflow_states` with a 4000-character constraint, update domain models, validation, and CRUD queries in the Store.
+We checked the repository and subagent integration seams across `router-proxy`, `pi-extensions/mecha-rpc`, and the `pi-packages` fork:
+- In the router-managed architecture, the embedded session engine in Go (`router-proxy/internal/managed/`) is the authoritative host that runs embedded agents and manages background subagents via `embedded_subagent_runner.go`, `embedded_subagent_public_tools.go`, and `embedded_subagent_wake.go`.
+- The public tools for embedded agents (`subagent`, `get_subagent_result`, `steer_subagent`) are defined and registered directly in Go via `Manager.EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool` in `router-proxy/internal/managed/embedded_subagent_public_tools.go`.
+- Subagent completion wake notifications are dispatched and formatted directly in Go via `DeliverSubagentParentWake` in `embedded_subagent_wake.go` and `FormatSubagentWakePrompt` in `embedded_subagent_results.go`.
+- For `pi-subagents` / `mecha-rpc`: In router-managed RPC mode, `fixedSubagentsTools` in `supervisor.go` specifies the list of fixed subagent tools. We will add `"list_subagents"` to `fixedSubagentsTools` in `supervisor.go` (and `store/workflow_tools.go` in `CanonicalWorkflowTools`) so manifest validation, tool parity, and workflow state tool filtering include it seamlessly. The core logic executes entirely within `router-proxy`. No changes to `pi-packages` are required because `pi-subagents` delegates subagent lifecycle management in embedded mode to the router-proxy host tools.
 
-- [ ] **1.1 Test-First (TDD)**:
-  - Add tests in `router-proxy/internal/store/workflow_states_test.go`:
-    - Test validation: reject `req.Goal` exceeding 4000 bytes with `WorkflowStateValidationError` on field `"goal"`.
-    - Test `CreateWorkflowState` with non-empty goal and verify persistence and retrieval.
-    - Test `UpdateWorkflowState` updating goal from empty to non-empty and vice-versa.
-    - Test `ListWorkflowStates` and `ListWorkflowStatesByWorkflow` returning `Goal`.
-    - Test `GetWorkflowWithStates` returning `Goal` on constituent states.
-  - Add test in `router-proxy/internal/store/migrations_test.go` verifying migration `099_workflow_state_goal.sql` runs cleanly and enforces the check constraint.
-- [ ] **1.2 Migration Script**:
-  - Create `router-proxy/internal/store/migrations/099_workflow_state_goal.sql`:
-    ```sql
-    ALTER TABLE workflow_states ADD COLUMN goal TEXT NOT NULL DEFAULT '' CHECK (length(goal) <= 4000);
+---
+
+## 3. Detailed Component Implementation
+
+### 3.1 Component 1: `list_subagents` Tool (`router-proxy/internal/managed/`)
+
+#### Schema & Parameters
+In `router-proxy/internal/managed/embedded_subagent_public_tools.go`:
+- Define `embeddedListSubagentsSchema() *ai.Schema`:
+  - `status` (optional string): `"active"` (default, filters for `running` and `queued`), `"all"`, `"running"`, `"queued"`, `"completed"`, `"failed"`, `"stopped"`, `"timed_out"`.
+  - `limit` (optional integer): Default 50, minimum 1, maximum 100.
+  - Closed schema: `AdditionalAllowed = false`.
+- Tool name: `"list_subagents"`.
+- Description: `"List background subagents launched by this agent, including their IDs, descriptions, statuses, and runtimes."`
+
+#### Querying Store & In-Memory State
+In `m.embeddedListSubagentsTool(parent store.EmbeddedBinding) agent.AgentTool`:
+- Check context cancellation: `if err := ctx.Err(); err != nil { return agent.AgentToolResult{}, err }`.
+- Parse arguments:
+  - `statusRaw, _ := args["status"].(string)` -> default `"active"`. Normalized to lower case.
+  - `limitRaw` -> default 50. Validate integer bounds 1 to 100 (clamp or return error if invalid type/range).
+- Retrieve all subagent records for the parent binding using `m.store.ManagedSubagents(ctx, parent)`.
+  - The read fence in `ManagedSubagents` verifies the durable parent identity and epoch boundaries.
+  - In addition, combine/refresh with live in-memory metrics from `m.subagentsActive`:
+    - Acquire `m.subagentsMu.Lock()`.
+    - For subagents currently in `m.subagentsActive`, read live `startTime`, `turnCount`, `toolUseCount`, `totalTokens`, and current status to present up-to-the-millisecond duration and turn counts for active agents.
+    - Release `m.subagentsMu.Unlock()`.
+- Filter records according to `status`:
+  - `"active"`: status is `"running"` or `"queued"`.
+  - `"all"`: all records.
+  - Specific status: case-insensitive match on `record.Status`.
+- Sort by `created_at DESC` (or maintain creation order).
+- Enforce `limit`.
+
+#### Formatting Output
+Format structured JSON response:
+```json
+{
+  "summary": {
+    "total_matching": 2,
+    "total_active": 2,
+    "running_count": 1,
+    "queued_count": 1
+  },
+  "subagents": [
+    {
+      "agent_id": "subagent-parent-123",
+      "subagent_type": "general-purpose",
+      "description": "run unit tests",
+      "status": "running",
+      "started_at": "2026-06-02T10:00:00Z",
+      "elapsed_seconds": 42.5,
+      "turn_count": 3,
+      "tool_uses": 5
+    }
+  ]
+}
+```
+Return as `ai.TextContent` in `agent.AgentToolResult`.
+
+#### Registration in Public Tools & Child Exclusion
+- In `router-proxy/internal/managed/embedded_subagent_public_tools.go`:
+  Update `EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool`:
+  ```go
+  func (m *Manager) EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool {
+      return []agent.AgentTool{
+          m.embeddedSubagentTool(parent),
+          m.embeddedGetSubagentResultTool(parent),
+          m.embeddedSteerSubagentTool(parent),
+          m.embeddedListSubagentsTool(parent),
+      }
+  }
+  ```
+- Child sessions construct their toolset in `NewEmbeddedSubagentTools(cwd)` (`embedded_subagent_tools.go`). It only registers `read`, `edit`, `write`, `bash`. Neither `subagent`, `get_subagent_result`, `steer_subagent`, nor `list_subagents` are registered in child sessions.
+- In `router-proxy/internal/managed/supervisor.go`:
+  Add `"list_subagents"` to `fixedSubagentsTools`:
+  ```go
+  var fixedSubagentsTools = []string{"subagent", "get_subagent_result", "steer_subagent", "list_subagents"}
+  ```
+- In `router-proxy/internal/store/workflow_tools.go`:
+  Add `list_subagents` definition to `CanonicalWorkflowTools`.
+
+---
+
+### 3.2 Component 2: Enriched Completion Notification (`embedded_subagent_wake.go` & `embedded_subagent_results.go`)
+
+#### Querying Active Siblings in `DeliverSubagentParentWake`
+In `router-proxy/internal/managed/embedded_subagent_wake.go`:
+- Before building the mailbox envelope in `deliverSubagentMailboxNotificationWithContext(ctx context.Context, parent store.EmbeddedBinding, record store.ManagedSubagentRecord)`:
+  - Query all subagents for the parent: `allChildren, err := m.store.ManagedSubagents(ctx, parent)`.
+  - Filter for active siblings:
+    ```go
+    var activeSiblings []store.ManagedSubagentRecord
+    if err == nil {
+        for _, child := range allChildren {
+            if child == nil {
+                continue
+            }
+            // Strictly exclude the subagent that just completed
+            if child.AgentID == record.AgentID {
+                continue
+            }
+            if child.Status == "running" || child.Status == "queued" {
+                activeSiblings = append(activeSiblings, *child)
+            }
+        }
+    }
     ```
-  - Register migration `099_workflow_state_goal.sql` in `router-proxy/internal/store/store.go`.
-- [ ] **1.3 Store Model & Validation**:
-  - In `router-proxy/internal/store/workflow_states.go`:
-    - Add constant `maxWorkflowStateGoalBytes = 4000`.
-    - Add `Goal string `json:"goal"`` to `WorkflowState`.
-    - Add `Goal string `json:"goal"`` to `WorkflowStateRequest`.
-    - In `validateWorkflowStateRequest`, validate `len([]byte(req.Goal)) <= maxWorkflowStateGoalBytes`.
-- [ ] **1.4 Store CRUD SQL**:
-  - Update all SQL queries in `router-proxy/internal/store/workflow_states.go` and `router-proxy/internal/store/workflows.go`:
-    - `CreateWorkflowState`: insert `goal`.
-    - `UpdateWorkflowState`: update `goal`.
-    - `GetWorkflowState`, `ListWorkflowStates`, `ListWorkflowStatesByWorkflow`, `GetWorkflowWithStates`: select `goal` column and scan into `WorkflowState.Goal`.
-- [ ] **1.5 Validation**: Run `go test ./router-proxy/internal/store/...` to confirm all tests pass.
+  - Pass `activeSiblings` into the formatter:
+    `body := FormatSubagentWakePromptWithActiveSiblings(record, activeSiblings)`
+
+#### Prompt Formatter Enhancement
+In `router-proxy/internal/managed/embedded_subagent_results.go`:
+- Maintain `FormatSubagentWakePrompt(record store.ManagedSubagentRecord)` for backwards compatibility:
+  ```go
+  func FormatSubagentWakePrompt(record store.ManagedSubagentRecord) string {
+      return FormatSubagentWakePromptWithActiveSiblings(record, nil)
+  }
+  ```
+- Introduce `FormatSubagentWakePromptWithActiveSiblings(record store.ManagedSubagentRecord, activeSiblings []store.ManagedSubagentRecord) string`:
+  - Format base preview:
+    ```
+    [Subagent Completed] Task <agent_id> (<desc>) finished with status <status>: <preview>
+    ```
+  - If `len(activeSiblings) > 0`:
+    Append sibling block:
+    ```
+    Active subagents still running (<N>):
+    - <sibling.AgentID> (<desc>): <status> (<duration>)
+    ```
+    Where duration is formatted using `FormatSubagentDurationSeconds(sibling.DurationSeconds)`.
+  - Append call-to-action & footer:
+    ```
+    Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.
+
+    ---
+    *Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*
+    ```
+  - If `len(activeSiblings) == 0`:
+    Omit the active subagents block entirely, keeping the prompt clean and identical to prior formatting.
 
 ---
 
-### Phase 2: HTTP Transport Layer
-*Goal*: Expose `goal` through REST endpoints for workflow states and workflow bundles, with proper payload parsing and response serialization.
+## 4. Tests & Regression Prevention Strategy
 
-- [ ] **2.1 Test-First (TDD)**:
-  - Add transport tests in `router-proxy/internal/transport/workflow_states_http_test.go`:
-    - Test POST `/v1/workflow-states` with `{"goal": "Finish phase 1"}` creates state and returns `goal` in JSON.
-    - Test PUT `/v1/workflow-states/{id}` updates `goal`.
-    - Test GET `/v1/workflow-states/{id}` returns `goal`.
-    - Test validation errors (e.g. goal > 4000 bytes) return HTTP 400.
-  - In `router-proxy/internal/transport/workflows_http_test.go`:
-    - Verify workflow bundle creation/update preserves state `goal`.
-- [ ] **2.2 Transport Handlers**:
-  - In `router-proxy/internal/transport/workflow_states_http.go`:
-    - Ensure request payload unmarshals `goal` into `WorkflowStateRequest`.
-    - Ensure JSON response representations include `goal`.
-  - In `router-proxy/internal/transport/workflows_http.go`:
-    - Ensure state objects within workflow endpoints serialize and deserialize `goal`.
-- [ ] **2.3 Validation**: Run `go test ./router-proxy/internal/transport/...` to confirm HTTP endpoints adhere to the contract.
+Per the mandatory dev-loop requirements, integration tests that exercise real within-service paths and prevent regressions are mandatory.
 
----
+### 4.1 Unit & Formatting Tests
+File: `router-proxy/internal/managed/embedded_subagent_results_test.go`
+- `TestFormatSubagentWakePromptWithActiveSiblings_NoSiblings`:
+  - Proves wake prompt matches standard single-completion format with no spurious sibling section.
+- `TestFormatSubagentWakePromptWithActiveSiblings_MultipleActiveSiblings`:
+  - Verifies `Active subagents still running (2):` block is generated with accurate agent IDs, descriptions, statuses, and elapsed durations.
 
-### Phase 3: Runtime Activation & Lifecycle
-*Goal*: Automatically synchronize agent goal configuration upon entering, transitioning, or exiting workflow states.
+### 4.2 Public Tool Schema & Construction Tests
+File: `router-proxy/internal/managed/embedded_subagent_public_tools_test.go`
+- Update `TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion`:
+  - Assert `EmbeddedSubagentPublicTools` returns 4 tools: `subagent`, `get_subagent_result`, `steer_subagent`, `list_subagents`.
+  - Assert `list_subagents` parameter schema: `status` (string), `limit` (integer).
+  - Verify child tools (`NewEmbeddedSubagentTools`) strictly exclude `list_subagents`.
 
-- [ ] **3.1 Test-First (TDD)**:
-  - Add lifecycle tests in `router-proxy/internal/managed/embedded_workflow_transition_test.go` and `router-proxy/internal/managed/embedded_workflow_activation_test.go`:
-    - Test state transition to a state with non-empty goal: agent goal is updated with `Enabled: true`, `Goal: state.Goal`, `GoalLockEnabled: true`.
-    - Test state transition to a state with empty goal: agent goal is disabled (`Enabled: false, Goal: "", GoalLockEnabled: false`).
-    - Test workflow exit (`action="exit"`): agent goal is deactivated (`Enabled: false, Goal: "", GoalLockEnabled: false`).
-  - Add transport lifecycle tests in `router-proxy/internal/transport/managed_http_test.go`:
-    - Test assigning workflow state via HTTP `/v1/managed-agents/{id}/workflow-state` synchronizes goal policy to agent session.
-    - Test clearing workflow state via HTTP deactivates goal.
-- [ ] **3.2 Manager Lifecycle Sync**:
-  - In `router-proxy/internal/store/managed.go` / `router-proxy/internal/managed/`:
-    - Coordinate goal policy updates alongside `SetManagedAgentActiveWorkflowState`.
-    - If target state has `state.Goal != ""`:
-      ```go
-      ManagedGoalConfig{
-          Enabled: true,
-          Goal:    state.Goal,
-          Settings: store.ManagedGoalSettings{
-              GoalLockEnabled: true,
-          },
-      }
-      ```
-    - If target state has `state.Goal == ""` or is cleared:
-      ```go
-      ManagedGoalConfig{
-          Enabled: false,
-          Goal:    "",
-          Settings: store.ManagedGoalSettings{
-              GoalLockEnabled: false,
-          },
-      }
-      ```
-- [ ] **3.3 State Transition Execution**:
-  - In `router-proxy/internal/managed/embedded_workflow_transition.go`:
-    - When handling `"transition"`: look up target `WorkflowState`. If `targetState.Goal != ""`, apply locked goal configuration; otherwise deactivate goal.
-    - When handling `"exit"`: deactivate goal policy and unlock.
-  - In `router-proxy/internal/transport/managed_http.go`:
-    - Ensure manual workflow state assignment or clearing triggers goal synchronization.
-- [ ] **3.4 Validation**: Run `go test -run 'TestWorkflow.*' ./router-proxy/internal/managed/...` and `./router-proxy/internal/transport/...`.
+### 4.3 Mandatory Within-Service Integration Tests
+File: `router-proxy/internal/managed/embedded_subagent_public_tools_test.go` and `embedded_subagent_wake_test.go`
+1. **`TestListSubagentsTool_ExecutionAndFiltering`** (Integration):
+   - Setup: Real SQLite store, Manager instance with faux provider.
+   - Spawn multiple subagents: one running, one queued, one completed, one failed.
+   - Execute `list_subagents` with:
+     - Default status (`"active"`): returns running and queued subagents only; verifies counts.
+     - Filter `"all"`: returns all subagents.
+     - Filter `"completed"`: returns only the completed subagent.
+     - Limit: verify limit clamping and truncation.
+   - Verify caller parent boundary: Parent A cannot see Parent B's subagents (cross-parent fence isolation).
+2. **`TestDeliverSubagentParentWake_WithActiveSiblings_Integration`** (Integration):
+   - Setup: Real parent agent in SQLite store.
+   - Create 3 subagent records under parent: Child 1 (completed), Child 2 (running), Child 3 (queued).
+   - Trigger `DeliverSubagentParentWake` for Child 1.
+   - Inspect mailbox envelope enqueued in the store for the parent agent.
+   - Assert envelope body contains `[Subagent Completed] Task child-1 ...`.
+   - Assert envelope body contains `Active subagents still running (2):` with Child 2 and Child 3 details.
+   - Assert Child 1 is NOT included in the active siblings list.
+3. **`TestDeliverSubagentParentWake_WithoutActiveSiblings_Integration`** (Integration):
+   - Setup: Real parent agent in SQLite store with single subagent (Child 1).
+   - Trigger `DeliverSubagentParentWake` for Child 1.
+   - Assert envelope body does NOT contain `Active subagents still running`.
 
 ---
 
-### Phase 4: Goal Lock Enforcement
-*Goal*: Prevent worker agents from modifying or disabling state-mandated goals while active in a workflow state with a goal.
+## 5. Implementation Phases & Step-by-Step Execution
 
-- [ ] **4.1 Test-First (TDD)**:
-  - Add tests in `router-proxy/internal/managed/managed_goal_projection_test.go`:
-    - Test worker calling `goal(action="set", goal="worker goal")` when agent is in a workflow state with a goal returns error:
-      `goal is locked by active workflow state "<StateName>"`
-    - Test worker calling `goal(action="off")` when agent is in a workflow state with a goal returns error:
-      `goal is locked by active workflow state "<StateName>"`
-    - Test worker calling `goal(action="status")` when locked is PERMITTED and returns active status.
-    - Test worker calling `goal(action="set")` when in a workflow state without a goal (`state.Goal == ""`) is permitted.
-    - Test worker calling `goal(action="set")` when not in any workflow state is permitted.
-- [ ] **4.2 Enforcement Implementation**:
-  - In `router-proxy/internal/managed/managed_goal_projection.go` (`executeManagedGoalControl`):
-    - Check active workflow state of the agent.
-    - If agent has active workflow state and `state.Goal != ""`:
-      - If `invocation.Arguments["action"] == "set"` or `action == "off"`:
-        ```go
-        return RootControlHandlerResult{}, fmt.Errorf("goal is locked by active workflow state %q", state.Name)
-        ```
-      - If `action == "status"`: allow execution.
-- [ ] **4.3 Validation**: Run `go test ./router-proxy/internal/managed/...` to verify goal lock and edge cases.
-
----
-
-### Phase 5: Web UI
-*Goal*: Support workflow state goals in the frontend, enabling operators to configure, edit, preview, and visualize goals on states.
-
-- [ ] **5.1 Domain Types**:
-  - In `web/router-ui-react/src/domain/workflow-states.ts`:
-    - Add `goal?: string;` to `WorkflowState`.
-    - Add `goal?: string;` to `WorkflowStateInput`.
-- [ ] **5.2 Test-First (TDD)**:
-  - Add tests in `web/router-ui-react/src/components/WorkflowStateNode.test.tsx`:
-    - Renders `<span className="node-badge badge-goal" title={state.goal}><i className="fa-solid fa-flag" aria-hidden="true" /> Goal</span>` when `state.goal` is present.
-    - Does not render badge when `state.goal` is empty or undefined.
-  - Add tests in `web/router-ui-react/src/components/StateConfigModal.test.tsx`:
-    - Shows "Configure Goal" button when `goal` is empty.
-    - Clicking "Configure Goal" opens `GoalEditorDialog`.
-    - When `goal` is set, displays preview box with goal text, "Edit Goal" button, and "Clear Goal" button.
-    - Saving `GoalEditorDialog` updates draft state and emits updated `goal` in `onSave`.
-    - Clicking "Clear Goal" sets `goal` to `""`.
-- [ ] **5.3 Component Implementation**:
-  - In `web/router-ui-react/src/components/WorkflowStateNode.tsx`:
-    - Add goal badge rendering condition when `Boolean(state.goal)`.
-  - In `web/router-ui-react/src/components/StateConfigModal.tsx`:
-    - Initialize local `goal: string` from `state.goal ?? ""`.
-    - Add goal management UI section reusing `GoalEditorDialog`.
-    - Support save from `GoalEditorDialog` and clear action.
-    - Pass `goal` in `updated` state to `onSave`.
-  - In `web/router-ui-react/src/components/WorkflowStatesPage.tsx`:
-    - Include `goal` in state creation/edit forms and state table/summary list items.
-- [ ] **5.4 Validation**:
-  - Run frontend test suite: `npm --prefix web/router-ui-react test`.
-  - Run frontend build: `npm --prefix web/router-ui-react run build`.
-
----
-
-### Phase 6: Verification & Robot Review
-*Goal*: End-to-end integration validation across all layers, followed by robot code review.
-
-- [ ] **6.1 End-to-End Behavioral Test**:
-  - Add behavioral functional test in `router-proxy/internal/managed/`:
-    - Create workflow with two states: "State A" (goal: "Fix bug") and "State B" (no goal).
-    - Activate "State A" on agent -> verify agent goal is locked to "Fix bug".
-    - Worker attempts to change goal -> verify rejected with exact error format.
-    - Worker queries status -> verify permitted.
-    - Agent transitions to "State B" -> verify goal is cleared and unlocked.
-    - Worker calls `goal(action="set")` -> verify now permitted.
-- [ ] **6.2 Full Test Suite & Linting**:
-  - Backend: `go test -v -race ./router-proxy/...`
-  - Frontend: `npm --prefix web/router-ui-react run test` and `npm --prefix web/router-ui-react run build`
-- [ ] **6.3 Robot Review**:
-  - Run robot review on all modified files using Wolfgang's reviewer persona.
-  - Address any findings or polish.
-
----
-
-## 3. Parallel Execution Opportunities
-
-The implementation can be accelerated by executing independent workstreams in parallel:
-
-```
-[Track A: Backend]                               [Track B: Frontend]
-Phase 1: DB & Store (099, CRUD, models)          Phase 5.1: Domain model update (workflow-states.ts)
-           │                                                │
-Phase 2: HTTP Transport Layer                    Phase 5.2 & 5.3: UI Components
-           │                                     (WorkflowStateNode, StateConfigModal)
-Phase 3 & 4: Runtime Sync & Goal Lock                       │
-           │                                     Phase 5.4: Frontend tests & Vite build
-           └───────────────────────┬────────────────────────┘
-                                   ▼
-                    Phase 6: E2E Verification & Review
-```
-
-1. **Phase 1 (Store) & Phase 5.1 (UI Domain Types)**:
-   - Defining `goal?: string` in `workflow-states.ts` can be done concurrently with DB migration and Store CRUD.
-2. **Phase 2 (HTTP) & Phase 5.2/5.3 (Web UI Components)**:
-   - Web UI development (`WorkflowStateNode.tsx`, `StateConfigModal.tsx`) using mocked `WorkflowState` objects can run in parallel with HTTP transport endpoints (`workflow_states_http.go`).
-3. **Phase 3 (Lifecycle) & Phase 4 (Lock Enforcement)**:
-   - Transition lifecycle logic (`embedded_workflow_transition.go`) and worker tool control locking (`executeManagedGoalControl`) touch distinct code paths within `router-proxy/internal/managed/` and can be authored or tested concurrently.
-
----
-
-## 4. TDD & Verification Checklists
-
-Every phase strictly enforces write-tests-first:
-- [ ] Write failing unit test for store validation and CRUD before implementing `099_workflow_state_goal.sql` and `workflow_states.go`.
-- [ ] Write failing HTTP transport test before adding JSON parsing in `workflow_states_http.go`.
-- [ ] Write failing lifecycle transition test before synchronizing goal config in `embedded_workflow_transition.go`.
-- [ ] Write failing goal control test expecting `goal is locked by active workflow state "<StateName>"` before adding enforcement in `executeManagedGoalControl`.
-- [ ] Write failing Vitest UI component tests before updating `StateConfigModal.tsx` and `WorkflowStateNode.tsx`.
-- [ ] All tests must run with deterministic mocks, no external network calls or LLM API calls.
+1. **Step 1 (Red tests for prompt formatting)**:
+   - Add unit tests in `embedded_subagent_results_test.go` for `FormatSubagentWakePromptWithActiveSiblings`.
+2. **Step 2 (Enriched wake prompt formatting implementation)**:
+   - Implement `FormatSubagentWakePromptWithActiveSiblings` in `embedded_subagent_results.go`.
+   - Update `DeliverSubagentParentWake` in `embedded_subagent_wake.go` to query active siblings from store and pass to formatter.
+3. **Step 3 (Integration tests for wake delivery)**:
+   - Add integration tests in `embedded_subagent_wake_test.go` proving sibling formatting when siblings exist vs single subagent completion.
+4. **Step 4 (Red tests for `list_subagents` tool schema and execution)**:
+   - Update `embedded_subagent_public_tools_test.go` to assert 4 public tools and child exclusion.
+   - Add `TestListSubagentsTool_ExecutionAndFiltering` test cases.
+5. **Step 5 (Implement `list_subagents` tool)**:
+   - Implement `embeddedListSubagentsSchema` and `embeddedListSubagentsTool` in `embedded_subagent_public_tools.go`.
+   - Register in `EmbeddedSubagentPublicTools`.
+   - Update `fixedSubagentsTools` in `supervisor.go` and `CanonicalWorkflowTools` in `workflow_tools.go`.
+6. **Step 6 (Full validation, coverage & regression verification)**:
+   - Run `go test -v ./internal/managed/...` and `go test -v ./...`.
+   - Ensure clean build, zero regressions, and full coverage of new logic.

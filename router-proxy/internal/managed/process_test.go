@@ -182,10 +182,10 @@ func TestExpectedManagedActiveToolsIncludesBuiltinCodingTools(t *testing.T) {
 	require.NoError(t, err)
 
 	active := expectedManagedActiveTools(manifest)
-	for _, name := range []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent"} {
+	for _, name := range []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents"} {
 		require.Contains(t, active, name)
 	}
-	require.Len(t, active, len(manifest.Tools)+7)
+	require.Len(t, active, len(manifest.Tools)+8)
 }
 
 func TestManagedStderrTailRetainsAUsefulRedactedExitReason(t *testing.T) {
