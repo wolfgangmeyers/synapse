@@ -2,7 +2,7 @@ export interface ModelSummary { provider: string; id: string; name?: string }
 export interface ModelProjection { currentModel?: ModelSummary; availableModels?: ModelSummary[]; totalCount?: number; truncated?: boolean }
 export interface AgentModelFields { current_model?: ModelSummary; available_models?: ModelSummary[]; model_catalog_total_count: number; model_catalog_truncated: boolean }
 export interface ModelAgent { agent_id: string; instance_id?: string; current_model?: unknown; available_models?: unknown; model_catalog_total_count?: number; model_catalog_truncated?: boolean; [key: string]: unknown }
-const MAX_MODEL_SUMMARIES = 1_000;
+const MAX_MODEL_SUMMARIES = 4_096;
 const REJECTIONS = new Set(["invalid_model", "model_registry_failed", "model_registry_unavailable", "model_switch_failed", "model_switch_rejected", "model_switch_unavailable", "model_unavailable", "model_control_not_allowed", "unsupported_model_control"]);
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function safeInteger(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value); }

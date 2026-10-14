@@ -191,6 +191,28 @@ describe("direct HTTP transport", () => {
       ],
     }));
     await expect(invalidCatalogClient.models()).rejects.toMatchObject({ code: "invalid_response" });
+
+    const maxCatalogData = {
+      auth_revision: 1,
+      models: Array.from({ length: 4_096 }, (_, index) => ({
+        provider: "cursor" as const,
+        id: `cursor-model-${index}`,
+        name: `Cursor Model ${index}`,
+        available: true,
+      })),
+      default_model: null,
+    };
+    const maxCatalogClient = createHttpClient("http://router.test", async () => response(maxCatalogData));
+    await expect(maxCatalogClient.models()).resolves.toEqual(maxCatalogData);
+
+    const oversizedCatalogClient = createHttpClient("http://router.test", async () => response({
+      ...maxCatalogData,
+      models: [
+        ...maxCatalogData.models,
+        { provider: "cursor", id: "cursor-model-4096", name: "Oversized", available: true },
+      ],
+    }));
+    await expect(oversizedCatalogClient.models()).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("accepts an RFC3339Nano managed-agent snapshot", async () => {

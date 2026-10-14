@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -854,6 +855,19 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	}
 	_, err = durable.CommitManagedProviderSnapshot(ctx, providers, dupModels)
 	require.ErrorContains(t, err, "provider model is invalid")
+
+	// Snapshot exceeding maxManagedProviderModels (4096) is rejected
+	tooManyModels := make([]ManagedProviderModel, 4097)
+	for i := range tooManyModels {
+		tooManyModels[i] = ManagedProviderModel{
+			Provider:  "cursor",
+			ID:        fmt.Sprintf("cursor-%d", i),
+			Name:      fmt.Sprintf("Cursor %d", i),
+			Available: true,
+		}
+	}
+	_, err = durable.CommitManagedProviderSnapshot(ctx, providers, tooManyModels)
+	require.ErrorContains(t, err, "provider model snapshot is too large")
 
 	var secretRows int
 	require.NoError(t, durable.db.QueryRow(`SELECT count(*) FROM pragma_table_info('managed_provider_status') WHERE lower(name) LIKE '%token%' OR lower(name) LIKE '%secret%' OR lower(name) LIKE '%credential%'`).Scan(&secretRows))

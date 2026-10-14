@@ -320,7 +320,7 @@ function savedModel(value: unknown): { provider: string; id: string; name?: stri
 }
 function models(value: unknown): ModelsResponse {
   const root = recordValue(value); const defaultModel = savedModel(root?.default_model);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 256 || !root.models.every(providerModel) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || !root.models.every(providerModel) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
   return { auth_revision: root.auth_revision, models: root.models, default_model: defaultModel };
 }
 function defaultModel(value: unknown): DefaultModelResponse {
