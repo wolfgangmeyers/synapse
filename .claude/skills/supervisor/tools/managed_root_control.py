@@ -46,7 +46,7 @@ TOOLS = Path(__file__).resolve().parent
 ROOT_OPERATION_CONTRACT: dict[str, dict[str, frozenset[str] | None | bool]] = {
     "goal.control": {"fields": frozenset({"action", "goal", "settings"}), "actions": frozenset({"set", "status", "off"}), "available": True},
     "goal.snooze": {"fields": frozenset(), "actions": None, "available": True},
-    "context.control": {"fields": frozenset({"action", "policy", "customInstructions", "postCompactionNotification"}), "actions": frozenset({"status", "set_policy", "compact"}), "available": True},
+    "context.control": {"fields": frozenset({"action"}), "actions": frozenset({"status"}), "available": True},
     "ops.git_status": {"fields": frozenset({"action", "task"}), "actions": frozenset({"status"}), "available": True},
     "mail.send": {"fields": frozenset({"recipient", "body", "subject"}), "actions": None, "available": True},
     "mail.parent": {"fields": frozenset({"message"}), "actions": None, "available": False},

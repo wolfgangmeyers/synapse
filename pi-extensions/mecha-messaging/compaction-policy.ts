@@ -24,7 +24,7 @@ export type CompactionPolicy = { tiers: CompactionTier[]; postCompactionNotifica
 export type CompactionUsage = { percent: number | null; tokens: number | null; contextWindow: number; model?: ModelInput };
 type CompactionUsageOrPercent = number | CompactionUsage;
 
-const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
+const CONTEXT_THRESHOLD_SUFFIX = "Save key state to scratchpad before context reset; use workers or subagents for bounded side work to avoid context bloat.";
 export const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
 export const COMPACTION_POLICY_FILE_ENV = "MECHA_PI_COMPACTION_POLICY_FILE";
 export const DEFAULT_COMPACTION_POLICY_PATH = path.join(os.homedir(), ".mecha-developer", "compaction-policy.json");
@@ -34,22 +34,22 @@ const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
-  Object.freeze({ percent: 40, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
-  Object.freeze({ percent: 50, guidance: "compact soon, ideally at the next clean boundary" }),
-  Object.freeze({ percent: 60, guidance: "compact when practical; each call is getting meaningfully more expensive" }),
-  Object.freeze({ percent: 70, guidance: "strongly consider compacting before more expensive work" }),
-  Object.freeze({ percent: 80, guidance: "compact as soon as practical; the session is now very expensive" }),
-  Object.freeze({ percent: 90, guidance: "mandatory stop and compact before continuing", mandatory: true }),
+  Object.freeze({ percent: 40, guidance: "consider saving key state in scratchpad at a reasonable stopping point before context reset" }),
+  Object.freeze({ percent: 50, guidance: "save key state in scratchpad soon, preparing for context reset" }),
+  Object.freeze({ percent: 60, guidance: "save key state in scratchpad; session is approaching context reset" }),
+  Object.freeze({ percent: 70, guidance: "strongly recommend saving key findings and plan in scratchpad before context reset" }),
+  Object.freeze({ percent: 80, guidance: "approaching automatic context reset boundary; record key state in scratchpad immediately" }),
+  Object.freeze({ percent: 90, guidance: "mandatory stop: save key state in scratchpad before context reset occurs", mandatory: true }),
 ]);
 // Opus 5 reuses the small-context guidance wording verbatim at lower percentages;
-// mandatory compaction lands at 40% instead of 90%.
+// mandatory context reset lands at 40% instead of 90%.
 const OPUS_LEVEL_PERCENTS = Object.freeze([15, 20, 25, 30, 35, 40]);
 export const GEMINI_FLASH_CONTEXT_LEVELS = Object.freeze([
-  Object.freeze({ percent: 15, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
-  Object.freeze({ percent: 20, guidance: "compact soon, ideally at the next clean boundary" }),
-  Object.freeze({ percent: 25, guidance: "compact when practical; each call is getting meaningfully more expensive" }),
-  Object.freeze({ percent: 30, guidance: "strongly consider compacting before more expensive work" }),
-  Object.freeze({ percent: 35, guidance: "mandatory stop and compact before continuing", mandatory: true }),
+  Object.freeze({ percent: 15, guidance: "consider saving key state in scratchpad at a reasonable stopping point before context reset" }),
+  Object.freeze({ percent: 20, guidance: "save key state in scratchpad soon, preparing for context reset" }),
+  Object.freeze({ percent: 25, guidance: "save key state in scratchpad; session is approaching context reset" }),
+  Object.freeze({ percent: 30, guidance: "strongly recommend saving key findings and plan in scratchpad before context reset" }),
+  Object.freeze({ percent: 35, guidance: "approaching automatic context reset boundary; record key state in scratchpad immediately", mandatory: true }),
 ]);
 const OPUS_CONTEXT_LEVELS = Object.freeze(
   SMALL_CONTEXT_LEVELS.map((level, index) => Object.freeze({ ...level, percent: OPUS_LEVEL_PERCENTS[index] })),
@@ -58,10 +58,10 @@ const OPUS_CONTEXT_LEVELS = Object.freeze(
 // fallback. The upper bound is inclusive, so a window exactly at a boundary
 // uses that tier's ladder.
 const LARGE_CONTEXT_LEVELS = Object.freeze([
-  Object.freeze({ percent: 20, guidance: "large-context awareness only; no compaction needed yet" }),
-  Object.freeze({ percent: 30, guidance: "compact soon, ideally at the next clean boundary" }),
-  Object.freeze({ percent: 40, guidance: "large-context calls are expensive; compact as soon as practical" }),
-  Object.freeze({ percent: 45, guidance: "mandatory stop and compact before the session reaches 500k tokens", mandatory: true }),
+  Object.freeze({ percent: 20, guidance: "large-context awareness only; no context reset needed yet" }),
+  Object.freeze({ percent: 30, guidance: "save plan and progress in scratchpad before approaching context reset boundary" }),
+  Object.freeze({ percent: 40, guidance: "approaching context reset boundary; record key findings and plan in scratchpad" }),
+  Object.freeze({ percent: 45, guidance: "approaching automatic context reset boundary; record key state in scratchpad immediately", mandatory: true }),
 ]);
 export const DEFAULT_COMPACTION_POLICY: CompactionPolicyInput = Object.freeze({
   tiers: Object.freeze([

@@ -332,24 +332,22 @@ test("inline allowance normalizes functions aliases and leaves the pool unchange
   assert.equal(policy.grant("edit", 1).remainingPool, 4);
 });
 
-test("mecha_context reports compaction as deferred until an idle settled boundary", async () => {
-  let compactCalls = 0;
-  let idle = false;
+test("mecha_context reports context reset and scratchpad status, and rejects compact action", async () => {
   const fixture = createFixture();
-  fixture.context.isIdle = () => idle;
-  fixture.context.compact = () => { compactCalls += 1; };
   await sessionStart(fixture);
 
-  const deferred = await execute(fixture, "mecha_context", {
-    action: "compact",
-    customInstructions: "preserve the handoff",
+  const status = await execute(fixture, "mecha_context", {
+    action: "status",
   });
-  assert.equal(deferred.details?.compactState, "deferred_until_agent_settled");
-  assert.equal(compactCalls, 0);
+  assert.equal(status.isError, undefined);
+  assert.equal(status.details?.system, "context_reset+scratchpad");
+  assert.equal(status.details?.warningThresholdPercent, 70);
+  assert.equal(status.details?.resetThresholdPercent, 80);
+  assert.ok(status.details?.guidance);
 
-  for (const handler of fixture.handlers.get("agent_settled") ?? []) await handler({}, fixture.context);
-  assert.equal(compactCalls, 0);
-  idle = true;
-  for (const handler of fixture.handlers.get("agent_settled") ?? []) await handler({}, fixture.context);
-  assert.equal(compactCalls, 1);
+  const compactAttempt = await execute(fixture, "mecha_context", {
+    action: "compact",
+  });
+  assert.equal(compactAttempt.isError, true);
+  assert.match(compactAttempt.content[0].text, /compaction has been replaced/);
 });

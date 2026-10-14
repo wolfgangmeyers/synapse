@@ -18,7 +18,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "mecha_mailbox_send", Name: "mecha_mailbox_send", Category: "lifecycle", Description: "Send async mailbox messages"},
 	{ID: "goal", Name: "goal", Category: "lifecycle", Description: "Inspect or control goals"},
 	{ID: "goal_snooze", Name: "goal_snooze", Category: "lifecycle", Description: "Snooze goal evaluations"},
-	{ID: "mecha_context", Name: "mecha_context", Category: "lifecycle", Description: "Manage context compaction"},
+	{ID: "mecha_context", Name: "mecha_context", Category: "lifecycle", Description: "Inspect context usage and reset status"},
 	{ID: "mecha_reminder", Name: "mecha_reminder", Category: "lifecycle", Description: "Schedule reminders"},
 	{ID: "mecha_workflow_transition", Name: "mecha_workflow_transition", Category: "lifecycle", Description: "Transition workflow state or exit workflow"},
 	{ID: "context_reset", Name: "context_reset", Category: "lifecycle", Description: "Reset agent context"},

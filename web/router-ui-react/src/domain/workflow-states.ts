@@ -37,14 +37,39 @@ export interface WorkflowStatePosition {
   ui_pos_y: number;
 }
 
+export type WorkflowVariableType = "text" | "textarea";
+
+export interface WorkflowVariableDefinition {
+  name: string;
+  label: string;
+  description?: string;
+  type: WorkflowVariableType;
+  required?: boolean;
+  default_value?: string;
+}
+
 export interface Workflow {
   id: string;
   name: string;
   description: string;
   entry_state_id: string | null;
+  variables?: WorkflowVariableDefinition[];
   created_at: string;
   updated_at: string;
   state_count?: number;
+}
+
+export interface CreateWorkflowRequest {
+  name: string;
+  description?: string;
+  variables?: WorkflowVariableDefinition[];
+}
+
+export interface UpdateWorkflowRequest {
+  name?: string;
+  description?: string;
+  entry_state_id?: string | null;
+  variables?: WorkflowVariableDefinition[];
 }
 
 export interface WorkflowWithStates {
@@ -94,7 +119,7 @@ export const KNOWN_WORKFLOW_TOOLS: KnownToolDefinition[] = [
   { id: "mecha_mailbox_send", name: "mecha_mailbox_send", category: "lifecycle", description: "Send async mailbox messages" },
   { id: "goal", name: "goal", category: "lifecycle", description: "Inspect or control goals" },
   { id: "goal_snooze", name: "goal_snooze", category: "lifecycle", description: "Snooze goal evaluations" },
-  { id: "mecha_context", name: "mecha_context", category: "lifecycle", description: "Manage context compaction" },
+  { id: "mecha_context", name: "mecha_context", category: "lifecycle", description: "Inspect context usage and reset status" },
   { id: "mecha_reminder", name: "mecha_reminder", category: "lifecycle", description: "Schedule reminders" },
   { id: "mecha_workflow_transition", name: "mecha_workflow_transition", category: "lifecycle", description: "Transition workflow state or exit workflow" },
   { id: "context_reset", name: "context_reset", category: "lifecycle", description: "Reset agent context" },

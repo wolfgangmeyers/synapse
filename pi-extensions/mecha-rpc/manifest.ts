@@ -62,7 +62,7 @@ export const BASELINE_TOOL_NAMES = Object.freeze([
 const BASELINE_DEFINITION_SHA256: Readonly<Record<typeof BASELINE_TOOL_NAMES[number], string>> = Object.freeze({
   goal: "7beb0bc57b881d24f980bb721e1deb0805942e87aeb7777a458fc13811f092c6",
   goal_snooze: "c48cde2a484a5b70736fa37e3f1c736977109453f20b84192b7fb27968bd0b27",
-  mecha_context: "a6ae2502f76c2b5c1837bddcf8c8613e1f96fade26e7e37c89068a7070b844c8",
+  mecha_context: "b94a12b4d09d01e7ec155afb93e34087c2ae48da5c64f6eec818301db340f630",
   mecha_git: "ea52281c3d5dcb4311c571d3ce326a719545b7ffa74acacbc54b2b1226c9a9a5",
   mecha_mailbox_send: "4eab3aa0a26a699d314653f85e7fc5420eebcb2afa5a87bc48c5e372e9fe53b2",
   mecha_parent_message: "2eb0922dc3c0acad276229837c72ca829bfeee04be4ae0c5522cee464cec0da0",

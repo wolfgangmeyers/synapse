@@ -320,42 +320,11 @@ func (m *Manager) executeRootControlHandler(ctx context.Context, binding *manage
 	if !ok || arguments["action"] != "compact" {
 		return invokeRootControlHandler(ctx, handler, invocation, reconcile)
 	}
-	if reconcile {
-		return RootControlHandlerResult{}, errors.New("native Pi compaction outcome is unknown after recovery")
-	}
-	compact, ok := binding.rpc.(NativeCompactionRPC)
-	if !ok {
-		return RootControlHandlerResult{}, errors.New("managed Pi does not support native compaction")
-	}
-	instructions := ""
-	if value, present := arguments["customInstructions"]; present {
-		text, textOK := value.(string)
-		if !textOK {
-			return RootControlHandlerResult{}, errors.New("managed compaction instructions are invalid")
-		}
-		instructions = text
-	}
-	if err := compact.Compact(ctx, instructions); err != nil {
-		return RootControlHandlerResult{}, err
-	}
-	details := map[string]any{"action": "compact", "native_compaction": true}
-	if value, present := arguments["postCompactionNotification"]; present {
-		note, textOK := value.(string)
-		if !textOK {
-			return RootControlHandlerResult{}, errors.New("managed post-compaction notification is invalid")
-		}
-		if note != "" {
-			// Notification delivery is a post-success convenience. The completed
-			// compaction remains truthful even if Pi cannot append that handoff.
-			envelope := map[string]any{"protocol": "mecha.post-compaction/v1", "notification": note, "runtime_generation": invocation.Fence.RuntimeGeneration, "session_epoch": invocation.Fence.SessionEpoch, "manifest_sha256": invocation.Fence.ManifestHash}
-			if err := compact.PostCompactionNotification(ctx, envelope); err != nil {
-				details["post_compaction_notification"] = "unavailable"
-			} else {
-				details["post_compaction_notification"] = "delivered"
-			}
-		}
-	}
-	return RootControlHandlerResult{Status: "ok", Content: "Pi context compacted.", Details: details}, nil
+	return RootControlHandlerResult{
+		Status:       "error",
+		ErrorCode:    "COMPACTION_DEPRECATED",
+		ErrorMessage: "Compaction is deprecated; context reset and scratchpad are used instead",
+	}, nil
 }
 
 func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managedBinding, _ RootControlHandler, claim *store.ManagedControlHandlerClaim, result RootControlHandlerResult, executeErr error, alreadyCommitted bool) {
