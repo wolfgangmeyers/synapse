@@ -1,7 +1,7 @@
 const MAX_LINE_BYTES = 64 * 1024;
-const MAX_RESULT_BYTES = 128 * 1024;
+const MAX_RESULT_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024;
-const MAX_MODELS = 256;
+const MAX_MODELS = 4096;
 const PROVIDERS = new Set(["openai-codex", "google", "cursor", "google-vertex", "antigravity"]);
 const OPERATIONS = new Set(["models", "login", "logout"]);
 

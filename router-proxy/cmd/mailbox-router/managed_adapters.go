@@ -104,7 +104,7 @@ func (h fixedAuthHelper) Snapshot(ctx context.Context) ([]store.ManagedProviderS
 	command := exec.CommandContext(ctx, h.nodeExecutable, h.config.AuthHelperPath)
 	command.Env = h.environment()
 	command.Stdin = strings.NewReader(`{"operation":"models"}` + "\n")
-	stdout := &boundedHelperOutput{limit: 128 * 1024}
+	stdout := &boundedHelperOutput{limit: 2 * 1024 * 1024}
 	command.Stdout = stdout
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
@@ -178,7 +178,7 @@ func (b *boundedHelperOutput) Write(value []byte) (int, error) {
 }
 
 func decodeHelperSnapshot(raw []byte) ([]store.ManagedProviderStatus, []store.ManagedProviderModel, bool) {
-	if len(raw) == 0 || len(raw) > 128*1024 {
+	if len(raw) == 0 || len(raw) > 2*1024*1024 {
 		return nil, nil, false
 	}
 	var wire struct {
@@ -253,8 +253,8 @@ func (r *helperRun) Wait() error {
 func (r *helperRun) read(stdout io.Reader) {
 	defer close(r.events)
 	defer close(r.done)
-	scanner := bufio.NewScanner(io.LimitReader(stdout, 128*1024))
-	scanner.Buffer(make([]byte, 4*1024), 64*1024)
+	scanner := bufio.NewScanner(io.LimitReader(stdout, 2*1024*1024))
+	scanner.Buffer(make([]byte, 4*1024), 2*1024*1024)
 	for scanner.Scan() {
 		event, ok := decodeHelperEvent(scanner.Bytes())
 		if !ok {

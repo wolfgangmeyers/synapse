@@ -61,7 +61,7 @@ type ManagedProviderSnapshot struct {
 	Models       []ManagedProviderModel  `json:"models"`
 }
 
-const maxManagedProviderModels = 256
+const maxManagedProviderModels = 4096
 
 var managedProviderNames = map[string]bool{
 	"openai-codex":  true,

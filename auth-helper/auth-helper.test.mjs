@@ -113,6 +113,19 @@ test("catalog projection is deterministic, deduplicated, and excludes unavailabl
   });
 });
 
+test("catalog projection enforces MAX_MODELS limit of 4096", () => {
+  const models = Array.from({ length: 4096 }, (_, index) => ({
+    provider: "cursor",
+    id: `model-${index}`,
+    name: `Model ${index}`,
+    available: true,
+  }));
+  assert.equal(projectCatalog(models).models.length, 4096);
+  assert.throws(() => {
+    projectCatalog([...models, { provider: "cursor", id: "overflow", name: "Overflow", available: true }]);
+  }, /model catalog is too large/);
+});
+
 test("an unsupported OpenAI API-key credential is never treated as ChatGPT subscription auth", async () => {
   const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
   const authPath = join(home, "auth.json");
