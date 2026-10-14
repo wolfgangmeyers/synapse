@@ -256,6 +256,48 @@ func TestSubagentToolValidationAndUnsupportedArguments(t *testing.T) {
 	}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "message is required")
+
+	// 8. Invalid timeout
+	_, err = subTool.Execute(ctx, "v7", map[string]any{
+		"prompt":  "do work",
+		"timeout": 0,
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout must be an integer >= 1")
+
+	_, err = subTool.Execute(ctx, "v7b", map[string]any{
+		"prompt":  "do work",
+		"timeout": -10,
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout must be an integer >= 1")
+
+	// 9. Valid timeout accepted and defaults verified
+	validRes, err := subTool.Execute(ctx, "v8", map[string]any{
+		"prompt":  "do work",
+		"timeout": 120,
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, validRes.Content[0].(ai.TextContent).Text, "Agent started in background.")
+
+	// Verify default timeout is 600s (10m) when omitted
+	validDefault, err := subTool.Execute(ctx, "v9", map[string]any{
+		"prompt": "do work without timeout param",
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, validDefault.Content[0].(ai.TextContent).Text, "Agent started in background.")
+	var defChildID string
+	for _, l := range strings.Split(validDefault.Content[0].(ai.TextContent).Text, "\n") {
+		if strings.HasPrefix(l, "Agent ID: ") {
+			defChildID = strings.TrimPrefix(l, "Agent ID: ")
+		}
+	}
+	require.NotEmpty(t, defChildID)
+	mgr.subagentsMu.Lock()
+	defTask := mgr.subagentsRegistry[defChildID]
+	mgr.subagentsMu.Unlock()
+	require.NotNil(t, defTask)
+	assert.Equal(t, 10*time.Minute, defTask.timeout)
 }
 
 func TestSubagentRunningFourthPullThrottledAndTerminalUnlimited(t *testing.T) {
@@ -412,19 +454,19 @@ func TestSubagentForeignAndStaleIDsDenied(t *testing.T) {
 	}, nil)
 	require.Error(t, err, "foreign parent must be denied steer")
 
-	// 3. Stale epoch parent A cannot get_subagent_result
+	// 3. Stale epoch parent A CAN get_subagent_result (decoupled across epochs)
 	staleToolsA := mgr.EmbeddedSubagentPublicTools(staleA)
 	getStaleA := lookupTool(t, staleToolsA, "get_subagent_result")
 	_, err = getStaleA.Execute(ctx, "get-stale", map[string]any{"agent_id": childID}, nil)
-	require.Error(t, err, "stale parent must be denied get")
+	require.NoError(t, err, "subagent result retrieval succeeds across parent epoch")
 
-	// 4. Stale epoch parent A cannot steer_subagent
+	// 4. Stale epoch parent A CAN steer_subagent (decoupled across epochs)
 	steerStaleA := lookupTool(t, staleToolsA, "steer_subagent")
 	_, err = steerStaleA.Execute(ctx, "steer-stale", map[string]any{
 		"agent_id": childID,
-		"message":  "stale steer",
+		"message":  "epoch steer",
 	}, nil)
-	require.Error(t, err, "stale parent must be denied steer")
+	require.NoError(t, err, "subagent steer succeeds across parent epoch")
 
 	// 5. Non-existent child ID denied
 	getToolA := lookupTool(t, toolsA, "get_subagent_result")
