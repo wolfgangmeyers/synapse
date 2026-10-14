@@ -79,6 +79,11 @@ class ConversationHistoryTest {
         assertNull(parseHistoryResponse(wrongPeer.toString(), "android-owner", "peer"))
         assertNull(parseHistoryResponse(unknownRoot.toString(), "android-owner", "peer"))
 
+        val withNextBefore = JSONObject(valid.toString()).put("next_before", 42L)
+        assertNotNull(parseHistoryResponse(withNextBefore.toString(), "android-owner", "peer"))
+        val withNullNextBefore = JSONObject(valid.toString()).put("next_before", JSONObject.NULL)
+        assertNotNull(parseHistoryResponse(withNullNextBefore.toString(), "android-owner", "peer"))
+
         listOf("sequence", "id", "message_incarnation_id", "from", "to", "body", "created_at", "recorded_at", "attachments").forEach { key ->
             val message = valid.getJSONArray("messages").getJSONObject(0)
             message.remove(key)
@@ -404,7 +409,7 @@ class ConversationHistoryTest {
         val pending = message(
             "pending",
             sequence = 0,
-            createdAt = "2026-08-28T23:59:00Z",
+            createdAt = testTimestamp(60_000),
             direction = Direction.OUTGOING,
             deliveryStatus = OutboundDeliveryStatus.PENDING,
         )
@@ -490,7 +495,7 @@ class ConversationHistoryTest {
         id: String,
         incarnation: String = "",
         sequence: Long = 0,
-        createdAt: String = "2026-08-03T00:00:00.000Z",
+        createdAt: String = testTimestamp(),
         direction: Direction = Direction.INCOMING,
         deliveryStatus: OutboundDeliveryStatus = OutboundDeliveryStatus.NONE,
     ) = ChatMessage(
@@ -504,4 +509,10 @@ class ConversationHistoryTest {
         recipient = if (direction == Direction.OUTGOING) "peer" else "",
         deliveryStatus = deliveryStatus,
     )
+
+    private fun testTimestamp(offsetMs: Long = 0): String =
+        java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'")
+            .withZone(java.time.ZoneOffset.UTC)
+            .format(java.time.Instant.ofEpochMilli(System.currentTimeMillis() + offsetMs))
+
 }

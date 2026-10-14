@@ -83,7 +83,12 @@ internal fun parseHistoryResponse(
     expectedPeer: String? = null,
 ): HistoryResponse? = runCatching {
     val payload = JSONObject(body)
-    if (!hasExactHistoryKeys(payload, setOf("owner", "peer", "high_water_sequence", "messages"))) return@runCatching null
+    val allowedKeys = setOf("owner", "peer", "high_water_sequence", "messages", "next_before")
+    val requiredKeys = setOf("owner", "peer", "high_water_sequence", "messages")
+    if (!hasOnlyHistoryKeys(payload, allowedKeys) || !requiredKeys.all(payload::has)) return@runCatching null
+    if (payload.has("next_before") && !payload.isNull("next_before")) {
+        strictHistoryLong(payload, "next_before", 1L) ?: return@runCatching null
+    }
     val owner = strictHistoryString(payload, "owner", 1, 128) ?: return@runCatching null
     val peer = strictHistoryString(payload, "peer", 1, 128) ?: return@runCatching null
     if (expectedOwner != null && owner != expectedOwner) return@runCatching null

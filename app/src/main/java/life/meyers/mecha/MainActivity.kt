@@ -187,9 +187,12 @@ internal data class PeerStatus(
     val instanceId: String? = null,
     val modelCatalog: ModelCatalog = ModelCatalog(CatalogStatus.LOADING),
     val goalState: GoalState? = null,
+    val source: String = "tmux",
+    val runtime: String? = null,
 ) {
     val active get() = activityState == "active"
     val compacting get() = activityState == "compacting"
+    val isEmbedded get() = source == "router-managed" && runtime == "embedded"
 }
 
 internal enum class ActivityOrbit(val color: Color) {
@@ -1583,72 +1586,91 @@ class MainActivity : ComponentActivity() {
         } ?: return
         Thread {
             try {
+                var agentsArray: JSONArray? = null
                 client.newCall(Request.Builder().url("${routerHttpFor(router)}/v1/agents").build()).execute().use { response ->
-                    if (!response.isSuccessful || generation != connectionGeneration) return@use
-                    val agents = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents") ?: return@use
-                    if (!discoveryResponseWithinBound(agents)) return@use
-                    runOnUiThread {
-                        var retryPeer: String? = null
-                        historyLock.withLock {
-                            if (generation != connectionGeneration || router != activeRouter) return@withLock
-                            val existingById = peers.associateBy(PeerStatus::id)
-                            val discovered = buildList {
-                                for (index in 0 until agents.length()) {
-                                    val agent = agents.optJSONObject(index) ?: continue
-                                    val peer = agent.optString("agent_id")
-                                        .takeIf { it.isNotBlank() && it != agentId && AGENT_ID.matches(it) } ?: continue
-                                    val instance = agent.optString("instance_id").takeIf { it.isNotBlank() }
-                                    val observedAt = historyObservationTimestamp(agent.optString("connected_at"))
-                                    if (instance != null) add(DiscoveredPeer(peer, agent, instance, observedAt))
-                                }
-                            }
-                            val discoveredById = discovered.associateBy(DiscoveredPeer::id)
-                            val nextPeers = buildList {
-                                peers.forEach { current ->
-                                    val candidate = discoveredById[current.id]
-                                    if (candidate != null && peerStateEventFence.acceptDiscovery(
-                                            request,
-                                            candidate.id,
-                                            candidate.instanceId,
-                                            candidate.observedAtMs,
-                                        )
-                                    ) {
-                                        val updated = peerStatusFromJson(candidate.id, candidate.source, current)
-                                        if (current.instanceId != null && current.instanceId != updated.instanceId) {
-                                            settleOutboundForPeer(candidate.id, updated.instanceId)
-                                        }
-                                        add(updated)
-                                        if (shouldRetryHistoryAfterPeerResolution(
-                                                activeHydrationFence,
-                                                selectedPeer,
-                                                candidate.id,
-                                                current.instanceId,
-                                                updated.instanceId,
-                                                connectionGeneration,
-                                            )
-                                        ) retryPeer = candidate.id
-                                    } else if (candidate != null || !peerStateEventFence.isCurrentForPeer(request, current.id)) {
-                                        // Keep the current projection when this candidate was
-                                        // rejected as stale. A newer peer event also remains
-                                        // authoritative when discovery omits that peer.
-                                        add(current)
-                                    }
-                                }
-                                discovered.forEach { candidate ->
-                                    if (candidate.id in existingById) return@forEach
-                                    if (peerStateEventFence.acceptDiscovery(
-                                            request,
-                                            candidate.id,
-                                            candidate.instanceId,
-                                            candidate.observedAtMs,
-                                        )
-                                    ) add(peerStatusFromJson(candidate.id, candidate.source))
-                                }
-                            }
-                            peers = nextPeers.distinctBy(PeerStatus::id).sortedBy(PeerStatus::id)
-                        }
-                        retryPeer?.takeIf { leaseId.isNotBlank() }?.let { hydrateHistory(it, generation) }
+                    if (response.isSuccessful && generation == connectionGeneration) {
+                        agentsArray = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents")
                     }
+                }
+                val agents = agentsArray ?: return@Thread
+                if (!discoveryResponseWithinBound(agents)) return@Thread
+
+                val managedList = runCatching {
+                    client.newCall(Request.Builder().url("${routerHttpFor(router)}/v1/managed-agents").build()).execute().use { response ->
+                        if (!response.isSuccessful || generation != connectionGeneration) return@use emptyList<JSONObject>()
+                        val root = JSONObject(response.body?.string().orEmpty())
+                        val managedAgents = root.optJSONArray("agents") ?: return@use emptyList<JSONObject>()
+                        buildList {
+                            for (i in 0 until managedAgents.length()) {
+                                managedAgents.optJSONObject(i)?.let { add(it) }
+                            }
+                        }
+                    }
+                }.getOrNull().orEmpty()
+
+                runOnUiThread {
+                    var retryPeer: String? = null
+                    historyLock.withLock {
+                        if (generation != connectionGeneration || router != activeRouter) return@withLock
+                        val existingById = peers.associateBy(PeerStatus::id)
+                        val discovered = buildList {
+                            for (index in 0 until agents.length()) {
+                                val agent = agents.optJSONObject(index) ?: continue
+                                val peer = agent.optString("agent_id")
+                                    .takeIf { it.isNotBlank() && it != agentId && AGENT_ID.matches(it) } ?: continue
+                                val instance = agent.optString("instance_id").takeIf { it.isNotBlank() }
+                                val observedAt = historyObservationTimestamp(agent.optString("connected_at"))
+                                if (instance != null) add(DiscoveredPeer(peer, agent, instance, observedAt))
+                            }
+                        }
+                        val discoveredById = discovered.associateBy(DiscoveredPeer::id)
+                        val nextPeers = buildList {
+                            peers.forEach { current ->
+                                val candidate = discoveredById[current.id]
+                                if (candidate != null && peerStateEventFence.acceptDiscovery(
+                                        request,
+                                        candidate.id,
+                                        candidate.instanceId,
+                                        candidate.observedAtMs,
+                                    )
+                                ) {
+                                    val updated = peerStatusFromJson(candidate.id, candidate.source, current)
+                                    if (current.instanceId != null && current.instanceId != updated.instanceId) {
+                                        settleOutboundForPeer(candidate.id, updated.instanceId)
+                                    }
+                                    add(updated)
+                                    if (shouldRetryHistoryAfterPeerResolution(
+                                            activeHydrationFence,
+                                            selectedPeer,
+                                            candidate.id,
+                                            current.instanceId,
+                                            updated.instanceId,
+                                            connectionGeneration,
+                                        )
+                                    ) retryPeer = candidate.id
+                                } else if (candidate != null || !peerStateEventFence.isCurrentForPeer(request, current.id)) {
+                                    // Keep the current projection when this candidate was
+                                    // rejected as stale. A newer peer event also remains
+                                    // authoritative when discovery omits that peer.
+                                    add(current)
+                                }
+                            }
+                            discovered.forEach { candidate ->
+                                if (candidate.id in existingById) return@forEach
+                                if (peerStateEventFence.acceptDiscovery(
+                                        request,
+                                        candidate.id,
+                                        candidate.instanceId,
+                                        candidate.observedAtMs,
+                                    )
+                                ) add(peerStatusFromJson(candidate.id, candidate.source))
+                            }
+                        }
+
+                        val mergedWithManaged = mergeManagedPeers(nextPeers, managedList, agentId)
+                        peers = mergedWithManaged.distinctBy(PeerStatus::id).sortedBy(PeerStatus::id)
+                    }
+                    retryPeer?.takeIf { leaseId.isNotBlank() }?.let { hydrateHistory(it, generation) }
                 }
             } catch (_: Exception) {
                 // The active connection remains usable when discovery is unavailable.
@@ -3265,6 +3287,21 @@ private fun PeerRow(
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(humanName(peerId), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (peer.isEmbedded) {
+                            Spacer(Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Teal.copy(alpha = 0.18f),
+                            ) {
+                                Text(
+                                    "Embedded",
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Teal,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                        }
                         if (peer.compacting) {
                             Spacer(Modifier.width(8.dp))
                             CompactingIndicator(compact = true)
@@ -3625,6 +3662,21 @@ private fun Conversation(
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (peerStatus.isEmbedded) {
+                                Spacer(Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Teal.copy(alpha = 0.18f),
+                                ) {
+                                    Text(
+                                        "Embedded",
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Teal,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                }
+                            }
                             if (peerStatus.compacting) {
                                 Spacer(Modifier.width(8.dp))
                                 CompactingIndicator(compact = true)
@@ -5259,6 +5311,8 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
     }
     val goalState = if (source.has("goal_state")) parseGoalStateValue(source.optJSONObject("goal_state"))
     else current?.goalState?.takeIf { sameInstance }
+    val peerSource = source.optString("source").takeIf { it.isNotBlank() } ?: current?.source ?: "tmux"
+    val runtime = source.optString("runtime").takeIf { it.isNotBlank() } ?: current?.runtime
     return PeerStatus(
         id = peer,
         activityState = source.optString("activity_state", "idle"),
@@ -5268,7 +5322,87 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
         instanceId = instanceId ?: current?.instanceId,
         modelCatalog = catalog,
         goalState = goalState,
+        source = peerSource,
+        runtime = runtime,
     )
+}
+
+internal fun peerStatusFromManaged(
+    agentId: String,
+    managedAgent: JSONObject,
+    children: List<SubagentSummary> = emptyList(),
+    current: PeerStatus? = null,
+): PeerStatus {
+    val activityState = when (managedAgent.optString("activity_state", "idle")) {
+        "active", "idle", "compacting", "starting", "stopped", "failed" -> managedAgent.optString("activity_state")
+        else -> "idle"
+    }
+    val goalState = if (managedAgent.has("goal_state")) parseGoalStateValue(managedAgent.optJSONObject("goal_state"))
+    else current?.goalState
+    val modelObj = managedAgent.optJSONObject("model")
+    val currentModel = modelObj?.let {
+        ModelSummary(it.optString("provider"), it.optString("id"), it.optString("name").ifBlank { it.optString("id") })
+    } ?: current?.modelCatalog?.current
+    val catalog = ModelCatalog(
+        status = if (currentModel != null) CatalogStatus.READY else CatalogStatus.EMPTY,
+        models = currentModel?.let(::listOf) ?: emptyList(),
+        totalCount = if (currentModel != null) 1 else 0,
+        truncated = false,
+        current = currentModel,
+    )
+    val runtime = managedAgent.optString("runtime", "embedded").ifBlank { "embedded" }
+    return PeerStatus(
+        id = agentId,
+        activityState = activityState,
+        subagentCount = children.size,
+        subagents = children,
+        instanceId = current?.instanceId,
+        modelCatalog = catalog,
+        goalState = goalState,
+        source = "router-managed",
+        runtime = runtime,
+    )
+}
+
+internal fun mergeManagedPeers(
+    tmuxPeers: List<PeerStatus>,
+    managedAgents: List<JSONObject>,
+    localAgentId: String,
+): List<PeerStatus> {
+    val existingById = tmuxPeers.associateBy(PeerStatus::id)
+    val managedRows = buildList {
+        for (managed in managedAgents) {
+            val agentId = managed.optString("agent_id").takeIf { it.isNotBlank() } ?: continue
+            if (agentId == localAgentId || !AGENT_ID.matches(agentId)) continue
+            val parentAgentId = managed.optString("parent_agent_id").takeIf { it.isNotBlank() }
+            if (parentAgentId != null) continue
+            val current = existingById[agentId]
+            add(peerStatusFromManaged(agentId, managed, current = current))
+        }
+    }
+    val managedById = managedRows.associateBy(PeerStatus::id)
+    val result = mutableListOf<PeerStatus>()
+    for (tmux in tmuxPeers) {
+        val managed = managedById[tmux.id]
+        if (managed != null) {
+            result.add(
+                tmux.copy(
+                    source = "router-managed",
+                    runtime = managed.runtime,
+                    activityState = if (managed.activityState != "idle") managed.activityState else tmux.activityState,
+                    goalState = managed.goalState ?: tmux.goalState,
+                )
+            )
+        } else {
+            result.add(tmux)
+        }
+    }
+    for (managed in managedRows) {
+        if (managed.id !in existingById) {
+            result.add(managed)
+        }
+    }
+    return result.sortedBy(PeerStatus::id)
 }
 
 internal fun formatMessageTimestamp(createdAt: String): String = runCatching {
