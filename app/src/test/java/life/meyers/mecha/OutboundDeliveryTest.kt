@@ -351,10 +351,16 @@ class OutboundDeliveryTest {
             recipient = operationScope.peer,
             body = "body-$id",
             direction = Direction.OUTGOING,
-            createdAt = "2026-08-23T00:00:00.000Z",
+            createdAt = testTimestamp(),
             deliveryStatus = OutboundDeliveryStatus.PENDING,
         ),
         requestBody = "body-$id",
         deadlineAtMs = deadline,
     )
+
+    private fun testTimestamp(offsetMs: Long = 0): String =
+        java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'")
+            .withZone(java.time.ZoneOffset.UTC)
+            .format(java.time.Instant.ofEpochMilli(System.currentTimeMillis() + offsetMs))
+
 }

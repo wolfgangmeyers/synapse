@@ -68,7 +68,7 @@ class InboundDeliveryTest {
                 .put("agent_id", "android")
                 .put("instance_id", "instance-1")
                 .put("lease_id", "lease-1")
-                .put("expires_at", "2026-08-29T00:00:30.000Z")
+                .put("expires_at", testTimestamp(30000))
                 .put("recovered", false)
                 .put("agent_role", "user_interaction"),
             "request-1",
@@ -207,7 +207,7 @@ class InboundDeliveryTest {
                 .put("agent_id", "android")
                 .put("instance_id", "instance-1")
                 .put("lease_id", "lease-1")
-                .put("expires_at", "2026-08-29T00:00:30.000Z")
+                .put("expires_at", testTimestamp(30000))
                 .put("recovered", false)
                 .put("agent_role", "user_interaction"),
             "request-legacy",
@@ -230,14 +230,14 @@ class InboundDeliveryTest {
                     .put("from", "sender")
                     .put("to", "android")
                     .put("body", "one")
-                    .put("created_at", "2026-08-29T00:00:00.000Z"),
+                    .put("created_at", testTimestamp(0)),
             ).put(
                 JSONObject()
                     .put("id", "message-2")
                     .put("from", "sender")
                     .put("to", "android")
                     .put("body", "two")
-                    .put("created_at", "2026-08-29T00:00:01.000Z"),
+                    .put("created_at", testTimestamp(1000)),
             ))
         }
         val receipts = mutableListOf<Pair<String, JSONObject>>()
@@ -281,14 +281,14 @@ class InboundDeliveryTest {
                     .put("from", "sender")
                     .put("to", "android")
                     .put("body", "one")
-                    .put("created_at", "2026-08-29T00:00:00.000Z"),
+                    .put("created_at", testTimestamp(0)),
             ).put(
                 JSONObject()
                     .put("id", "message-2")
                     .put("from", "sender")
                     .put("to", "android")
                     .put("body", "two")
-                    .put("created_at", "2026-08-29T00:00:01.000Z"),
+                    .put("created_at", testTimestamp(1000)),
             ))
         }
         val receipts = mutableListOf<JSONObject>()
@@ -353,7 +353,7 @@ class InboundDeliveryTest {
                     .put("from", "sender")
                     .put("to", "android")
                     .put("body", "wrong")
-                    .put("created_at", "2026-08-29T00:00:00.000Z"),
+                    .put("created_at", testTimestamp(0)),
             ))
         }
 
@@ -395,7 +395,7 @@ class InboundDeliveryTest {
 
     @Test
     fun staleIncomingMessageRejectedByRetentionSendsNoReceipt() {
-        val now = Instant.parse("2026-08-29T00:00:00Z").toEpochMilli()
+        val now = System.currentTimeMillis()
         val events = mutableListOf<String>()
         val frame = deliveryFrame("stale-message").put(
             "message",
@@ -467,8 +467,8 @@ class InboundDeliveryTest {
                 .put("from", "sender")
                 .put("to", "android")
                 .put("body", "hello")
-                .put("created_at", "2026-08-29T00:00:00.000Z")
-                .put("recorded_at", "2026-08-29T00:00:00.000Z")
+                .put("created_at", testTimestamp(0))
+                .put("recorded_at", testTimestamp(0))
                 .put("attachments", org.json.JSONArray()))
 
         assertTrue(validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) != null)
@@ -520,16 +520,16 @@ class InboundDeliveryTest {
             .put("from", "sender")
             .put("to", "android")
             .put("body", "hello")
-            .put("created_at", "2026-08-29T00:00:00.000Z"))
+            .put("created_at", testTimestamp(0)))
         .put("message_incarnation_id", "550e8400-e29b-41d4-a716-446655440000")
         .put("attempt_number", 2)
-        .put("delivery_expires_at", "2026-08-29T00:00:30.000Z")
+        .put("delivery_expires_at", testTimestamp(30000))
 
     private fun deliveryItem(id: String, incarnation: String, attempt: Int) = JSONObject()
         .put("message_id", id)
         .put("message_incarnation_id", incarnation)
         .put("attempt_number", attempt)
-        .put("delivery_expires_at", "2026-08-29T00:00:30.000Z")
+        .put("delivery_expires_at", testTimestamp(30000))
 
     private fun parse(value: JSONObject) = ChatMessage(
         id = value.getString("id"),
@@ -541,4 +541,10 @@ class InboundDeliveryTest {
         createdAt = value.getString("created_at"),
         recipient = value.optString("to", "android"),
     )
+
+    private fun testTimestamp(offsetMs: Long = 0): String =
+        java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'")
+            .withZone(java.time.ZoneOffset.UTC)
+            .format(java.time.Instant.ofEpochMilli(System.currentTimeMillis() + offsetMs))
+
 }
