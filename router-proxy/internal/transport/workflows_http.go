@@ -2,10 +2,40 @@ package transport
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
+
+var filenameSanitizeRegex = regexp.MustCompile(`[^a-zA-Z0-9_\-]+`)
+
+func sanitizeFilename(name string) string {
+	s := strings.TrimSpace(name)
+	s = filenameSanitizeRegex.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	return strings.ToLower(s)
+}
+
+func (r *Router) handleWorkflowImport(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+		return
+	}
+	var bundle store.WorkflowExportBundle
+	if err := json.NewDecoder(req.Body).Decode(&bundle); err != nil {
+		r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+		return
+	}
+	createdWf, _, err := r.store.ImportWorkflow(req.Context(), bundle)
+	if err != nil {
+		r.writeError(w, storeError(err))
+		return
+	}
+	r.writeJSON(w, http.StatusCreated, createdWf)
+}
 
 func (r *Router) handleWorkflowsCollection(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
@@ -171,6 +201,23 @@ func (r *Router) handleWorkflowItem(w http.ResponseWriter, req *http.Request, id
 			return
 		}
 		r.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+	case "export":
+		if req.Method != http.MethodGet {
+			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+			return
+		}
+		bundle, err := r.store.ExportWorkflow(req.Context(), id)
+		if err != nil {
+			r.writeError(w, storeError(err))
+			return
+		}
+		sanitizedName := sanitizeFilename(bundle.Workflow.Name)
+		if sanitizedName == "" {
+			sanitizedName = "workflow"
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-workflow.json"`, sanitizedName))
+		r.writeJSON(w, http.StatusOK, bundle)
 
 	default:
 		r.writeError(w, &httpError{status: 404, code: "not_found"})

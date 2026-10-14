@@ -1,8 +1,9 @@
 import { useState, useEffect, type ReactElement } from "react";
 import type { RouterHttpClient } from "../transport/http-client";
-import type { Workflow } from "../domain/workflow-states";
+import type { Workflow, WorkflowExportBundle } from "../domain/workflow-states";
 import { DialogShell } from "./DialogShell";
 import { WorkflowCanvas } from "./WorkflowCanvas";
+import { ImportWorkflowModal } from "./ImportWorkflowModal";
 
 export interface WorkflowsPageProps {
   client: RouterHttpClient;
@@ -31,6 +32,8 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
 
   const [deleteWorkflowId, setDeleteWorkflowId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
 
   const fetchWorkflows = async () => {
     try {
@@ -97,6 +100,29 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     }
   };
 
+  const handleExport = async (wf: Workflow) => {
+    try {
+      setError(undefined);
+      const bundle = await client.exportWorkflow(wf.id);
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(bundle, null, 2));
+      const downloadAnchor = document.createElement("a");
+      const sanitizedName = wf.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || "workflow";
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `${sanitizedName}-workflow.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to export workflow");
+    }
+  };
+
+  const handleImport = async (bundle: WorkflowExportBundle) => {
+    const imported = await client.importWorkflow(bundle);
+    await fetchWorkflows();
+    setSelectedWorkflowId(imported.id);
+  };
+
   const handleDuplicate = async (wf: Workflow) => {
     try {
       setError(undefined);
@@ -155,18 +181,27 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
             <span className="badge">{workflows.length}</span>
           </div>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => {
-            setNewWorkflowName("");
-            setNewWorkflowDesc("");
-            setCreateError(undefined);
-            setCreateDialogOpen(true);
-          }}
-        >
-          <i className="fa-solid fa-plus" aria-hidden="true" /> New Workflow
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setImportDialogOpen(true)}
+          >
+            <i className="fa-solid fa-file-import" aria-hidden="true" /> Import Workflow
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              setNewWorkflowName("");
+              setNewWorkflowDesc("");
+              setCreateError(undefined);
+              setCreateDialogOpen(true);
+            }}
+          >
+            <i className="fa-solid fa-plus" aria-hidden="true" /> New Workflow
+          </button>
+        </div>
       </header>
 
       {error ? (
@@ -239,6 +274,15 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                       onClick={() => void handleDuplicate(wf)}
                     >
                       <i className="fa-solid fa-copy" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      title="Export workflow"
+                      aria-label="Export workflow"
+                      onClick={() => void handleExport(wf)}
+                    >
+                      <i className="fa-solid fa-file-export" aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -389,6 +433,12 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
           </div>
         </DialogShell>
       ) : null}
+
+      <ImportWorkflowModal
+        open={importDialogOpen}
+        onClose={() => setImportDialogOpen(false)}
+        onImport={handleImport}
+      />
     </div>
   );
 }

@@ -278,6 +278,41 @@ func TestWorkflowHTTP(t *testing.T) {
 	require.Equal(t, http.StatusConflict, res.StatusCode)
 	res.Body.Close()
 
+	// 12b. Export Workflow: GET /v1/workflows/{id}/export -> 200 with Content-Disposition
+	res, err = client.Get(server.URL + "/v1/workflows/" + dupID + "/export")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	cdHeader := res.Header.Get("Content-Disposition")
+	require.Contains(t, cdHeader, "cloned-workflow-workflow.json")
+	var exportBundle store.WorkflowExportBundle
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&exportBundle))
+	res.Body.Close()
+	require.Equal(t, 1, exportBundle.SchemaVersion)
+	require.Equal(t, "Cloned Workflow", exportBundle.Workflow.Name)
+	require.Len(t, exportBundle.States, 1)
+
+	// 12c. Import Workflow: POST /v1/workflows/import -> 201 Created
+	exportBundle.Workflow.Name = "Imported From Test"
+	impBody, _ := json.Marshal(exportBundle)
+	res, err = client.Post(server.URL+"/v1/workflows/import", "application/json", bytes.NewReader(impBody))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, res.StatusCode)
+	var importedWf map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&importedWf))
+	res.Body.Close()
+	require.Equal(t, "Imported From Test", importedWf["name"])
+	impID := importedWf["id"].(string)
+	require.NotEmpty(t, impID)
+
+	// Verify imported workflow via GET
+	res, err = client.Get(server.URL + "/v1/workflows/" + impID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var impGetRes map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&impGetRes))
+	res.Body.Close()
+	require.Len(t, impGetRes["states"].([]any), 1)
+
 	// 13. DELETE /v1/workflows/{id} -> 204 No Content
 	delReq, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/workflows/"+wfID, nil)
 	require.NoError(t, err)

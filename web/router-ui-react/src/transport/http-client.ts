@@ -7,7 +7,7 @@ import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
-import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates, CreateWorkflowRequest, UpdateWorkflowRequest } from "../domain/workflow-states";
+import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates, CreateWorkflowRequest, UpdateWorkflowRequest, WorkflowExportBundle } from "../domain/workflow-states";
 import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
@@ -410,6 +410,8 @@ export interface RouterHttpClient {
   updateWorkflow(id: string, req: UpdateWorkflowRequest): Promise<Workflow>;
   deleteWorkflow(id: string): Promise<void>;
   duplicateWorkflow(id: string, req?: { name?: string }): Promise<Workflow>;
+  exportWorkflow(id: string): Promise<WorkflowExportBundle>;
+  importWorkflow(bundle: WorkflowExportBundle): Promise<Workflow>;
   updateWorkflowLayout(id: string, positions: WorkflowStatePosition[]): Promise<void>;
   setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }): Promise<unknown>;
   setManagedAgentWorkflow(agentId: string, workflowId: string, variables?: Record<string, string>): Promise<unknown>;
@@ -522,6 +524,8 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     updateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}`, "PUT", req) as Promise<Workflow>,
     deleteWorkflow: async (id) => { await request(`/v1/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }); },
     duplicateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/duplicate`, "POST", req ?? {}) as Promise<Workflow>,
+    exportWorkflow: async (id) => request(`/v1/workflows/${encodeURIComponent(id)}/export`) as Promise<WorkflowExportBundle>,
+    importWorkflow: async (bundle) => jsonRequest("/v1/workflows/import", "POST", bundle) as Promise<Workflow>,
     updateWorkflowLayout: async (id, positions) => { await jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/layout`, "PUT", { positions }); },
     setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }) => {
       const payload: Record<string, unknown> = workflowStateId

@@ -77,6 +77,40 @@ export interface WorkflowWithStates {
   states: WorkflowState[];
 }
 
+export interface WorkflowTransitionExport {
+  target_state_key: string;
+  description: string;
+}
+
+export interface WorkflowStateExport {
+  key: string;
+  name: string;
+  description: string;
+  entry_text: string;
+  goal: string;
+  is_entry_state: boolean;
+  allow_exit: boolean;
+  allowed_tools: string[];
+  reminders: WorkflowReminderConfig[];
+  ui_pos_x: number;
+  ui_pos_y: number;
+  transitions: WorkflowTransitionExport[];
+}
+
+export interface WorkflowInfoExport {
+  name: string;
+  description: string;
+  variables: WorkflowVariableDefinition[];
+}
+
+export interface WorkflowExportBundle {
+  schema_version: number;
+  exported_at: string;
+  workflow: WorkflowInfoExport;
+  entry_state_key: string;
+  states: WorkflowStateExport[];
+}
+
 export interface WorkflowStateInput {
   workflow_id?: string | null;
   name: string;

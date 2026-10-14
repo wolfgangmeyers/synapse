@@ -128,6 +128,52 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
     unmount();
   });
 
+  it("exports workflow from canvas toolbar", async () => {
+    const user = userEvent.setup();
+    const clickSpy = vi.fn();
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const el = originalCreateElement(tagName);
+      if (tagName === "a") {
+        el.click = clickSpy;
+      }
+      return el;
+    });
+
+    const exportMock = vi.fn().mockResolvedValue({
+      schema_version: 1,
+      exported_at: "2026-10-01T00:00:00Z",
+      workflow: {
+        name: "Feature Dev",
+        description: "Standard dev loop",
+        variables: [],
+      },
+      entry_state_key: "st-1",
+      states: [],
+    });
+
+    const mockClient = {
+      getWorkflow: vi.fn().mockResolvedValue({
+        workflow: mockWorkflows[0],
+        states: mockStates,
+      }),
+      exportWorkflow: exportMock,
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowCanvas workflowId="wf-1" client={mockClient} onBack={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Export/i })).toBeDefined();
+    });
+
+    const exportBtn = screen.getByRole("button", { name: /Export/i });
+    await user.click(exportBtn);
+
+    expect(exportMock).toHaveBeenCalledWith("wf-1");
+    expect(clickSpy).toHaveBeenCalled();
+    unmount();
+  });
+
   it("displays health check warnings on canvas when there is a dead-end or no entry", async () => {
     const brokenWorkflow = {
       id: "wf-broken",
