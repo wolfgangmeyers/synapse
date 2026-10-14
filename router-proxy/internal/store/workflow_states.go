@@ -793,9 +793,14 @@ func (s *Store) CleanUpManagedAgentWorkflowReminders(ctx context.Context, agentI
 	})
 }
 
-func (s *Store) SpawnWorkflowStateReminders(ctx context.Context, agentID string, state *WorkflowState) error {
+func (s *Store) SpawnWorkflowStateReminders(ctx context.Context, agentID string, state *WorkflowState, vars ...map[string]string) error {
 	if state == nil || len(state.Reminders) == 0 {
 		return nil
+	}
+
+	var varMap map[string]string
+	if len(vars) > 0 {
+		varMap = vars[0]
 	}
 
 	nowTime := s.clock.Now()
@@ -813,12 +818,22 @@ func (s *Store) SpawnWorkflowStateReminders(ctx context.Context, agentID string,
 			intervalMS = &ms
 		}
 
+		subject := cfg.Subject
+		if subject != nil && varMap != nil {
+			subst := SubstituteVariables(*subject, varMap)
+			subject = &subst
+		}
+		body := cfg.Body
+		if varMap != nil {
+			body = SubstituteVariables(body, varMap)
+		}
+
 		created, _, err := s.CreateReminder(ctx, ReminderRequest{
 			ID:         remID,
 			Target:     agentID,
 			Creator:    "system",
-			Subject:    cfg.Subject,
-			Body:       cfg.Body,
+			Subject:    subject,
+			Body:       body,
 			CreatedAt:  now,
 			NextDueAt:  dueAt,
 			IntervalMS: intervalMS,

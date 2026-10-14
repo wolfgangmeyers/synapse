@@ -7,7 +7,7 @@ import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
-import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates } from "../domain/workflow-states";
+import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates, CreateWorkflowRequest, UpdateWorkflowRequest } from "../domain/workflow-states";
 import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
@@ -406,12 +406,13 @@ export interface RouterHttpClient {
   deleteWorkflowState(id: string): Promise<unknown>;
   listWorkflows(): Promise<Workflow[]>;
   getWorkflow(id: string): Promise<WorkflowWithStates>;
-  createWorkflow(req: { name: string; description?: string }): Promise<Workflow>;
-  updateWorkflow(id: string, req: { name?: string; description?: string; entry_state_id?: string | null }): Promise<Workflow>;
+  createWorkflow(req: CreateWorkflowRequest): Promise<Workflow>;
+  updateWorkflow(id: string, req: UpdateWorkflowRequest): Promise<Workflow>;
   deleteWorkflow(id: string): Promise<void>;
   duplicateWorkflow(id: string, req?: { name?: string }): Promise<Workflow>;
   updateWorkflowLayout(id: string, positions: WorkflowStatePosition[]): Promise<void>;
-  setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null): Promise<unknown>;
+  setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }): Promise<unknown>;
+  setManagedAgentWorkflow(agentId: string, workflowId: string, variables?: Record<string, string>): Promise<unknown>;
   setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
   attachmentUrl(reference: string): string;
   managedAgents(): Promise<ManagedAgentsResponse>;
@@ -522,8 +523,19 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     deleteWorkflow: async (id) => { await request(`/v1/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }); },
     duplicateWorkflow: async (id, req) => jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/duplicate`, "POST", req ?? {}) as Promise<Workflow>,
     updateWorkflowLayout: async (id, positions) => { await jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/layout`, "PUT", { positions }); },
-    setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null) =>
-      managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", workflowStateId ? { action: "activate", workflow_state_id: workflowStateId } : { action: "deactivate" }),
+    setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }) => {
+      const payload: Record<string, unknown> = workflowStateId
+        ? { action: "activate", workflow_state_id: workflowStateId }
+        : { action: "deactivate" };
+      if (options?.workflow_id !== undefined) payload.workflow_id = options.workflow_id;
+      if (options?.variables !== undefined) payload.variables = options.variables;
+      return managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", payload);
+    },
+    setManagedAgentWorkflow: async (agentId: string, workflowId: string, variables?: Record<string, string>) => {
+      const payload: Record<string, unknown> = { action: "activate", workflow_id: workflowId };
+      if (variables !== undefined) payload.variables = variables;
+      return managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", payload);
+    },
     setManagedAgentAllowInlineTools: async (agentId: string, allowed: boolean) =>
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/allow-inline-tools`, "POST", { allow_inline_tools: allowed }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),

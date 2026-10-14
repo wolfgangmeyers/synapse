@@ -135,8 +135,12 @@ type ManagedAgentRecord struct {
 	LaunchRecipe *ManagedLaunchRecipe
 	// ParentAgentID records the parent agent ID if this agent is a subagent.
 	ParentAgentID string
+	// ActiveWorkflowID records the currently active workflow ID if set.
+	ActiveWorkflowID string
 	// ActiveWorkflowStateID records the currently active workflow state ID if set.
 	ActiveWorkflowStateID string
+	// WorkflowVariables records key-value variables passed during workflow activation.
+	WorkflowVariables map[string]string
 	// Worktree indicates if the agent was launched in an isolated git worktree.
 	Worktree bool
 	// WorktreeBasePath is the root git repository path when Worktree is true.
@@ -4828,6 +4832,28 @@ func loadManagedActiveWorkflowStateIDTx(ctx context.Context, db *sql.DB, agent *
 		return err
 	}
 	agent.ActiveWorkflowStateID = stateID.String
+
+	// Also load active_workflow_id and workflow_variables_json if columns exist
+	hasWfIDCol, err := managedAgentColumnTx(ctx, db, "active_workflow_id")
+	if err == nil && hasWfIDCol {
+		var wfID sql.NullString
+		if err := db.QueryRowContext(ctx, `SELECT active_workflow_id FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&wfID); err == nil {
+			agent.ActiveWorkflowID = wfID.String
+		}
+	}
+
+	hasVarsCol, err := managedAgentColumnTx(ctx, db, "workflow_variables_json")
+	if err == nil && hasVarsCol {
+		var varsJSON sql.NullString
+		if err := db.QueryRowContext(ctx, `SELECT workflow_variables_json FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&varsJSON); err == nil {
+			if varsJSON.Valid && strings.TrimSpace(varsJSON.String) != "" {
+				var parsed map[string]string
+				if err := json.Unmarshal([]byte(varsJSON.String), &parsed); err == nil {
+					agent.WorkflowVariables = parsed
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -4852,7 +4878,112 @@ func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID 
 		}
 	}
 	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
+	if workflowStateID == nil {
+		// When clearing state, also clear workflow_id and variables if columns exist
+		hasWfID, _ := managedAgentColumnTx(ctx, s.db, "active_workflow_id")
+		hasVars, _ := managedAgentColumnTx(ctx, s.db, "workflow_variables_json")
+		var res sql.Result
+		var execErr error
+		if hasWfID && hasVars {
+			res, execErr = s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=NULL, active_workflow_id=NULL, workflow_variables_json=NULL, updated_at=? WHERE agent_id=?`, now, agentID)
+		} else {
+			res, execErr = s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`, stateIDVal, now, agentID)
+		}
+		if execErr != nil {
+			return execErr
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("managed agent not found")
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	res, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`, stateIDVal, now, agentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("managed agent not found")
+	}
+	if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, agentID string, workflowID *string, workflowStateID *string, vars map[string]string) error {
+	hasStateCol, err := managedAgentColumnTx(ctx, s.db, "active_workflow_state_id")
+	if err != nil {
+		return err
+	}
+	if !hasStateCol {
+		return errors.New("active_workflow_state_id column does not exist")
+	}
+
+	var stateIDVal sql.NullString
+	if workflowStateID != nil && *workflowStateID != "" {
+		stateIDVal = sql.NullString{String: *workflowStateID, Valid: true}
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_states WHERE id=?`, *workflowStateID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errors.New("workflow state not found")
+			}
+			return err
+		}
+	}
+
+	var wfIDVal sql.NullString
+	if workflowID != nil && *workflowID != "" {
+		wfIDVal = sql.NullString{String: *workflowID, Valid: true}
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflows WHERE id=?`, *workflowID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errors.New("workflow not found")
+			}
+			return err
+		}
+	}
+
+	var varsJSONVal sql.NullString
+	if vars != nil {
+		bytes, err := json.Marshal(vars)
+		if err != nil {
+			return err
+		}
+		varsJSONVal = sql.NullString{String: string(bytes), Valid: true}
+	}
+
+	// Deactivation: workflowStateID == nil
+	if workflowStateID == nil {
+		stateIDVal = sql.NullString{Valid: false}
+		wfIDVal = sql.NullString{Valid: false}
+		varsJSONVal = sql.NullString{Valid: false}
+	}
+
+	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
+
+	hasWfID, _ := managedAgentColumnTx(ctx, s.db, "active_workflow_id")
+	hasVars, _ := managedAgentColumnTx(ctx, s.db, "workflow_variables_json")
+
+	var res sql.Result
+	if hasWfID && hasVars {
+		res, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, active_workflow_id=?, workflow_variables_json=?, updated_at=? WHERE agent_id=?`,
+			stateIDVal, wfIDVal, varsJSONVal, now, agentID)
+	} else {
+		res, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET active_workflow_state_id=?, updated_at=? WHERE agent_id=?`,
+			stateIDVal, now, agentID)
+	}
 	if err != nil {
 		return err
 	}

@@ -228,6 +228,53 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.Empty(t, goalPolicy.Config.Goal)
 	require.False(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
+	// 8. Test transition with variable substitution in goal, reminders, guidance
+	wfWithVars, err := db.CreateWorkflow(ctx, store.WorkflowRequest{
+		Name: "Variable WF",
+		Variables: &[]store.WorkflowVariableDefinition{
+			{Name: "COMPONENT", DefaultValue: "core"},
+		},
+	})
+	require.NoError(t, err)
+
+	stateWithVars, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		Name:        "Deploy",
+		Description: "Deploying ${COMPONENT}",
+		Goal:        "Deploy {{COMPONENT}} to prod",
+		AllowExit:   ptr(true),
+		WorkflowID:  &wfWithVars.ID,
+	})
+	require.NoError(t, err)
+
+	// Connect Done -> Deploy
+	doneWithTrans, err := db.UpdateWorkflowState(ctx, doneState.ID, store.WorkflowStateRequest{
+		Name:        doneState.Name,
+		Description: doneState.Description,
+		AllowExit:   ptr(true),
+		Transitions: []store.WorkflowTransitionConfig{
+			{TargetStateID: stateWithVars.ID, Description: "Deploy component"},
+		},
+	})
+	require.NoError(t, err)
+	_ = doneWithTrans
+
+	// Activate Done state with variables
+	require.NoError(t, db.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, &wfWithVars.ID, &doneState.ID, map[string]string{"COMPONENT": "auth-service"}))
+
+	// Transition to Deploy
+	resVar, err := tool.Execute(ctx, "call-6", map[string]any{
+		"action":       "transition",
+		"target_state": "Deploy",
+	}, nil)
+	require.NoError(t, err)
+	resVarText := resVar.Content[0].(ai.TextContent).Text
+	require.Contains(t, resVarText, "Deploying auth-service")
+
+	// Verify goal was substituted
+	goalPolicy, err = db.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.Equal(t, "Deploy auth-service to prod", goalPolicy.Config.Goal)
+
 	// 8. Test subagent invocation rejection
 	subagentID := "subagent-transitions-1"
 	require.NoError(t, db.CreateManagedSubagent(ctx, binding, store.ManagedSubagentRecord{

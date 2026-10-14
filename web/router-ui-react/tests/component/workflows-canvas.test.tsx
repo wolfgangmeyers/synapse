@@ -259,5 +259,61 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
 
     unmount();
   });
+
+  it("opens WorkflowVariablesModal when Variables button is clicked in toolbar", async () => {
+    const user = userEvent.setup();
+    const updateWorkflowMock = vi.fn().mockResolvedValue({
+      ...mockWorkflows[0],
+      variables: [
+        {
+          name: "repo_url",
+          label: "Repository URL",
+          type: "text",
+          required: true,
+        },
+      ],
+    });
+
+    const mockClient = {
+      getWorkflow: vi.fn().mockResolvedValue({
+        workflow: {
+          ...mockWorkflows[0],
+          variables: [
+            {
+              name: "repo_url",
+              label: "Repository URL",
+              type: "text",
+              required: true,
+            },
+          ],
+        },
+        states: mockStates,
+      }),
+      updateWorkflow: updateWorkflowMock,
+      updateWorkflowLayout: vi.fn().mockResolvedValue(undefined),
+      workflowTools: vi.fn().mockResolvedValue({ tools: [] }),
+    } as unknown as RouterHttpClient;
+
+    const { unmount } = render(<WorkflowCanvas workflowId="wf-1" client={mockClient} onBack={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Variables/i })).toBeDefined();
+    });
+
+    // Check button shows count badge
+    expect(screen.getByRole("button", { name: /Variables \(1\)/i })).toBeDefined();
+
+    // Click Variables button
+    await user.click(screen.getByRole("button", { name: /Variables \(1\)/i }));
+
+    // Verify modal is open
+    await waitFor(() => {
+      expect(screen.getByText("Workflow Variables: Feature Dev")).toBeDefined();
+      expect(screen.getByText("${repo_url}")).toBeDefined();
+    });
+
+    unmount();
+  });
 });
+
 
