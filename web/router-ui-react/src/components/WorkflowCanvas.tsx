@@ -552,6 +552,31 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
           </button>
           <button
             type="button"
+            className="btn btn-secondary"
+            onClick={async () => {
+              if (!workflow) return;
+              try {
+                const bundle = await client.exportWorkflow(workflow.id);
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(bundle, null, 2));
+                const downloadAnchor = document.createElement("a");
+                const sanitizedName = workflow.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || "workflow";
+                downloadAnchor.setAttribute("href", dataStr);
+                downloadAnchor.setAttribute("download", `${sanitizedName}-workflow.json`);
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                downloadAnchor.remove();
+                setStatusMessage("Workflow exported");
+                setTimeout(() => setStatusMessage(null), 2000);
+              } catch (err: unknown) {
+                setError(err instanceof Error ? err.message : "Failed to export workflow");
+              }
+            }}
+            title="Export workflow to JSON"
+          >
+            <i className="fa-solid fa-file-export" aria-hidden="true" /> Export
+          </button>
+          <button
+            type="button"
             className="btn btn-primary"
             onClick={() => {
               setNewStateName("");

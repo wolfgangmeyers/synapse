@@ -209,6 +209,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/workflows":
 		r.handleWorkflowsCollection(w, req)
 		return
+	case path == "/v1/workflows/import":
+		r.handleWorkflowImport(w, req)
+		return
 	case path == "/v1/workflow-states":
 		r.handleWorkflowStatesCollection(w, req)
 		return
