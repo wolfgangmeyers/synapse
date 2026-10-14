@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -39,13 +40,14 @@ func (m *Manager) subagentThrottle() *SubagentThrottle {
 	return m.subagentThrottleInstance
 }
 
-// EmbeddedSubagentPublicTools is the sole primary constructor returning the three public SDK subagent tools:
-// "subagent", "get_subagent_result", and "steer_subagent", bound to the parent's exact EmbeddedBinding fence.
+// EmbeddedSubagentPublicTools is the sole primary constructor returning the four public SDK subagent tools:
+// "subagent", "get_subagent_result", "steer_subagent", and "list_subagents", bound to the parent's exact EmbeddedBinding fence.
 func (m *Manager) EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool {
 	return []agent.AgentTool{
 		m.embeddedSubagentTool(parent),
 		m.embeddedGetSubagentResultTool(parent),
 		m.embeddedSteerSubagentTool(parent),
+		m.embeddedListSubagentsTool(parent),
 	}
 }
 
@@ -463,6 +465,184 @@ func (m *Manager) embeddedSteerSubagentTool(parent store.EmbeddedBinding) agent.
 				Content: ai.ContentList{ai.TextContent{
 					Text: fmt.Sprintf("Steering message sent to agent %s. The agent will process it after its current tool execution.", agentID),
 				}},
+			}, nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 4. list_subagents tool (private builder)
+// ---------------------------------------------------------------------------
+
+func embeddedListSubagentsSchema() *ai.Schema {
+	closed := false
+	minLimit := 1.0
+	maxLimit := 100.0
+	limitSchema := ai.Integer("Maximum number of subagents to return (default: 50, minimum: 1, maximum: 100).")
+	limitSchema.Minimum = &minLimit
+	limitSchema.Maximum = &maxLimit
+
+	s := ai.Object(
+		ai.Opt("status", ai.String("Filter subagents by status: 'active' (default: running + queued), 'all', 'running', 'queued', 'completed', 'failed', 'stopped', 'timed_out'.")),
+		ai.Opt("limit", limitSchema),
+	)
+	s.AdditionalAllowed = &closed
+	return s
+}
+
+type listSubagentsItem struct {
+	AgentID        string  `json:"agent_id"`
+	SubagentType   string  `json:"subagent_type"`
+	Description    string  `json:"description"`
+	Status         string  `json:"status"`
+	StartedAt      string  `json:"started_at"`
+	ElapsedSeconds float64 `json:"elapsed_seconds"`
+	TurnCount      int     `json:"turn_count"`
+	ToolUses       int     `json:"tool_uses"`
+}
+
+type listSubagentsSummary struct {
+	TotalMatching int `json:"total_matching"`
+	TotalActive   int `json:"total_active"`
+	RunningCount  int `json:"running_count"`
+	QueuedCount   int `json:"queued_count"`
+}
+
+type listSubagentsResponse struct {
+	Summary   listSubagentsSummary `json:"summary"`
+	Subagents []listSubagentsItem  `json:"subagents"`
+}
+
+func (m *Manager) embeddedListSubagentsTool(parent store.EmbeddedBinding) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "list_subagents",
+		Description: "List background subagents launched by this agent, including their IDs, descriptions, statuses, and runtimes.",
+		Parameters:  embeddedListSubagentsSchema(),
+		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if err := ctx.Err(); err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			statusFilter := "active"
+			if s, ok := args["status"].(string); ok && strings.TrimSpace(s) != "" {
+				statusFilter = strings.ToLower(strings.TrimSpace(s))
+			}
+
+			limit := 50
+			if l, ok := args["limit"].(float64); ok {
+				limit = int(l)
+			} else if l, ok := args["limit"].(int); ok {
+				limit = l
+			}
+			if limit < 1 {
+				limit = 1
+			} else if limit > 100 {
+				limit = 100
+			}
+
+			allRecords, err := m.store.ManagedSubagents(ctx, parent)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			// Capture live in-memory stats for active tasks
+			m.subagentsMu.Lock()
+			activeSnapshots := make(map[string]*subagentTask, len(m.subagentsActive))
+			for k, v := range m.subagentsActive {
+				activeSnapshots[k] = v
+			}
+			m.subagentsMu.Unlock()
+
+			var totalActive, runningCount, queuedCount int
+			for _, rec := range allRecords {
+				if rec == nil {
+					continue
+				}
+				if rec.Status == "running" {
+					runningCount++
+					totalActive++
+				} else if rec.Status == "queued" {
+					queuedCount++
+					totalActive++
+				}
+			}
+
+			var filtered []listSubagentsItem
+			for _, rec := range allRecords {
+				if rec == nil {
+					continue
+				}
+
+				match := false
+				switch statusFilter {
+				case "all":
+					match = true
+				case "active":
+					match = (rec.Status == "running" || rec.Status == "queued")
+				default:
+					match = strings.EqualFold(rec.Status, statusFilter)
+				}
+
+				if !match {
+					continue
+				}
+
+				item := listSubagentsItem{
+					AgentID:        rec.AgentID,
+					SubagentType:   rec.SubagentType,
+					Description:    rec.Description,
+					Status:         rec.Status,
+					StartedAt:      rec.CreatedAt,
+					ElapsedSeconds: rec.DurationSeconds,
+					TurnCount:      rec.TurnCount,
+					ToolUses:       rec.ToolUseCount,
+				}
+
+				if task, ok := activeSnapshots[rec.AgentID]; ok && task != nil {
+					task.mu.Lock()
+					item.TurnCount = task.turnCount
+					item.ToolUses = task.toolUseCount
+					item.Status = task.status
+					if !task.startTime.IsZero() {
+						var now time.Time
+						if m.clock != nil {
+							now = m.clock.Now()
+						} else {
+							now = time.Now()
+						}
+						item.ElapsedSeconds = now.Sub(task.startTime).Seconds()
+					}
+					task.mu.Unlock()
+				}
+
+				filtered = append(filtered, item)
+			}
+
+			totalMatching := len(filtered)
+			if len(filtered) > limit {
+				filtered = filtered[:limit]
+			}
+			if filtered == nil {
+				filtered = []listSubagentsItem{}
+			}
+
+			resp := listSubagentsResponse{
+				Summary: listSubagentsSummary{
+					TotalMatching: totalMatching,
+					TotalActive:   totalActive,
+					RunningCount:  runningCount,
+					QueuedCount:   queuedCount,
+				},
+				Subagents: filtered,
+			}
+
+			body, err := json.MarshalIndent(resp, "", "  ")
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			return agent.AgentToolResult{
+				Content: ai.ContentList{ai.TextContent{Text: string(body)}},
 			}, nil
 		},
 	}
