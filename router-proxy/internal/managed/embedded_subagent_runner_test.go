@@ -1763,3 +1763,53 @@ func TestSubagentCompletionMailboxNotificationSenderIsSystem(t *testing.T) {
 	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox WHERE recipient!='system'`).Scan(&userOutboxCount))
 	require.Equal(t, 1, userOutboxCount, "turn reply should be routed to default human user")
 }
+
+func TestSubagentRunnerExecutionTimeout(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_timeout.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-timeout")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	// Provider hangs until test finishes or context cancelled
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(tCtx ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			// Simulate long-running work responding to cancellation
+			time.Sleep(500 * time.Millisecond)
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "should not complete"}}, ai.StopStop)
+		},
+	})
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	// Spawn subagent with a 50ms timeout
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     "subagent-timeout-1",
+		Description: "timeout test",
+		Prompt:      "hang around",
+		Timeout:     50 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", res.Status)
+
+	require.Eventually(t, func() bool {
+		rec, err := db.ManagedSubagent(ctx, parent, "subagent-timeout-1")
+		if err != nil {
+			return false
+		}
+		return rec.Status == "failed"
+	}, 3*time.Second, 20*time.Millisecond)
+
+	saved, err := db.ManagedSubagent(ctx, parent, "subagent-timeout-1")
+	require.NoError(t, err)
+	require.Equal(t, "failed", saved.Status)
+	require.Contains(t, saved.Error, "subagent execution timed out (exceeded")
+	require.Contains(t, saved.ResultText, "Subagent execution timed out")
+}
+

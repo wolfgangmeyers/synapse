@@ -24,6 +24,7 @@ type SubagentSpawnRequest struct {
 	Description  string
 	SubagentType string
 	MaxTurns     int // 0 = unlimited
+	Timeout      time.Duration
 	Prompt       string
 	Resume       string // ID of terminal child to resume with Prompt
 }
@@ -40,6 +41,7 @@ type subagentTask struct {
 	subagentType string
 	description  string
 	maxTurns     int
+	timeout      time.Duration
 	prompt       string
 
 	mu               sync.Mutex
@@ -177,7 +179,7 @@ func (m *Manager) closeSubagents() {
 	}
 }
 
-// TimeoutExpiredSubagents stops and hard-aborts any running subagent whose execution has exceeded maxDuration.
+// TimeoutExpiredSubagents stops and hard-aborts any running subagent whose execution has exceeded its timeout.
 func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 	if maxDuration <= 0 {
 		maxDuration = 1 * time.Hour
@@ -186,8 +188,14 @@ func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 	m.subagentsMu.Lock()
 	var toAbort []*subagentTask
 	for _, task := range m.subagentsActive {
-		if task != nil && !task.startTime.IsZero() && now.Sub(task.startTime) > maxDuration {
-			toAbort = append(toAbort, task)
+		if task != nil && !task.startTime.IsZero() {
+			limit := task.timeout
+			if limit <= 0 {
+				limit = maxDuration
+			}
+			if now.Sub(task.startTime) > limit {
+				toAbort = append(toAbort, task)
+			}
 		}
 	}
 	m.subagentsMu.Unlock()
@@ -366,6 +374,11 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 			return nil, err
 		}
 
+		timeout := req.Timeout
+		if timeout <= 0 {
+			timeout = 10 * time.Minute
+		}
+
 		task := &subagentTask{
 			parent:          parent,
 			childID:         childID,
@@ -373,6 +386,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 			subagentType:    resumedRecord.SubagentType,
 			description:     resumedRecord.Description,
 			maxTurns:        resumedRecord.MaxTurns,
+			timeout:         timeout,
 			prompt:          req.Prompt,
 			status:          "queued",
 			baseTurns:       resumedRecord.TurnCount,
@@ -443,6 +457,11 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 		return nil, err
 	}
 
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+
 	task := &subagentTask{
 		parent:       parent,
 		childID:      childID,
@@ -450,6 +469,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 		subagentType: kind,
 		description:  req.Description,
 		maxTurns:     req.MaxTurns,
+		timeout:      timeout,
 		prompt:       req.Prompt,
 		status:       "queued",
 	}
@@ -750,7 +770,11 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	defer m.resumeParentGoalIfIdle(task.parent)
 	defer m.releaseSubagentSlot(task)
 
-	taskCtx, cancel := context.WithCancel(m.runCtx)
+	timeout := task.timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	taskCtx, cancel := context.WithTimeout(m.runCtx, timeout)
 	task.mu.Lock()
 	task.cancel = cancel
 	task.startTime = m.clock.Now()
@@ -989,6 +1013,10 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		terminalStatus = "failed"
 		errorMsg = "hard turn limit reached: exceeded maximum turn limit and grace period without settling"
 		resultText = "Subagent aborted: exceeded maximum turn limit and grace period without settling."
+	} else if taskCtx.Err() == context.DeadlineExceeded || errors.Is(taskCtx.Err(), context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
+		terminalStatus = "failed"
+		errorMsg = fmt.Sprintf("subagent execution timed out (exceeded %v)", timeout)
+		resultText = fmt.Sprintf("Subagent execution timed out (exceeded %v).", timeout)
 	} else if task.stopped {
 		terminalStatus = "stopped"
 		resultText = "Subagent stopped."

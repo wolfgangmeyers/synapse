@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -58,11 +59,16 @@ func embeddedSubagentSpawnSchema() *ai.Schema {
 	maxTurnsSchema := ai.Integer("Maximum number of agentic turns before stopping. Omit for unlimited (default).")
 	maxTurnsSchema.Minimum = &minTurns
 
+	minTimeout := 1.0
+	timeoutSchema := ai.Integer("Timeout in seconds before stopping subagent execution. Defaults to 600 (10 minutes). Minimum: 1.")
+	timeoutSchema.Minimum = &minTimeout
+
 	s := ai.Object(
 		ai.Prop("prompt", ai.String("The task for the agent to perform.")),
 		ai.Opt("description", ai.String("A short (3-5 word) description of the task (shown in UI).")),
 		ai.Opt("subagent_type", ai.String("The type of specialized agent to use. Available types: general-purpose, Plan.")),
 		ai.Opt("max_turns", maxTurnsSchema),
+		ai.Opt("timeout", timeoutSchema),
 		ai.Opt("resume", ai.String("Optional agent ID to resume from. Continues from previous context.")),
 	)
 	s.AdditionalAllowed = &closed
@@ -131,6 +137,29 @@ func (m *Manager) embeddedSubagentTool(parent store.EmbeddedBinding) agent.Agent
 				}
 			}
 
+			timeoutSecs := 600
+			if raw, ok := args["timeout"]; ok && raw != nil {
+				switch v := raw.(type) {
+				case float64:
+					if v < 1 || v != float64(int(v)) {
+						return agent.AgentToolResult{}, errors.New("timeout must be an integer >= 1")
+					}
+					timeoutSecs = int(v)
+				case int:
+					if v < 1 {
+						return agent.AgentToolResult{}, errors.New("timeout must be an integer >= 1")
+					}
+					timeoutSecs = v
+				case int64:
+					if v < 1 {
+						return agent.AgentToolResult{}, errors.New("timeout must be an integer >= 1")
+					}
+					timeoutSecs = int(v)
+				default:
+					return agent.AgentToolResult{}, errors.New("timeout must be an integer >= 1")
+				}
+			}
+
 			resume, _ := args["resume"].(string)
 			resume = strings.TrimSpace(resume)
 
@@ -141,6 +170,7 @@ func (m *Manager) embeddedSubagentTool(parent store.EmbeddedBinding) agent.Agent
 				Description:  description,
 				SubagentType: subagentType,
 				MaxTurns:     maxTurns,
+				Timeout:      time.Duration(timeoutSecs) * time.Second,
 				Prompt:       prompt,
 				Resume:       resume,
 			}
