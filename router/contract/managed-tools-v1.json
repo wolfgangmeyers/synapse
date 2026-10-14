@@ -57,7 +57,7 @@
     {
       "capability_id": "mecha_context",
       "label": "Mecha Context",
-      "description": "Inspect or configure Pi context-threshold notifications, or trigger self-compaction.",
+      "description": "Inspect context usage, threshold warnings, and context reset status.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -67,64 +67,20 @@
         "properties": {
           "action": {
             "type": "string",
-            "maxLength": 64,
-            "enum": [
-              "status",
-              "set_policy",
-              "compact"
-            ]
-          },
-          "policy": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [],
-            "properties": {
-              "levels": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "percent"
-                  ],
-                  "properties": {
-                    "percent": {
-                      "type": "number",
-                      "minimum": 1,
-                      "maximum": 99
-                    },
-                    "guidance": {
-                      "type": "string",
-                      "maxLength": 2000
-                    },
-                    "mandatory": {
-                      "type": "boolean"
-                    }
-                  }
-                },
-                "maxItems": 64
-              }
-            }
-          },
-          "customInstructions": {
-            "type": "string",
-            "maxLength": 2000
-          },
-          "postCompactionNotification": {
-            "type": "string",
-            "maxLength": 2000
+            "minLength": 6,
+            "maxLength": 6
           }
         }
       },
       "operation_id": "context.control",
-      "prompt_snippet": "Inspect context-threshold policy or request Pi self-compaction",
+      "prompt_snippet": "Inspect context usage, threshold boundaries, and reset status",
       "prompt_guidelines": [
-        "Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.",
+        "Use mecha_context with action status for context usage and reset boundaries.",
         "Call pi__mecha_context through the Cursor pi bridge."
       ],
       "name": "mecha_context",
-      "definition_id": "def_a6ae2502f76c2b5c1837bddcf8c8613e1f96fade26e7e37c89068a7070b844c8",
-      "definition_sha256": "a6ae2502f76c2b5c1837bddcf8c8613e1f96fade26e7e37c89068a7070b844c8"
+      "definition_id": "def_b94a12b4d09d01e7ec155afb93e34087c2ae48da5c64f6eec818301db340f630",
+      "definition_sha256": "b94a12b4d09d01e7ec155afb93e34087c2ae48da5c64f6eec818301db340f630"
     },
     {
       "capability_id": "mecha_git",

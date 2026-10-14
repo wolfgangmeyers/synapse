@@ -363,13 +363,13 @@ func TestRootAdaptersBehavioralFunctionalTable(t *testing.T) {
 			require.Equal(t, "disable", settings[tool.OperationID].(map[string]any)["action"])
 		}},
 		{capability: "mecha_context", run: func(t *testing.T, f *rootAdapterFixture, tool managed.ManifestTool) {
-			for _, args := range []map[string]any{{"action": "status"}, {"action": "set_policy", "policy": map[string]any{"levels": []any{}}, "customInstructions": "bounded fixture", "postCompactionNotification": "fixture"}} {
+			for _, args := range []map[string]any{{"action": "status"}} {
 				row, _ := f.invoke(t, tool, args)
 				requireRootAdapterOK(t, row)
 			}
 			settings := rootAdapterHostState(t, f.executor.home)["settings"].(map[string]any)[f.agent.AgentID].(map[string]any)
 			policy := settings[tool.OperationID].(map[string]any)
-			require.Equal(t, "set_policy", policy["action"])
+			require.Equal(t, "status", policy["action"])
 		}},
 		{capability: "goal", run: func(t *testing.T, f *rootAdapterFixture, tool managed.ManifestTool) {
 			row, _ := f.invoke(t, tool, map[string]any{"action": "set", "goal": "finish root adapter proof"})

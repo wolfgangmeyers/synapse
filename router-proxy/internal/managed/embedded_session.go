@@ -975,7 +975,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		toolExecutions[id] = w
 	}
 	freshReminderIntents := make(map[string]bool)
-	freshCompactionIntents := make(map[string]bool)
+
 	p.goalInvocation = func(id string) *store.EmbeddedGoalInvocation {
 		freshWorkerMu.Lock()
 		defer freshWorkerMu.Unlock()
@@ -1134,17 +1134,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedGoalSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
 			return store.EmbeddedGoalSnoozeTurn{UserSeq: p.turnSeq, UserDigest: p.turnDigest}
 		}, goalAdmitted, goalCompleted))
-		tools = append(tools, m.embeddedCompactionTool(owner, func(id string) bool {
-			freshWorkerMu.Lock()
-			defer freshWorkerMu.Unlock()
-			fresh := freshCompactionIntents[id]
-			delete(freshCompactionIntents, id)
-			return fresh
-		}, func() (int64, string) { return p.seq, p.digest }, func(id string, result ai.ToolResultMessage) {
-			freshWorkerMu.Lock()
-			compactionResults[id] = &result
-			freshWorkerMu.Unlock()
-		}))
+		tools = append(tools, m.embeddedCompactionTool(owner))
 		tools = append(tools, m.embeddedReminderTool(owner, func(id string) bool {
 			freshWorkerMu.Lock()
 			defer freshWorkerMu.Unlock()
@@ -1374,7 +1364,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	}
 	workerPrompt := resolveEmbeddedWorkerSystemPrompt(role, binding.AgentID, saved.Cwd)
 	if activeWorkflowState != nil {
-		if guidance := formatWorkflowStateGuidance(ctx, m.store, activeWorkflowState); guidance != "" {
+		wfVars := saved.WorkflowVariables
+		if guidance := formatWorkflowStateGuidance(ctx, m.store, activeWorkflowState, wfVars); guidance != "" {
 			workerPrompt = workerPrompt + "\n\n" + guidance
 		}
 	}
@@ -1450,8 +1441,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 			}
 			if call.ToolCall.Name == "mecha_context" {
-				if (role != "root" && role != "worker") || len(call.ToolCall.Arguments) != 1 {
-					return &agent.PolicyDenial{Reason: "context requires own root or worker and a closed action"}
+				if role != "root" && role != "worker" {
+					return &agent.PolicyDenial{Reason: "context requires own root or worker"}
+				}
+				if len(call.ToolCall.Arguments) != 1 || call.ToolCall.Arguments["action"] != "status" {
+					return &agent.PolicyDenial{Reason: "mecha_context only supports action=status; compaction has been replaced by context reset and scratchpad"}
 				}
 			}
 			if call.ToolCall.Name == "mecha_reminder" {
@@ -1549,22 +1543,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					return err
 				}
 			}
-			if call.ToolCall.Name == "mecha_context" && call.ToolCall.Arguments["action"] == "compact" {
-				freshWorkerMu.Lock()
-				delete(freshCompactionIntents, call.ToolCall.ID)
-				delete(compactionResults, call.ToolCall.ID)
-				freshWorkerMu.Unlock()
-				prior, err := m.store.RecoverEmbeddedEffect(callCtx, binding, call.ToolCall.ID)
-				if err == nil {
-					if !bytes.Equal(prior.Intent, intent) {
-						return errors.New("compaction call ID conflicts with original arguments")
-					}
-					return errors.New("compaction outcome unknown or already recorded: no replay")
-				}
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
-				}
-			}
+
 			if call.ToolCall.Name == "mecha_reminder" {
 				freshWorkerMu.Lock()
 				reminderExecutions[call.ToolCall.ID] = reminderExecution{}
@@ -1624,11 +1603,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
 				return err
 			}
-			if call.ToolCall.Name == "mecha_context" && call.ToolCall.Arguments["action"] == "compact" {
-				freshWorkerMu.Lock()
-				freshCompactionIntents[call.ToolCall.ID] = true
-				freshWorkerMu.Unlock()
-			}
+
 			if call.ToolCall.Name == "mecha_reminder" {
 				freshWorkerMu.Lock()
 				freshReminderIntents[call.ToolCall.ID] = true

@@ -887,3 +887,80 @@ func TestManagerResetEmbeddedAgent(t *testing.T) {
 	require.Equal(t, 0, oldCurrent)
 }
 
+func TestMechaContextToolStatusAndRejectCompact(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "context_tool_test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	mgr := &Manager{store: db}
+
+	// 1. Create a 1M+ agent and verify mecha_context status
+	b1M := subagentTestParent(t, db, "agent-1m")
+	tok1M := 350_000
+	pct1M := 35.0
+	require.NoError(t, db.UpdateManagedAgentContextUsage(ctx, "agent-1m", &tok1M, 1_000_000, &pct1M))
+
+	owner1M := embeddedOwner{binding: b1M}
+	tool1M := mgr.embeddedCompactionTool(owner1M)
+	require.Equal(t, "mecha_context", tool1M.Name)
+
+	// Call status on 1M+ agent
+	resStatus1M, err := tool1M.Execute(ctx, "call-1", map[string]any{"action": "status"}, nil)
+	require.NoError(t, err)
+	require.Len(t, resStatus1M.Content, 1)
+	statusText1M := resStatus1M.Content[0].(ai.TextContent).Text
+	require.Contains(t, statusText1M, `"session_id":"agent-1m-session"`)
+	require.Contains(t, statusText1M, `"epoch":1`)
+	require.Contains(t, statusText1M, `"warning_threshold_percent":40`)
+	require.Contains(t, statusText1M, `"reset_threshold_percent":50`)
+	require.Contains(t, statusText1M, `"system":"context_reset+scratchpad"`)
+	require.Contains(t, statusText1M, `"current_tokens":350000`)
+	require.Contains(t, statusText1M, `"context_window":1000000`)
+	require.NotContains(t, strings.ToLower(statusText1M), "compaction is active")
+
+	// 2. Create a <1M agent and verify mecha_context status
+	bSmall := subagentTestParent(t, db, "agent-small")
+	tokSmall := 120_000
+	pctSmall := 60.0
+	require.NoError(t, db.UpdateManagedAgentContextUsage(ctx, "agent-small", &tokSmall, 200_000, &pctSmall))
+
+	ownerSmall := embeddedOwner{binding: bSmall}
+	toolSmall := mgr.embeddedCompactionTool(ownerSmall)
+
+	resStatusSmall, err := toolSmall.Execute(ctx, "call-2", map[string]any{"action": "status"}, nil)
+	require.NoError(t, err)
+	statusTextSmall := resStatusSmall.Content[0].(ai.TextContent).Text
+	require.Contains(t, statusTextSmall, `"session_id":"agent-small-session"`)
+	require.Contains(t, statusTextSmall, `"epoch":1`)
+	require.Contains(t, statusTextSmall, `"warning_threshold_percent":70`)
+	require.Contains(t, statusTextSmall, `"reset_threshold_percent":80`)
+
+	// 3. Verify action=compact is REJECTED
+	_, errCompact := tool1M.Execute(ctx, "call-3", map[string]any{"action": "compact"}, nil)
+	require.Error(t, errCompact)
+	require.Contains(t, errCompact.Error(), "unsupported mecha_context action")
+	require.Contains(t, errCompact.Error(), "compaction has been replaced by context reset and scratchpad")
+
+	// 4. Verify invalid/missing action is rejected
+	_, errEmpty := tool1M.Execute(ctx, "call-4", map[string]any{}, nil)
+	require.Error(t, errEmpty)
+	_, errInvalid := tool1M.Execute(ctx, "call-5", map[string]any{"action": "set_policy"}, nil)
+	require.Error(t, errInvalid)
+
+	// 5. Verify FormatContextResetWarningReminder wording has NO reference to compaction
+	reminder1M := FormatContextResetWarningReminder(400_000, 1_000_000)
+	require.Contains(t, reminder1M, "400000 / 1000000 tokens (40.0%)")
+	require.Contains(t, reminder1M, "Approaching automatic reset boundary at 50%")
+	require.Contains(t, reminder1M, "scratchpad")
+	require.NotContains(t, strings.ToLower(reminder1M), "compact")
+
+	reminderSmall := FormatContextResetWarningReminder(140_000, 200_000)
+	require.Contains(t, reminderSmall, "140000 / 200000 tokens (70.0%)")
+	require.Contains(t, reminderSmall, "Approaching automatic reset boundary at 80%")
+	require.Contains(t, reminderSmall, "scratchpad")
+	require.NotContains(t, strings.ToLower(reminderSmall), "compact")
+}
+
+

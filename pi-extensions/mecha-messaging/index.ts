@@ -342,9 +342,9 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
     ],
   },
   mecha_context: {
-    promptSnippet: "Inspect context-threshold policy or request Pi self-compaction",
+    promptSnippet: "Inspect context usage, threshold boundaries, and reset status",
     promptGuidelines: [
-      "Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.",
+      "Use mecha_context with action status for context usage and reset boundaries.",
       "Call pi__mecha_context through the Cursor pi bridge.",
     ],
   },
@@ -1150,57 +1150,27 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   if (typeof pi.registerTool === "function") pi.registerTool({
     name: "mecha_context",
     label: "Mecha Context",
-    description: "Inspect or configure Pi context-threshold notifications, or trigger self-compaction. Use action=compact only after a threshold notification or direct user instruction. postCompactionNotification is optional: include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. A default handoff note can be configured in the compaction policy, and a per-compact call can override it.",
+    description: "Inspect context usage, threshold warnings, and context reset status. Save key state in scratchpad before reaching the reset threshold.",
     ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_context,
     parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
-      action: { type: "string", enum: ["status", "set_policy", "compact"], description: "status inspects usage/policy, set_policy changes thresholds/default handoff note, compact requests self-compaction." },
-      policy: { oneOf: [
-        { type: "object", additionalProperties: false, required: ["levels"], properties: {
-          postCompactionNotification: { type: "string", description: "Optional default handoff note injected after successful compaction. Include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed." },
-          models: { type: "object" },
-          levels: { type: "array", minItems: 1, items: { oneOf: [
-            { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
-            { type: "object", additionalProperties: false, required: ["percent"], properties: {
-              percent: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
-              guidance: { type: "string", minLength: 1 },
-              mandatory: { type: "boolean" },
-            } },
-          ] } },
-        } },
-        { type: "object", additionalProperties: false, required: ["tiers"], properties: {
-          postCompactionNotification: { type: "string", description: "Optional default handoff note injected after successful compaction. Include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed." },
-          models: { type: "object" },
-          tiers: { type: "array", minItems: 1, items: {
-            type: "object", additionalProperties: false, required: ["levels"], properties: {
-              maxContextTokens: { oneOf: [{ type: "integer", minimum: 1 }, { type: "null" }] },
-              levels: { type: "array", minItems: 1, items: { oneOf: [
-                { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
-                { type: "object", additionalProperties: false, required: ["percent"], properties: {
-                  percent: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
-                  guidance: { type: "string", minLength: 1 },
-                  mandatory: { type: "boolean" },
-                } },
-              ] } },
-            },
-          } },
-        } },
-        { type: "array", minItems: 1, items: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 } },
-      ] },
-      customInstructions: { type: "string", description: "Optional instructions for Pi's compaction summary." },
-      postCompactionNotification: { type: "string", description: "Optional per-compact handoff note. Include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. Overrides any default handoff note configured in the compaction policy for this compact call." },
+      action: { type: "string", enum: ["status"], description: "status inspects current context usage, threshold warnings, and reset boundaries." },
     } },
     async execute(_toolCallId: string, input: ContextToolInput, _signal: AbortSignal | undefined, _onUpdate: (() => void) | undefined, toolContext: PiContext) {
       try {
-        if (input.action === "set_policy") {
-          const status = compactionState().setPolicy(input.policy, toolContext);
-          return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
+        if (input.action !== "status") {
+          throw new Error("unsupported mecha_context action: compaction has been replaced by context reset and scratchpad; only action=status is supported");
         }
-        if (input.action === "compact") {
-          const request = compactionState().requestSelfCompaction(input, toolContext);
-          return { content: [{ type: "text", text: "Self-compaction deferred until Pi reaches the idle settled boundary." }], details: { ...compactionState().status(toolContext), compactState: "deferred_until_agent_settled", postCompactionNotification: request.postCompactionNotification } };
-        }
-        if (input.action !== "status") throw new Error("unsupported mecha_context action");
-        const status = compactionState().status(toolContext);
+        const usage = toolContext.getContextUsage?.();
+        const contextWindow = usage?.contextWindow ?? 0;
+        const warningThresholdPercent = contextWindow >= 1_000_000 ? 40 : 70;
+        const resetThresholdPercent = contextWindow >= 1_000_000 ? 50 : 80;
+        const status = {
+          system: "context_reset+scratchpad",
+          usage,
+          warningThresholdPercent,
+          resetThresholdPercent,
+          guidance: "Compaction is deprecated. Save key state in scratchpad before approaching the reset threshold. At the reset threshold, context is automatically reset to fresh headroom while preserving scratchpad memory and recent conversation.",
+        };
         return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
       } catch (error) {
         return { content: [{ type: "text", text: errorMessage(error) }], details: {}, isError: true };
