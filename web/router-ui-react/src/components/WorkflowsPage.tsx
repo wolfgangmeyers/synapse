@@ -254,7 +254,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                   <div className="workflow-card-actions" onClick={(e) => e.stopPropagation()}>
                     <button
                       type="button"
-                      className="btn-icon"
+                      className="icon-btn-round"
                       title="Edit / Rename"
                       aria-label="Edit or rename workflow"
                       onClick={() => {
@@ -268,7 +268,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                     </button>
                     <button
                       type="button"
-                      className="btn-icon"
+                      className="icon-btn-round"
                       title="Duplicate workflow"
                       aria-label="Duplicate workflow"
                       onClick={() => void handleDuplicate(wf)}
@@ -277,7 +277,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                     </button>
                     <button
                       type="button"
-                      className="btn-icon"
+                      className="icon-btn-round"
                       title="Export workflow"
                       aria-label="Export workflow"
                       onClick={() => void handleExport(wf)}
@@ -286,7 +286,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                     </button>
                     <button
                       type="button"
-                      className="btn-icon btn-danger"
+                      className="icon-btn-round danger"
                       title="Delete workflow"
                       aria-label="Delete workflow"
                       onClick={() => setDeleteWorkflowId(wf.id)}

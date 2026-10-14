@@ -69,6 +69,10 @@ Rules for System 1 integrations:
 
 The backend must accept browser calls from arbitrary frontend URLs. Cross-origin browser routes need permissive, non-credentialed CORS transport headers, including the request headers used for idempotency and diagnostics. This is compatibility, not access control: never parse, allowlist, log as identity, or authorize by `Origin` or CORS headers, and never enable credentialed CORS, cookies, or session-based browser authority. Browser clients must omit credentials for direct managed-control calls. Test both a direct cross-origin browser launch and an arbitrary `Origin`; same-origin proxies are useful but never the only supported route.
 
+## UI Icon Button Styling
+
+Small icon-only action buttons across cards, headers, toolbars, and list items must use the compact circular icon button styling (`.icon-btn-round`: 24px x 24px, `border-radius: 999px`, subtle border and translucent background with hover states, as seen in the agent conversation header and agent list) rather than large blocky/rectangular buttons.
+
 ## Maintenance
 
 When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.

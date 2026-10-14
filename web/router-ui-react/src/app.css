@@ -3438,8 +3438,70 @@ p:empty { display: none; }
 
 .workflow-card-actions {
   display: flex;
-  gap: 0.25rem;
+  align-items: center;
+  gap: 6px;
   margin-left: 0.5rem;
+}
+
+.icon-btn-round,
+.workflow-card-actions button,
+.state-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px !important;
+  height: 24px !important;
+  min-width: 24px !important;
+  min-height: 24px !important;
+  max-width: 24px !important;
+  max-height: 24px !important;
+  margin: 0;
+  padding: 0 !important;
+  border: 1px solid rgba(181, 188, 208, 0.34) !important;
+  border-radius: 999px !important;
+  background: rgba(181, 188, 208, 0.12) !important;
+  color: var(--muted) !important;
+  line-height: 1;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: all 0.15s ease-in-out;
+}
+
+.icon-btn-round i,
+.workflow-card-actions button i,
+.state-card-actions button i {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.icon-btn-round:not(:disabled):hover,
+.workflow-card-actions button:not(:disabled):hover,
+.state-card-actions button:not(:disabled):hover {
+  background: rgba(181, 188, 208, 0.22) !important;
+  color: var(--text) !important;
+}
+
+.icon-btn-round.danger:not(:disabled):hover,
+.icon-btn-round.btn-danger:not(:disabled):hover,
+.workflow-card-actions button.workflow-card-action-delete:not(:disabled):hover,
+.workflow-card-actions button.danger:not(:disabled):hover,
+.workflow-card-actions button.btn-danger:not(:disabled):hover,
+.state-card-actions button.danger:not(:disabled):hover,
+.state-card-actions button.btn-danger:not(:disabled):hover {
+  background: rgba(239, 68, 68, 0.25) !important;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+  color: #f87171 !important;
+}
+
+.icon-btn-round.danger:not(:disabled):hover i,
+.icon-btn-round.btn-danger:not(:disabled):hover i,
+.workflow-card-actions button.workflow-card-action-delete:not(:disabled):hover i,
+.workflow-card-actions button.danger:not(:disabled):hover i,
+.workflow-card-actions button.btn-danger:not(:disabled):hover i,
+.state-card-actions button.danger:not(:disabled):hover i,
+.state-card-actions button.btn-danger:not(:disabled):hover i {
+  color: #f87171 !important;
 }
 
 .workflow-card-meta {
