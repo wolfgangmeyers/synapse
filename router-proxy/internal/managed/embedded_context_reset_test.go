@@ -73,10 +73,9 @@ func TestContextThresholdExceeded(t *testing.T) {
 // TestContextResetPortsLastFewMessages verifies that executing context reset:
 // 1. Starts a new epoch in embedded_sessions (epoch 2)
 // 2. Marks the old epoch current=0
-// 3. Appends the genesis prompt as entry 1
-// 4. Ports the last 4-6 messages from epoch 1
-// 5. Appends the wake prompt ContextResetWakePrompt
-// 6. Executes the assistant wake turn response
+// 3. Ports the last 4-6 messages from epoch 1 (no synthetic genesis prompt added when PendingInitialInstruction is empty)
+// 4. Appends the wake prompt ContextResetWakePrompt
+// 5. Executes the assistant wake turn response
 func TestContextResetPortsLastFewMessages(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -174,36 +173,30 @@ func TestContextResetPortsLastFewMessages(t *testing.T) {
 	snap2, err := db.ReopenEmbedded(ctx, nextBinding)
 	require.NoError(t, err)
 
-	require.Equal(t, 10, len(snap2.Entries), "epoch 2 should have genesis + 6 ported + system + wake user + wake assistant = 10 entries")
+	require.Equal(t, 9, len(snap2.Entries), "epoch 2 should have 6 ported + system + wake user + wake assistant = 9 entries")
 
-	// Verify Entry 1 is genesis prompt
-	msg1, err := ai.UnmarshalMessage(snap2.Entries[0].Body)
-	require.NoError(t, err)
-	require.Equal(t, ai.RoleUser, msg1.MessageRole())
-	require.Equal(t, "Turn 1 work message", messageContentText(msg1))
-
-	// Verify the ported messages match the tail of epoch 1 (entries 3..8 of snap1 correspond to entries 1..6 of snap2)
+	// Verify the ported messages match the tail of epoch 1 (entries 3..8 of snap1 correspond to entries 0..5 of snap2)
 	for i := 0; i < 6; i++ {
 		origMsg, err := ai.UnmarshalMessage(snap1.Entries[3+i].Body)
 		require.NoError(t, err)
-		portedMsg, err := ai.UnmarshalMessage(snap2.Entries[1+i].Body)
+		portedMsg, err := ai.UnmarshalMessage(snap2.Entries[0+i].Body)
 		require.NoError(t, err)
 		require.Equal(t, origMsg.MessageRole(), portedMsg.MessageRole(), "ported message role must match original")
 	}
 
-	// Verify Entry 8 is the system prompt injected for the new session
-	sysMsg, err := ai.UnmarshalMessage(snap2.Entries[7].Body)
+	// Verify Entry 7 is the system prompt injected for the new session
+	sysMsg, err := ai.UnmarshalMessage(snap2.Entries[6].Body)
 	require.NoError(t, err)
 	require.Equal(t, ai.RoleSystem, sysMsg.MessageRole())
 
-	// Verify Entry 9 is the post-reset wake prompt
-	wakeMsg, err := ai.UnmarshalMessage(snap2.Entries[8].Body)
+	// Verify Entry 8 is the post-reset wake prompt
+	wakeMsg, err := ai.UnmarshalMessage(snap2.Entries[7].Body)
 	require.NoError(t, err)
 	require.Equal(t, ai.RoleUser, wakeMsg.MessageRole())
 	require.Equal(t, ContextResetWakePrompt, messageContentText(wakeMsg))
 
-	// Verify Entry 10 is the assistant response
-	wakeResp, err := ai.UnmarshalMessage(snap2.Entries[9].Body)
+	// Verify Entry 9 is the assistant response
+	wakeResp, err := ai.UnmarshalMessage(snap2.Entries[8].Body)
 	require.NoError(t, err)
 	require.Equal(t, ai.RoleAssistant, wakeResp.MessageRole())
 
@@ -962,5 +955,153 @@ func TestMechaContextToolStatusAndRejectCompact(t *testing.T) {
 	require.Contains(t, reminderSmall, "scratchpad")
 	require.NotContains(t, strings.ToLower(reminderSmall), "compact")
 }
+
+// TestContextResetGenesisPromptPreservedOnlyWhenExplicitlySet verifies:
+// 1. When saved.PendingInitialInstruction is set, it is appended to epoch 2.
+// 2. When saved.PendingInitialInstruction is empty, no genesis prompt is added at all.
+func TestContextResetGenesisPromptPreservedOnlyWhenExplicitlySet(t *testing.T) {
+	ctx := context.Background()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+		Models: []providers.FauxModelDefinition{{
+			ID:            "genesis-test-model",
+			ContextWindow: 1_000_000,
+			MaxTokens:     4096,
+			Input:         []string{"text"},
+		}},
+	})
+	defer reg.Unregister()
+
+	steps := make([]providers.FauxResponseStep, 20)
+	for i := range steps {
+		steps[i] = func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "OK"}}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(steps)
+
+	t.Run("PendingInitialInstructionIsPreserved", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test_preserved.db")
+		db, err := store.Open(ctx, dbPath, store.Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		mgr := makeSubagentTestManager(t, db, reg, 4)
+		defer mgr.Close(ctx)
+
+		explicitInstruction := "Follow these strict requirements for the task."
+
+		// Reserve agent with PendingInitialInstruction set on launch
+		id := "instruction-agent"
+		agent := store.ManagedAgentRecord{
+			AgentID: id, Name: id, SlotHeld: true, Cwd: t.TempDir(),
+			SelectedModel:              store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-sol"},
+			Runtime:                    "embedded",
+			DesiredState:               "running",
+			PiSessionID:                id + "-session",
+			SessionEpoch:               1,
+			ManifestRevision:           1,
+			ManifestHash:               strings.Repeat("a", 64),
+			PendingInitialInstruction: explicitInstruction,
+		}
+		op := store.ManagedOperation{
+			OperationID: id + "-launch", Method: "POST", CanonicalPath: "/v1/managed-agents",
+			RequestID: id + "-launch", CanonicalBodyHash: strings.Repeat("a", 64), ResponseStatus: 202,
+			ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`),
+		}
+		require.NoError(t, db.ReserveManagedLaunch(ctx, agent, op))
+		require.NoError(t, db.UpdateManagedAgentStarting(ctx, id, agent.PiSessionID, store.ProcessIdentityRecord{PID: 123, StartMarker: "start", Incarnation: "inc"}, "generation-1"))
+		require.NoError(t, db.MarkManagedReady(ctx, id))
+		parent := store.EmbeddedBinding{AgentID: id, SessionID: agent.PiSessionID, Epoch: 1, Generation: "generation-1"}
+		require.NoError(t, db.BindEmbeddedSession(ctx, parent, "worker"))
+		token, err := db.AcquireEmbeddedOwner(ctx, parent, "fixture:"+parent.AgentID, time.Minute)
+		require.NoError(t, err)
+		parent.OwnerToken = token
+		registerParentOwner(mgr, parent)
+
+		savedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, explicitInstruction, savedAgent.PendingInitialInstruction)
+
+		owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+		ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+		err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, "Initial message")
+		require.NoError(t, err)
+
+		err = mgr.ExecuteContextReset(ownerCtx, parent, "test_instruction_preserved")
+		require.NoError(t, err)
+
+		updatedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, int64(2), updatedAgent.SessionEpoch)
+
+		nextBinding := store.EmbeddedBinding{
+			AgentID:    parent.AgentID,
+			SessionID:  updatedAgent.PiSessionID,
+			Epoch:      2,
+			Generation: parent.Generation,
+			OwnerToken: 1,
+		}
+		snap2, err := db.ReopenEmbedded(ctx, nextBinding)
+		require.NoError(t, err)
+
+		// Entry 0 must be the preserved initial instruction
+		msg0, err := ai.UnmarshalMessage(snap2.Entries[0].Body)
+		require.NoError(t, err)
+		require.Equal(t, ai.RoleUser, msg0.MessageRole())
+		require.Contains(t, messageContentText(msg0), explicitInstruction)
+	})
+
+	t.Run("EmptyInitialInstructionLeavesNoGenesisPrompt", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test_no_genesis.db")
+		db, err := store.Open(ctx, dbPath, store.Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		mgr := makeSubagentTestManager(t, db, reg, 4)
+		defer mgr.Close(ctx)
+
+		parent := subagentTestParent(t, db, "no-instruction-agent")
+		registerParentOwner(mgr, parent)
+
+		savedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+		require.NoError(t, err)
+		require.Empty(t, savedAgent.PendingInitialInstruction)
+
+		owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+		ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+		err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, "First turn prompt")
+		require.NoError(t, err)
+
+		err = mgr.ExecuteContextReset(ownerCtx, parent, "test_no_genesis")
+		require.NoError(t, err)
+
+		updatedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, int64(2), updatedAgent.SessionEpoch)
+
+		nextBinding := store.EmbeddedBinding{
+			AgentID:    parent.AgentID,
+			SessionID:  updatedAgent.PiSessionID,
+			Epoch:      2,
+			Generation: parent.Generation,
+			OwnerToken: 1,
+		}
+		snap2, err := db.ReopenEmbedded(ctx, nextBinding)
+		require.NoError(t, err)
+
+		// Check all entries in snap2 to ensure NO synthetic genesis prompt exists
+		for _, entry := range snap2.Entries {
+			msg, err := ai.UnmarshalMessage(entry.Body)
+			require.NoError(t, err)
+			content := messageContentText(msg)
+			require.NotContains(t, content, "You are the 'no-instruction-agent' agent. Proceed with your assigned task.")
+			require.NotContains(t, content, "You are a mecha agent.")
+		}
+	})
+}
+
 
 

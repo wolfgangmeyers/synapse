@@ -109,14 +109,10 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	}
 
 	var sessionMessages []agent.AgentMessage
-	var firstUserText string
 	for _, entry := range snap.Entries {
 		msg, err := ai.UnmarshalMessage(entry.Body)
 		if err != nil {
 			continue
-		}
-		if msg.MessageRole() == ai.RoleUser && firstUserText == "" {
-			firstUserText = messageContentText(msg)
 		}
 		if msg.MessageRole() != ai.RoleSystem {
 			sessionMessages = append(sessionMessages, msg)
@@ -180,30 +176,27 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	}
 	m.mu.Unlock()
 
-	// Append genesis prompt
-	genesisText := saved.PendingInitialInstruction
-	if genesisText == "" && len(firstUserText) > 0 && len(firstUserText) < 1000 {
-		genesisText = firstUserText
-	}
-	if genesisText == "" {
-		genesisText = fmt.Sprintf("You are the '%s' agent. Proceed with your assigned task.", saved.AgentID)
-	} else if saved.PendingInitialInstruction != "" {
+	// Append initial instruction if explicitly set on launch, otherwise do not synthesize a genesis prompt.
+	var genesisMsg *ai.UserMessage
+	if saved.PendingInitialInstruction != "" {
+		genesisText := saved.PendingInitialInstruction
 		role, _ := m.store.EmbeddedSessionRole(ctx, binding)
 		if role != "root" {
 			genesisText = formatGenesisPrompt(saved.AgentID, genesisText)
 		}
-	}
-	genesisMsg := ai.UserMessage{
-		Content: ai.ContentList{
-			ai.TextContent{Text: genesisText},
-		},
-	}
-	genesisBody, err := json.Marshal(genesisMsg)
-	if err != nil {
-		return fmt.Errorf("marshal genesis message: %w", err)
-	}
-	if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, "user", genesisBody); err != nil {
-		return fmt.Errorf("append genesis prompt: %w", err)
+		msg := ai.UserMessage{
+			Content: ai.ContentList{
+				ai.TextContent{Text: genesisText},
+			},
+		}
+		genesisBody, err := json.Marshal(msg)
+		if err != nil {
+			return fmt.Errorf("marshal genesis message: %w", err)
+		}
+		if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, "user", genesisBody); err != nil {
+			return fmt.Errorf("append genesis prompt: %w", err)
+		}
+		genesisMsg = &msg
 	}
 
 	// Append scratchpad entries (if any)
@@ -257,7 +250,9 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 
 	// Immediately update context usage for the reset agent so the UI immediately sees the reset tokens.
 	var resetMessages []agent.AgentMessage
-	resetMessages = append(resetMessages, genesisMsg)
+	if genesisMsg != nil {
+		resetMessages = append(resetMessages, *genesisMsg)
+	}
 	if scratchpadMsg != nil {
 		resetMessages = append(resetMessages, *scratchpadMsg)
 	}
