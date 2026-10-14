@@ -1608,8 +1608,10 @@ func (r *Router) handleManagedWorkflowStateGET(w http.ResponseWriter, req *http.
 	}
 	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 		"agent_id":                  agentID,
+		"active_workflow_id":        agent.ActiveWorkflowID,
 		"active_workflow_state_id":  agent.ActiveWorkflowStateID,
 		"active_workflow_state":     activeState,
+		"workflow_variables":        agent.WorkflowVariables,
 	}, nil)
 }
 
@@ -1643,36 +1645,75 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 
 	switch action {
 	case "activate":
-		rawWorkflowID, hasWorkflowID := payload["workflow_state_id"]
-		if !hasWorkflowID {
-			r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_FIELD", "workflow_state_id is required for activate"})
-			return
+		var workflowID *string
+		if rawWfID, exists := payload["workflow_id"]; exists && len(rawWfID) > 0 && string(rawWfID) != "null" {
+			var wID string
+			if err := json.Unmarshal(rawWfID, &wID); err == nil && strings.TrimSpace(wID) != "" {
+				trimmed := strings.TrimSpace(wID)
+				workflowID = &trimmed
+			}
 		}
+
+		var variables map[string]string
+		if rawVars, exists := payload["variables"]; exists && len(rawVars) > 0 && string(rawVars) != "null" {
+			if err := json.Unmarshal(rawVars, &variables); err != nil {
+				r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_FIELD", "variables must be a map of string to string"})
+				return
+			}
+		}
+
 		var workflowStateID string
-		if err := json.Unmarshal(rawWorkflowID, &workflowStateID); err != nil || strings.TrimSpace(workflowStateID) == "" {
-			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_FIELD", "workflow_state_id must be a non-empty string"})
+		rawStateID, hasStateID := payload["workflow_state_id"]
+		if hasStateID && len(rawStateID) > 0 && string(rawStateID) != "null" {
+			_ = json.Unmarshal(rawStateID, &workflowStateID)
+			workflowStateID = strings.TrimSpace(workflowStateID)
+		}
+
+		// If workflow_id is provided and workflow_state_id is empty, lookup workflow EntryStateID
+		if workflowID != nil && workflowStateID == "" {
+			wf, err := r.store.GetWorkflow(req.Context(), *workflowID)
+			if err != nil || wf == nil {
+				r.writeManagedError(w, req, &managedHTTPError{404, "WORKFLOW_NOT_FOUND", "Workflow not found"})
+				return
+			}
+			if wf.EntryStateID == nil || strings.TrimSpace(*wf.EntryStateID) == "" {
+				r.writeManagedError(w, req, &managedHTTPError{400, "BAD_REQUEST", "workflow has no entry state"})
+				return
+			}
+			workflowStateID = strings.TrimSpace(*wf.EntryStateID)
+		}
+
+		if workflowStateID == "" {
+			r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_FIELD", "workflow_state_id is required for activate when workflow has no entry state"})
 			return
 		}
+
 		wfState, err := r.store.GetWorkflowState(req.Context(), workflowStateID)
 		if err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{404, "WORKFLOW_STATE_NOT_FOUND", "Workflow state not found"})
 			return
 		}
 
+		// If workflow_id wasn't explicitly passed in payload, inherit it from state if set
+		if workflowID == nil && wfState.WorkflowID != nil && strings.TrimSpace(*wfState.WorkflowID) != "" {
+			workflowID = wfState.WorkflowID
+		}
+
 		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
 
-		if err := r.store.SetManagedAgentActiveWorkflowState(req.Context(), agentID, &wfState.ID); err != nil {
+		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, workflowID, &wfState.ID, variables); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update agent workflow state"})
 			return
 		}
 
-		// Synchronize goal with workflow state
+		// Synchronize goal with workflow state, applying variable substitution
 		if wfState.Goal != "" {
+			goalText := store.SubstituteVariables(wfState.Goal, variables)
 			goalSettings := store.DefaultManagedGoalSettings()
 			goalSettings.GoalLockEnabled = true
 			_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
 				Enabled:  true,
-				Goal:     wfState.Goal,
+				Goal:     goalText,
 				Settings: goalSettings,
 			})
 		} else {
@@ -1685,7 +1726,7 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			})
 		}
 
-		_ = r.store.SpawnWorkflowStateReminders(req.Context(), agentID, wfState)
+		_ = r.store.SpawnWorkflowStateReminders(req.Context(), agentID, wfState, variables)
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 
@@ -1694,12 +1735,14 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			var sb strings.Builder
 			sb.WriteString(fmt.Sprintf("[Workflow Activated: %s]\n", wfState.Name))
 			if strings.TrimSpace(wfState.Description) != "" {
-				sb.WriteString(fmt.Sprintf("%s\n\n", strings.TrimSpace(wfState.Description)))
+				descText := store.SubstituteVariables(strings.TrimSpace(wfState.Description), variables)
+				sb.WriteString(fmt.Sprintf("%s\n\n", descText))
 			} else {
 				sb.WriteString("\n")
 			}
 			if strings.TrimSpace(wfState.EntryText) != "" {
-				sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", strings.TrimSpace(wfState.EntryText)))
+				entryText := store.SubstituteVariables(strings.TrimSpace(wfState.EntryText), variables)
+				sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", entryText))
 			}
 			sb.WriteString("### Allowed Transitions\n")
 			if len(wfState.Transitions) == 0 {
@@ -1712,6 +1755,7 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 					}
 					desc := strings.TrimSpace(tr.Description)
 					if desc != "" {
+						desc = store.SubstituteVariables(desc, variables)
 						sb.WriteString(fmt.Sprintf("- %s: %s\n", targetName, desc))
 					} else {
 						sb.WriteString(fmt.Sprintf("- %s\n", targetName))
@@ -1751,15 +1795,22 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			},
 		)
 
+		var activeWorkflowID string
+		if workflowID != nil {
+			activeWorkflowID = *workflowID
+		}
+
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 			"agent_id":                 agentID,
+			"active_workflow_id":       activeWorkflowID,
 			"active_workflow_state_id": wfState.ID,
 			"active_workflow_state":    wfState,
+			"workflow_variables":       variables,
 		}, nil)
 
 	case "deactivate":
 		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
-		if err := r.store.SetManagedAgentActiveWorkflowState(req.Context(), agentID, nil); err != nil {
+		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, nil, nil, nil); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
 			return
 		}
@@ -1775,8 +1826,10 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 			"agent_id":                 agentID,
+			"active_workflow_id":       "",
 			"active_workflow_state_id": "",
 			"active_workflow_state":    nil,
+			"workflow_variables":       nil,
 		}, nil)
 
 	default:

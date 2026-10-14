@@ -23,20 +23,33 @@ func embeddedWorkflowTransitionSchema() *ai.Schema {
 }
 
 // formatWorkflowStateGuidance formats the context guidance for a given workflow state.
-func formatWorkflowStateGuidance(ctx context.Context, s *store.Store, state *store.WorkflowState) string {
+func formatWorkflowStateGuidance(ctx context.Context, s *store.Store, state *store.WorkflowState, vars ...map[string]string) string {
 	if state == nil {
 		return ""
 	}
+	var varMap map[string]string
+	if len(vars) > 0 {
+		varMap = vars[0]
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## Active Workflow State: %s\n", state.Name))
 	if strings.TrimSpace(state.Description) != "" {
-		sb.WriteString(fmt.Sprintf("%s\n\n", strings.TrimSpace(state.Description)))
+		desc := strings.TrimSpace(state.Description)
+		if varMap != nil {
+			desc = store.SubstituteVariables(desc, varMap)
+		}
+		sb.WriteString(fmt.Sprintf("%s\n\n", desc))
 	} else {
 		sb.WriteString("\n")
 	}
 
 	if strings.TrimSpace(state.EntryText) != "" {
-		sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", strings.TrimSpace(state.EntryText)))
+		entryText := strings.TrimSpace(state.EntryText)
+		if varMap != nil {
+			entryText = store.SubstituteVariables(entryText, varMap)
+		}
+		sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", entryText))
 	}
 
 	sb.WriteString("### Allowed Transitions\n")
@@ -52,6 +65,9 @@ func formatWorkflowStateGuidance(ctx context.Context, s *store.Store, state *sto
 			}
 			desc := strings.TrimSpace(tr.Description)
 			if desc != "" {
+				if varMap != nil {
+					desc = store.SubstituteVariables(desc, varMap)
+				}
 				sb.WriteString(fmt.Sprintf("- %s: %s\n", targetName, desc))
 			} else {
 				sb.WriteString(fmt.Sprintf("- %s\n", targetName))
@@ -100,6 +116,11 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				return agent.AgentToolResult{}, errors.New("agent has no active workflow state")
 			}
 
+			var workflowVars map[string]string
+			if agentRec != nil {
+				workflowVars = agentRec.WorkflowVariables
+			}
+
 			reasonStr, _ := args["reason"].(string)
 
 			switch action {
@@ -143,18 +164,19 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				// Cleanup old reminders
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
 
-				// Transition to new state
+				// Transition to new state (preserving existing workflow ID and variables)
 				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, &targetState.ID); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to transition workflow state: %w", err)
 				}
 
-				// Synchronize goal with target state
+				// Synchronize goal with target state, substituting variables
 				if targetState.Goal != "" {
+					goalText := store.SubstituteVariables(targetState.Goal, workflowVars)
 					goalSettings := store.DefaultManagedGoalSettings()
 					goalSettings.GoalLockEnabled = true
 					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
 						Enabled:  true,
-						Goal:     targetState.Goal,
+						Goal:     goalText,
 						Settings: goalSettings,
 					})
 				} else {
@@ -168,7 +190,7 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				}
 
 				// Spawn new reminders
-				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState)
+				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState, workflowVars)
 
 				// Record history presentation
 				eventKey := fmt.Sprintf("workflow-transition:%s:%s:%s:%s", owner.binding.AgentID, currentState.ID, targetState.ID, id)
@@ -200,7 +222,7 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				}
 
 				// Construct synchronous response with the new state's guidance
-				guidance := formatWorkflowStateGuidance(ctx, m.store, targetState)
+				guidance := formatWorkflowStateGuidance(ctx, m.store, targetState, workflowVars)
 				resultText := fmt.Sprintf("Successfully transitioned to workflow state: %s.\n\n%s", targetState.Name, guidance)
 				return agent.AgentToolResult{
 					Content: []ai.Content{ai.TextContent{Text: resultText}},
@@ -214,8 +236,8 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				// Cleanup reminders
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
 
-				// Deactivate state
-				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, nil); err != nil {
+				// Deactivate state and clear active workflow and variables
+				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, owner.binding.AgentID, nil, nil, nil); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to exit workflow state: %w", err)
 				}
 

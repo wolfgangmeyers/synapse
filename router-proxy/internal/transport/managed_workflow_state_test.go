@@ -367,4 +367,80 @@ func TestManagedAgentWorkflowStateTransitionsIntegration(t *testing.T) {
 	res.Body.Close()
 	require.Equal(t, "", getResp3["active_workflow_state_id"])
 	require.Nil(t, getResp3["active_workflow_state"])
+
+	// 8. Test activating workflow with variables and workflow_id lookup of EntryStateID
+	wfWithEntry, err := durable.CreateWorkflow(ctx, store.WorkflowRequest{
+		Name:         "Release Pipeline",
+		Description:  "End to end release",
+		EntryStateID: &planState.ID,
+		Variables: &[]store.WorkflowVariableDefinition{
+			{
+				Name:         "RELEASE_TAG",
+				Label:        "Release Tag",
+				DefaultValue: "v1.0.0",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	activateWfBody, err := json.Marshal(map[string]any{
+		"action":      "activate",
+		"workflow_id": wfWithEntry.ID,
+		"variables": map[string]string{
+			"RELEASE_TAG": "v2.5.0",
+		},
+	})
+	require.NoError(t, err)
+	reqWf, err := http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(activateWfBody))
+	require.NoError(t, err)
+	reqWf.Header.Set("Content-Type", "application/json")
+	reqWf.Header.Set("X-Request-ID", uuid.NewString())
+
+	res, err = client.Do(reqWf)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var actWfResp map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&actWfResp))
+	res.Body.Close()
+
+	require.Equal(t, wfWithEntry.ID, actWfResp["active_workflow_id"])
+	require.Equal(t, planState.ID, actWfResp["active_workflow_state_id"])
+	varsMap, ok := actWfResp["workflow_variables"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "v2.5.0", varsMap["RELEASE_TAG"])
+
+	// GET confirms active_workflow_id and workflow_variables
+	res, err = client.Get(server.URL + "/v1/managed-agents/" + agentID + "/workflow-state")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	var getResp4 map[string]any
+	require.NoError(t, json.NewDecoder(res.Body).Decode(&getResp4))
+	res.Body.Close()
+	require.Equal(t, wfWithEntry.ID, getResp4["active_workflow_id"])
+	require.Equal(t, planState.ID, getResp4["active_workflow_state_id"])
+	varsMap4, ok := getResp4["workflow_variables"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "v2.5.0", varsMap4["RELEASE_TAG"])
+
+	// Test activating workflow with no entry state -> 400 Bad Request
+	wfNoEntry, err := durable.CreateWorkflow(ctx, store.WorkflowRequest{
+		Name:        "No Entry Workflow",
+		Description: "Has no entry state",
+	})
+	require.NoError(t, err)
+
+	activateNoEntryBody, err := json.Marshal(map[string]any{
+		"action":      "activate",
+		"workflow_id": wfNoEntry.ID,
+	})
+	require.NoError(t, err)
+	reqNoEntry, err := http.NewRequest(http.MethodPut, server.URL+"/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewReader(activateNoEntryBody))
+	require.NoError(t, err)
+	reqNoEntry.Header.Set("Content-Type", "application/json")
+	reqNoEntry.Header.Set("X-Request-ID", uuid.NewString())
+
+	res, err = client.Do(reqNoEntry)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, res.StatusCode)
+	res.Body.Close()
 }

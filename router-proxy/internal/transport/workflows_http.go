@@ -193,10 +193,20 @@ func parseWorkflowRequest(payload map[string]json.RawMessage) (store.WorkflowReq
 		entryStateID = &entryID
 	}
 
+	var variables *[]store.WorkflowVariableDefinition
+	if raw, exists := payload["variables"]; exists && len(raw) > 0 && string(raw) != "null" {
+		var vars []store.WorkflowVariableDefinition
+		if err := json.Unmarshal(raw, &vars); err != nil {
+			return store.WorkflowRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+		variables = &vars
+	}
+
 	return store.WorkflowRequest{
 		Name:         name,
 		Description:  desc,
 		EntryStateID: entryStateID,
+		Variables:    variables,
 	}, nil
 }
 

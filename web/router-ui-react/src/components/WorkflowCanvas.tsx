@@ -28,6 +28,7 @@ import type {
 import { WorkflowStateNode, type WorkflowStateNodeData } from "./WorkflowStateNode";
 import { StateConfigModal } from "./StateConfigModal";
 import { EdgeConfigModal } from "./EdgeConfigModal";
+import { WorkflowVariablesModal } from "./WorkflowVariablesModal";
 import { DialogShell } from "./DialogShell";
 
 export interface WorkflowCanvasProps {
@@ -87,6 +88,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
   const [configState, setConfigState] = useState<WorkflowState | null>(null);
   const [deleteConfirmState, setDeleteConfirmState] = useState<WorkflowState | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
+  const [variablesModalOpen, setVariablesModalOpen] = useState(false);
   const [workflowTools, setWorkflowTools] = useState<KnownToolDefinition[] | undefined>(undefined);
 
   // Fetch tools from backend
@@ -541,6 +543,15 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
           </button>
           <button
             type="button"
+            className="btn btn-secondary"
+            onClick={() => setVariablesModalOpen(true)}
+            title="Configure workflow variables"
+          >
+            <i className="fa-solid fa-sliders" aria-hidden="true" /> Variables
+            {workflow?.variables && workflow.variables.length > 0 ? ` (${workflow.variables.length})` : ""}
+          </button>
+          <button
+            type="button"
             className="btn btn-primary"
             onClick={() => {
               setNewStateName("");
@@ -729,6 +740,21 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
           onClose={() => setSelectedEdge(null)}
           onSave={(desc) => void handleSaveEdge(desc)}
           onDelete={() => void handleDeleteEdge()}
+        />
+      )}
+
+      {/* Workflow Variables Modal */}
+      {workflow && variablesModalOpen && (
+        <WorkflowVariablesModal
+          isOpen={variablesModalOpen}
+          workflow={workflow}
+          onClose={() => setVariablesModalOpen(false)}
+          onSave={async (variables) => {
+            await client.updateWorkflow(workflow.id, { variables });
+            setWorkflow((prev) => (prev ? { ...prev, variables } : null));
+            setStatusMessage("Variables updated");
+            setTimeout(() => setStatusMessage(null), 2000);
+          }}
         />
       )}
     </div>

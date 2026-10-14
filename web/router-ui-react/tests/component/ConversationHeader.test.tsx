@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ConversationHeader } from "../../src/components/ConversationHeader";
 import type { Agent } from "../../src/state/agent-projection";
+import type { Workflow } from "../../src/domain/workflow-states";
+import type { RouterHttpClient } from "../../src/transport/http-client";
 import {
   formatCompactTokens,
   formatContextUsageLabel,
@@ -149,5 +151,220 @@ describe("ConversationHeader context usage bar", () => {
     const { container } = render(<ConversationHeader agent={agent} />);
     const bar = container.querySelector(".header-context-usage");
     expect(bar).toBeNull();
+  });
+});
+
+describe("ConversationHeader workflow controls", () => {
+  beforeEach(() => {
+    cleanup();
+  });
+  const routerManagedAgent: Agent = {
+    agent_id: "agent-1",
+    source: "router-managed",
+    activity_state: "idle",
+  };
+
+  const sampleWorkflows: Workflow[] = [
+    {
+      id: "wf-1",
+      name: "Simple Workflow",
+      description: "A workflow without variables",
+      entry_state_id: "state-1",
+      state_count: 3,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+    {
+      id: "wf-2",
+      name: "Complex Workflow",
+      description: "A workflow with variables",
+      entry_state_id: "state-2",
+      state_count: 5,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      variables: [
+        {
+          name: "target_env",
+          label: "Target Environment",
+          type: "text",
+          required: true,
+          default_value: "production",
+        },
+      ],
+    },
+    {
+      id: "wf-3",
+      name: "No Entry Workflow",
+      description: "A workflow without entry state",
+      entry_state_id: null,
+      state_count: 0,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  ];
+
+  function createMockClient(overrides: Partial<RouterHttpClient> = {}): RouterHttpClient {
+    return {
+      listWorkflows: vi.fn().mockResolvedValue(sampleWorkflows),
+      setManagedAgentWorkflow: vi.fn().mockResolvedValue({}),
+      setManagedAgentWorkflowState: vi.fn().mockResolvedValue({}),
+      getWorkflowState: vi.fn().mockResolvedValue({
+        workflow_state: {
+          id: "state-2",
+          name: "Initial State",
+          entry_text: "Deploying to ${target_env}",
+          goal: "Ensure ${target_env} is healthy",
+        },
+      }),
+      ...overrides,
+    } as unknown as RouterHttpClient;
+  }
+
+  it("renders lightning bolt icon instead of diagram-project icon", async () => {
+    const mockClient = createMockClient();
+    const { container } = render(
+      <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+    );
+
+    const btn = container.querySelector(".workflow-header-button");
+    expect(btn).not.toBeNull();
+    const boltIcon = btn?.querySelector(".fa-bolt");
+    expect(boltIcon).not.toBeNull();
+    const diagramIcon = btn?.querySelector(".fa-diagram-project");
+    expect(diagramIcon).toBeNull();
+  });
+
+  it("adds 'has-workflow active' classes when agent has active workflow or active workflow state", () => {
+    const mockClient = createMockClient();
+    const agentWithWf: Agent = {
+      ...routerManagedAgent,
+      active_workflow_id: "wf-1",
+    };
+    const { container: c1 } = render(
+      <ConversationHeader agent={agentWithWf} client={mockClient} />
+    );
+    expect(c1.querySelector(".workflow-header-button.has-workflow.active")).not.toBeNull();
+
+    const agentWithState: Agent = {
+      ...routerManagedAgent,
+      active_workflow_state_id: "state-1",
+    };
+    const { container: c2 } = render(
+      <ConversationHeader agent={agentWithState} client={mockClient} />
+    );
+    expect(c2.querySelector(".workflow-header-button.has-workflow.active")).not.toBeNull();
+  });
+
+  it("lists workflows with name, description, and state count badge when dropdown is opened", async () => {
+    const mockClient = createMockClient();
+    const { container } = render(
+      <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+    );
+
+    await waitFor(() => {
+      expect(mockClient.listWorkflows).toHaveBeenCalled();
+    });
+
+    const btn = container.querySelector(".workflow-header-button")!;
+    fireEvent.click(btn);
+
+    expect(screen.getByText("Simple Workflow")).toBeDefined();
+    expect(screen.getByText("A workflow without variables")).toBeDefined();
+    expect(screen.getByText("3 states")).toBeDefined();
+    expect(screen.getByText("Complex Workflow")).toBeDefined();
+    expect(screen.getByText("5 states")).toBeDefined();
+  });
+
+  it("shows Deactivate Workflow action when agent has an active workflow", async () => {
+    const mockClient = createMockClient();
+    const agentWithWf: Agent = {
+      ...routerManagedAgent,
+      active_workflow_id: "wf-1",
+    };
+    const { container } = render(
+      <ConversationHeader agent={agentWithWf} client={mockClient} />
+    );
+
+    await waitFor(() => {
+      expect(mockClient.listWorkflows).toHaveBeenCalled();
+    });
+
+    const btn = container.querySelector(".workflow-header-button")!;
+    fireEvent.click(btn);
+
+    const deactivateBtn = container.querySelector(".workflow-dropdown-item.deactivate");
+    expect(deactivateBtn).not.toBeNull();
+    expect(deactivateBtn?.textContent).toContain("Deactivate Workflow");
+    expect(deactivateBtn?.querySelector(".fa-xmark")).not.toBeNull();
+
+    fireEvent.click(deactivateBtn!);
+    await waitFor(() => {
+      expect(mockClient.setManagedAgentWorkflowState).toHaveBeenCalledWith("agent-1", null);
+    });
+  });
+
+  it("calls setManagedAgentWorkflow directly when clicking workflow without variables", async () => {
+    const mockClient = createMockClient();
+    const { container } = render(
+      <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+    );
+
+    await waitFor(() => {
+      expect(mockClient.listWorkflows).toHaveBeenCalled();
+    });
+
+    const btn = container.querySelector(".workflow-header-button")!;
+    fireEvent.click(btn);
+
+    const simpleWfBtn = screen.getByText("Simple Workflow");
+    fireEvent.click(simpleWfBtn);
+
+    await waitFor(() => {
+      expect(mockClient.setManagedAgentWorkflow).toHaveBeenCalledWith("agent-1", "wf-1");
+    });
+  });
+
+  it("opens WorkflowLaunchModal when clicking workflow with variables", async () => {
+    const mockClient = createMockClient();
+    const { container } = render(
+      <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+    );
+
+    await waitFor(() => {
+      expect(mockClient.listWorkflows).toHaveBeenCalled();
+    });
+
+    const btn = container.querySelector(".workflow-header-button")!;
+    fireEvent.click(btn);
+
+    const complexWfBtn = screen.getByText("Complex Workflow");
+    fireEvent.click(complexWfBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Launch Workflow: Complex Workflow")).toBeDefined();
+      expect(screen.getByText("Target Environment")).toBeDefined();
+    });
+  });
+
+  it("shows notification when workflow has no entry state", async () => {
+    const mockClient = createMockClient();
+    const { container } = render(
+      <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+    );
+
+    await waitFor(() => {
+      expect(mockClient.listWorkflows).toHaveBeenCalled();
+    });
+
+    const btn = container.querySelector(".workflow-header-button")!;
+    fireEvent.click(btn);
+
+    const noEntryWfBtn = screen.getByText("No Entry Workflow");
+    fireEvent.click(noEntryWfBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('Workflow "No Entry Workflow" has no entry state.')).toBeDefined();
+    });
+    expect(mockClient.setManagedAgentWorkflow).not.toHaveBeenCalled();
   });
 });

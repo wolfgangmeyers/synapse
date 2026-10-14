@@ -48,6 +48,16 @@ func TestWorkflowHTTP(t *testing.T) {
 	createPayload := map[string]any{
 		"name":        "Test Workflow",
 		"description": "Workflow for transport tests",
+		"variables": []map[string]any{
+			{
+				"name":          "target_env",
+				"label":         "Target Environment",
+				"description":   "Environment to target",
+				"type":          "text",
+				"required":      true,
+				"default_value": "production",
+			},
+		},
 	}
 	body, _ = json.Marshal(createPayload)
 	res, err = client.Post(server.URL+"/v1/workflows", "application/json", bytes.NewReader(body))
@@ -60,6 +70,12 @@ func TestWorkflowHTTP(t *testing.T) {
 	require.NotEmpty(t, wfID)
 	require.Equal(t, "Test Workflow", createdWf["name"])
 	require.Equal(t, "Workflow for transport tests", createdWf["description"])
+	varsList, ok := createdWf["variables"].([]any)
+	require.True(t, ok)
+	require.Len(t, varsList, 1)
+	firstVar := varsList[0].(map[string]any)
+	require.Equal(t, "target_env", firstVar["name"])
+	require.Equal(t, "production", firstVar["default_value"])
 
 	// 4. POST /v1/workflows conflict -> 409
 	res, err = client.Post(server.URL+"/v1/workflows", "application/json", bytes.NewReader(body))

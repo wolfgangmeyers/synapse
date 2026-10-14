@@ -878,6 +878,8 @@ export interface ManagedAgent {
     projection_state?: "pending" | "applied" | "failed";
   };
   active_workflow_state_id?: string | null;
+  active_workflow_id?: string | null;
+  workflow_variables?: Record<string, string> | null;
 }
 
 export interface ManagedAgentLaunchPayload {
