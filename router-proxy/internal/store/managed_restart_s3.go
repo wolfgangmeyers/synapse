@@ -38,7 +38,7 @@ func restartStartAttempt(owner string) bool {
 
 func restartReservationInputValid(reservation ManagedLifecycleRestartReservation) bool {
 	modelOmitted := reservation.SelectedModel.Provider == "" && reservation.SelectedModel.ID == ""
-	modelValid := managedIdentifierRE.MatchString(reservation.SelectedModel.Provider) && managedIdentifierRE.MatchString(reservation.SelectedModel.ID)
+	modelValid := managedIdentifierRE.MatchString(reservation.SelectedModel.Provider) && managedModelIDRE.MatchString(reservation.SelectedModel.ID)
 	if !isLifecycleText(reservation.AgentID) || reservation.Method == "" || reservation.CanonicalPath == "" || reservation.RequestID == "" || reservation.CanonicalBodyHash == "" || reservation.CurrentOperationID == "" || !validManagedRuntimeFence(reservation.SourceFence) || reservation.SourceFence.AgentID != reservation.AgentID || reservation.PlannedTargetRuntimeGeneration == "" || (!modelOmitted && !modelValid) {
 		return false
 	}

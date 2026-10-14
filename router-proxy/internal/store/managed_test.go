@@ -794,6 +794,8 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	models := []ManagedProviderModel{
 		{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true},
 		{Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true},
+		{Provider: "cursor", ID: "claude-fable-5-1@1m", Name: "Claude Fable 5.1 @ 1m", Available: true},
+		{Provider: "cursor", ID: "claude-opus-4-7@1m:fast", Name: "Claude Opus 4.7 (fast) @ 1m", Available: true},
 		{Provider: "antigravity", ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Available: true},
 	}
 	revision, err := durable.CommitManagedProviderSnapshot(ctx, providers, models)

@@ -22,6 +22,7 @@ var ErrManagedChildSnapshotConflict = errors.New("managed child snapshot conflic
 var ErrManagedCrashRecoveryUnavailable = errors.New("managed crash recovery table is unavailable")
 
 var managedIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var managedModelIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@/:-]{0,255}$`)
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var managedSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var managedCanonicalUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -496,7 +497,7 @@ func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 }
 
 func validDefaultModel(model *ManagedModel) error {
-	if model != nil && (!managedIdentifierRE.MatchString(model.Provider) || !managedIdentifierRE.MatchString(model.ID)) {
+	if model != nil && (!managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
 		return errors.New("invalid default model")
 	}
 	return nil
@@ -625,7 +626,7 @@ func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []M
 	modelKeys := make(map[string]bool, len(models))
 	for _, model := range models {
 		key := model.Provider + "\x00" + model.ID
-		if !validManagedProvider(model.Provider) || !seen[model.Provider] || !authenticated[model.Provider] || !managedIdentifierRE.MatchString(model.ID) || model.Name == "" || len(model.Name) > 512 || modelKeys[key] {
+		if !validManagedProvider(model.Provider) || !seen[model.Provider] || !authenticated[model.Provider] || !managedModelIDRE.MatchString(model.ID) || model.Name == "" || len(model.Name) > 512 || modelKeys[key] {
 			return 0, errors.New("provider model is invalid")
 		}
 		modelKeys[key] = true
