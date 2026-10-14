@@ -21,11 +21,15 @@ export function WorkflowVariablesModal({
     workflow.variables ? workflow.variables.map((v) => ({ ...v })) : []
   );
 
+  // Screen view mode: "list" (overview of variables) or "form" (dedicated add/edit screen)
+  const [viewMode, setViewMode] = useState<"list" | "form">("list");
+
   // Sync state whenever workflow or modal opening changes
   useEffect(() => {
     if (isOpen) {
       setVariables(workflow.variables ? workflow.variables.map((v) => ({ ...v })) : []);
       resetForm();
+      setViewMode("list");
       setError(null);
     }
   }, [isOpen, workflow]);
@@ -33,7 +37,6 @@ export function WorkflowVariablesModal({
   // Form state
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [name, setName] = useState("");
-  const [label, setLabel] = useState("");
   const [description, setDescription] = useState("");
   const [type, setType] = useState<WorkflowVariableType>("text");
   const [required, setRequired] = useState(false);
@@ -51,7 +54,6 @@ export function WorkflowVariablesModal({
   const resetForm = () => {
     setEditingIndex(null);
     setName("");
-    setLabel("");
     setDescription("");
     setType("text");
     setRequired(false);
@@ -59,17 +61,27 @@ export function WorkflowVariablesModal({
     setFormError(null);
   };
 
+  const startCreate = () => {
+    resetForm();
+    setViewMode("form");
+  };
+
   const startEdit = (index: number) => {
     const v = variables[index];
     if (!v) return;
     setEditingIndex(index);
     setName(v.name);
-    setLabel(v.label);
     setDescription(v.description ?? "");
     setType(v.type);
     setRequired(Boolean(v.required));
     setDefaultValue(v.default_value ?? "");
     setFormError(null);
+    setViewMode("form");
+  };
+
+  const cancelForm = () => {
+    resetForm();
+    setViewMode("list");
   };
 
   const handleDelete = (index: number) => {
@@ -86,7 +98,6 @@ export function WorkflowVariablesModal({
     setFormError(null);
 
     const trimmedName = name.trim();
-    const trimmedLabel = label.trim();
 
     if (!trimmedName) {
       setFormError("Variable name is required.");
@@ -107,14 +118,9 @@ export function WorkflowVariablesModal({
       return;
     }
 
-    if (!trimmedLabel) {
-      setFormError("Variable label is required.");
-      return;
-    }
-
     const definition: WorkflowVariableDefinition = {
       name: trimmedName,
-      label: trimmedLabel,
+      label: trimmedName,
       type,
       ...(description.trim() ? { description: description.trim() } : {}),
       ...(required ? { required: true } : { required: false }),
@@ -128,6 +134,7 @@ export function WorkflowVariablesModal({
     }
 
     resetForm();
+    setViewMode("list");
   };
 
   const handleSaveModal = async () => {
@@ -143,153 +150,26 @@ export function WorkflowVariablesModal({
     }
   };
 
-  return (
-    <DialogShell
-      open={isOpen}
-      title={`Workflow Variables: ${workflow.name}`}
-      titleId="workflow-variables-dialog-title"
-      description="Define input variables for this workflow. Variables can be referenced in state prompts as ${VAR} or {{VAR}}."
-      onClose={onClose}
-      closeLabel="Close workflow variables dialog"
-      className="message-dialog workflow-dialog"
-    >
-      <div className="workflow-variables-modal-content" style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-        {error && (
-          <div
-            className="alert alert-danger"
-            style={{
-              color: "#f87171",
-              backgroundColor: "rgba(127, 29, 29, 0.4)",
-              border: "1px solid #991b1b",
-              borderRadius: "6px",
-              padding: "8px 12px",
-              fontSize: "13px",
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        {/* Defined Variables List */}
-        <div>
-          <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "0.95rem", fontWeight: 600 }}>
-            Configured Variables ({variables.length})
-          </h4>
-          {variables.length === 0 ? (
-            <p style={{ color: "var(--text-secondary, #9ca3af)", fontSize: "0.85rem", fontStyle: "italic", margin: "0.25rem 0" }}>
-              No variables configured yet. Add one below.
-            </p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxHeight: "220px", overflowY: "auto" }}>
-              {variables.map((variable, idx) => (
-                <div
-                  key={variable.name}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "8px 12px",
-                    background: "var(--surface-raised, rgba(255, 255, 255, 0.04))",
-                    border: "1px solid var(--line, rgba(255, 255, 255, 0.1))",
-                    borderRadius: "6px",
-                    gap: "8px",
-                  }}
-                >
-                  <div style={{ display: "flex", flexDirection: "column", gap: "2px", minWidth: 0, flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                      <code style={{ fontWeight: 600, color: "#60a5fa" }}>${`{${variable.name}}`}</code>
-                      <span style={{ fontWeight: 500, fontSize: "0.9rem" }}>{variable.label}</span>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          padding: "1px 6px",
-                          borderRadius: "4px",
-                          background: variable.type === "textarea" ? "rgba(168, 85, 247, 0.15)" : "rgba(59, 130, 246, 0.15)",
-                          color: variable.type === "textarea" ? "#c084fc" : "#93c5fd",
-                          border: `1px solid ${variable.type === "textarea" ? "rgba(168, 85, 247, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
-                        }}
-                      >
-                        {variable.type}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          padding: "1px 6px",
-                          borderRadius: "4px",
-                          background: variable.required ? "rgba(239, 68, 68, 0.15)" : "rgba(107, 114, 128, 0.2)",
-                          color: variable.required ? "#f87171" : "#9ca3af",
-                          border: `1px solid ${variable.required ? "rgba(239, 68, 68, 0.3)" : "rgba(107, 114, 128, 0.3)"}`,
-                        }}
-                      >
-                        {variable.required ? "Required" : "Optional"}
-                      </span>
-                    </div>
-                    {variable.description && (
-                      <span style={{ fontSize: "0.8rem", color: "var(--text-secondary, #9ca3af)" }}>
-                        {variable.description}
-                      </span>
-                    )}
-                    {variable.default_value !== undefined && variable.default_value !== "" && (
-                      <span style={{ fontSize: "0.78rem", color: "var(--text-secondary, #9ca3af)" }}>
-                        Default: <code>{variable.default_value}</code>
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", gap: "6px" }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => startEdit(idx)}
-                      title="Edit variable"
-                      style={{ padding: "4px 8px" }}
-                    >
-                      <i className="fa-solid fa-pen" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleDelete(idx)}
-                      title="Delete variable"
-                      style={{ padding: "4px 8px", color: "#f87171" }}
-                    >
-                      <i className="fa-solid fa-trash" aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Add / Edit Form */}
+  if (viewMode === "form") {
+    return (
+      <DialogShell
+        open={isOpen}
+        title={editingIndex !== null ? `Edit Variable: ${variables[editingIndex]?.name}` : "Add Variable"}
+        titleId="workflow-variable-form-dialog-title"
+        description={
+          editingIndex !== null
+            ? "Update configuration for this workflow variable."
+            : "Configure a new input variable for this workflow."
+        }
+        onClose={cancelForm}
+        closeLabel="Close variable form"
+        className="message-dialog workflow-dialog"
+      >
         <form
           onSubmit={handleAddOrUpdate}
-          style={{
-            background: "var(--surface-raised, rgba(255, 255, 255, 0.02))",
-            border: "1px solid var(--line, rgba(255, 255, 255, 0.1))",
-            borderRadius: "6px",
-            padding: "12px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "0.75rem",
-          }}
+          className="workflow-variables-modal-content"
+          style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: "0.9rem" }}>
-              {editingIndex !== null ? `Edit Variable: ${variables[editingIndex]?.name}` : "Add Variable"}
-            </strong>
-            {editingIndex !== null && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={resetForm}
-                style={{ fontSize: "0.75rem", padding: "2px 8px" }}
-              >
-                Cancel Edit
-              </button>
-            )}
-          </div>
-
           {formError && (
             <div
               className="alert alert-danger"
@@ -298,56 +178,26 @@ export function WorkflowVariablesModal({
                 backgroundColor: "rgba(127, 29, 29, 0.4)",
                 border: "1px solid #991b1b",
                 borderRadius: "6px",
-                padding: "6px 10px",
-                fontSize: "12px",
+                padding: "8px 12px",
+                fontSize: "13px",
               }}
             >
               {formError}
             </div>
           )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-            <div className="form-group">
-              <label htmlFor="var-name" style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem", fontWeight: 600 }}>
-                Variable Name *
-              </label>
-              <input
-                id="var-name"
-                type="text"
-                className="form-control"
-                placeholder="e.g. repo_url"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
-            <div className="form-group">
-              <label htmlFor="var-label" style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem", fontWeight: 600 }}>
-                Display Label *
-              </label>
-              <input
-                id="var-label"
-                type="text"
-                className="form-control"
-                placeholder="e.g. Repository URL"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                required
-              />
-            </div>
-          </div>
-
           <div className="form-group">
-            <label htmlFor="var-desc" style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem", fontWeight: 600 }}>
-              Description / Hint (optional)
+            <label htmlFor="var-name" style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem", fontWeight: 600 }}>
+              Variable Name *
             </label>
             <input
-              id="var-desc"
+              id="var-name"
               type="text"
               className="form-control"
-              placeholder="e.g. Git repository clone URL"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              placeholder="e.g. repo_url"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
             />
           </div>
 
@@ -380,6 +230,20 @@ export function WorkflowVariablesModal({
           </div>
 
           <div className="form-group">
+            <label htmlFor="var-desc" style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem", fontWeight: 600 }}>
+              Description / Hint (optional)
+            </label>
+            <input
+              id="var-desc"
+              type="text"
+              className="form-control"
+              placeholder="e.g. Git repository clone URL"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
+
+          <div className="form-group">
             <label htmlFor="var-default" style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem", fontWeight: 600 }}>
               Default Value (optional)
             </label>
@@ -387,7 +251,7 @@ export function WorkflowVariablesModal({
               <textarea
                 id="var-default"
                 className="form-control"
-                rows={2}
+                rows={3}
                 placeholder="Default value if not provided"
                 value={defaultValue}
                 onChange={(e) => setDefaultValue(e.target.value)}
@@ -404,14 +268,139 @@ export function WorkflowVariablesModal({
             )}
           </div>
 
-          <div style={{ display: "flex", justifyContent: "flex-end" }}>
-            <button type="submit" className="btn btn-secondary btn-sm">
-              {editingIndex !== null ? "Update Variable" : "Add Variable"}
+          <div className="dialog-actions workflow-dialog-actions" style={{ marginTop: "0.5rem" }}>
+            <button type="button" className="btn btn-secondary" onClick={cancelForm}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary">
+              {editingIndex !== null ? "Save Variable" : "Add Variable"}
             </button>
           </div>
         </form>
+      </DialogShell>
+    );
+  }
 
-        {/* Modal Actions Footer */}
+  return (
+    <DialogShell
+      open={isOpen}
+      title={`Workflow Variables: ${workflow.name}`}
+      titleId="workflow-variables-dialog-title"
+      description="Define input variables for this workflow. Variables can be referenced in state prompts as ${VAR} or {{VAR}}."
+      onClose={onClose}
+      closeLabel="Close workflow variables dialog"
+      className="message-dialog workflow-dialog"
+    >
+      <div className="workflow-variables-modal-content" style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+        {error && (
+          <div
+            className="alert alert-danger"
+            style={{
+              color: "#f87171",
+              backgroundColor: "rgba(127, 29, 29, 0.4)",
+              border: "1px solid #991b1b",
+              borderRadius: "6px",
+              padding: "8px 12px",
+              fontSize: "13px",
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h4 style={{ margin: 0, fontSize: "0.95rem", fontWeight: 600 }}>
+            Configured Variables ({variables.length})
+          </h4>
+          <button type="button" className="btn btn-primary btn-sm" onClick={startCreate}>
+            + Add Variable
+          </button>
+        </div>
+
+        {variables.length === 0 ? (
+          <p style={{ color: "var(--text-secondary, #9ca3af)", fontSize: "0.85rem", fontStyle: "italic", margin: "0.25rem 0" }}>
+            No variables configured yet. Click "+ Add Variable" to create one.
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxHeight: "280px", overflowY: "auto" }}>
+            {variables.map((variable, idx) => (
+              <div
+                key={variable.name}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "8px 12px",
+                  background: "var(--surface-raised, rgba(255, 255, 255, 0.04))",
+                  border: "1px solid var(--line, rgba(255, 255, 255, 0.1))",
+                  borderRadius: "6px",
+                  gap: "8px",
+                }}
+              >
+                <div style={{ display: "flex", flexDirection: "column", gap: "2px", minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                    <code style={{ fontWeight: 600, color: "#60a5fa" }}>${`{${variable.name}}`}</code>
+                    <span
+                      style={{
+                        fontSize: "0.75rem",
+                        padding: "1px 6px",
+                        borderRadius: "4px",
+                        background: variable.type === "textarea" ? "rgba(168, 85, 247, 0.15)" : "rgba(59, 130, 246, 0.15)",
+                        color: variable.type === "textarea" ? "#c084fc" : "#93c5fd",
+                        border: `1px solid ${variable.type === "textarea" ? "rgba(168, 85, 247, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
+                      }}
+                    >
+                      {variable.type}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.75rem",
+                        padding: "1px 6px",
+                        borderRadius: "4px",
+                        background: variable.required ? "rgba(239, 68, 68, 0.15)" : "rgba(107, 114, 128, 0.2)",
+                        color: variable.required ? "#f87171" : "#9ca3af",
+                        border: `1px solid ${variable.required ? "rgba(239, 68, 68, 0.3)" : "rgba(107, 114, 128, 0.3)"}`,
+                      }}
+                    >
+                      {variable.required ? "Required" : "Optional"}
+                    </span>
+                  </div>
+                  {variable.description && (
+                    <span style={{ fontSize: "0.8rem", color: "var(--text-secondary, #9ca3af)" }}>
+                      {variable.description}
+                    </span>
+                  )}
+                  {variable.default_value !== undefined && variable.default_value !== "" && (
+                    <span style={{ fontSize: "0.78rem", color: "var(--text-secondary, #9ca3af)" }}>
+                      Default: <code>{variable.default_value}</code>
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => startEdit(idx)}
+                    title="Edit variable"
+                    style={{ padding: "4px 8px" }}
+                  >
+                    <i className="fa-solid fa-pen" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleDelete(idx)}
+                    title="Delete variable"
+                    style={{ padding: "4px 8px", color: "#f87171" }}
+                  >
+                    <i className="fa-solid fa-trash" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="dialog-actions workflow-dialog-actions" style={{ marginTop: "0.5rem" }}>
           <button type="button" className="btn btn-secondary" onClick={onClose} disabled={saving}>
             Cancel
