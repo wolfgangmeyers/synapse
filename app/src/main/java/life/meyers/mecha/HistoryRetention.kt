@@ -379,7 +379,7 @@ private fun validateHistoryAttachment(raw: Any?): Boolean {
 }
 
 internal fun isMessageInConversationScope(sender: String, recipient: String, owner: String, peer: String): Boolean =
-    (sender == owner && recipient == peer) || (sender == peer && recipient == owner)
+    (sender == peer || recipient == peer) && sender != recipient
 
 internal fun isInboundDeliveryForAgent(sender: String, recipient: String, agentId: String): Boolean =
     recipient == agentId && sender != agentId
@@ -387,6 +387,8 @@ internal fun isInboundDeliveryForAgent(sender: String, recipient: String, agentI
 internal fun conversationPeerForMessage(message: ChatMessage, owner: String): String? = when {
     message.sender == owner && message.recipient != owner -> message.recipient
     message.recipient == owner && message.sender != owner -> message.sender
+    message.sender == "wolfgang" && message.recipient != "wolfgang" -> message.recipient
+    message.recipient == "wolfgang" && message.sender != "wolfgang" -> message.sender
     else -> null
 }
 
