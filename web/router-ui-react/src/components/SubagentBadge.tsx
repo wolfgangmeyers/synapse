@@ -1,22 +1,42 @@
 import { useState, type ReactElement } from "react";
+import type { ManagedChild } from "../protocol/types";
 import type { SubagentSummary } from "../state/agent-projection";
 import type { RouterHttpClient } from "../transport/http-client";
+import { SubagentViewerDialog } from "./SubagentViewerDialog";
 
 export interface SubagentBadgeProps {
   agentId?: string | undefined;
   client?: RouterHttpClient | undefined;
   onStopSubagent?: ((childId: string) => void) | undefined;
   count?: number | undefined;
-  subagents?: SubagentSummary[] | undefined;
+  subagents?: (SubagentSummary | ManagedChild)[] | undefined;
   expanded?: boolean | undefined;
   onToggle?: (() => void) | undefined;
   listId?: string | undefined;
   ariaLabel?: string | undefined;
   externalDisclosure?: boolean | undefined;
+  isEmbedded?: boolean | undefined;
+  runtime?: string | undefined;
 }
 
-export function SubagentBadge({ agentId, client, onStopSubagent, count, subagents = [], expanded = false, onToggle, listId, ariaLabel, externalDisclosure = false }: SubagentBadgeProps): ReactElement | null {
+export function SubagentBadge({
+  agentId,
+  client,
+  onStopSubagent,
+  count,
+  subagents = [],
+  expanded = false,
+  onToggle,
+  listId,
+  ariaLabel,
+  externalDisclosure = false,
+  isEmbedded,
+  runtime,
+}: SubagentBadgeProps): ReactElement | null {
   const [stoppedIds, setStoppedIds] = useState<Set<string>>(() => new Set());
+  const [isViewerOpen, setIsViewerOpen] = useState(false);
+
+  const isEmbeddedWorker = Boolean(isEmbedded || runtime === "embedded");
 
   const effectiveSubagents = subagents.map((s) => stoppedIds.has(s.id) ? { ...s, status: "stopped" as const } : s);
   const stoppedCount = subagents.filter((s) => stoppedIds.has(s.id) && (!s.status || s.status === "running" || s.status === "queued")).length;
@@ -26,6 +46,39 @@ export function SubagentBadge({ agentId, client, onStopSubagent, count, subagent
   if (total < 1 && (!expanded || effectiveSubagents.length === 0)) return null;
   const countLabel = total > 0 ? `${total} subagent${total === 1 ? "" : "s"}` : "Child history";
   const label = ariaLabel ?? countLabel;
+
+  if (isEmbeddedWorker) {
+    const content = (
+      <>
+        <span className="subagent-dot" aria-hidden="true" />
+        <span className="subagent-badge-content">{countLabel}</span>
+      </>
+    );
+
+    return (
+      <>
+        <button
+          type="button"
+          className="subagent-indicator expandable"
+          onClick={() => setIsViewerOpen(true)}
+          aria-label={label}
+        >
+          {content}
+        </button>
+        {isViewerOpen ? (
+          <SubagentViewerDialog
+            open={isViewerOpen}
+            onClose={() => setIsViewerOpen(false)}
+            agentId={agentId}
+            subagents={subagents}
+            client={client}
+            onStopSubagent={onStopSubagent}
+          />
+        ) : null}
+      </>
+    );
+  }
+
   const canExpand = externalDisclosure || effectiveSubagents.length > 0;
   const content = <><span className="subagent-dot" aria-hidden="true" /><span className="subagent-badge-content">{countLabel}</span></>;
   if (!canExpand) return <span className="subagent-indicator" aria-label={label}>{content}</span>;

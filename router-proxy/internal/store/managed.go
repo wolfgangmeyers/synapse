@@ -960,6 +960,14 @@ func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAge
 		columns += `,worktree,worktree_base_path,worktree_branch`
 		values = append(values, boolInt(agent.Worktree), nullIfEmpty(agent.WorktreeBasePath), nullIfEmpty(agent.WorktreeBranch))
 	}
+	hasParentAgentID, err := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
+	if err != nil {
+		return err
+	}
+	if hasParentAgentID && agent.ParentAgentID != "" {
+		columns += `,parent_agent_id`
+		values = append(values, agent.ParentAgentID)
+	}
 	hasAllowInlineTools, err := managedAgentColumnTx(ctx, s.db, "allow_inline_tools")
 	if err != nil {
 		return err

@@ -306,7 +306,7 @@ func (m *Manager) dispatchEmbeddedStartupWake(ctx context.Context, saved store.M
 	scope := embeddedClaimedWakeScope{binding: b, processGeneration: generation, id: decision.Wake.ID, kind: decision.Kind}
 	var prompts []agent.AgentMessage
 	if decision.Kind != "interrupted" {
-		prompts = []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Continue working from your saved context."}}}}
+		prompts = []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context."}}}}
 	}
 	return m.runEmbeddedClaimedWake(ctx, saved, scope, prompts)
 }

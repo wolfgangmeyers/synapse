@@ -56,6 +56,7 @@ func makeSubagentTestManagerWithClock(t *testing.T, db *store.Store, reg *provid
 	limits := DefaultLimits()
 	if capacity > 0 {
 		limits.SubagentCapacity = capacity
+		limits.SubagentPerWorkerCapacity = capacity
 	}
 	config := Config{
 		SessionRoot:                  filepath.Join(root, "sessions"),
@@ -214,6 +215,99 @@ func TestSubagentRunnerCapacityAndFIFOQueue(t *testing.T) {
 		t.Logf("rec4.Status: %s, Error: %s", rec4.Status, rec4.Error)
 		return rec4.Status == "completed"
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestSubagentRunnerPerWorkerCapacityIsolation(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_isolation.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parentA := subagentTestParent(t, db, "parent-iso-a")
+	parentB := subagentTestParent(t, db, "parent-iso-b")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	gate := make(chan struct{})
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			<-gate
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "done"}}, ai.StopStop)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			<-gate
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "done"}}, ai.StopStop)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			<-gate
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "done"}}, ai.StopStop)
+		},
+	})
+
+	root := t.TempDir()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	limits := DefaultLimits()
+	limits.SubagentCapacity = 100
+	limits.SubagentPerWorkerCapacity = 1
+	config := Config{
+		SessionRoot:                  filepath.Join(root, "sessions"),
+		AllowedWorkingDirectoryRoots: []string{root, t.TempDir(), os.TempDir()},
+		Limits:                       limits,
+	}
+	credDir := filepath.Join(testfixture.PrivateDir(t), "creds")
+	require.NoError(t, os.MkdirAll(credDir, 0700))
+	credentials, err := store.OpenLocalCodexCredentialStore(filepath.Join(credDir, "credential.json"))
+	require.NoError(t, err)
+	require.NoError(t, credentials.Save(context.Background(), store.CodexCredential{
+		AccessToken:  "token",
+		RefreshToken: "refresh",
+		AccountID:    "account",
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+	}))
+	mgr, err := NewManager(ManagerOptions{
+		Store:                db,
+		Manifest:             manifest,
+		Config:               config,
+		CodexCredentialStore: credentials,
+		EmbeddedModelResolver: func(record store.ManagedAgentRecord) *ai.Model {
+			return reg.GetModel()
+		},
+	})
+	require.NoError(t, err)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parentA)
+	registerParentOwner(mgr, parentB)
+
+	// Parent A spawns 1st subagent -> running (at per-worker limit of 1)
+	resA1, err := mgr.SpawnSubagent(ctx, parentA, SubagentSpawnRequest{
+		AgentID:     "subagent-parent-iso-a-1",
+		Description: "task a1",
+		Prompt:      "prompt a1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", resA1.Status)
+
+	// Parent A spawns 2nd subagent -> queued (exceeds Parent A's limit of 1)
+	resA2, err := mgr.SpawnSubagent(ctx, parentA, SubagentSpawnRequest{
+		AgentID:     "subagent-parent-iso-a-2",
+		Description: "task a2",
+		Prompt:      "prompt a2",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "queued", resA2.Status)
+
+	// Parent B spawns subagent -> MUST BE RUNNING (NOT blocked by Parent A's queue)
+	resB1, err := mgr.SpawnSubagent(ctx, parentB, SubagentSpawnRequest{
+		AgentID:     "subagent-parent-iso-b-1",
+		Description: "task b1",
+		Prompt:      "prompt b1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", resB1.Status, "Parent B subagent must run even though Parent A has queued subagents")
+
+	close(gate)
 }
 
 func TestSubagentRunnerCleanTextSettling(t *testing.T) {

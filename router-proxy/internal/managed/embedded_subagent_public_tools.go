@@ -40,14 +40,15 @@ func (m *Manager) subagentThrottle() *SubagentThrottle {
 	return m.subagentThrottleInstance
 }
 
-// EmbeddedSubagentPublicTools is the sole primary constructor returning the four public SDK subagent tools:
-// "subagent", "get_subagent_result", "steer_subagent", and "list_subagents", bound to the parent's exact EmbeddedBinding fence.
+// EmbeddedSubagentPublicTools is the sole primary constructor returning the public SDK subagent tools:
+// "subagent", "get_subagent_result", "steer_subagent", "list_subagents", and "stop_subagent", bound to the parent's exact EmbeddedBinding fence.
 func (m *Manager) EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool {
 	return []agent.AgentTool{
 		m.embeddedSubagentTool(parent),
 		m.embeddedGetSubagentResultTool(parent),
 		m.embeddedSteerSubagentTool(parent),
 		m.embeddedListSubagentsTool(parent),
+		m.embeddedStopSubagentTool(parent),
 	}
 }
 
@@ -637,6 +638,56 @@ func (m *Manager) embeddedListSubagentsTool(parent store.EmbeddedBinding) agent.
 			}
 
 			body, err := json.MarshalIndent(resp, "", "  ")
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			return agent.AgentToolResult{
+				Content: ai.ContentList{ai.TextContent{Text: string(body)}},
+			}, nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 5. stop_subagent tool (private builder)
+// ---------------------------------------------------------------------------
+
+func embeddedStopSubagentSchema() *ai.Schema {
+	closed := false
+	s := ai.Object(
+		ai.Prop("agent_id", ai.String("The subagent ID to stop.")),
+		ai.Opt("reason", ai.String("Optional reason or note for stopping the subagent.")),
+	)
+	s.AdditionalAllowed = &closed
+	return s
+}
+
+func (m *Manager) embeddedStopSubagentTool(parent store.EmbeddedBinding) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "stop_subagent",
+		Description: "Stop a running background subagent by its agent ID. Aborts the subagent's execution immediately.",
+		Parameters:  embeddedStopSubagentSchema(),
+		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if err := ctx.Err(); err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			agentID, _ := args["agent_id"].(string)
+			agentID = strings.TrimSpace(agentID)
+			if agentID == "" {
+				return agent.AgentToolResult{}, errors.New("agent_id is required")
+			}
+
+			if err := m.StopSubagent(ctx, parent.AgentID, agentID); err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			resp := map[string]string{
+				"status":   "stopped",
+				"agent_id": agentID,
+			}
+			body, err := json.Marshal(resp)
 			if err != nil {
 				return agent.AgentToolResult{}, err
 			}
