@@ -773,9 +773,19 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
   return <Fragment>
     {thinkingText && !isThinkingKind ? <ThinkingTraceCard thinking={thinkingText} time={time} agentId={entry.agent_id} entry={entry} /> : null}
     {companionText ? (
-      <div className="activity-companion-text">
-        <MarkdownBody body={companionText} />
-      </div>
+      <article className="bubble-wrap incoming activity-companion-bubble">
+        <div className="bubble-label">
+          <strong>{entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id ?? "Assistant"}</strong>
+          {time.dateTime && time.label ? (
+            <time dateTime={time.dateTime} title={time.title}>
+              {time.label}
+            </time>
+          ) : null}
+        </div>
+        <div className="bubble">
+          <MarkdownBody body={companionText} />
+        </div>
+      </article>
     ) : null}
     <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} style={articleStyle} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} data-tool={presentation?.kind === "tool" && presentation.tool_name ? normalizedToolName(presentation.tool_name) : undefined} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
