@@ -390,7 +390,7 @@ func TestBehavioral_Scratchpad_HookedWorkerTurns(t *testing.T) {
 		return providers.FauxAssistantMessage(ai.ContentList{
 			providers.FauxToolCall("scratchpad", map[string]any{
 				"action": "delete",
-				"id":     idToDelete,
+				"ids":    []any{idToDelete},
 			}, "sp-call-del"),
 		}, ai.StopToolUse)
 	}
