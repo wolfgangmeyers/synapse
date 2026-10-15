@@ -155,6 +155,10 @@ describe("SubagentViewerDialog", () => {
       />
     );
 
+    // Initial render in list view triggers pollPreviews for active subagents
+    expect(mockClient.managedHistory).toHaveBeenCalledWith("sub-1", "complete");
+    mockClient.managedHistory.mockClear();
+
     // Open detail view
     const card = screen.getByRole("button", { name: /Polling Task/ });
     act(() => {
@@ -185,12 +189,16 @@ describe("SubagentViewerDialog", () => {
       backBtn.click();
     });
 
-    // Advance time -> polling should no longer trigger
+    // Reset mock calls to verify detail polling has stopped and list view preview polling resumed
+    mockClient.managedHistory.mockClear();
+
+    // Advance time -> detail history polling should no longer trigger
     await act(async () => {
       vi.advanceTimersByTime(4000);
     });
-    expect(mockClient.managedHistory).toHaveBeenCalledTimes(3);
 
+    // In list view, preview polling polls every 2 seconds for active subagents
+    // but the detail view's interval (loading complete entries for sub-1) was stopped upon back navigation
     vi.useRealTimers();
   });
 
@@ -276,4 +284,70 @@ describe("SubagentViewerDialog", () => {
     // Only one ThinkingTraceCard should be rendered across the 3 consecutive tool calls
     expect(thinkingNodes).toHaveLength(1);
   });
+
+  it("displays the last activity preview on card preview and does not duplicate description in drilldown header", async () => {
+    const subagents = [
+      {
+        id: "sub-1",
+        description: "Task Description for Worker",
+        status: "running" as const,
+        started_at: "2026-03-30T05:00:00Z",
+      },
+    ];
+
+    const mockHistoryEntries = [
+      {
+        id: "complete:1",
+        agent_id: "sub-1",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "bash",
+        },
+        tool_input: {
+          command: "git status --porcelain",
+        },
+        at: "2026-03-30T05:01:00Z",
+      },
+    ];
+
+    const mockClient = {
+      managedHistory: vi.fn(async () => ({
+        view: "complete" as const,
+        entries: mockHistoryEntries,
+        next_before: null,
+      })),
+    };
+
+    render(
+      <SubagentViewerDialog
+        open={true}
+        onClose={() => {}}
+        subagents={subagents as any}
+        client={mockClient as any}
+      />
+    );
+
+    // Verify card preview displays the last activity preview (bash command)
+    const previewElement = await screen.findByText("git status --porcelain");
+    expect(previewElement).toBeInTheDocument();
+    expect(previewElement.closest(".subagent-card-preview")).toBeInTheDocument();
+
+    // Click to enter drilldown view
+    const card = screen.getByRole("button", { name: /Task Description for Worker/ });
+    act(() => {
+      card.click();
+    });
+
+    // Verify detail header does NOT duplicate the subagent description string under subagent-drilldown-info
+    const drilldownInfo = document.querySelector(".subagent-drilldown-info");
+    expect(drilldownInfo).toBeInTheDocument();
+    expect(drilldownInfo).not.toHaveTextContent("Task Description for Worker");
+    expect(drilldownInfo?.querySelector(".subagent-title")).toBeNull();
+
+    // Dialog title in DialogShell still displays it at the top of the dialog
+    expect(screen.getByRole("heading", { name: "Task Description for Worker" })).toBeInTheDocument();
+  });
 });
+

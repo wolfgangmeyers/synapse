@@ -944,6 +944,7 @@ export interface ManagedHistoryError {
 export interface ManagedHistoryPresentation {
   kind: ManagedHistoryKind;
   tool_name?: string;
+  detail?: string;
   outcome?: ManagedHistoryOutcome;
   from?: string;
   to?: string;

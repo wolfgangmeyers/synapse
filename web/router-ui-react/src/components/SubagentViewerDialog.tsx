@@ -93,6 +93,35 @@ function isToolOrActivityMeta(entry: ManagedHistoryEntry): boolean {
   return false;
 }
 
+export function formatLastActivityPreview(entry?: ManagedHistoryEntry): string | null {
+  if (!entry) return null;
+  const toolName = entry.presentation?.tool_name;
+  if (entry.presentation?.kind === "tool" || entry.category === "managed_tool") {
+    if (toolName === "bash") {
+      const cmd = (entry.tool_input as { command?: string } | undefined)?.command || entry.presentation?.detail || "";
+      return cmd.trim() || "bash";
+    }
+    if (toolName === "read" || toolName === "edit" || toolName === "write") {
+      const p = (entry.tool_input as { path?: string } | undefined)?.path || entry.presentation?.detail || "";
+      return p ? `${toolName}: ${p}` : toolName;
+    }
+    if (entry.presentation?.detail) {
+      return entry.presentation.detail;
+    }
+    return toolName || "Tool invocation";
+  }
+  if (entry.presentation?.summary) {
+    return entry.presentation.summary;
+  }
+  if (entry.message_content) {
+    return entry.message_content.trim();
+  }
+  if (entry.message && entry.message !== "Message sent" && entry.message !== "Reply sent") {
+    return entry.message.trim();
+  }
+  return null;
+}
+
 function getMessageEntryDetails(
   entry: ManagedHistoryEntry,
 ): { role: string; text: string; isAssistant: boolean } | null {
@@ -151,6 +180,7 @@ export function SubagentViewerDialog({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [previews, setPreviews] = useState<Record<string, string>>({});
   const conversationContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -194,6 +224,54 @@ export function SubagentViewerDialog({
   const selectedSubagent = selectedSubagentId
     ? subagents.find((s) => s.id === selectedSubagentId) ?? null
     : null;
+
+  // Poll active subagents in list view for last activity preview
+  useEffect(() => {
+    if (!open || selectedSubagentId !== null || !client) return;
+
+    let active = true;
+
+    const pollPreviews = async () => {
+      const activeSubagents = subagents.filter(
+        (s) => s.status === "running" || s.status === "queued",
+      );
+
+      await Promise.all(
+        activeSubagents.map(async (subagent) => {
+          try {
+            const res = await client.managedHistory(subagent.id, "complete");
+            if (!active) return;
+            const entries = res.entries ?? [];
+            if (entries.length === 0) return;
+            // Look for the last meaningful preview or the last entry
+            for (let i = entries.length - 1; i >= 0; i--) {
+              const preview = formatLastActivityPreview(entries[i]);
+              if (preview) {
+                setPreviews((prev) => {
+                  if (prev[subagent.id] === preview) return prev;
+                  return { ...prev, [subagent.id]: preview };
+                });
+                return;
+              }
+            }
+          } catch {
+            // Ignore preview polling failures
+          }
+        }),
+      );
+    };
+
+    void pollPreviews();
+
+    const intervalId = window.setInterval(() => {
+      void pollPreviews();
+    }, 2000);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [client, open, selectedSubagentId, subagents]);
 
   // Fetch and poll history when a subagent is selected
   useEffect(() => {
@@ -338,9 +416,6 @@ export function SubagentViewerDialog({
                 <i className="fa-solid fa-arrow-left" aria-hidden="true" />
               </button>
               <div className="subagent-drilldown-info">
-                <span className="subagent-title">
-                  {selectedSubagent?.description || selectedSubagentId}
-                </span>
                 {selectedSubagent ? (
                   <span
                     className={`subagent-status-pill status-${selectedSubagent.status || "unknown"}`}
@@ -483,10 +558,8 @@ export function SubagentViewerDialog({
                       </div>
 
                       <div className="subagent-card-preview">
-                        <p>
-                          {subagent.description
-                            ? `Task: ${subagent.description}`
-                            : `Run ${child.run_id || subagent.id}`}
+                        <p title={previews[subagent.id] || "No activity recorded yet"}>
+                          {previews[subagent.id] || (isActive ? "Running..." : "No activity recorded")}
                         </p>
                       </div>
 
