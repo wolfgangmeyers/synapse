@@ -22,7 +22,7 @@ import (
 
 const (
 	embeddedSubagentFileLimit = 512 * 1024
-	embeddedSubagentBashLimit = 512 * 1024
+	embeddedSubagentBashLimit = 64 * 1024
 	embeddedImageReadLimit    = 10 * 1024 * 1024 // 10 MiB
 )
 
