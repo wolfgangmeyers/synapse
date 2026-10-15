@@ -350,4 +350,80 @@ func TestEmbeddedScratchpadPinnedLimit(t *testing.T) {
 	require.Contains(t, res.Content[0].(ai.TextContent).Text, "pinned.")
 }
 
+func TestEmbeddedScratchpadBatchOperations(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "worker-scratchpad-batch"
+	binding := store.EmbeddedBinding{AgentID: agentID, SessionID: "session-1", Epoch: 1, Generation: "gen-1"}
+	owner := embeddedOwner{binding: binding, identity: "fixture:" + agentID}
+
+	mgr := &Manager{store: db}
+	tool := mgr.embeddedScratchpadTool(owner)
+
+	// Schema test for ids
+	schema := embeddedScratchpadSchema()
+	require.True(t, schema.Check(map[string]any{"action": "pin", "ids": []any{"id-1", "id-2"}}))
+	require.True(t, schema.Check(map[string]any{"action": "unpin", "ids": []any{"id-1", "id-2"}}))
+	require.True(t, schema.Check(map[string]any{"action": "delete", "ids": []any{"id-1", "id-2"}}))
+
+	// Create 4 entries
+	var entryIDs []string
+	for i := 1; i <= 4; i++ {
+		res, err := tool.Execute(ctx, fmt.Sprintf("call-app-%d", i), map[string]any{
+			"action":  "append",
+			"content": fmt.Sprintf("Batch entry %d", i),
+		}, nil)
+		require.NoError(t, err)
+		txt := res.Content[0].(ai.TextContent).Text
+		parts := strings.Split(txt, " ")
+		require.True(t, len(parts) >= 4)
+		entryIDs = append(entryIDs, parts[3])
+	}
+	require.Len(t, entryIDs, 4)
+
+	// Batch pin entries 0 and 1 using ids slice
+	res, err := tool.Execute(ctx, "call-batch-pin", map[string]any{
+		"action": "pin",
+		"ids":    []any{entryIDs[0], entryIDs[1]},
+	}, nil)
+	require.NoError(t, err)
+	out := res.Content[0].(ai.TextContent).Text
+	require.Contains(t, out, "Scratchpad entries pinned (2):")
+	require.Contains(t, out, entryIDs[0])
+	require.Contains(t, out, entryIDs[1])
+
+	// Batch unpin entries 0 and 1
+	res, err = tool.Execute(ctx, "call-batch-unpin", map[string]any{
+		"action": "unpin",
+		"ids":    []string{entryIDs[0], entryIDs[1]},
+	}, nil)
+	require.NoError(t, err)
+	out = res.Content[0].(ai.TextContent).Text
+	require.Contains(t, out, "Scratchpad entries unpinned (2):")
+	require.Contains(t, out, entryIDs[0])
+	require.Contains(t, out, entryIDs[1])
+
+	// Batch delete entries 2 and 3
+	res, err = tool.Execute(ctx, "call-batch-delete", map[string]any{
+		"action": "delete",
+		"ids":    strings.Join([]string{entryIDs[2], entryIDs[3]}, ","),
+	}, nil)
+	require.NoError(t, err)
+	out = res.Content[0].(ai.TextContent).Text
+	require.Contains(t, out, "Deleted 2 scratchpad entries:")
+	require.Contains(t, out, entryIDs[2])
+	require.Contains(t, out, entryIDs[3])
+
+	// Verify entries 2 and 3 are gone
+	entries, total, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, entries, 2)
+}
+
+
 

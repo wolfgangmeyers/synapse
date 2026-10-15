@@ -332,3 +332,203 @@ func (s *Store) DeleteScratchpadEntry(ctx context.Context, agentID, entryID stri
 	}
 	return nil
 }
+
+// SetScratchpadEntriesPinned updates the pinned status of multiple scratchpad entries.
+// It returns the list of entry IDs that were actually updated, or an error if none were found
+// or if pinning would exceed the 10 pinned entry limit.
+func (s *Store) SetScratchpadEntriesPinned(ctx context.Context, agentID string, entryIDs []string, pinned bool) ([]string, error) {
+	if strings.TrimSpace(agentID) == "" {
+		return nil, errors.New("agent_id must not be empty")
+	}
+	cleanIDs := dedupeScratchpadIDs(entryIDs)
+	if len(cleanIDs) == 0 {
+		return nil, errors.New("at least one entry ID is required")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(cleanIDs)), ",")
+	queryArgs := make([]any, 0, len(cleanIDs)+1)
+	queryArgs = append(queryArgs, agentID)
+	for _, id := range cleanIDs {
+		queryArgs = append(queryArgs, id)
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, pinned FROM scratchpad_entries WHERE agent_id = ? AND id IN (`+placeholders+`)`,
+		queryArgs...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	foundOrder := make(map[string]bool)
+	var foundIDs []string
+	newPins := 0
+	for rows.Next() {
+		var id string
+		var isPinned int
+		if err := rows.Scan(&id, &isPinned); err != nil {
+			return nil, err
+		}
+		foundOrder[id] = true
+		foundIDs = append(foundIDs, id)
+		if pinned && isPinned != 1 {
+			newPins++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(foundIDs) == 0 {
+		return nil, errors.New("scratchpad entry not found")
+	}
+
+	if pinned && newPins > 0 {
+		var currentPinned int
+		err := tx.QueryRowContext(ctx, `SELECT count(*) FROM scratchpad_entries WHERE agent_id = ? AND pinned = 1`, agentID).Scan(&currentPinned)
+		if err != nil {
+			return nil, err
+		}
+		if currentPinned+newPins > 10 {
+			return nil, ErrPinnedLimitReached
+		}
+	}
+
+	now := formatTimestamp(s.clock.Now())
+	pinnedVal := 0
+	if pinned {
+		pinnedVal = 1
+	}
+
+	updateArgs := make([]any, 0, len(foundIDs)+3)
+	updateArgs = append(updateArgs, pinnedVal, now, agentID)
+	for _, id := range foundIDs {
+		updateArgs = append(updateArgs, id)
+	}
+	updatePlaceholders := strings.TrimRight(strings.Repeat("?,", len(foundIDs)), ",")
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE scratchpad_entries SET pinned = ?, updated_at = ? WHERE agent_id = ? AND id IN (`+updatePlaceholders+`)`,
+		updateArgs...,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	var orderedFound []string
+	for _, id := range cleanIDs {
+		if foundOrder[id] {
+			orderedFound = append(orderedFound, id)
+		}
+	}
+
+	return orderedFound, nil
+}
+
+// DeleteScratchpadEntries deletes multiple scratchpad entries for an agent.
+// It returns the list of entry IDs that were actually deleted, or an error if none were found.
+func (s *Store) DeleteScratchpadEntries(ctx context.Context, agentID string, entryIDs []string) ([]string, error) {
+	if strings.TrimSpace(agentID) == "" {
+		return nil, errors.New("agent_id must not be empty")
+	}
+	cleanIDs := dedupeScratchpadIDs(entryIDs)
+	if len(cleanIDs) == 0 {
+		return nil, errors.New("at least one entry ID is required")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(cleanIDs)), ",")
+	queryArgs := make([]any, 0, len(cleanIDs)+1)
+	queryArgs = append(queryArgs, agentID)
+	for _, id := range cleanIDs {
+		queryArgs = append(queryArgs, id)
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM scratchpad_entries WHERE agent_id = ? AND id IN (`+placeholders+`)`,
+		queryArgs...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	foundOrder := make(map[string]bool)
+	var foundIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		foundOrder[id] = true
+		foundIDs = append(foundIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(foundIDs) == 0 {
+		return nil, errors.New("scratchpad entry not found")
+	}
+
+	deleteArgs := make([]any, 0, len(foundIDs)+1)
+	deleteArgs = append(deleteArgs, agentID)
+	for _, id := range foundIDs {
+		deleteArgs = append(deleteArgs, id)
+	}
+	deletePlaceholders := strings.TrimRight(strings.Repeat("?,", len(foundIDs)), ",")
+
+	_, err = tx.ExecContext(ctx,
+		`DELETE FROM scratchpad_entries WHERE agent_id = ? AND id IN (`+deletePlaceholders+`)`,
+		deleteArgs...,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	var orderedFound []string
+	for _, id := range cleanIDs {
+		if foundOrder[id] {
+			orderedFound = append(orderedFound, id)
+		}
+	}
+
+	return orderedFound, nil
+}
+
+func dedupeScratchpadIDs(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	var result []string
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; !exists {
+			seen[trimmed] = struct{}{}
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+

@@ -439,4 +439,87 @@ func TestPinnedEntryLimit(t *testing.T) {
 	require.True(t, otherEntry.Pinned)
 }
 
+func TestScratchpadBatchCRUD(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(ctx, dbPath, Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "agent-batch-1"
+	otherAgent := "agent-batch-2"
+
+	// Create 5 unpinned entries
+	var entries []*ScratchpadEntry
+	for i := 1; i <= 5; i++ {
+		e, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("Note %d", i), false)
+		require.NoError(t, err)
+		entries = append(entries, e)
+	}
+
+	// 1. Batch pin entries 0, 1, 2
+	pinIDs := []string{entries[0].ID, entries[1].ID, entries[2].ID}
+	updated, err := db.SetScratchpadEntriesPinned(ctx, agentID, pinIDs, true)
+	require.NoError(t, err)
+	require.Equal(t, pinIDs, updated)
+
+	// Verify they are pinned
+	for _, id := range pinIDs {
+		recent, _, err := db.FetchScratchpadRecent(ctx, agentID, 10)
+		require.NoError(t, err)
+		for _, e := range recent {
+			if e.ID == id {
+				require.True(t, e.Pinned)
+			}
+		}
+	}
+
+	// 2. Batch unpin entries 0 and 1
+	unpinIDs := []string{entries[0].ID, entries[1].ID}
+	updated, err = db.SetScratchpadEntriesPinned(ctx, agentID, unpinIDs, false)
+	require.NoError(t, err)
+	require.Equal(t, unpinIDs, updated)
+
+	// 3. Batch pin limit enforcement (already have entry 2 pinned, creating 8 more makes 9 pinned)
+	for i := 6; i <= 13; i++ {
+		_, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("Note %d", i), true)
+		require.NoError(t, err)
+	}
+	// Currently 9 pinned. Pinning 2 more entries should fail limit (10).
+	_, err = db.SetScratchpadEntriesPinned(ctx, agentID, []string{entries[0].ID, entries[1].ID}, true)
+	require.ErrorIs(t, err, ErrPinnedLimitReached)
+
+	// Pinning just 1 more entry should succeed (9 + 1 = 10)
+	updated, err = db.SetScratchpadEntriesPinned(ctx, agentID, []string{entries[0].ID}, true)
+	require.NoError(t, err)
+	require.Equal(t, []string{entries[0].ID}, updated)
+
+	// 4. Batch delete entries 3 and 4
+	deleteIDs := []string{entries[3].ID, entries[4].ID}
+	deleted, err := db.DeleteScratchpadEntries(ctx, agentID, deleteIDs)
+	require.NoError(t, err)
+	require.Equal(t, deleteIDs, deleted)
+
+	// Deleting again should return not found error
+	_, err = db.DeleteScratchpadEntries(ctx, agentID, deleteIDs)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad entry not found", err.Error())
+
+	// Deleting with other agent should return not found error
+	_, err = db.DeleteScratchpadEntries(ctx, otherAgent, []string{entries[0].ID})
+	require.Error(t, err)
+	require.Equal(t, "scratchpad entry not found", err.Error())
+
+	// Validation
+	_, err = db.SetScratchpadEntriesPinned(ctx, "", []string{entries[0].ID}, false)
+	require.Error(t, err)
+	_, err = db.SetScratchpadEntriesPinned(ctx, agentID, []string{}, false)
+	require.Error(t, err)
+	_, err = db.DeleteScratchpadEntries(ctx, "", []string{entries[0].ID})
+	require.Error(t, err)
+	_, err = db.DeleteScratchpadEntries(ctx, agentID, []string{})
+	require.Error(t, err)
+}
+
+
 

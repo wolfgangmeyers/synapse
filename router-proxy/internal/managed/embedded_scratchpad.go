@@ -17,13 +17,57 @@ func embeddedScratchpadSchema() *ai.Schema {
 		ai.Prop("action", ai.EnumOf("append", "fetch", "paginate", "search", "pin", "unpin", "delete")),
 		ai.Opt("content", ai.String("Content of the scratchpad entry (for append, maximum 4000 characters).")),
 		ai.Opt("pinned", ai.Boolean("Whether the entry is pinned (for append / pin).")),
-		ai.Opt("id", ai.String("Entry ID (for pin / unpin / delete).")),
+		ai.Opt("id", ai.String("Single entry ID (for pin / unpin / delete).")),
+		ai.Opt("ids", ai.ArrayOf(ai.String("Entry ID"), "Batch entry IDs (for pin / unpin / delete).")),
 		ai.Opt("query", ai.String("Search query string (for search).")),
 		ai.Opt("limit", ai.Integer("Maximum entries to return (optional, default 5, max 20).")),
 		ai.Opt("offset", ai.Integer("Pagination offset (optional, default 0).")),
 	)
 	schema.AdditionalAllowed = &closed
 	return schema
+}
+
+func extractScratchpadEntryIDs(args map[string]any, action string) ([]string, error) {
+	var rawIDs []string
+	if idVal, ok := args["id"].(string); ok && strings.TrimSpace(idVal) != "" {
+		rawIDs = append(rawIDs, idVal)
+	}
+	if idsVal, ok := args["ids"]; ok && idsVal != nil {
+		switch v := idsVal.(type) {
+		case []string:
+			rawIDs = append(rawIDs, v...)
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+					rawIDs = append(rawIDs, s)
+				}
+			}
+		case string:
+			for _, part := range strings.Split(v, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					rawIDs = append(rawIDs, trimmed)
+				}
+			}
+		}
+	}
+
+	seen := make(map[string]struct{}, len(rawIDs))
+	var ids []string
+	for _, id := range rawIDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; !exists {
+			seen[trimmed] = struct{}{}
+			ids = append(ids, trimmed)
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("id or ids is required for %s", action)
+	}
+	return ids, nil
 }
 
 func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
@@ -195,55 +239,97 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 				}, nil
 
 			case "pin":
-				entryID, ok := args["id"].(string)
-				if !ok || strings.TrimSpace(entryID) == "" {
-					return agent.AgentToolResult{}, errors.New("id is required for pin")
+				ids, err := extractScratchpadEntryIDs(args, "pin")
+				if err != nil {
+					return agent.AgentToolResult{}, err
 				}
 				pinnedVal := true
 				if p, ok := args["pinned"].(bool); ok {
 					pinnedVal = p
 				}
-				if err := m.store.SetScratchpadPinned(ctx, agentID, entryID, pinnedVal); err != nil {
-					if errors.Is(err, store.ErrPinnedLimitReached) {
-						return agent.AgentToolResult{}, err
-					}
-					return agent.AgentToolResult{}, fmt.Errorf("pin scratchpad entry: %w", err)
-				}
 				actionLabel := "pinned"
 				if !pinnedVal {
 					actionLabel = "unpinned"
 				}
+
+				if len(ids) == 1 {
+					if err := m.store.SetScratchpadPinned(ctx, agentID, ids[0], pinnedVal); err != nil {
+						if errors.Is(err, store.ErrPinnedLimitReached) {
+							return agent.AgentToolResult{}, err
+						}
+						return agent.AgentToolResult{}, fmt.Errorf("pin scratchpad entry: %w", err)
+					}
+					return agent.AgentToolResult{
+						Content: ai.ContentList{
+							ai.TextContent{Text: fmt.Sprintf("Scratchpad entry %s %s.", ids[0], actionLabel)},
+						},
+					}, nil
+				}
+
+				updatedIDs, err := m.store.SetScratchpadEntriesPinned(ctx, agentID, ids, pinnedVal)
+				if err != nil {
+					if errors.Is(err, store.ErrPinnedLimitReached) {
+						return agent.AgentToolResult{}, err
+					}
+					return agent.AgentToolResult{}, fmt.Errorf("pin scratchpad entries: %w", err)
+				}
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
-						ai.TextContent{Text: fmt.Sprintf("Scratchpad entry %s %s.", entryID, actionLabel)},
+						ai.TextContent{Text: fmt.Sprintf("Scratchpad entries %s (%d): %s", actionLabel, len(updatedIDs), strings.Join(updatedIDs, ", "))},
 					},
 				}, nil
 
 			case "unpin":
-				entryID, ok := args["id"].(string)
-				if !ok || strings.TrimSpace(entryID) == "" {
-					return agent.AgentToolResult{}, errors.New("id is required for unpin")
+				ids, err := extractScratchpadEntryIDs(args, "unpin")
+				if err != nil {
+					return agent.AgentToolResult{}, err
 				}
-				if err := m.store.SetScratchpadPinned(ctx, agentID, entryID, false); err != nil {
-					return agent.AgentToolResult{}, fmt.Errorf("unpin scratchpad entry: %w", err)
+
+				if len(ids) == 1 {
+					if err := m.store.SetScratchpadPinned(ctx, agentID, ids[0], false); err != nil {
+						return agent.AgentToolResult{}, fmt.Errorf("unpin scratchpad entry: %w", err)
+					}
+					return agent.AgentToolResult{
+						Content: ai.ContentList{
+							ai.TextContent{Text: fmt.Sprintf("Scratchpad entry %s unpinned.", ids[0])},
+						},
+					}, nil
+				}
+
+				updatedIDs, err := m.store.SetScratchpadEntriesPinned(ctx, agentID, ids, false)
+				if err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("unpin scratchpad entries: %w", err)
 				}
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
-						ai.TextContent{Text: fmt.Sprintf("Scratchpad entry %s unpinned.", entryID)},
+						ai.TextContent{Text: fmt.Sprintf("Scratchpad entries unpinned (%d): %s", len(updatedIDs), strings.Join(updatedIDs, ", "))},
 					},
 				}, nil
 
 			case "delete":
-				entryID, ok := args["id"].(string)
-				if !ok || strings.TrimSpace(entryID) == "" {
-					return agent.AgentToolResult{}, errors.New("id is required for delete")
+				ids, err := extractScratchpadEntryIDs(args, "delete")
+				if err != nil {
+					return agent.AgentToolResult{}, err
 				}
-				if err := m.store.DeleteScratchpadEntry(ctx, agentID, entryID); err != nil {
-					return agent.AgentToolResult{}, fmt.Errorf("delete scratchpad entry: %w", err)
+
+				if len(ids) == 1 {
+					if err := m.store.DeleteScratchpadEntry(ctx, agentID, ids[0]); err != nil {
+						return agent.AgentToolResult{}, fmt.Errorf("delete scratchpad entry: %w", err)
+					}
+					return agent.AgentToolResult{
+						Content: ai.ContentList{
+							ai.TextContent{Text: fmt.Sprintf("Deleted scratchpad entry %s", ids[0])},
+						},
+					}, nil
+				}
+
+				deletedIDs, err := m.store.DeleteScratchpadEntries(ctx, agentID, ids)
+				if err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("delete scratchpad entries: %w", err)
 				}
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
-						ai.TextContent{Text: fmt.Sprintf("Deleted scratchpad entry %s", entryID)},
+						ai.TextContent{Text: fmt.Sprintf("Deleted %d scratchpad entries: %s", len(deletedIDs), strings.Join(deletedIDs, ", "))},
 					},
 				}, nil
 
