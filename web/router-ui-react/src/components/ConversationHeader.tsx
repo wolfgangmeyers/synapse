@@ -7,7 +7,9 @@ import { ArrivalIndicator } from "./ArrivalIndicator";
 import { AgentAvatar } from "./AgentAvatar";
 import { AlienText } from "./AlienText";
 import type { Arrival } from "../domain/arrivals";
+import type { PromptTemplate } from "../domain/prompt-templates";
 import type { RouterHttpClient } from "../transport/http-client";
+
 import type { Workflow } from "../domain/workflow-states";
 import { WorkflowLaunchModal } from "./WorkflowLaunchModal";
 import { contextUsageSeverityClass, formatContextUsageLabel, formatContextUsageTooltip } from "../utils/format";
@@ -17,6 +19,7 @@ export type ConversationView = "quiet" | "complete";
 export interface ConversationHeaderProps {
   agent?: Agent | undefined;
   client?: RouterHttpClient | undefined;
+  templates?: PromptTemplate[] | Record<string, string> | Map<string, string> | undefined;
   onInterrupt?: (() => void) | undefined;
   activeReminderCount?: number | undefined;
   arrival?: Arrival | undefined;
@@ -41,6 +44,7 @@ export interface ConversationHeaderProps {
   chatOnly?: boolean | undefined;
   onToggleChatOnly?: (() => void) | undefined;
 }
+
 
 function activeManagedSubagents(agent: Agent): NonNullable<Agent["subagents"]> {
   return (agent.managed_children ?? []).flatMap((child) => {
@@ -75,7 +79,8 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
+
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
   const managedFailure = failedManagedAgent(agent);
@@ -297,6 +302,7 @@ export function ConversationHeader({ agent, client, onInterrupt, activeReminderC
     workflow={launchModalWorkflow}
     agentId={agent.agent_id}
     client={client}
+    {...(templates !== undefined ? { templates } : {})}
     onClose={() => setLaunchModalWorkflow(null)}
   />
 ) : null}</header>;

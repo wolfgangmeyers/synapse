@@ -32,23 +32,27 @@ func formatWorkflowStateGuidance(ctx context.Context, s *store.Store, state *sto
 		varMap = vars[0]
 	}
 
+	expand := func(text string) string {
+		if s != nil {
+			return s.SubstituteAndExpandText(ctx, text, varMap)
+		}
+		if varMap != nil {
+			return store.SubstituteVariables(text, varMap)
+		}
+		return text
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## Active Workflow State: %s\n", state.Name))
 	if strings.TrimSpace(state.Description) != "" {
-		desc := strings.TrimSpace(state.Description)
-		if varMap != nil {
-			desc = store.SubstituteVariables(desc, varMap)
-		}
+		desc := expand(strings.TrimSpace(state.Description))
 		sb.WriteString(fmt.Sprintf("%s\n\n", desc))
 	} else {
 		sb.WriteString("\n")
 	}
 
 	if strings.TrimSpace(state.EntryText) != "" {
-		entryText := strings.TrimSpace(state.EntryText)
-		if varMap != nil {
-			entryText = store.SubstituteVariables(entryText, varMap)
-		}
+		entryText := expand(strings.TrimSpace(state.EntryText))
 		sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", entryText))
 	}
 
@@ -65,9 +69,7 @@ func formatWorkflowStateGuidance(ctx context.Context, s *store.Store, state *sto
 			}
 			desc := strings.TrimSpace(tr.Description)
 			if desc != "" {
-				if varMap != nil {
-					desc = store.SubstituteVariables(desc, varMap)
-				}
+				desc = expand(desc)
 				sb.WriteString(fmt.Sprintf("- %s: %s\n", targetName, desc))
 			} else {
 				sb.WriteString(fmt.Sprintf("- %s\n", targetName))
@@ -170,9 +172,9 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				}
 				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
 
-				// Synchronize goal with target state, substituting variables
+				// Synchronize goal with target state, substituting variables and expanding prompt templates
 				if targetState.Goal != "" {
-					goalText := store.SubstituteVariables(targetState.Goal, workflowVars)
+					goalText := m.store.SubstituteAndExpandText(ctx, targetState.Goal, workflowVars)
 					goalSettings := store.DefaultManagedGoalSettings()
 					goalSettings.GoalLockEnabled = true
 					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{

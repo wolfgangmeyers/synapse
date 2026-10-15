@@ -819,14 +819,11 @@ func (s *Store) SpawnWorkflowStateReminders(ctx context.Context, agentID string,
 		}
 
 		subject := cfg.Subject
-		if subject != nil && varMap != nil {
-			subst := SubstituteVariables(*subject, varMap)
+		if subject != nil {
+			subst := s.SubstituteAndExpandText(ctx, *subject, varMap)
 			subject = &subst
 		}
-		body := cfg.Body
-		if varMap != nil {
-			body = SubstituteVariables(body, varMap)
-		}
+		body := s.SubstituteAndExpandText(ctx, cfg.Body, varMap)
 
 		created, _, err := s.CreateReminder(ctx, ReminderRequest{
 			ID:         remID,
