@@ -2546,7 +2546,12 @@ class MainActivity : ComponentActivity() {
     ): ChatMessage {
         val value = validated.payload
         val sender = value.getString("from")
-        val direction = if (sender == localAgentId) Direction.OUTGOING else Direction.INCOMING
+        val recipient = value.getString("to")
+        val direction = when {
+            sender == localAgentId || sender == "wolfgang" -> Direction.OUTGOING
+            recipient == localAgentId || recipient == "wolfgang" -> Direction.INCOMING
+            else -> Direction.INCOMING
+        }
         return ChatMessage(
             id = value.getString("id"),
             incarnationId = validated.incarnationId,
@@ -2557,7 +2562,7 @@ class MainActivity : ComponentActivity() {
             createdAt = value.getString("created_at"),
             recordedAt = validated.recordedAt,
             attachments = imageReferences(value.optJSONArray("attachments"), router),
-            recipient = value.getString("to"),
+            recipient = recipient,
             deliveryStatus = if (direction == Direction.OUTGOING) OutboundDeliveryStatus.SENT else OutboundDeliveryStatus.NONE,
         )
     }

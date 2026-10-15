@@ -515,4 +515,27 @@ class ConversationHistoryTest {
             .withZone(java.time.ZoneOffset.UTC)
             .format(java.time.Instant.ofEpochMilli(System.currentTimeMillis() + offsetMs))
 
+    @Test
+    fun conversationScopeAllowsOperatorFallbackMessages() {
+        // Postel's law: router falls back to wolfgang <-> peer conversation when new android client has no history
+        assertTrue(isMessageInConversationScope("wolfgang", "supervisor", "android-7a28f24c", "supervisor"))
+        assertTrue(isMessageInConversationScope("supervisor", "wolfgang", "android-7a28f24c", "supervisor"))
+        assertTrue(isMessageInConversationScope("android-7a28f24c", "supervisor", "android-7a28f24c", "supervisor"))
+        assertTrue(isMessageInConversationScope("supervisor", "android-7a28f24c", "android-7a28f24c", "supervisor"))
+
+        // Rejects messages not involving the peer or self-messages
+        assertFalse(isMessageInConversationScope("wolfgang", "other-agent", "android-7a28f24c", "supervisor"))
+        assertFalse(isMessageInConversationScope("supervisor", "supervisor", "android-7a28f24c", "supervisor"))
+    }
+
+    @Test
+    fun conversationPeerForMessageHandlesOperatorMessages() {
+        val incomingFromPeerToWolfgang = message("1").copy(sender = "supervisor", recipient = "wolfgang")
+        val outgoingFromWolfgangToPeer = message("2").copy(sender = "wolfgang", recipient = "supervisor")
+        val incomingFromPeerToAndroid = message("3").copy(sender = "supervisor", recipient = "android-7a28f24c")
+
+        assertEquals("supervisor", conversationPeerForMessage(incomingFromPeerToWolfgang, "android-7a28f24c"))
+        assertEquals("supervisor", conversationPeerForMessage(outgoingFromWolfgangToPeer, "android-7a28f24c"))
+        assertEquals("supervisor", conversationPeerForMessage(incomingFromPeerToAndroid, "android-7a28f24c"))
+    }
 }
