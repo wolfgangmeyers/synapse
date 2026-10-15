@@ -188,7 +188,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             source: st.id,
             target: tr.target_state_id,
             label: undefined,
-            type: "smoothstep",
+            type: "bezier",
             interactionWidth: 20,
             markerEnd: {
               type: MarkerType.ArrowClosed,
@@ -688,7 +688,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             snapToGrid
             snapGrid={[15, 15]}
             defaultEdgeOptions={{
-              type: "smoothstep",
+              type: "bezier",
               style: { stroke: "#38bdf8", strokeWidth: 2 },
             }}
           >
