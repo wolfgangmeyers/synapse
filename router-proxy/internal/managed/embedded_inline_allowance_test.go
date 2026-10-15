@@ -251,6 +251,25 @@ func TestInlineToolExecutionGate(t *testing.T) {
 			if mgr.IsInlineToolsAllowed(ctx, agentID) {
 				return nil
 			}
+			lookupTools := []agent.AgentTool{}
+			if lane != nil {
+				if dynTools := lane.getActiveTools(); len(dynTools) > 0 {
+					lookupTools = dynTools
+				} else if dynBase := lane.getBaseTools(); len(dynBase) > 0 {
+					lookupTools = dynBase
+				}
+			}
+			hasAllowanceTool := false
+			for _, t := range lookupTools {
+				if t.Name == InlineToolAllowanceToolName {
+					hasAllowanceTool = true
+					break
+				}
+			}
+			if !hasAllowanceTool {
+				return nil
+			}
+
 			if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
 				return nil
 			}
@@ -261,6 +280,21 @@ func TestInlineToolExecutionGate(t *testing.T) {
 		}
 		return nil
 	}
+
+	// Set lane tools to include mecha_request_inline_tool_allowance
+	lane.setTools([]agent.AgentTool{
+		{Name: "bash"},
+		{Name: "edit"},
+		{Name: "write"},
+		{Name: "read"},
+		{Name: InlineToolAllowanceToolName},
+	}, []agent.AgentTool{
+		{Name: "bash"},
+		{Name: "edit"},
+		{Name: "write"},
+		{Name: "read"},
+		{Name: InlineToolAllowanceToolName},
+	})
 
 	// 1. allow_inline_tools == false and 0 credits: bash is BLOCKED
 	res := gateCheck("bash")
@@ -316,6 +350,18 @@ func TestInlineToolExecutionGate(t *testing.T) {
 	resBlockedAgain := gateCheck("bash")
 	require.NotNil(t, resBlockedAgain)
 	require.True(t, resBlockedAgain.Block)
+
+	// 5. When mecha_request_inline_tool_allowance is NOT present in available tools,
+	// bash is NOT blocked even if credits are 0 and allow_inline_tools == false.
+	lane.setTools([]agent.AgentTool{
+		{Name: "bash"},
+		{Name: "read"},
+	}, []agent.AgentTool{
+		{Name: "bash"},
+		{Name: "read"},
+	})
+	resNoAllowanceTool := gateCheck("bash")
+	require.Nil(t, resNoAllowanceTool, "bash must NOT be blocked when mecha_request_inline_tool_allowance is not available to the agent")
 }
 
 func TestUnrestrictedInlineToolsReproduction(t *testing.T) {
