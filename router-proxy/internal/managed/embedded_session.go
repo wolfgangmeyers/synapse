@@ -577,6 +577,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			var thinking strings.Builder
 			var errMsg string
 			var stopReason ai.StopReason
+			hasToolCalls := false
 			switch assistant := message.(type) {
 			case ai.AssistantMessage:
 				stopReason = assistant.StopReason
@@ -585,7 +586,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				final = stopReason == ai.StopStop || stopReason == ai.StopError
 				errMsg = assistant.ErrorMessage
 				for _, c := range assistant.Content {
-					if t, ok := c.(ai.TextContent); ok {
+					if _, ok := c.(ai.ToolCall); ok {
+						hasToolCalls = true
+					} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
+						hasToolCalls = true
+					} else if t, ok := c.(ai.TextContent); ok {
 						text.WriteString(t.Text)
 					} else if t, ok := c.(*ai.TextContent); ok && t != nil {
 						text.WriteString(t.Text)
@@ -603,7 +608,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					final = stopReason == ai.StopStop || stopReason == ai.StopError
 					errMsg = assistant.ErrorMessage
 					for _, c := range assistant.Content {
-						if t, ok := c.(ai.TextContent); ok {
+						if _, ok := c.(ai.ToolCall); ok {
+							hasToolCalls = true
+						} else if call, ok := c.(*ai.ToolCall); ok && call != nil {
+							hasToolCalls = true
+						} else if t, ok := c.(ai.TextContent); ok {
 							text.WriteString(t.Text)
 						} else if t, ok := c.(*ai.TextContent); ok && t != nil {
 							text.WriteString(t.Text)
@@ -630,7 +639,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					replyBodyText = fmt.Sprintf("%s\n\nTurn failed: %s", replyBodyText, errMsg)
 				}
 			}
-			if len(strings.TrimSpace(replyBodyText)) > 0 {
+			if !hasToolCalls && len(strings.TrimSpace(replyBodyText)) > 0 {
 				eventKey := fmt.Sprintf("embedded-assistant:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
 				presentation := &store.ManagedHistoryPresentation{
 					Kind:     "message",
