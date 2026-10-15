@@ -1800,6 +1800,10 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			activeWorkflowID = *workflowID
 		}
 
+		if r.managed != nil {
+			_ = r.managed.SyncEmbeddedWorkflowTools(req.Context(), agentID)
+		}
+
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 			"agent_id":                 agentID,
 			"active_workflow_id":       activeWorkflowID,
@@ -1813,6 +1817,9 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, nil, nil, nil); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
 			return
+		}
+		if r.managed != nil {
+			_ = r.managed.SyncEmbeddedWorkflowTools(req.Context(), agentID)
 		}
 		// Deactivate goal on workflow state deactivation
 		goalSettings := store.DefaultManagedGoalSettings()
