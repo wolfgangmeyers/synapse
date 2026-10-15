@@ -491,8 +491,57 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			if p.afterUserAppend != nil {
 				p.afterUserAppend(ctx)
 			}
+
+			// Record user / steering message to managed_complete_history
+			var userText strings.Builder
+			switch user := message.(type) {
+			case ai.UserMessage:
+				for _, c := range user.Content {
+					if t, ok := c.(ai.TextContent); ok {
+						userText.WriteString(t.Text)
+					} else if t, ok := c.(*ai.TextContent); ok && t != nil {
+						userText.WriteString(t.Text)
+					}
+				}
+			case *ai.UserMessage:
+				if user != nil {
+					for _, c := range user.Content {
+						if t, ok := c.(ai.TextContent); ok {
+							userText.WriteString(t.Text)
+						} else if t, ok := c.(*ai.TextContent); ok && t != nil {
+							userText.WriteString(t.Text)
+						}
+					}
+				}
+			}
+			userBodyText := userText.String()
+			if len(strings.TrimSpace(userBodyText)) > 0 {
+				eventKey := fmt.Sprintf("embedded-user:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
+				presentation := &store.ManagedHistoryPresentation{
+					Kind:    "message",
+					Outcome: "success",
+					From:    "user",
+					To:      p.binding.AgentID,
+					Summary: "User message",
+				}
+				historyEntry, err := p.db.RecordManagedCompleteHistoryWithDetails(
+					ctx,
+					p.binding.AgentID,
+					"managed_message",
+					"info",
+					"User message",
+					eventKey,
+					presentation,
+					nil,
+					&userBodyText,
+				)
+				if err == nil && p.publishComplete != nil && historyEntry.ID != "" {
+					p.publishComplete(historyEntry)
+				}
+			}
 		} else if message.MessageRole() == ai.RoleAssistant {
 			final := false
+			_ = final
 			var text strings.Builder
 			var thinking strings.Builder
 			var errMsg string
@@ -550,7 +599,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					replyBodyText = fmt.Sprintf("%s\n\nTurn failed: %s", replyBodyText, errMsg)
 				}
 			}
-			if final && len(strings.TrimSpace(replyBodyText)) > 0 {
+			if len(strings.TrimSpace(replyBodyText)) > 0 {
 				eventKey := fmt.Sprintf("embedded-assistant:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
 				presentation := &store.ManagedHistoryPresentation{
 					Kind:     "message",
@@ -1390,6 +1439,27 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				if m.IsInlineToolsAllowed(callCtx, binding.AgentID) {
 					return nil
 				}
+				// Check if mecha_request_inline_tool_allowance is available to the agent.
+				// If it is NOT available, do not block inline tools.
+				lookupTools := tools
+				if currentLane := m.laneFor(binding.AgentID); currentLane != nil {
+					if dynTools := currentLane.getActiveTools(); len(dynTools) > 0 {
+						lookupTools = dynTools
+					} else if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
+						lookupTools = dynBase
+					}
+				}
+				hasAllowanceTool := false
+				for _, t := range lookupTools {
+					if t.Name == InlineToolAllowanceToolName {
+						hasAllowanceTool = true
+						break
+					}
+				}
+				if !hasAllowanceTool {
+					return nil
+				}
+
 				// Otherwise, check allowance credits
 				lane := m.laneFor(binding.AgentID)
 				if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
