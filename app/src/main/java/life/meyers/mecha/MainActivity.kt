@@ -66,8 +66,19 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -109,6 +120,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -132,9 +144,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
+import java.util.Locale
 import java.util.LinkedHashMap
 import java.util.Timer
 import java.util.UUID
@@ -162,6 +176,7 @@ private val Teal = Color(0xFF78E0CD)
 private val TextPrimary = Color(0xFFF2F4FF)
 private val TextMuted = Color(0xFFB5BCD0)
 private val MessageTimestampFormatter: DateTimeFormatter = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withZone(ZoneId.systemDefault())
+private val EventTimestampFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a", Locale.US).withZone(ZoneId.systemDefault())
 
 internal enum class Direction { INCOMING, OUTGOING }
 
@@ -387,6 +402,7 @@ internal data class AgentTimelineEvent(
     val summary: String,
     val outcome: String?,
     val toolInput: String?,
+    val output: String? = null,
 ) {
     val key: String get() = "event:$id"
 }
@@ -825,10 +841,105 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                     val presentation = entry.optJSONObject("presentation")
                     val kind = presentation?.optString("kind").orEmpty()
                     val toolName = presentation?.optString("tool_name")
+                    val toolInputObj = entry.optJSONObject("tool_input")
+
+                    // 1. Reconcile Messages vs Event Chips:
+                    // Check if this entry is a chat message to/from Wolfgang or user:
+                    val isMessage = kind == "message"
+                        || toolName == "mecha_mailbox_send"
+                        || (toolName == "mecha_worker" && toolInputObj?.optString("action") == "send")
+
+                    val sender = entry.optString("sender_identity").takeIf { it.isNotBlank() }
+                        ?: presentation?.optString("from").takeIf { !it.isNullOrBlank() }
+                        ?: entry.optString("agent_id")
+                    val recipient = toolInputObj?.optString("recipient").takeIf { !it.isNullOrBlank() }
+                        ?: presentation?.optString("to")
+                    val content = toolInputObj?.optString("body").takeIf { !it.isNullOrBlank() }
+                        ?: entry.optString("message_content").takeIf { it.isNotBlank() }
+                        ?: entry.optString("message")
+
+                    if (isMessage) {
+                        val isIncomingToWolfgang = recipient?.equals("wolfgang", ignoreCase = true) == true
+                            || recipient?.equals("user", ignoreCase = true) == true
+                        val isWolfgangPrompt = sender.equals("wolfgang", ignoreCase = true)
+                            || sender.equals("user", ignoreCase = true)
+
+                        if (isIncomingToWolfgang) {
+                            // Incoming chat message from the agent to Wolfgang!
+                            val incomingMsg = ChatMessage(
+                                id = eId,
+                                incarnationId = "",
+                                sequence = 0L,
+                                sender = targetAgent,
+                                body = content,
+                                direction = Direction.INCOMING,
+                                createdAt = at.takeIf { it.isNotBlank() } ?: Instant.now().toString(),
+                                recipient = recipient.orEmpty(),
+                            )
+                            runOnUiThread {
+                                if (generation == connectionGeneration) {
+                                    val currentMsgs = outboundState.messagesByPeer[targetAgent].orEmpty()
+                                    if (currentMsgs.none { it.id == eId || (it.body == content && content.isNotBlank()) }) {
+                                        val updatedMsgs = currentMsgs + incomingMsg
+                                        outboundState = outboundState.copy(
+                                            messagesByPeer = outboundState.messagesByPeer + (targetAgent to updatedMsgs)
+                                        )
+                                        if (selectedPeer == targetAgent) {
+                                            messages = updatedMsgs
+                                        }
+                                    }
+                                }
+                            }
+                            return
+                        } else if (isWolfgangPrompt) {
+                            // Wolfgang's user prompt!
+                            val outgoingMsg = ChatMessage(
+                                id = eId,
+                                incarnationId = "",
+                                sequence = 0L,
+                                sender = "wolfgang",
+                                body = content,
+                                direction = Direction.OUTGOING,
+                                createdAt = at.takeIf { it.isNotBlank() } ?: Instant.now().toString(),
+                                recipient = targetAgent,
+                                deliveryStatus = OutboundDeliveryStatus.SENT,
+                            )
+                            runOnUiThread {
+                                if (generation == connectionGeneration) {
+                                    val currentMsgs = outboundState.messagesByPeer[targetAgent].orEmpty()
+                                    if (currentMsgs.none { it.id == eId || (it.body == content && content.isNotBlank()) }) {
+                                        val updatedMsgs = currentMsgs + outgoingMsg
+                                        outboundState = outboundState.copy(
+                                            messagesByPeer = outboundState.messagesByPeer + (targetAgent to updatedMsgs)
+                                        )
+                                        if (selectedPeer == targetAgent) {
+                                            messages = updatedMsgs
+                                        }
+                                    }
+                                }
+                            }
+                            return
+                        }
+                        // In general: If kind == "message", NEVER add it to liveEventsByAgent!
+                        return
+                    }
+
                     val summary = presentation?.optString("summary") ?: entry.optString("message")
                     val outcome = presentation?.optString("outcome")
-                    val toolInput = entry.optJSONObject("tool_input")?.toString()
-                    val event = AgentTimelineEvent(eId, targetAgent, at, kind, toolName, summary, outcome, toolInput)
+                    val toolInput = toolInputObj?.toString()
+                    val output = entry.optString("message_content").takeIf { it.isNotBlank() }
+                        ?: presentation?.optJSONObject("error")?.optString("message")
+                    val event = AgentTimelineEvent(
+                        id = eId,
+                        agentId = targetAgent,
+                        timestamp = at,
+                        kind = kind,
+                        toolName = toolName,
+                        summary = summary,
+                        outcome = outcome,
+                        toolInput = toolInput,
+                        output = output,
+                    )
                     runOnUiThread {
                         if (generation == connectionGeneration) {
                             val existing = liveEventsByAgent[targetAgent].orEmpty()
@@ -4485,49 +4596,180 @@ private fun ControlStatusText(state: ControlState) {
 
 @Composable
 private fun AgentEventChip(event: AgentTimelineEvent) {
+    var expanded by remember { mutableStateOf(false) }
+    val formattedTime = remember(event.timestamp) { formatEventTimestamp(event.timestamp) }
+
+    val toolIcon = when (event.toolName?.lowercase() ?: event.kind.lowercase()) {
+        "bash" -> Icons.Default.Terminal
+        "read", "write", "edit" -> Icons.Default.Description
+        "subagent", "mecha_worker" -> Icons.Default.AccountTree
+        "goal" -> Icons.Default.Flag
+        "reminder", "mecha_reminder" -> Icons.Default.Schedule
+        "context_reset", "reset" -> Icons.Default.Sync
+        else -> Icons.Default.Build
+    }
+
+    val outcomeNormalized = event.outcome?.lowercase().orEmpty()
+    val isSuccess = outcomeNormalized in setOf("success", "completed", "done")
+    val isError = outcomeNormalized in setOf("error", "failed", "interrupted")
+    val outcomeBadgeColor = when {
+        isSuccess -> Color(0xFF4ADE80)
+        isError -> Color(0xFFFF8A80)
+        else -> Color(0xFFFFC857)
+    }
+    val outcomeBadgeText = when {
+        isSuccess -> "success"
+        isError -> "error"
+        outcomeNormalized.isNotBlank() -> outcomeNormalized
+        else -> "running"
+    }
+
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = SurfaceRaised,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+            .clickable { expanded = !expanded }
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp)
         ) {
-            val toolLabel = event.toolName?.takeIf { it.isNotBlank() } ?: event.kind.takeIf { it.isNotBlank() } ?: "event"
-            Surface(
-                shape = RoundedCornerShape(4.dp),
-                color = Periwinkle.copy(alpha = 0.2f)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                Icon(
+                    imageVector = toolIcon,
+                    contentDescription = null,
+                    tint = Periwinkle,
+                    modifier = Modifier.size(16.dp)
+                )
+
+                val toolLabel = event.toolName?.takeIf { it.isNotBlank() } ?: event.kind.takeIf { it.isNotBlank() } ?: "event"
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Periwinkle.copy(alpha = 0.2f)
+                ) {
+                    Text(
+                        text = toolLabel,
+                        color = Periwinkle,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+
                 Text(
-                    text = toolLabel,
-                    color = Periwinkle,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    text = event.summary,
+                    color = TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = if (expanded) 10 else 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+
+                if (formattedTime.isNotBlank()) {
+                    Text(
+                        text = formattedTime,
+                        color = TextMuted.copy(alpha = 0.7f),
+                        fontSize = 10.sp
+                    )
+                }
+
+                // Outcome badge / pill
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = outcomeBadgeColor.copy(alpha = 0.15f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        if (isSuccess) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = outcomeBadgeColor,
+                                modifier = Modifier.size(10.dp)
+                            )
+                        } else if (isError) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = outcomeBadgeColor,
+                                modifier = Modifier.size(10.dp)
+                            )
+                        }
+                        Text(
+                            text = outcomeBadgeText,
+                            color = outcomeBadgeColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = TextMuted,
+                    modifier = Modifier.size(16.dp)
                 )
             }
-            Text(
-                text = event.summary,
-                color = TextMuted,
-                fontSize = 12.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            val outcomeColor = when (event.outcome) {
-                "success" -> Color(0xFF4ADE80)
-                "error" -> Color(0xFFFF8A80)
-                else -> Color(0xFFFFC857)
+
+            if (expanded) {
+                val hasToolInput = !event.toolInput.isNullOrBlank()
+                val hasOutput = !event.output.isNullOrBlank()
+
+                if (hasToolInput || hasOutput) {
+                    Spacer(Modifier.height(8.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Ink)
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (hasToolInput) {
+                            Text(
+                                text = "PARAMETERS",
+                                color = TextMuted,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = event.toolInput.orEmpty(),
+                                color = TextPrimary,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+                        if (hasOutput) {
+                            if (hasToolInput) {
+                                HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 2.dp))
+                            }
+                            Text(
+                                text = "RESULT",
+                                color = TextMuted,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = event.output.orEmpty(),
+                                color = if (isError) Color(0xFFFF8A80) else Teal,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
             }
-            val outcomeText = event.outcome?.takeIf { it.isNotBlank() } ?: "active"
-            Text(
-                text = outcomeText,
-                color = outcomeColor,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Medium
-            )
         }
     }
 }
@@ -5538,6 +5780,16 @@ internal fun mergeManagedPeers(
 internal fun formatMessageTimestamp(createdAt: String): String = runCatching {
     MessageTimestampFormatter.format(Instant.parse(createdAt))
 }.getOrElse { "" }
+
+internal fun formatEventTimestamp(timestamp: String): String {
+    if (timestamp.isBlank()) return ""
+    return runCatching {
+        val instant = runCatching { Instant.parse(timestamp) }
+            .recoverCatching { OffsetDateTime.parse(timestamp).toInstant() }
+            .getOrNull() ?: return@runCatching ""
+        EventTimestampFormatter.format(instant)
+    }.getOrElse { "" }
+}
 
 private fun humanName(id: String): String = id.split(Regex("[._-]+"))
     .filter { it.isNotBlank() }
