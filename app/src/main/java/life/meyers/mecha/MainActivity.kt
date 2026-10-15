@@ -859,10 +859,15 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                         ?: entry.optString("message")
 
                     if (isMessage) {
-                        val isIncomingToWolfgang = recipient?.equals("wolfgang", ignoreCase = true) == true
-                            || recipient?.equals("user", ignoreCase = true) == true
-                        val isWolfgangPrompt = sender.equals("wolfgang", ignoreCase = true)
-                            || sender.equals("user", ignoreCase = true)
+                        val isUser = { id: String? ->
+                            if (id.isNullOrBlank()) false
+                            else {
+                                val norm = id.trim().lowercase()
+                                norm == "wolfgang" || norm == "user" || norm == agentId.lowercase() || norm.startsWith("android-")
+                            }
+                        }
+                        val isIncomingToWolfgang = isUser(recipient)
+                        val isWolfgangPrompt = isUser(sender)
 
                         if (isIncomingToWolfgang) {
                             // Incoming chat message from the agent to Wolfgang!
@@ -3819,8 +3824,13 @@ private fun Conversation(
             }
         }
     }
-    LaunchedEffect(messages.lastOrNull()?.id) {
-        if (messages.isNotEmpty()) transcriptState.animateScrollToItem(messages.lastIndex)
+    val timelineEntries = remember(messages, agentEvents) {
+        (messages.map { ConversationTimelineEntry.Chat(it) } +
+         agentEvents.map { ConversationTimelineEntry.Event(it) })
+            .sortedBy { it.timestamp }
+    }
+    LaunchedEffect(timelineEntries.lastOrNull()?.key) {
+        if (timelineEntries.isNotEmpty()) transcriptState.animateScrollToItem(timelineEntries.lastIndex)
     }
     val orbit = activityOrbitFor(peerStatus)
     Column(Modifier.fillMaxSize()) {
@@ -3952,11 +3962,7 @@ private fun Conversation(
                 TextButton(onClick = onRetryHistory) { Text("Retry", color = Periwinkle) }
             }
         }
-        val timelineEntries = remember(messages, agentEvents) {
-            (messages.map { ConversationTimelineEntry.Chat(it) } +
-             agentEvents.map { ConversationTimelineEntry.Event(it) })
-                .sortedBy { it.timestamp }
-        }
+
         if (timelineEntries.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("Start a conversation with ${humanName(peer)}", color = TextMuted)
