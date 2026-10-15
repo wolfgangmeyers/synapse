@@ -77,7 +77,7 @@ interface HealthIssue {
 export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasProps): ReactElement {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [states, setStates] = useState<WorkflowState[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // React Flow state
@@ -128,7 +128,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
   // Fetch workflow and states
   const loadWorkflowData = useCallback(async () => {
     try {
-      setLoading(true);
       setError(null);
       const res: WorkflowWithStates = await client.getWorkflow(workflowId);
       setWorkflow(res.workflow);
@@ -136,7 +135,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load workflow");
     } finally {
-      setLoading(false);
+      setInitialLoading(false);
     }
   }, [client, workflowId]);
 
@@ -156,25 +155,28 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
   useEffect(() => {
     if (!workflow) return;
 
-    const newNodes: Node[] = states.map((st, index) => {
-      // Use ui_pos_x / ui_pos_y if present, otherwise default grid layout
-      const x = st.ui_pos_x !== undefined && st.ui_pos_x !== 0 ? st.ui_pos_x : 50 + (index % 3) * (NODE_WIDTH + 80);
-      const y = st.ui_pos_y !== undefined && st.ui_pos_y !== 0 ? st.ui_pos_y : 50 + Math.floor(index / 3) * (NODE_HEIGHT + 60);
+    setNodes((prevNodes) => {
+      const prevNodeMap = new Map(prevNodes.map((n) => [n.id, n]));
+      return states.map((st, index) => {
+        const prev = prevNodeMap.get(st.id);
+        const x = prev?.position.x ?? (st.ui_pos_x !== undefined && st.ui_pos_x !== 0 ? st.ui_pos_x : 50 + (index % 3) * (NODE_WIDTH + 80));
+        const y = prev?.position.y ?? (st.ui_pos_y !== undefined && st.ui_pos_y !== 0 ? st.ui_pos_y : 50 + Math.floor(index / 3) * (NODE_HEIGHT + 60));
 
-      const nodeData: WorkflowStateNodeData = {
-        state: st,
-        workflow,
-        isEntry: workflow.entry_state_id === st.id,
-        onOpenConfig: handleOpenConfig,
-        onDeleteState: handleDeleteStatePrompt,
-      };
+        const nodeData: WorkflowStateNodeData = {
+          state: st,
+          workflow,
+          isEntry: workflow.entry_state_id === st.id,
+          onOpenConfig: handleOpenConfig,
+          onDeleteState: handleDeleteStatePrompt,
+        };
 
-      return {
-        id: st.id,
-        type: "workflowState",
-        position: { x, y },
-        data: nodeData as unknown as Record<string, unknown>,
-      };
+        return {
+          id: st.id,
+          type: "workflowState",
+          position: { x, y },
+          data: nodeData as unknown as Record<string, unknown>,
+        };
+      });
     });
 
     const newEdges: Edge[] = [];
@@ -201,7 +203,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
       }
     });
 
-    setNodes(newNodes);
     setEdges(newEdges);
   }, [workflow, states, handleOpenConfig, handleDeleteStatePrompt]);
 
@@ -666,7 +667,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             </span>
           </div>
         )}
-        {loading ? (
+        {initialLoading ? (
           <div className="workflows-loading" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
             Loading workflow canvas...
           </div>
