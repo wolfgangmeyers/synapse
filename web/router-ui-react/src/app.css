@@ -4123,6 +4123,42 @@ p:empty { display: none; }
   color: var(--text);
 }
 
+select.form-control,
+.form-select {
+  width: 100%;
+  padding: 8px 36px 8px 12px;
+  background-color: var(--surface-raised, #1a1d24);
+  border: 1px solid var(--line, #2b303c);
+  border-radius: 10px;
+  color: var(--text, #e1e4ea);
+  font-size: 14px;
+  line-height: 1.5;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%238a92a6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+  background-position: right 12px center;
+  background-repeat: no-repeat;
+  background-size: 16px 16px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+select.form-control:focus,
+.form-select:focus {
+  outline: none;
+  border-color: var(--primary, #3b82f6);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+select.form-control option,
+.form-select option {
+  background-color: var(--surface-raised, #1a1d24);
+  color: var(--text, #e1e4ea);
+  padding: 8px;
+}
+
+
 
 
 

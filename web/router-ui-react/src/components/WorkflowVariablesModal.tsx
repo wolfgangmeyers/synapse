@@ -208,7 +208,7 @@ export function WorkflowVariablesModal({
               </label>
               <select
                 id="var-type"
-                className="form-control"
+                className="form-control form-select"
                 value={type}
                 onChange={(e) => setType(e.target.value as WorkflowVariableType)}
               >
