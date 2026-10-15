@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
 )
@@ -292,4 +293,41 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	}, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "subagents cannot invoke workflow state transitions")
+
+	// 9. Test SyncEmbeddedWorkflowTools updates active tools dynamically
+	lane := mgr.laneFor(agentID)
+	lane.setTools([]agent.AgentTool{
+		{Name: "read"},
+		{Name: "edit"},
+		{Name: "bash"},
+	}, []agent.AgentTool{
+		{Name: "read"},
+		{Name: "edit"},
+		{Name: "bash"},
+	})
+	// In Deploy state, AllowedTools is empty, so all tools should remain allowed
+	require.NoError(t, mgr.SyncEmbeddedWorkflowTools(ctx, agentID))
+	require.Len(t, lane.getActiveTools(), 3)
+
+	// Now update Deploy state to restrict allowed tools to "read" only
+	_, err = db.UpdateWorkflowState(ctx, stateWithVars.ID, store.WorkflowStateRequest{
+		Name:         stateWithVars.Name,
+		Description:  stateWithVars.Description,
+		AllowedTools: []string{"read"},
+		AllowExit:    ptr(true),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.SyncEmbeddedWorkflowTools(ctx, agentID))
+	activeNow := lane.getActiveTools()
+	require.Len(t, activeNow, 1)
+	require.Equal(t, "read", activeNow[0].Name)
+
+	// Exit workflow and verify all tools are restored
+	resExit2, err := tool.Execute(ctx, "call-exit-2", map[string]any{
+		"action": "exit",
+	}, nil)
+	require.NoError(t, err)
+	_ = resExit2
+	require.Len(t, lane.getActiveTools(), 3)
 }

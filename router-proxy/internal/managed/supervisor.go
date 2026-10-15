@@ -171,6 +171,66 @@ type managedAgentLane struct {
 	inlinePoolRemainingMs    int64
 	inlinePoolUpdatedAt      time.Time
 	contextUsage             *ContextUsage
+	baseTools                []agent.AgentTool
+	activeTools              []agent.AgentTool
+}
+
+func (l *managedAgentLane) getTools() ([]agent.AgentTool, []agent.AgentTool) {
+	if l == nil {
+		return nil, nil
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	var baseCopy, activeCopy []agent.AgentTool
+	if l.baseTools != nil {
+		baseCopy = append([]agent.AgentTool(nil), l.baseTools...)
+	}
+	if l.activeTools != nil {
+		activeCopy = append([]agent.AgentTool(nil), l.activeTools...)
+	}
+	return baseCopy, activeCopy
+}
+
+func (l *managedAgentLane) setTools(base, active []agent.AgentTool) {
+	if l == nil {
+		return
+	}
+	l.activeMu.Lock()
+	defer l.activeMu.Unlock()
+	if base != nil {
+		l.baseTools = append([]agent.AgentTool(nil), base...)
+	} else {
+		l.baseTools = nil
+	}
+	if active != nil {
+		l.activeTools = append([]agent.AgentTool(nil), active...)
+	} else {
+		l.activeTools = nil
+	}
+}
+
+func (l *managedAgentLane) getActiveTools() []agent.AgentTool {
+	if l == nil {
+		return nil
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	if l.activeTools == nil {
+		return nil
+	}
+	return append([]agent.AgentTool(nil), l.activeTools...)
+}
+
+func (l *managedAgentLane) getBaseTools() []agent.AgentTool {
+	if l == nil {
+		return nil
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	if l.baseTools == nil {
+		return nil
+	}
+	return append([]agent.AgentTool(nil), l.baseTools...)
 }
 
 func (l *managedAgentLane) getContextUsage() *ContextUsage {
@@ -2396,7 +2456,7 @@ func boundedManagedDiagnostic(detail, context string) string {
 var managedNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var hiddenCommands = []string{"mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1"}
 var legacyCommands = []string{"goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}
-var fixedSubagentsTools = []string{"subagent", "get_subagent_result", "steer_subagent", "list_subagents"}
+var fixedSubagentsTools = []string{"subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent"}
 var fixedManagedCodingTools = []string{"read", "bash", "edit", "write"}
 
 func expectedManagedActiveTools(manifest Manifest) []string {

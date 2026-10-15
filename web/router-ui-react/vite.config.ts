@@ -19,15 +19,21 @@ export default defineConfig({
     },
   },
   server: {
-    host: "127.0.0.1",
-    port: 5173,
+    host: "0.0.0.0",
+    port: 8787,
     strictPort: false,
-    ...(allowedHosts.length === 0 ? {} : { allowedHosts }),
+    allowedHosts: true,
     // Keep browser traffic on the web UI origin so remote clients can use the
     // same API and WebSocket surface without needing direct router access.
     proxy: {
       "/v1": { target: routerUrl, changeOrigin: true, ws: true },
     },
+  },
+  preview: {
+    host: "0.0.0.0",
+    port: 8787,
+    strictPort: false,
+    allowedHosts: true,
   },
   test: {
     environment: "jsdom",

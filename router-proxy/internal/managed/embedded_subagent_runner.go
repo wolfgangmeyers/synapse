@@ -121,7 +121,34 @@ func (m *Manager) subagentCapacity() int {
 	if m.config.Limits.SubagentCapacity > 0 {
 		return m.config.Limits.SubagentCapacity
 	}
-	return DefaultSubagentCapacity
+	return DefaultGlobalSubagentCapacity
+}
+
+func (m *Manager) subagentPerWorkerCapacity() int {
+	if m.config.Limits.SubagentPerWorkerCapacity > 0 {
+		return m.config.Limits.SubagentPerWorkerCapacity
+	}
+	return DefaultSubagentPerWorkerCapacity
+}
+
+func (m *Manager) activeSubagentsForParentLocked(parentID string) int {
+	count := 0
+	for _, task := range m.subagentsActive {
+		if task.parent.AgentID == parentID {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *Manager) canRunSubagentLocked(parentID string) bool {
+	if len(m.subagentsActive) >= m.subagentCapacity() {
+		return false
+	}
+	if m.activeSubagentsForParentLocked(parentID) >= m.subagentPerWorkerCapacity() {
+		return false
+	}
+	return true
 }
 
 func (m *Manager) finalizeQueuedTask(task *subagentTask, status, resultText string) {
@@ -238,8 +265,19 @@ func (m *Manager) releaseSubagentSlot(task *subagentTask) {
 
 func (m *Manager) drainQueueLocked() {
 	for len(m.subagentsQueue) > 0 && len(m.subagentsActive) < m.subagentCapacity() {
-		candidate := m.subagentsQueue[0]
-		m.subagentsQueue = m.subagentsQueue[1:]
+		candidateIndex := -1
+		for i, cand := range m.subagentsQueue {
+			if m.canRunSubagentLocked(cand.parent.AgentID) {
+				candidateIndex = i
+				break
+			}
+		}
+		if candidateIndex < 0 {
+			break
+		}
+
+		candidate := m.subagentsQueue[candidateIndex]
+		m.subagentsQueue = append(m.subagentsQueue[:candidateIndex], m.subagentsQueue[candidateIndex+1:]...)
 
 		candidate.mu.Lock()
 		if candidate.stopped || candidate.status != "queued" {
@@ -400,7 +438,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 		defer m.subagentsMu.Unlock()
 		m.subagentsRegistry[childID] = task
 
-		if len(m.subagentsActive) < m.subagentCapacity() {
+		if m.canRunSubagentLocked(parent.AgentID) {
 			err := m.store.UpdateManagedSubagentAttempt(ctx, parent, childID, task.attempt, "queued", store.ManagedSubagentResult{
 				Status:          "running",
 				TurnCount:       task.baseTurns,
@@ -478,7 +516,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, parent store.EmbeddedBindin
 	defer m.subagentsMu.Unlock()
 	m.subagentsRegistry[childID] = task
 
-	if len(m.subagentsActive) < m.subagentCapacity() {
+	if m.canRunSubagentLocked(parent.AgentID) {
 		err := m.store.UpdateManagedSubagentAttempt(ctx, parent, childID, 1, "queued", store.ManagedSubagentResult{
 			Status: "running",
 		})
@@ -992,8 +1030,21 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		}
 	}
 
+	hasGoalTool := false
+	for _, t := range tools {
+		if t.Name == "goal" {
+			hasGoalTool = true
+			break
+		}
+	}
+
+	initialPrompt := task.prompt
+	if hasGoalTool && initialPrompt != "" && !strings.Contains(strings.ToLower(initialPrompt), "goal tool") && !strings.Contains(initialPrompt, "action='set'") {
+		initialPrompt = initialPrompt + "\n\nCRITICAL: You have the `goal` tool available. As your very first action, use the `goal` tool (with action='set') to set a clear, actionable goal for completing this task."
+	}
+
 	if !hasUserOrTool {
-		_, runErr = session.Run(taskCtx, task.prompt)
+		_, runErr = session.Run(taskCtx, initialPrompt)
 	} else if lastRole == ai.RoleUser || lastRole == ai.RoleToolResult {
 		runErr = session.Continue(taskCtx)
 		if runErr != nil && strings.Contains(runErr.Error(), "Cannot continue") {
@@ -1002,7 +1053,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	} else {
 		prompt := "Continue working from your saved context."
 		if task.prompt != "" && task.attempt > 1 && task.turnCount == 0 {
-			prompt = task.prompt
+			prompt = initialPrompt
 		}
 		_, runErr = session.Run(taskCtx, prompt)
 	}

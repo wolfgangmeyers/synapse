@@ -157,7 +157,7 @@ func FormatSubagentWakePromptWithActiveSiblings(record store.ManagedSubagentReco
 		b.WriteString("\n")
 	}
 
-	b.WriteString("Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
+	b.WriteString("Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.\n\nNOTE: Subagents sometimes report completion prematurely or stop short of fulfilling all requirements. Please verify that the subagent actually completed the requested task before assuming it is done.\n\n---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*")
 	return b.String()
 }
 
@@ -192,7 +192,7 @@ func FormatSubagentNotificationWithOptions(record store.ManagedSubagentRecord, o
 	b.WriteString(preview)
 	b.WriteString("\n\n")
 
-	fmt.Fprintf(&b, "Full output not included in notification. Call get_subagent_result(%q) to retrieve the complete result.", record.AgentID)
+	fmt.Fprintf(&b, "Full output not included in notification. Call get_subagent_result(%q) to retrieve the complete result.\n\nNOTE: Subagents sometimes report completion prematurely or stop short of fulfilling all requirements. Please verify that the subagent actually completed the requested task before assuming it is done.", record.AgentID)
 	return b.String()
 }
 

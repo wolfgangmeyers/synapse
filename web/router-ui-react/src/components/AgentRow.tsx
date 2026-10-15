@@ -39,9 +39,17 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
   // Managed snapshots retain terminal runs for recovery/audit purposes. The
   // shared live-child disclosure must only represent work that is still queued
   // or running, just as the tmux subagent projection does.
-  const managedSubagents = managed ? activeManagedSubagents(agent) : [];
+  const managedSubagents = managed
+    ? (agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"
+        ? (agent.managed_children ?? [])
+        : activeManagedSubagents(agent))
+    : [];
   const subagents = managed ? managedSubagents : agent.subagents ?? [];
-  const subagentCount = managed ? managedSubagents.length : agent.subagent_count ?? subagents.length;
+  const subagentCount = managed
+    ? (agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"
+        ? (agent.managed_children ?? []).filter(c => (c.status === "queued" || c.status === "running") && c.recovery?.state !== "interrupted_unknown").length
+        : managedSubagents.length)
+    : agent.subagent_count ?? subagents.length;
   const subagentListID = `agent-row-subagents-${agent.agent_id}`;
   const hasSubagents = subagentCount > 0;
   const showSubagentBadge = hasSubagents && !compacting;
@@ -65,7 +73,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
           <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? (agent.managed_agent?.runtime === "embedded" ? "Embedded" : "RPC") : "tmux"}</small>
         </span>
         {showSubagentBadge ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
-          <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} onStopSubagent={onStopSubagent} client={client} agentId={agent.agent_id} />
+          <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} onStopSubagent={onStopSubagent} client={client} agentId={agent.agent_id} isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"} />
         </span> : null}
         {starting ? <span className="starting-indicator"><span className="starting-dot" aria-hidden="true" />Starting…</span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}

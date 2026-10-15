@@ -47,13 +47,14 @@ func TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion(t *test
 	defer mgr.Close(ctx)
 	registerParentOwner(mgr, parent)
 
-	// 1. Primary constructor returns exactly the 4 public tools
+	// 1. Primary constructor returns exactly the 5 public tools
 	tools := mgr.EmbeddedSubagentPublicTools(parent)
-	require.Len(t, tools, 4)
+	require.Len(t, tools, 5)
 	require.Equal(t, "subagent", tools[0].Name)
 	require.Equal(t, "get_subagent_result", tools[1].Name)
 	require.Equal(t, "steer_subagent", tools[2].Name)
 	require.Equal(t, "list_subagents", tools[3].Name)
+	require.Equal(t, "stop_subagent", tools[4].Name)
 
 	// Verify parameter schema contains only S3-specified parameters:
 	// prompt, description, subagent_type, max_turns, resume.
@@ -75,9 +76,15 @@ func TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion(t *test
 	require.Contains(t, listSchema.Properties, "status")
 	require.Contains(t, listSchema.Properties, "limit")
 
+	stopSchema := tools[4].Parameters
+	require.NotNil(t, stopSchema)
+	require.Contains(t, stopSchema.Properties, "agent_id")
+	require.Contains(t, stopSchema.Properties, "reason")
+	require.Contains(t, stopSchema.Required, "agent_id")
+
 	// 2. Child nested surface strictly excluded:
 	// The child subagent toolset (NewEmbeddedSubagentTools) must ONLY contain confined read, edit, write, bash.
-	// It must NOT contain subagent, get_subagent_result, steer_subagent, or list_subagents.
+	// It must NOT contain subagent, get_subagent_result, steer_subagent, list_subagents, or stop_subagent.
 	childTools, cleanup, err := mgr.EmbeddedSubagentTools(t.TempDir())
 	require.NoError(t, err)
 	defer cleanup()
@@ -87,6 +94,7 @@ func TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion(t *test
 		require.NotEqual(t, "get_subagent_result", ct.Name, "child must not have get_subagent_result tool")
 		require.NotEqual(t, "steer_subagent", ct.Name, "child must not have steer_subagent tool")
 		require.NotEqual(t, "list_subagents", ct.Name, "child must not have list_subagents tool")
+		require.NotEqual(t, "stop_subagent", ct.Name, "child must not have stop_subagent tool")
 		require.NotEqual(t, "mecha_worker", ct.Name, "child must not have supervisor tools")
 		require.NotEqual(t, "mecha_mailbox_send", ct.Name, "child must not have supervisor tools")
 	}

@@ -15,11 +15,13 @@ import (
 )
 
 const (
-	MaxManagedAgents           = 32
-	MaxInitialInstructionBytes = 32 * 1024
-	MaxRPCLineBytes            = 1 << 20
-	DefaultSubagentCapacity    = 4
-	EmbeddedSystemInstruction  = "CRITICAL: To execute any action or launch a subagent, you MUST emit an actual structured tool call (e.g. `subagent`, `bash`). NEVER simulate or type tool observations or background launch notices (such as 'Observation: subagent...' or 'Agent started in background') in message text. Actions only take effect when invoked as real tool calls. Never simulate, roleplay, or print bracketed tool observations or completion notifications in message text. Always invoke declared tools directly. When answering user inquiries or instructions, always provide a clear, direct conversational response to the user after executing any required tools. Never finish silently without addressing the user's inquiry. CONVERSATIONAL PRIORITY: When you receive a direct message or inquiry from the user or supervisor, you MUST prioritize answering their message directly and conversationally in your response text before taking any further action or tool calls on background goals. If they ask a question (such as why you stopped, what you are doing, or asking for status), answer them clearly, directly, and honestly. Do NOT ignore user messages to continue background tool execution."
+	MaxManagedAgents                 = 32
+	MaxInitialInstructionBytes       = 32 * 1024
+	MaxRPCLineBytes                  = 1 << 20
+	DefaultGlobalSubagentCapacity    = 100
+	DefaultSubagentCapacity          = DefaultGlobalSubagentCapacity
+	DefaultSubagentPerWorkerCapacity = 10
+	EmbeddedSystemInstruction        = "CRITICAL: To execute any action or launch a subagent, you MUST emit an actual structured tool call (e.g. `subagent`, `bash`). NEVER simulate or type tool observations or background launch notices (such as 'Observation: subagent...' or 'Agent started in background') in message text. Actions only take effect when invoked as real tool calls. Never simulate, roleplay, or print bracketed tool observations or completion notifications in message text. Always invoke declared tools directly. When answering user inquiries or instructions, always provide a clear, direct conversational response to the user after executing any required tools. Never finish silently without addressing the user's inquiry. CONVERSATIONAL PRIORITY: When you receive a direct message or inquiry from the user or supervisor, you MUST prioritize answering their message directly and conversationally in your response text before taking any further action or tool calls on background goals. If they ask a question (such as why you stopped, what you are doing, or asking for status), answer them clearly, directly, and honestly. Do NOT ignore user messages to continue background tool execution."
 )
 
 type Limits struct {
@@ -27,6 +29,7 @@ type Limits struct {
 	MaxInitialInstructionBytes int
 	MaxRPCLineBytes            int
 	SubagentCapacity           int
+	SubagentPerWorkerCapacity  int
 	GracefulStop               time.Duration
 	TermStop                   time.Duration
 }
@@ -71,7 +74,15 @@ type Config struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxAgents: MaxManagedAgents, MaxInitialInstructionBytes: MaxInitialInstructionBytes, MaxRPCLineBytes: MaxRPCLineBytes, SubagentCapacity: DefaultSubagentCapacity, GracefulStop: 5 * time.Second, TermStop: 5 * time.Second}
+	return Limits{
+		MaxAgents:                  MaxManagedAgents,
+		MaxInitialInstructionBytes: MaxInitialInstructionBytes,
+		MaxRPCLineBytes:            MaxRPCLineBytes,
+		SubagentCapacity:           DefaultGlobalSubagentCapacity,
+		SubagentPerWorkerCapacity:  DefaultSubagentPerWorkerCapacity,
+		GracefulStop:               5 * time.Second,
+		TermStop:                   5 * time.Second,
+	}
 }
 
 func (c *Config) normalize() {
@@ -87,6 +98,9 @@ func (c *Config) normalize() {
 	}
 	if c.Limits.SubagentCapacity <= 0 {
 		c.Limits.SubagentCapacity = defaults.SubagentCapacity
+	}
+	if c.Limits.SubagentPerWorkerCapacity <= 0 {
+		c.Limits.SubagentPerWorkerCapacity = defaults.SubagentPerWorkerCapacity
 	}
 	if c.Limits.GracefulStop == 0 {
 		c.Limits.GracefulStop = defaults.GracefulStop
