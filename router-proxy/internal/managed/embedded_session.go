@@ -515,7 +515,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				}
 			}
 			userBodyText := userText.String()
-			if len(strings.TrimSpace(userBodyText)) > 0 {
+			if len(strings.TrimSpace(userBodyText)) > 0 && !strings.HasPrefix(strings.TrimSpace(userBodyText), "[Workflow Activated:") {
 				eventKey := fmt.Sprintf("embedded-user:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
 				presentation := &store.ManagedHistoryPresentation{
 					Kind:    "message",
