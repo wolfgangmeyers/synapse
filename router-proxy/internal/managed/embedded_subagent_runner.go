@@ -562,6 +562,34 @@ func (m *Manager) SteerSubagent(ctx context.Context, parent store.EmbeddedBindin
 
 	task.mu.Lock()
 	defer task.mu.Unlock()
+
+	summary := fmt.Sprintf("Steering from %s", parent.AgentID)
+	presentation := &store.ManagedHistoryPresentation{
+		Kind:    "message",
+		Outcome: "success",
+		From:    parent.AgentID,
+		To:      childID,
+		Summary: summary,
+	}
+	eventKey := fmt.Sprintf("subagent-steer:%s:%s:%d", childID, parent.AgentID, m.clock.Now().UnixNano())
+	msgCopy := message
+	parentIdentity := parent.AgentID
+	entry, recErr := m.store.RecordManagedCompleteHistoryWithFullDetails(
+		ctx,
+		childID,
+		"managed_message",
+		"info",
+		summary,
+		eventKey,
+		presentation,
+		nil,
+		&msgCopy,
+		&parentIdentity,
+	)
+	if recErr == nil && entry.ID != "" {
+		m.publishCompleteHistory(entry)
+	}
+
 	if task.status == "queued" {
 		task.bufferedSteering = append(task.bufferedSteering, message)
 		return nil
@@ -855,12 +883,13 @@ func (m *Manager) runSubagent(task *subagentTask) {
 
 	// 2. Checked SDK persistence
 	p := &embeddedPersistence{
-		db:              m.store,
-		binding:         childBinding,
-		digest:          "genesis",
-		afterUserAppend: m.embeddedAfterUserAppend,
-		publishComplete: m.publishCompleteHistory,
-		toolInputs:      make(map[string]any),
+		db:                 m.store,
+		binding:            childBinding,
+		digest:             "genesis",
+		afterUserAppend:    m.embeddedAfterUserAppend,
+		publishComplete:    m.publishCompleteHistory,
+		toolInputs:         make(map[string]any),
+		toolCompanionTexts: make(map[string]string),
 	}
 
 	// 3. Fresh confined tools on every run (never reuse closed tools)
@@ -923,6 +952,37 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
 			if err := admitWorkflowStateTool(callCtx, m.store, childAgent.AgentID, call.ToolCall.Name); err != nil {
 				return &agent.PolicyDenial{Reason: err.Error()}
+			}
+			toolName := call.ToolCall.Name
+			toolCallID := call.ToolCall.ID
+			if toolCallID != "" && toolName != "" {
+				var companionText string
+				if p != nil && p.currentTurnAssistantText != "" {
+					companionText = p.currentTurnAssistantText
+					p.currentTurnAssistantText = ""
+					if p.toolCompanionTexts == nil {
+						p.toolCompanionTexts = make(map[string]string)
+					}
+					p.toolCompanionTexts[toolCallID] = companionText
+				}
+				if p != nil {
+					p.toolExecuted = true
+					if p.toolInputs == nil {
+						p.toolInputs = make(map[string]any)
+					}
+					p.toolInputs[toolCallID] = call.ToolCall.Arguments
+				}
+				invocationKey := fmt.Sprintf("tool:%s:%s", childBinding.AgentID, toolCallID)
+				entry, err := m.store.RecordManagedCompleteHistoryWithPresentationAndInput(callCtx, childBinding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
+					Kind:          "tool",
+					ToolName:      toolName,
+					Outcome:       "active",
+					Summary:       "Running",
+					CompanionText: companionText,
+				}, call.ToolCall.Arguments)
+				if err == nil {
+					m.publishCompleteHistory(entry)
+				}
 			}
 			return nil
 		},

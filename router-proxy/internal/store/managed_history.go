@@ -32,8 +32,9 @@ type ManagedHistoryPresentation struct {
 	ChildState string               `json:"child_state,omitempty"`
 	Summary    string               `json:"summary,omitempty"`
 	Error      *ManagedHistoryError `json:"error,omitempty"`
-	Thinking   string               `json:"thinking,omitempty"`
-	OccurredAt string               `json:"occurred_at,omitempty"`
+	Thinking      string               `json:"thinking,omitempty"`
+	CompanionText string               `json:"companion_text,omitempty"`
+	OccurredAt    string               `json:"occurred_at,omitempty"`
 }
 
 type ManagedHistoryEntry struct {
@@ -101,7 +102,7 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true, "subagent_complete": true, "subagent": true}[value.Kind] {
 		return false
 	}
-	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) {
+	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) || !managedHistoryText(value.CompanionText, 65536, true) {
 		return false
 	}
 	if value.Kind == "goal_evaluation" {
@@ -290,6 +291,10 @@ func (s *Store) RecordManagedCompleteHistoryWithPresentationAndInput(ctx context
 }
 
 func (s *Store) RecordManagedCompleteHistoryWithDetails(ctx context.Context, agentID, category, level, message, eventKey string, presentation *ManagedHistoryPresentation, toolInput any, messageContent *string) (ManagedHistoryEntry, error) {
+	return s.RecordManagedCompleteHistoryWithFullDetails(ctx, agentID, category, level, message, eventKey, presentation, toolInput, messageContent, nil)
+}
+
+func (s *Store) RecordManagedCompleteHistoryWithFullDetails(ctx context.Context, agentID, category, level, message, eventKey string, presentation *ManagedHistoryPresentation, toolInput any, messageContent *string, senderIdentity *string) (ManagedHistoryEntry, error) {
 	if ctx == nil || !isLifecycleText(agentID) || category == "" || level == "" || !managedHistoryText(message, 512, false) || len(category) > 64 || len(level) > 32 || len(eventKey) > 200 || !utf8.ValidString(category) || !utf8.ValidString(level) || !utf8.ValidString(eventKey) {
 		return ManagedHistoryEntry{}, errors.New("managed history entry is invalid")
 	}
@@ -317,9 +322,18 @@ func (s *Store) RecordManagedCompleteHistoryWithDetails(ctx context.Context, age
 		}
 		cleanContent = &str
 	}
+	var cleanSender *string
+	if senderIdentity != nil {
+		str := strings.ToValidUTF8(*senderIdentity, "")
+		str = strings.ReplaceAll(str, "\x00", "")
+		if len(str) > 128 {
+			str = str[:128]
+		}
+		cleanSender = &str
+	}
 	var entry ManagedHistoryEntry
 	err = s.runImmediate(ctx, func() error {
-		entry, err = s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation, managedHistoryDetails{ToolInputJSON: toolInputJSON, MessageContent: cleanContent})
+		entry, err = s.recordManagedCompleteHistoryTx(ctx, agentID, category, level, message, eventKey, presentationJSON, presentation, managedHistoryDetails{ToolInputJSON: toolInputJSON, MessageContent: cleanContent, SenderIdentity: cleanSender})
 		return err
 	})
 	return entry, err

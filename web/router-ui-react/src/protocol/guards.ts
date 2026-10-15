@@ -282,6 +282,7 @@ function isManagedHistoryPresentation(value: unknown): boolean {
   if (value.child_label !== undefined && !isSafeManagedHistoryString(value.child_label, 1, 160)) return false;
   if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown", "cancelled"].includes(value.child_state))) return false;
   if (value.thinking !== undefined && typeof value.thinking !== "string") return false;
+  if (value.companion_text !== undefined && typeof value.companion_text !== "string") return false;
   if (value.occurred_at !== undefined && (typeof value.occurred_at !== "string" || !isRouterUtcTimestamp(value.occurred_at))) return false;
   const isGoalEval = value.kind === "goal_evaluation";
   const isSummarySafe = value.summary === undefined || (isGoalEval ? isSafeString(value.summary, 1, 512) : isSafeManagedHistoryString(value.summary, 1, 512));
