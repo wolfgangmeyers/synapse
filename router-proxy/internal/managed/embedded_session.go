@@ -67,9 +67,11 @@ type embeddedPersistence struct {
 	thinkingGenerated bool
 	toolCallReceived  bool
 	lastStopReason    ai.StopReason
-	lastErrorMessage  string
-	source            string
-	msgID             string
+	lastErrorMessage         string
+	currentTurnAssistantText string
+	toolCompanionTexts       map[string]string
+	source                   string
+	msgID                    string
 }
 
 func (p *embeddedPersistence) hasSteerAttempt(messageID string) bool {
@@ -141,15 +143,34 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 	}()
 	if message.MessageRole() == ai.RoleUser {
 		p.currentThinking = ""
+		p.currentTurnAssistantText = ""
 	}
 	var assistantContent ai.ContentList
+	var assistantTextContent strings.Builder
 	switch assistant := message.(type) {
 	case ai.AssistantMessage:
 		assistantContent = assistant.Content
+		for _, part := range assistant.Content {
+			if t, ok := part.(ai.TextContent); ok {
+				assistantTextContent.WriteString(t.Text)
+			} else if t, ok := part.(*ai.TextContent); ok && t != nil {
+				assistantTextContent.WriteString(t.Text)
+			}
+		}
 	case *ai.AssistantMessage:
 		if assistant != nil {
 			assistantContent = assistant.Content
+			for _, part := range assistant.Content {
+				if t, ok := part.(ai.TextContent); ok {
+					assistantTextContent.WriteString(t.Text)
+				} else if t, ok := part.(*ai.TextContent); ok && t != nil {
+					assistantTextContent.WriteString(t.Text)
+				}
+			}
 		}
+	}
+	if text := strings.TrimSpace(assistantTextContent.String()); text != "" {
+		p.currentTurnAssistantText = text
 	}
 	var stepThinking string
 	for _, part := range assistantContent {
@@ -254,14 +275,20 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			if toolOutput != "" {
 				contentPtr = &toolOutput
 			}
+			var companionText string
+			if p.toolCompanionTexts != nil {
+				companionText = p.toolCompanionTexts[toolCallID]
+				delete(p.toolCompanionTexts, toolCallID)
+			}
 			level := "info"
 			messageText := "Ran " + toolName
 			pres := &store.ManagedHistoryPresentation{
-				Kind:     "tool",
-				ToolName: toolName,
-				Outcome:  "success",
-				Summary:  "Completed successfully",
-				Thinking: p.currentThinking,
+				Kind:          "tool",
+				ToolName:      toolName,
+				Outcome:       "success",
+				Summary:       "Completed successfully",
+				Thinking:      p.currentThinking,
+				CompanionText: companionText,
 			}
 			if isFailed {
 				level = "error"
@@ -271,12 +298,13 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				}
 				messageText = displayName + " failed"
 				pres = &store.ManagedHistoryPresentation{
-					Kind:     "tool",
-					ToolName: toolName,
-					Outcome:  "failed",
-					Summary:  "The operation could not be completed.",
-					Error:    &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false},
-					Thinking: p.currentThinking,
+					Kind:          "tool",
+					ToolName:      toolName,
+					Outcome:       "failed",
+					Summary:       "The operation could not be completed.",
+					Error:         &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false},
+					Thinking:      p.currentThinking,
+					CompanionText: companionText,
 				}
 			}
 			if toolName == "mecha_mailbox_send" {
@@ -516,27 +544,30 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 			userBodyText := userText.String()
 			if len(strings.TrimSpace(userBodyText)) > 0 && !strings.HasPrefix(strings.TrimSpace(userBodyText), "[Workflow Activated:") {
-				eventKey := fmt.Sprintf("embedded-user:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
-				presentation := &store.ManagedHistoryPresentation{
-					Kind:    "message",
-					Outcome: "success",
-					From:    "user",
-					To:      p.binding.AgentID,
-					Summary: "User message",
-				}
-				historyEntry, err := p.db.RecordManagedCompleteHistoryWithDetails(
-					ctx,
-					p.binding.AgentID,
-					"managed_message",
-					"info",
-					"User message",
-					eventKey,
-					presentation,
-					nil,
-					&userBodyText,
-				)
-				if err == nil && p.publishComplete != nil && historyEntry.ID != "" {
-					p.publishComplete(historyEntry)
+				isSubagent := strings.HasPrefix(p.binding.AgentID, "subagent-")
+				if !isSubagent {
+					eventKey := fmt.Sprintf("embedded-user:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
+					presentation := &store.ManagedHistoryPresentation{
+						Kind:    "message",
+						Outcome: "success",
+						From:    "user",
+						To:      p.binding.AgentID,
+						Summary: "User message",
+					}
+					historyEntry, err := p.db.RecordManagedCompleteHistoryWithDetails(
+						ctx,
+						p.binding.AgentID,
+						"managed_message",
+						"info",
+						"User message",
+						eventKey,
+						presentation,
+						nil,
+						&userBodyText,
+					)
+					if err == nil && p.publishComplete != nil && historyEntry.ID != "" {
+						p.publishComplete(historyEntry)
+					}
 				}
 			}
 		} else if message.MessageRole() == ai.RoleAssistant {
@@ -977,7 +1008,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, err
 		}
 	}
-	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, flushReplies: func(agentID string) { m.flushEmbeddedReplies(ctx, agentID) }, toolInputs: make(map[string]any)}
+	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, flushReplies: func(agentID string) { m.flushEmbeddedReplies(ctx, agentID) }, toolInputs: make(map[string]any), toolCompanionTexts: make(map[string]string)}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
 			return 0, err
@@ -1478,6 +1509,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			toolCallID := call.ToolCall.ID
 			if toolCallID != "" && toolName != "" {
+				var companionText string
+				if p != nil && p.currentTurnAssistantText != "" {
+					companionText = p.currentTurnAssistantText
+					p.currentTurnAssistantText = ""
+					if p.toolCompanionTexts == nil {
+						p.toolCompanionTexts = make(map[string]string)
+					}
+					p.toolCompanionTexts[toolCallID] = companionText
+				}
 				if p != nil && toolName != "goal" && toolName != "goal_snooze" && toolName != "context_reset" && toolName != "reset" {
 					p.toolExecuted = true
 					if p.toolInputs == nil {
@@ -1487,10 +1527,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 				invocationKey := fmt.Sprintf("tool:%s:%s", binding.AgentID, toolCallID)
 				entry, err := m.store.RecordManagedCompleteHistoryWithPresentationAndInput(callCtx, binding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
-					Kind:     "tool",
-					ToolName: toolName,
-					Outcome:  "active",
-					Summary:  "Running",
+					Kind:          "tool",
+					ToolName:      toolName,
+					Outcome:       "active",
+					Summary:       "Running",
+					CompanionText: companionText,
 				}, call.ToolCall.Arguments)
 				if err == nil {
 					m.publishCompleteHistory(entry)

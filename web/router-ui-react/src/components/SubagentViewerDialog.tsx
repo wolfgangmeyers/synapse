@@ -243,9 +243,10 @@ export function SubagentViewerDialog({
             if (!active) return;
             const entries = res.entries ?? [];
             if (entries.length === 0) return;
+            const sorted = [...entries].sort(compareManagedHistoryEntries);
             // Look for the last meaningful preview or the last entry
-            for (let i = entries.length - 1; i >= 0; i--) {
-              const preview = formatLastActivityPreview(entries[i]);
+            for (let i = sorted.length - 1; i >= 0; i--) {
+              const preview = formatLastActivityPreview(sorted[i]);
               if (preview) {
                 setPreviews((prev) => {
                   if (prev[subagent.id] === preview) return prev;

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SubagentViewerDialog } from "../../src/components/SubagentViewerDialog";
 import type { ManagedChild } from "../../src/protocol/types";
@@ -348,6 +348,239 @@ describe("SubagentViewerDialog", () => {
 
     // Dialog title in DialogShell still displays it at the top of the dialog
     expect(screen.getByRole("heading", { name: "Task Description for Worker" })).toBeInTheDocument();
+  });
+
+  it("renders companion text and steering messages with sender identity", async () => {
+    const subagents = [
+      {
+        id: "sub-1",
+        description: "Steered Task",
+        status: "running" as const,
+        started_at: "2026-03-30T05:00:00Z",
+      },
+    ];
+
+    const mockHistoryEntries = [
+      {
+        id: "complete:1",
+        agent_id: "sub-1",
+        category: "managed_message",
+        message: "Steering from parent-agent",
+        message_content: "Please prioritize the emergency fix first.",
+        sender_identity: "parent-agent",
+        presentation: {
+          kind: "message" as const,
+          outcome: "success" as const,
+          from: "parent-agent",
+          summary: "Steering from parent-agent",
+        },
+        at: "2026-03-30T05:00:01Z",
+      },
+      {
+        id: "complete:2",
+        agent_id: "sub-1",
+        category: "managed_tool",
+        message: "Ran bash",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "bash",
+          outcome: "success" as const,
+          summary: "Completed successfully",
+          companion_text: "I am executing the emergency fix now.",
+        },
+        at: "2026-03-30T05:00:02Z",
+      },
+    ];
+
+    const mockClient = {
+      managedHistory: vi.fn(async () => ({
+        view: "complete" as const,
+        entries: mockHistoryEntries,
+        next_before: null,
+      })),
+    };
+
+    render(
+      <SubagentViewerDialog
+        open={true}
+        onClose={() => {}}
+        subagents={subagents as any}
+        client={mockClient as any}
+      />
+    );
+
+    // Drill down
+    const card = screen.getByRole("button", { name: /Steered Task/ });
+    act(() => {
+      card.click();
+    });
+
+    // Check steering message and role
+    await waitFor(() => {
+      expect(screen.getByText("parent-agent")).toBeInTheDocument();
+      expect(screen.getByText("Please prioritize the emergency fix first.")).toBeInTheDocument();
+    });
+
+    // Check companion text on tool call
+    expect(screen.getByText("I am executing the emergency fix now.")).toBeInTheDocument();
+  });
+
+  it("displays the most recent activity preview on card preview regardless of entry ordering from API", async () => {
+    const subagents = [
+      {
+        id: "sub-1",
+        description: "Task Description for Worker",
+        status: "running" as const,
+        started_at: "2026-03-30T05:00:00Z",
+      },
+    ];
+
+    // API returns entries ordered descending (newest first: complete:3, complete:2, complete:1)
+    const mockHistoryEntriesDescending = [
+      {
+        id: "complete:3",
+        agent_id: "sub-1",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "edit",
+        },
+        tool_input: {
+          path: "src/main.ts",
+        },
+        at: "2026-03-30T05:03:00Z",
+      },
+      {
+        id: "complete:2",
+        agent_id: "sub-1",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "read",
+        },
+        tool_input: {
+          path: "src/index.ts",
+        },
+        at: "2026-03-30T05:02:00Z",
+      },
+      {
+        id: "complete:1",
+        agent_id: "sub-1",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "bash",
+        },
+        tool_input: {
+          command: "git status --porcelain",
+        },
+        at: "2026-03-30T05:01:00Z",
+      },
+    ];
+
+    const mockClient = {
+      managedHistory: vi.fn(async () => ({
+        view: "complete" as const,
+        entries: mockHistoryEntriesDescending,
+        next_before: null,
+      })),
+    };
+
+    render(
+      <SubagentViewerDialog
+        open={true}
+        onClose={() => {}}
+        subagents={subagents as any}
+        client={mockClient as any}
+      />
+    );
+
+    // Verify card preview displays the latest activity (edit: src/main.ts), NOT the earliest (git status)
+    const previewElement = await screen.findByText("edit: src/main.ts");
+    expect(previewElement).toBeInTheDocument();
+    expect(screen.queryByText("git status --porcelain")).toBeNull();
+  });
+
+  it("extracts the latest entry as card preview when entries are ordered ascending (earliest at index 0)", async () => {
+    const subagents = [
+      {
+        id: "sub-2",
+        description: "Task Ascending Order",
+        status: "running" as const,
+        started_at: "2026-03-30T05:00:00Z",
+      },
+    ];
+
+    // API returns entries ordered ascending (earliest first: complete:1, complete:2, complete:3)
+    const mockHistoryEntriesAscending = [
+      {
+        id: "complete:1",
+        agent_id: "sub-2",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "bash",
+        },
+        tool_input: {
+          command: "npm test",
+        },
+        at: "2026-03-30T05:01:00Z",
+      },
+      {
+        id: "complete:2",
+        agent_id: "sub-2",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "read",
+        },
+        tool_input: {
+          path: "package.json",
+        },
+        at: "2026-03-30T05:02:00Z",
+      },
+      {
+        id: "complete:3",
+        agent_id: "sub-2",
+        category: "managed_tool",
+        message: "Tool execution",
+        presentation: {
+          kind: "tool" as const,
+          tool_name: "write",
+        },
+        tool_input: {
+          path: "src/output.txt",
+        },
+        at: "2026-03-30T05:03:00Z",
+      },
+    ];
+
+    const mockClient = {
+      managedHistory: vi.fn(async () => ({
+        view: "complete" as const,
+        entries: mockHistoryEntriesAscending,
+        next_before: null,
+      })),
+    };
+
+    render(
+      <SubagentViewerDialog
+        open={true}
+        onClose={() => {}}
+        subagents={subagents as any}
+        client={mockClient as any}
+      />
+    );
+
+    // Verify card preview displays the latest entry (write: src/output.txt), not the first entry (npm test)
+    const previewElement = await screen.findByText("write: src/output.txt");
+    expect(previewElement).toBeInTheDocument();
+    expect(screen.queryByText("npm test")).toBeNull();
   });
 });
 

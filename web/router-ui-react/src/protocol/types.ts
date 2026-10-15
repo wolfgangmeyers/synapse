@@ -953,6 +953,7 @@ export interface ManagedHistoryPresentation {
   summary?: string;
   error?: ManagedHistoryError;
   thinking?: string;
+  companion_text?: string;
   occurred_at?: string;
 }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
