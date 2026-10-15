@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
   ReactFlow,
   Background,
@@ -115,6 +115,13 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
   // Status message
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Unsaved layout changes tracking
+  const [hasUnsavedLayout, setHasUnsavedLayout] = useState(false);
+  const [savingLayout, setSavingLayout] = useState(false);
+
+  // Initial fitView control so subsequent state additions or updates don't reset viewport zoom
+  const initialFitViewDone = useRef(false);
 
   const nodeTypes = useMemo(() => ({ workflowState: WorkflowStateNode }), []);
 
@@ -266,23 +273,32 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
   // Persist node positions on drag stop
   const onNodeDragStop = useCallback(
-    async (_event: unknown, _node: Node, allNodes: Node[]) => {
-      const positions: WorkflowStatePosition[] = allNodes.map((n) => ({
-        state_id: n.id,
-        ui_pos_x: Math.round(n.position.x),
-        ui_pos_y: Math.round(n.position.y),
-      }));
-
-      try {
-        await client.updateWorkflowLayout(workflowId, positions);
-        setStatusMessage("Layout saved");
-        setTimeout(() => setStatusMessage(null), 2000);
-      } catch (err: unknown) {
-        console.error("Failed to auto-save layout", err);
-      }
+    (_event: unknown, _node: Node, _allNodes: Node[]) => {
+      setHasUnsavedLayout(true);
     },
-    [client, workflowId]
+    []
   );
+
+  // Manual save layout
+  const handleSaveLayout = useCallback(async () => {
+    setSavingLayout(true);
+    const positions: WorkflowStatePosition[] = nodes.map((n) => ({
+      state_id: n.id,
+      ui_pos_x: Math.round(n.position.x),
+      ui_pos_y: Math.round(n.position.y),
+    }));
+
+    try {
+      await client.updateWorkflowLayout(workflowId, positions);
+      setHasUnsavedLayout(false);
+      setStatusMessage("Layout saved");
+      setTimeout(() => setStatusMessage(null), 2000);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save layout");
+    } finally {
+      setSavingLayout(false);
+    }
+  }, [client, workflowId, nodes]);
 
   // Tidy Layout button
   const handleTidyLayout = async () => {
@@ -297,6 +313,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
     try {
       await client.updateWorkflowLayout(workflowId, positions);
+      setHasUnsavedLayout(false);
       setStatusMessage("Layout reorganized & saved");
       setTimeout(() => setStatusMessage(null), 2500);
     } catch (err: unknown) {
@@ -528,10 +545,16 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
         </div>
 
         <div className="canvas-toolbar-actions">
-          {statusMessage && (
-            <span className="canvas-status-pill animate-fade">
-              <i className="fa-solid fa-check" aria-hidden="true" /> {statusMessage}
-            </span>
+          {hasUnsavedLayout && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => void handleSaveLayout()}
+              disabled={savingLayout}
+              title="Save modified node positions"
+            >
+              <i className="fa-solid fa-floppy-disk" aria-hidden="true" /> {savingLayout ? "Saving..." : "Save Layout"}
+            </button>
           )}
           <button
             type="button"
@@ -627,6 +650,22 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
       {/* React Flow Canvas */}
       <div className="canvas-flow-container" style={{ flex: 1, position: "relative", minHeight: "450px" }}>
+        {statusMessage && (
+          <div
+            className="canvas-status-toast animate-fade"
+            style={{
+              position: "absolute",
+              top: "16px",
+              right: "16px",
+              zIndex: 10,
+              pointerEvents: "none",
+            }}
+          >
+            <span className="canvas-status-pill">
+              <i className="fa-solid fa-check" aria-hidden="true" /> {statusMessage}
+            </span>
+          </div>
+        )}
         {loading ? (
           <div className="workflows-loading" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
             Loading workflow canvas...
@@ -641,7 +680,10 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             onConnect={onConnect}
             onNodeDragStop={onNodeDragStop}
             onEdgeClick={onEdgeClick}
-            fitView
+            fitView={!initialFitViewDone.current}
+            onInit={() => {
+              initialFitViewDone.current = true;
+            }}
             snapToGrid
             snapGrid={[15, 15]}
             defaultEdgeOptions={{

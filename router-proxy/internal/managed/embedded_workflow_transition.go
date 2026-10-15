@@ -168,6 +168,7 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, &targetState.ID); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to transition workflow state: %w", err)
 				}
+				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
 
 				// Synchronize goal with target state, substituting variables
 				if targetState.Goal != "" {
@@ -240,6 +241,7 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, owner.binding.AgentID, nil, nil, nil); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to exit workflow state: %w", err)
 				}
+				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
 
 				// Deactivate goal on exit
 				goalSettings := store.DefaultManagedGoalSettings()
@@ -298,4 +300,49 @@ func (m *Manager) EmbeddedWorkflowTransitionToolForTest(agentID, identity, toolN
 	}
 	return m.embeddedWorkflowTransitionTool(owner, toolName)
 }
+
+// SyncEmbeddedWorkflowTools updates the active tools on the agent's lane and active session
+// according to the current active workflow state tool restrictions.
+func (m *Manager) SyncEmbeddedWorkflowTools(ctx context.Context, agentID string) error {
+	if m == nil || agentID == "" {
+		return nil
+	}
+	lane := m.laneFor(agentID)
+	if lane == nil {
+		return nil
+	}
+
+	baseTools := lane.getBaseTools()
+	if len(baseTools) == 0 {
+		return nil
+	}
+
+	activeWorkflowState, err := m.store.GetManagedAgentActiveWorkflowState(ctx, agentID)
+	if err != nil {
+		return err
+	}
+
+	var filteredTools []agent.AgentTool
+	if activeWorkflowState == nil || len(activeWorkflowState.AllowedTools) == 0 {
+		filteredTools = append([]agent.AgentTool(nil), baseTools...)
+	} else {
+		for _, tool := range baseTools {
+			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
+				filteredTools = append(filteredTools, tool)
+			}
+		}
+	}
+
+	lane.activeMu.Lock()
+	lane.activeTools = append([]agent.AgentTool(nil), filteredTools...)
+	session := lane.activeSession
+	lane.activeMu.Unlock()
+
+	if session != nil && session.Agent != nil {
+		session.Agent.SetTools(filteredTools)
+	}
+
+	return nil
+}
+
 

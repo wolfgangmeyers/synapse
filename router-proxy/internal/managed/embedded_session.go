@@ -1237,18 +1237,23 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		tools = append(tools, tool)
 	}
+	for i := range tools {
+		tools[i] = m.wrapEmbeddedToolTimeout(binding.AgentID, tools[i])
+	}
+	baseTools := append([]agent.AgentTool(nil), tools...)
+	lane := m.laneFor(binding.AgentID)
 	activeWorkflowState, activeStateErr := m.store.GetManagedAgentActiveWorkflowState(ctx, binding.AgentID)
 	if activeStateErr == nil && activeWorkflowState != nil && len(activeWorkflowState.AllowedTools) > 0 {
 		var filteredTools []agent.AgentTool
-		for _, tool := range tools {
+		for _, tool := range baseTools {
 			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
 				filteredTools = append(filteredTools, tool)
 			}
 		}
 		tools = filteredTools
 	}
-	for i := range tools {
-		tools[i] = m.wrapEmbeddedToolTimeout(binding.AgentID, tools[i])
+	if lane != nil {
+		lane.setTools(baseTools, tools)
 	}
 	var appliedReceipt *store.EmbeddedGoalAppliedReceipt
 	// The SDK invokes StreamFn only when it has selected a provider request.
@@ -1421,10 +1426,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					m.publishCompleteHistory(entry)
 				}
 			}
+			lookupTools := tools
+			if currentLane := m.laneFor(binding.AgentID); currentLane != nil {
+				if dynTools := currentLane.getActiveTools(); len(dynTools) > 0 {
+					lookupTools = dynTools
+				} else if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
+					lookupTools = dynBase
+				}
+			}
 			var registered *agent.AgentTool
-			for i := range tools {
-				if call.ToolCall.Name == tools[i].Name {
-					registered = &tools[i]
+			for i := range lookupTools {
+				if call.ToolCall.Name == lookupTools[i].Name {
+					registered = &lookupTools[i]
 					break
 				}
 			}
@@ -1625,7 +1638,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			return nil
 		}})
-	lane := m.laneFor(saved.AgentID)
+	lane = m.laneFor(saved.AgentID)
 	lane.activeMu.Lock()
 	lane.activeSession = session
 	lane.activePersistence = p
