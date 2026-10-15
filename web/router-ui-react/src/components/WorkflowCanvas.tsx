@@ -7,6 +7,7 @@ import {
   applyEdgeChanges,
   type Node,
   type Edge,
+  type DefaultEdgeOptions,
   type OnNodesChange,
   type OnEdgesChange,
   type OnConnect,
@@ -35,6 +36,14 @@ export interface WorkflowCanvasProps {
   workflowId: string;
   client: RouterHttpClient;
   onBack: () => void;
+}
+
+interface WorkflowEdge extends Edge {
+  pathOptions?: { curvature?: number };
+}
+
+interface WorkflowDefaultEdgeOptions extends DefaultEdgeOptions {
+  pathOptions?: { curvature?: number };
 }
 
 const NODE_WIDTH = 260;
@@ -82,12 +91,12 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
 
   // React Flow state
   const [nodes, setNodes] = useState<Node[]>([]);
-  const [edges, setEdges] = useState<Edge[]>([]);
+  const [edges, setEdges] = useState<WorkflowEdge[]>([]);
 
   // Dialogs
   const [configState, setConfigState] = useState<WorkflowState | null>(null);
   const [deleteConfirmState, setDeleteConfirmState] = useState<WorkflowState | null>(null);
-  const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<WorkflowEdge | null>(null);
   const [variablesModalOpen, setVariablesModalOpen] = useState(false);
   const [workflowTools, setWorkflowTools] = useState<KnownToolDefinition[] | undefined>(undefined);
 
@@ -179,7 +188,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
       });
     });
 
-    const newEdges: Edge[] = [];
+    const newEdges: WorkflowEdge[] = [];
     states.forEach((st) => {
       if (st.transitions) {
         st.transitions.forEach((tr, trIdx) => {
@@ -189,6 +198,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             target: tr.target_state_id,
             label: undefined,
             type: "bezier",
+            pathOptions: { curvature: 0.7 },
             interactionWidth: 20,
             markerEnd: {
               type: MarkerType.ArrowClosed,
@@ -268,8 +278,8 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
     setNodes((nds) => applyNodeChanges(changes, nds));
   }, []);
 
-  const onEdgesChange: OnEdgesChange = useCallback((changes) => {
-    setEdges((eds) => applyEdgeChanges(changes, eds));
+  const onEdgesChange: OnEdgesChange<WorkflowEdge> = useCallback((changes) => {
+    setEdges((eds) => applyEdgeChanges<WorkflowEdge>(changes, eds));
   }, []);
 
   // Persist node positions on drag stop
@@ -689,8 +699,9 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
             snapGrid={[15, 15]}
             defaultEdgeOptions={{
               type: "bezier",
+              pathOptions: { curvature: 0.7 },
               style: { stroke: "#38bdf8", strokeWidth: 2 },
-            }}
+            } as WorkflowDefaultEdgeOptions}
           >
             <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#334155" />
             <Controls />
