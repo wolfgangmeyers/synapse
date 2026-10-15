@@ -103,7 +103,7 @@ internal fun parseHistoryResponse(
     if (messages.length() > MAX_HISTORY_MESSAGES) return@runCatching null
     val highWaterSequence = strictHistoryLong(payload, "high_water_sequence", 0L) ?: return@runCatching null
     for (index in 0 until messages.length()) {
-        val message = validateLiveMessagePayload(messages.opt(index), LiveMessageFrameKind.CONVERSATION_MESSAGE)
+        val message = validateHistoryMessagePayload(messages.opt(index))
             ?: return@runCatching null
         if (!isMessageInConversationScope(
                 message.payload.getString("from"),
@@ -202,14 +202,21 @@ internal fun validateLiveMessageFrame(
             "message_incarnation_id", "attempt_number", "delivery_expires_at", "delivery_items", "delivery_messages",
         )
     }
-    if (!hasOnlyHistoryKeys(frame, allowed) || !baseRequired.all(frame::has) || frame.optString("version") != "v1") return@runCatching null
+    val requiredKeys = when (kind) {
+        LiveMessageFrameKind.CONVERSATION_MESSAGE -> setOf("type", "message")
+        LiveMessageFrameKind.DELIVERY_MESSAGE -> baseRequired
+    }
+    if (!hasOnlyHistoryKeys(frame, allowed) || !requiredKeys.all(frame::has)) return@runCatching null
+    if (frame.has("version") && frame.optString("version") != "v1") return@runCatching null
     val expectedType = when (kind) {
         LiveMessageFrameKind.CONVERSATION_MESSAGE -> "conversation_message"
         LiveMessageFrameKind.DELIVERY_MESSAGE -> "message"
     }
     if (frame.optString("type") != expectedType) return@runCatching null
-    val frameId = strictHistoryString(frame, "frame_id", 1, 128) ?: return@runCatching null
-    if (!HISTORY_FRAME_ID.matches(frameId)) return@runCatching null
+    if (frame.has("frame_id")) {
+        val frameId = strictHistoryString(frame, "frame_id", 1, 128) ?: return@runCatching null
+        if (!HISTORY_FRAME_ID.matches(frameId)) return@runCatching null
+    }
     val payload = frame.get("message") as? JSONObject ?: return@runCatching null
     val parsed = validateLiveMessagePayload(payload, kind) ?: return@runCatching null
     if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE) return@runCatching parsed
@@ -272,6 +279,41 @@ internal fun validateLiveMessageFrame(
 }.getOrNull()
 
 /** Validates the common message envelope plus the fields specific to each protocol payload. */
+internal fun validateHistoryMessagePayload(
+    raw: Any?,
+): ValidatedLiveMessage? = runCatching {
+    val message = raw as? JSONObject ?: return@runCatching null
+    val common = setOf("id", "from", "to", "body", "created_at")
+    val allowed = common + setOf("subject", "source", "sequence", "message_incarnation_id", "recorded_at", "attachments")
+    val required = common + setOf("sequence", "message_incarnation_id", "recorded_at", "attachments")
+    if (!hasOnlyHistoryKeys(message, allowed) || !required.all(message::has)) return@runCatching null
+    val id = strictHistoryString(message, "id", 1, 128) ?: return@runCatching null
+    if (!HISTORY_MESSAGE_ID.matches(id)) return@runCatching null
+    val sender = strictHistoryString(message, "from", 1, 128) ?: return@runCatching null
+    val recipient = strictHistoryString(message, "to", 1, 128) ?: return@runCatching null
+    if (!HISTORY_AGENT_ID.matches(sender) || !HISTORY_AGENT_ID.matches(recipient)) return@runCatching null
+    val subject = strictHistoryOptionalString(message, "subject", 256)
+    if (message.has("subject") && subject == null) return@runCatching null
+    val body = strictHistoryString(message, "body", 0, 65_536) ?: return@runCatching null
+    val createdAt = strictHistoryString(message, "created_at", 24, 24) ?: return@runCatching null
+    if (!HISTORY_UTC_MILLIS.matches(createdAt) || parseHistoryTimestamp(createdAt) == null) return@runCatching null
+    if (message.has("source") && !validateMessageSource(message.get("source"))) return@runCatching null
+
+    val sequence = strictHistoryLong(message, "sequence", 1L) ?: return@runCatching null
+    val incarnation = strictHistoryString(message, "message_incarnation_id", 36, 36) ?: return@runCatching null
+    if (!HISTORY_INCARNATION_ID.matches(incarnation)) return@runCatching null
+    val recordedAt = strictHistoryString(message, "recorded_at", 24, 24) ?: return@runCatching null
+    if (!HISTORY_UTC_MILLIS.matches(recordedAt) || parseHistoryTimestamp(recordedAt) == null) return@runCatching null
+    val attachments = message.get("attachments") as? JSONArray ?: return@runCatching null
+    if (attachments.length() > MAX_IMAGE_ATTACHMENTS) return@runCatching null
+    for (index in 0 until attachments.length()) {
+        if (!validateHistoryAttachment(attachments.opt(index))) return@runCatching null
+    }
+    sender.length
+    subject?.length
+    ValidatedLiveMessage(message, incarnation, sequence, recordedAt)
+}.getOrNull()
+
 internal fun validateLiveMessagePayload(
     raw: Any?,
     kind: LiveMessageFrameKind,
@@ -282,10 +324,7 @@ internal fun validateLiveMessagePayload(
         LiveMessageFrameKind.CONVERSATION_MESSAGE -> setOf("sequence", "message_incarnation_id", "recorded_at", "attachments")
         LiveMessageFrameKind.DELIVERY_MESSAGE -> setOf("sentinel")
     }
-    val required = common + when (kind) {
-        LiveMessageFrameKind.CONVERSATION_MESSAGE -> setOf("sequence", "message_incarnation_id", "recorded_at", "attachments")
-        LiveMessageFrameKind.DELIVERY_MESSAGE -> emptySet()
-    }
+    val required = common
     if (!hasOnlyHistoryKeys(message, allowed) || !required.all(message::has)) return@runCatching null
     val id = strictHistoryString(message, "id", 1, 128) ?: return@runCatching null
     if (!HISTORY_MESSAGE_ID.matches(id)) return@runCatching null
@@ -300,18 +339,21 @@ internal fun validateLiveMessagePayload(
     if (message.has("source") && !validateMessageSource(message.get("source"))) return@runCatching null
     if (message.has("sentinel") && !validateSentinel(message.get("sentinel"))) return@runCatching null
 
-    val sequence = if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE) {
-        strictHistoryLong(message, "sequence", 1L) ?: return@runCatching null
+    val sequence = if (message.has("sequence")) {
+        strictHistoryLong(message, "sequence", 0L) ?: return@runCatching null
     } else 0L
-    val incarnation = if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE) {
-        strictHistoryString(message, "message_incarnation_id", 36, 36) ?: return@runCatching null
+    val incarnation = if (message.has("message_incarnation_id") && !message.isNull("message_incarnation_id")) {
+        val rawIncarnation = message.optString("message_incarnation_id")
+        if (rawIncarnation.isNotBlank()) {
+            strictHistoryString(message, "message_incarnation_id", 36, 36) ?: return@runCatching null
+        } else ""
     } else ""
-    if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE && !HISTORY_INCARNATION_ID.matches(incarnation)) return@runCatching null
-    val recordedAt = if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE) {
+    if (incarnation.isNotBlank() && !HISTORY_INCARNATION_ID.matches(incarnation)) return@runCatching null
+    val recordedAt = if (message.has("recorded_at") && !message.isNull("recorded_at")) {
         strictHistoryString(message, "recorded_at", 24, 24) ?: return@runCatching null
     } else null
     if (recordedAt != null && (!HISTORY_UTC_MILLIS.matches(recordedAt) || parseHistoryTimestamp(recordedAt) == null)) return@runCatching null
-    if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE) {
+    if (message.has("attachments") && !message.isNull("attachments")) {
         val attachments = message.get("attachments") as? JSONArray ?: return@runCatching null
         if (attachments.length() > MAX_IMAGE_ATTACHMENTS) return@runCatching null
         for (index in 0 until attachments.length()) {

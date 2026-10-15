@@ -538,4 +538,33 @@ class ConversationHistoryTest {
         assertEquals("supervisor", conversationPeerForMessage(outgoingFromWolfgangToPeer, "android-7a28f24c"))
         assertEquals("supervisor", conversationPeerForMessage(incomingFromPeerToAndroid, "android-7a28f24c"))
     }
+    @Test
+    fun validateLiveMessageFrameAcceptsRouterBroadcastConversationMessage() {
+        val baseMessage = JSONObject()
+            .put("id", "11111111-2222-3333-4444-555555555555")
+            .put("from", "agent-one")
+            .put("to", "wolfgang")
+            .put("body", "Hello world from agent")
+            .put("created_at", "2026-04-13T12:00:00.000Z")
+            .put("sequence", 42)
+
+        val frame = JSONObject()
+            .put("type", "conversation_message")
+            .put("message", baseMessage)
+
+        val parsed = validateLiveMessageFrame(frame, LiveMessageFrameKind.CONVERSATION_MESSAGE)
+        assertNotNull(parsed)
+        assertEquals(42L, parsed?.sequence)
+        assertEquals("Hello world from agent", parsed?.payload?.optString("body"))
+
+        val withOptionalFields = JSONObject(frame.toString())
+            .put("version", "v1")
+            .put("frame_id", "frame-1234")
+
+        val parsedWithOptions = validateLiveMessageFrame(withOptionalFields, LiveMessageFrameKind.CONVERSATION_MESSAGE)
+        assertNotNull(parsedWithOptions)
+        assertEquals(42L, parsedWithOptions?.sequence)
+        assertEquals("Hello world from agent", parsedWithOptions?.payload?.optString("body"))
+    }
+
 }

@@ -114,6 +114,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -362,6 +363,34 @@ private val PaperclipIcon: ImageVector = ImageVector.Builder(
     }
 }.build()
 
+internal sealed interface ConversationTimelineEntry {
+    val timestamp: String
+    val key: String
+
+    data class Chat(val message: ChatMessage) : ConversationTimelineEntry {
+        override val timestamp get() = message.createdAt
+        override val key get() = message.key
+    }
+
+    data class Event(val event: AgentTimelineEvent) : ConversationTimelineEntry {
+        override val timestamp get() = event.timestamp
+        override val key get() = event.key
+    }
+}
+
+internal data class AgentTimelineEvent(
+    val id: String,
+    val agentId: String,
+    val timestamp: String,
+    val kind: String,
+    val toolName: String?,
+    val summary: String,
+    val outcome: String?,
+    val toolInput: String?,
+) {
+    val key: String get() = "event:$id"
+}
+
 internal data class ChatMessage(
     val id: String,
     val incarnationId: String,
@@ -567,6 +596,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var instanceId: String
     private lateinit var drafts: DraftStore
     private var socket: WebSocket? = null
+private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEvent>>>(emptyMap())
+    private var uiLiveSocket: WebSocket? = null
     private var leaseTimer: Timer? = null
     private var leaseId = ""
     private var negotiatedAckConfirmation = ""
@@ -776,6 +807,39 @@ class MainActivity : ComponentActivity() {
         }
         connection = "Connecting to your agents…"
         val registrationRequestId = UUID.randomUUID().toString()
+                val uiLiveWsUrl = routerWs()?.replace(Regex("/v1/agents.*"), "/v1/ui-live")
+            ?: routerWs()?.replace(Regex("/v1.*"), "/v1/ui-live")
+            ?: (activeRouterConfig()?.let {
+                val scheme = if (it.scheme == "https") "wss" else "ws"
+                "$scheme://${it.endpoint}/v1/ui-live"
+            } ?: "ws://$activeRouter/v1/ui-live")
+        uiLiveSocket = client.newWebSocket(Request.Builder().url(uiLiveWsUrl).build(), object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (generation != connectionGeneration) return
+                val frame = try { JSONObject(text) } catch (_: Exception) { return }
+                if (frame.optString("type") == "history_entry") {
+                    val entry = frame.optJSONObject("entry") ?: return
+                    val eId = entry.optString("id").takeIf { it.isNotBlank() } ?: return
+                    val targetAgent = entry.optString("agent_id").takeIf { it.isNotBlank() } ?: return
+                    val at = entry.optString("at")
+                    val presentation = entry.optJSONObject("presentation")
+                    val kind = presentation?.optString("kind").orEmpty()
+                    val toolName = presentation?.optString("tool_name")
+                    val summary = presentation?.optString("summary") ?: entry.optString("message")
+                    val outcome = presentation?.optString("outcome")
+                    val toolInput = entry.optJSONObject("tool_input")?.toString()
+                    val event = AgentTimelineEvent(eId, targetAgent, at, kind, toolName, summary, outcome, toolInput)
+                    runOnUiThread {
+                        if (generation == connectionGeneration) {
+                            val existing = liveEventsByAgent[targetAgent].orEmpty()
+                            if (existing.none { it.id == eId }) {
+                                liveEventsByAgent = liveEventsByAgent + (targetAgent to (existing + event).takeLast(50))
+                            }
+                        }
+                    }
+                }
+            }
+        })
         socket = client.newWebSocket(Request.Builder().url(routerWs()).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (generation != connectionGeneration) return
@@ -936,6 +1000,8 @@ class MainActivity : ComponentActivity() {
         clearPromptTemplateScope()
         leaseTimer?.cancel()
         leaseTimer = null
+        uiLiveSocket?.close(1000, "reconnecting")
+        uiLiveSocket = null
         socket?.close(1000, "reconnecting")
         socket = null
     }
@@ -3133,6 +3199,7 @@ class MainActivity : ComponentActivity() {
                         Conversation(
                             peers.firstOrNull { it.id == selectedPeer } ?: PeerStatus(selectedPeer),
                             messages,
+                            liveEventsByAgent[selectedPeer].orEmpty(),
                             images,
                             draftValue,
                             ::updateDraft,
@@ -3552,6 +3619,7 @@ private fun PulsingDot(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp)
 private fun Conversation(
     peerStatus: PeerStatus,
     messages: List<ChatMessage>,
+    agentEvents: List<AgentTimelineEvent> = emptyList(),
     pendingImages: List<PendingImage>,
     draftValue: TextFieldValue,
     onDraft: (TextFieldValue) -> Unit,
@@ -3773,7 +3841,12 @@ private fun Conversation(
                 TextButton(onClick = onRetryHistory) { Text("Retry", color = Periwinkle) }
             }
         }
-        if (messages.isEmpty()) {
+        val timelineEntries = remember(messages, agentEvents) {
+            (messages.map { ConversationTimelineEntry.Chat(it) } +
+             agentEvents.map { ConversationTimelineEntry.Event(it) })
+                .sortedBy { it.timestamp }
+        }
+        if (timelineEntries.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("Start a conversation with ${humanName(peer)}", color = TextMuted)
             }
@@ -3784,8 +3857,11 @@ private fun Conversation(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(messages, key = { it.key }) { message ->
-                    MessageBubble(message, routerBase, imageLoader)
+                items(timelineEntries, key = { it.key }) { entry ->
+                    when (entry) {
+                        is ConversationTimelineEntry.Chat -> MessageBubble(entry.message, routerBase, imageLoader)
+                        is ConversationTimelineEntry.Event -> AgentEventChip(entry.event)
+                    }
                 }
             }
         }
@@ -4405,6 +4481,55 @@ private fun ControlStatusText(state: ControlState) {
         ControlStatus.UNCONFIRMED -> state.message ?: "The router may have accepted this change."
     }
     if (text.isNotEmpty()) Text(text, color = if (state.status == ControlStatus.REJECTED) Color(0xFFFF8A80) else TextMuted, style = MaterialTheme.typography.bodySmall)
+}
+
+@Composable
+private fun AgentEventChip(event: AgentTimelineEvent) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = SurfaceRaised,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            val toolLabel = event.toolName?.takeIf { it.isNotBlank() } ?: event.kind.takeIf { it.isNotBlank() } ?: "event"
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = Periwinkle.copy(alpha = 0.2f)
+            ) {
+                Text(
+                    text = toolLabel,
+                    color = Periwinkle,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            Text(
+                text = event.summary,
+                color = TextMuted,
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            val outcomeColor = when (event.outcome) {
+                "success" -> Color(0xFF4ADE80)
+                "error" -> Color(0xFFFF8A80)
+                else -> Color(0xFFFFC857)
+            }
+            val outcomeText = event.outcome?.takeIf { it.isNotBlank() } ?: "active"
+            Text(
+                text = outcomeText,
+                color = outcomeColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
 }
 
 @Composable
