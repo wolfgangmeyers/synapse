@@ -71,6 +71,13 @@ type ReminderRequest struct {
 }
 
 func (s *Store) CreateReminder(ctx context.Context, request ReminderRequest) (bool, *domain.Reminder, error) {
+	if templateInclusionPattern.MatchString(request.Body) {
+		request.Body = s.SubstituteAndExpandText(ctx, request.Body, nil)
+	}
+	if request.Subject != nil && templateInclusionPattern.MatchString(*request.Subject) {
+		expandedSub := s.SubstituteAndExpandText(ctx, *request.Subject, nil)
+		request.Subject = &expandedSub
+	}
 	candidate, err := validateReminderRequest(request, s.maxBodyBytes)
 	if err != nil {
 		return false, nil, err

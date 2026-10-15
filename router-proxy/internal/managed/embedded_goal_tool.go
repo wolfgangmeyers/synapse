@@ -62,6 +62,9 @@ func (m *Manager) embeddedGoalTool(owner embeddedOwner, admitted func(string) *s
 		if err != nil {
 			return agent.AgentToolResult{}, err
 		}
+		if command.Action == "set" && m.store != nil {
+			command.Goal = m.store.SubstituteAndExpandText(ctx, command.Goal, nil)
+		}
 		if command.Action == "status" {
 			policy, _, err := m.store.ApplyEmbeddedGoalCall(ctx, owner.binding, id, command)
 			if err != nil {

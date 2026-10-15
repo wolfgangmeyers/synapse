@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, type ReactElement, type FormEvent } from "react";
 import type { Workflow, WorkflowState } from "../domain/workflow-states";
+import type { PromptTemplate } from "../domain/prompt-templates";
 import type { RouterHttpClient } from "../transport/http-client";
 import { renderTemplate } from "../domain/template-engine";
 import { DialogShell } from "./DialogShell";
@@ -9,6 +10,7 @@ export interface WorkflowLaunchModalProps {
   workflow: Workflow;
   agentId: string;
   client: RouterHttpClient;
+  templates?: PromptTemplate[] | Record<string, string> | Map<string, string>;
   onClose: () => void;
   onSuccess?: () => void;
 }
@@ -18,14 +20,60 @@ export function WorkflowLaunchModal({
   workflow,
   agentId,
   client,
+  templates: initialTemplates,
   onClose,
   onSuccess,
 }: WorkflowLaunchModalProps): ReactElement | null {
   const [variables, setVariables] = useState<Record<string, string>>({});
   const [entryState, setEntryState] = useState<WorkflowState | null>(null);
+  const [fetchedTemplates, setFetchedTemplates] = useState<Record<string, string>>({});
   const [loadingState, setLoadingState] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Normalize or fetch prompt templates
+  useEffect(() => {
+    if (!open) return;
+    if (initialTemplates) {
+      if (Array.isArray(initialTemplates)) {
+        const map: Record<string, string> = {};
+        for (const t of initialTemplates) {
+          const key = t.id ?? t.name;
+          if (key) map[key] = t.body;
+        }
+        setFetchedTemplates(map);
+      }
+      return;
+    }
+
+    let mounted = true;
+    client
+      .promptTemplates?.()
+      .then((res) => {
+        if (mounted && res?.prompt_templates) {
+          const map: Record<string, string> = {};
+          for (const t of res.prompt_templates) {
+            const key = t.id ?? t.name;
+            if (key) map[key] = t.body;
+          }
+          setFetchedTemplates(map);
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to fetch prompt templates for workflow launch preview", err);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [open, initialTemplates, client]);
+
+  const templateMap = useMemo(() => {
+    if (initialTemplates && !(Array.isArray(initialTemplates))) {
+      return initialTemplates;
+    }
+    return fetchedTemplates;
+  }, [initialTemplates, fetchedTemplates]);
 
   // Initialize variable defaults when modal opens or workflow changes
   useEffect(() => {
@@ -84,16 +132,17 @@ export function WorkflowLaunchModal({
     return false;
   }, [workflow.variables, variables]);
 
-  // Live previews rendered with current variable values
+  // Live previews rendered with current variable values and prompt templates
   const previewEntryText = useMemo(() => {
     if (!entryState?.entry_text) return "";
-    return renderTemplate(entryState.entry_text, variables);
-  }, [entryState?.entry_text, variables]);
+    return renderTemplate(entryState.entry_text, variables, templateMap);
+  }, [entryState?.entry_text, variables, templateMap]);
 
   const previewGoal = useMemo(() => {
     if (!entryState?.goal) return "";
-    return renderTemplate(entryState.goal, variables);
-  }, [entryState?.goal, variables]);
+    return renderTemplate(entryState.goal, variables, templateMap);
+  }, [entryState?.goal, variables, templateMap]);
+
 
   if (!open) {
     return null;

@@ -1706,9 +1706,9 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			return
 		}
 
-		// Synchronize goal with workflow state, applying variable substitution
+		// Synchronize goal with workflow state, applying variable substitution and template expansion
 		if wfState.Goal != "" {
-			goalText := store.SubstituteVariables(wfState.Goal, variables)
+			goalText := r.store.SubstituteAndExpandText(req.Context(), wfState.Goal, variables)
 			goalSettings := store.DefaultManagedGoalSettings()
 			goalSettings.GoalLockEnabled = true
 			_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
@@ -1735,13 +1735,13 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			var sb strings.Builder
 			sb.WriteString(fmt.Sprintf("[Workflow Activated: %s]\n", wfState.Name))
 			if strings.TrimSpace(wfState.Description) != "" {
-				descText := store.SubstituteVariables(strings.TrimSpace(wfState.Description), variables)
+				descText := r.store.SubstituteAndExpandText(req.Context(), strings.TrimSpace(wfState.Description), variables)
 				sb.WriteString(fmt.Sprintf("%s\n\n", descText))
 			} else {
 				sb.WriteString("\n")
 			}
 			if strings.TrimSpace(wfState.EntryText) != "" {
-				entryText := store.SubstituteVariables(strings.TrimSpace(wfState.EntryText), variables)
+				entryText := r.store.SubstituteAndExpandText(req.Context(), strings.TrimSpace(wfState.EntryText), variables)
 				sb.WriteString(fmt.Sprintf("### Instructions\n%s\n\n", entryText))
 			}
 			sb.WriteString("### Allowed Transitions\n")
@@ -1755,7 +1755,7 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 					}
 					desc := strings.TrimSpace(tr.Description)
 					if desc != "" {
-						desc = store.SubstituteVariables(desc, variables)
+						desc = r.store.SubstituteAndExpandText(req.Context(), desc, variables)
 						sb.WriteString(fmt.Sprintf("- %s: %s\n", targetName, desc))
 					} else {
 						sb.WriteString(fmt.Sprintf("- %s\n", targetName))
