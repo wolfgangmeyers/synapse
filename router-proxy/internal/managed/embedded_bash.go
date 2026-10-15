@@ -64,7 +64,7 @@ func embeddedBashSchema() *ai.Schema {
 // Only fixed runner branches may set a trusted Bash failure class.
 type embeddedBashFailureClass uint8
 
-const embeddedBashOutputTruncated embeddedBashFailureClass = 1
+const maxBashOutputBytes = 64 * 1024
 
 func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentTool {
 	return agent.AgentTool{
@@ -91,7 +91,7 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentT
 			cmd.Dir = cwd
 			cmd.Env = os.Environ()
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			out := &limitedBashWriter{limit: 524288, overflow: make(chan struct{})}
+			out := &limitedBashWriter{limit: maxBashOutputBytes, overflow: make(chan struct{})}
 			cmd.Stdout = out
 			cmd.Stderr = out
 			cmd.WaitDelay = time.Second
@@ -102,7 +102,7 @@ func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentT
 				m.embeddedBashAfterStart(cmd.Process.Pid)
 			}
 			truncated := func() (agent.AgentToolResult, error) {
-				result := fmt.Sprintf("exit=0\n%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", out.text(), out.limit)
+				result := fmt.Sprintf("exit=0\n%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", out.text(), maxBashOutputBytes)
 				content := ai.ContentList{ai.TextContent{Text: result}}
 				return agent.AgentToolResult{Content: content}, nil
 			}

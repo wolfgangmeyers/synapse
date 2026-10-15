@@ -860,6 +860,9 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 			}
 
 			var parts []any
+			if len(outText) > 65536 {
+				outText = outText[:65536] + "\n[tool output clamped for context safety]"
+			}
 			parts = append(parts, map[string]any{
 				"functionResponse": map[string]any{
 					"name": toolName,
