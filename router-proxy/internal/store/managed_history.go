@@ -23,15 +23,15 @@ type ManagedHistoryError struct {
 // diagnostic channel: tool output, process data, and raw errors stay out of
 // Complete history. Redacted invocation input is stored separately for details.
 type ManagedHistoryPresentation struct {
-	Kind       string               `json:"kind"`
-	ToolName   string               `json:"tool_name,omitempty"`
-	Outcome    string               `json:"outcome,omitempty"`
-	From       string               `json:"from,omitempty"`
-	To         string               `json:"to,omitempty"`
-	ChildLabel string               `json:"child_label,omitempty"`
-	ChildState string               `json:"child_state,omitempty"`
-	Summary    string               `json:"summary,omitempty"`
-	Error      *ManagedHistoryError `json:"error,omitempty"`
+	Kind          string               `json:"kind"`
+	ToolName      string               `json:"tool_name,omitempty"`
+	Outcome       string               `json:"outcome,omitempty"`
+	From          string               `json:"from,omitempty"`
+	To            string               `json:"to,omitempty"`
+	ChildLabel    string               `json:"child_label,omitempty"`
+	ChildState    string               `json:"child_state,omitempty"`
+	Summary       string               `json:"summary,omitempty"`
+	Error         *ManagedHistoryError `json:"error,omitempty"`
 	Thinking      string               `json:"thinking,omitempty"`
 	CompanionText string               `json:"companion_text,omitempty"`
 	OccurredAt    string               `json:"occurred_at,omitempty"`
@@ -102,7 +102,7 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true, "subagent_complete": true, "subagent": true}[value.Kind] {
 		return false
 	}
-	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 48, true) || !managedHistoryText(value.To, 48, true) || !managedHistoryText(value.ChildLabel, 160, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) || !managedHistoryText(value.CompanionText, 65536, true) {
+	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 128, true) || !managedHistoryText(value.To, 128, true) || !managedHistoryText(value.ChildLabel, 160, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) || !managedHistoryText(value.CompanionText, 65536, true) {
 		return false
 	}
 	if value.Kind == "goal_evaluation" {
@@ -747,4 +747,3 @@ func (s *Store) BackfillEmbeddedRecentToolCalls(ctx context.Context) error {
 	}
 	return nil
 }
-

@@ -588,6 +588,8 @@ func (m *Manager) SteerSubagent(ctx context.Context, parent store.EmbeddedBindin
 	)
 	if recErr == nil && entry.ID != "" {
 		m.publishCompleteHistory(entry)
+	} else if recErr != nil {
+		log.Printf("failed to record subagent steer message: error=%v child_id=%s", recErr, childID)
 	}
 
 	if task.status == "queued" {
