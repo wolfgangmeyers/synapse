@@ -80,8 +80,7 @@ func newLaunchValidationServer(t *testing.T, catalog managed.ModelSource, rpcFac
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	rpcFactory.active = expectedManagedActiveToolsForTransportTest(manifest)
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
-	require.NoError(t, err)
+	durable, _ := store.OpenTestStore(t)
 	processFactory := &launchValidationProcessFactory{}
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{SessionRoot: t.TempDir(), AllowedWorkingDirectoryRoots: []string{root}, RouterURL: "http://127.0.0.1:1"}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: rpcFactory, CatalogSource: catalog, ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
 	require.NoError(t, err)

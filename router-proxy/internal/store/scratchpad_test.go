@@ -520,6 +520,3 @@ func TestScratchpadBatchCRUD(t *testing.T) {
 	_, err = db.DeleteScratchpadEntries(ctx, agentID, []string{})
 	require.Error(t, err)
 }
-
-
-

@@ -22,7 +22,13 @@ func setupGoalTestServer(t *testing.T) (*httptest.Server, *store.Store, *managed
 	t.Helper()
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "router.db")
-	durable, err := store.Open(ctx, dbPath, store.Options{})
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(ctx, dbPath, opts)
 	require.NoError(t, err)
 
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))

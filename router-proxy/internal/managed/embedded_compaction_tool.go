@@ -31,7 +31,6 @@ type ManagedContextStatus struct {
 }
 
 // embeddedCompactionTool exposes mecha_context for inspecting context usage and reset status.
-// Compaction has been replaced by context reset + scratchpad.
 func (m *Manager) embeddedCompactionTool(owner embeddedOwner, _ ...any) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "mecha_context",
@@ -43,29 +42,35 @@ func (m *Manager) embeddedCompactionTool(owner embeddedOwner, _ ...any) agent.Ag
 			}
 			action, ok := args["action"].(string)
 			if !ok || action != "status" {
-				return agent.AgentToolResult{}, errors.New("unsupported mecha_context action: compaction has been replaced by context reset and scratchpad; only action=status is supported")
+				return agent.AgentToolResult{}, errors.New("unsupported mecha_context action: only action=status is supported; context is managed via context_reset and scratchpad")
 			}
 
-			warningPct := 70
-			resetPct := 80
+			warningPct := DefaultContextWarningPercent
+			resetPct := DefaultContextResetPercent
 			status := ManagedContextStatus{
 				SessionID:               owner.binding.SessionID,
 				Epoch:                   owner.binding.Epoch,
 				WarningThresholdPercent: warningPct,
 				ResetThresholdPercent:   resetPct,
 				System:                  "context_reset+scratchpad",
-				Guidance:                "Context compaction is deprecated and has been replaced by context reset and scratchpad. Save key findings and plans to scratchpad before reaching the reset threshold. At the reset threshold, context history is automatically reset to fresh headroom while preserving scratchpad memory and recent conversation.",
+				Guidance:                "Manage context by recording important notes and next steps to the scratchpad before reaching the reset threshold. At the reset threshold, context history is automatically reset to fresh headroom while preserving scratchpad memory and recent conversation.",
 			}
 
 			if m.store != nil {
+				cfg, _ := m.store.GetContextThresholdConfig(ctx)
 				if agentRec, err := m.store.ManagedAgent(ctx, owner.binding.AgentID); err == nil && agentRec != nil {
 					status.CurrentTokens = agentRec.ContextTokens
 					status.ContextWindow = agentRec.ContextWindow
 					status.Percent = agentRec.ContextPercent
-					if agentRec.ContextWindow >= 1_000_000 {
-						status.WarningThresholdPercent = 40
-						status.ResetThresholdPercent = 50
+					var mModel Model
+					if resolved, rErr := ResolveModel(agentRec.SelectedModel); rErr == nil && resolved != nil {
+						mModel = Model{Provider: resolved.Provider, ID: resolved.ID, ContextWindow: resolved.ContextWindow}
+					} else {
+						mModel = Model{Provider: agentRec.SelectedModel.Provider, ID: agentRec.SelectedModel.ID, ContextWindow: agentRec.ContextWindow}
 					}
+					status.WarningThresholdPercent, status.ResetThresholdPercent = ResolveContextThresholds(mModel, cfg)
+				} else {
+					status.WarningThresholdPercent, status.ResetThresholdPercent = ResolveContextThresholds(Model{}, cfg)
 				}
 
 				if entries, totalCount, err := m.store.FetchScratchpadRecent(ctx, owner.binding.AgentID, 1); err == nil {

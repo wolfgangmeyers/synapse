@@ -312,7 +312,14 @@ func newManagedFunctionalFixture(t *testing.T, extraEnvironment ...string) *mana
 		RouterURL: "http://127.0.0.1:1", ManifestPath: manifestPath, MechaRPCExtension: manifestPath, PiSubagentsExtension: manifestPath,
 		AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor", TestOnlyEnvironment: testEnvironment,
 	}
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	dbPath := filepath.Join(t.TempDir(), "router.db")
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(ctx, dbPath, opts)
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable, Config: config, Manifest: manifest,

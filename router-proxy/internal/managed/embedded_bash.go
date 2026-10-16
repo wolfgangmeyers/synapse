@@ -68,13 +68,13 @@ const maxBashOutputBytes = 64 * 1024
 
 func (m *Manager) embeddedBashTool(owner embeddedOwner, cwd string) agent.AgentTool {
 	return agent.AgentTool{
-		Name:             "bash",
-		Description:      "Run a bash command in the current working directory.",
+		Name:        "bash",
+		Description: "Run a bash command in the current working directory.",
 		PromptGuidelines: []string{
 			"When you run a command to investigate, continue until the task is complete, or write your answer to the user.",
 			"When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.",
 		},
-		Parameters:       embeddedBashSchema(),
+		Parameters: embeddedBashSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			spec, err := parseEmbeddedBash(args)
 			if err != nil {

@@ -250,7 +250,7 @@ func (p *eofWaitProcess) Stops() int {
 
 func TestManagerMarksReadyOnlyAfterReadinessSources(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -280,7 +280,7 @@ func TestManagerMarksReadyOnlyAfterReadinessSources(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("initial instruction was not sent")
 	}
-	require.Equal(t, []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt", "snapshot", "snapshot-receipt", "prompt"}, rpc.calls)
+	require.Equal(t, []string{"state", "state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt", "snapshot", "snapshot-receipt", "prompt"}, rpc.calls)
 	require.Equal(t, 1, rpc.promptCount)
 	source, err := durable.ManagedReadinessSource(ctx, "alpha")
 	require.NoError(t, err)
@@ -318,7 +318,7 @@ func TestManagerSourceReadinessFailuresNeverAdmitTheInitialInstruction(t *testin
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+			durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, durable.Close()) })
 			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -365,7 +365,7 @@ func TestManagerSourceReadinessFailuresNeverAdmitTheInitialInstruction(t *testin
 
 func TestManagerReadinessFailureRecordsLiveBindingSubreasonAndLaunchContext(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -409,26 +409,26 @@ func TestManagerLaterReadinessGuardsRetainLiveBindingSubreason(t *testing.T) {
 			name:             "policy confirmation",
 			failedGroupCheck: 3,
 			guard:            "before policy confirmation",
-			wantCalls:        []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt"},
+			wantCalls:        []string{"state", "state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt"},
 		},
 		{
 			name:             "child snapshot",
 			failedGroupCheck: 4,
 			guard:            "before child snapshot",
-			wantCalls:        []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt"},
+			wantCalls:        []string{"state", "state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt"},
 			wantPolicy:       true,
 		},
 		{
 			name:             "child snapshot confirmation",
 			failedGroupCheck: 5,
 			guard:            "before child snapshot confirmation",
-			wantCalls:        []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt", "snapshot", "snapshot-receipt"},
+			wantCalls:        []string{"state", "state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt", "snapshot", "snapshot-receipt"},
 			wantPolicy:       true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+			durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, durable.Close()) })
 			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -474,7 +474,7 @@ func TestManagerLaterReadinessGuardsRetainLiveBindingSubreason(t *testing.T) {
 
 func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -538,7 +538,7 @@ func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 
 func TestManagerDoesNotClassifyManagerInducedExitAsProcessExit(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -579,7 +579,7 @@ func TestManagerDoesNotClassifyManagerInducedExitAsProcessExit(t *testing.T) {
 
 func TestManagerKeepsEOFWhenWaitIsUnavailableWithoutCaptureDelay(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -624,7 +624,7 @@ func TestManagerKeepsEOFWhenWaitIsUnavailableWithoutCaptureDelay(t *testing.T) {
 
 func TestManagerRecordsPrePublishedZeroExitAsProcessExit(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -669,7 +669,7 @@ func TestManagerRecordsPrePublishedZeroExitAsProcessExit(t *testing.T) {
 
 func TestManagerPersistsNaturalExitStopFailureWithExactBinding(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -727,7 +727,7 @@ func TestManagerPersistsNaturalExitStopFailureWithExactBinding(t *testing.T) {
 
 func TestManagerPersistsStopFailureWithExactBinding(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -770,7 +770,7 @@ func TestManagerPersistsStopFailureWithExactBinding(t *testing.T) {
 
 func TestManagerIgnoresRPCCloseFailureAfterReapedEOF(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -812,7 +812,7 @@ func TestManagerIgnoresRPCCloseFailureAfterReapedEOF(t *testing.T) {
 func TestManagerKeepsUnconfirmedReadinessPipeFailuresAsReadinessFailures(t *testing.T) {
 	for _, stateErr := range []error{io.EOF, context.DeadlineExceeded} {
 		ctx := context.Background()
-		durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+		durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 		require.NoError(t, err)
 		manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 		require.NoError(t, err)
@@ -838,7 +838,7 @@ func TestManagerKeepsUnconfirmedReadinessPipeFailuresAsReadinessFailures(t *test
 
 func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -890,7 +890,7 @@ func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
 
 func TestManagerMarksReapedManagedProcessFailed(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))

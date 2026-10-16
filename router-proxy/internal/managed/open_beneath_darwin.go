@@ -21,4 +21,3 @@ func renameatNoReplace(olddirfd int, oldpath string, newdirfd int, newpath strin
 	}
 	return unix.Renameat(olddirfd, oldpath, newdirfd, newpath)
 }
-

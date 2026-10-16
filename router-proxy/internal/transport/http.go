@@ -218,6 +218,12 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/workflow-tools":
 		r.handleWorkflowTools(w, req)
 		return
+	case req.Method == http.MethodGet && path == "/v1/settings/context-thresholds":
+		r.handleContextThresholdConfigGET(w, req)
+		return
+	case req.Method == http.MethodPut && path == "/v1/settings/context-thresholds":
+		r.handleContextThresholdConfigPUT(w, req)
+		return
 	case req.Method == http.MethodGet && path == "/v1/settings/systemone":
 		r.handleSystemOneConfigGET(w, req)
 		return
@@ -267,7 +273,61 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleMessageItem(w, req, id, action)
 		return
 	}
+	if agentID, monitorID, action, ok := agentMonitorRoute(path); ok {
+		r.handleAgentMonitorHTTP(w, req, agentID, monitorID, action)
+		return
+	}
 	r.writeError(w, &httpError{status: 404, code: "not_found"})
+}
+
+func agentMonitorRoute(path string) (agentID, monitorID, action string, ok bool) {
+	// Match /v1/agents/{id}/monitors... or /v1/managed-agents/{id}/monitors...
+	prefix := ""
+	if strings.HasPrefix(path, "/v1/agents/") {
+		prefix = "/v1/agents/"
+	} else if strings.HasPrefix(path, "/v1/managed-agents/") {
+		prefix = "/v1/managed-agents/"
+	} else {
+		return "", "", "", false
+	}
+
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 || parts[1] != "monitors" {
+		return "", "", "", false
+	}
+
+	var err error
+	agentID, err = url.PathUnescape(parts[0])
+	if err != nil || agentID == "" {
+		return "", "", "", false
+	}
+
+	if len(parts) == 2 {
+		// /v1/agents/{id}/monitors
+		return agentID, "", "", true
+	}
+
+	monitorID, err = url.PathUnescape(parts[2])
+	if err != nil || monitorID == "" {
+		return "", "", "", false
+	}
+
+	if len(parts) == 3 {
+		// /v1/agents/{id}/monitors/{monitorId}
+		return agentID, monitorID, "", true
+	}
+
+	if len(parts) == 4 {
+		// /v1/agents/{id}/monitors/{monitorId}/{action}
+		action, err = url.PathUnescape(parts[3])
+		if err != nil {
+			return "", "", "", false
+		}
+		return agentID, monitorID, action, true
+	}
+
+	return "", "", "", false
 }
 
 func routeID(path, prefix string) (string, string, bool) {

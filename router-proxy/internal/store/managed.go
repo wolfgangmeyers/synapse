@@ -833,7 +833,7 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 					}
 				}
 			}
-			if existingState == "failed" || isStuck {
+			if (existingState == "failed" && existingID == agent.AgentID) || isStuck {
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_readiness_sources WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id = ?`, existingID)
@@ -4710,7 +4710,6 @@ func loadManagedParentAgentIDTx(ctx context.Context, db *sql.DB, agent *ManagedA
 	return nil
 }
 
-
 func loadManagedWorktreeTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
 	hasWorktree, err := managedAgentColumnTx(ctx, db, "worktree")
 	if err != nil || !hasWorktree || agent == nil {
@@ -5007,7 +5006,6 @@ func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, 
 	}
 	return nil
 }
-
 
 // loadManagedLaunchRecipeTx attaches the durable launch recipe to an agent
 // record if present. Pre-045 stores lack the table entirely, and pre-086

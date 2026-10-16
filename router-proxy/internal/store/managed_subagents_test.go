@@ -506,6 +506,3 @@ func TestManagedSubagentsAcrossParentEpochReset(t *testing.T) {
 	require.Equal(t, child.AgentID, saved.AgentID)
 	require.Equal(t, int64(1), saved.ParentEpoch)
 }
-
-
-

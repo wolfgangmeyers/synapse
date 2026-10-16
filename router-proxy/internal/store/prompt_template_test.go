@@ -263,7 +263,7 @@ func TestPromptTemplateClockSemantics(t *testing.T) {
 	normal, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{Name: "normal", Body: "body"})
 	require.NoError(t, err)
 	supplied := "2028-01-01T00:00:00.123Z"
-	require.Equal(t, testUUID("0001"), normal.ID)
+	require.Equal(t, "normal", normal.ID)
 	require.True(t, IsPortablePromptTemplateID(testUUID("0002")))
 	require.True(t, isCanonicalPromptTemplateTimestamp(supplied))
 	imported, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{ID: ptr(testUUID("0002")), Name: "imported", Body: "body", UpdatedAt: &supplied})

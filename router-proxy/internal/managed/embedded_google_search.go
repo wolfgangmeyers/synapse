@@ -476,4 +476,3 @@ func (m *Manager) executeGeminiAPIKeyGrounding(ctx context.Context, apiKey, quer
 
 	return formatGroundingResponse(&parsed)
 }
-

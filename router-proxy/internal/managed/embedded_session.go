@@ -31,42 +31,42 @@ type steerPending struct {
 // embeddedPersistence serializes one root's checked SDK callbacks in its
 // Manager lane. SQLite owns the binding, append head, and checkpoint fence.
 type embeddedPersistence struct {
-	db                *store.Store
-	binding           store.EmbeddedBinding
-	seq               int64
-	digest            string
-	turnSeq           int64
-	turnDigest        string
-	mail              *store.EmbeddedMailAttempt
-	mailMessage       []byte
-	mailAttempt       string
-	mailAppendErr     error
-	steerMu           sync.Mutex
-	steerQueue        []*steerPending
-	notice            *store.EmbeddedInterruptedNotice
-	noticeMessage     []byte
-	noticeStart       bool
-	wake              *embeddedClaimedWakeScope
-	wakeUsed          bool
-	wakeFinal         *store.EmbeddedEntry
-	reminderResult    func(context.Context, ai.ToolResultMessage, bool) error
-	goalResult        func(context.Context, ai.ToolResultMessage, bool) error
-	goalInvocation    func(string) *store.EmbeddedGoalInvocation
-	toolInvocation    func(string) *store.EmbeddedToolInvocation
-	toolChecked       func(string)
-	goalEntry         store.EmbeddedEntry
-	compactionResult  func(ai.ToolResultMessage) (bool, error)
-	pendingCompaction string
-	afterUserAppend   func(context.Context)
-	publishComplete   func(store.ManagedHistoryEntry)
-	flushReplies      func(string)
-	toolInputs        map[string]any
-	currentThinking   string
-	lastThinkingText  string
-	toolExecuted      bool
-	thinkingGenerated bool
-	toolCallReceived  bool
-	lastStopReason    ai.StopReason
+	db                       *store.Store
+	binding                  store.EmbeddedBinding
+	seq                      int64
+	digest                   string
+	turnSeq                  int64
+	turnDigest               string
+	mail                     *store.EmbeddedMailAttempt
+	mailMessage              []byte
+	mailAttempt              string
+	mailAppendErr            error
+	steerMu                  sync.Mutex
+	steerQueue               []*steerPending
+	notice                   *store.EmbeddedInterruptedNotice
+	noticeMessage            []byte
+	noticeStart              bool
+	wake                     *embeddedClaimedWakeScope
+	wakeUsed                 bool
+	wakeFinal                *store.EmbeddedEntry
+	reminderResult           func(context.Context, ai.ToolResultMessage, bool) error
+	goalResult               func(context.Context, ai.ToolResultMessage, bool) error
+	goalInvocation           func(string) *store.EmbeddedGoalInvocation
+	toolInvocation           func(string) *store.EmbeddedToolInvocation
+	toolChecked              func(string)
+	goalEntry                store.EmbeddedEntry
+	compactionResult         func(ai.ToolResultMessage) (bool, error)
+	pendingCompaction        string
+	afterUserAppend          func(context.Context)
+	publishComplete          func(store.ManagedHistoryEntry)
+	flushReplies             func(string)
+	toolInputs               map[string]any
+	currentThinking          string
+	lastThinkingText         string
+	toolExecuted             bool
+	thinkingGenerated        bool
+	toolCallReceived         bool
+	lastStopReason           ai.StopReason
 	lastErrorMessage         string
 	currentTurnAssistantText string
 	toolCompanionTexts       map[string]string
@@ -544,30 +544,27 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 			userBodyText := userText.String()
 			if len(strings.TrimSpace(userBodyText)) > 0 && !strings.HasPrefix(strings.TrimSpace(userBodyText), "[Workflow Activated:") {
-				isSubagent := strings.HasPrefix(p.binding.AgentID, "subagent-")
-				if !isSubagent {
-					eventKey := fmt.Sprintf("embedded-user:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
-					presentation := &store.ManagedHistoryPresentation{
-						Kind:    "message",
-						Outcome: "success",
-						From:    "user",
-						To:      p.binding.AgentID,
-						Summary: "User message",
-					}
-					historyEntry, err := p.db.RecordManagedCompleteHistoryWithDetails(
-						ctx,
-						p.binding.AgentID,
-						"managed_message",
-						"info",
-						"User message",
-						eventKey,
-						presentation,
-						nil,
-						&userBodyText,
-					)
-					if err == nil && p.publishComplete != nil && historyEntry.ID != "" {
-						p.publishComplete(historyEntry)
-					}
+				eventKey := fmt.Sprintf("embedded-user:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
+				presentation := &store.ManagedHistoryPresentation{
+					Kind:    "message",
+					Outcome: "success",
+					From:    "user",
+					To:      p.binding.AgentID,
+					Summary: "User message",
+				}
+				historyEntry, err := p.db.RecordManagedCompleteHistoryWithDetails(
+					ctx,
+					p.binding.AgentID,
+					"managed_message",
+					"info",
+					"User message",
+					eventKey,
+					presentation,
+					nil,
+					&userBodyText,
+				)
+				if err == nil && p.publishComplete != nil && historyEntry.ID != "" {
+					p.publishComplete(historyEntry)
 				}
 			}
 		} else if message.MessageRole() == ai.RoleAssistant {
@@ -1578,7 +1575,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					return &agent.PolicyDenial{Reason: "context requires own root or worker"}
 				}
 				if len(call.ToolCall.Arguments) != 1 || call.ToolCall.Arguments["action"] != "status" {
-					return &agent.PolicyDenial{Reason: "mecha_context only supports action=status; compaction has been replaced by context reset and scratchpad"}
+					return &agent.PolicyDenial{Reason: "mecha_context only supports action=status; context is managed via context_reset and scratchpad"}
 				}
 			}
 			if call.ToolCall.Name == "mecha_reminder" {

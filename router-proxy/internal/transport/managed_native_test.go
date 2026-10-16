@@ -896,7 +896,7 @@ func seedListenColdAgent(t *testing.T, durable *store.Store, config managed.Conf
 }
 
 func expectedManagedActiveToolsForTransport(manifest managed.Manifest) []string {
-	active := []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent"}
+	active := []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent"}
 	for _, tool := range manifest.Tools {
 		active = append(active, tool.Name)
 	}

@@ -15,8 +15,8 @@ import (
 
 	"errors"
 	"fmt"
-	"strings"
 	"github.com/sky-valley/pi/ai"
+	"strings"
 	"time"
 )
 

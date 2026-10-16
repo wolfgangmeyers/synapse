@@ -241,6 +241,9 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := store.applyMigrations(ctx, migrations); err != nil {
 		return closeOnError(err)
 	}
+	if err := store.backfillPromptTemplateSlugs(ctx); err != nil {
+		return closeOnError(err)
+	}
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id='082_conversation_send_receipt_lifecycle')`).Scan(&store.receiptLifecycle); err != nil {
 		return closeOnError(err)
 	}

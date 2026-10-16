@@ -25,7 +25,13 @@ func rateOutcomeFixture(t *testing.T) (*Router, *store.Store, *sql.DB, *determin
 	ctx := context.Background()
 	clock := deterministic.NewFixedClock(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
 	path := filepath.Join(t.TempDir(), "router.db")
-	durable, err := store.Open(ctx, path, store.Options{Clock: clock})
+	opts := store.Options{Clock: clock}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, path); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(ctx, path, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = durable.Close() })
 	router, err := New(Options{Store: durable, Clock: clock})

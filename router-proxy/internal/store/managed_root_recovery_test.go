@@ -504,5 +504,3 @@ func TestManagedLaunchRecipeSchemaCorruptionSurfacesError(t *testing.T) {
 		require.Error(t, err, "corrupted schema_migrations table must surface error, not suppress")
 	}
 }
-
-

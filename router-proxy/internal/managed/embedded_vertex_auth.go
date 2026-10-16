@@ -49,15 +49,15 @@ type vertexTokenCache struct {
 var currentVertexToken vertexTokenCache
 
 type vertexADCFile struct {
-	Type                    string `json:"type"`
-	ClientEmail             string `json:"client_email"`
-	PrivateKey              string `json:"private_key"`
-	ProjectID               string `json:"project_id"`
-	ClientID                string `json:"client_id"`
-	ClientSecret            string `json:"client_secret"`
-	RefreshToken            string `json:"refresh_token"`
-	QuotaProjectID          string `json:"quota_project_id"`
-	TokenURI                string `json:"token_uri"`
+	Type           string `json:"type"`
+	ClientEmail    string `json:"client_email"`
+	PrivateKey     string `json:"private_key"`
+	ProjectID      string `json:"project_id"`
+	ClientID       string `json:"client_id"`
+	ClientSecret   string `json:"client_secret"`
+	RefreshToken   string `json:"refresh_token"`
+	QuotaProjectID string `json:"quota_project_id"`
+	TokenURI       string `json:"token_uri"`
 }
 
 // resolveVertexADCInfo locates ADC credentials path, project, and location.

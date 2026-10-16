@@ -273,4 +273,3 @@ func (s *Store) EmbeddedGoalDiagnostics(ctx context.Context, agentID string) (ma
 	}
 	return counts, &last, nil
 }
-

@@ -1168,4 +1168,3 @@ func (r *Router) exit(code int) {
 	}
 	os.Exit(code)
 }
-

@@ -175,12 +175,12 @@ func TestFakeDeviceAcquisition(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var prompt DevicePrompt
-			got, err := acquire(ctx, srv.Client(), srv.URL, func(p DevicePrompt) {
+			got, err := acquireWithOptions(ctx, srv.Client(), srv.URL, func(p DevicePrompt) {
 				prompt = p
 				if tc.cancel {
 					cancel()
 				}
-			})
+			}, acquireOptions{minInterval: 5 * time.Millisecond, slowdownDelta: 5 * time.Millisecond})
 			if prompt.UserCode != "FAKE-PUBLIC" || prompt.VerificationURL != "https://auth.openai.com/codex/device" {
 				t.Errorf("public prompt: %+v", prompt)
 			}

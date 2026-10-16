@@ -925,6 +925,3 @@ func TestListSubagentsTool_ExecutionAndFiltering(t *testing.T) {
 	assert.Equal(t, 4, limitResp.Summary.TotalMatching)
 	require.Len(t, limitResp.Subagents, 1)
 }
-
-
-

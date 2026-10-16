@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
@@ -480,7 +482,17 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	if config.SessionRoot == "" {
-		config.SessionRoot = filepath.Join(os.TempDir(), "managed-sessions")
+		if env := os.Getenv("MECHA_TEST_SESSION_ROOT"); env != "" {
+			config.SessionRoot = env
+		} else if testing.Testing() || flag.Lookup("test.v") != nil {
+			if dir, err := os.MkdirTemp("", fmt.Sprintf("managed-sessions-%d-*", os.Getpid())); err == nil {
+				config.SessionRoot = dir
+			} else {
+				config.SessionRoot = filepath.Join(os.TempDir(), fmt.Sprintf("managed-sessions-%d", os.Getpid()))
+			}
+		} else {
+			config.SessionRoot = filepath.Join(os.TempDir(), "managed-sessions")
+		}
 	}
 	manifest := options.Manifest
 	if manifest.Protocol == "" {

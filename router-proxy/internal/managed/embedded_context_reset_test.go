@@ -626,33 +626,33 @@ func TestPreResetScratchpadWarningReminder(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("WarningThresholdCalculations", func(t *testing.T) {
-		// 1M+ models: 40%
+		// 1M+ models with 40% warning
 		model1M := Model{Provider: "google", ID: "gemini-flash", ContextWindow: 1_000_000}
-		require.False(t, contextWarningThresholdExceeded(model1M, 399_999), "39.9999% should not exceed 40% warning threshold")
-		require.True(t, contextWarningThresholdExceeded(model1M, 400_000), "exact 40% should exceed warning threshold")
-		require.True(t, contextWarningThresholdExceeded(model1M, 450_000), "45% should exceed 40% warning threshold")
-		require.True(t, ContextWarningThresholdExceeded(model1M, 400_000), "exported ContextWarningThresholdExceeded must match")
+		require.False(t, contextWarningThresholdExceeded(model1M, 399_999, 40), "39.9999% should not exceed 40% warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model1M, 400_000, 40), "exact 40% should exceed warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model1M, 450_000, 40), "45% should exceed 40% warning threshold")
+		require.True(t, ContextWarningThresholdExceeded(model1M, 400_000, 40), "exported ContextWarningThresholdExceeded must match")
 
 		// 2M model: 40% = 800,000
 		model2M := Model{Provider: "google", ID: "gemini-pro", ContextWindow: 2_000_000}
-		require.False(t, contextWarningThresholdExceeded(model2M, 799_999))
-		require.True(t, contextWarningThresholdExceeded(model2M, 800_000))
+		require.False(t, contextWarningThresholdExceeded(model2M, 799_999, 40))
+		require.True(t, contextWarningThresholdExceeded(model2M, 800_000, 40))
 
 		// <1M models: 70%
 		model100k := Model{Provider: "anthropic", ID: "claude-haiku", ContextWindow: 100_000}
-		require.False(t, contextWarningThresholdExceeded(model100k, 69_999), "69.999% should not exceed 70% warning threshold")
-		require.True(t, contextWarningThresholdExceeded(model100k, 70_000), "exact 70% should exceed warning threshold")
-		require.True(t, contextWarningThresholdExceeded(model100k, 75_000), "75% should exceed 70% warning threshold")
-		require.True(t, ContextWarningThresholdExceeded(model100k, 70_000), "exported ContextWarningThresholdExceeded must match")
+		require.False(t, contextWarningThresholdExceeded(model100k, 69_999, 70), "69.999% should not exceed 70% warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model100k, 70_000, 70), "exact 70% should exceed warning threshold")
+		require.True(t, contextWarningThresholdExceeded(model100k, 75_000, 70), "75% should exceed 70% warning threshold")
+		require.True(t, ContextWarningThresholdExceeded(model100k, 70_000, 70), "exported ContextWarningThresholdExceeded must match")
 
 		// 200k model: 70% = 140,000
 		model200k := Model{Provider: "anthropic", ID: "claude-sonnet", ContextWindow: 200_000}
-		require.False(t, contextWarningThresholdExceeded(model200k, 139_999))
-		require.True(t, contextWarningThresholdExceeded(model200k, 140_000))
+		require.False(t, contextWarningThresholdExceeded(model200k, 139_999, 70))
+		require.True(t, contextWarningThresholdExceeded(model200k, 140_000, 70))
 
 		// <= 0
-		require.False(t, contextWarningThresholdExceeded(Model{ContextWindow: 0}, 100))
-		require.False(t, contextWarningThresholdExceeded(Model{ContextWindow: -10}, 100))
+		require.False(t, contextWarningThresholdExceeded(Model{ContextWindow: 0}, 100, 70))
+		require.False(t, contextWarningThresholdExceeded(Model{ContextWindow: -10}, 100, 70))
 	})
 
 	t.Run("WarningReminderEmittedWhenExceedingThreshold", func(t *testing.T) {
@@ -927,14 +927,14 @@ func TestMechaContextToolStatusAndRejectCompact(t *testing.T) {
 	statusTextSmall := resStatusSmall.Content[0].(ai.TextContent).Text
 	require.Contains(t, statusTextSmall, `"session_id":"agent-small-session"`)
 	require.Contains(t, statusTextSmall, `"epoch":1`)
-	require.Contains(t, statusTextSmall, `"warning_threshold_percent":70`)
-	require.Contains(t, statusTextSmall, `"reset_threshold_percent":80`)
+	require.Contains(t, statusTextSmall, `"warning_threshold_percent":10`)
+	require.Contains(t, statusTextSmall, `"reset_threshold_percent":20`)
 
 	// 3. Verify action=compact is REJECTED
 	_, errCompact := tool1M.Execute(ctx, "call-3", map[string]any{"action": "compact"}, nil)
 	require.Error(t, errCompact)
 	require.Contains(t, errCompact.Error(), "unsupported mecha_context action")
-	require.Contains(t, errCompact.Error(), "compaction has been replaced by context reset and scratchpad")
+	require.Contains(t, errCompact.Error(), "only action=status is supported")
 
 	// 4. Verify invalid/missing action is rejected
 	_, errEmpty := tool1M.Execute(ctx, "call-4", map[string]any{}, nil)
@@ -943,15 +943,17 @@ func TestMechaContextToolStatusAndRejectCompact(t *testing.T) {
 	require.Error(t, errInvalid)
 
 	// 5. Verify FormatContextResetWarningReminder wording has NO reference to compaction
-	reminder1M := FormatContextResetWarningReminder(400_000, 1_000_000)
+	reminder1M := FormatContextResetWarningReminder(400_000, 1_000_000, 40, 50)
 	require.Contains(t, reminder1M, "400000 / 1000000 tokens (40.0%)")
-	require.Contains(t, reminder1M, "Approaching automatic reset boundary at 50%")
+	require.Contains(t, reminder1M, "crossing the 40% warning threshold")
+	require.Contains(t, reminder1M, "automatic reset occurs at 50%")
 	require.Contains(t, reminder1M, "scratchpad")
 	require.NotContains(t, strings.ToLower(reminder1M), "compact")
 
-	reminderSmall := FormatContextResetWarningReminder(140_000, 200_000)
+	reminderSmall := FormatContextResetWarningReminder(140_000, 200_000, 70, 80)
 	require.Contains(t, reminderSmall, "140000 / 200000 tokens (70.0%)")
-	require.Contains(t, reminderSmall, "Approaching automatic reset boundary at 80%")
+	require.Contains(t, reminderSmall, "crossing the 70% warning threshold")
+	require.Contains(t, reminderSmall, "automatic reset occurs at 80%")
 	require.Contains(t, reminderSmall, "scratchpad")
 	require.NotContains(t, strings.ToLower(reminderSmall), "compact")
 }
@@ -995,13 +997,13 @@ func TestContextResetGenesisPromptPreservedOnlyWhenExplicitlySet(t *testing.T) {
 		id := "instruction-agent"
 		agent := store.ManagedAgentRecord{
 			AgentID: id, Name: id, SlotHeld: true, Cwd: t.TempDir(),
-			SelectedModel:              store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-sol"},
-			Runtime:                    "embedded",
-			DesiredState:               "running",
-			PiSessionID:                id + "-session",
-			SessionEpoch:               1,
-			ManifestRevision:           1,
-			ManifestHash:               strings.Repeat("a", 64),
+			SelectedModel:             store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-sol"},
+			Runtime:                   "embedded",
+			DesiredState:              "running",
+			PiSessionID:               id + "-session",
+			SessionEpoch:              1,
+			ManifestRevision:          1,
+			ManifestHash:              strings.Repeat("a", 64),
 			PendingInitialInstruction: explicitInstruction,
 		}
 		op := store.ManagedOperation{
@@ -1102,6 +1104,3 @@ func TestContextResetGenesisPromptPreservedOnlyWhenExplicitlySet(t *testing.T) {
 		}
 	})
 }
-
-
-

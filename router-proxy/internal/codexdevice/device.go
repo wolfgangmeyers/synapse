@@ -85,7 +85,26 @@ func post(ctx context.Context, client *http.Client, endpoint, contentType string
 	return resp.StatusCode, data, nil
 }
 
+type acquireOptions struct {
+	minInterval   time.Duration
+	slowdownDelta time.Duration
+}
+
 func acquire(ctx context.Context, client *http.Client, base string, notify func(DevicePrompt)) (store.CodexCredential, error) {
+	return acquireWithOptions(ctx, client, base, notify, acquireOptions{
+		minInterval:   time.Second,
+		slowdownDelta: 5 * time.Second,
+	})
+}
+
+func acquireWithOptions(ctx context.Context, client *http.Client, base string, notify func(DevicePrompt), opts acquireOptions) (store.CodexCredential, error) {
+	if opts.minInterval <= 0 {
+		opts.minInterval = time.Second
+	}
+	if opts.slowdownDelta <= 0 {
+		opts.slowdownDelta = 5 * time.Second
+	}
+
 	var empty store.CodexCredential
 	if ctx == nil || client == nil || notify == nil {
 		return empty, errors.New("device flow invalid")
@@ -115,8 +134,8 @@ func acquire(ctx context.Context, client *http.Client, base string, notify func(
 		}
 		interval = time.Duration(n * float64(time.Second))
 	}
-	if interval < time.Second {
-		interval = time.Second
+	if interval < opts.minInterval {
+		interval = opts.minInterval
 	}
 	notify(DevicePrompt{UserCode: start.UserCode, VerificationURL: verificationURL, Interval: interval, ExpiresIn: 900 * time.Second})
 	if err := ctx.Err(); err != nil {
@@ -156,7 +175,7 @@ func acquire(ctx context.Context, client *http.Client, base string, notify func(
 			switch failure.Error.Code {
 			case "deviceauth_authorization_pending":
 			case "slow_down":
-				interval += 5 * time.Second
+				interval += opts.slowdownDelta
 			default:
 				return empty, errors.New("device authorization failed")
 			}

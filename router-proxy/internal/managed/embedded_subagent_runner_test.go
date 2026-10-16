@@ -553,6 +553,24 @@ func TestSubagentRunnerQueuedAndRunningSteering(t *testing.T) {
 	err = mgr.SteerSubagent(ctx, parent, "subagent-parent-steer-2", "steer while queued")
 	require.NoError(t, err)
 
+	// Verify steering message is recorded in managed_complete_history
+	hist, err := db.ManagedHistoryPage(ctx, "subagent-parent-steer-2", "complete", 0, 50)
+	require.NoError(t, err)
+	foundSteerHistory := false
+	for _, e := range hist.Entries {
+		if strings.Contains(e.Message, "Steering from") {
+			foundSteerHistory = true
+			require.NotNil(t, e.Presentation)
+			require.Equal(t, "message", e.Presentation.Kind)
+			require.Equal(t, parent.AgentID, e.Presentation.From)
+			require.Equal(t, "subagent-parent-steer-2", e.Presentation.To)
+			require.NotNil(t, e.MessageContent)
+			require.Equal(t, "steer while queued", *e.MessageContent)
+			break
+		}
+	}
+	require.True(t, foundSteerHistory, "steering message must be recorded in complete history")
+
 	foreign := subagentTestParent(t, db, "foreign-parent")
 	err = mgr.SteerSubagent(ctx, foreign, "subagent-parent-steer-2", "foreign steer")
 	require.Error(t, err)
@@ -1906,4 +1924,3 @@ func TestSubagentRunnerExecutionTimeout(t *testing.T) {
 	require.Contains(t, saved.Error, "subagent execution timed out (exceeded")
 	require.Contains(t, saved.ResultText, "Subagent execution timed out")
 }
-

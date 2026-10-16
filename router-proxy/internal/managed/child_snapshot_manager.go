@@ -33,7 +33,6 @@ func (m *Manager) PublishProjection() {
 	m.publishProjection()
 }
 
-
 // installChildDeltaReceiver starts only after the binding is ready. The client
 // is already tied to one Pi stdout stream; the durable fence and owner checks
 // below additionally reject replacement-process and stale lifecycle events.

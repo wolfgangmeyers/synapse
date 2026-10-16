@@ -50,6 +50,12 @@ export interface RouterLogDiagnostic { category: RouterLogDiagnosticCategory; co
 export interface RouterLogResponse { status: RouterLogStatus; lines: RouterLogLine[]; next_cursor: string | null; diagnostics: RouterLogDiagnostic[] }
 export interface DefaultModelResponse { operation_id: string; default_model: { provider: string; id: string; name?: string } | null; effective_fallback: ProviderModel }
 export interface SystemOneConfig { host: string; port: number; enabled: boolean }
+export interface ModelContextThreshold { warning_percent: number; reset_percent: number }
+export interface ContextThresholdConfig {
+  warning_percent: number;
+  reset_percent: number;
+  model_thresholds: Record<string, ModelContextThreshold>;
+}
 export interface SystemOneTestRequest { model?: string | undefined; state: unknown; questions: Record<string, unknown> }
 export interface SystemOneTestResponse {
   status: "ok" | "error";
@@ -440,6 +446,8 @@ export interface RouterHttpClient {
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
   systemOneConfig(): Promise<SystemOneConfig>;
   saveSystemOneConfig(config: SystemOneConfig): Promise<SystemOneConfig>;
+  contextThresholds(): Promise<ContextThresholdConfig>;
+  saveContextThresholds(config: ContextThresholdConfig): Promise<ContextThresholdConfig>;
   testSystemOne(payload?: SystemOneTestRequest): Promise<SystemOneTestResponse>;
   restartRouter(): Promise<{ ok: boolean; restarting: boolean }>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
@@ -609,6 +617,46 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         port: typeof rec?.port === "number" ? rec.port : 0,
         enabled: Boolean(rec?.enabled),
       };
+    },
+    contextThresholds: async () => {
+      const body = await request("/v1/settings/context-thresholds");
+      const rec = recordValue(body);
+      const warning_percent = typeof rec?.warning_percent === "number" ? rec.warning_percent : 10;
+      const reset_percent = typeof rec?.reset_percent === "number" ? rec.reset_percent : 20;
+      const model_thresholds: Record<string, ModelContextThreshold> = {};
+      const rawOverrides = recordValue(rec?.model_thresholds);
+      if (rawOverrides) {
+        for (const [key, val] of Object.entries(rawOverrides)) {
+          const item = recordValue(val);
+          if (item && typeof item.warning_percent === "number" && typeof item.reset_percent === "number") {
+            model_thresholds[key] = {
+              warning_percent: item.warning_percent,
+              reset_percent: item.reset_percent,
+            };
+          }
+        }
+      }
+      return { warning_percent, reset_percent, model_thresholds };
+    },
+    saveContextThresholds: async (config) => {
+      const body = await jsonRequest("/v1/settings/context-thresholds", "PUT", config);
+      const rec = recordValue(body);
+      const warning_percent = typeof rec?.warning_percent === "number" ? rec.warning_percent : 10;
+      const reset_percent = typeof rec?.reset_percent === "number" ? rec.reset_percent : 20;
+      const model_thresholds: Record<string, ModelContextThreshold> = {};
+      const rawOverrides = recordValue(rec?.model_thresholds);
+      if (rawOverrides) {
+        for (const [key, val] of Object.entries(rawOverrides)) {
+          const item = recordValue(val);
+          if (item && typeof item.warning_percent === "number" && typeof item.reset_percent === "number") {
+            model_thresholds[key] = {
+              warning_percent: item.warning_percent,
+              reset_percent: item.reset_percent,
+            };
+          }
+        }
+      }
+      return { warning_percent, reset_percent, model_thresholds };
     },
     testSystemOne: async (payload) => {
       const body = await jsonRequest("/v1/systemone/test", "POST", payload ?? {});

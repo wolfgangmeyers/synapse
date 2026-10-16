@@ -514,12 +514,12 @@ func TestEmbeddedGoalReNudgesOnSingleEmptyResponse(t *testing.T) {
 }
 
 // TestEmbeddedGoalEvaluatorErrorFallsBackToNotDoneAndContinues tests that:
-// - Turn 1: Evaluator returns an error (ai.StopError). The system does NOT stall in UNKNOWN;
-//   it logs the error, falls back to NOT_DONE, and dispatches a continuation turn.
-// - Turn 2: Evaluator returns malformed/unparseable text. The system fails open to NOT_DONE
-//   and dispatches another continuation turn.
-// - Turn 3: Evaluator returns DONE. The agent completes and settles cleanly.
-// - Durable assertions: No rows remain in UNKNOWN, fallback rows are NOT_DONE, and continuations ran.
+//   - Turn 1: Evaluator returns an error (ai.StopError). The system does NOT stall in UNKNOWN;
+//     it logs the error, falls back to NOT_DONE, and dispatches a continuation turn.
+//   - Turn 2: Evaluator returns malformed/unparseable text. The system fails open to NOT_DONE
+//     and dispatches another continuation turn.
+//   - Turn 3: Evaluator returns DONE. The agent completes and settles cleanly.
+//   - Durable assertions: No rows remain in UNKNOWN, fallback rows are NOT_DONE, and continuations ran.
 func TestEmbeddedGoalEvaluatorErrorFallsBackToNotDoneAndContinues(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -652,5 +652,3 @@ func TestEmbeddedGoalEvaluatorErrorFallsBackToNotDoneAndContinues(t *testing.T) 
 	// Turn 3 evaluation: completed normally with DONE
 	require.Equal(t, store.EmbeddedGoalEvaluationDone, evals[2].state)
 }
-
-

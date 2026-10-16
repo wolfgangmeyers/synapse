@@ -20,4 +20,3 @@ func openBeneath(rootFD int, relPath string) (int, error) {
 func renameatNoReplace(olddirfd int, oldpath string, newdirfd int, newpath string) error {
 	return unix.Renameat2(olddirfd, oldpath, newdirfd, newpath, unix.RENAME_NOREPLACE)
 }
-

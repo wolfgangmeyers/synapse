@@ -34,6 +34,7 @@ func contextThresholdExceeded(model Model, currentTokens int) bool {
 func ContextThresholdExceeded(model Model, currentTokens int) bool {
 	return contextThresholdExceeded(model, currentTokens)
 }
+
 type Catalog struct {
 	AuthRevision int64
 	Models       []Model

@@ -71,8 +71,14 @@ func newInterleavedG2FixtureWithListen(t *testing.T, listen bool) *interleavedG2
 		require.NoError(t, os.Mkdir(f.projects[i], 0700))
 	}
 	f.dbPath = filepath.Join(f.root, "router.db")
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, f.dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
 	var err error
-	f.db, err = store.Open(ctx, f.dbPath, store.Options{})
+	f.db, err = store.Open(ctx, f.dbPath, opts)
 	require.NoError(t, err)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)

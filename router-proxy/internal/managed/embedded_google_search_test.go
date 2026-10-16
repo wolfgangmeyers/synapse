@@ -151,13 +151,13 @@ func TestEmbeddedGoogleSearch_VertexIntegration(t *testing.T) {
 	tmpDir := t.TempDir()
 	adcPath := filepath.Join(tmpDir, "application_default_credentials.json")
 	adcData := map[string]any{
-		"type":          "service_account",
-		"project_id":    "vertex-test-project",
-		"private_key":   "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...",
-		"client_email":  "test@vertex-test-project.iam.gserviceaccount.com",
-		"client_id":     "1234567890",
-		"auth_uri":      "https://accounts.google.com/o/oauth2/auth",
-		"token_uri":     "https://oauth2.googleapis.com/token",
+		"type":         "service_account",
+		"project_id":   "vertex-test-project",
+		"private_key":  "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...",
+		"client_email": "test@vertex-test-project.iam.gserviceaccount.com",
+		"client_id":    "1234567890",
+		"auth_uri":     "https://accounts.google.com/o/oauth2/auth",
+		"token_uri":    "https://oauth2.googleapis.com/token",
 	}
 	adcBytes, _ := json.Marshal(adcData)
 	_ = os.WriteFile(adcPath, adcBytes, 0600)

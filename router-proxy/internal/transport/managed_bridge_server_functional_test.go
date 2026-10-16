@@ -142,7 +142,13 @@ func newPhase2BFixture(t *testing.T, options ManagedBridgeHandlerOptions) *phase
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
-	durable, err := store.Open(ctx, path, store.Options{})
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, path); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(ctx, path, opts)
 	require.NoError(t, err)
 	token := []byte(strings.Repeat("r", 32))
 	verifier, err := managedbridge.NewVerifier(token)

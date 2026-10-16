@@ -34,6 +34,7 @@ export interface ConversationHeaderProps {
   onInlineToolSettings?: (() => void) | undefined;
   onScratchpad?: (() => void) | undefined;
   onManageManaged?: (() => void) | undefined;
+  onContextThresholds?: (() => void) | undefined;
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
   onToggleSubagents?: (() => void) | undefined;
@@ -79,7 +80,7 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
 
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
@@ -284,9 +285,18 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   <button type="button" className={`scroll-lock-button ${scrollLocked ? "active" : ""}`} onClick={onToggleScrollLock} aria-label="Toggle scroll lock" title={scrollLocked ? "Scroll locked (auto-scroll paused)" : "Lock scroll"}><i className={scrollLocked ? "fa-solid fa-lock" : "fa-solid fa-lock-open"} aria-hidden="true" /></button>
 ) : null}</h2>{showContextUsage && contextUsage ? (
   <div
-    className="header-context-usage"
-    title={contextTooltip}
+    className={`header-context-usage${onContextThresholds ? " clickable" : ""}`}
+    title={`${contextTooltip}${onContextThresholds ? " (Click to configure thresholds)" : ""}`}
     aria-label={`Context usage: ${contextLabel}`}
+    role={onContextThresholds ? "button" : undefined}
+    tabIndex={onContextThresholds ? 0 : undefined}
+    onClick={onContextThresholds}
+    onKeyDown={(e) => {
+      if (onContextThresholds && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        onContextThresholds();
+      }
+    }}
   >
     <div className="context-usage-track">
       <div

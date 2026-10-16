@@ -1607,11 +1607,11 @@ func (r *Router) handleManagedWorkflowStateGET(w http.ResponseWriter, req *http.
 		}
 	}
 	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
-		"agent_id":                  agentID,
-		"active_workflow_id":        agent.ActiveWorkflowID,
-		"active_workflow_state_id":  agent.ActiveWorkflowStateID,
-		"active_workflow_state":     activeState,
-		"workflow_variables":        agent.WorkflowVariables,
+		"agent_id":                 agentID,
+		"active_workflow_id":       agent.ActiveWorkflowID,
+		"active_workflow_state_id": agent.ActiveWorkflowStateID,
+		"active_workflow_state":    activeState,
+		"workflow_variables":       agent.WorkflowVariables,
 	}, nil)
 }
 
@@ -1700,6 +1700,7 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		}
 
 		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
+		_ = r.store.CleanUpManagedAgentWorkflowMonitors(req.Context(), agentID)
 
 		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, workflowID, &wfState.ID, variables); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to update agent workflow state"})
@@ -1727,6 +1728,9 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		}
 
 		_ = r.store.SpawnWorkflowStateReminders(req.Context(), agentID, wfState, variables)
+		if r.managed != nil {
+			_ = r.managed.SpawnWorkflowStateMonitors(req.Context(), agentID, wfState, variables)
+		}
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 
@@ -1814,6 +1818,7 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 
 	case "deactivate":
 		_ = r.store.CleanUpManagedAgentWorkflowReminders(req.Context(), agentID)
+		_ = r.store.CleanUpManagedAgentWorkflowMonitors(req.Context(), agentID)
 		if err := r.store.SetManagedAgentActiveWorkflowWithVariables(req.Context(), agentID, nil, nil, nil); err != nil {
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Failed to deactivate workflow state"})
 			return

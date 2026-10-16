@@ -21,8 +21,7 @@ import (
 
 func newUILiveTestRouter(t *testing.T) (*Router, *store.Store, *httptest.Server) {
 	t.Helper()
-	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
-	require.NoError(t, err)
+	durable, _ := store.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})

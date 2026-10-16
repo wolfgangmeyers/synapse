@@ -1194,4 +1194,3 @@ func TestRecoverManagedRootColdStartsDoesNotFailSubagents(t *testing.T) {
 	require.Equal(t, "running", running.Status)
 	require.Empty(t, running.Error)
 }
-

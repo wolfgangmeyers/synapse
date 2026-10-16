@@ -361,7 +361,7 @@ func (s *Store) DeleteWorkflow(ctx context.Context, id string) (bool, error) {
 }
 
 func (s *Store) ListWorkflowStatesByWorkflow(ctx context.Context, workflowID string) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE workflow_id = ? ORDER BY name ASC, id ASC`, workflowID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE workflow_id = ? ORDER BY name ASC, id ASC`, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -372,16 +372,18 @@ func (s *Store) ListWorkflowStatesByWorkflow(ctx context.Context, workflowID str
 		var state WorkflowState
 		var wfID sql.NullString
 		var remindersJSON sql.NullString
+		var monitorsJSON sql.NullString
 		var allowedToolsJSON sql.NullString
 		var transitionsJSON sql.NullString
 		var allowExitInt int
-		if err := rows.Scan(&state.ID, &wfID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.ID, &wfID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if wfID.Valid {
 			state.WorkflowID = &wfID.String
 		}
 		state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
+		state.Monitors = unmarshalWorkflowMonitors(monitorsJSON.String)
 		state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
 		state.Transitions = unmarshalWorkflowTransitions(transitionsJSON.String)
 		state.AllowExit = (allowExitInt == 1)
@@ -540,6 +542,10 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			if err != nil {
 				return err
 			}
+			monitorsJSON, err := marshalWorkflowMonitors(st.Monitors)
+			if err != nil {
+				return err
+			}
 			allowedToolsJSON, err := marshalWorkflowAllowedTools(st.AllowedTools)
 			if err != nil {
 				return err
@@ -557,8 +563,8 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			uiPosX := st.UIPosX + 20
 			uiPosY := st.UIPosY + 20
 
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				newStateID, newWfID, candidateName, st.Description, st.EntryText, st.Goal, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newStateID, newWfID, candidateName, st.Description, st.EntryText, st.Goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
 			if err != nil {
 				return err
 			}

@@ -668,4 +668,3 @@ func TestDeliverSubagentParentWake_WithAndWithoutActiveSiblings_Integration(t *t
 	require.Contains(t, body2, "[Subagent Completed] Task child-2")
 	require.NotContains(t, body2, "Active subagents still running")
 }
-

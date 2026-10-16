@@ -443,7 +443,7 @@ func estimateMessageTokens(m ai.Message) int {
 				chars += 1000
 			}
 		}
-		return (chars + 3) / 4 + 4
+		return (chars+3)/4 + 4
 	}
 	if am, ok := asAssistantMsg(m); ok {
 		chars := 0
@@ -464,7 +464,7 @@ func estimateMessageTokens(m ai.Message) int {
 				chars += len(call.Name) + len(argsBytes)
 			}
 		}
-		return (chars + 3) / 4 + 4
+		return (chars+3)/4 + 4
 	}
 	if tm, ok := asToolResultMsg(m); ok {
 		chars := len(ai.ContentText(tm.Content))
@@ -475,11 +475,11 @@ func estimateMessageTokens(m ai.Message) int {
 				chars += 1000
 			}
 		}
-		return (chars + 3) / 4 + 4
+		return (chars+3)/4 + 4
 	}
 	if sm, ok := asSystemMsg(m); ok {
 		chars := len(ai.GetSystemMessageText(sm))
-		return (chars + 3) / 4 + 4
+		return (chars+3)/4 + 4
 	}
 	return 4
 }
@@ -507,12 +507,12 @@ func estimateGoogleContentsTokens(contents []map[string]any) int {
 			if fc, ok := pMap["functionCall"].(map[string]any); ok {
 				name, _ := fc["name"].(string)
 				args, _ := json.Marshal(fc["args"])
-				total += (len(name) + len(args) + 3) / 4 + 4
+				total += (len(name)+len(args)+3)/4 + 4
 			}
 			if fr, ok := pMap["functionResponse"].(map[string]any); ok {
 				name, _ := fr["name"].(string)
 				resp, _ := json.Marshal(fr["response"])
-				total += (len(name) + len(resp) + 3) / 4 + 4
+				total += (len(name)+len(resp)+3)/4 + 4
 			}
 			if _, ok := pMap["inlineData"]; ok {
 				total += 258

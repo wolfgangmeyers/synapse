@@ -400,6 +400,11 @@ func TestConversationHistoryPagedMostRecentAndCursor(t *testing.T) {
 func openTestStoreWithOptions(t *testing.T, options Options) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "router.db")
+	if options.Migrations == nil {
+		if err := CloneTemplateDB(t, path); err == nil {
+			options.Migrations = []Migration{}
+		}
+	}
 	store, err := Open(context.Background(), path, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
