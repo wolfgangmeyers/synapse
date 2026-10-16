@@ -104,6 +104,57 @@ describe("protocol guards", () => {
     expect(isManagedAgent({ ...managedAgent, runtime: "embedded", context_usage: { tokens: "invalid", context_window: 1048576, percent: null } })).toBe(false);
   });
 
+  it("validates managed agent with open-schema, accepting active_workflow_id, workflow_variables, and unknown forward-compatible fields", () => {
+    const managedAgent = {
+      agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+      desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+      created_at: "2026-09-09T09:48:28.414204Z", started_at: "2026-09-09T09:48:29.414204003Z", updated_at: "2026-09-09T09:48:30Z", last_error: null,
+    };
+
+    // active_workflow_id validation (string | null | undefined)
+    expect(isManagedAgent({ ...managedAgent, active_workflow_id: "wf-dev-loop" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_id: "" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_id: null })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_id: undefined })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_id: 123 })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, active_workflow_id: "a".repeat(129) })).toBe(false);
+
+    // workflow_variables validation (record of string to string | null | undefined)
+    expect(isManagedAgent({ ...managedAgent, workflow_variables: { TASK: "fix-bug", ENV: "staging" } })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_variables: {} })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_variables: null })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_variables: undefined })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_variables: "not-a-record" })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, workflow_variables: { INVALID: 123 } })).toBe(false);
+
+    // both workflow fields together
+    expect(isManagedAgent({
+      ...managedAgent,
+      active_workflow_id: "wf-123",
+      active_workflow_state_id: "state-456",
+      workflow_variables: { FOO: "bar" },
+    })).toBe(true);
+
+    // open-schema forward compatibility with unknown/new fields
+    expect(isManagedAgent({ ...managedAgent, future_backend_feature: true })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, custom_tags: ["alpha", "beta"], extra_config: { nested: 1 } })).toBe(true);
+
+    // privateRuntimeFields are strictly rejected
+    for (const privateField of ["pid", "process_pid", "session_id", "pi_session_id", "process_incarnation", "runtime_generation", "generation", "managedProjectionVersion"]) {
+      expect(isManagedAgent({ ...managedAgent, [privateField]: "secret" })).toBe(false);
+    }
+
+    // archived records are rejected
+    expect(isManagedAgent({ ...managedAgent, record_kind: "archived" })).toBe(false);
+
+    // missing required fields are rejected
+    const { agent_id, ...missingAgentId } = managedAgent;
+    expect(isManagedAgent(missingAgentId)).toBe(false);
+    const { manifest, ...missingManifest } = managedAgent;
+    expect(isManagedAgent(missingManifest)).toBe(false);
+  });
+
   it("accepts bounded Complete history details while keeping presentation metadata closed", () => {
     const entry = { id: "complete:1", agent_id: "managed-alpha", at: "2026-09-09T09:48:28Z", level: "info", message: "Ran bash", presentation: { kind: "tool", tool_name: "functions.bash", outcome: "success", summary: "Completed successfully" } };
     expect(isManagedHistoryEntry(entry)).toBe(true);

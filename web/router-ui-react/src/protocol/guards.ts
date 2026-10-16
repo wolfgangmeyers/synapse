@@ -171,13 +171,20 @@ export function isContextUsage(value: unknown): value is ContextUsage {
 
 export function isManagedAgent(value: unknown): value is ManagedAgent {
   const required = ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"];
-  if (!isRecord(value) || !hasOnlyKeys(value, [...required, "goal_state", "runtime", "active_workflow_state_id", "worktree", "allow_inline_tools", "context_usage"]) || !required.every((key) => Object.hasOwn(value, key))) return false;
+  if (!isRecord(value) || !required.every((key) => Object.hasOwn(value, key))) return false;
   if (privateRuntimeFields.some((field) => Object.hasOwn(value, field))) return false;
   if (Object.hasOwn(value, "record_kind") && (value as any).record_kind === "archived") return false;
-  if (Object.hasOwn(value, "allow_inline_tools") && typeof value.allow_inline_tools !== "boolean") return false;
-  if (Object.hasOwn(value, "worktree") && typeof value.worktree !== "boolean") return false;
-  if (Object.hasOwn(value, "runtime") && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
-  if (Object.hasOwn(value, "active_workflow_state_id") && value.active_workflow_state_id !== null && !isSafeString(value.active_workflow_state_id, 0, 128)) return false;
+  if (Object.hasOwn(value, "allow_inline_tools") && value.allow_inline_tools !== undefined && typeof value.allow_inline_tools !== "boolean") return false;
+  if (Object.hasOwn(value, "worktree") && value.worktree !== undefined && typeof value.worktree !== "boolean") return false;
+  if (Object.hasOwn(value, "runtime") && value.runtime !== undefined && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
+  if (Object.hasOwn(value, "active_workflow_state_id") && value.active_workflow_state_id !== null && value.active_workflow_state_id !== undefined && !isSafeString(value.active_workflow_state_id, 0, 128)) return false;
+  if (Object.hasOwn(value, "active_workflow_id") && value.active_workflow_id !== null && value.active_workflow_id !== undefined && !isSafeString(value.active_workflow_id, 0, 128)) return false;
+  if (Object.hasOwn(value, "workflow_variables") && value.workflow_variables !== null && value.workflow_variables !== undefined) {
+    if (!isRecord(value.workflow_variables)) return false;
+    for (const [k, v] of Object.entries(value.workflow_variables)) {
+      if (!isSafeString(k, 1, 256) || !isSafeString(v, 0, 65536)) return false;
+    }
+  }
   if (Object.hasOwn(value, "context_usage") && value.context_usage !== undefined && !isContextUsage(value.context_usage)) return false;
   const model = value.model; const manifest = value.manifest; const lastError = value.last_error;
   if (!isAgentId(value.agent_id) || value.source !== "router-managed" || !isSafeString(value.cwd, 1, 4096) || !isSafeString(value.desired_state, 1, 64) || !isSafeString(value.lifecycle_state, 1, 64) || !isSafeString(value.activity_state, 1, 64) || typeof value.accepting_prompts !== "boolean" || !isRouterUtcTimestamp(value.created_at) || (value.started_at !== null && !isRouterUtcTimestamp(value.started_at)) || !isRouterUtcTimestamp(value.updated_at)) return false;
