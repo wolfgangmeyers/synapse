@@ -17,6 +17,13 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -1171,6 +1178,9 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
 
     private fun refreshPeers() {
         if (leaseId.isNotBlank()) discoverPeers(connectionGeneration)
+        if (selectedPeer.isNotBlank()) {
+            hydrateActivityHistory(selectedPeer)
+        }
     }
 
     private fun fetchCapabilities(generation: Int, router: String = activeRouter, registeredLease: String = leaseId) = Thread {
@@ -2605,7 +2615,79 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
         peer?.let(::hydrateHistory)
     }
 
+    private fun hydrateActivityHistory(peer: String) {
+        val router = activeRouter ?: return
+        if (peer.isBlank()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val encodedPeer = URLEncoder.encode(peer, "UTF-8").replace("+", "%20")
+            val urlString = "${routerHttpFor(router)}/v1/history?agent_id=$encodedPeer&view=complete&limit=100"
+            try {
+                val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 10_000
+                    readTimeout = 10_000
+                    requestMethod = "GET"
+                    setRequestProperty("Accept", "application/json")
+                }
+                if (conn.responseCode in 200..299) {
+                    val raw = conn.inputStream.bufferedReader().use { it.readText() }
+                    val json = JSONObject(raw)
+                    val entries = json.optJSONArray("entries") ?: JSONArray()
+                    val parsed = mutableListOf<AgentTimelineEvent>()
+                    for (i in 0 until entries.length()) {
+                        val entry = entries.optJSONObject(i) ?: continue
+                        val presentation = entry.optJSONObject("presentation")
+                        val kind = presentation?.optString("kind").orEmpty().ifBlank { entry.optString("kind") }
+                        if (kind == "message") continue
+                        val eId = entry.optString("id").takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+                        val at = entry.optString("at").takeIf { it.isNotBlank() } ?: entry.optString("recorded_at")
+                        val toolName = presentation?.optString("tool_name").takeIf { !it.isNullOrBlank() }
+                            ?: entry.optString("tool_name").takeIf { it.isNotBlank() }
+                        val toolInputObj = entry.optJSONObject("tool_input")
+                        val summary = presentation?.optString("summary").takeIf { !it.isNullOrBlank() }
+                            ?: entry.optString("message").takeIf { it.isNotBlank() }
+                            ?: toolName
+                            ?: kind
+                        val outcome = presentation?.optString("outcome").takeIf { !it.isNullOrBlank() }
+                            ?: entry.optString("outcome").takeIf { it.isNotBlank() }
+                            ?: "success"
+                        val toolInput = toolInputObj?.toString(2)
+                        val output = entry.optString("message_content").takeIf { it.isNotBlank() }
+                            ?: presentation?.optJSONObject("error")?.optString("message")
+                            ?: entry.optString("message").takeIf { it != summary }
+
+                        parsed.add(
+                            AgentTimelineEvent(
+                                id = eId,
+                                agentId = peer,
+                                timestamp = at,
+                                kind = kind,
+                                toolName = toolName,
+                                summary = summary,
+                                outcome = outcome,
+                                toolInput = toolInput,
+                                output = output
+                            )
+                        )
+                    }
+                    withContext(Dispatchers.Main) {
+                        val existing = liveEventsByAgent[peer].orEmpty()
+                        val combined = (existing + parsed)
+                            .associateBy { it.id }
+                            .values
+                            .sortedBy { it.timestamp }
+                            .takeLast(200)
+                        liveEventsByAgent = liveEventsByAgent + (peer to combined)
+                    }
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                // Ignore transient network errors during history hydration
+            }
+        }
+    }
+
     private fun hydrateHistory(peer: String, generation: Int = connectionGeneration) {
+        hydrateActivityHistory(peer)
         val request = historyLock.withLock {
             // The default generation is read before the lock. Recheck it, the selected
             // peer, and the owner scope after waiting so a stale caller cannot publish LOADING.
@@ -2821,7 +2903,10 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
         messages = historyFor(peer)
         outboundState = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (peer to messages))
         persistKnownPeers(knownPeers() + peer)
-        if (leaseId.isNotBlank()) hydrateHistory(peer)
+        if (leaseId.isNotBlank()) {
+            hydrateHistory(peer)
+            hydrateActivityHistory(peer)
+        }
     }
 
     private fun clearReminderLocksForPeer(peer: String) {
