@@ -12,19 +12,23 @@ import type {
 export interface ContextThresholdDialogProps {
   open: boolean;
   client: RouterHttpClient;
+  catalog?: ModelsResponse | null;
+  models?: ProviderModel[];
   onClose: () => void;
 }
 
 export function ContextThresholdDialog({
   open,
   client,
+  catalog: propCatalog,
+  models: propModels,
   onClose,
 }: ContextThresholdDialogProps): ReactElement {
   const [warningPercent, setWarningPercent] = useState<number>(10);
   const [resetPercent, setResetPercent] = useState<number>(20);
   const [modelThresholds, setModelThresholds] = useState<Record<string, ModelContextThreshold>>({});
 
-  const [catalog, setCatalog] = useState<ModelsResponse | null>(null);
+  const [catalog, setCatalog] = useState<ModelsResponse | null>(() => propCatalog ?? null);
   const [selectedModelKey, setSelectedModelKey] = useState<string>("");
   const [overrideWarning, setOverrideWarning] = useState<number>(15);
   const [overrideReset, setOverrideReset] = useState<number>(25);
@@ -33,6 +37,27 @@ export function ContextThresholdDialog({
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const effectiveModels: ProviderModel[] = propModels && propModels.length > 0
+    ? propModels
+    : propCatalog?.models && propCatalog.models.length > 0
+      ? propCatalog.models
+      : catalog?.models ?? [];
+
+  useEffect(() => {
+    if (propCatalog) {
+      setCatalog(propCatalog);
+    }
+  }, [propCatalog]);
+
+  useEffect(() => {
+    if (!selectedModelKey && effectiveModels.length > 0) {
+      const first = effectiveModels[0];
+      if (first) {
+        setSelectedModelKey(`${first.provider}/${first.id}`);
+      }
+    }
+  }, [selectedModelKey, effectiveModels]);
 
   useEffect(() => {
     if (!open) {
@@ -44,18 +69,20 @@ export function ContextThresholdDialog({
     setError(null);
     setSuccessMessage(null);
 
+    const needsModels = (!propModels || propModels.length === 0) && (!propCatalog || !propCatalog.models || propCatalog.models.length === 0);
+
     Promise.all([
       client.contextThresholds(),
-      client.models().catch(() => null),
+      needsModels ? client.models().catch(() => null) : Promise.resolve(null),
     ])
-      .then(([cfg, models]) => {
+      .then(([cfg, fetchedModels]) => {
         setWarningPercent(cfg.warning_percent || 10);
         setResetPercent(cfg.reset_percent || 20);
         setModelThresholds(cfg.model_thresholds || {});
-        if (models) {
-          setCatalog(models);
-          const firstModel = models.models?.[0];
-          if (firstModel) {
+        if (fetchedModels) {
+          setCatalog(fetchedModels);
+          const firstModel = fetchedModels.models?.[0];
+          if (firstModel && !selectedModelKey) {
             setSelectedModelKey(`${firstModel.provider}/${firstModel.id}`);
           }
         }
@@ -67,7 +94,7 @@ export function ContextThresholdDialog({
       .finally(() => {
         setLoading(false);
       });
-  }, [open, client]);
+  }, [open, client, propCatalog, propModels]);
 
   const handleGlobalWarningChange = (val: number): void => {
     const clamped = Math.max(1, Math.min(99, val));
@@ -255,8 +282,8 @@ export function ContextThresholdDialog({
                       disabled={saving}
                       className="threshold-select"
                     >
-                      {catalog?.models && catalog.models.length > 0 ? (
-                        catalog.models.map((m: ProviderModel) => {
+                      {effectiveModels.length > 0 ? (
+                        effectiveModels.map((m: ProviderModel) => {
                           const key = `${m.provider}/${m.id}`;
                           return (
                             <option key={key} value={key}>

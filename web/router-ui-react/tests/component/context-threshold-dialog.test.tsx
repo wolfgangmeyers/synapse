@@ -117,4 +117,29 @@ describe("ContextThresholdDialog", () => {
       expect(names).toContain("google-vertex/gemini-3.8-pro");
     });
   });
+
+  it("uses provided catalog and models props without fetching models if provided", async () => {
+    const client = createMockClient({
+      models: vi.fn(),
+    });
+    render(
+      <ContextThresholdDialog
+        open={true}
+        client={client}
+        catalog={initialModels}
+        onClose={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Model:")).toBeInTheDocument();
+      const options = Array.from(document.querySelectorAll("#override-model-select option")).map(
+        (o) => (o as HTMLOptionElement).value
+      );
+      expect(options).toContain("google-vertex/gemini-3.8-pro");
+    });
+
+    expect(client.models).not.toHaveBeenCalled();
+  });
 });
+
