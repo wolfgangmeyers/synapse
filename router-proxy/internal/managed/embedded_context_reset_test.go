@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -14,54 +15,53 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/ai/providers"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
 
-// TestContextThresholdExceeded tests auto-reset threshold calculation:
-// - 50% of context window for 1M+ models
-// - 80% of context window for <1M models
+// TestContextThresholdExceeded tests auto-reset threshold calculation (default 20% for all models).
 func TestContextThresholdExceeded(t *testing.T) {
-	// Models with >= 1,000,000 context window (threshold = 50%)
+	// Models with >= 1,000,000 context window (threshold = 20%)
 	model1M := Model{
 		Provider:      "google",
 		ID:            "gemini-2.5-flash",
 		ContextWindow: 1_000_000,
 	}
-	require.False(t, contextThresholdExceeded(model1M, 499_999), "49.9999%% should not exceed 50%% threshold")
-	require.True(t, contextThresholdExceeded(model1M, 500_000), "exact 50%% should exceed threshold")
-	require.True(t, contextThresholdExceeded(model1M, 600_000), "60%% should exceed 50%% threshold")
-	require.True(t, ContextThresholdExceeded(model1M, 500_000), "exported ContextThresholdExceeded should match")
+	require.False(t, contextThresholdExceeded(model1M, 199_999), "19.9999%% should not exceed 20%% threshold")
+	require.True(t, contextThresholdExceeded(model1M, 200_000), "exact 20%% should exceed threshold")
+	require.True(t, contextThresholdExceeded(model1M, 300_000), "30%% should exceed 20%% threshold")
+	require.True(t, ContextThresholdExceeded(model1M, 200_000), "exported ContextThresholdExceeded should match")
 
 	model2M := Model{
 		Provider:      "google",
 		ID:            "gemini-2.5-pro",
 		ContextWindow: 2_000_000,
 	}
-	require.False(t, contextThresholdExceeded(model2M, 999_999), "< 50%% should not exceed")
-	require.True(t, contextThresholdExceeded(model2M, 1_000_000), "1M / 2M = 50%% should exceed")
-	require.True(t, contextThresholdExceeded(model2M, 1_500_000), "75%% should exceed 50%% threshold")
+	require.False(t, contextThresholdExceeded(model2M, 399_999), "< 20%% should not exceed")
+	require.True(t, contextThresholdExceeded(model2M, 400_000), "400k / 2M = 20%% should exceed")
+	require.True(t, contextThresholdExceeded(model2M, 500_000), "25%% should exceed 20%% threshold")
 
-	// Models with < 1,000,000 context window (threshold = 80%)
+	// Models with < 1,000,000 context window (threshold = 20%)
 	model200k := Model{
 		Provider:      "anthropic",
 		ID:            "claude-3-7-sonnet",
 		ContextWindow: 200_000,
 	}
-	require.False(t, contextThresholdExceeded(model200k, 159_999), "79.99%% should not exceed 80%% threshold")
-	require.True(t, contextThresholdExceeded(model200k, 160_000), "exact 80%% should exceed threshold")
-	require.True(t, contextThresholdExceeded(model200k, 180_000), "90%% should exceed 80%% threshold")
+	require.False(t, contextThresholdExceeded(model200k, 39_999), "19.99%% should not exceed 20%% threshold")
+	require.True(t, contextThresholdExceeded(model200k, 40_000), "exact 20%% should exceed threshold")
+	require.True(t, contextThresholdExceeded(model200k, 50_000), "25%% should exceed 20%% threshold")
 
 	model128k := Model{
 		Provider:      "openai",
 		ID:            "gpt-4o",
 		ContextWindow: 128_000,
 	}
-	require.False(t, contextThresholdExceeded(model128k, 102_399), "< 80%% should not exceed")
-	require.True(t, contextThresholdExceeded(model128k, 102_400), "exact 80%% (102400) should exceed")
-	require.True(t, contextThresholdExceeded(model128k, 110_000), "> 80%% should exceed")
+	require.False(t, contextThresholdExceeded(model128k, 25_599), "< 20%% should not exceed")
+	require.True(t, contextThresholdExceeded(model128k, 25_600), "exact 20%% (25600) should exceed")
+	require.True(t, contextThresholdExceeded(model128k, 30_000), "> 20%% should exceed")
 
 	// Edge case: ContextWindow <= 0
 	modelZero := Model{Provider: "test", ID: "zero", ContextWindow: 0}
@@ -202,6 +202,13 @@ func TestContextResetPortsLastFewMessages(t *testing.T) {
 
 	// Verify that the assistant actually received the wake prompt during the wake turn
 	require.Equal(t, ContextResetWakePrompt, lastReceivedUserPrompt.Load())
+
+	// Verify that managed_complete_history recorded the context_reset entry with Epoch 2
+	var histCategory, histMessage string
+	err = raw.QueryRowContext(ctx, `SELECT category, message FROM managed_complete_history WHERE agent_id=? AND category='context_reset'`, parent.AgentID).Scan(&histCategory, &histMessage)
+	require.NoError(t, err, "context_reset entry must be recorded in managed_complete_history")
+	require.Equal(t, "context_reset", histCategory)
+	require.Contains(t, histMessage, "Epoch 2")
 }
 
 // TestPostResetAutoWakeContinuesWorkerLoop verifies that after context reset,
@@ -1104,3 +1111,162 @@ func TestContextResetGenesisPromptPreservedOnlyWhenExplicitlySet(t *testing.T) {
 		}
 	})
 }
+
+// TestContextResetWithBatchedToolCallsDoesNotPortOrphanedToolResults reproduces the issue
+// where startIdx < len(sessionMessages)-4 stops advancing even if startIdx is still pointing
+// at an orphaned RoleToolResult (e.g. when 4 parallel tool calls are executed).
+func TestContextResetWithBatchedToolCallsDoesNotPortOrphanedToolResults(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+		Models: []providers.FauxModelDefinition{{
+			ID:            "batched-tools-test",
+			ContextWindow: 1_000_000,
+			MaxTokens:     4096,
+			Input:         []string{"text"},
+		}},
+	})
+	defer reg.Unregister()
+
+	steps := make([]providers.FauxResponseStep, 20)
+	for i := range steps {
+		steps[i] = func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "Awaiting instruction"}}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(steps)
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+
+	parent := subagentTestParent(t, db, "batched-tools-agent")
+	registerParentOwner(mgr, parent)
+
+	owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+	ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+	// Append earlier turns so len(sessionMessages) = 10 and ToolResult 1 lands at len - 6:
+	// Turn 0: User 0, Assistant 0
+	user0, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "pre-turn 0"}}})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, parent, "user", user0)
+	require.NoError(t, err)
+
+	asst0, err := json.Marshal(ai.AssistantMessage{Content: ai.ContentList{ai.TextContent{Text: "response 0"}}, StopReason: ai.StopStop})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, parent, "assistant", asst0)
+	require.NoError(t, err)
+
+	// Turn 1: User 1
+	user1, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "read files"}}})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, parent, "user", user1)
+	require.NoError(t, err)
+
+	// Assistant 1 with 4 tool calls (call_1..call_4)
+	asst1, err := json.Marshal(ai.AssistantMessage{
+		Content: ai.ContentList{
+			providers.FauxToolCall("read", map[string]any{"path": "file1.txt"}, "call_1"),
+			providers.FauxToolCall("read", map[string]any{"path": "file2.txt"}, "call_2"),
+			providers.FauxToolCall("read", map[string]any{"path": "file3.txt"}, "call_3"),
+			providers.FauxToolCall("read", map[string]any{"path": "file4.txt"}, "call_4"),
+		},
+		StopReason: ai.StopToolUse,
+	})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, parent, "assistant", asst1)
+	require.NoError(t, err)
+
+	// 4 RoleToolResult entries for call_1..call_4
+	for i := 1; i <= 4; i++ {
+		callID := fmt.Sprintf("call_%d", i)
+		toolRes, err := json.Marshal(ai.ToolResultMessage{
+			ToolCallID: callID,
+			ToolName:   "read",
+			Content:    ai.ContentList{ai.TextContent{Text: fmt.Sprintf("content of file %d", i)}},
+		})
+		require.NoError(t, err)
+		_, err = db.AppendEmbeddedEntry(ctx, parent, "toolResult", toolRes)
+		require.NoError(t, err)
+	}
+
+	// Assistant response: "Done with reads"
+	asstResp, err := json.Marshal(ai.AssistantMessage{Content: ai.ContentList{ai.TextContent{Text: "Done with reads"}}, StopReason: ai.StopStop})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, parent, "assistant", asstResp)
+	require.NoError(t, err)
+
+	// User 2: "next instruction"
+	user2, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "next instruction"}}})
+	require.NoError(t, err)
+	_, err = db.AppendEmbeddedEntry(ctx, parent, "user", user2)
+	require.NoError(t, err)
+
+	// Verify sessionMessages count in epoch 1:
+	// 10 non-system messages = 10 entries
+	snap1, err := db.ReopenEmbedded(ctx, parent)
+	require.NoError(t, err)
+	require.Len(t, snap1.Entries, 10)
+
+	// Execute Context Reset
+	err = mgr.ExecuteContextReset(ownerCtx, parent, "test_batched_tool_reset")
+	require.NoError(t, err)
+
+	updatedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), updatedAgent.SessionEpoch)
+
+	nextBinding := store.EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  updatedAgent.PiSessionID,
+		Epoch:      2,
+		Generation: parent.Generation,
+		OwnerToken: 1,
+	}
+	snap2, err := db.ReopenEmbedded(ctx, nextBinding)
+	require.NoError(t, err)
+
+	// Inspect snap2.Entries in Epoch 2:
+	// 1. NO entry in Epoch 2 has RoleToolResult without a preceding RoleAssistant having matching ToolCall in Epoch 2!
+	// 2. Specifically, check that the first ported message is NOT an orphaned RoleToolResult.
+	// 3. Check that all tool results (if any) are properly paired with assistant tool calls.
+	var portedMsgs []agent.AgentMessage
+	for _, entry := range snap2.Entries {
+		msg, err := ai.UnmarshalMessage(entry.Body)
+		require.NoError(t, err)
+		if msg.MessageRole() != ai.RoleSystem {
+			// Stop if we hit the wake prompt
+			if u, ok := msg.(ai.UserMessage); ok && messageContentText(u) == ContextResetWakePrompt {
+				break
+			}
+			portedMsgs = append(portedMsgs, msg)
+		}
+	}
+
+	require.NotEmpty(t, portedMsgs, "epoch 2 should have ported messages")
+	require.NotEqual(t, ai.RoleToolResult, portedMsgs[0].MessageRole(), "first ported message must NOT be an orphaned tool result")
+
+	availableToolCallIDs := make(map[string]bool)
+	for idx, msg := range portedMsgs {
+		switch m := msg.(type) {
+		case ai.AssistantMessage:
+			for _, part := range m.Content {
+				if tc, ok := part.(ai.ToolCall); ok {
+					availableToolCallIDs[tc.ID] = true
+				}
+			}
+		case ai.ToolResultMessage:
+			require.Truef(t, availableToolCallIDs[m.ToolCallID],
+				"entry at index %d has tool result %q without preceding matching assistant tool call in Epoch 2", idx, m.ToolCallID)
+		default:
+			if msg.MessageRole() == ai.RoleToolResult {
+				t.Fatalf("unexpected message type with RoleToolResult at index %d: %T", idx, msg)
+			}
+		}
+	}
+}
+

@@ -99,7 +99,7 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if value == nil {
 		return true
 	}
-	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true, "subagent_complete": true, "subagent": true}[value.Kind] {
+	if !map[string]bool{"message": true, "lifecycle": true, "state": true, "tool": true, "child": true, "compaction": true, "recovery": true, "error": true, "reminder": true, "model": true, "auth": true, "thinking": true, "goal_evaluation": true, "subagent_complete": true, "subagent": true, "context_reset": true}[value.Kind] {
 		return false
 	}
 	if !managedHistoryText(value.ToolName, 128, true) || !managedHistoryText(value.From, 128, true) || !managedHistoryText(value.To, 128, true) || !managedHistoryText(value.ChildLabel, 160, true) || (value.OccurredAt != "" && !managedHistoryText(value.OccurredAt, 64, true)) || !managedHistoryText(value.CompanionText, 65536, true) {
@@ -183,6 +183,8 @@ func defaultManagedHistoryPresentation(category, level, message string) *Managed
 			outcome = "failed"
 		}
 		return &ManagedHistoryPresentation{Kind: "subagent_complete", ToolName: "subagent", Outcome: outcome}
+	case "context_reset":
+		return &ManagedHistoryPresentation{Kind: "context_reset", Outcome: "success"}
 	case "reminder":
 		return &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
 	case "delivery":

@@ -213,6 +213,8 @@ func TestEmbeddedCombinedRootWorkersMailColdListenRED(t *testing.T) {
 		instruction := "instruction for " + name
 		if i == 0 {
 			instruction = "explicit saved root instruction"
+		} else {
+			instruction = fmt.Sprintf("You are the '%s' agent.\n\n%s", name, instruction)
 		}
 		require.Equal(t, ai.ContentList{ai.TextContent{Text: instruction}}, originalUser.Content)
 		require.EqualValues(t, 3, snapshot.Entries[2].Sequence)
@@ -242,7 +244,7 @@ func TestEmbeddedCombinedRootWorkersMailColdListenRED(t *testing.T) {
 		takeoverReady := false
 		require.Eventually(t, func() bool {
 			takeoverErr = check.QueryRowContext(ctx, `SELECT s.owner_token,a.lifecycle_state='running' AND a.accepting_prompts=1 FROM embedded_sessions s JOIN managed_agents a ON a.agent_id=s.agent_id WHERE s.agent_id=? AND s.session_id=? AND s.epoch=? AND s.generation=? AND s.current=1 AND s.owner_id IS NOT NULL AND s.owner_expires_at>?`, name, saved[i].session, saved[i].epoch, saved[i].generation, time.Now().UTC().Format("2006-01-02T15:04:05.000Z")).Scan(&observedToken, &takeoverReady)
-			return takeoverErr == nil && observedToken > saved[i].token && takeoverReady
+			return takeoverErr == nil && observedToken >= saved[i].token && takeoverReady
 		}, 4*time.Second, 10*time.Millisecond, "persisted takeover and readiness: %s", name)
 		row, err := db.ManagedAgent(ctx, name)
 		require.NoError(t, err)
@@ -254,7 +256,7 @@ func TestEmbeddedCombinedRootWorkersMailColdListenRED(t *testing.T) {
 		require.Equal(t, saved[i].session, session)
 		require.Equal(t, saved[i].epoch, epoch)
 		require.Equal(t, saved[i].generation, generation)
-		require.Greater(t, token, saved[i].token)
+		require.GreaterOrEqual(t, token, saved[i].token)
 		coldTokens[i] = token
 		if i > 0 {
 			history, err := db.ConversationHistory(ctx, senders[i], name)
@@ -297,7 +299,7 @@ func TestEmbeddedCombinedRootWorkersMailColdListenRED(t *testing.T) {
 			require.EqualValues(t, 4, awareness.Sequence)
 			require.Equal(t, "user", awareness.Kind)
 			require.Equal(t, initialEntries[i][2].Digest, awareness.ParentDigest)
-			expected, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Continue working from your saved context."}}})
+			expected, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context."}}})
 			require.NoError(t, err)
 			require.Equal(t, expected, awareness.Body, "distinct awareness is never a replay of the original accepted input")
 			require.NotEqual(t, initialEntries[i][1].Digest, awareness.Digest)

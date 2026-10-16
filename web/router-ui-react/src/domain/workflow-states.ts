@@ -14,6 +14,24 @@ export interface WorkflowReminderConfig {
   interval_seconds?: number;
 }
 
+export interface WorkflowMonitorConfig {
+  id: string;
+  name: string;
+  description?: string;
+  interval_seconds?: number;
+  cooldown_seconds?: number;
+  max_alerts?: number;
+  trailing_messages_count?: number;
+  question_type: "noul" | "choice" | "score";
+  question_instructions: string;
+  question_criteria?: unknown;
+  question_options?: unknown;
+  condition_operator: string;
+  condition_threshold: string;
+  nudge_template: string;
+  fallback_mode?: string;
+}
+
 export interface WorkflowState {
   id: string;
   workflow_id?: string | null;
@@ -22,6 +40,7 @@ export interface WorkflowState {
   entry_text: string;
   goal?: string | undefined;
   reminders?: WorkflowReminderConfig[];
+  monitors?: WorkflowMonitorConfig[];
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
   allow_exit?: boolean;
@@ -92,6 +111,7 @@ export interface WorkflowStateExport {
   allow_exit: boolean;
   allowed_tools: string[];
   reminders: WorkflowReminderConfig[];
+  monitors?: WorkflowMonitorConfig[];
   ui_pos_x: number;
   ui_pos_y: number;
   transitions: WorkflowTransitionExport[];
@@ -118,6 +138,7 @@ export interface WorkflowStateInput {
   entry_text?: string;
   goal?: string | undefined;
   reminders?: WorkflowReminderConfig[];
+  monitors?: WorkflowMonitorConfig[];
   allowed_tools?: string[];
   transitions?: WorkflowTransitionConfig[];
   allow_exit?: boolean;

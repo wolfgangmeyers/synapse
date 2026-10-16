@@ -22,12 +22,7 @@ func contextThresholdExceeded(model Model, currentTokens int) bool {
 	if model.ContextWindow <= 0 {
 		return false
 	}
-	var threshold int
-	if model.ContextWindow >= 1_000_000 {
-		threshold = model.ContextWindow * 50 / 100
-	} else {
-		threshold = model.ContextWindow * 80 / 100
-	}
+	threshold := model.ContextWindow * DefaultContextResetPercent / 100
 	return currentTokens >= threshold
 }
 
