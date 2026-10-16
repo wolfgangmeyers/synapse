@@ -5797,17 +5797,21 @@ internal fun visibleConnectedPeers(peers: List<PeerStatus>, filter: String): Lis
 }
 
 internal fun normalizedSubagentSummaries(subagents: JSONArray?): List<SubagentSummary> {
-    if (subagents == null) return emptyList()
-    return buildList {
-        for (index in 0 until subagents.length()) {
-            val subagent = subagents.optJSONObject(index) ?: continue
-            val id = subagent.optString("id").trim().take(128)
-            val description = subagent.optString("description").trim().take(512)
-            if (id.isBlank() || description.isBlank()) continue
-            val type = subagent.optString("type").trim().take(64)
-            add(SubagentSummary(id, description, type))
+    if (subagents == null || subagents.length() == 0) return emptyList()
+    val summaries = mutableListOf<SubagentSummary>()
+    for (i in 0 until subagents.length()) {
+        val subagent = subagents.optJSONObject(i) ?: continue
+        val status = subagent.optString("status").trim().lowercase()
+        val isTerminal = status == "completed" || status == "failed" || status == "stopped" || status == "cancelled" || status == "aborted" || status == "timed_out"
+        if (isTerminal) continue
+        val id = subagent.optString("id").trim()
+        val description = subagent.optString("description").trim()
+        val type = subagent.optString("type").trim().ifBlank { "subagent" }
+        if (id.isNotBlank() && description.isNotBlank()) {
+            summaries.add(SubagentSummary(id = id, description = description, type = type))
         }
-    }.take(999)
+    }
+    return summaries
 }
 
 internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerStatus? = null): PeerStatus {
