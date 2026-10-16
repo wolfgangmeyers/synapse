@@ -278,7 +278,6 @@ func (m *Manager) ResumeIdleEmbeddedGoals(ctx context.Context) error {
 	return nil
 }
 
-
 const (
 	managedInitialReplayTranscriptPoll = 25 * time.Millisecond
 	// Stock Pi can emit delayed active after durable assistant persistence, so

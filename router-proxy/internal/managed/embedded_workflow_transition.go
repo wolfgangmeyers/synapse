@@ -163,8 +163,9 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					return agent.AgentToolResult{}, fmt.Errorf("target workflow state %q not found", matchedTargetID)
 				}
 
-				// Cleanup old reminders
+				// Cleanup old reminders and monitors
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
+				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
 
 				// Transition to new state (preserving existing workflow ID and variables)
 				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, &targetState.ID); err != nil {
@@ -194,6 +195,9 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 
 				// Spawn new reminders
 				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState, workflowVars)
+
+				// Spawn new monitors
+				_ = m.SpawnWorkflowStateMonitors(ctx, owner.binding.AgentID, targetState, workflowVars)
 
 				// Record history presentation
 				eventKey := fmt.Sprintf("workflow-transition:%s:%s:%s:%s", owner.binding.AgentID, currentState.ID, targetState.ID, id)
@@ -236,8 +240,9 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					return agent.AgentToolResult{}, fmt.Errorf("workflow exit is not permitted from state %q (locked state; must transition to an exit-eligible state first)", currentState.Name)
 				}
 
-				// Cleanup reminders
+				// Cleanup reminders and monitors
 				_ = m.store.CleanUpManagedAgentWorkflowReminders(ctx, owner.binding.AgentID)
+				_ = m.store.CleanUpManagedAgentWorkflowMonitors(ctx, owner.binding.AgentID)
 
 				// Deactivate state and clear active workflow and variables
 				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, owner.binding.AgentID, nil, nil, nil); err != nil {
@@ -346,5 +351,3 @@ func (m *Manager) SyncEmbeddedWorkflowTools(ctx context.Context, agentID string)
 
 	return nil
 }
-
-

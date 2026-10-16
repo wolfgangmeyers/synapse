@@ -20,34 +20,71 @@ import (
 const ContextResetWakePrompt = "Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."
 const ContextResetWarningReminder = "Context usage threshold warning: You are approaching the context reset boundary. Please use the scratchpad tool to record your current plan, key findings, and immediate next steps now before context reset occurs."
 
-func FormatContextResetWarningReminder(currentTokens, contextWindow int) string {
-	resetBoundaryPct := 80
-	if contextWindow >= 1_000_000 {
-		resetBoundaryPct = 50
+// DefaultContextWarningPercent and DefaultContextResetPercent mirror store defaults.
+const (
+	DefaultContextWarningPercent = 10
+	DefaultContextResetPercent   = 20
+)
+
+// ResolveContextThresholds determines the effective warning and reset percentages for a given model.
+// Priority:
+// 1. Model override by provider/id
+// 2. Model override by id
+// 3. Config global thresholds (if > 0)
+// 4. Default thresholds (10% warning, 20% reset)
+func ResolveContextThresholds(model Model, cfg store.ContextThresholdConfig) (warningPct int, resetPct int) {
+	if cfg.ModelThresholds != nil {
+		if model.Provider != "" && model.ID != "" {
+			fullKey := model.Provider + "/" + model.ID
+			if override, ok := cfg.ModelThresholds[fullKey]; ok {
+				if override.WarningPercent > 0 && override.ResetPercent > override.WarningPercent {
+					return override.WarningPercent, override.ResetPercent
+				}
+			}
+		}
+		if model.ID != "" {
+			if override, ok := cfg.ModelThresholds[model.ID]; ok {
+				if override.WarningPercent > 0 && override.ResetPercent > override.WarningPercent {
+					return override.WarningPercent, override.ResetPercent
+				}
+			}
+		}
 	}
+
+	if cfg.WarningPercent > 0 && cfg.ResetPercent > cfg.WarningPercent {
+		return cfg.WarningPercent, cfg.ResetPercent
+	}
+
+	return DefaultContextWarningPercent, DefaultContextResetPercent
+}
+
+func FormatContextResetWarningReminder(currentTokens, contextWindow, warningPct, resetPct int) string {
 	pct := float64(0)
 	if contextWindow > 0 {
 		pct = float64(currentTokens) / float64(contextWindow) * 100.0
 	}
-	return fmt.Sprintf("Context threshold reached: %d / %d tokens (%.1f%%). Approaching automatic reset boundary at %d%%. Please use the scratchpad tool to record your current plan, key findings, and immediate next steps before reset occurs.",
-		currentTokens, contextWindow, pct, resetBoundaryPct)
+	return fmt.Sprintf("Context usage warning: You have reached %d / %d tokens (%.1f%%), crossing the %d%% warning threshold. Please immediately update your scratchpad with all key findings, progress, and pending steps to remember going forward, then call the context_reset tool to reset your context window before automatic reset occurs at %d%%.",
+		currentTokens, contextWindow, pct, warningPct, resetPct)
 }
 
-func contextWarningThresholdExceeded(model Model, currentTokens int) bool {
-	if model.ContextWindow <= 0 {
+func contextWarningThresholdExceeded(model Model, currentTokens, warningPct int) bool {
+	if model.ContextWindow <= 0 || warningPct <= 0 {
 		return false
 	}
-	var threshold int
-	if model.ContextWindow >= 1_000_000 {
-		threshold = model.ContextWindow * 40 / 100
-	} else {
-		threshold = model.ContextWindow * 70 / 100
-	}
+	threshold := model.ContextWindow * warningPct / 100
 	return currentTokens >= threshold
 }
 
-func ContextWarningThresholdExceeded(model Model, currentTokens int) bool {
-	return contextWarningThresholdExceeded(model, currentTokens)
+func ContextWarningThresholdExceeded(model Model, currentTokens, warningPct int) bool {
+	return contextWarningThresholdExceeded(model, currentTokens, warningPct)
+}
+
+func contextThresholdExceededWithPct(model Model, currentTokens, resetPct int) bool {
+	if model.ContextWindow <= 0 || resetPct <= 0 {
+		return false
+	}
+	threshold := model.ContextWindow * resetPct / 100
+	return currentTokens >= threshold
 }
 
 type managerContextKey struct{}
@@ -311,13 +348,22 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 
 	currentTokens := embeddedProjectedTokens(session.History())
 	managedModel := Model{Provider: model.Provider, ID: model.ID, ContextWindow: model.ContextWindow}
-	if contextThresholdExceeded(managedModel, currentTokens) {
-		log.Printf("[embedded:%s] Context threshold exceeded: %d tokens (window: %d). Triggering auto-reset.",
-			binding.AgentID, currentTokens, model.ContextWindow)
+
+	warningPct := DefaultContextWarningPercent
+	resetPct := DefaultContextResetPercent
+	if m.store != nil {
+		if cfg, err := m.store.GetContextThresholdConfig(ctx); err == nil {
+			warningPct, resetPct = ResolveContextThresholds(managedModel, cfg)
+		}
+	}
+
+	if contextThresholdExceededWithPct(managedModel, currentTokens, resetPct) {
+		log.Printf("[embedded:%s] Context threshold exceeded: %d tokens (window: %d, reset: %d%%). Triggering auto-reset.",
+			binding.AgentID, currentTokens, model.ContextWindow, resetPct)
 		if err := m.ExecuteContextReset(ctx, binding, "threshold_exceeded"); err != nil {
 			log.Printf("[embedded:%s] auto context reset failed: %v", binding.AgentID, err)
 		}
-	} else if contextWarningThresholdExceeded(managedModel, currentTokens) {
+	} else if contextWarningThresholdExceeded(managedModel, currentTokens, warningPct) {
 		lane := m.laneFor(binding.AgentID)
 		if lane.warningEpoch != binding.Epoch {
 			lane.warningEpoch = binding.Epoch
@@ -325,15 +371,15 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 		}
 		if !lane.warningEmitted {
 			lane.warningEmitted = true
-			log.Printf("[embedded:%s] Emitted pre-reset scratchpad reminder (tokens: %d)", binding.AgentID, currentTokens)
-			if err := m.emitContextWarningReminder(ctx, binding, currentTokens, model.ContextWindow); err != nil {
+			log.Printf("[embedded:%s] Emitted pre-reset scratchpad reminder (tokens: %d, warning: %d%%, reset: %d%%)", binding.AgentID, currentTokens, warningPct, resetPct)
+			if err := m.emitContextWarningReminder(ctx, binding, currentTokens, model.ContextWindow, warningPct, resetPct); err != nil {
 				log.Printf("[embedded:%s] failed to emit pre-reset scratchpad reminder: %v", binding.AgentID, err)
 			}
 		}
 	}
 }
 
-func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.EmbeddedBinding, currentTokens, contextWindow int) error {
+func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.EmbeddedBinding, currentTokens, contextWindow, warningPct, resetPct int) error {
 	if m.store == nil {
 		return errors.New("store is nil")
 	}
@@ -344,7 +390,7 @@ func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.
 	}
 	source := protocol.MessageSource{Kind: "reminder"}
 	subject := "Context usage threshold warning"
-	body := FormatContextResetWarningReminder(currentTokens, contextWindow)
+	body := FormatContextResetWarningReminder(currentTokens, contextWindow, warningPct, resetPct)
 	envelope := protocol.Envelope{
 		ID:        msgID,
 		From:      "system",

@@ -129,6 +129,113 @@ func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T)
 	require.Contains(t, string(output), "MECHA_ROUTER_MANAGED must be true or false")
 }
 
+func TestLauncherRestartBehavior(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+
+	setupLauncherEnv := func(t *testing.T, makeScript string) (string, []string) {
+		t.Helper()
+		tempDir := t.TempDir()
+		fakeBin := filepath.Join(tempDir, "bin")
+		require.NoError(t, os.MkdirAll(fakeBin, 0o700))
+		makePath := filepath.Join(fakeBin, "make")
+		require.NoError(t, os.WriteFile(makePath, []byte(makeScript), 0o700))
+
+		managedHome := filepath.Join(tempDir, "managed-home")
+		env := make([]string, 0, len(os.Environ())+5)
+		for _, v := range os.Environ() {
+			if !strings.HasPrefix(v, "MECHA_ROUTER_") && !strings.HasPrefix(v, "PATH=") {
+				env = append(env, v)
+			}
+		}
+		env = append(env,
+			"PATH="+fakeBin+":"+os.Getenv("PATH"),
+			"MECHA_ROUTER_MANAGED=false",
+			"MECHA_ROUTER_MANAGED_HOME="+managedHome,
+			"MECHA_ROUTER_MANAGED_SESSION_ROOT="+filepath.Join(managedHome, "sessions"),
+		)
+		return tempDir, env
+	}
+
+	t.Run("exits cleanly on code 0 without restart", func(t *testing.T) {
+		countFile := filepath.Join(t.TempDir(), "runs")
+		makeScript := fmt.Sprintf("#!/bin/sh\necho run >> %q\nexit 0\n", countFile)
+		_, env := setupLauncherEnv(t, makeScript)
+
+		cmd := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
+		cmd.Env = env
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(output))
+
+		runs, err := os.ReadFile(countFile)
+		require.NoError(t, err)
+		require.Equal(t, "run\n", string(runs))
+	})
+
+	t.Run("exits cleanly on code 130 without restart", func(t *testing.T) {
+		countFile := filepath.Join(t.TempDir(), "runs")
+		makeScript := fmt.Sprintf("#!/bin/sh\necho run >> %q\nexit 130\n", countFile)
+		_, env := setupLauncherEnv(t, makeScript)
+
+		cmd := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
+		cmd.Env = env
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(output))
+
+		runs, err := os.ReadFile(countFile)
+		require.NoError(t, err)
+		require.Equal(t, "run\n", string(runs))
+	})
+
+	t.Run("exits cleanly on code 143 without restart", func(t *testing.T) {
+		countFile := filepath.Join(t.TempDir(), "runs")
+		makeScript := fmt.Sprintf("#!/bin/sh\necho run >> %q\nexit 143\n", countFile)
+		_, env := setupLauncherEnv(t, makeScript)
+
+		cmd := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
+		cmd.Env = env
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(output))
+
+		runs, err := os.ReadFile(countFile)
+		require.NoError(t, err)
+		require.Equal(t, "run\n", string(runs))
+	})
+
+	t.Run("restarts on abnormal exit codes like 1 and 75", func(t *testing.T) {
+		countFile := filepath.Join(t.TempDir(), "runs")
+		// On run 1, exit 1; on run 2, exit 75; on run 3, exit 0 so the test terminates
+		makeScript := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]q ]; then
+  count=$(wc -l < %[1]q)
+fi
+echo run >> %[1]q
+if [ "$count" -eq 0 ]; then
+  exit 1
+elif [ "$count" -eq 1 ]; then
+  exit 75
+else
+  exit 0
+fi
+`, countFile)
+		_, env := setupLauncherEnv(t, makeScript)
+
+		cmd := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
+		cmd.Env = env
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(output))
+
+		outStr := string(output)
+		require.Contains(t, outStr, "run_router.sh: router exited with code 1; restarting in 1s...")
+		require.Contains(t, outStr, "run_router.sh: router exited with code 75; restarting in 1s...")
+
+		runs, err := os.ReadFile(countFile)
+		require.NoError(t, err)
+		require.Equal(t, "run\nrun\nrun\n", string(runs))
+	})
+}
+
 func TestMakefileForwardsLaunchRecipeMismatchToRouterCommand(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)

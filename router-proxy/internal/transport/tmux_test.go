@@ -252,7 +252,14 @@ func TestTmuxRoutesRejectUnavailableAndInvalidNames(t *testing.T) {
 
 func newTmuxServer(t *testing.T, tmux transport.TmuxAdapter) *httptest.Server {
 	t.Helper()
-	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.sqlite"), store.Options{})
+	dbPath := filepath.Join(t.TempDir(), "router.sqlite")
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(context.Background(), dbPath, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	router, err := transport.New(transport.Options{Store: durable, Tmux: tmux})

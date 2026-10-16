@@ -247,16 +247,17 @@ func readyFailingDirectManager(t *testing.T) (*Manager, *store.Store, string, *f
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
-	durable, err := store.Open(ctx, path, store.Options{})
+	durable, err := openTestStore(t, ctx, path, store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
+	sessionRoot := filepath.Join(root, "sessions")
 	process := &launchProcess{identity: ProcessIdentity{PID: 993, StartMarker: "direct-start", Incarnation: "direct-incarnation"}, stopped: make(chan struct{})}
 	rpc := &failingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, directPrompted: make(chan struct{})}
 	manager, err := NewManager(ManagerOptions{
-		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		Store: durable, Config: Config{SessionRoot: sessionRoot, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
 		ProcessFactory: failingDirectFactory{process: process, rpc: rpc}, RPCFactory: failingDirectRPCFactory{rpc: rpc},
 		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
@@ -278,16 +279,17 @@ func readyFailingDirectManager(t *testing.T) (*Manager, *store.Store, string, *f
 
 func TestManagedDirectPromptShowsWorkingUntilSettled(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
+	sessionRoot := filepath.Join(root, "sessions")
 	process := &launchProcess{identity: ProcessIdentity{PID: 995, StartMarker: "holding-start", Incarnation: "holding-incarnation"}, stopped: make(chan struct{})}
 	rpc := &holdingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, prompted: make(chan struct{}), events: make(chan DirectMailboxEvent, 3)}
 	manager, err := NewManager(ManagerOptions{
-		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		Store: durable, Config: Config{SessionRoot: sessionRoot, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
 		ProcessFactory: holdingDirectFactory{process: process, rpc: rpc}, RPCFactory: holdingDirectRPCFactory{rpc: rpc},
 		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
@@ -361,15 +363,16 @@ func TestManagedDirectPromptShowsWorkingUntilSettled(t *testing.T) {
 func TestManagedDirectReceiptStreamClosureInterruptsPersistedFinalOnlyAfterDeliveryAck(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "router.db")
-	durable, err := store.Open(ctx, databasePath, store.Options{})
+	durable, err := openTestStore(t, ctx, databasePath, store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = durable.Close() })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
+	sessionRoot := filepath.Join(root, "sessions")
 	process := &launchProcess{identity: ProcessIdentity{PID: 996, StartMarker: "closing-start", Incarnation: "closing-incarnation"}, stopped: make(chan struct{})}
 	rpc := &holdingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, prompted: make(chan struct{}), events: make(chan DirectMailboxEvent, 3)}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: holdingDirectFactory{process: process, rpc: rpc}, RPCFactory: holdingDirectRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: sessionRoot, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: holdingDirectFactory{process: process, rpc: rpc}, RPCFactory: holdingDirectRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "closing-agent", Cwd: root, RequestID: "closing-launch"})
@@ -440,16 +443,17 @@ func TestManagedDirectReceiptStreamClosureInterruptsPersistedFinalOnlyAfterDeliv
 
 func TestManagedDirectReplyPublishesAfterAppendAndBeforeNextOffer(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
+	sessionRoot := filepath.Join(root, "sessions")
 	process := &launchProcess{identity: ProcessIdentity{PID: 994, StartMarker: "reply-start", Incarnation: "reply-incarnation"}, stopped: make(chan struct{})}
 	rpc := &replyingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}}
 	manager, err := NewManager(ManagerOptions{
-		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		Store: durable, Config: Config{SessionRoot: sessionRoot, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
 		ProcessFactory: replyingDirectFactory{process: process, rpc: rpc}, RPCFactory: replyingDirectRPCFactory{rpc: rpc},
 		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
@@ -617,7 +621,7 @@ func TestOfferDirectAndCloseShareTaskAdmission(t *testing.T) {
 
 func TestManagedDirectRecoveryWakeup(t *testing.T) {
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -694,14 +698,15 @@ func TestManagedDirectOfferUsesPrivateRPCCapability(t *testing.T) {
 func TestManagedProcessLimitRejectsThirtyThirdConcurrentStart(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	sessionRoot := filepath.Join(root, "sessions")
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	defer durable.Close()
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	active := expectedManagedActiveTools(manifest)
 	factory := &admissionFactory{started: make(chan struct{}), release: make(chan struct{}), active: active}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: admissionRPCFactory{active: active}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: sessionRoot, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: admissionRPCFactory{active: active}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	for index := 0; index < 32; index++ {
 		_, err = manager.Launch(ctx, LaunchRequest{Name: fmt.Sprintf("agent-%02d", index), Cwd: root, RequestID: fmt.Sprintf("request-%02d", index)})
@@ -937,7 +942,7 @@ func (f restartPreparationRPCFactory) Open(context.Context, Process) (RPC, error
 func readyRestartManager(t *testing.T, preparationError error, models ...Model) (*Manager, *store.Store, *restartPreparationRPC) {
 	t.Helper()
 	ctx := context.Background()
-	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	durable, err := openTestStore(t, ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))

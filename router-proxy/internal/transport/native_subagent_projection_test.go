@@ -17,7 +17,13 @@ func setupTestStoreWithParent(t *testing.T, parentID string) (*store.Store, stri
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "test.db")
-	s, err := store.Open(ctx, path, store.Options{})
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, path); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	s, err := store.Open(ctx, path, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 
@@ -83,12 +89,12 @@ func TestNativeSubagentExcludedFromTopLevelProjection(t *testing.T) {
 	require.NoError(t, err)
 
 	child := store.ManagedSubagentRecord{
-		AgentID:        "native-child-hidden",
-		ParentAgentID:  parent.AgentID,
-		Description:    "explore directory",
-		SubagentType:   "general-purpose",
-		Status:         "queued",
-		MaxTurns:       5,
+		AgentID:       "native-child-hidden",
+		ParentAgentID: parent.AgentID,
+		Description:   "explore directory",
+		SubagentType:  "general-purpose",
+		Status:        "queued",
+		MaxTurns:      5,
 	}
 	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
 
@@ -125,22 +131,22 @@ func TestNativeSubagentBadgeCountAndDisclosureQueuedAndRunning(t *testing.T) {
 	require.NoError(t, err)
 
 	child1 := store.ManagedSubagentRecord{
-		AgentID:        "native-child-q",
-		ParentAgentID:  parent.AgentID,
-		Description:    "queued task description",
-		SubagentType:   "general-purpose",
-		Status:         "queued",
-		MaxTurns:       3,
+		AgentID:       "native-child-q",
+		ParentAgentID: parent.AgentID,
+		Description:   "queued task description",
+		SubagentType:  "general-purpose",
+		Status:        "queued",
+		MaxTurns:      3,
 	}
 	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child1))
 
 	child2 := store.ManagedSubagentRecord{
-		AgentID:        "native-child-r",
-		ParentAgentID:  parent.AgentID,
-		Description:    "running task description",
-		SubagentType:   "general-purpose",
-		Status:         "running",
-		MaxTurns:       5,
+		AgentID:       "native-child-r",
+		ParentAgentID: parent.AgentID,
+		Description:   "running task description",
+		SubagentType:  "general-purpose",
+		Status:        "running",
+		MaxTurns:      5,
 	}
 	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child2))
 
@@ -181,12 +187,12 @@ func TestNativeSubagentTerminalHidesBadge(t *testing.T) {
 	require.NoError(t, err)
 
 	child := store.ManagedSubagentRecord{
-		AgentID:        "native-child-term",
-		ParentAgentID:  parent.AgentID,
-		Description:    "short task",
-		SubagentType:   "general-purpose",
-		Status:         "running",
-		MaxTurns:       2,
+		AgentID:       "native-child-term",
+		ParentAgentID: parent.AgentID,
+		Description:   "short task",
+		SubagentType:  "general-purpose",
+		Status:        "running",
+		MaxTurns:      2,
 	}
 	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
 
@@ -217,12 +223,12 @@ func TestNativeSubagentRemainsVisibleAcrossParentEpoch(t *testing.T) {
 	require.NoError(t, err)
 
 	child := store.ManagedSubagentRecord{
-		AgentID:        "native-child-epoch1",
-		ParentAgentID:  parent.AgentID,
-		Description:    "child from epoch 1",
-		SubagentType:   "general-purpose",
-		Status:         "running",
-		MaxTurns:       5,
+		AgentID:       "native-child-epoch1",
+		ParentAgentID: parent.AgentID,
+		Description:   "child from epoch 1",
+		SubagentType:  "general-purpose",
+		Status:        "running",
+		MaxTurns:      5,
 	}
 	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
 
@@ -321,12 +327,12 @@ func TestExistingRPCChildrenRemainWithNativeSubagents(t *testing.T) {
 
 	// 2. Add native subagent
 	nativeChild := store.ManagedSubagentRecord{
-		AgentID:        "native-sub-1",
-		ParentAgentID:  parent.AgentID,
-		Description:    "native child work",
-		SubagentType:   "general-purpose",
-		Status:         "running",
-		MaxTurns:       3,
+		AgentID:       "native-sub-1",
+		ParentAgentID: parent.AgentID,
+		Description:   "native child work",
+		SubagentType:  "general-purpose",
+		Status:        "running",
+		MaxTurns:      3,
 	}
 	require.NoError(t, s.CreateManagedSubagent(ctx, parent, nativeChild))
 

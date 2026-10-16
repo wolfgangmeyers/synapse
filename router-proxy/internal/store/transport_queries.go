@@ -284,7 +284,7 @@ func (s *Store) CreatePromptTemplate(ctx context.Context, request PromptTemplate
 		}
 
 		id := ""
-		if request.ID != nil {
+		if request.ID != nil && *request.ID != "" {
 			id = *request.ID
 			var existingID string
 			err := s.db.QueryRowContext(ctx, "SELECT id FROM prompt_templates WHERE id = ?", id).Scan(&existingID)
@@ -295,13 +295,23 @@ func (s *Store) CreatePromptTemplate(ctx context.Context, request PromptTemplate
 				return err
 			}
 		} else {
-			var err error
-			id, err = s.ids.Next()
-			if err != nil {
-				return err
+			baseSlug := SlugifyPromptTemplate(request.Name)
+			if baseSlug == "" {
+				return &PromptTemplateValidationError{}
 			}
-			if !generatedPromptTemplateIDPattern.MatchString(id) {
-				return fmt.Errorf("generated prompt template ID is invalid")
+			id = baseSlug
+			suffix := 2
+			for {
+				var existingID string
+				err := s.db.QueryRowContext(ctx, "SELECT id FROM prompt_templates WHERE id = ?", id).Scan(&existingID)
+				if errors.Is(err, sql.ErrNoRows) {
+					break
+				}
+				if err != nil {
+					return err
+				}
+				id = fmt.Sprintf("%s-%d", baseSlug, suffix)
+				suffix++
 			}
 		}
 
@@ -411,6 +421,12 @@ func validatePromptTemplateRequest(request PromptTemplateRequest) error {
 		return &PromptTemplateValidationError{}
 	}
 	if request.ID != nil && !IsPortablePromptTemplateID(*request.ID) {
+		return &PromptTemplateValidationError{}
+	}
+	if request.ID != nil && *request.ID != "" && !IsValidPromptTemplateSlug(*request.ID) && !IsPortablePromptTemplateID(*request.ID) {
+		return &PromptTemplateValidationError{}
+	}
+	if (request.ID == nil || *request.ID == "") && SlugifyPromptTemplate(request.Name) == "" {
 		return &PromptTemplateValidationError{}
 	}
 	if request.UpdatedAt != nil && !isCanonicalPromptTemplateTimestamp(*request.UpdatedAt) {

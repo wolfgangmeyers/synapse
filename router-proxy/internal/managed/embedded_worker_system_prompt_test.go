@@ -119,14 +119,14 @@ func TestEmbeddedWorkerSystemPromptAndGenesisInSession(t *testing.T) {
 
 	var processes, rpcs atomic.Int32
 	manager, err := NewManager(ManagerOptions{
-		Store:                        db,
-		Manifest:                     manifest,
-		Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-		CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-		ProcessFactory:               &rootRedProcessFactory{calls: &processes},
-		RPCFactory:                   rootRedRPCFactory{calls: &rpcs},
-		EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
-		CodexCredentialStore:         testfixture.CodexAdmission(t),
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		ProcessFactory:        &rootRedProcessFactory{calls: &processes},
+		RPCFactory:            rootRedRPCFactory{calls: &rpcs},
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
 	})
 	require.NoError(t, err)
 

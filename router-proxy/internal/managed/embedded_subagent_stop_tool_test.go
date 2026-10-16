@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sky-valley/pi/ai/providers"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
+	"github.com/sky-valley/pi/ai/providers"
 	"github.com/stretchr/testify/require"
 )
 

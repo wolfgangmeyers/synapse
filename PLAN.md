@@ -1,226 +1,271 @@
-# Implementation Plan: Subagent Visibility and Enriched Completion Notifications
+# PLAN: Embedded Worker Context Thresholds & Compaction Hint Removal
 
-## 1. Overview & Context
+## 1. Overview & Architecture Mapping
 
-This plan implements the features specified in `SPEC.md`:
-1. **`list_subagents` embedded tool**: A new embedded tool registered on parent worker sessions in `router-proxy` allowing workers to inspect running, queued, and historical subagents under their binding fence.
-2. **Enriched completion wake notification**: When any subagent terminates, `DeliverSubagentParentWake` inspects whether active sibling subagents (queued or running) remain under the parent binding. If siblings remain, it appends an explicit summary block `Active subagents still running (N):` to the parent wake prompt, giving the parent full awareness of concurrent tasks without guessing or polling.
-3. **Child subagent containment & isolation**: Subagents themselves must not receive `list_subagents` in their toolset (alongside existing exclusion of `subagent`, `get_subagent_result`, `steer_subagent`, etc.).
-4. **Integration regression tests**: Full within-service integration tests proving parent execution, child tool exclusion, wake formatting with siblings and without siblings, and durability across sessions/epochs.
+This plan implements Phase 2 dev-loop engineering for embedded worker context thresholds and compaction hint cleanup as specified in `SPEC.md`.
 
----
-
-## 2. Delegation & Delegate Seam Analysis (`pi-subagents` vs `router-proxy`)
-
-We checked the repository and subagent integration seams across `router-proxy`, `pi-extensions/mecha-rpc`, and the `pi-packages` fork:
-- In the router-managed architecture, the embedded session engine in Go (`router-proxy/internal/managed/`) is the authoritative host that runs embedded agents and manages background subagents via `embedded_subagent_runner.go`, `embedded_subagent_public_tools.go`, and `embedded_subagent_wake.go`.
-- The public tools for embedded agents (`subagent`, `get_subagent_result`, `steer_subagent`) are defined and registered directly in Go via `Manager.EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool` in `router-proxy/internal/managed/embedded_subagent_public_tools.go`.
-- Subagent completion wake notifications are dispatched and formatted directly in Go via `DeliverSubagentParentWake` in `embedded_subagent_wake.go` and `FormatSubagentWakePrompt` in `embedded_subagent_results.go`.
-- For `pi-subagents` / `mecha-rpc`: In router-managed RPC mode, `fixedSubagentsTools` in `supervisor.go` specifies the list of fixed subagent tools. We will add `"list_subagents"` to `fixedSubagentsTools` in `supervisor.go` (and `store/workflow_tools.go` in `CanonicalWorkflowTools`) so manifest validation, tool parity, and workflow state tool filtering include it seamlessly. The core logic executes entirely within `router-proxy`. No changes to `pi-packages` are required because `pi-subagents` delegates subagent lifecycle management in embedded mode to the router-proxy host tools.
-
----
-
-## 3. Detailed Component Implementation
-
-### 3.1 Component 1: `list_subagents` Tool (`router-proxy/internal/managed/`)
-
-#### Schema & Parameters
-In `router-proxy/internal/managed/embedded_subagent_public_tools.go`:
-- Define `embeddedListSubagentsSchema() *ai.Schema`:
-  - `status` (optional string): `"active"` (default, filters for `running` and `queued`), `"all"`, `"running"`, `"queued"`, `"completed"`, `"failed"`, `"stopped"`, `"timed_out"`.
-  - `limit` (optional integer): Default 50, minimum 1, maximum 100.
-  - Closed schema: `AdditionalAllowed = false`.
-- Tool name: `"list_subagents"`.
-- Description: `"List background subagents launched by this agent, including their IDs, descriptions, statuses, and runtimes."`
-
-#### Querying Store & In-Memory State
-In `m.embeddedListSubagentsTool(parent store.EmbeddedBinding) agent.AgentTool`:
-- Check context cancellation: `if err := ctx.Err(); err != nil { return agent.AgentToolResult{}, err }`.
-- Parse arguments:
-  - `statusRaw, _ := args["status"].(string)` -> default `"active"`. Normalized to lower case.
-  - `limitRaw` -> default 50. Validate integer bounds 1 to 100 (clamp or return error if invalid type/range).
-- Retrieve all subagent records for the parent binding using `m.store.ManagedSubagents(ctx, parent)`.
-  - The read fence in `ManagedSubagents` verifies the durable parent identity and epoch boundaries.
-  - In addition, combine/refresh with live in-memory metrics from `m.subagentsActive`:
-    - Acquire `m.subagentsMu.Lock()`.
-    - For subagents currently in `m.subagentsActive`, read live `startTime`, `turnCount`, `toolUseCount`, `totalTokens`, and current status to present up-to-the-millisecond duration and turn counts for active agents.
-    - Release `m.subagentsMu.Unlock()`.
-- Filter records according to `status`:
-  - `"active"`: status is `"running"` or `"queued"`.
-  - `"all"`: all records.
-  - Specific status: case-insensitive match on `record.Status`.
-- Sort by `created_at DESC` (or maintain creation order).
-- Enforce `limit`.
-
-#### Formatting Output
-Format structured JSON response:
-```json
-{
-  "summary": {
-    "total_matching": 2,
-    "total_active": 2,
-    "running_count": 1,
-    "queued_count": 1
-  },
-  "subagents": [
-    {
-      "agent_id": "subagent-parent-123",
-      "subagent_type": "general-purpose",
-      "description": "run unit tests",
-      "status": "running",
-      "started_at": "2026-06-02T10:00:00Z",
-      "elapsed_seconds": 42.5,
-      "turn_count": 3,
-      "tool_uses": 5
-    }
-  ]
-}
+### Component Architecture & Interactions
 ```
-Return as `ai.TextContent` in `agent.AgentToolResult`.
-
-#### Registration in Public Tools & Child Exclusion
-- In `router-proxy/internal/managed/embedded_subagent_public_tools.go`:
-  Update `EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool`:
-  ```go
-  func (m *Manager) EmbeddedSubagentPublicTools(parent store.EmbeddedBinding) []agent.AgentTool {
-      return []agent.AgentTool{
-          m.embeddedSubagentTool(parent),
-          m.embeddedGetSubagentResultTool(parent),
-          m.embeddedSteerSubagentTool(parent),
-          m.embeddedListSubagentsTool(parent),
-      }
-  }
-  ```
-- Child sessions construct their toolset in `NewEmbeddedSubagentTools(cwd)` (`embedded_subagent_tools.go`). It only registers `read`, `edit`, `write`, `bash`. Neither `subagent`, `get_subagent_result`, `steer_subagent`, nor `list_subagents` are registered in child sessions.
-- In `router-proxy/internal/managed/supervisor.go`:
-  Add `"list_subagents"` to `fixedSubagentsTools`:
-  ```go
-  var fixedSubagentsTools = []string{"subagent", "get_subagent_result", "steer_subagent", "list_subagents"}
-  ```
-- In `router-proxy/internal/store/workflow_tools.go`:
-  Add `list_subagents` definition to `CanonicalWorkflowTools`.
+┌─────────────────────────────────────────────────────────────┐
+│ Web UI (React)                                              │
+│ - ContextThresholdDialog.tsx (DialogShell, round icon btns) │
+│ - Sidebar menu: "Context Thresholds"                        │
+│ - ConversationHeader: Clickable context bar / controls      │
+│ - http-client.ts: contextThresholds() & save...             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ HTTP GET/PUT /v1/settings/context-thresholds
+┌──────────────────────────────▼──────────────────────────────┐
+│ HTTP Transport Router                                       │
+│ - internal/transport/context_threshold_http.go              │
+│ - Input validation (0 < warning < reset <= 100)             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│ Store & SQLite Migration                                    │
+│ - migrations/103_context_threshold_settings.sql             │
+│ - managed_settings columns:                                 │
+│     context_warning_percent (default 10)                    │
+│     context_reset_percent (default 20)                      │
+│     context_model_overrides (JSON, default '{}')            │
+│ - internal/store/managed_context_thresholds.go              │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Cached / Atomic Read
+┌──────────────────────────────▼──────────────────────────────┐
+│ Managed Execution Engine                                    │
+│ - embedded_context_reset.go (dynamic threshold resolution)  │
+│ - embedded_compaction_tool.go -> context status tool        │
+│ - In-band reminder: 10% warning prompt to scratchpad        │
+│ - Fallback auto-reset: 20% hard boundary                    │
+│ - Compaction string cleanup in mecha_context & session      │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-### 3.2 Component 2: Enriched Completion Notification (`embedded_subagent_wake.go` & `embedded_subagent_results.go`)
+## 2. Requirement-to-Task & File Mapping
 
-#### Querying Active Siblings in `DeliverSubagentParentWake`
-In `router-proxy/internal/managed/embedded_subagent_wake.go`:
-- Before building the mailbox envelope in `deliverSubagentMailboxNotificationWithContext(ctx context.Context, parent store.EmbeddedBinding, record store.ManagedSubagentRecord)`:
-  - Query all subagents for the parent: `allChildren, err := m.store.ManagedSubagents(ctx, parent)`.
-  - Filter for active siblings:
+| SPEC Requirement | Module / Component | Files to Change / Create | Exact Deliverable |
+| :--- | :--- | :--- | :--- |
+| **REQ-1**: Schema Migration | Store / SQLite | `router-proxy/internal/store/migrations/103_context_threshold_settings.sql` | Add `context_warning_percent`, `context_reset_percent`, `context_model_overrides` to `managed_settings`. |
+| **REQ-2**: Store Interface & Persistence | Store | `router-proxy/internal/store/managed_context_thresholds.go`<br>`router-proxy/internal/store/managed_context_thresholds_test.go` | `ContextThresholdConfig`, `ModelThresholdOverride`, `GetContextThresholdConfig`, `SetContextThresholdConfig`. |
+| **REQ-3**: Dynamic Threshold Resolution | Managed Engine | `router-proxy/internal/managed/embedded_context_reset.go`<br>`router-proxy/internal/managed/models.go` | `ResolveContextThresholds(model Model, cfg ContextThresholdConfig)`, evaluate per-model override matching exact ID or Provider/ID, fallback to global (10/20). |
+| **REQ-4**: In-band Warning & Auto-Reset | Managed Engine | `router-proxy/internal/managed/embedded_context_reset.go` | Update `checkContextResetAfterTurn` to evaluate resolved thresholds; format reminder with scratchpad instructions and active reset % boundary; enforce single-epoch reminder delivery. |
+| **REQ-5**: Compaction Hint Removal | Managed Tools / Prompts | `router-proxy/internal/managed/embedded_compaction_tool.go`<br>`router-proxy/internal/managed/embedded_session.go`<br>`router-proxy/internal/managed/root_control_manager.go` | Remove legacy "compaction is deprecated" and "compaction" from `mecha_context` guidance, tool descriptions, policy denial messages, and unsupported action responses. |
+| **REQ-6**: REST API Endpoints | Transport | `router-proxy/internal/transport/context_threshold_http.go`<br>`router-proxy/internal/transport/context_threshold_http_test.go`<br>`router-proxy/internal/transport/http.go`<br>`router-proxy/internal/transport/managed_http.go` | Implement `GET /v1/settings/context-thresholds` and `PUT /v1/settings/context-thresholds` with payload validation ($1 \le \text{warning} < \text{reset} \le 100$). |
+| **REQ-7**: React Web UI Dialog | Web UI | `web/router-ui-react/src/components/ContextThresholdDialog.tsx`<br>`web/router-ui-react/src/transport/http-client.ts`<br>`web/router-ui-react/src/components/Sidebar.tsx`<br>`web/router-ui-react/src/components/ConversationHeader.tsx`<br>`web/router-ui-react/src/App.tsx`<br>`web/router-ui-react/src/app.css` | `ContextThresholdDialog` with `DialogShell`, global warning/reset inputs, per-model overrides table (add/edit/delete), model dropdown from `/v1/models`, circular icon buttons, click trigger on context bar and sidebar menu. |
+| **REQ-8**: Behavioral Functional Tests | Tests | `router-proxy/internal/managed/embedded_context_reset_test.go`<br>`router-proxy/internal/managed/embedded_behavioral_lifecycle_test.go` | Mock LLM integration test: warning at 10%, auto-reset at 20%, per-model override precedence, scratchpad preservation, zero compaction strings. |
+| **REQ-9**: Web UI Component Tests | UI Tests | `web/router-ui-react/tests/component/context-threshold-dialog.test.tsx` | Vitest component tests: modal open/render, validation error handling, override addition/deletion, successful save. |
+
+---
+
+## 3. Detailed Implementation Steps
+
+### Task 1: Database Migration
+- **File**: `router-proxy/internal/store/migrations/103_context_threshold_settings.sql`
+- **Schema Changes**:
+  ```sql
+  -- Add context threshold configuration columns to managed_settings
+  ALTER TABLE managed_settings ADD COLUMN context_warning_percent INTEGER NOT NULL DEFAULT 10;
+  ALTER TABLE managed_settings ADD COLUMN context_reset_percent INTEGER NOT NULL DEFAULT 20;
+  ALTER TABLE managed_settings ADD COLUMN context_model_overrides TEXT NOT NULL DEFAULT '{}';
+  ```
+- **Validation**: Ensure migration executes smoothly against existing SQLite database instances in `store.Open()`.
+
+### Task 2: Store Interface and SQLite Methods
+- **File**: `router-proxy/internal/store/managed_context_thresholds.go`
+- **Data Models**:
+  ```go
+  type ModelThresholdOverride struct {
+      WarningPercent int `json:"warning_percent"`
+      ResetPercent   int `json:"reset_percent"`
+  }
+
+  type ContextThresholdConfig struct {
+      Global         ModelThresholdOverride            `json:"global"`
+      ModelOverrides map[string]ModelThresholdOverride `json:"model_overrides,omitempty"`
+  }
+  ```
+- **Default Constants**:
+  - `DefaultContextWarningPercent = 10`
+  - `DefaultContextResetPercent = 20`
+- **Functions**:
+  - `GetContextThresholdConfig(ctx context.Context) (ContextThresholdConfig, error)`:
+    - Reads from `managed_settings`.
+    - Handles defaults if columns are NULL or table is empty.
+    - Unmarshals `context_model_overrides` JSON into map.
+  - `SetContextThresholdConfig(ctx context.Context, cfg ContextThresholdConfig) error`:
+    - Validates configuration boundaries ($1 \le \text{warning} < \text{reset} \le 100$).
+    - Serializes overrides JSON.
+    - Executes `UPDATE managed_settings SET context_warning_percent=?, context_reset_percent=?, context_model_overrides=?, updated_at=? WHERE singleton_id=1`.
+- **Unit Test**: `router-proxy/internal/store/managed_context_thresholds_test.go` verifying read, write, update, and persistence across cold re-opens.
+
+### Task 3: Compaction Mentions Cleanup
+- **File 1**: `router-proxy/internal/managed/embedded_compaction_tool.go` (and consider renaming to `embedded_context_tool.go`):
+  - Description: `"Read this session's context usage, threshold warnings, and context reset status."`
+  - Action error: `"unsupported mecha_context action: only action=status is supported. Context resets are performed via context_reset."`
+  - Guidance string:
     ```go
-    var activeSiblings []store.ManagedSubagentRecord
-    if err == nil {
-        for _, child := range allChildren {
-            if child == nil {
-                continue
-            }
-            // Strictly exclude the subagent that just completed
-            if child.AgentID == record.AgentID {
-                continue
-            }
-            if child.Status == "running" || child.Status == "queued" {
-                activeSiblings = append(activeSiblings, *child)
-            }
+    Guidance: "Save key findings, decisions, and immediate plans to scratchpad before reaching the reset threshold. At the reset threshold, context history is automatically reset to fresh headroom while preserving scratchpad memory and recent conversation. You may also invoke context_reset directly at any time.",
+    ```
+  - Threshold fields in `ManagedContextStatus`:
+    - Populate `WarningThresholdPercent` and `ResetThresholdPercent` dynamically from resolved model thresholds rather than hardcoded 40/50 or 70/80.
+- **File 2**: `router-proxy/internal/managed/embedded_session.go`:
+  - Update policy denial on `mecha_context`:
+    `"mecha_context only supports action=status; context resets are performed via context_reset"`
+- **File 3**: `router-proxy/internal/managed/root_control_manager.go`:
+  - Retain `COMPACTION_DEPRECATED` for external root-control backward compatibility if needed, or update message to: `"Context compaction is retired; context reset and scratchpad are used instead"`.
+
+### Task 4: Dynamic Threshold Resolution in Managed Engine
+- **File**: `router-proxy/internal/managed/embedded_context_reset.go`
+- **Functions to add/modify**:
+  - `ResolveContextThresholds(model Model, cfg store.ContextThresholdConfig) (warningPct, resetPct int)`:
+    - Checks `cfg.ModelOverrides[model.ID]` and `cfg.ModelOverrides[model.Provider+"/"+model.ID]`.
+    - If found, returns override `WarningPercent` and `ResetPercent`.
+    - Else returns `cfg.Global.WarningPercent` and `cfg.Global.ResetPercent`.
+    - If `cfg.Global` values are 0, fall back to defaults (10 and 20).
+  - Update `FormatContextResetWarningReminder(currentTokens, contextWindow, resetPct int) string`:
+    ```go
+    func FormatContextResetWarningReminder(currentTokens, contextWindow, resetPct int) string {
+        pct := float64(0)
+        if contextWindow > 0 {
+            pct = float64(currentTokens) / float64(contextWindow) * 100.0
         }
+        return fmt.Sprintf("Context threshold reached: %d / %d tokens (%.1f%%). Approaching automatic reset boundary at %d%%. Please use the scratchpad tool to record your current plan, key findings, and immediate next steps before reset occurs, or call context_reset now.",
+            currentTokens, contextWindow, pct, resetPct)
     }
     ```
-  - Pass `activeSiblings` into the formatter:
-    `body := FormatSubagentWakePromptWithActiveSiblings(record, activeSiblings)`
+  - In `checkContextResetAfterTurn`:
+    - Load context threshold config: `m.store.GetContextThresholdConfig(ctx)`.
+    - Resolve `warningPct, resetPct := ResolveContextThresholds(managedModel, cfg)`.
+    - Threshold limits:
+      - `resetThresholdTokens := model.ContextWindow * resetPct / 100`
+      - `warningThresholdTokens := model.ContextWindow * warningPct / 100`
+    - Condition 1: `currentTokens >= resetThresholdTokens`:
+      - Trigger `m.ExecuteContextReset(ctx, binding, "threshold_exceeded")`.
+    - Condition 2: `currentTokens >= warningThresholdTokens`:
+      - If `!lane.warningEmitted` for `binding.Epoch`:
+        - Set `lane.warningEmitted = true` and `lane.warningEpoch = binding.Epoch`.
+        - Emit warning reminder via `emitContextWarningReminder(ctx, binding, currentTokens, model.ContextWindow, resetPct)`.
 
-#### Prompt Formatter Enhancement
-In `router-proxy/internal/managed/embedded_subagent_results.go`:
-- Maintain `FormatSubagentWakePrompt(record store.ManagedSubagentRecord)` for backwards compatibility:
-  ```go
-  func FormatSubagentWakePrompt(record store.ManagedSubagentRecord) string {
-      return FormatSubagentWakePromptWithActiveSiblings(record, nil)
-  }
-  ```
-- Introduce `FormatSubagentWakePromptWithActiveSiblings(record store.ManagedSubagentRecord, activeSiblings []store.ManagedSubagentRecord) string`:
-  - Format base preview:
-    ```
-    [Subagent Completed] Task <agent_id> (<desc>) finished with status <status>: <preview>
-    ```
-  - If `len(activeSiblings) > 0`:
-    Append sibling block:
-    ```
-    Active subagents still running (<N>):
-    - <sibling.AgentID> (<desc>): <status> (<duration>)
-    ```
-    Where duration is formatted using `FormatSubagentDurationSeconds(sibling.DurationSeconds)`.
-  - Append call-to-action & footer:
-    ```
-    Call get_subagent_result if you need the full output, and proceed immediately with the next steps to complete your task.
+### Task 5: HTTP Transport Endpoints
+- **File**: `router-proxy/internal/transport/context_threshold_http.go`
+- **Endpoints**:
+  - `GET /v1/settings/context-thresholds`:
+    - Calls `r.store.GetContextThresholdConfig(req.Context())`.
+    - Returns JSON response.
+  - `PUT /v1/settings/context-thresholds`:
+    - Reads payload with 64 KiB limit.
+    - Validates:
+      - `global.warning_percent` must be in $[1, 99]$.
+      - `global.reset_percent` must be in $[1, 100]$.
+      - `global.warning_percent < global.reset_percent`.
+      - For each entry in `model_overrides`:
+        - Key must not be empty.
+        - $1 \le \text{warning\_percent} < \text{reset\_percent} \le 100$.
+    - Calls `r.store.SetContextThresholdConfig(req.Context(), cfg)`.
+    - Returns HTTP 200 with saved config.
+- **Routing**:
+  - Hook into `router-proxy/internal/transport/http.go` and `router-proxy/internal/transport/managed_http.go`.
+- **Unit & Integration Test**: `router-proxy/internal/transport/context_threshold_http_test.go`:
+  - Tests GET defaults.
+  - Tests PUT valid configuration.
+  - Tests PUT invalid configuration (warning >= reset, negative, >100) -> 400 Bad Request.
 
-    ---
-    *Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*
-    ```
-  - If `len(activeSiblings) == 0`:
-    Omit the active subagents block entirely, keeping the prompt clean and identical to prior formatting.
+### Task 6: React Web UI Configuration Dialog
+- **File**: `web/router-ui-react/src/components/ContextThresholdDialog.tsx`
+  - Uses `DialogShell` (`open={open} onClose={onClose} title="Context Reset & Warning Thresholds"`).
+  - Sections:
+    1. **Global Thresholds**:
+       - Number inputs / sliders for Warning Threshold % and Auto-Reset Threshold %.
+       - Live visual helper displaying warning boundary (e.g. 10%) vs auto-reset boundary (e.g. 20%).
+    2. **Per-Model Overrides**:
+       - Table listing model overrides with Model Name, Warning %, Reset %, and Actions (Edit, Delete).
+       - "Add Model Override" sub-form with dropdown populated from `client.models()` and numeric inputs.
+       - Compact circular buttons (`.icon-btn-round`) for Add/Remove actions.
+    3. **Action Bar**:
+       - "Cancel" and "Save Thresholds" buttons.
+       - Error banner for validation feedback.
+- **Client Library**: `web/router-ui-react/src/transport/http-client.ts`:
+  - Add `contextThresholds(): Promise<ContextThresholdConfig>`
+  - Add `saveContextThresholds(cfg: ContextThresholdConfig): Promise<ContextThresholdConfig>`
+- **UI Integration**:
+  - `web/router-ui-react/src/components/Sidebar.tsx`: Add "Context Thresholds" option in the Managed Actions ellipsis menu.
+  - `web/router-ui-react/src/components/ConversationHeader.tsx`: Context usage bar is rendered with an onClick handler (or an adjacent settings icon) to open `ContextThresholdDialog`.
+  - `web/router-ui-react/src/App.tsx`:
+    - Manage dialog state: `dialog === "context-thresholds"`.
+    - Render `<ContextThresholdDialog open={dialog === "context-thresholds"} client={session.transport.http} onClose={() => setDialog(undefined)} />`.
+- **CSS Styling**: `web/router-ui-react/src/app.css`:
+  - Styles for threshold dialog, sliders/inputs, override table, and interactive context bar hover states adhering to single-user dark theme guidelines.
+
+### Task 7: End-to-End Behavioral Functional Tests
+- **File**: `router-proxy/internal/managed/embedded_context_reset_test.go`
+  - `TestContextThresholds_WarningAndResetBehavioral`:
+    - Configure global thresholds to warning 10%, reset 20%.
+    - Spawn embedded agent with mock model (e.g. ContextWindow = 10,000 tokens).
+    - Step 1: Agent generates 1,200 tokens (12% usage, > 10% warning, < 20% reset).
+      - Verify mailbox receives `Context usage threshold warning` reminder.
+      - Verify reminder text explicitly references scratchpad, context reset, and the 20% boundary.
+      - Verify zero compaction mentions in the message.
+    - Step 2: Next turn generates additional tokens (total 2,500 tokens, 25% usage, > 20% reset).
+      - Verify automatic fallback context reset triggers: epoch advances from 1 to 2.
+      - Verify wake turn prompt delivered (`ContextResetWakePrompt`).
+      - Verify scratchpad notes and recent messages are preserved in epoch 2 context.
+  - `TestContextThresholds_PerModelOverride`:
+    - Configure global warning 10%, reset 20%.
+    - Set per-model override for `mock-provider/override-model`: warning 30%, reset 40%.
+    - Agent with `override-model` reaches 15% usage -> verify NO warning emitted.
+    - Agent reaches 32% usage -> verify warning emitted.
+    - Agent reaches 42% usage -> verify auto-reset triggers.
+  - `TestCompactionHintsCleanRemoval`:
+    - Query `mecha_context` with `action=status` -> verify output contains no compaction references and contains dynamic threshold percentages.
+    - Query with invalid action -> verify error contains no compaction references.
+    - Audit all prompts and error returns.
+- **File**: `web/router-ui-react/tests/component/context-threshold-dialog.test.tsx`:
+  - Test loading threshold configuration.
+  - Test validation error when `warning >= reset`.
+  - Test adding a per-model override and clicking Save.
 
 ---
 
-## 4. Tests & Regression Prevention Strategy
+## 4. Verification Checklist & Test Commands
 
-Per the mandatory dev-loop requirements, integration tests that exercise real within-service paths and prevent regressions are mandatory.
+### Verification Checklist
+- [ ] Database migration 103 applies cleanly on startup without data loss.
+- [ ] `GET /v1/settings/context-thresholds` returns default 10% / 20% thresholds and empty overrides.
+- [ ] `PUT /v1/settings/context-thresholds` validates bounds and persists changes.
+- [ ] `mecha_context` tool contains zero compaction strings in description, guidance, or error outputs.
+- [ ] In-band warning reminder is sent at or above warning threshold (default 10%) exactly once per epoch.
+- [ ] Auto-reset executes when tokens exceed reset threshold (default 20%).
+- [ ] Per-model overrides correctly take precedence over global settings.
+- [ ] React UI dialog allows adjusting global thresholds, adding/editing per-model overrides, and saving.
+- [ ] TypeScript type checks and ESLint rules pass with zero errors (`npm run lint:mecha-messaging`, etc.).
+- [ ] Go unit and integration tests pass cleanly (`go test ./...`).
 
-### 4.1 Unit & Formatting Tests
-File: `router-proxy/internal/managed/embedded_subagent_results_test.go`
-- `TestFormatSubagentWakePromptWithActiveSiblings_NoSiblings`:
-  - Proves wake prompt matches standard single-completion format with no spurious sibling section.
-- `TestFormatSubagentWakePromptWithActiveSiblings_MultipleActiveSiblings`:
-  - Verifies `Active subagents still running (2):` block is generated with accurate agent IDs, descriptions, statuses, and elapsed durations.
+### Test Commands
+```bash
+# 1. Run Go store migration & settings tests
+go test -v ./router-proxy/internal/store -run "TestContextThreshold"
 
-### 4.2 Public Tool Schema & Construction Tests
-File: `router-proxy/internal/managed/embedded_subagent_public_tools_test.go`
-- Update `TestEmbeddedSubagentPublicToolsConstructionAndChildSurfaceExclusion`:
-  - Assert `EmbeddedSubagentPublicTools` returns 4 tools: `subagent`, `get_subagent_result`, `steer_subagent`, `list_subagents`.
-  - Assert `list_subagents` parameter schema: `status` (string), `limit` (integer).
-  - Verify child tools (`NewEmbeddedSubagentTools`) strictly exclude `list_subagents`.
+# 2. Run Go transport API endpoint tests
+go test -v ./router-proxy/internal/transport -run "TestContextThreshold"
 
-### 4.3 Mandatory Within-Service Integration Tests
-File: `router-proxy/internal/managed/embedded_subagent_public_tools_test.go` and `embedded_subagent_wake_test.go`
-1. **`TestListSubagentsTool_ExecutionAndFiltering`** (Integration):
-   - Setup: Real SQLite store, Manager instance with faux provider.
-   - Spawn multiple subagents: one running, one queued, one completed, one failed.
-   - Execute `list_subagents` with:
-     - Default status (`"active"`): returns running and queued subagents only; verifies counts.
-     - Filter `"all"`: returns all subagents.
-     - Filter `"completed"`: returns only the completed subagent.
-     - Limit: verify limit clamping and truncation.
-   - Verify caller parent boundary: Parent A cannot see Parent B's subagents (cross-parent fence isolation).
-2. **`TestDeliverSubagentParentWake_WithActiveSiblings_Integration`** (Integration):
-   - Setup: Real parent agent in SQLite store.
-   - Create 3 subagent records under parent: Child 1 (completed), Child 2 (running), Child 3 (queued).
-   - Trigger `DeliverSubagentParentWake` for Child 1.
-   - Inspect mailbox envelope enqueued in the store for the parent agent.
-   - Assert envelope body contains `[Subagent Completed] Task child-1 ...`.
-   - Assert envelope body contains `Active subagents still running (2):` with Child 2 and Child 3 details.
-   - Assert Child 1 is NOT included in the active siblings list.
-3. **`TestDeliverSubagentParentWake_WithoutActiveSiblings_Integration`** (Integration):
-   - Setup: Real parent agent in SQLite store with single subagent (Child 1).
-   - Trigger `DeliverSubagentParentWake` for Child 1.
-   - Assert envelope body does NOT contain `Active subagents still running`.
+# 3. Run Go behavioral lifecycle & context reset tests
+go test -v ./router-proxy/internal/managed -run "TestContextThreshold|TestContextReset"
+
+# 4. Run Web UI component tests
+cd web/router-ui-react && npm run test tests/component/context-threshold-dialog.test.tsx
+
+# 5. Build router-proxy binary to verify compilation
+cd /home/wolfgang/code/mecha-developer/router-proxy && go build -o /tmp/router-proxy-test ./cmd/mailbox-router
+```
 
 ---
 
-## 5. Implementation Phases & Step-by-Step Execution
+## 5. Rollback Considerations
 
-1. **Step 1 (Red tests for prompt formatting)**:
-   - Add unit tests in `embedded_subagent_results_test.go` for `FormatSubagentWakePromptWithActiveSiblings`.
-2. **Step 2 (Enriched wake prompt formatting implementation)**:
-   - Implement `FormatSubagentWakePromptWithActiveSiblings` in `embedded_subagent_results.go`.
-   - Update `DeliverSubagentParentWake` in `embedded_subagent_wake.go` to query active siblings from store and pass to formatter.
-3. **Step 3 (Integration tests for wake delivery)**:
-   - Add integration tests in `embedded_subagent_wake_test.go` proving sibling formatting when siblings exist vs single subagent completion.
-4. **Step 4 (Red tests for `list_subagents` tool schema and execution)**:
-   - Update `embedded_subagent_public_tools_test.go` to assert 4 public tools and child exclusion.
-   - Add `TestListSubagentsTool_ExecutionAndFiltering` test cases.
-5. **Step 5 (Implement `list_subagents` tool)**:
-   - Implement `embeddedListSubagentsSchema` and `embeddedListSubagentsTool` in `embedded_subagent_public_tools.go`.
-   - Register in `EmbeddedSubagentPublicTools`.
-   - Update `fixedSubagentsTools` in `supervisor.go` and `CanonicalWorkflowTools` in `workflow_tools.go`.
-6. **Step 6 (Full validation, coverage & regression verification)**:
-   - Run `go test -v ./internal/managed/...` and `go test -v ./...`.
-   - Ensure clean build, zero regressions, and full coverage of new logic.
+1. **Database Backward Compatibility**:
+   - Migration 103 only adds columns to `managed_settings` with safe defaults (`context_warning_percent=10`, `context_reset_percent=20`, `context_model_overrides='{}'`).
+   - If rolled back to an earlier router binary, earlier versions ignore unknown columns in `managed_settings`.
+2. **Fallback Safety**:
+   - If store queries fail or return corrupt data, `ResolveContextThresholds` falls back to safe hardcoded defaults (10% warning / 20% reset).
+   - If context window is 0 or negative, threshold evaluation is disabled to prevent spurious resets or division by zero.

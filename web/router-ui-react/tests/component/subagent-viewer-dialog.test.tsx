@@ -425,6 +425,61 @@ describe("SubagentViewerDialog", () => {
     expect(screen.getByText("I am executing the emergency fix now.")).toBeInTheDocument();
   });
 
+  it("renders a steering message with exact payload from complete:36854", async () => {
+    const subagents = [
+      {
+        id: "sub-1",
+        description: "Optimize Tests Worker",
+        status: "running" as const,
+        started_at: "2026-03-30T05:00:00Z",
+      },
+    ];
+
+    const mockHistoryEntries = [
+      {
+        id: "complete:36854",
+        agent_id: "sub-1",
+        from: "optimize-tests",
+        message: "Steering from optimize-tests",
+        message_content: "Hello from the user",
+        presentation: {
+          from: "optimize-tests",
+        },
+      },
+    ];
+
+    const mockClient = {
+      managedHistory: vi.fn(async () => ({
+        view: "complete" as const,
+        entries: mockHistoryEntries,
+        next_before: null,
+      })),
+    };
+
+    render(
+      <SubagentViewerDialog
+        open={true}
+        onClose={() => {}}
+        subagents={subagents as any}
+        client={mockClient as any}
+      />
+    );
+
+    const card = screen.getByRole("button", { name: /Optimize Tests Worker/ });
+    act(() => {
+      card.click();
+    });
+
+    const content = await screen.findByText("Hello from the user");
+    expect(content).toBeInTheDocument();
+
+    const role = screen.getByText("optimize-tests");
+    expect(role).toBeInTheDocument();
+
+    const entryDiv = content.closest(".subagent-message-entry");
+    expect(entryDiv).toHaveClass("user");
+  });
+
   it("displays the most recent activity preview on card preview regardless of entry ordering from API", async () => {
     const subagents = [
       {

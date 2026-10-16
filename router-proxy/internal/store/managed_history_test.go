@@ -269,3 +269,61 @@ func TestManagedAgentCaseInsensitiveLookup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "workflows", mixed.AgentID)
 }
+
+func TestManagedHistoryPresentationAcceptsLongSubagentIDsInFromAndTo(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+
+	parentID := "worker-lead-supervisor"
+	childID := "subagent-worker-lead-supervisor-3fa85f64-5717-4562-b3fc-2c963f66afa6" // ~68 chars
+
+	pres := &ManagedHistoryPresentation{
+		Kind:    "message",
+		Outcome: "success",
+		From:    parentID,
+		To:      childID,
+		Summary: "Steering from " + parentID,
+	}
+	content := "Please focus on step 2"
+	entry, err := durable.RecordManagedCompleteHistoryWithFullDetails(
+		ctx,
+		childID,
+		"managed_message",
+		"info",
+		"Steering from "+parentID,
+		"subagent-steer:test-1",
+		pres,
+		nil,
+		&content,
+		&parentID,
+	)
+	require.NoError(t, err, "subagent ID > 48 chars in To must be accepted")
+	require.NotNil(t, entry.Presentation)
+	require.Equal(t, childID, entry.Presentation.To)
+	require.Equal(t, parentID, entry.Presentation.From)
+
+	// Also test subagent in From
+	presReverse := &ManagedHistoryPresentation{
+		Kind:    "message",
+		Outcome: "success",
+		From:    childID,
+		To:      parentID,
+		Summary: "Update from " + childID,
+	}
+	entry2, err := durable.RecordManagedCompleteHistoryWithFullDetails(
+		ctx,
+		childID,
+		"managed_message",
+		"info",
+		"Update from "+childID,
+		"subagent-steer:test-2",
+		presReverse,
+		nil,
+		&content,
+		&childID,
+	)
+	require.NoError(t, err, "subagent ID > 48 chars in From must be accepted")
+	require.NotNil(t, entry2.Presentation)
+	require.Equal(t, childID, entry2.Presentation.From)
+	require.Equal(t, parentID, entry2.Presentation.To)
+}

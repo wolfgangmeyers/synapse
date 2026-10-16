@@ -245,4 +245,3 @@ func TestResetActiveEmbeddedAgentsAllToolCallsDangling(t *testing.T) {
 	require.True(t, results[1].IsError)
 	require.Equal(t, "Command interrupted by router restart", results[1].Content[0].(ai.TextContent).Text)
 }
-

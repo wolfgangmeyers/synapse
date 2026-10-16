@@ -68,8 +68,8 @@ func newBehavioralHarness(t *testing.T, resolver func(store.ManagedAgentRecord) 
 	credentials := testfixture.CodexAdmission(t)
 
 	managerOpts := managed.ManagerOptions{
-		Store:         db,
-		Manifest:      manifest,
+		Store:    db,
+		Manifest: manifest,
 		Config: managed.Config{
 			SessionRoot:                  filepath.Join(root, "sessions"),
 			AllowedWorkingDirectoryRoots: []string{root, t.TempDir(), os.TempDir()},

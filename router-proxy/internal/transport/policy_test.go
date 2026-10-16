@@ -91,7 +91,14 @@ func (tmux *auditTmux) wasCalled() bool {
 func newPolicyRouter(t *testing.T, options Options) (*Router, *store.Store, *deterministic.FixedClock) {
 	t.Helper()
 	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
-	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock, IDSource: deterministic.NewSequenceIDSource("audit-1", "audit-2", "audit-3", "audit-4")})
+	dbPath := filepath.Join(t.TempDir(), "router.db")
+	opts := store.Options{Clock: clock, IDSource: deterministic.NewSequenceIDSource("audit-1", "audit-2", "audit-3", "audit-4")}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(context.Background(), dbPath, opts)
 	require.NoError(t, err)
 	options.Store = durable
 	options.Clock = clock
@@ -162,7 +169,14 @@ func TestRouterRejectsHalfConfiguredTmuxAudit(t *testing.T) {
 
 func newPolicyRouterForValidation(t *testing.T, options Options) (*Router, error) {
 	t.Helper()
-	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	dbPath := filepath.Join(t.TempDir(), "router.db")
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(context.Background(), dbPath, opts)
 	require.NoError(t, err)
 	options.Store = durable
 	router, err := New(options)

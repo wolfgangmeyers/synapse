@@ -139,4 +139,3 @@ func TestEmbeddedMailOfferDirectIdleExpiredLeaseReacquires(t *testing.T) {
 		return e == nil && a.State == domain.MessageAcknowledged && calls.Load() == 1
 	}, 3*time.Second, 10*time.Millisecond)
 }
-

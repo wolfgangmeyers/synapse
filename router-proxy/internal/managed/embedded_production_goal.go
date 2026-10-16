@@ -210,4 +210,3 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 		m.publishCompleteHistory(entry)
 	}
 }
-

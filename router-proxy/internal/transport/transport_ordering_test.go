@@ -319,7 +319,14 @@ func TestStaleGoalResultCannotSatisfyNewerPendingControl(t *testing.T) {
 func newTransportOrderingFixture(t *testing.T) (*store.Store, *Router) {
 	t.Helper()
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
-	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	dbPath := filepath.Join(t.TempDir(), "router.db")
+	opts := store.Options{Clock: clock}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	durable, err := store.Open(context.Background(), dbPath, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 	router, err := New(Options{Store: durable, Clock: clock})

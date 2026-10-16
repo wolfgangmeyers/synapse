@@ -17,12 +17,12 @@ var (
 )
 
 const (
-	maxWorkflowStateNameBytes        = 256
-	maxWorkflowStateDescriptionBytes = 4096
-	maxWorkflowStateEntryTextBytes   = 65536
-	maxWorkflowStateGoalBytes        = 4000
-	maxWorkflowReminderBodyBytes     = 16384
-	maxWorkflowReminderDelaySeconds  = 2592000
+	maxWorkflowStateNameBytes             = 256
+	maxWorkflowStateDescriptionBytes      = 4096
+	maxWorkflowStateEntryTextBytes        = 65536
+	maxWorkflowStateGoalBytes             = 4000
+	maxWorkflowReminderBodyBytes          = 16384
+	maxWorkflowReminderDelaySeconds       = 2592000
 	maxWorkflowTransitionDescriptionBytes = 1024
 )
 
@@ -47,36 +47,56 @@ type WorkflowReminderConfig struct {
 	IntervalSeconds *int64               `json:"interval_seconds,omitempty"`
 }
 
+type WorkflowMonitorConfig struct {
+	ID                    string          `json:"id"`
+	Name                  string          `json:"name"`
+	Description           string          `json:"description,omitempty"`
+	IntervalSeconds       int             `json:"interval_seconds,omitempty"`
+	CooldownSeconds       int             `json:"cooldown_seconds,omitempty"`
+	MaxAlerts             int             `json:"max_alerts,omitempty"`
+	TrailingMessagesCount int             `json:"trailing_messages_count,omitempty"`
+	QuestionType          string          `json:"question_type"`
+	QuestionInstructions  string          `json:"question_instructions"`
+	QuestionCriteria      json.RawMessage `json:"question_criteria,omitempty"`
+	QuestionOptions       json.RawMessage `json:"question_options,omitempty"`
+	ConditionOperator     string          `json:"condition_operator"`
+	ConditionThreshold    string          `json:"condition_threshold"`
+	NudgeTemplate         string          `json:"nudge_template"`
+	FallbackMode          string          `json:"fallback_mode,omitempty"`
+}
+
 type WorkflowState struct {
-	ID           string                   `json:"id"`
-	WorkflowID   *string                  `json:"workflow_id,omitempty"`
-	Name         string                   `json:"name"`
-	Description  string                   `json:"description"`
-	EntryText    string                   `json:"entry_text"`
-	Goal         string                   `json:"goal"`
-	Reminders    []WorkflowReminderConfig `json:"reminders"`
-	AllowedTools []string                 `json:"allowed_tools"`
+	ID           string                     `json:"id"`
+	WorkflowID   *string                    `json:"workflow_id,omitempty"`
+	Name         string                     `json:"name"`
+	Description  string                     `json:"description"`
+	EntryText    string                     `json:"entry_text"`
+	Goal         string                     `json:"goal"`
+	Reminders    []WorkflowReminderConfig   `json:"reminders"`
+	Monitors     []WorkflowMonitorConfig    `json:"monitors"`
+	AllowedTools []string                   `json:"allowed_tools"`
 	Transitions  []WorkflowTransitionConfig `json:"transitions"`
-	AllowExit    bool                     `json:"allow_exit"`
-	UIPosX       float64                  `json:"ui_pos_x"`
-	UIPosY       float64                  `json:"ui_pos_y"`
-	CreatedAt    string                   `json:"created_at"`
-	UpdatedAt    string                   `json:"updated_at"`
+	AllowExit    bool                       `json:"allow_exit"`
+	UIPosX       float64                    `json:"ui_pos_x"`
+	UIPosY       float64                    `json:"ui_pos_y"`
+	CreatedAt    string                     `json:"created_at"`
+	UpdatedAt    string                     `json:"updated_at"`
 }
 
 type WorkflowStateRequest struct {
-	ID           *string                  `json:"id,omitempty"`
-	WorkflowID   *string                  `json:"workflow_id,omitempty"`
-	Name         string                   `json:"name"`
-	Description  string                   `json:"description"`
-	EntryText    string                   `json:"entry_text"`
-	Goal         string                   `json:"goal"`
-	Reminders    []WorkflowReminderConfig `json:"reminders"`
-	AllowedTools []string                 `json:"allowed_tools"`
+	ID           *string                    `json:"id,omitempty"`
+	WorkflowID   *string                    `json:"workflow_id,omitempty"`
+	Name         string                     `json:"name"`
+	Description  string                     `json:"description"`
+	EntryText    string                     `json:"entry_text"`
+	Goal         string                     `json:"goal"`
+	Reminders    []WorkflowReminderConfig   `json:"reminders"`
+	Monitors     []WorkflowMonitorConfig    `json:"monitors"`
+	AllowedTools []string                   `json:"allowed_tools"`
 	Transitions  []WorkflowTransitionConfig `json:"transitions"`
-	AllowExit    *bool                    `json:"allow_exit,omitempty"`
-	UIPosX       *float64                 `json:"ui_pos_x,omitempty"`
-	UIPosY       *float64                 `json:"ui_pos_y,omitempty"`
+	AllowExit    *bool                      `json:"allow_exit,omitempty"`
+	UIPosX       *float64                   `json:"ui_pos_x,omitempty"`
+	UIPosY       *float64                   `json:"ui_pos_y,omitempty"`
 }
 
 type WorkflowStateValidationError struct {
@@ -108,7 +128,7 @@ func (e *WorkflowStateNotFoundError) Error() string {
 func (e *WorkflowStateNotFoundError) Code() string { return "workflow_state_not_found" }
 
 type WorkflowStateInUseError struct {
-	ID      string
+	ID            string
 	ReferrerState string
 }
 
@@ -271,8 +291,30 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 	return nil
 }
 
+func marshalWorkflowMonitors(monitors []WorkflowMonitorConfig) (string, error) {
+	if monitors == nil {
+		return "[]", nil
+	}
+	data, err := json.Marshal(monitors)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalWorkflowMonitors(raw string) []WorkflowMonitorConfig {
+	if strings.TrimSpace(raw) == "" {
+		return []WorkflowMonitorConfig{}
+	}
+	var monitors []WorkflowMonitorConfig
+	if err := json.Unmarshal([]byte(raw), &monitors); err != nil || monitors == nil {
+		return []WorkflowMonitorConfig{}
+	}
+	return monitors
+}
+
 func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -283,16 +325,18 @@ func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error)
 		var state WorkflowState
 		var workflowID sql.NullString
 		var remindersJSON sql.NullString
+		var monitorsJSON sql.NullString
 		var allowedToolsJSON sql.NullString
 		var transitionsJSON sql.NullString
 		var allowExitInt int
-		if err := rows.Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if workflowID.Valid {
 			state.WorkflowID = &workflowID.String
 		}
 		state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
+		state.Monitors = unmarshalWorkflowMonitors(monitorsJSON.String)
 		state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
 		state.Transitions = unmarshalWorkflowTransitions(transitionsJSON.String)
 		state.AllowExit = (allowExitInt == 1)
@@ -323,11 +367,12 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 	var state WorkflowState
 	var workflowID sql.NullString
 	var remindersJSON sql.NullString
+	var monitorsJSON sql.NullString
 	var allowedToolsJSON sql.NullString
 	var transitionsJSON sql.NullString
 	var allowExitInt int
-	err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-		Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+		Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -338,6 +383,7 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 		state.WorkflowID = &workflowID.String
 	}
 	state.Reminders = unmarshalWorkflowReminders(remindersJSON.String)
+	state.Monitors = unmarshalWorkflowMonitors(monitorsJSON.String)
 	state.AllowedTools = unmarshalWorkflowAllowedTools(allowedToolsJSON.String)
 	state.Transitions = unmarshalWorkflowTransitions(transitionsJSON.String)
 	state.AllowExit = (allowExitInt == 1)
@@ -459,6 +505,11 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			return err
 		}
 
+		monitorsJSON, err := marshalWorkflowMonitors(req.Monitors)
+		if err != nil {
+			return err
+		}
+
 		sanitizedTools, err := sanitizeWorkflowAllowedTools(req.AllowedTools)
 		if err != nil {
 			return err
@@ -501,8 +552,8 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			uiPosY = *req.UIPosY
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, workflowIDVal, name, desc, entryText, goal, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, workflowIDVal, name, desc, entryText, goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -513,6 +564,10 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 		remindersCopy := req.Reminders
 		if remindersCopy == nil {
 			remindersCopy = []WorkflowReminderConfig{}
+		}
+		monitorsCopy := req.Monitors
+		if monitorsCopy == nil {
+			monitorsCopy = []WorkflowMonitorConfig{}
 		}
 		transitionsCopy := req.Transitions
 		if transitionsCopy == nil {
@@ -527,6 +582,7 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			EntryText:    entryText,
 			Goal:         goal,
 			Reminders:    remindersCopy,
+			Monitors:     monitorsCopy,
 			AllowedTools: sanitizedTools,
 			Transitions:  transitionsCopy,
 			AllowExit:    (allowExitInt == 1),
@@ -551,11 +607,12 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 		var existing WorkflowState
 		var existingWorkflowID sql.NullString
 		var existingReminders sql.NullString
+		var existingMonitors sql.NullString
 		var existingAllowedTools sql.NullString
 		var existingTransitions sql.NullString
 		var existingAllowExitInt int
-		err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-			Scan(&existing.ID, &existingWorkflowID, &existing.Name, &existing.Description, &existing.EntryText, &existing.Goal, &existingReminders, &existingAllowedTools, &existingTransitions, &existingAllowExitInt, &existing.UIPosX, &existing.UIPosY, &existing.CreatedAt, &existing.UpdatedAt)
+		err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+			Scan(&existing.ID, &existingWorkflowID, &existing.Name, &existing.Description, &existing.EntryText, &existing.Goal, &existingReminders, &existingMonitors, &existingAllowedTools, &existingTransitions, &existingAllowExitInt, &existing.UIPosX, &existing.UIPosY, &existing.CreatedAt, &existing.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowStateNotFoundError{ID: id}
 		}
@@ -663,8 +720,13 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			uiPosY = *req.UIPosY
 		}
 
-		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET workflow_id = ?, name = ?, description = ?, entry_text = ?, goal = ?, reminders_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, ui_pos_x = ?, ui_pos_y = ?, updated_at = ? WHERE id = ?`,
-			workflowIDVal, name, desc, entryText, goal, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, id)
+		monitorsJSON, err := marshalWorkflowMonitors(req.Monitors)
+		if err != nil {
+			return err
+		}
+
+		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET workflow_id = ?, name = ?, description = ?, entry_text = ?, goal = ?, reminders_json = ?, monitors_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, ui_pos_x = ?, ui_pos_y = ?, updated_at = ? WHERE id = ?`,
+			workflowIDVal, name, desc, entryText, goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, id)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -675,6 +737,10 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 		remindersCopy := req.Reminders
 		if remindersCopy == nil {
 			remindersCopy = []WorkflowReminderConfig{}
+		}
+		monitorsCopy := req.Monitors
+		if monitorsCopy == nil {
+			monitorsCopy = []WorkflowMonitorConfig{}
 		}
 		transitionsCopy := req.Transitions
 		if transitionsCopy == nil {
@@ -689,6 +755,7 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			EntryText:    entryText,
 			Goal:         goal,
 			Reminders:    remindersCopy,
+			Monitors:     monitorsCopy,
 			AllowedTools: sanitizedTools,
 			Transitions:  transitionsCopy,
 			AllowExit:    (allowExitInt == 1),

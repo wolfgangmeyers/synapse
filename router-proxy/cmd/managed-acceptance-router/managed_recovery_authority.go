@@ -21,7 +21,7 @@ import (
 const managedRecoveryEvidenceLimit = 40
 
 type managedRecoveryAuthority struct {
-	db          *sql.DB
+	db             *sql.DB
 	providerURL    string
 	trialID        string
 	token          string

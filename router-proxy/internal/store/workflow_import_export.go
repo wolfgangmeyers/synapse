@@ -423,7 +423,7 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				allowExitInt = 0
 			}
 
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)`,
 				newStateID, newWfID, st.Name, st.Description, st.EntryText, st.Goal, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
 			if err != nil {
 				return err

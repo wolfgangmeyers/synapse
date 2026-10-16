@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/stretchr/testify/require"
 )
 
 // resolveAntigravityExtensionPath locates the installed pi-antigravity extension entry point portably.

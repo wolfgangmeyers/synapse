@@ -120,5 +120,3 @@ func TestManagedLaunchGitWorktreeErrorHTTPResponse(t *testing.T) {
 		t.Errorf("expected clean message %q, got %q", expected, payload.Error.Message)
 	}
 }
-
-

@@ -317,7 +317,3 @@ func TestChildEnvironmentForMissingCloudSDKDirDoesNotFallbackToDefaultADC(t *tes
 	require.NotEqual(t, defaultADC, childGAC, "broken/missing CLOUDSDK_CONFIG must not quietly fall back to host default ADC")
 	require.Empty(t, childGAC, "no GAC should be injected when explicit CLOUDSDK_CONFIG is set")
 }
-
-
-
-

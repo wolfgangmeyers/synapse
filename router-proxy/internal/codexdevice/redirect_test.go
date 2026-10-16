@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -57,7 +58,7 @@ func TestDeviceRedirectDoesNotSendToHostileRecipient(t *testing.T) {
 			if client.CheckRedirect != nil {
 				t.Fatal("fixture client does not have default redirect policy")
 			}
-			got, err := acquire(context.Background(), client, issuer.URL, func(DevicePrompt) {})
+			got, err := acquireWithOptions(context.Background(), client, issuer.URL, func(DevicePrompt) {}, acquireOptions{minInterval: 5 * time.Millisecond, slowdownDelta: 5 * time.Millisecond})
 			if err == nil || err.Error() != tc.wantError || got != (store.CodexCredential{}) {
 				t.Errorf("unexpected result: credential=%+v err=%v", got, err)
 			}

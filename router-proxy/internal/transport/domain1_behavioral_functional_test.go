@@ -147,6 +147,22 @@ func (r *domain1RootRPC) GetRootControlEntry(context.Context, string) (map[strin
 	return nil, nil
 }
 
+func (r *domain1RootRPC) ReconcileRootControlResult(ctx context.Context, payload map[string]any) (managed.RootControlPersistedReceipt, error) {
+	row, err := r.store.ManagedControlRequest(ctx, payload["request_id"].(string))
+	if err != nil {
+		return managed.RootControlPersistedReceipt{}, err
+	}
+	return managed.RootControlPersistedReceipt{
+		ReceiptID:         "domain1-receipt-" + row.RequestID,
+		RequestID:         row.RequestID,
+		ResultID:          row.ResultID,
+		PayloadSHA256:     row.ResultPayloadSHA256,
+		RuntimeGeneration: row.Fence.RuntimeGeneration,
+		SessionEpoch:      row.Fence.SessionEpoch,
+		ManifestSHA256:    row.Fence.ManifestHash,
+	}, nil
+}
+
 func (r *domain1RootRPC) submittedPayloads() []map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -382,7 +398,7 @@ func TestDomain1ManagedRootPythonAdapterUsesFencedRouterAndDurableResults(t *tes
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store:    taskStore,
-		Config:   managed.Config{RouterURL: "http://127.0.0.1:1", AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		Config:   managed.Config{SessionRoot: t.TempDir(), RouterURL: "http://127.0.0.1:1", AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: processFactory, RPCFactory: processFactory, RootControlHandlers: handlers,
 		CatalogSource:              managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true },
@@ -548,7 +564,7 @@ func TestDomain1RouterReminderSchedulerRearmsAcrossRouterRecreation(t *testing.T
 	session := ""
 	rpc := &domain1RootRPC{managedTestRPC: managedTestRPC{session: &session, active: expectedManagedActiveToolsForTransport(manifest)}, store: durable, installed: make(chan struct{}), submissions: make(chan domain1Submission, 1)}
 	factory := &domain1ProcessFactory{process: managedProcess, rpc: rpc, session: &session}
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: factory, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{SessionRoot: t.TempDir(), AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: factory, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	firstRouter, err := New(Options{Store: durable, Clock: clock})
 	require.NoError(t, err)
@@ -638,7 +654,7 @@ func TestDomain1RootFenceRejectsDecoyAndMalformedEventsBeforePersistence(t *test
 	tracker := &domain1PythonExecutor{home: t.TempDir(), routerURL: "http://127.0.0.1:1"}
 	handlers, err := managed.NewOperationalRootControlHandlers(manifest, tracker)
 	require.NoError(t, err)
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{RouterURL: "http://127.0.0.1:1", AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"}, Manifest: manifest, ProcessFactory: factory, RPCFactory: factory, RootControlHandlers: handlers, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{SessionRoot: t.TempDir(), RouterURL: "http://127.0.0.1:1", AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"}, Manifest: manifest, ProcessFactory: factory, RPCFactory: factory, RootControlHandlers: handlers, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)

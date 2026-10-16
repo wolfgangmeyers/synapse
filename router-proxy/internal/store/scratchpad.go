@@ -531,4 +531,3 @@ func dedupeScratchpadIDs(items []string) []string {
 	}
 	return result
 }
-

@@ -470,4 +470,3 @@ func TestUnwrapEmbeddedMailText(t *testing.T) {
 	plain := "Just a normal prompt"
 	require.Equal(t, plain, unwrapEmbeddedMailText(plain))
 }
-

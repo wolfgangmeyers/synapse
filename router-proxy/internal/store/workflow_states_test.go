@@ -581,4 +581,3 @@ func TestWorkflowStateTransitionsAndExit(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, vanishedA)
 }
-

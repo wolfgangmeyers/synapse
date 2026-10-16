@@ -87,12 +87,12 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"agent_id": agent.AgentID, "source": "router-managed", "cwd": agent.Cwd, "runtime": agent.Runtime,
 		"model":         map[string]any{"provider": agent.SelectedModel.Provider, "id": agent.SelectedModel.ID},
 		"desired_state": agent.DesiredState, "lifecycle_state": agent.LifecycleState, "activity_state": agent.ActivityState,
-		"accepting_prompts": agent.AcceptingPrompts,
+		"accepting_prompts":        agent.AcceptingPrompts,
 		"active_workflow_state_id": agent.ActiveWorkflowStateID,
-		"worktree": agent.Worktree,
-		"allow_inline_tools": allowInline,
-		"manifest":          map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
-		"created_at":        agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
+		"worktree":                 agent.Worktree,
+		"allow_inline_tools":       allowInline,
+		"manifest":                 map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
+		"created_at":               agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
 	}
 	if agent.StartedAt != "" {
 		result["started_at"] = agent.StartedAt

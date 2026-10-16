@@ -84,4 +84,3 @@ func TestBatchItemSystemNotice(t *testing.T) {
 	require.Contains(t, item, "[---\n*Automated notification from system. Do not reply to this message — messages to 'system' are not accepted.*]")
 	require.NotContains(t, item, "Reply via mailbox to system")
 }
-

@@ -271,6 +271,3 @@ func TestBackfillEmbeddedGoalEvaluationsDeduplicatesAndCapsSpam(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, shouldRecordDone, "DONE evaluation must always be recorded")
 }
-
-
-

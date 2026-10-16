@@ -159,8 +159,7 @@ func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
 
 func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
-	require.NoError(t, err)
+	durable, _ := store.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
@@ -1093,4 +1092,3 @@ func TestManagedAgentInterruptAndSubagentStopHTTP(t *testing.T) {
 		require.Equal(t, http.StatusInternalServerError, res.StatusCode)
 	}
 }
-

@@ -35,8 +35,14 @@ func newParentlessHTTPG3Fixture(t *testing.T) *embeddedHTTPG2Fixture {
 	t.Logf("Cwd fixture path=%s after_mode=%#o", f.root, info.Mode().Perm())
 	ctx := context.Background()
 	f.dbPath = filepath.Join(t.TempDir(), "router.db")
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, f.dbPath); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
 	var err error
-	f.db, err = store.Open(ctx, f.dbPath, store.Options{})
+	f.db, err = store.Open(ctx, f.dbPath, opts)
 	require.NoError(t, err)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)

@@ -1264,7 +1264,6 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_ConsecutiveTurns(t *testing.
 	require.Equal(t, "Now do something else", txtParts[0].(map[string]any)["text"])
 }
 
-
 func TestOpenAI_ImageConversion(t *testing.T) {
 	fakePNG := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 	img := ai.ImageContent{
@@ -2107,7 +2106,3 @@ func TestAntigravityModelProviderPreservation(t *testing.T) {
 	require.Equal(t, "gemini-3.8-flash", gModel.ID)
 	require.NotNil(t, gStream)
 }
-
-
-
-

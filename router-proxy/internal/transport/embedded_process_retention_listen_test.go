@@ -16,7 +16,13 @@ func processRetentionRouterFixture(t *testing.T) (*store.Store, *Router, *sql.DB
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "retry.db")
-	db, err := store.Open(ctx, path, store.Options{})
+	opts := store.Options{}
+	if opts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, path); err == nil {
+			opts.Migrations = []store.Migration{}
+		}
+	}
+	db, err := store.Open(ctx, path, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))

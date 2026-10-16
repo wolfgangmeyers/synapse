@@ -93,8 +93,9 @@ case "${1:-}" in
     fi
     EXIT_FILE="$(mktemp -t router_exit.XXXXXX)"
     export ROUTER_EXIT_FILE="$EXIT_FILE"
+    INTERRUPTED=0
     trap 'rm -f "$EXIT_FILE"' EXIT
-    trap 'exit 0' INT TERM
+    trap 'INTERRUPTED=1; exit 0' INT TERM
     while true; do
       set +e
       make -C "$ROOT_DIR/router-proxy" run-router \
@@ -129,7 +130,7 @@ case "${1:-}" in
         rm -f "$EXIT_FILE"
       fi
       set -e
-      if [[ "$exit_code" -eq 0 ]]; then
+      if [[ "$INTERRUPTED" -eq 1 || "$exit_code" -eq 0 || "$exit_code" -eq 130 || "$exit_code" -eq 143 ]]; then
         exit 0
       fi
       printf '%s\n' "run_router.sh: router exited with code $exit_code; restarting in 1s..." >&2

@@ -44,13 +44,13 @@ func TestEmbeddedMailPoisonPillDoesNotSpin(t *testing.T) {
 	reg.SetResponses([]providers.FauxResponseStep{step, step, step, step, step})
 
 	manager, err := NewManager(ManagerOptions{
-		Store:                        db,
-		Manifest:                     manifest,
-		Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-		CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-		EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
-		CodexCredentialStore:         testfixture.CodexAdmission(t),
-		EmbeddedMailBackoff:          10 * time.Millisecond,
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		EmbeddedMailBackoff:   10 * time.Millisecond,
 	})
 	require.NoError(t, err)
 	defer manager.Close(ctx)
@@ -475,20 +475,20 @@ func TestEmbeddedMailToolsNoSyntheticFallbackText(t *testing.T) {
 		reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep})
 
 		manager, err := NewManager(ManagerOptions{
-			Store:                        db,
-			Manifest:                     manifest,
-			Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-			CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-			EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
-			CodexCredentialStore:         testfixture.CodexAdmission(t),
-			EmbeddedMailBackoff:          10 * time.Millisecond,
+			Store:                 db,
+			Manifest:              manifest,
+			Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+			CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+			EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+			CodexCredentialStore:  testfixture.CodexAdmission(t),
+			EmbeddedMailBackoff:   10 * time.Millisecond,
 		})
 		require.NoError(t, err)
 		defer manager.Close(ctx)
 
 		launched, err := manager.Launch(ctx, LaunchRequest{
 			Name: "clean-reply-worker", Cwd: root, Runtime: "embedded",
-			Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+			Model:     &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
 			RequestID: "c1111111-1111-4111-8111-111111111111",
 		})
 		require.NoError(t, err)
@@ -560,20 +560,20 @@ func TestEmbeddedMailToolsNoSyntheticFallbackText(t *testing.T) {
 		reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep})
 
 		manager, err := NewManager(ManagerOptions{
-			Store:                        db,
-			Manifest:                     manifest,
-			Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-			CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-			EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
-			CodexCredentialStore:         testfixture.CodexAdmission(t),
-			EmbeddedMailBackoff:          10 * time.Millisecond,
+			Store:                 db,
+			Manifest:              manifest,
+			Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+			CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+			EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+			CodexCredentialStore:  testfixture.CodexAdmission(t),
+			EmbeddedMailBackoff:   10 * time.Millisecond,
 		})
 		require.NoError(t, err)
 		defer manager.Close(ctx)
 
 		launched, err := manager.Launch(ctx, LaunchRequest{
 			Name: "silent-reply-worker", Cwd: root, Runtime: "embedded",
-			Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+			Model:     &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
 			RequestID: "c3333333-3333-4333-8333-333333333333",
 		})
 		require.NoError(t, err)
@@ -637,20 +637,20 @@ func TestEmbeddedMailToolsNoSyntheticFallbackText(t *testing.T) {
 		reg.SetResponses([]providers.FauxResponseStep{initialStep, initialStep})
 
 		manager, err := NewManager(ManagerOptions{
-			Store:                        db,
-			Manifest:                     manifest,
-			Config:                       Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-			CatalogSource:                CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-			EmbeddedModelResolver:        func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
-			CodexCredentialStore:         testfixture.CodexAdmission(t),
-			EmbeddedMailBackoff:          10 * time.Millisecond,
+			Store:                 db,
+			Manifest:              manifest,
+			Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+			CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+			EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+			CodexCredentialStore:  testfixture.CodexAdmission(t),
+			EmbeddedMailBackoff:   10 * time.Millisecond,
 		})
 		require.NoError(t, err)
 		defer manager.Close(ctx)
 
 		launched, err := manager.Launch(ctx, LaunchRequest{
 			Name: "nudge-reply-worker", Cwd: root, Runtime: "embedded",
-			Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+			Model:     &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
 			RequestID: "d1111111-1111-4111-8111-111111111111",
 		})
 		require.NoError(t, err)

@@ -417,5 +417,3 @@ func TestWorkflowToolsHTTP(t *testing.T) {
 	}
 	require.True(t, foundGoogleSearch, "expected google_search to be in workflow tools list")
 }
-
-

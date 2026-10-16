@@ -424,6 +424,3 @@ func TestEmbeddedScratchpadBatchOperations(t *testing.T) {
 	require.Equal(t, 2, total)
 	require.Len(t, entries, 2)
 }
-
-
-

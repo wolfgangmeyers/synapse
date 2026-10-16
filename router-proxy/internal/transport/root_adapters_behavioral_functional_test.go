@@ -154,9 +154,24 @@ func newRootAdapterFixture(t *testing.T) *rootAdapterFixture {
 	}))
 
 	var errOpen error
-	fixture.store, errOpen = store.Open(ctx, filepath.Join(t.TempDir(), "task.db"), store.Options{Clock: clock})
+	taskPath := filepath.Join(t.TempDir(), "task.db")
+	taskOpts := store.Options{Clock: clock}
+	if taskOpts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, taskPath); err == nil {
+			taskOpts.Migrations = []store.Migration{}
+		}
+	}
+	fixture.store, errOpen = store.Open(ctx, taskPath, taskOpts)
 	require.NoError(t, errOpen)
-	fixture.decoy, errOpen = store.Open(ctx, filepath.Join(t.TempDir(), "decoy.db"), store.Options{Clock: clock})
+
+	decoyPath := filepath.Join(t.TempDir(), "decoy.db")
+	decoyOpts := store.Options{Clock: clock}
+	if decoyOpts.Migrations == nil {
+		if err := store.CloneTemplateDB(t, decoyPath); err == nil {
+			decoyOpts.Migrations = []store.Migration{}
+		}
+	}
+	fixture.decoy, errOpen = store.Open(ctx, decoyPath, decoyOpts)
 	require.NoError(t, errOpen)
 	fixture.decoyRouter, errOpen = New(Options{Store: fixture.decoy, Clock: clock})
 	require.NoError(t, errOpen)

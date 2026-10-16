@@ -556,6 +556,9 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 	r.closeExpiredLeaseSessions(result.ExpiredLeases)
 	r.publishLifecycleUpdates(ctx, result.LifecycleUpdates)
 	reminderSuccess, reminderFailure := r.sweepReminders(ctx)
+	if r.managed != nil {
+		r.managed.SweepAgentMonitors(ctx)
+	}
 	r.sweepAttachmentsBestEffort()
 	// Node publishes activity expiry before its heartbeat/sweep record.
 	r.sweepLiveState()
