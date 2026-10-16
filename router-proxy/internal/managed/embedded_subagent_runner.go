@@ -1129,7 +1129,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	} else if taskCtx.Err() == context.DeadlineExceeded || errors.Is(taskCtx.Err(), context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
 		terminalStatus = "failed"
 		errorMsg = fmt.Sprintf("subagent execution timed out (exceeded %v)", timeout)
-		resultText = fmt.Sprintf("Subagent execution timed out (exceeded %v).", timeout)
+		resultText = fmt.Sprintf("Subagent execution timed out (exceeded %v). If necessary, you can specify a higher timeout, but it is strongly preferred to break the task into smaller batches of work.", timeout)
 	} else if task.stopped {
 		terminalStatus = "stopped"
 		resultText = "Subagent stopped."
