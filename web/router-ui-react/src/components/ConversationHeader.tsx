@@ -12,6 +12,7 @@ import type { RouterHttpClient } from "../transport/http-client";
 
 import type { Workflow } from "../domain/workflow-states";
 import { WorkflowLaunchModal } from "./WorkflowLaunchModal";
+import { AgentMonitorsDialog } from "./AgentMonitorsDialog";
 import { contextUsageSeverityClass, formatContextUsageLabel, formatContextUsageTooltip } from "../utils/format";
 
 export type ConversationView = "quiet" | "complete";
@@ -112,6 +113,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const [allowInlineToolsUpdating, setAllowInlineToolsUpdating] = useState(false);
   const [launchModalWorkflow, setLaunchModalWorkflow] = useState<Workflow | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
+  const [showMonitorsDialog, setShowMonitorsDialog] = useState(false);
 
   const allowInlineTools = Boolean(agent?.allow_inline_tools ?? agent?.managed_agent?.allow_inline_tools);
 
@@ -277,6 +279,16 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   <button type="button" className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`} onClick={onReminders} aria-label="Add reminder" title="Add reminder">
     <i className="fa-solid fa-clock" aria-hidden="true" />
   </button>
+) : null}{agent && client ? (
+  <button
+    type="button"
+    className="icon-btn-round agent-monitors-header-button"
+    onClick={() => setShowMonitorsDialog(true)}
+    aria-label="System 1 Monitors"
+    title="System 1 Monitors"
+  >
+    <i className="fa-solid fa-shield-halved" aria-hidden="true" />
+  </button>
 ) : null}{agent && showAgentControls ? <button type="button" className="inline-tool-settings-button" onClick={onInlineToolSettings} aria-label="Inline tool settings" title="Inline tool settings"><i className="fa-solid fa-gear" aria-hidden="true" /></button> : null}{agent?.source === "router-managed" && onManageManaged ? <button type="button" className="managed-agent-header-button" onClick={onManageManaged} aria-label="Manage worker" title="Manage worker"><i className="fa-solid fa-gear" aria-hidden="true" /></button> : null}{agent && onToggleChatOnly ? (
   <button type="button" className={`chat-only-button ${chatOnly ? "active" : ""}`} onClick={onToggleChatOnly} aria-label="Toggle chat-only mode" title={chatOnly ? "Chat-only active (tools hidden)" : "Chat-only mode"}>
     <i className="fa-solid fa-comments" aria-hidden="true" />
@@ -314,6 +326,13 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     client={client}
     {...(templates !== undefined ? { templates } : {})}
     onClose={() => setLaunchModalWorkflow(null)}
+  />
+) : null}{agent && client ? (
+  <AgentMonitorsDialog
+    agentId={agent.agent_id}
+    isOpen={showMonitorsDialog}
+    onClose={() => setShowMonitorsDialog(false)}
+    client={client}
   />
 ) : null}</header>;
 }

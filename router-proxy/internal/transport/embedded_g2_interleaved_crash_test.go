@@ -195,7 +195,7 @@ func (f *interleavedG2Fixture) launch(t *testing.T) [2]store.ManagedAgentRecord 
 	var rows [2]store.ManagedAgentRecord
 	for i, name := range []string{"g2-worker-a", "g2-worker-b"} {
 		status, raw := f.call(http.MethodPost, "/v1/managed-agents", fmt.Sprintf("c6111111-1111-4111-8111-%012d", i+1),
-			fmt.Sprintf(`{"name":%q,"cwd":%q,"model":{"provider":"openai-codex","id":"gpt-5.6-terra"},"initial_instruction":%q}`, name, f.projects[i], "independent instruction for "+name))
+			fmt.Sprintf(`{"name":%q,"cwd":%q,"model":{"provider":"openai-codex","id":"gpt-5.6-terra"},"initial_instruction":%q,"allow_inline_tools":true}`, name, f.projects[i], "independent instruction for "+name))
 		require.Equal(t, http.StatusAccepted, status, string(raw))
 	}
 	var states [2]string
@@ -457,19 +457,17 @@ func TestEmbeddedG2InterleavedCrashScaffold(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(root, "project-b", "effect.txt"))
 	var effectState string
 	var effectCount, resultCount, finalCount, bFinalCount, outboxCount int
-	require.NoError(t, raw.QueryRow(`SELECT count(*),max(state) FROM embedded_effects WHERE effect_id='g2-a-write-once' AND agent_id='g2-worker-a'`).Scan(&effectCount, &effectState))
-	require.Equal(t, 1, effectCount)
-	require.Equal(t, "unknown", effectState, "SDK write has a saved result but its file intent remains conservatively uncertain")
+	require.NoError(t, raw.QueryRow(`SELECT count(*),coalesce(max(state),'') FROM embedded_effects WHERE effect_id='g2-a-write-once' AND agent_id='g2-worker-a'`).Scan(&effectCount, &effectState))
+	require.Zero(t, effectCount, "ordinary write does not write intent to embedded_effects")
+	require.Empty(t, effectState)
 	aRow, err := db.ManagedAgent(ctx, "g2-worker-a")
 	require.NoError(t, err)
 	binding := store.EmbeddedBinding{AgentID: aRow.AgentID, SessionID: aRow.PiSessionID, Epoch: aRow.SessionEpoch, Generation: aRow.RuntimeGeneration}
 	claim, err := db.AcquireEmbeddedOwner(ctx, binding, "g2-cold-recovery", 30*time.Second)
 	require.NoError(t, err, "old owner lease must expire on the recovery clock")
 	binding.OwnerToken = claim
-	effect, err := db.RecoverEmbeddedEffect(ctx, binding, "g2-a-write-once")
-	require.NoError(t, err)
-	require.Equal(t, "unknown", effect.State)
-	require.False(t, effect.ShouldReplay, "never rerun uncertain SDK write")
+	_, err = db.RecoverEmbeddedEffect(ctx, binding, "g2-a-write-once")
+	require.ErrorIs(t, err, sql.ErrNoRows, "ordinary write has no saved embedded_effects row")
 	require.NoError(t, raw.QueryRow(`SELECT count(*) FROM embedded_entries WHERE agent_id='g2-worker-a' AND kind='toolResult'`).Scan(&resultCount))
 	require.Equal(t, 1, resultCount)
 	require.NoError(t, raw.QueryRow(`SELECT count(*) FROM embedded_entries WHERE agent_id='g2-worker-a' AND kind='assistant' AND seq=(SELECT entry_seq FROM embedded_reply_outbox WHERE attempt_id=?)`, attemptA).Scan(&finalCount))

@@ -1,7 +1,8 @@
 import { useState, useEffect, type ReactElement, type FormEvent } from "react";
-import type { WorkflowState, WorkflowReminderConfig, KnownToolDefinition } from "../domain/workflow-states";
+import type { WorkflowState, WorkflowReminderConfig, WorkflowMonitorConfig, KnownToolDefinition } from "../domain/workflow-states";
 import { KNOWN_WORKFLOW_TOOLS } from "../domain/workflow-states";
 import { DEFAULT_GOAL_STATE, type GoalState, type goalControlPayload } from "../domain/goals";
+import { MONITOR_PRESETS, getMonitorPresetById } from "../domain/monitor-presets";
 import { secureUuid } from "../platform/secure-uuid";
 import { DialogShell } from "./DialogShell";
 import { GoalEditorDialog } from "./GoalEditorDialog";
@@ -38,6 +39,29 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
   const [reminders, setReminders] = useState<WorkflowReminderConfig[]>(
     state.reminders ? state.reminders.map((r) => ({ ...r })) : []
   );
+
+  const [monitors, setMonitors] = useState<WorkflowMonitorConfig[]>(
+    state.monitors ? state.monitors.map((m) => ({ ...m })) : []
+  );
+
+  const [activeTab, setActiveTab] = useState<"general" | "monitors">("general");
+
+  // Monitor form state inside Monitors tab
+  const [showMonitorForm, setShowMonitorForm] = useState(false);
+  const [editingMonitorIdx, setEditingMonitorIdx] = useState<number | null>(null);
+  const [monitorSelectedPreset, setMonitorSelectedPreset] = useState("");
+  const [monitorName, setMonitorName] = useState("");
+  const [monitorNudge, setMonitorNudge] = useState("");
+  const [monitorInterval, setMonitorInterval] = useState(30);
+  const [monitorCooldown, setMonitorCooldown] = useState(120);
+  const [monitorInstructions, setMonitorInstructions] = useState("");
+  const [monitorQuestionType, setMonitorQuestionType] = useState<"noul" | "choice" | "score">("noul");
+  const [monitorOperator, setMonitorOperator] = useState("gte");
+  const [monitorThreshold, setMonitorThreshold] = useState("0.8");
+  const [monitorTrailingCount, setMonitorTrailingCount] = useState(6);
+  const [monitorMaxAlerts, setMonitorMaxAlerts] = useState(0);
+  const [monitorShowAdvanced, setMonitorShowAdvanced] = useState(false);
+  const [monitorFormError, setMonitorFormError] = useState<string | null>(null);
 
   const [goal, setGoal] = useState<string>(state.goal ?? "");
   const [showGoalEditor, setShowGoalEditor] = useState(false);
@@ -127,6 +151,104 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
     setReminders((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  const openAddMonitor = () => {
+    setEditingMonitorIdx(null);
+    setMonitorSelectedPreset("");
+    setMonitorName("");
+    setMonitorNudge("");
+    setMonitorInterval(30);
+    setMonitorCooldown(120);
+    setMonitorInstructions("");
+    setMonitorQuestionType("noul");
+    setMonitorOperator("gte");
+    setMonitorThreshold("0.8");
+    setMonitorTrailingCount(6);
+    setMonitorMaxAlerts(0);
+    setMonitorShowAdvanced(false);
+    setMonitorFormError(null);
+    setShowMonitorForm(true);
+  };
+
+  const openEditMonitor = (idx: number) => {
+    const m = monitors[idx];
+    if (!m) return;
+    setEditingMonitorIdx(idx);
+    setMonitorSelectedPreset("");
+    setMonitorName(m.name);
+    setMonitorNudge(m.nudge_template);
+    setMonitorInterval(m.interval_seconds ?? 30);
+    setMonitorCooldown(m.cooldown_seconds ?? 120);
+    setMonitorInstructions(m.question_instructions);
+    setMonitorQuestionType(m.question_type ?? "noul");
+    setMonitorOperator(m.condition_operator ?? "gte");
+    setMonitorThreshold(m.condition_threshold ?? "0.8");
+    setMonitorTrailingCount(m.trailing_messages_count ?? 6);
+    setMonitorMaxAlerts(m.max_alerts ?? 0);
+    setMonitorShowAdvanced(false);
+    setMonitorFormError(null);
+    setShowMonitorForm(true);
+  };
+
+  const handleMonitorPresetSelect = (presetId: string) => {
+    setMonitorSelectedPreset(presetId);
+    if (!presetId) return;
+    const p = getMonitorPresetById(presetId);
+    if (p) {
+      setMonitorName(p.payload.name);
+      setMonitorNudge(p.payload.nudge_template);
+      setMonitorInterval(p.payload.interval_seconds ?? 30);
+      setMonitorCooldown(p.payload.cooldown_seconds ?? 120);
+      setMonitorInstructions(p.payload.question_instructions);
+      setMonitorQuestionType(p.payload.question_type);
+      setMonitorOperator(p.payload.condition_operator);
+      setMonitorThreshold(p.payload.condition_threshold);
+      setMonitorTrailingCount(p.payload.trailing_messages_count ?? 6);
+      setMonitorMaxAlerts(p.payload.max_alerts ?? 0);
+    }
+  };
+
+  const saveMonitor = (e: FormEvent) => {
+    e.preventDefault();
+    if (!monitorName.trim()) {
+      setMonitorFormError("Monitor name is required");
+      return;
+    }
+    if (!monitorNudge.trim()) {
+      setMonitorFormError("Nudge message is required");
+      return;
+    }
+    if (!monitorInstructions.trim()) {
+      setMonitorFormError("Question instructions are required");
+      return;
+    }
+
+    const config: WorkflowMonitorConfig = {
+      id: editingMonitorIdx !== null ? monitors[editingMonitorIdx]?.id ?? secureUuid() : secureUuid(),
+      name: monitorName.trim(),
+      nudge_template: monitorNudge.trim(),
+      interval_seconds: monitorInterval,
+      cooldown_seconds: monitorCooldown,
+      question_instructions: monitorInstructions.trim(),
+      question_type: monitorQuestionType,
+      condition_operator: monitorOperator,
+      condition_threshold: monitorThreshold,
+      trailing_messages_count: monitorTrailingCount,
+      max_alerts: monitorMaxAlerts,
+      fallback_mode: "skip",
+    };
+
+    if (editingMonitorIdx !== null) {
+      setMonitors((prev) => prev.map((m, i) => (i === editingMonitorIdx ? config : m)));
+    } else {
+      setMonitors((prev) => [...prev, config]);
+    }
+    setShowMonitorForm(false);
+  };
+
+  const removeMonitor = (idx: number) => {
+    setMonitors((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
@@ -145,6 +267,7 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
         goal: goal.trim(),
         allowed_tools: restrictTools ? Array.from(selectedTools) : [],
         reminders,
+        monitors,
         allow_exit: allowExit,
       };
       await onSave(updated, makeEntry);

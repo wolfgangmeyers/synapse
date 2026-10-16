@@ -36,6 +36,67 @@ export interface ScratchpadResponse {
   entries: ScratchpadEntry[];
   total_count: number;
 }
+export interface AgentMonitor {
+  id: string;
+  agent_id: string;
+  workflow_state_id?: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  interval_seconds: number;
+  next_eval_at: string;
+  last_evaluated_at?: string;
+  cooldown_seconds: number;
+  last_fired_at?: string;
+  consecutive_alerts: number;
+  max_alerts: number;
+  trailing_messages_count: number;
+  question_type: 'noul' | 'choice' | 'score';
+  question_instructions: string;
+  question_criteria_json: string;
+  question_options_json: string;
+  condition_operator: string;
+  condition_threshold: string;
+  nudge_template: string;
+  fallback_mode: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAgentMonitorPayload {
+  name: string;
+  description?: string;
+  enabled?: boolean;
+  interval_seconds?: number;
+  cooldown_seconds?: number;
+  max_alerts?: number;
+  trailing_messages_count?: number;
+  question_type: 'noul' | 'choice' | 'score';
+  question_instructions: string;
+  question_criteria_json?: string;
+  question_options_json?: string;
+  condition_operator: string;
+  condition_threshold: string;
+  nudge_template: string;
+  fallback_mode?: string;
+}
+
+export interface MonitorEvaluationResult {
+  monitor_id: string;
+  agent_id: string;
+  evaluated_at: string;
+  matched: boolean;
+  skipped: boolean;
+  skip_reason?: string;
+  question_type: string;
+  operator: string;
+  threshold: string;
+  actual_value?: any;
+  nudge?: string;
+  alert_fired: boolean;
+  next_eval_at: string;
+  error?: string;
+}
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
 export interface ProviderModel { provider: ManagedProvider; id: string; name: string; available: boolean }
@@ -453,6 +514,12 @@ export interface RouterHttpClient {
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
   scratchpadForAgent(agentId: string, limit?: number): Promise<ScratchpadResponse>;
+  listAgentMonitors(agentId: string): Promise<AgentMonitor[]>;
+  createAgentMonitor(agentId: string, payload: CreateAgentMonitorPayload): Promise<AgentMonitor>;
+  getAgentMonitor(agentId: string, monitorId: string): Promise<AgentMonitor>;
+  updateAgentMonitor(agentId: string, monitorId: string, payload: Partial<CreateAgentMonitorPayload>): Promise<AgentMonitor>;
+  deleteAgentMonitor(agentId: string, monitorId: string): Promise<void>;
+  evaluateAgentMonitor(agentId: string, monitorId: string): Promise<MonitorEvaluationResult>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
   stopManagedSubagent(agentId: string, childId: string): Promise<void>;
@@ -691,6 +758,49 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         entries: body.entries as ScratchpadEntry[],
         total_count: body.total_count,
       };
+    },
+    listAgentMonitors: async (agentId: string): Promise<AgentMonitor[]> => {
+      const res = await request(`/v1/agents/${encodeURIComponent(agentId)}/monitors`, { method: "GET", credentials: "omit" });
+      const body = recordValue(res);
+      if (!body || !Array.isArray(body.monitors)) {
+        throw invalidResponse("Router returned an invalid agent monitors list response", body);
+      }
+      return body.monitors as AgentMonitor[];
+    },
+    createAgentMonitor: async (agentId: string, payload: CreateAgentMonitorPayload): Promise<AgentMonitor> => {
+      const res = await jsonRequest(`/v1/agents/${encodeURIComponent(agentId)}/monitors`, "POST", payload);
+      const body = recordValue(res);
+      if (!body || !body.monitor) {
+        throw invalidResponse("Router returned an invalid create monitor response", body);
+      }
+      return body.monitor as AgentMonitor;
+    },
+    getAgentMonitor: async (agentId: string, monitorId: string): Promise<AgentMonitor> => {
+      const res = await request(`/v1/agents/${encodeURIComponent(agentId)}/monitors/${encodeURIComponent(monitorId)}`, { method: "GET", credentials: "omit" });
+      const body = recordValue(res);
+      if (!body || !body.monitor) {
+        throw invalidResponse("Router returned an invalid get monitor response", body);
+      }
+      return body.monitor as AgentMonitor;
+    },
+    updateAgentMonitor: async (agentId: string, monitorId: string, payload: Partial<CreateAgentMonitorPayload>): Promise<AgentMonitor> => {
+      const res = await jsonRequest(`/v1/agents/${encodeURIComponent(agentId)}/monitors/${encodeURIComponent(monitorId)}`, "PUT", payload);
+      const body = recordValue(res);
+      if (!body || !body.monitor) {
+        throw invalidResponse("Router returned an invalid update monitor response", body);
+      }
+      return body.monitor as AgentMonitor;
+    },
+    deleteAgentMonitor: async (agentId: string, monitorId: string): Promise<void> => {
+      await request(`/v1/agents/${encodeURIComponent(agentId)}/monitors/${encodeURIComponent(monitorId)}`, { method: "DELETE", credentials: "omit" });
+    },
+    evaluateAgentMonitor: async (agentId: string, monitorId: string): Promise<MonitorEvaluationResult> => {
+      const res = await jsonRequest(`/v1/agents/${encodeURIComponent(agentId)}/monitors/${encodeURIComponent(monitorId)}/evaluate`, "POST", {});
+      const body = recordValue(res);
+      if (!body) {
+        throw invalidResponse("Router returned an invalid evaluate monitor response", body);
+      }
+      return body as unknown as MonitorEvaluationResult;
     },
   };
 }

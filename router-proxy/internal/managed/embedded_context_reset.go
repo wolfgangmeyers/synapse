@@ -163,10 +163,12 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	} else {
 		startIdx := len(sessionMessages) - 6
 		// Ensure we don't start on an orphaned tool result
-		for startIdx < len(sessionMessages)-4 && sessionMessages[startIdx].MessageRole() == ai.RoleToolResult {
+		for startIdx < len(sessionMessages) && sessionMessages[startIdx].MessageRole() == ai.RoleToolResult {
 			startIdx++
 		}
-		portedMessages = sessionMessages[startIdx:]
+		if startIdx < len(sessionMessages) {
+			portedMessages = sessionMessages[startIdx:]
+		}
 	}
 
 	nextEpoch := binding.Epoch + 1
@@ -308,6 +310,34 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	lane := m.laneFor(binding.AgentID)
 	lane.warningEmitted = false
 	lane.warningEpoch = nextEpoch
+
+	// Record explicit context_reset entry in managed_complete_history so UI timeline renders the Epoch marker.
+	resetKey := fmt.Sprintf("context-reset:%s:%d:%s", binding.AgentID, nextEpoch, uuid.New().String()[:8])
+	resetSummary := fmt.Sprintf("Context reset to epoch %d (%s)", nextEpoch, reason)
+	resetMsg := fmt.Sprintf("Context reset (Epoch %d)", nextEpoch)
+	pres := &store.ManagedHistoryPresentation{
+		Kind:     "context_reset",
+		ToolName: "context_reset",
+		Outcome:  "success",
+		Summary:  resetSummary,
+	}
+	historyEntry, err := m.store.RecordManagedCompleteHistoryWithDetails(
+		ctx,
+		binding.AgentID,
+		"context_reset",
+		"info",
+		resetMsg,
+		resetKey,
+		pres,
+		map[string]any{"epoch": nextEpoch, "reason": reason},
+		&resetSummary,
+	)
+	if err == nil {
+		m.publishCompleteHistory(historyEntry)
+	} else {
+		log.Printf("[embedded:%s] failed to record context_reset history: %v", binding.AgentID, err)
+	}
+
 	if err := m.runEmbeddedSessionPrompt(runCtx, *updatedAgent, ContextResetWakePrompt); err != nil {
 		return fmt.Errorf("dispatch context reset wake turn: %w", err)
 	}
@@ -417,6 +447,33 @@ func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.
 	} else {
 		_, _ = m.store.ResolveMessageTarget(ctx, result.Message.ID)
 	}
+
+	// Record explicit complete history entry for UI timeline so the warning reminder is immediately visible.
+	eventKey := fmt.Sprintf("context-warning:%s:%d:%s", binding.AgentID, binding.Epoch, msgID)
+	pres := &store.ManagedHistoryPresentation{
+		Kind:    "reminder",
+		Outcome: "warning",
+		From:    "system",
+		To:      binding.AgentID,
+		Summary: "Context usage threshold warning",
+	}
+	historyEntry, histErr := m.store.RecordManagedCompleteHistoryWithDetails(
+		ctx,
+		binding.AgentID,
+		"reminder",
+		"info",
+		"Context usage threshold warning",
+		eventKey,
+		pres,
+		nil,
+		&body,
+	)
+	if histErr == nil {
+		m.publishCompleteHistory(historyEntry)
+	} else {
+		log.Printf("[embedded:%s] failed to record context warning history: %v", binding.AgentID, histErr)
+	}
+
 	m.OfferDirect(binding.AgentID)
 	return nil
 }

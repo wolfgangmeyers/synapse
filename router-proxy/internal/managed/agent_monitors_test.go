@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
@@ -516,3 +517,88 @@ func TestAgentMonitor_TrailingInterval(t *testing.T) {
 	require.NoError(t, err)
 	require.WithinDuration(t, expectedNext, parsedNext, time.Second)
 }
+
+func TestAgentMonitor_ExtractTranscriptCrossPeer(t *testing.T) {
+	ctx := context.Background()
+	mgr, durable, agentID := setupTestManagerAndAgent(t, ctx)
+	defer durable.Close()
+
+	now := time.Now().UTC()
+	nowStr := now.Format("2006-01-02T15:04:05.000Z")
+
+	// Insert messages between agent and different peers (not just supervisor)
+	// Peer 1: user
+	_, err := durable.Enqueue(ctx, protocol.Envelope{
+		ID:        "msg-1",
+		From:      "user",
+		To:        agentID,
+		Body:      "Hello from user",
+		CreatedAt: nowStr,
+	}, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body: &[]string{"Hello from user"}[0],
+		},
+	})
+	require.NoError(t, err)
+
+	// Peer 2: another worker / peer
+	_, err = durable.Enqueue(ctx, protocol.Envelope{
+		ID:        "msg-2",
+		From:      agentID,
+		To:        "worker-bob",
+		Body:      "Delegating task to Bob",
+		CreatedAt: nowStr,
+	}, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body: &[]string{"Delegating task to Bob"}[0],
+		},
+	})
+	require.NoError(t, err)
+
+	wfState := "implementing"
+	mon := &store.ManagedAgentMonitor{
+		ID:                    "mon-transcript-1",
+		AgentID:               agentID,
+		WorkflowStateID:       &wfState,
+		Name:                  "Transcript Test Monitor",
+		Enabled:               true,
+		IntervalSeconds:       60,
+		CooldownSeconds:       120,
+		TrailingMessagesCount: 5,
+		QuestionType:          "noul",
+		ConditionOperator:     "gte",
+		ConditionThreshold:    "0.8",
+		FallbackMode:          "skip",
+	}
+
+	// We can invoke EvaluateSingleMonitor or verify extractTranscript
+	var receivedState string
+	sys1Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			State string `json:"state"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		receivedState = req.State
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeSystemOneResponse(map[string]any{"noul": 0.5}))
+	}))
+	defer sys1Srv.Close()
+
+	hostPort := strings.TrimPrefix(sys1Srv.URL, "http://")
+	parts := strings.Split(hostPort, ":")
+	port, _ := strconv.Atoi(parts[1])
+	require.NoError(t, durable.SetSystemOneConfig(ctx, store.SystemOneConfig{
+		Enabled: true,
+		Host:    parts[0],
+		Port:    port,
+	}))
+
+	_, err = mgr.EvaluateSingleMonitor(ctx, mon, now)
+	require.NoError(t, err)
+
+	require.Contains(t, receivedState, "Agent: "+agentID)
+	require.Contains(t, receivedState, "Workflow State: implementing")
+	require.Contains(t, receivedState, "[user -> "+agentID+"]: Hello from user")
+	require.Contains(t, receivedState, "["+agentID+" -> worker-bob]: Delegating task to Bob")
+}
+

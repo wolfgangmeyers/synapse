@@ -162,7 +162,7 @@ func (s *Store) ConversationHistoryPaged(ctx context.Context, owner, peer string
 	// Postel's Law: If the requester connected as generic "user" or has an empty history with peer,
 	// check if the primary human operator has conversation history with this peer.
 	// The router is the authoritative source of record for conversation history.
-	if owner == "user" || len(result) == 0 {
+	if owner == "user" {
 		human, humanErr := s.LastHumanRecipient(ctx, peer)
 		if humanErr == nil && human != "" && human != "user" && human != owner {
 			humanResult, humanNextBefore, hErr := s.conversationHistoryForPairPaged(ctx, human, peer, before, limit)
@@ -193,6 +193,57 @@ func (s *Store) ConversationHistoryPaged(ctx context.Context, owner, peer string
 		}
 	}
 	return result, nextBefore, nil
+}
+
+func (s *Store) RecentAgentMessages(ctx context.Context, agentID string, limit int) ([]domain.ConversationMessage, error) {
+	if agentID == "" {
+		return nil, errors.New("agentID is required")
+	}
+	var rows *sql.Rows
+	var err error
+	if limit <= 0 {
+		rows, err = s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
+			FROM conversation_messages WHERE sender = ? OR recipient = ? ORDER BY conversation_sequence ASC`, agentID, agentID)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
+			FROM conversation_messages WHERE sender = ? OR recipient = ? ORDER BY conversation_sequence DESC LIMIT ?`, agentID, agentID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.ConversationMessage
+	for rows.Next() {
+		var message domain.ConversationMessage
+		var subject, attachments, source sql.NullString
+		if err := rows.Scan(&message.Sequence, &message.ID, &message.MessageIncarnationID, &message.From, &message.To, &subject, &message.Body, &message.CreatedAt, &message.RecordedAt, &attachments, &source); err != nil {
+			return nil, err
+		}
+		if subject.Valid {
+			message.Subject = &subject.String
+		}
+		message.Attachments = []json.RawMessage{}
+		if attachments.Valid && attachments.String != "" {
+			if err := json.Unmarshal([]byte(attachments.String), &message.Attachments); err != nil {
+				return nil, err
+			}
+		}
+		message.Source = protocol.MessageSource{Kind: "unknown"}
+		if source.Valid {
+			message.Source.Kind = source.String
+		}
+		result = append(result, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if limit > 0 {
+		// Reverse from DESC (query order) to chronological ASC for display
+		for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+			result[i], result[j] = result[j], result[i]
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) ConversationHighWaterSequence(ctx context.Context) (int64, error) {

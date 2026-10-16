@@ -124,32 +124,13 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 		return false, nil
 	}
 
-	// 2. Read trailing conversation / history messages
+	// 2. Read trailing conversation / history messages across all peers
 	trailingCount := mon.TrailingMessagesCount
 	if trailingCount <= 0 {
 		trailingCount = 6
 	}
 
-	history, _, err := m.store.ConversationHistoryPaged(ctx, "supervisor", mon.AgentID, 0, trailingCount)
-	if err != nil {
-		history = nil
-	}
-
-	// Format state context from trailing messages
-	var stateBuilder strings.Builder
-	stateBuilder.WriteString(fmt.Sprintf("Agent: %s\n", mon.AgentID))
-	if mon.WorkflowStateID != nil && *mon.WorkflowStateID != "" {
-		stateBuilder.WriteString(fmt.Sprintf("Workflow State: %s\n", *mon.WorkflowStateID))
-	}
-	stateBuilder.WriteString("Recent transcript:\n")
-	if len(history) == 0 {
-		stateBuilder.WriteString("(No recent messages)\n")
-	} else {
-		for _, msg := range history {
-			stateBuilder.WriteString(fmt.Sprintf("[%s -> %s]: %s\n", msg.From, msg.To, msg.Body))
-		}
-	}
-	stateStr := stateBuilder.String()
+	stateStr := m.extractTranscript(ctx, mon, trailingCount)
 
 	// 3. Prepare System 1 Question
 	qKey := "mon_q"
@@ -306,6 +287,26 @@ func (m *Manager) fireMonitorAlert(ctx context.Context, mon *store.ManagedAgentM
 
 	m.OfferDirect(mon.AgentID)
 	return true, nil
+}
+
+func (m *Manager) extractTranscript(ctx context.Context, mon *store.ManagedAgentMonitor, limit int) string {
+	var stateBuilder strings.Builder
+	stateBuilder.WriteString(fmt.Sprintf("Agent: %s\n", mon.AgentID))
+	if mon.WorkflowStateID != nil && *mon.WorkflowStateID != "" {
+		stateBuilder.WriteString(fmt.Sprintf("Workflow State: %s\n", *mon.WorkflowStateID))
+	}
+	stateBuilder.WriteString("Recent transcript:\n")
+
+	messages, err := m.store.RecentAgentMessages(ctx, mon.AgentID, limit)
+	if err != nil || len(messages) == 0 {
+		stateBuilder.WriteString("(No recent messages)\n")
+		return stateBuilder.String()
+	}
+
+	for _, msg := range messages {
+		stateBuilder.WriteString(fmt.Sprintf("[%s -> %s]: %s\n", msg.From, msg.To, msg.Body))
+	}
+	return stateBuilder.String()
 }
 
 // SpawnWorkflowStateMonitors creates monitors for an agent based on a workflow state's monitor definitions,

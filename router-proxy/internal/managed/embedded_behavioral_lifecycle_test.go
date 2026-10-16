@@ -512,6 +512,13 @@ func TestBehavioral_ContextReset_WarningAndAutomaticEpochRotation(t *testing.T) 
 		return m
 	})
 
+	// Configure thresholds for this test: 70% warning, 80% reset
+	require.NoError(t, h.db.SetContextThresholdConfig(h.ctx, store.ContextThresholdConfig{
+		WarningPercent:  70,
+		ResetPercent:    80,
+		ModelThresholds: map[string]store.ModelContextThreshold{},
+	}))
+
 	launched, err := h.manager.Launch(h.ctx, managed.LaunchRequest{
 		Name:      "context-reset-worker",
 		Cwd:       h.root,

@@ -470,3 +470,82 @@ func TestUnwrapEmbeddedMailText(t *testing.T) {
 	plain := "Just a normal prompt"
 	require.Equal(t, plain, unwrapEmbeddedMailText(plain))
 }
+
+func TestEmbeddedGoalCircuitBreakerTurnErrorsHalt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var requests atomic.Int32
+	respond := func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+		n := requests.Add(1)
+		if n == 1 {
+			// Turn 1 step 1: set goal ("error circuit breaker test")
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "error test"}, "goal_call_1"),
+			}, ai.StopToolUse)
+		}
+		// Subsequent turns: return assistant message with StopReason: ai.StopError
+		return &ai.AssistantMessage{
+			StopReason:   ai.StopError,
+			ErrorMessage: "Antigravity API error 400: function response turn comes immediately after a function call turn",
+		}
+	}
+
+	steps := make([]providers.FauxResponseStep, 50)
+	for i := range steps {
+		steps[i] = respond
+	}
+	reg.SetResponses(steps)
+
+	m, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		GoalContinuationDelay: 10 * time.Millisecond,
+		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
+			return store.EmbeddedGoalEvaluationNotDone, "still needs work", nil
+		},
+	})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+	setEmbeddedRecoveryGeneration(t, ctx, db, m)
+
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               "error-cb-agent",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "start error circuit breaker test",
+		RequestID:          "err-cb-1111-1111-1111-111111111111",
+	})
+	require.NoError(t, err)
+
+	// Verify that the system trips a circuit breaker and does NOT enter a runaway loop
+	// (it halts after bounded attempts, e.g. 3 consecutive errors, and activity state settles to idle).
+	// If there's a runaway loop, requests will keep climbing well beyond bounded attempts.
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify requests are bounded (e.g. at most 1 initial + 3 consecutive errors + 1 margin = <= 5)
+	reqCount := requests.Load()
+	require.LessOrEqual(t, reqCount, int32(5), "requests should be bounded by circuit breaker, got runaway loop with %d requests", reqCount)
+
+	// Verify activity state settles to idle
+	require.Eventually(t, func() bool {
+		agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+		return err == nil && agent.ActivityState == "idle"
+	}, 3*time.Second, 10*time.Millisecond)
+}
+
