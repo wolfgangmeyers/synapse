@@ -28,6 +28,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.animation.core.LinearEasing
@@ -4738,23 +4739,16 @@ private fun AgentEventChip(event: AgentTimelineEvent) {
     }
 
     val outcomeNormalized = event.outcome?.lowercase().orEmpty()
-    val isSuccess = outcomeNormalized in setOf("success", "completed", "done")
-    val isError = outcomeNormalized in setOf("error", "failed", "interrupted")
-    val outcomeBadgeColor = when {
-        isSuccess -> Color(0xFF4ADE80)
-        isError -> Color(0xFFFF8A80)
-        else -> Color(0xFFFFC857)
-    }
-    val outcomeBadgeText = when {
-        isSuccess -> "success"
-        isError -> "error"
-        outcomeNormalized.isNotBlank() -> outcomeNormalized
-        else -> "running"
+    val borderStroke = when {
+        outcomeNormalized == "error" || outcomeNormalized == "failure" -> BorderStroke(1.5.dp, Color(0xFFEF4444))
+        outcomeNormalized in setOf("running", "active", "in_progress") -> BorderStroke(1.dp, Color(0xFFF59E0B))
+        else -> BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f))
     }
 
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = SurfaceRaised,
+        shape = RoundedCornerShape(8.dp),
+        color = SurfaceDark,
+        border = borderStroke,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 4.dp, vertical = 2.dp)
@@ -4805,39 +4799,12 @@ private fun AgentEventChip(event: AgentTimelineEvent) {
                 )
             }
 
-            // Outcome badge / pill
-            Surface(
-                shape = RoundedCornerShape(4.dp),
-                color = outcomeBadgeColor.copy(alpha = 0.15f)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    if (isSuccess) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = null,
-                            tint = outcomeBadgeColor,
-                            modifier = Modifier.size(10.dp)
-                        )
-                    } else if (isError) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = outcomeBadgeColor,
-                            modifier = Modifier.size(10.dp)
-                        )
-                    }
-                    Text(
-                        text = outcomeBadgeText,
-                        color = outcomeBadgeColor,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = "Details",
+                tint = TextMuted.copy(alpha = 0.5f),
+                modifier = Modifier.size(16.dp)
+            )
         }
     }
 
