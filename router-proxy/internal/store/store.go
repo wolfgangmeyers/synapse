@@ -459,6 +459,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 				continue
 			}
 		}
+		if migration.ID == "104_widen_managed_agents_lifecycle_state" {
+			if err := s.applyWidenManagedAgentsLifecycleState104(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
+		}
 		if migration.ID == "085_embedded_subagent_role" {
 			if err := s.applyEmbeddedSubagentRoleMigration085(ctx, migration); err != nil {
 				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
@@ -986,6 +992,77 @@ func (s *Store) backfillMessageIncarnations(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) applyWidenManagedAgentsLifecycleState104(ctx context.Context, migration Migration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE id=?`, migration.ID).Scan(&exists)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	var enabled int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		return err
+	}
+	if enabled != 1 {
+		return errors.New("migration 104 requires foreign keys enabled")
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA legacy_alter_table=ON`); err != nil {
+		_, _ = s.db.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+		return err
+	}
+	restore := func() error {
+		if _, err := s.db.ExecContext(context.Background(), `PRAGMA legacy_alter_table=OFF`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
+			return err
+		}
+		var value int
+		if err := s.db.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&value); err != nil {
+			return err
+		}
+		if value != 1 {
+			return errors.New("migration 104 failed to restore foreign keys")
+		}
+		return nil
+	}
+	fail := func(cause error, begun bool) error {
+		if begun {
+			_, _ = s.db.ExecContext(context.Background(), `ROLLBACK`)
+		}
+		if err := restore(); err != nil {
+			return fmt.Errorf("%w; restore foreign keys: %v", cause, err)
+		}
+		return cause
+	}
+	if _, err := s.db.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fail(err, false)
+	}
+	if _, err := s.db.ExecContext(ctx, migration.SQL); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, migration.ID, formatTimestamp(s.clock.Now())); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `COMMIT`); err != nil {
+		return fail(err, true)
+	}
+	if err := restore(); err != nil {
+		return err
+	}
+	return chmodStateFiles(s.path)
 }
 
 func (s *Store) runImmediate(ctx context.Context, operation func() error) error {
