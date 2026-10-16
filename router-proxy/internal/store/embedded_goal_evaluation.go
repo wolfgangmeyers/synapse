@@ -211,8 +211,11 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 		}
 		if outcome == EmbeddedGoalEvaluationCompleted || outcome == EmbeddedGoalEvaluationDone {
 			now := formatTimestamp(s.clock.Now())
-			_, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='done',last_outcome='COMPLETED',updated_at=?,evaluator_reason=? WHERE agent_id=? AND applied_revision=? AND projection_state='applied'`, now, reason, b.AgentID, k.GoalRevision)
+			_, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET goal_enabled=0,evaluator_state='done',last_outcome='COMPLETED',updated_at=?,evaluator_reason=? WHERE agent_id=? AND applied_revision=? AND projection_state='applied'`, now, reason, b.AgentID, k.GoalRevision)
 			if err != nil {
+				return err
+			}
+			if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
 				return err
 			}
 		}
