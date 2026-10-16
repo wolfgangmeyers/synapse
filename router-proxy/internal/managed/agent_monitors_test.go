@@ -13,7 +13,6 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
-	"github.com/reflexivity/mecha-developer/router-proxy/internal/systemone"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -73,7 +72,7 @@ func setupTestManagerAndAgent(t *testing.T, ctx context.Context) (*managed.Manag
 	durable, err := store.Open(ctx, dbPath, store.Options{})
 	require.NoError(t, err)
 
-	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "router", "contract", "managed-tools-v1.json"))
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 
 	mgr, err := managed.NewManager(managed.ManagerOptions{
@@ -247,12 +246,8 @@ func TestAgentMonitor_CooldownPeriodEnforcement(t *testing.T) {
 	called := false
 	sys1Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		resp := systemone.Response{
-			Answers: map[string]any{
-				"mon_q": 0.95,
-			},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeSystemOneResponse(map[string]any{"noul": 0.95}))
 	}))
 	defer sys1Srv.Close()
 
@@ -308,12 +303,8 @@ func TestAgentMonitor_MaxAlertsEnforcement(t *testing.T) {
 	called := false
 	sys1Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		resp := systemone.Response{
-			Answers: map[string]any{
-				"mon_q": 0.95,
-			},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeSystemOneResponse(map[string]any{"noul": 0.95}))
 	}))
 	defer sys1Srv.Close()
 
@@ -483,12 +474,8 @@ func TestAgentMonitor_TrailingInterval(t *testing.T) {
 	defer durable.Close()
 
 	sys1Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := systemone.Response{
-			Answers: map[string]any{
-				"mon_q": 0.2, // Condition will not be met
-			},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeSystemOneResponse(map[string]any{"noul": 0.2})) // Condition will not be met
 	}))
 	defer sys1Srv.Close()
 
