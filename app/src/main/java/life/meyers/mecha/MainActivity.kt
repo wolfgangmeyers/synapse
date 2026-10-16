@@ -833,6 +833,27 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (generation != connectionGeneration) return
                 val frame = try { JSONObject(text) } catch (_: Exception) { return }
+                if (frame.optString("type") == "managed_children_snapshot") {
+                    val childrenArray = frame.optJSONArray("children")
+                    if (childrenArray != null) {
+                        val byAgent = mutableMapOf<String, List<SubagentSummary>>()
+                        for (i in 0 until childrenArray.length()) {
+                            val item = childrenArray.optJSONObject(i) ?: continue
+                            val aId = item.optString("agent_id").takeIf { it.isNotBlank() } ?: continue
+                            val subs = normalizedSubagentSummaries(item.optJSONArray("children"))
+                            byAgent[aId] = subs
+                        }
+                        runOnUiThread {
+                            if (generation == connectionGeneration) {
+                                peers = peers.map { peer ->
+                                    val subs = byAgent[peer.id]
+                                    if (subs != null) peer.copy(subagents = subs, subagentCount = subs.size) else peer
+                                }
+                            }
+                        }
+                    }
+                    return
+                }
                 if (frame.optString("type") == "history_entry") {
                     val entry = frame.optJSONObject("entry") ?: return
                     val eId = entry.optString("id").takeIf { it.isNotBlank() } ?: return
@@ -931,9 +952,10 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
 
                     val summary = presentation?.optString("summary") ?: entry.optString("message")
                     val outcome = presentation?.optString("outcome")
-                    val toolInput = toolInputObj?.toString()
+                    val toolInput = toolInputObj?.toString(2)
                     val output = entry.optString("message_content").takeIf { it.isNotBlank() }
                         ?: presentation?.optJSONObject("error")?.optString("message")
+                        ?: entry.optString("message").takeIf { it != summary }
                     val event = AgentTimelineEvent(
                         id = eId,
                         agentId = targetAgent,
@@ -1790,6 +1812,21 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                     }
                 }.getOrNull().orEmpty()
 
+                val childrenByManagedId = buildMap<String, List<SubagentSummary>> {
+                    for (managed in managedList) {
+                        val mId = managed.optString("agent_id").takeIf { it.isNotBlank() } ?: continue
+                        runCatching {
+                            client.newCall(Request.Builder().url("${routerHttpFor(router)}/v1/managed-agents/$mId/children").build()).execute().use { response ->
+                                if (response.isSuccessful && generation == connectionGeneration) {
+                                    val root = JSONObject(response.body?.string().orEmpty())
+                                    val subs = normalizedSubagentSummaries(root.optJSONArray("children"))
+                                    put(mId, subs)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 runOnUiThread {
                     var retryPeer: String? = null
                     historyLock.withLock {
@@ -1849,7 +1886,7 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                             }
                         }
 
-                        val mergedWithManaged = mergeManagedPeers(nextPeers, managedList, agentId)
+                        val mergedWithManaged = mergeManagedPeers(nextPeers, managedList, agentId, childrenByManagedId)
                         peers = mergedWithManaged.distinctBy(PeerStatus::id).sortedBy(PeerStatus::id)
                     }
                     retryPeer?.takeIf { leaseId.isNotBlank() }?.let { hydrateHistory(it, generation) }
@@ -4602,7 +4639,7 @@ private fun ControlStatusText(state: ControlState) {
 
 @Composable
 private fun AgentEventChip(event: AgentTimelineEvent) {
-    var expanded by remember { mutableStateOf(false) }
+    var showDialog by remember { mutableStateOf(false) }
     val formattedTime = remember(event.timestamp) { formatEventTimestamp(event.timestamp) }
 
     val toolIcon = when (event.toolName?.lowercase() ?: event.kind.lowercase()) {
@@ -4636,25 +4673,131 @@ private fun AgentEventChip(event: AgentTimelineEvent) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 4.dp, vertical = 2.dp)
-            .clickable { expanded = !expanded }
+            .clickable { showDialog = true }
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = toolIcon,
-                    contentDescription = null,
-                    tint = Periwinkle,
-                    modifier = Modifier.size(16.dp)
-                )
+            Icon(
+                imageVector = toolIcon,
+                contentDescription = null,
+                tint = Periwinkle,
+                modifier = Modifier.size(16.dp)
+            )
 
+            val toolLabel = event.toolName?.takeIf { it.isNotBlank() } ?: event.kind.takeIf { it.isNotBlank() } ?: "event"
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = Periwinkle.copy(alpha = 0.2f)
+            ) {
+                Text(
+                    text = toolLabel,
+                    color = Periwinkle,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+
+            Text(
+                text = event.summary,
+                color = TextMuted,
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+
+            if (formattedTime.isNotBlank()) {
+                Text(
+                    text = formattedTime,
+                    color = TextMuted.copy(alpha = 0.7f),
+                    fontSize = 10.sp
+                )
+            }
+
+            // Outcome badge / pill
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = outcomeBadgeColor.copy(alpha = 0.15f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    if (isSuccess) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = null,
+                            tint = outcomeBadgeColor,
+                            modifier = Modifier.size(10.dp)
+                        )
+                    } else if (isError) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = outcomeBadgeColor,
+                            modifier = Modifier.size(10.dp)
+                        )
+                    }
+                    Text(
+                        text = outcomeBadgeText,
+                        color = outcomeBadgeColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+    }
+
+    if (showDialog) {
+        AgentEventDetailDialog(event = event, onDismiss = { showDialog = false })
+    }
+}
+
+@Composable
+private fun AgentEventDetailDialog(event: AgentTimelineEvent, onDismiss: () -> Unit) {
+    val formattedTime = remember(event.timestamp) { formatEventTimestamp(event.timestamp) }
+    val toolIcon = when (event.toolName?.lowercase() ?: event.kind.lowercase()) {
+        "bash" -> Icons.Default.Terminal
+        "read", "write", "edit" -> Icons.Default.Description
+        "subagent", "mecha_worker" -> Icons.Default.AccountTree
+        "goal" -> Icons.Default.Flag
+        "reminder", "mecha_reminder" -> Icons.Default.Schedule
+        "context_reset", "reset" -> Icons.Default.Sync
+        else -> Icons.Default.Build
+    }
+    val outcomeNormalized = event.outcome?.lowercase().orEmpty()
+    val isSuccess = outcomeNormalized in setOf("success", "completed", "done")
+    val isError = outcomeNormalized in setOf("error", "failed", "interrupted")
+    val outcomeBadgeColor = when {
+        isSuccess -> Color(0xFF4ADE80)
+        isError -> Color(0xFFFF8A80)
+        else -> Color(0xFFFFC857)
+    }
+    val outcomeBadgeText = when {
+        isSuccess -> "success"
+        isError -> "error"
+        outcomeNormalized.isNotBlank() -> outcomeNormalized
+        else -> "running"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceRaised,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(toolIcon, contentDescription = null, tint = Periwinkle, modifier = Modifier.size(20.dp))
                 val toolLabel = event.toolName?.takeIf { it.isNotBlank() } ?: event.kind.takeIf { it.isNotBlank() } ?: "event"
                 Surface(
                     shape = RoundedCornerShape(4.dp),
@@ -4663,121 +4806,91 @@ private fun AgentEventChip(event: AgentTimelineEvent) {
                     Text(
                         text = toolLabel,
                         color = Periwinkle,
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
-
-                Text(
-                    text = event.summary,
-                    color = TextMuted,
-                    fontSize = 12.sp,
-                    maxLines = if (expanded) 10 else 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-
-                if (formattedTime.isNotBlank()) {
-                    Text(
-                        text = formattedTime,
-                        color = TextMuted.copy(alpha = 0.7f),
-                        fontSize = 10.sp
-                    )
-                }
-
-                // Outcome badge / pill
                 Surface(
                     shape = RoundedCornerShape(4.dp),
                     color = outcomeBadgeColor.copy(alpha = 0.15f)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        if (isSuccess) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = null,
-                                tint = outcomeBadgeColor,
-                                modifier = Modifier.size(10.dp)
-                            )
-                        } else if (isError) {
-                            Icon(
-                                imageVector = Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = outcomeBadgeColor,
-                                modifier = Modifier.size(10.dp)
-                            )
-                        }
-                        Text(
-                            text = outcomeBadgeText,
-                            color = outcomeBadgeColor,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
+                    Text(
+                        text = outcomeBadgeText,
+                        color = outcomeBadgeColor,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
                 }
-
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    tint = TextMuted,
-                    modifier = Modifier.size(16.dp)
-                )
+                Spacer(Modifier.weight(1f))
+                if (formattedTime.isNotBlank()) {
+                    Text(formattedTime, color = TextMuted, fontSize = 11.sp)
+                }
             }
-
-            if (expanded) {
+        },
+        text = {
+            val scrollState = rememberScrollState()
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (event.summary.isNotBlank()) {
+                    Text(
+                        text = event.summary,
+                        color = TextPrimary,
+                        fontSize = 13.sp
+                    )
+                }
                 val hasToolInput = !event.toolInput.isNullOrBlank()
                 val hasOutput = !event.output.isNullOrBlank()
 
-                if (hasToolInput || hasOutput) {
-                    Spacer(Modifier.height(8.dp))
+                if (hasToolInput) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(6.dp))
                             .background(Ink)
                             .padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        if (hasToolInput) {
-                            Text(
-                                text = "PARAMETERS",
-                                color = TextMuted,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = event.toolInput.orEmpty(),
-                                color = TextPrimary,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp
-                            )
-                        }
-                        if (hasOutput) {
-                            if (hasToolInput) {
-                                HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 2.dp))
-                            }
-                            Text(
-                                text = "RESULT",
-                                color = TextMuted,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = event.output.orEmpty(),
-                                color = if (isError) Color(0xFFFF8A80) else Teal,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp
-                            )
-                        }
+                        Text("PARAMETERS", color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = event.toolInput.orEmpty(),
+                            color = TextPrimary,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                if (hasOutput) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Ink)
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("RESULT", color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = event.output.orEmpty(),
+                            color = if (isError) Color(0xFFFF8A80) else Teal,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = Periwinkle)
+            }
         }
-    }
+    )
 }
 
 @Composable
@@ -5746,6 +5859,7 @@ internal fun mergeManagedPeers(
     tmuxPeers: List<PeerStatus>,
     managedAgents: List<JSONObject>,
     localAgentId: String,
+    childrenByAgent: Map<String, List<SubagentSummary>> = emptyMap(),
 ): List<PeerStatus> {
     val existingById = tmuxPeers.associateBy(PeerStatus::id)
     val managedRows = buildList {
@@ -5755,7 +5869,8 @@ internal fun mergeManagedPeers(
             val parentAgentId = managed.optString("parent_agent_id").takeIf { it.isNotBlank() }
             if (parentAgentId != null) continue
             val current = existingById[agentId]
-            add(peerStatusFromManaged(agentId, managed, current = current))
+            val children = childrenByAgent[agentId] ?: current?.subagents ?: emptyList()
+            add(peerStatusFromManaged(agentId, managed, children = children, current = current))
         }
     }
     val managedById = managedRows.associateBy(PeerStatus::id)
@@ -5769,6 +5884,8 @@ internal fun mergeManagedPeers(
                     runtime = managed.runtime,
                     activityState = if (managed.activityState != "idle") managed.activityState else tmux.activityState,
                     goalState = managed.goalState ?: tmux.goalState,
+                    subagentCount = if (managed.subagentCount > 0) managed.subagentCount else tmux.subagentCount,
+                    subagents = if (managed.subagents.isNotEmpty()) managed.subagents else tmux.subagents,
                 )
             )
         } else {
