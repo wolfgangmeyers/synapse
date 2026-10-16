@@ -186,6 +186,7 @@ func TestEmbeddedEvaluationCompletedMarksPolicyDone(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "done", policy.EvaluatorState)
 	require.Equal(t, "COMPLETED", policy.LastOutcome)
+	require.False(t, policy.Config.Enabled, "goal must be automatically turned off when completed")
 
 	counts, last, err := s.EmbeddedGoalDiagnostics(ctx, b.AgentID)
 	require.NoError(t, err)
