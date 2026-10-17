@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -26,6 +27,110 @@ import (
 type steerPending struct {
 	attempt *store.EmbeddedMailAttempt
 	userMsg []byte
+}
+
+// EmbeddedManager is an alias for Manager providing embedded session control and tool bridging.
+type EmbeddedManager = Manager
+
+// SavedAgentSession is an alias for store.ManagedAgentRecord representing a saved agent session.
+type SavedAgentSession = store.ManagedAgentRecord
+
+// SetMCPManager installs the MCP manager used for remote MCP tool distribution.
+func (m *EmbeddedManager) SetMCPManager(mgr *mcp.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mcpManager = mgr
+}
+
+// MCPManager returns the active MCP manager, if configured.
+func (m *EmbeddedManager) MCPManager() *mcp.Manager {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.mcpManager
+}
+
+// buildSessionTools queries active MCP tools if m.mcpManager is set and returns them as agent tools.
+func (m *EmbeddedManager) buildSessionTools(saved *SavedAgentSession) []agent.AgentTool {
+	var tools []agent.AgentTool
+	m.mu.Lock()
+	mcpMgr := m.mcpManager
+	m.mu.Unlock()
+
+	if mcpMgr == nil {
+		return tools
+	}
+
+	activeTools, err := mcpMgr.ListActiveTools(context.Background())
+	if err != nil {
+		return tools
+	}
+
+	for _, t := range activeTools {
+		toolName := t.PrefixedName
+		if toolName == "" {
+			toolName = t.Name
+		}
+		desc := ""
+		if t.Description != nil {
+			desc = *t.Description
+		}
+		tools = append(tools, m.embeddedMCPTool(t.ServerID, toolName, desc, t.InputSchemaJSON))
+	}
+	return tools
+}
+
+// embeddedMCPTool constructs an agent.AgentTool wrapper around a remote MCP tool.
+func (m *EmbeddedManager) embeddedMCPTool(serverID, toolName, desc, schema string) agent.AgentTool {
+	var parsedSchema ai.Schema
+	trimmed := strings.TrimSpace(schema)
+	if trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &parsedSchema); err != nil {
+			parsedSchema = ai.Schema{Type: "object"}
+		}
+	}
+	if parsedSchema.Type == "" {
+		parsedSchema.Type = "object"
+	}
+
+	return agent.AgentTool{
+		Name:        toolName,
+		Description: desc,
+		Parameters:  &parsedSchema,
+		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			m.mu.Lock()
+			mcpMgr := m.mcpManager
+			m.mu.Unlock()
+
+			if mcpMgr == nil {
+				return agent.AgentToolResult{
+					Content: ai.ContentList{ai.TextContent{Text: "Error: MCP manager not available"}},
+				}, errors.New("mcp manager not available")
+			}
+
+			res, err := mcpMgr.CallTool(ctx, serverID, toolName, args)
+			if err != nil {
+				return agent.AgentToolResult{
+					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error calling remote tool %s: %v", toolName, err)}},
+				}, fmt.Errorf("call remote tool %s: %w", toolName, err)
+			}
+
+			var content ai.ContentList
+			if res != nil {
+				for _, c := range res.Content {
+					if c.Type == "image" && c.Data != "" {
+						content = append(content, ai.ImageContent{Data: c.Data, MimeType: c.MimeType})
+					} else {
+						content = append(content, ai.TextContent{Text: c.Text})
+					}
+				}
+			}
+			if len(content) == 0 {
+				content = ai.ContentList{ai.TextContent{Text: ""}}
+			}
+
+			return agent.AgentToolResult{Content: content}, nil
+		},
+	}
 }
 
 // embeddedPersistence serializes one root's checked SDK callbacks in its
@@ -1296,6 +1401,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			tools = append(tools, m.embeddedGoogleSearchTool(owner))
 		}
 		tools = append(tools, m.EmbeddedSubagentPublicTools(binding)...)
+		tools = append(tools, m.buildSessionTools(&saved)...)
 	}
 	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {
 		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted, func(id string) bool {

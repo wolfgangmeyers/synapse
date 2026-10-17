@@ -1005,21 +1005,29 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_StandardFunctionResponseWith
 		},
 	}
 
-	// Not in droppedToolCalls, so it produces functionResponse + inlineData
+	// Tool result with image produces functionResponse in turn 1, and image in turn 2 (separated to satisfy Vertex AI requirements)
 	contents := convertMessagesToGoogleContents(messages)
-	require.Len(t, contents, 1)
-	turn := contents[0]
-	require.Equal(t, "user", turn["role"])
+	require.Len(t, contents, 2)
 
-	parts := turn["parts"].([]any)
-	require.Len(t, parts, 2)
+	turn1 := contents[0]
+	require.Equal(t, "user", turn1["role"])
+	parts1 := turn1["parts"].([]any)
+	require.Len(t, parts1, 1)
 
-	frPart := parts[0].(map[string]any)
+	frPart := parts1[0].(map[string]any)
 	fr, ok := frPart["functionResponse"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "read", fr["name"])
 
-	imgPart := parts[1].(map[string]any)
+	turn2 := contents[1]
+	require.Equal(t, "user", turn2["role"])
+	parts2 := turn2["parts"].([]any)
+	require.Len(t, parts2, 2)
+
+	textPart := parts2[0].(map[string]any)
+	require.Equal(t, "Tool result image:", textPart["text"])
+
+	imgPart := parts2[1].(map[string]any)
 	inlineData, ok := imgPart["inlineData"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "image/gif", inlineData["mimeType"])

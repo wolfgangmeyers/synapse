@@ -721,6 +721,17 @@ func partsHaveFunctionResponse(parts []any) bool {
 	return false
 }
 
+func partsHaveInlineData(parts []any) bool {
+	for _, p := range parts {
+		if pm, ok := p.(map[string]any); ok {
+			if _, has := pm["inlineData"]; has {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func partsHaveText(parts []any) bool {
 	for _, p := range parts {
 		if pMap, ok := p.(map[string]any); ok {
@@ -859,21 +870,23 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 				rawContents = append(rawContents, precedingModelTurn)
 			}
 
-			var parts []any
 			if len(outText) > 65536 {
 				outText = outText[:65536] + "\n[tool output clamped for context safety]"
 			}
-			parts = append(parts, map[string]any{
+			frPart := map[string]any{
 				"functionResponse": map[string]any{
 					"name": toolName,
 					"response": map[string]any{
 						"output": outText,
 					},
 				},
-			})
+			}
+			rawContents = append(rawContents, map[string]any{"role": "user", "parts": []any{frPart}})
+
+			var imageParts []any
 			for _, part := range tm.Content {
 				if img, ok := part.(ai.ImageContent); ok {
-					parts = append(parts, map[string]any{
+					imageParts = append(imageParts, map[string]any{
 						"inlineData": map[string]any{
 							"mimeType": img.MimeType,
 							"data":     img.Data,
@@ -881,7 +894,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 					})
 					continue
 				} else if img, ok := part.(*ai.ImageContent); ok && img != nil {
-					parts = append(parts, map[string]any{
+					imageParts = append(imageParts, map[string]any{
 						"inlineData": map[string]any{
 							"mimeType": img.MimeType,
 							"data":     img.Data,
@@ -890,8 +903,9 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 					continue
 				}
 			}
-			if len(parts) > 0 {
-				rawContents = append(rawContents, map[string]any{"role": "user", "parts": parts})
+			if len(imageParts) > 0 {
+				imgTurnParts := append([]any{map[string]any{"text": "Tool result image:"}}, imageParts...)
+				rawContents = append(rawContents, map[string]any{"role": "user", "parts": imgTurnParts})
 			}
 		} else if am, ok := asAssistantMsg(msg); ok {
 			toolCallCount := 0
@@ -1025,7 +1039,10 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 						currHasFR := partsHaveFunctionResponse(parts)
 						lastHasText := partsHaveText(lastParts)
 						currHasText := partsHaveText(parts)
-						if (lastHasFR && currHasText) || (lastHasText && currHasFR) {
+						lastHasImg := partsHaveInlineData(lastParts)
+						currHasImg := partsHaveInlineData(parts)
+
+						if (lastHasFR && (currHasText || currHasImg)) || ((lastHasText || lastHasImg) && currHasFR) {
 							canMerge = false
 						}
 					}

@@ -233,6 +233,12 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodPost && path == "/v1/systemone/test":
 		r.handleSystemOneTestPOST(w, req)
 		return
+	case path == "/v1/settings/mcp-servers":
+		r.handleMCPServersCollection(w, req)
+		return
+	case path == "/v1/mcp/oauth/callback":
+		r.handleMCPOAuthCallback(w, req)
+		return
 	case path == "/v1/router/restart":
 		if req.Method != http.MethodPost {
 			r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
@@ -250,6 +256,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+		return
+	}
+	if serverID, subAction, subSub, ok := mcpServerRoute(path); ok {
+		r.handleMCPServerItem(w, req, serverID, subAction, subSub)
 		return
 	}
 	if id, _, ok := routeID(path, "/v1/reminders/"); ok {
@@ -328,6 +338,45 @@ func agentMonitorRoute(path string) (agentID, monitorID, action string, ok bool)
 	}
 
 	return "", "", "", false
+}
+
+func mcpServerRoute(path string) (id, subAction, subSub string, ok bool) {
+	prefix := "/v1/settings/mcp-servers/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", "", false
+	}
+	raw := strings.TrimPrefix(path, prefix)
+	if raw == "" {
+		return "", "", "", false
+	}
+	parts := strings.Split(raw, "/")
+	serverID, err := url.PathUnescape(parts[0])
+	if err != nil || serverID == "" {
+		return "", "", "", false
+	}
+
+	switch len(parts) {
+	case 1:
+		return serverID, "", "", true
+	case 2:
+		subAction, err = url.PathUnescape(parts[1])
+		if err != nil || subAction == "" {
+			return "", "", "", false
+		}
+		return serverID, subAction, "", true
+	case 3:
+		subAction, err = url.PathUnescape(parts[1])
+		if err != nil || subAction == "" {
+			return "", "", "", false
+		}
+		subSub, err = url.PathUnescape(parts[2])
+		if err != nil || subSub == "" {
+			return "", "", "", false
+		}
+		return serverID, subAction, subSub, true
+	default:
+		return "", "", "", false
+	}
 }
 
 func routeID(path, prefix string) (string, string, bool) {
