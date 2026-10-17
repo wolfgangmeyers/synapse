@@ -4,7 +4,7 @@ import type { Arrival } from "../domain/arrivals";
 import { humanName } from "../state/selectors";
 import { BrandHeader } from "./BrandHeader";
 import { RouterSelector } from "./RouterSelector";
-import { ConnectionStatus, type ConnectionState } from "./ConnectionStatus";
+import type { ConnectionState } from "./ConnectionStatus";
 import { AgentList } from "./AgentList";
 import { loadRecentAgents, normalizeRecentAgents, saveRecentAgents } from "../persistence/recent-agents";
 import { ownerScope, type StorageAdapter } from "../persistence/settings-repository";
@@ -58,6 +58,16 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
     recentScope.current = { persistence, scopeKey };
     setRecent(loadRecentAgents(persistence, scopeKey));
   }, [persistence, scopeKey]);
+
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    setRecent((prev) => {
+      if (prev[0] === selectedAgentId) return prev;
+      const next = normalizeRecentAgents([selectedAgentId, ...prev]);
+      saveRecentAgents(persistence, scopeKey, next);
+      return next;
+    });
+  }, [selectedAgentId, persistence, scopeKey]);
   const agentListRef = useRef<HTMLDivElement>(null);
   const [managedActionsOpen, setManagedActionsOpen] = useState(false);
   const managedActionsId = useId();
@@ -95,5 +105,53 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
     return () => { document.removeEventListener("pointerdown", closeOnOutsidePointer); document.removeEventListener("keydown", closeOnEscape); };
   }, [managedActionsOpen]);
 
-  return <div className="sidebar-content"><BrandHeader onRefresh={onRefresh} /><RouterSelector label={routerLabel} onClick={onRouterClick} /><div className="connection-actions"><ConnectionStatus status={connection} identity={connectionIdentity} detail={connectionDetail} />{hasManagedActions ? <div className="managed-actions" ref={managedActionsRef}><button type="button" className="managed-actions-trigger" aria-label="Managed actions" aria-haspopup="menu" aria-expanded={managedActionsOpen} aria-controls={`${managedActionsId}-menu`} onClick={() => setManagedActionsOpen((open) => !open)}><i className="fa-solid fa-ellipsis" aria-hidden="true" /></button>{managedActionsOpen ? <div id={`${managedActionsId}-menu`} className="managed-actions-menu" role="menu" aria-label="Managed actions">{onLaunchManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onLaunchManaged)}>Launch managed agent</button> : null}{onRestartAllManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartAllManaged)}>Restart all managed</button> : null}{onRestartRouter ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartRouter)}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" style={{ marginRight: 8 }} />Restart router</button> : null}{onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}{onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}{onContextThresholds ? <button type="button" role="menuitem" onClick={() => runManagedAction(onContextThresholds)}>Context Thresholds</button> : null}</div> : null}</div> : null}</div>{isConnected ? <><div className="section-title"><span>Agents</span><small>{visible.length}</small></div><input className="agent-filter" type="search" value={activeFilter} onChange={(event) => changeFilter(event.currentTarget.value)} placeholder="Filter connected agents" autoComplete="off" aria-label="Filter connected agents" /><AgentList listRef={agentListRef} client={client} agents={visible} selectedAgentId={selectedAgentId} arrivals={arrivals} reminderCounts={reminderCounts} expandedAgentIds={expandedAgentIds} onSelectAgent={selectAgent} onGoal={onGoal} onReminders={onReminders} onToggleSubagents={onToggleSubagents} onStopSubagent={onStopSubagent} onOpenArrival={onOpenArrival} onDismissArrival={onDismissArrival} /></> : null}</div>;
+  return (
+    <div className="sidebar-content">
+      <BrandHeader onRefresh={onRefresh} />
+      <div className="connection-actions">
+        <RouterSelector
+          label={routerLabel}
+          status={connection}
+          identity={connectionIdentity}
+          detail={connectionDetail}
+          onClick={onRouterClick}
+        />
+        {hasManagedActions ? (
+          <div className="managed-actions" ref={managedActionsRef}>
+            <button
+              type="button"
+              className="managed-actions-trigger"
+              aria-label="Managed actions"
+              aria-haspopup="menu"
+              aria-expanded={managedActionsOpen}
+              aria-controls={`${managedActionsId}-menu`}
+              onClick={() => setManagedActionsOpen((open) => !open)}
+            >
+              <i className="fa-solid fa-ellipsis" aria-hidden="true" />
+            </button>
+            {managedActionsOpen ? (
+              <div id={`${managedActionsId}-menu`} className="managed-actions-menu" role="menu" aria-label="Managed actions">
+                {onLaunchManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onLaunchManaged)}>Launch managed agent</button> : null}
+                {onRestartAllManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartAllManaged)}>Restart all managed</button> : null}
+                {onRestartRouter ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartRouter)}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" style={{ marginRight: 8 }} />Restart router</button> : null}
+                {onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}
+                {onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}
+                {onContextThresholds ? <button type="button" role="menuitem" onClick={() => runManagedAction(onContextThresholds)}>Context Thresholds</button> : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      {isConnected ? (
+        <>
+          <div className="section-title">
+            <span>Agents</span>
+            <small>{visible.length}</small>
+          </div>
+          <input className="agent-filter" type="search" value={activeFilter} onChange={(event) => changeFilter(event.currentTarget.value)} placeholder="Filter connected agents" autoComplete="off" aria-label="Filter connected agents" />
+          <AgentList listRef={agentListRef} client={client} agents={visible} selectedAgentId={selectedAgentId} arrivals={arrivals} reminderCounts={reminderCounts} expandedAgentIds={expandedAgentIds} onSelectAgent={selectAgent} onGoal={onGoal} onReminders={onReminders} onToggleSubagents={onToggleSubagents} onStopSubagent={onStopSubagent} onOpenArrival={onOpenArrival} onDismissArrival={onDismissArrival} />
+        </>
+      ) : null}
+    </div>
+  );
 }
