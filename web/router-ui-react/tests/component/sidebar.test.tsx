@@ -20,7 +20,9 @@ describe("Sidebar", () => {
   it("filters and selects agents", () => {
     const onSelect = vi.fn();
     render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);
-    expect(screen.getByRole("button", { name: "Router local and provider sign-in settings" })).toHaveTextContent("Router & sign-in");
+    const routerBtn = screen.getByRole("button", { name: /local/i });
+    expect(routerBtn).toHaveTextContent("local");
+    expect(routerBtn).toHaveTextContent("Connected");
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "alpha" } });
     expect(screen.getByRole("button", { name: /Alpha Bot/i })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Beta/i })).toBeNull();
@@ -40,9 +42,11 @@ describe("Sidebar", () => {
     const onProviderSettings = vi.fn();
     render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onRestartAllManaged={onRestartAllManaged} onProviderSettings={onProviderSettings} />);
 
-    const connection = screen.getByLabelText("Connection status");
+    const routerBtn = screen.getByRole("button", { name: /local/i });
+    expect(routerBtn).toHaveTextContent("local");
+    expect(routerBtn).toHaveTextContent("Connected as wolfgang");
     const menuButton = screen.getByRole("button", { name: "Managed actions" });
-    expect(connection.parentElement).toContainElement(menuButton);
+    expect(routerBtn.parentElement).toContainElement(menuButton);
     expect(menuButton).toHaveAttribute("aria-haspopup", "menu");
     expect(menuButton).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
@@ -73,6 +77,40 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("menuitem", { name: "Provider settings" }));
     expect(onProviderSettings).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
+  });
 
+  it("moves an agent to the top of the visible list when selectedAgentId changes", () => {
+    const agents = [
+      { agent_id: "alpha.bot", source: "router-managed" as const },
+      { agent_id: "beta.bot", source: "router-managed" as const },
+      { agent_id: "gamma.bot", source: "router-managed" as const },
+    ];
+    const { rerender } = render(
+      <Sidebar
+        scope={{ routerUrl: "http://router.test", agentId: "web" }}
+        routerLabel="local"
+        connection="connected"
+        agents={agents}
+      />
+    );
+
+    // Initial order is alphabetical: alpha, beta, gamma
+    const listItemsBefore = screen.getAllByRole("listitem").map((el) => el.getAttribute("data-agent-id"));
+    expect(listItemsBefore).toEqual(["alpha.bot", "beta.bot", "gamma.bot"]);
+
+    // When gamma is selected (e.g. freshly launched)
+    rerender(
+      <Sidebar
+        scope={{ routerUrl: "http://router.test", agentId: "web" }}
+        routerLabel="local"
+        connection="connected"
+        agents={agents}
+        selectedAgentId="router-managed:gamma.bot"
+      />
+    );
+
+    // Gamma should now rise to the top
+    const listItemsAfter = screen.getAllByRole("listitem").map((el) => el.getAttribute("data-agent-id"));
+    expect(listItemsAfter).toEqual(["gamma.bot", "alpha.bot", "beta.bot"]);
   });
 });
