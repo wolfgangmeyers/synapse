@@ -105,6 +105,50 @@ func (s *Store) HasPendingWakeOrStartedContinuation(ctx context.Context, b Embed
 	return count > 0, err
 }
 
+// GetActiveGoalContinuations returns a list of sibling agent IDs that have active goals
+// or active/reserved goal continuations.
+func (s *Store) GetActiveGoalContinuations(ctx context.Context, callerAgentID string) ([]string, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+
+	seen := make(map[string]bool)
+	var activeAgents []string
+
+	// Query embedded_goal_continuations if table exists
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT agent_id FROM embedded_goal_continuations WHERE state IN ('reserved', 'started') AND agent_id != ?`, callerAgentID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var agentID string
+			if err := rows.Scan(&agentID); err == nil && agentID != "" && !seen[agentID] {
+				seen[agentID] = true
+				activeAgents = append(activeAgents, agentID)
+			}
+		}
+	}
+
+	// Query managed_agent_policies for active goals if table exists
+	pRows, err := s.db.QueryContext(ctx, `SELECT DISTINCT agent_id FROM managed_agent_policies WHERE goal_enabled = 1 AND agent_id != ?`, callerAgentID)
+	if err == nil {
+		defer pRows.Close()
+		for pRows.Next() {
+			var agentID string
+			if err := pRows.Scan(&agentID); err == nil && agentID != "" && !seen[agentID] {
+				seen[agentID] = true
+				activeAgents = append(activeAgents, agentID)
+			}
+		}
+	}
+
+	return activeAgents, nil
+}
+
 // continuations for the exact recovered session. Evaluator claims and started
 // UNKNOWN rows are never recovery work.
 func (s *Store) ReservedEmbeddedGoalSnoozes(ctx context.Context, b EmbeddedBinding) ([]EmbeddedGoalContinuation, error) {

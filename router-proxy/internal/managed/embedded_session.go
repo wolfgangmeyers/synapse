@@ -1257,6 +1257,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "workflow_transition"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "extend_tool_timeout"))
+		tools = append(tools, m.embeddedRestartRouterTool(owner, "mecha_restart_router"))
+		tools = append(tools, m.embeddedRestartRouterTool(owner, "restart_router"))
 		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))
 		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd))
 		readTool, err := coding.CreateTool("read", saved.Cwd)
