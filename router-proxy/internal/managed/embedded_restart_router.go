@@ -20,7 +20,8 @@ func embeddedRestartRouterSchema() *ai.Schema {
 	return s
 }
 
-func (m *Manager) embeddedRestartRouterTool(owner embeddedOwner, toolName string) agent.AgentTool {
+func (m *Manager) embeddedRestartRouterTool(owner embeddedOwner) agent.AgentTool {
+	const toolName = "mecha_restart_router"
 	desc := "Request a controlled restart of the mailbox router process. Automatically restarts if no other workers or subagents are active. If other workers or subagents are active, requires a two-step rejection safeguard before force can be used."
 	return agent.AgentTool{
 		Name:        toolName,
