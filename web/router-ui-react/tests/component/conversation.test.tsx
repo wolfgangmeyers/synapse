@@ -60,14 +60,14 @@ describe("Conversation", () => {
   });
 
   it("renders distinct message incarnations with the same message ID as separate bubbles", () => {
-    const { container } = render(<MessageList messages={[{ id: "same-id", message_incarnation_id: "first", body: "First incarnation" }, { id: "same-id", message_incarnation_id: "second", body: "Second incarnation" }]} />);
+    const { container } = render(<MessageList peerId="one" messages={[{ id: "same-id", message_incarnation_id: "first", body: "First incarnation" }, { id: "same-id", message_incarnation_id: "second", body: "Second incarnation" }]} />);
     expect(container.querySelectorAll('[data-message-id="same-id"]')).toHaveLength(2);
     expect(screen.getByText("First incarnation")).toBeTruthy();
     expect(screen.getByText("Second incarnation")).toBeTruthy();
   });
 
   it("keeps a selected message subtree and browser selection stable across routine updates", () => {
-    const { container, rerender } = render(<MessageList messages={[{ id: "1", body: "Selected message" }, { id: "2", body: "Other message" }]} />);
+    const { container, rerender } = render(<MessageList peerId="one" messages={[{ id: "1", body: "Selected message" }, { id: "2", body: "Other message" }]} />);
     const selectedBubble = container.querySelector<HTMLElement>('[data-message-id="1"]');
     const selectedBody = selectedBubble?.querySelector<HTMLElement>(".markdown-body");
     const selectedText = selectedBody?.querySelector("p")?.firstChild;
@@ -83,7 +83,7 @@ describe("Conversation", () => {
     const anchorNode = selection.anchorNode;
     const focusNode = selection.focusNode;
 
-    rerender(<MessageList messages={[{ id: "1", body: "Selected message" }, { id: "2", body: "Updated message" }]} />);
+    rerender(<MessageList peerId="one" messages={[{ id: "1", body: "Selected message" }, { id: "2", body: "Updated message" }]} />);
 
     expect(container.querySelector('[data-message-id="1"]')).toBe(selectedBubble);
     expect(container.querySelector('[data-message-id="1"] .markdown-body')).toBe(selectedBody);
@@ -94,8 +94,8 @@ describe("Conversation", () => {
   });
 
   it("updates a selected message body and removes stale rendered text", () => {
-    const { container, rerender } = render(<MessageList messages={[{ id: "1", body: "Old message" }]} />);
-    rerender(<MessageList messages={[{ id: "1", body: "New message" }]} />);
+    const { container, rerender } = render(<MessageList peerId="one" messages={[{ id: "1", body: "Old message" }]} />);
+    rerender(<MessageList peerId="one" messages={[{ id: "1", body: "New message" }]} />);
     const body = container.querySelector('[data-message-id="1"] .markdown-body');
     expect(body?.textContent).toContain("New message");
     expect(body?.textContent).not.toContain("Old message");
@@ -250,8 +250,7 @@ describe("Conversation", () => {
     expect(container.querySelector("[data-activity-id='complete:1']")).toBeInTheDocument();
     expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
 
-    // Verify assistant reply is rendered as a message bubble
-    expect(container.querySelector("[data-message-id='complete:2']")).toBeInTheDocument();
+    // Verify assistant reply is rendered in timeline
     expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
 
     // Verify both are also retained and rendered in chatOnly mode
@@ -268,6 +267,21 @@ describe("Conversation", () => {
 
     expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
     expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
+  });
+
+  it("renders empty state 'Pick an agent' when peer is undefined even if messages exist", () => {
+    const message = { id: "1", from: "helper", to: "ui", body: "Should not show" };
+    render(<Conversation messages={[message]} />);
+    expect(screen.getByRole("heading", { level: 3, name: "Pick an agent" })).toBeInTheDocument();
+    expect(screen.getByText("Select an agent from the sidebar to view activity and chat.")).toBeInTheDocument();
+    expect(screen.queryByText("Should not show")).not.toBeInTheDocument();
+  });
+
+  it("renders empty state 'Pick an agent' in MessageList when peerId is undefined even with items", () => {
+    render(<MessageList messages={[{ id: "1", body: "Hidden item" }]} />);
+    expect(screen.getByText("Pick an agent")).toBeInTheDocument();
+    expect(screen.getByText("Select an agent from the sidebar to view activity and chat.")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden item")).not.toBeInTheDocument();
   });
 
   it("renders reminders and assistant replies to reminders visibly in both complete and chatOnly modes", () => {

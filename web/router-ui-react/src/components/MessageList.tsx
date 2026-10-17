@@ -1,10 +1,9 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
-import { isRecord } from "../protocol/guards";
 import type { ManagedHistoryEntry } from "../protocol/types";
-import { shouldFollowToBottom } from "../state/conversation-projection";
-import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getMailboxSendDetails, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { currentUsername } from "../persistence/settings-repository";
+import { shouldFollowToBottom } from "../state/conversation-projection";
+import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
 
@@ -39,8 +38,9 @@ function activitySequence(entry: ManagedHistoryEntry): number {
   return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
-function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, allEntries?: readonly ManagedHistoryEntry[]): boolean {
+function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: string, allEntries?: readonly ManagedHistoryEntry[]): boolean {
   if (isContextResetEntry(entry)) return true;
+  if (isMailboxSendToUser(entry, currentUser, allEntries) !== undefined) return true;
   // A managed child stays in the persistent active-subagents area until its
   // terminal update. Its actual subagent tool invocation remains a normal
   // Complete history entry because it has presentation.kind === "tool".
@@ -73,35 +73,13 @@ function dateLabel(timestamp: number): string | undefined {
 
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
   if (isContextResetEntry(entry)) return false;
-  const toolName = entry.presentation?.tool_name;
-  const isTool = entry.presentation?.kind === "tool";
-  const isMailboxTool = toolName === "mecha_mailbox_send" || (toolName === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send");
-  const isMessageKind = entry.presentation?.kind === "message";
-  if (!isTool && !isMessageKind) return false;
-  if (isTool && !isMailboxTool) return false;
-  const mailboxDetails = getMailboxSendDetails(entry.tool_input);
-  const content = mailboxDetails?.body ?? entry.message_content;
-  if (!content) return false;
-  const to = mailboxDetails?.recipient ?? entry.presentation?.to;
-  const from = entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id;
-  const entryTime = activityTime(entry);
-  return messages.some((m) => {
-    if (m.id === entry.id) return true;
-    if (m.body !== content) return false;
-    const senderMatches = m.from === from || m.to === to || m.from === entry.sender_identity;
-    if (!senderMatches) return false;
-    const mTime = messageTime(m, Number.MAX_SAFE_INTEGER);
-    if (entryTime !== Number.MAX_SAFE_INTEGER && mTime !== Number.MAX_SAFE_INTEGER) {
-      return Math.abs(entryTime - mTime) <= 120_000;
-    }
-    return true;
-  });
+  return messages.some((m) => m.id === entry.id);
 }
 
 export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
+  const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
-  const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const [announcement, setAnnouncement] = useState("");
   const announcedActivity = useRef(new Set<string>());
   const activityLiveInitialized = useRef(false);
@@ -116,34 +94,17 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
       })),
     ];
     for (const entry of activityEntries ?? []) {
-      if (!isMeaningfulCompleteActivity(entry, activityEntries) || isAlreadyInMessages(entry, messages)) {
+      if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) {
         continue;
       }
       const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
       if (userMail !== undefined) {
-        const thinkingText = getThinkingContent(entry);
-        if (thinkingText) {
-          rawItems.push({
-            type: "activity" as const,
-            id: `${entry.id}:thinking`,
-            timestamp: activityTime(entry) - 1,
-            sequence: activitySequence(entry),
-            entry: {
-              id: `${entry.id}:thinking`,
-              agent_id: entry.agent_id,
-              ...(entry.at !== undefined ? { at: entry.at } : {}),
-              presentation: {
-                kind: "thinking",
-                outcome: "success",
-                thinking: thinkingText,
-              },
-              thinking: thinkingText,
-            },
-          });
+        if (isAlreadyInMessages(entry, messages)) {
+          continue;
         }
         rawItems.push({
-          type: "message" as const,
-          id: entry.id,
+          type: "message",
+          id: `activity-msg-${entry.id}`,
           timestamp: activityTime(entry),
           sequence: activitySequence(entry),
           message: {
@@ -157,15 +118,18 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
             ...(entry.presentation?.outcome === "active" ? { pending: true } : {}),
           },
         });
-      } else {
-        rawItems.push({
-          type: "activity" as const,
-          id: entry.id,
-          timestamp: activityTime(entry),
-          sequence: activitySequence(entry),
-          entry,
-        });
+        continue;
       }
+      if (isAlreadyInMessages(entry, messages)) {
+        continue;
+      }
+      rawItems.push({
+        type: "activity" as const,
+        id: entry.id,
+        timestamp: activityTime(entry),
+        sequence: activitySequence(entry),
+        entry,
+      });
     }
     return rawItems.sort(
       (left, right) =>
@@ -244,10 +208,10 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   const hasItems = renderedItems.length > 0;
   const hasActivity = activityEntries !== undefined;
   let previousDate: string | undefined;
-  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{hasOlder && <li key="pagination:load-older" className="timeline-load-older-item"><button type="button" className="load-older-button" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? "Loading older history…" : "Load older history"}</button></li>}{renderedItems.map(({ item, suppressThinking, epoch }) => {
+  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{peerId === undefined ? <EmptyState watermark title="Pick an agent" description="Select an agent from the sidebar to view activity and chat." /> : hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{hasOlder && <li key="pagination:load-older" className="timeline-load-older-item"><button type="button" className="load-older-button" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? "Loading older history…" : "Load older history"}</button></li>}{renderedItems.map(({ item, suppressThinking, epoch }) => {
     const currentDate = dateLabel(item.timestamp);
     const separator = currentDate !== undefined && currentDate !== previousDate ? <li key={`date:${currentDate}:${item.id}`} className="timeline-date" aria-hidden="true">{currentDate}</li> : null;
     previousDate = currentDate ?? previousDate;
     return <Fragment key={`${item.type}:${item.id}`}>{separator}<li className={`timeline-item timeline-item--${item.type}${item.type === "activity" && isContextResetEntry(item.entry) ? " timeline-item--context-reset" : ""}`}>{item.type === "message" ? <MessageBubble message={item.message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})} /> : <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />}</li></Fragment>;
-  })}</ol> : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : peerId === undefined ? <EmptyState watermark title="Pick an agent" description="Select an agent from the sidebar to view activity and chat." /> : <EmptyState title={hasActivity ? "No messages or activity yet" : "No messages yet"} description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."} />}{hasItems && error ? <p className="error" role="alert">{error}</p> : null}<p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p></div>;
+  })}</ol> : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : <EmptyState title={hasActivity ? "No messages or activity yet" : "No messages yet"} description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."} />}{hasItems && error ? <p className="error" role="alert">{error}</p> : null}<p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p></div>;
 }
