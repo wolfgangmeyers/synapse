@@ -443,6 +443,45 @@ function managedOperation(value: unknown): ManagedOperationResponse {
   return result;
 }
 
+export interface MCPServer {
+  id: string;
+  name: string;
+  url: string;
+  auth_type: "none" | "bearer" | "oauth" | string;
+  client_id?: string;
+  token_endpoint?: string;
+  auth_endpoint?: string;
+  registration_endpoint?: string;
+  revocation_endpoint?: string;
+  scopes?: string;
+  status: "connected" | "needs_auth" | "error" | "unconfigured" | string;
+  last_error?: string;
+  tools_count: number;
+  last_sync_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AddMCPServerRequest {
+  url: string;
+  name?: string;
+  auth_type?: "none" | "bearer" | "oauth";
+  auth_mode?: "none" | "bearer" | "oauth";
+  client_id?: string;
+  client_secret?: string;
+  token_endpoint?: string;
+  auth_endpoint?: string;
+  registration_endpoint?: string;
+  revocation_endpoint?: string;
+  scopes?: string;
+}
+
+export interface MCPServerDetailResponse {
+  server: MCPServer;
+  tools?: unknown[];
+  token?: unknown;
+}
+
 export interface RouterHttpClient {
   readonly routerUrl: string;
   request(path: string, init?: RequestInit): Promise<unknown>;
@@ -510,6 +549,12 @@ export interface RouterHttpClient {
   contextThresholds(): Promise<ContextThresholdConfig>;
   saveContextThresholds(config: ContextThresholdConfig): Promise<ContextThresholdConfig>;
   testSystemOne(payload?: SystemOneTestRequest): Promise<SystemOneTestResponse>;
+  listMCPServers(): Promise<MCPServer[]>;
+  addMCPServer(payload: AddMCPServerRequest): Promise<{ server: MCPServer; auth_url?: string }>;
+  deleteMCPServer(id: string): Promise<void>;
+  syncMCPServer(id: string): Promise<{ server: MCPServer; tools?: unknown[]; error?: unknown }>;
+  startMCPOAuth(id: string): Promise<{ authorization_url: string }>;
+  revokeMCPServer(id: string): Promise<{ server: MCPServer }>;
   restartRouter(): Promise<{ ok: boolean; restarting: boolean }>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
@@ -732,6 +777,46 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         status: rec?.status === "ok" ? "ok" : "error",
         ...(rec?.response ? { response: rec.response as SystemOneTestResponse["response"] } : {}),
         ...(rec?.error ? { error: String(rec.error) } : {}),
+      };
+    },
+    listMCPServers: async () => {
+      const body = await request("/v1/settings/mcp-servers");
+      const rec = recordValue(body);
+      if (!rec || !Array.isArray(rec.servers)) return [];
+      return rec.servers as MCPServer[];
+    },
+    addMCPServer: async (payload) => {
+      const body = await jsonRequest("/v1/settings/mcp-servers", "POST", payload);
+      const rec = recordValue(body);
+      return {
+        server: rec?.server as MCPServer,
+        ...(typeof rec?.auth_url === "string" ? { auth_url: rec.auth_url } : {}),
+      };
+    },
+    deleteMCPServer: async (id) => {
+      await request(`/v1/settings/mcp-servers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
+    syncMCPServer: async (id) => {
+      const body = await jsonRequest(`/v1/settings/mcp-servers/${encodeURIComponent(id)}/sync`, "POST", {});
+      const rec = recordValue(body);
+      return {
+        server: rec?.server as MCPServer,
+        ...(Array.isArray(rec?.tools) ? { tools: rec.tools } : {}),
+        ...(rec?.error ? { error: rec.error } : {}),
+      };
+    },
+    startMCPOAuth: async (id) => {
+      const body = await jsonRequest(`/v1/settings/mcp-servers/${encodeURIComponent(id)}/auth/start`, "POST", {});
+      const rec = recordValue(body);
+      return {
+        authorization_url: typeof rec?.authorization_url === "string" ? rec.authorization_url : "",
+      };
+    },
+    revokeMCPServer: async (id) => {
+      const body = await jsonRequest(`/v1/settings/mcp-servers/${encodeURIComponent(id)}/auth/revoke`, "POST", {});
+      const rec = recordValue(body);
+      return {
+        server: rec?.server as MCPServer,
       };
     },
     restartRouter: async () => {

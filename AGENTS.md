@@ -73,6 +73,10 @@ The backend must accept browser calls from arbitrary frontend URLs. Cross-origin
 
 Small icon-only action buttons across cards, headers, toolbars, and list items must use the compact circular icon button styling (`.icon-btn-round`: 24px x 24px, `border-radius: 999px`, subtle border and translucent background with hover states, as seen in the agent conversation header and agent list) rather than large blocky/rectangular buttons.
 
+## Config Dialog Layout Convention
+
+Configuration and management dialogs (such as MCP Servers, Routers, Providers, etc.) must follow the convention of cleanly separating the "add new item / edit item" form from the list view. The main view should be purely a list view showing configured items, empty state if none exist, and an "+ Add <Item>" action button in the header/toolbar. It must not clutter the list view with permanently visible inline input form fields. Clicking "+ Add" or "Edit" transitions to a dedicated form view (with Back/Cancel and Save/Submit actions) that returns to the list view upon completion or cancellation.
+
 ## Maintenance
 
 When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.

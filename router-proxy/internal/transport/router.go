@@ -22,6 +22,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/systemone"
@@ -258,6 +259,7 @@ type Options struct {
 	// TestOnlyHTTPHandler is mounted only by isolated acceptance binaries.
 	// Production commands leave it nil.
 	TestOnlyHTTPHandler http.Handler
+	MCPManager          *mcp.Manager
 	ExitFunc            func(int)
 	RestartDelay        time.Duration
 }
@@ -299,6 +301,7 @@ type Router struct {
 	policyCancel   context.CancelFunc
 
 	systemOneClient *systemone.Client
+	mcpManager      *mcp.Manager
 
 	mu sync.RWMutex
 	// lifecycleMu serializes listener startup with the transition to closed.
@@ -641,6 +644,7 @@ func New(options Options) (*Router, error) {
 	r.startupWork = r.runStartup
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
+	r.mcpManager = options.MCPManager
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
@@ -651,6 +655,9 @@ func New(options Options) (*Router, error) {
 		options.Managed.SetDirectReplyPublisher(r.persistManagedDirectReply)
 		options.Managed.SetEmbeddedReplyPublisher(r.persistEmbeddedReply)
 		options.Managed.SetEmbeddedMailPublisher(r.afterEnqueue)
+		if options.MCPManager != nil {
+			options.Managed.SetMCPManager(options.MCPManager)
+		}
 	}
 	if options.ProviderAuth != nil {
 		options.ProviderAuth.SetPublisher(r.publishProviderAuth)

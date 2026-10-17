@@ -13,11 +13,12 @@ export interface RouterManagerDialogProps {
   onSelect: (router: SavedRouter) => void;
   onRemove: (url: string) => void;
   onProviderSettings?: () => void;
+  onMCPServers?: () => void;
 }
 
 type Editor = { mode: "add" | "edit"; previousUrl?: string };
 
-export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId = DEFAULT_AGENT_ID, onClose, onSave, onSelect, onRemove, onProviderSettings = () => undefined }: RouterManagerDialogProps) {
+export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId = DEFAULT_AGENT_ID, onClose, onSave, onSelect, onRemove, onProviderSettings = () => undefined, onMCPServers = () => undefined }: RouterManagerDialogProps) {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [url, setUrl] = useState("");
   const [alias, setAlias] = useState("");
@@ -52,7 +53,13 @@ export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId =
 
   return (
     <DialogShell open={open} title="Routers" titleId="router-dialog-title" description="Each router keeps its own agents and chat history." onClose={onClose} closeLabel="Close routers" className="message-dialog router-dialog">
-      <div className="dialog-actions router-dialog-actions"><button type="button" className="secondary" onClick={onProviderSettings}>Provider settings</button><button type="button" aria-label="Add router" onClick={beginAdd}>Add router</button></div>
+      <div className="dialog-actions router-dialog-actions">
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button type="button" className="secondary" onClick={onProviderSettings}>Provider settings</button>
+          <button type="button" className="secondary" onClick={onMCPServers}>MCP servers</button>
+        </div>
+        <button type="button" aria-label="Add router" onClick={beginAdd}>Add router</button>
+      </div>
       <div className="saved-routers">
         {routers.map((router) => <div key={router.url} className={`router-row${router.url === activeUrl ? " active" : ""}`} tabIndex={0} role="button" aria-current={router.url === activeUrl ? "true" : undefined} onClick={() => onSelect(router)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(router); } }}>
           <div className="router-label"><strong>{routerDisplayName(router.url, router.alias)}</strong><div className="meta">{router.alias ? `${router.url}${router.url === activeUrl ? " · selected" : ""}` : router.url === activeUrl ? "selected" : ""}</div></div>
