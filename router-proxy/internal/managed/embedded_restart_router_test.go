@@ -36,7 +36,7 @@ func TestRestartRouterTool_EmptyReason(t *testing.T) {
 		},
 	}
 
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 
 	for _, invalidReason := range []string{"", "   ", "\t\n"} {
 		res, err := tool.Execute(ctx, "call-empty", map[string]any{
@@ -79,7 +79,7 @@ func TestRestartRouterTool_StringForceParameter(t *testing.T) {
 	}
 
 	mgr.markAgentTurnActive(siblingID, true)
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 
 	// 1. Initial attempt without force -> rejected
 	res1, err := tool.Execute(ctx, "call-step-1", map[string]any{
@@ -160,7 +160,7 @@ func TestRestartRouterTool_ImmediateSuccessWhenClear(t *testing.T) {
 		},
 	}
 
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 	require.Equal(t, "mecha_restart_router", tool.Name)
 
 	res, err := tool.Execute(ctx, "call-1", map[string]any{
@@ -210,7 +210,7 @@ func TestRestartRouterTool_RejectedWhenOtherWorkersActive(t *testing.T) {
 	// Simulate active sibling worker in Manager's active session or lane
 	mgr.markAgentTurnActive(siblingID, true)
 
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 	res, err := tool.Execute(ctx, "call-reject-sibling", map[string]any{
 		"reason": "testing sibling conflict",
 	}, nil)
@@ -263,7 +263,7 @@ func TestRestartRouterTool_RejectedWhenActiveSubagentsExist(t *testing.T) {
 	// Simulate active subagent
 	mgr.markSubagentActiveForTest("subagent-abc", callerID, "running")
 
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 	res, err := tool.Execute(ctx, "call-reject-subagent", map[string]any{
 		"reason": "testing subagent conflict",
 	}, nil)
@@ -309,7 +309,7 @@ func TestRestartRouterTool_ForceDisallowedWithoutPriorRejection(t *testing.T) {
 
 	mgr.markAgentTurnActive(siblingID, true)
 
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 	res, err := tool.Execute(ctx, "call-force-preemptive", map[string]any{
 		"reason": "emergency fix attempt",
 		"force":  true,
@@ -352,7 +352,7 @@ func TestRestartRouterTool_ForceAllowedAfterPriorRejection(t *testing.T) {
 	}
 
 	mgr.markAgentTurnActive(siblingID, true)
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 
 	// 1. Initial attempt without force -> rejected
 	res1, err := tool.Execute(ctx, "call-step-1", map[string]any{
@@ -412,7 +412,7 @@ func TestRestartRouterTool_ForceExpiredRejection(t *testing.T) {
 	}
 
 	mgr.markAgentTurnActive(siblingID, true)
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 
 	// Set lane rejection timestamp to 65 seconds ago
 	lane := mgr.laneFor(callerID)
@@ -438,28 +438,25 @@ func TestRestartRouterTool_ForceExpiredRejection(t *testing.T) {
 	}
 }
 
-// TestRestartRouterTool_AliasRegistration verifies that the alias `restart_router`
-// is registered with identical schema, description, and execution behavior.
-func TestRestartRouterTool_AliasRegistration(t *testing.T) {
+// TestRestartRouterTool_CanonicalName verifies that only the canonical name `mecha_restart_router`
+// is registered and returned.
+func TestRestartRouterTool_CanonicalName(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := store.Open(ctx, dbPath, store.Options{})
 	require.NoError(t, err)
 	defer db.Close()
 
-	agentID := "worker-restart-alias"
+	agentID := "worker-restart-canonical"
 	binding := store.EmbeddedBinding{AgentID: agentID, SessionID: "session-1", Epoch: 1, Generation: "gen-1"}
 	owner := embeddedOwner{binding: binding, identity: "fixture:" + agentID}
 
 	mgr := &Manager{store: db}
-	primaryTool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
-	aliasTool := mgr.embeddedRestartRouterTool(owner, "restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 
-	require.Equal(t, "mecha_restart_router", primaryTool.Name)
-	require.Equal(t, "restart_router", aliasTool.Name)
-	require.Equal(t, primaryTool.Description, aliasTool.Description)
-	require.NotNil(t, primaryTool.Parameters)
-	require.NotNil(t, aliasTool.Parameters)
+	require.Equal(t, "mecha_restart_router", tool.Name)
+	require.NotEmpty(t, tool.Description)
+	require.NotNil(t, tool.Parameters)
 }
 
 // TestRestartRouterTool_ExitCodeAndFile verifies exit code 75 protocol
@@ -488,7 +485,7 @@ func TestRestartRouterTool_ExitCodeAndFile(t *testing.T) {
 		},
 	}
 
-	tool := mgr.embeddedRestartRouterTool(owner, "mecha_restart_router")
+	tool := mgr.embeddedRestartRouterTool(owner)
 	res, err := tool.Execute(ctx, "call-exit-file", map[string]any{
 		"reason": "testing exit file writing",
 	}, nil)
@@ -602,14 +599,18 @@ func TestRestartRouter_RoleExclusion(t *testing.T) {
 		lane := mRole.laneFor(callerID)
 		require.NotNil(t, lane)
 		baseTools, _ := lane.getTools()
-		hasRestartRouter := false
+		hasMechaRestartRouter := false
+		hasLegacyRestartRouter := false
 		for _, tool := range baseTools {
-			if tool.Name == "mecha_restart_router" || tool.Name == "restart_router" {
-				hasRestartRouter = true
-				break
+			if tool.Name == "mecha_restart_router" {
+				hasMechaRestartRouter = true
+			}
+			if tool.Name == "restart_router" {
+				hasLegacyRestartRouter = true
 			}
 		}
-		require.True(t, hasRestartRouter, "role %s must have restart router tool in base tools", role)
+		require.True(t, hasMechaRestartRouter, "role %s must have mecha_restart_router in base tools", role)
+		require.False(t, hasLegacyRestartRouter, "role %s must NOT have restart_router alias in base tools", role)
 	}
 }
 
