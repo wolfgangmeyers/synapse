@@ -103,6 +103,7 @@ type ManagerOptions struct {
 	// durable IDs only; production leaves it nil and uses the S3 restart bridge.
 	RestartAllDispatcher              RestartAllDispatcher
 	RestartAllDispatchFailureRecorder RestartAllDispatchFailureRecorder
+	RestartExitTrigger                func(int)
 	// RootControlHandlers is the concrete owner set for the closed 16-operation
 	// registry. Nil retains safe correlated unavailable results until the host
 	// wires its real supervisor-service adapters.
@@ -162,6 +163,7 @@ type managedAgentLane struct {
 	activePersistence        *embeddedPersistence
 	consecutiveContinuations int
 	consecutiveEmptyTurns    int
+	consecutiveErrors        int
 	goalAttempt              int
 	mailAttempts             map[string]int
 	warningEpoch             int64
@@ -175,6 +177,58 @@ type managedAgentLane struct {
 	contextUsage             *ContextUsage
 	baseTools                []agent.AgentTool
 	activeTools              []agent.AgentTool
+	restartRejectedAt        time.Time
+	restartConflictDetail    string
+}
+
+func (l *managedAgentLane) recordRestartRouterRejection(t time.Time, reason string) {
+	if l == nil {
+		return
+	}
+	l.activeMu.Lock()
+	defer l.activeMu.Unlock()
+	l.restartRejectedAt = t
+	l.restartConflictDetail = reason
+}
+
+func (l *managedAgentLane) hasValidRestartRouterRejection(now time.Time, ttl time.Duration) bool {
+	if l == nil {
+		return false
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	if l.restartRejectedAt.IsZero() {
+		return false
+	}
+	diff := now.Sub(l.restartRejectedAt)
+	return diff >= 0 && diff <= ttl
+}
+
+func (l *managedAgentLane) consumeRestartRouterRejection(now time.Time, ttl time.Duration) bool {
+	if l == nil {
+		return false
+	}
+	l.activeMu.Lock()
+	defer l.activeMu.Unlock()
+	if l.restartRejectedAt.IsZero() {
+		return false
+	}
+	diff := now.Sub(l.restartRejectedAt)
+	if diff < 0 || diff > ttl {
+		return false
+	}
+	l.restartRejectedAt = time.Time{}
+	l.restartConflictDetail = ""
+	return true
+}
+
+func (l *managedAgentLane) getRestartRouterRejection() (time.Time, string) {
+	if l == nil {
+		return time.Time{}, ""
+	}
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	return l.restartRejectedAt, l.restartConflictDetail
 }
 
 func (l *managedAgentLane) getTools() ([]agent.AgentTool, []agent.AgentTool) {
@@ -452,6 +506,9 @@ type Manager struct {
 	startWG                                    sync.WaitGroup
 	closed                                     bool
 	closeErr                                   error
+	restarting                                 atomic.Bool
+	restartOnce                                sync.Once
+	restartExitTrigger                         func(int)
 }
 
 // AllowedWorkingDirectoryRoots returns a copy of the startup allowlist for the
@@ -552,6 +609,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
 	manager.goalContinuationDelay = options.GoalContinuationDelay
 	manager.embeddedMailBackoff = options.EmbeddedMailBackoff
+	manager.restartExitTrigger = options.RestartExitTrigger
 	if options.MaxConsecutiveGoalContinuations > 0 {
 		manager.maxConsecutiveGoalContinuations = options.MaxConsecutiveGoalContinuations
 	} else {
@@ -1488,6 +1546,81 @@ func (m *Manager) laneFor(agentID string) *managedAgentLane {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.laneLocked(agentID)
+}
+
+func defaultProcessExitTrigger(code int) {
+	if !testing.Testing() && flag.Lookup("test.v") == nil {
+		os.Exit(code)
+	}
+}
+
+func (m *Manager) TriggerRouterRestart() {
+	m.restarting.Store(true)
+	m.restartOnce.Do(func() {
+		if exitFile := os.Getenv("ROUTER_EXIT_FILE"); exitFile != "" {
+			_ = os.WriteFile(exitFile, []byte("75\n"), 0600)
+		}
+		if m != nil && m.restartExitTrigger != nil {
+			m.restartExitTrigger(75)
+		} else {
+			defaultProcessExitTrigger(75)
+		}
+	})
+}
+
+func (m *Manager) now() time.Time {
+	if m != nil && m.clock != nil {
+		return m.clock.Now()
+	}
+	return time.Now()
+}
+
+func (m *Manager) markAgentTurnActive(agentID string, active ...bool) {
+	isActive := true
+	if len(active) > 0 {
+		isActive = active[0]
+	}
+	m.activeSessionsMu.Lock()
+	if m.activeEmbeddedSessions == nil {
+		m.activeEmbeddedSessions = make(map[string]*coding.Session)
+	}
+	if isActive {
+		m.activeEmbeddedSessions[agentID] = &coding.Session{}
+	} else {
+		delete(m.activeEmbeddedSessions, agentID)
+	}
+	m.activeSessionsMu.Unlock()
+
+	lane := m.laneFor(agentID)
+	lane.activeMu.Lock()
+	if isActive {
+		lane.activeSession = &coding.Session{}
+	} else {
+		lane.activeSession = nil
+	}
+	lane.activeMu.Unlock()
+}
+
+func (m *Manager) markSubagentActiveForTest(taskID, agentID string, status ...string) {
+	st := "running"
+	if len(status) > 0 && status[0] != "" {
+		st = status[0]
+	}
+	m.subagentsMu.Lock()
+	defer m.subagentsMu.Unlock()
+	if m.subagentsActive == nil {
+		m.subagentsActive = make(map[string]*subagentTask)
+	}
+	if m.subagentsRegistry == nil {
+		m.subagentsRegistry = make(map[string]*subagentTask)
+	}
+	task := &subagentTask{
+		childID: taskID,
+		parent:  store.EmbeddedBinding{AgentID: agentID},
+		status:  st,
+	}
+	m.subagentsActive[taskID] = task
+	m.subagentsRegistry[taskID] = task
 }
 
 func (m *Manager) bindingFor(agentID string) (*managedBinding, bool) {
