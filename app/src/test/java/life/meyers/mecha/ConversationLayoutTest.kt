@@ -34,7 +34,12 @@ class ConversationLayoutTest {
     fun promptAndManagementActionsRemainInTheOverflowMenu() {
         val actions = conversationControlMenuActions(goalAvailable = false, modelAvailable = false)
         assertEquals(
-            listOf(ConversationControlAction.REMINDERS, ConversationControlAction.PROMPT, ConversationControlAction.MANAGE_PROMPTS),
+            listOf(
+                ConversationControlAction.REMINDERS,
+                ConversationControlAction.PROMPT,
+                ConversationControlAction.MANAGE_PROMPTS,
+                ConversationControlAction.TERMINATE,
+            ),
             actions,
         )
         assertTrue(conversationControlMenuActions(goalAvailable = true, modelAvailable = true).containsAll(actions))

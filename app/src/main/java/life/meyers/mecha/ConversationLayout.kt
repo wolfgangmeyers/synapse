@@ -20,7 +20,7 @@ internal fun goalEditorLayoutState(): GoalEditorLayoutState = GoalEditorLayoutSt
     usesImePadding = true,
 )
 
-internal enum class ConversationControlAction { GOAL, MODEL, REMINDERS, PROMPT, MANAGE_PROMPTS }
+internal enum class ConversationControlAction { GOAL, MODEL, REMINDERS, PROMPT, MANAGE_PROMPTS, TERMINATE }
 
 /** Prompt and template management remain in the mobile overflow menu at every capability state. */
 internal fun conversationControlMenuActions(
@@ -32,6 +32,7 @@ internal fun conversationControlMenuActions(
     add(ConversationControlAction.REMINDERS)
     add(ConversationControlAction.PROMPT)
     add(ConversationControlAction.MANAGE_PROMPTS)
+    add(ConversationControlAction.TERMINATE)
 }
 
 /** A TalkBack activation opens or closes the same menu as a touch activation. */
