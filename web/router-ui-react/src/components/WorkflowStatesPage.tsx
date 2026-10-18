@@ -257,6 +257,7 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
       allowed_tools: formAllToolsAllowed ? [] : formAllowedTools,
       transitions: validTransitions,
       allow_exit: formAllowExit,
+      ...(editingState?.monitors ? { monitors: editingState.monitors } : {}),
       reminders: formReminders.map((r) => ({
         id: r.id,
         type: r.type,

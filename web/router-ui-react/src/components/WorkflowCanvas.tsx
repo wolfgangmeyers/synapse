@@ -506,6 +506,7 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
       entry_text: updatedState.entry_text,
       goal: updatedState.goal,
       reminders: updatedState.reminders,
+      monitors: updatedState.monitors,
       allowed_tools: updatedState.allowed_tools,
       allow_exit: updatedState.allow_exit,
       transitions: updatedState.transitions,
