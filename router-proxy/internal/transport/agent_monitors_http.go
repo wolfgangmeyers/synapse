@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -48,6 +49,26 @@ func (r *Router) handleManagedAgentMonitorEvaluate(w http.ResponseWriter, req *h
 	if mon == nil {
 		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Agent monitor not found"})
 		return
+	}
+
+	if q := req.URL.Query().Get("since_sequence"); q != "" {
+		if seq, err := strconv.ParseInt(q, 10, 64); err == nil {
+			mon.LastEvaluatedSequence = seq
+		}
+	} else if req.Body != nil && req.ContentLength > 0 {
+		var body map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&body); err == nil {
+			if s, ok := body["since_sequence"]; ok {
+				switch v := s.(type) {
+				case float64:
+					mon.LastEvaluatedSequence = int64(v)
+				case string:
+					if seq, err := strconv.ParseInt(v, 10, 64); err == nil {
+						mon.LastEvaluatedSequence = seq
+					}
+				}
+			}
+		}
 	}
 
 	now := r.now()
@@ -299,6 +320,14 @@ func parseAgentMonitorPayload(agentID, monitorID string, payload map[string]json
 	}
 	if mon.ConditionThreshold == "" {
 		mon.ConditionThreshold = "0.8"
+	}
+
+	if raw, ok := payload["last_evaluated_sequence"]; ok && len(raw) > 0 && string(raw) != "null" {
+		var seq int64
+		if err := json.Unmarshal(raw, &seq); err != nil {
+			return nil, errors.New("last_evaluated_sequence must be an integer")
+		}
+		mon.LastEvaluatedSequence = seq
 	}
 
 	if raw, ok := payload["nudge_template"]; ok && len(raw) > 0 && string(raw) != "null" {

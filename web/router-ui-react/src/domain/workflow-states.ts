@@ -22,7 +22,7 @@ export interface WorkflowMonitorConfig {
   cooldown_seconds?: number;
   max_alerts?: number;
   trailing_messages_count?: number;
-  question_type: "noul" | "choice" | "score";
+  question_type: "noul";
   question_instructions: string;
   question_criteria?: unknown;
   question_options?: unknown;

@@ -44,9 +44,9 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
     state.monitors ? state.monitors.map((m) => ({ ...m })) : []
   );
 
-  const [activeTab, setActiveTab] = useState<"general" | "monitors">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "watchers">("general");
 
-  // Monitor form state inside Monitors tab
+  // Monitor form state inside Watchers tab
   const [showMonitorForm, setShowMonitorForm] = useState(false);
   const [editingMonitorIdx, setEditingMonitorIdx] = useState<number | null>(null);
   const [monitorSelectedPreset, setMonitorSelectedPreset] = useState("");
@@ -55,7 +55,7 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
   const [monitorInterval, setMonitorInterval] = useState(30);
   const [monitorCooldown, setMonitorCooldown] = useState(120);
   const [monitorInstructions, setMonitorInstructions] = useState("");
-  const [monitorQuestionType, setMonitorQuestionType] = useState<"noul" | "choice" | "score">("noul");
+  const [monitorQuestionType, setMonitorQuestionType] = useState<"noul">("noul");
   const [monitorOperator, setMonitorOperator] = useState("gte");
   const [monitorThreshold, setMonitorThreshold] = useState("0.8");
   const [monitorTrailingCount, setMonitorTrailingCount] = useState(6);
@@ -191,26 +191,27 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
 
   const handleMonitorPresetSelect = (presetId: string) => {
     setMonitorSelectedPreset(presetId);
-    if (!presetId) return;
-    const p = getMonitorPresetById(presetId);
-    if (p) {
-      setMonitorName(p.payload.name);
-      setMonitorNudge(p.payload.nudge_template);
-      setMonitorInterval(p.payload.interval_seconds ?? 30);
-      setMonitorCooldown(p.payload.cooldown_seconds ?? 120);
-      setMonitorInstructions(p.payload.question_instructions);
-      setMonitorQuestionType(p.payload.question_type);
-      setMonitorOperator(p.payload.condition_operator);
-      setMonitorThreshold(p.payload.condition_threshold);
-      setMonitorTrailingCount(p.payload.trailing_messages_count ?? 6);
-      setMonitorMaxAlerts(p.payload.max_alerts ?? 0);
+    if (presetId) {
+      const p = getMonitorPresetById(presetId);
+      if (p) {
+        setMonitorName(p.payload.name);
+        setMonitorNudge(p.payload.nudge_template);
+        setMonitorInterval(p.payload.interval_seconds ?? 30);
+        setMonitorCooldown(p.payload.cooldown_seconds ?? 120);
+        setMonitorInstructions(p.payload.question_instructions);
+        setMonitorQuestionType("noul");
+        setMonitorOperator(p.payload.condition_operator);
+        setMonitorThreshold(p.payload.condition_threshold);
+        setMonitorTrailingCount(p.payload.trailing_messages_count ?? 6);
+        setMonitorMaxAlerts(p.payload.max_alerts ?? 0);
+      }
     }
   };
 
   const saveMonitor = (e: FormEvent) => {
     e.preventDefault();
     if (!monitorName.trim()) {
-      setMonitorFormError("Monitor name is required");
+      setMonitorFormError("Watcher name is required");
       return;
     }
     if (!monitorNudge.trim()) {

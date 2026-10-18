@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
@@ -54,6 +56,21 @@ func TestAgentMonitorsHTTPCRUDAndEvaluate(t *testing.T) {
 
 	agentID := "agent-" + uuid.NewString()
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,'/tmp','openai-codex','gpt-5','running','running','idle','embedded','session-1',1,'gen-1',1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, agentID, "monitor-test-agent")
+	require.NoError(t, err)
+
+	// Seed at least one message for agent
+	nowStr := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	_, err = durable.Enqueue(ctx, protocol.Envelope{
+		ID:        "msg-init-" + agentID,
+		From:      "user",
+		To:        agentID,
+		Body:      "Initial message for agent",
+		CreatedAt: nowStr,
+	}, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body: &[]string{"Initial message for agent"}[0],
+		},
+	})
 	require.NoError(t, err)
 
 	baseURL := server.URL + "/v1/agents/" + agentID + "/monitors"

@@ -16,6 +16,7 @@ func createTestManagedAgent(t *testing.T, ctx context.Context, s *Store, agentID
 }
 
 func TestManagedAgentMonitorsCRUD(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 
@@ -140,6 +141,7 @@ func TestManagedAgentMonitorsCRUD(t *testing.T) {
 }
 
 func TestManagedAgentMonitorsDueAndEvaluation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 
@@ -192,10 +194,10 @@ func TestManagedAgentMonitorsDueAndEvaluation(t *testing.T) {
 	require.Len(t, due, 1)
 	require.Equal(t, "mon-due-1", due[0].ID)
 
-	// Record evaluated (no alert)
+	// Record evaluated (no alert) with last_evaluated_sequence
 	evalTime := t0
 	nextEval := t0.Add(30 * time.Second)
-	err = s.RecordManagedAgentMonitorEvaluated(ctx, "mon-due-1", evalTime, nextEval)
+	err = s.RecordManagedAgentMonitorEvaluated(ctx, "mon-due-1", evalTime, nextEval, 10)
 	require.NoError(t, err)
 
 	m1Fetched, err := s.GetManagedAgentMonitor(ctx, agentID, "mon-due-1")
@@ -204,12 +206,13 @@ func TestManagedAgentMonitorsDueAndEvaluation(t *testing.T) {
 	require.Equal(t, formatTimestamp(evalTime), *m1Fetched.LastEvaluatedAt)
 	require.Equal(t, formatTimestamp(nextEval), m1Fetched.NextEvalAt)
 	require.Equal(t, 0, m1Fetched.ConsecutiveAlerts)
+	require.Equal(t, int64(10), m1Fetched.LastEvaluatedSequence)
 	require.Nil(t, m1Fetched.LastFiredAt)
 
-	// Now record fired
+	// Now record fired with sequence 25
 	fireTime := nextEval
 	nextAfterFire := fireTime.Add(120 * time.Second)
-	err = s.RecordManagedAgentMonitorFired(ctx, "mon-due-1", fireTime, nextAfterFire)
+	err = s.RecordManagedAgentMonitorFired(ctx, "mon-due-1", fireTime, nextAfterFire, 25)
 	require.NoError(t, err)
 
 	m1Fetched, err = s.GetManagedAgentMonitor(ctx, agentID, "mon-due-1")
@@ -220,6 +223,7 @@ func TestManagedAgentMonitorsDueAndEvaluation(t *testing.T) {
 	require.Equal(t, formatTimestamp(fireTime), *m1Fetched.LastFiredAt)
 	require.Equal(t, formatTimestamp(nextAfterFire), m1Fetched.NextEvalAt)
 	require.Equal(t, 1, m1Fetched.ConsecutiveAlerts)
+	require.Equal(t, int64(25), m1Fetched.LastEvaluatedSequence)
 
 	// Fire again -> consecutive_alerts should be 2
 	fireTime2 := nextAfterFire
@@ -241,6 +245,7 @@ func TestManagedAgentMonitorsDueAndEvaluation(t *testing.T) {
 }
 
 func TestManagedAgentMonitorsWorkflowCleanupAndCascade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openTestStore(t)
 

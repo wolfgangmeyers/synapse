@@ -70,7 +70,7 @@ func TestEvaluateChoiceCondition(t *testing.T) {
 func setupTestManagerAndAgent(t *testing.T, ctx context.Context) (*managed.Manager, *store.Store, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "router.sqlite")
-	durable, err := store.Open(ctx, dbPath, store.Options{})
+	durable, err := openTestStore(t, ctx, dbPath, store.Options{})
 	require.NoError(t, err)
 
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
@@ -111,6 +111,21 @@ func setupTestManagerAndAgent(t *testing.T, ctx context.Context) (*managed.Manag
 		ResponseStatus: 202,
 		ResponseBody:  []byte(`{}`),
 	}))
+
+	// Enqueue initial test message so agent has conversation messages
+	setupNow := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	_, err = durable.Enqueue(ctx, protocol.Envelope{
+		ID:        "setup-msg-0001",
+		From:      "user",
+		To:        agentID,
+		Body:      "Initial prompt message",
+		CreatedAt: setupNow,
+	}, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body: &[]string{"Initial prompt message"}[0],
+		},
+	})
+	require.NoError(t, err)
 
 	return mgr, durable, agentID
 }
@@ -601,4 +616,99 @@ func TestAgentMonitor_ExtractTranscriptCrossPeer(t *testing.T) {
 	require.Contains(t, receivedState, "[user -> "+agentID+"]: Hello from user")
 	require.Contains(t, receivedState, "["+agentID+" -> worker-bob]: Delegating task to Bob")
 }
+
+func TestAgentMonitor_CursorTrackingAndSkipEmpty(t *testing.T) {
+	ctx := context.Background()
+	mgr, durable, agentID := setupTestManagerAndAgent(t, ctx)
+	defer durable.Close()
+
+	called := false
+	sys1Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeSystemOneResponse(map[string]any{"noul": 0.5}))
+	}))
+	defer sys1Srv.Close()
+
+	hostPort := strings.TrimPrefix(sys1Srv.URL, "http://")
+	parts := strings.Split(hostPort, ":")
+	port, _ := strconv.Atoi(parts[1])
+	require.NoError(t, durable.SetSystemOneConfig(ctx, store.SystemOneConfig{
+		Enabled: true,
+		Host:    parts[0],
+		Port:    port,
+	}))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	mon := &store.ManagedAgentMonitor{
+		ID:                 "mon-cursor-test",
+		AgentID:            agentID,
+		Name:               "Cursor Tracking Monitor",
+		Enabled:            true,
+		IntervalSeconds:    30,
+		CooldownSeconds:    120,
+		QuestionType:       "noul",
+		ConditionOperator:  "gte",
+		ConditionThreshold: "0.8",
+		FallbackMode:       "skip",
+	}
+	require.NoError(t, durable.CreateManagedAgentMonitor(ctx, mon))
+
+	// Initial message from setupTestManagerAndAgent exists.
+	// First evaluation: count > 0 -> calls System 1, saves maxSeq into mon.LastEvaluatedSequence
+	fired, err := mgr.EvaluateSingleMonitor(ctx, mon, now)
+	require.NoError(t, err)
+	require.False(t, fired)
+	require.True(t, called, "first evaluation should call System 1 because new message exists")
+
+	updated, err := durable.GetManagedAgentMonitor(ctx, agentID, mon.ID)
+	require.NoError(t, err)
+	require.Greater(t, updated.LastEvaluatedSequence, int64(0))
+	savedSeq := updated.LastEvaluatedSequence
+
+	// Second evaluation without new messages:
+	// count == 0 -> SKIP evaluation completely, do NOT call System 1
+	called = false
+	now2 := now.Add(35 * time.Second)
+	fired, err = mgr.EvaluateSingleMonitor(ctx, updated, now2)
+	require.NoError(t, err)
+	require.False(t, fired)
+	require.False(t, called, "second evaluation should skip System 1 when no new messages arrived")
+
+	updated2, err := durable.GetManagedAgentMonitor(ctx, agentID, mon.ID)
+	require.NoError(t, err)
+	require.Equal(t, savedSeq, updated2.LastEvaluatedSequence, "sequence cursor should remain unchanged")
+	expectedNext := now2.Add(30 * time.Second)
+	parsedNext, err := time.Parse(time.RFC3339Nano, updated2.NextEvalAt)
+	require.NoError(t, err)
+	require.WithinDuration(t, expectedNext, parsedNext, time.Second)
+
+	// Add a new message
+	nowStr := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	_, err = durable.Enqueue(ctx, protocol.Envelope{
+		ID:        "msg-new-001",
+		From:      "user",
+		To:        agentID,
+		Body:      "New action message",
+		CreatedAt: nowStr,
+	}, store.EnqueueOptions{
+		Conversation: &store.ConversationOptions{
+			Body: &[]string{"New action message"}[0],
+		},
+	})
+	require.NoError(t, err)
+
+	// Third evaluation with new message -> should call System 1 and advance cursor
+	called = false
+	now3 := now2.Add(35 * time.Second)
+	fired, err = mgr.EvaluateSingleMonitor(ctx, updated2, now3)
+	require.NoError(t, err)
+	require.False(t, fired)
+	require.True(t, called, "third evaluation should call System 1 because new message arrived")
+
+	updated3, err := durable.GetManagedAgentMonitor(ctx, agentID, mon.ID)
+	require.NoError(t, err)
+	require.Greater(t, updated3.LastEvaluatedSequence, savedSeq, "cursor should advance to new maxSeq")
+}
+
 

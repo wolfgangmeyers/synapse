@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/systemone"
@@ -120,17 +121,36 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 	if agent.LifecycleState != "running" {
 		// Agent not running, skip evaluation and reschedule
 		nextEval := now.Add(time.Duration(mon.IntervalSeconds) * time.Second)
-		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval)
+		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval, mon.LastEvaluatedSequence)
 		return false, nil
 	}
 
-	// 2. Read trailing conversation / history messages across all peers
+	// 2. Read trailing conversation / history messages across all peers since mon.LastEvaluatedSequence
 	trailingCount := mon.TrailingMessagesCount
 	if trailingCount <= 0 {
 		trailingCount = 6
 	}
 
-	stateStr := m.extractTranscript(ctx, mon, trailingCount)
+	messages, err := m.store.RecentAgentMessagesSince(ctx, mon.AgentID, mon.LastEvaluatedSequence, trailingCount)
+	if err != nil {
+		return false, fmt.Errorf("fetch recent agent messages: %w", err)
+	}
+
+	// IF count == 0: SKIP evaluation completely! Do not call System 1. Update next_eval_at to avoid immediate tight loop, but do NOT fire.
+	if len(messages) == 0 {
+		nextEval := now.Add(time.Duration(mon.IntervalSeconds) * time.Second)
+		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval, mon.LastEvaluatedSequence)
+		return false, nil
+	}
+
+	maxSeq := mon.LastEvaluatedSequence
+	for _, msg := range messages {
+		if msg.Sequence > maxSeq {
+			maxSeq = msg.Sequence
+		}
+	}
+
+	stateStr := m.formatTranscript(mon, messages)
 
 	// 3. Prepare System 1 Question
 	qKey := "mon_q"
@@ -165,11 +185,11 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 		// System 1 not available. Check fallback mode:
 		if mon.FallbackMode == "alert" {
 			// Trigger alert anyway
-			return m.fireMonitorAlert(ctx, mon, now, "Fallback alert (System 1 unavailable)")
+			return m.fireMonitorAlert(ctx, mon, now, "Fallback alert (System 1 unavailable)", maxSeq)
 		}
 		// Default "skip": reschedule
 		nextEval := now.Add(time.Duration(mon.IntervalSeconds) * time.Second)
-		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval)
+		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval, maxSeq)
 		return false, nil
 	}
 
@@ -183,10 +203,10 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 	resp, err := client.Invoke(ctx, cfg, sysReq)
 	if err != nil {
 		if mon.FallbackMode == "alert" {
-			return m.fireMonitorAlert(ctx, mon, now, fmt.Sprintf("Fallback alert (System 1 error: %v)", err))
+			return m.fireMonitorAlert(ctx, mon, now, fmt.Sprintf("Fallback alert (System 1 error: %v)", err), maxSeq)
 		}
 		nextEval := now.Add(time.Duration(mon.IntervalSeconds) * time.Second)
-		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval)
+		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval, maxSeq)
 		return false, nil
 	}
 
@@ -213,7 +233,7 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 	if !conditionMet {
 		// Condition not met -> record evaluation, reset consecutive alerts, schedule next interval
 		nextEval := now.Add(time.Duration(mon.IntervalSeconds) * time.Second)
-		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval)
+		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval, maxSeq)
 		return false, nil
 	}
 
@@ -221,15 +241,15 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 	if mon.MaxAlerts > 0 && mon.ConsecutiveAlerts >= mon.MaxAlerts {
 		// Suppress alert, schedule next interval
 		nextEval := now.Add(time.Duration(mon.IntervalSeconds) * time.Second)
-		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval)
+		_ = m.store.RecordManagedAgentMonitorEvaluated(ctx, mon.ID, now, nextEval, maxSeq)
 		return false, nil
 	}
 
 	// Fire alert
-	return m.fireMonitorAlert(ctx, mon, now, "")
+	return m.fireMonitorAlert(ctx, mon, now, "", maxSeq)
 }
 
-func (m *Manager) fireMonitorAlert(ctx context.Context, mon *store.ManagedAgentMonitor, now time.Time, fallbackNote string) (bool, error) {
+func (m *Manager) fireMonitorAlert(ctx context.Context, mon *store.ManagedAgentMonitor, now time.Time, fallbackNote string, lastEvalSeq ...int64) (bool, error) {
 	cooldown := mon.CooldownSeconds
 	if cooldown <= 0 {
 		cooldown = 120
@@ -237,7 +257,7 @@ func (m *Manager) fireMonitorAlert(ctx context.Context, mon *store.ManagedAgentM
 	nextEval := now.Add(time.Duration(cooldown) * time.Second)
 
 	// Update store state for monitor fired
-	if err := m.store.RecordManagedAgentMonitorFired(ctx, mon.ID, now, nextEval); err != nil {
+	if err := m.store.RecordManagedAgentMonitorFired(ctx, mon.ID, now, nextEval, lastEvalSeq...); err != nil {
 		return false, err
 	}
 
@@ -289,7 +309,7 @@ func (m *Manager) fireMonitorAlert(ctx context.Context, mon *store.ManagedAgentM
 	return true, nil
 }
 
-func (m *Manager) extractTranscript(ctx context.Context, mon *store.ManagedAgentMonitor, limit int) string {
+func (m *Manager) formatTranscript(mon *store.ManagedAgentMonitor, messages []domain.ConversationMessage) string {
 	var stateBuilder strings.Builder
 	stateBuilder.WriteString(fmt.Sprintf("Agent: %s\n", mon.AgentID))
 	if mon.WorkflowStateID != nil && *mon.WorkflowStateID != "" {
@@ -297,8 +317,7 @@ func (m *Manager) extractTranscript(ctx context.Context, mon *store.ManagedAgent
 	}
 	stateBuilder.WriteString("Recent transcript:\n")
 
-	messages, err := m.store.RecentAgentMessages(ctx, mon.AgentID, limit)
-	if err != nil || len(messages) == 0 {
+	if len(messages) == 0 {
 		stateBuilder.WriteString("(No recent messages)\n")
 		return stateBuilder.String()
 	}
@@ -307,6 +326,14 @@ func (m *Manager) extractTranscript(ctx context.Context, mon *store.ManagedAgent
 		stateBuilder.WriteString(fmt.Sprintf("[%s -> %s]: %s\n", msg.From, msg.To, msg.Body))
 	}
 	return stateBuilder.String()
+}
+
+func (m *Manager) extractTranscript(ctx context.Context, mon *store.ManagedAgentMonitor, limit int) string {
+	messages, err := m.store.RecentAgentMessages(ctx, mon.AgentID, limit)
+	if err != nil {
+		messages = nil
+	}
+	return m.formatTranscript(mon, messages)
 }
 
 // SpawnWorkflowStateMonitors creates monitors for an agent based on a workflow state's monitor definitions,

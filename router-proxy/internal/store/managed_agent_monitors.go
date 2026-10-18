@@ -32,6 +32,7 @@ type ManagedAgentMonitor struct {
 	QuestionOptions       json.RawMessage `json:"question_options" db:"question_options_json"`
 	ConditionOperator     string          `json:"condition_operator" db:"condition_operator"`
 	ConditionThreshold    string          `json:"condition_threshold" db:"condition_threshold"`
+	LastEvaluatedSequence int64           `json:"last_evaluated_sequence" db:"last_evaluated_sequence"`
 	NudgeTemplate         string          `json:"nudge_template" db:"nudge_template"`
 	FallbackMode          string          `json:"fallback_mode" db:"fallback_mode"`
 	CreatedAt             string          `json:"created_at" db:"created_at"`
@@ -107,14 +108,14 @@ INSERT INTO managed_agent_monitors (
   interval_seconds, next_eval_at, last_evaluated_at, cooldown_seconds,
   last_fired_at, consecutive_alerts, max_alerts, trailing_messages_count,
   question_type, question_instructions, question_criteria_json, question_options_json,
-  condition_operator, condition_threshold, nudge_template, fallback_mode,
+  condition_operator, condition_threshold, last_evaluated_sequence, nudge_template, fallback_mode,
   created_at, updated_at
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?, ?, ?, ?,
-  ?, ?, ?, ?,
+  ?, ?, ?, ?, ?,
   ?, ?
 )`,
 			monitor.ID,
@@ -137,6 +138,7 @@ INSERT INTO managed_agent_monitors (
 			optionsJSON,
 			monitor.ConditionOperator,
 			monitor.ConditionThreshold,
+			monitor.LastEvaluatedSequence,
 			monitor.NudgeTemplate,
 			monitor.FallbackMode,
 			monitor.CreatedAt,
@@ -175,6 +177,7 @@ func scanMonitor(row interface {
 		&optionsStr,
 		&m.ConditionOperator,
 		&m.ConditionThreshold,
+		&m.LastEvaluatedSequence,
 		&m.NudgeTemplate,
 		&m.FallbackMode,
 		&m.CreatedAt,
@@ -205,7 +208,7 @@ const monitorColumns = `
   interval_seconds, next_eval_at, last_evaluated_at, cooldown_seconds,
   last_fired_at, consecutive_alerts, max_alerts, trailing_messages_count,
   question_type, question_instructions, question_criteria_json, question_options_json,
-  condition_operator, condition_threshold, nudge_template, fallback_mode,
+  condition_operator, condition_threshold, last_evaluated_sequence, nudge_template, fallback_mode,
   created_at, updated_at
 `
 
@@ -284,6 +287,7 @@ UPDATE managed_agent_monitors SET
   question_options_json = ?,
   condition_operator = ?,
   condition_threshold = ?,
+  last_evaluated_sequence = ?,
   nudge_template = ?,
   fallback_mode = ?,
   updated_at = ?
@@ -307,6 +311,7 @@ WHERE agent_id = ? AND id = ?
 			optionsJSON,
 			monitor.ConditionOperator,
 			monitor.ConditionThreshold,
+			monitor.LastEvaluatedSequence,
 			monitor.NudgeTemplate,
 			monitor.FallbackMode,
 			monitor.UpdatedAt,
@@ -380,14 +385,27 @@ LIMIT ?
 }
 
 // RecordManagedAgentMonitorEvaluated records that an evaluation occurred (without firing an alert),
-// resetting consecutive_alerts to 0, updating last_evaluated_at and scheduling next_eval_at.
-func (s *Store) RecordManagedAgentMonitorEvaluated(ctx context.Context, monitorID string, evaluatedAt, nextEvalAt time.Time) error {
+// resetting consecutive_alerts to 0, updating last_evaluated_at, last_evaluated_sequence, and scheduling next_eval_at.
+func (s *Store) RecordManagedAgentMonitorEvaluated(ctx context.Context, monitorID string, evaluatedAt, nextEvalAt time.Time, lastEvalSeq ...int64) error {
 	evalStr := formatTimestamp(evaluatedAt)
 	nextStr := formatTimestamp(nextEvalAt)
 	nowStr := formatTimestamp(s.clock.Now())
 
 	return s.runImmediate(ctx, func() error {
-		res, err := s.db.ExecContext(ctx, `
+		var res sql.Result
+		var err error
+		if len(lastEvalSeq) > 0 {
+			res, err = s.db.ExecContext(ctx, `
+UPDATE managed_agent_monitors SET
+  last_evaluated_at = ?,
+  next_eval_at = ?,
+  consecutive_alerts = 0,
+  last_evaluated_sequence = ?,
+  updated_at = ?
+WHERE id = ?
+`, evalStr, nextStr, lastEvalSeq[0], nowStr, monitorID)
+		} else {
+			res, err = s.db.ExecContext(ctx, `
 UPDATE managed_agent_monitors SET
   last_evaluated_at = ?,
   next_eval_at = ?,
@@ -395,6 +413,7 @@ UPDATE managed_agent_monitors SET
   updated_at = ?
 WHERE id = ?
 `, evalStr, nextStr, nowStr, monitorID)
+		}
 		if err != nil {
 			return err
 		}
@@ -410,14 +429,28 @@ WHERE id = ?
 }
 
 // RecordManagedAgentMonitorFired records that an evaluation triggered an alert,
-// incrementing consecutive_alerts, updating last_evaluated_at, last_fired_at, and scheduling next_eval_at.
-func (s *Store) RecordManagedAgentMonitorFired(ctx context.Context, monitorID string, firedAt, nextEvalAt time.Time) error {
+// incrementing consecutive_alerts, updating last_evaluated_at, last_fired_at, last_evaluated_sequence, and scheduling next_eval_at.
+func (s *Store) RecordManagedAgentMonitorFired(ctx context.Context, monitorID string, firedAt, nextEvalAt time.Time, lastEvalSeq ...int64) error {
 	firedStr := formatTimestamp(firedAt)
 	nextStr := formatTimestamp(nextEvalAt)
 	nowStr := formatTimestamp(s.clock.Now())
 
 	return s.runImmediate(ctx, func() error {
-		res, err := s.db.ExecContext(ctx, `
+		var res sql.Result
+		var err error
+		if len(lastEvalSeq) > 0 {
+			res, err = s.db.ExecContext(ctx, `
+UPDATE managed_agent_monitors SET
+  last_evaluated_at = ?,
+  last_fired_at = ?,
+  next_eval_at = ?,
+  consecutive_alerts = consecutive_alerts + 1,
+  last_evaluated_sequence = ?,
+  updated_at = ?
+WHERE id = ?
+`, firedStr, firedStr, nextStr, lastEvalSeq[0], nowStr, monitorID)
+		} else {
+			res, err = s.db.ExecContext(ctx, `
 UPDATE managed_agent_monitors SET
   last_evaluated_at = ?,
   last_fired_at = ?,
@@ -426,6 +459,7 @@ UPDATE managed_agent_monitors SET
   updated_at = ?
 WHERE id = ?
 `, firedStr, firedStr, nextStr, nowStr, monitorID)
+		}
 		if err != nil {
 			return err
 		}
