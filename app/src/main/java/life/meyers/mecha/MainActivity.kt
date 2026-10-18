@@ -70,6 +70,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -213,6 +214,8 @@ internal data class PeerStatus(
     val goalState: GoalState? = null,
     val source: String = "tmux",
     val runtime: String? = null,
+    val worktree: Boolean = false,
+    val cwd: String = "",
 ) {
     val active get() = activityState == "active"
     val compacting get() = activityState == "compacting"
@@ -3394,6 +3397,8 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
 
     @Composable
     private fun MechaApp() {
+        var showLaunchWorkerDialog by remember { mutableStateOf(false) }
+        var peerToTerminate by remember { mutableStateOf<PeerStatus?>(null) }
         val colors = MaterialTheme.colorScheme.copy(
             background = Ink,
             surface = SurfaceDark,
@@ -3432,6 +3437,7 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                         onRefresh = ::refreshPeers,
                         onEditProfile = { showProfileEditor = true },
                         onManageRouters = { showRouterManager = true },
+                        onLaunchWorker = { showLaunchWorkerDialog = true },
                     )
                     else -> {
                         BackHandler(onBack = ::returnHome)
@@ -3466,6 +3472,7 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                             { peer, reminderId, action -> sendReminderLock(peer, reminderId, action) },
                             ::sendModelControl,
                             ::sendGoalControl,
+                            onTerminate = { peerToTerminate = peers.firstOrNull { it.id == selectedPeer } ?: PeerStatus(selectedPeer) },
                             promptTemplates,
                             promptTemplatesLoaded,
                             promptRequestState,
@@ -3484,6 +3491,33 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                     }
                 }
                 if (showProfileEditor) UsernameDialog(agentId, ::saveAgentId, { showProfileEditor = false })
+                if (showLaunchWorkerDialog) {
+                    val client = remember(activeRouter) { ManagedAgentClient(routerHttpFor(activeRouter)) }
+                    LaunchWorkerDialog(
+                        onDismiss = { showLaunchWorkerDialog = false },
+                        client = client,
+                        onLaunched = { newAgentId ->
+                            showLaunchWorkerDialog = false
+                            refreshPeers()
+                            selectPeer(newAgentId)
+                        }
+                    )
+                }
+                peerToTerminate?.let { targetPeer ->
+                    val client = remember(activeRouter) { ManagedAgentClient(routerHttpFor(activeRouter)) }
+                    TerminateWorkerDialog(
+                        peer = targetPeer,
+                        client = client,
+                        onDismiss = { peerToTerminate = null },
+                        onTerminated = {
+                            peerToTerminate = null
+                            if (selectedPeer == targetPeer.id) {
+                                returnHome()
+                            }
+                            refreshPeers()
+                        }
+                    )
+                }
                 selectedArrival?.let { arrival ->
                     MessageArrivalDialog(arrival, { selectedArrival = null }, { dismissMessageArrival(arrival.agent); selectedArrival = null })
                 }
@@ -3507,6 +3541,7 @@ private fun PeerHome(
     onRefresh: () -> Unit,
     onEditProfile: () -> Unit,
     onManageRouters: () -> Unit,
+    onLaunchWorker: () -> Unit = {},
 ) {
     val filteredPeers = visibleConnectedPeers(peers, agentFilter)
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
@@ -3519,6 +3554,9 @@ private fun PeerHome(
             Column(Modifier.weight(1f)) {
                 Text("Mecha", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text("Your agent network", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
+            }
+            IconButton(onLaunchWorker, Modifier.size(48.dp)) {
+                Icon(Icons.Default.Add, "Launch worker", tint = Periwinkle)
             }
             IconButton(onRefresh, Modifier.size(48.dp)) {
                 Icon(Icons.Default.Refresh, "Refresh agents", tint = Periwinkle)
@@ -3886,6 +3924,7 @@ private fun Conversation(
     onReminderLock: (String, String, String) -> Unit,
     onModel: (String, ModelSummary) -> Unit,
     onGoal: (String, GoalEditorDraft) -> Unit,
+    onTerminate: () -> Unit = {},
     promptTemplates: List<PromptTemplate>,
     promptTemplatesLoaded: Boolean,
     promptRequestState: PromptRequestState,
@@ -4034,6 +4073,7 @@ private fun Conversation(
                                 onLoadPromptTemplates()
                             },
                             onManagePrompts = { promptManagerOpen = true; onLoadPromptTemplates() },
+                            onTerminate = onTerminate,
                         )
                     } else {
                         if (capabilities.goalControlV1) {
@@ -4064,6 +4104,9 @@ private fun Conversation(
                         ) { Text("Prompt", color = Periwinkle) }
                         TextButton(onClick = { promptManagerOpen = true; onLoadPromptTemplates() }, modifier = Modifier.height(44.dp)) {
                             Text("Manage", color = TextMuted)
+                        }
+                        TextButton(onClick = onTerminate, modifier = Modifier.height(44.dp)) {
+                            Text("Terminate", color = Color(0xFFFF8A80))
                         }
                     }
                 }
@@ -4233,6 +4276,7 @@ private fun ConversationHeaderOverflowMenu(
     onReminders: () -> Unit,
     onPrompt: () -> Unit,
     onManagePrompts: () -> Unit,
+    onTerminate: () -> Unit = {},
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -4270,6 +4314,11 @@ private fun ConversationHeaderOverflowMenu(
                     ConversationControlAction.MANAGE_PROMPTS -> DropdownMenuItem(
                         text = { Text("Manage prompts") },
                         onClick = { expanded = false; onManagePrompts() },
+                        colors = menuColors,
+                    )
+                    ConversationControlAction.TERMINATE -> DropdownMenuItem(
+                        text = { Text("Terminate worker", color = Color(0xFFFF8A80)) },
+                        onClick = { expanded = false; onTerminate() },
                         colors = menuColors,
                     )
                 }
@@ -5860,6 +5909,8 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
     else current?.goalState?.takeIf { sameInstance }
     val peerSource = source.optString("source").takeIf { it.isNotBlank() } ?: current?.source ?: "tmux"
     val runtime = source.optString("runtime").takeIf { it.isNotBlank() } ?: current?.runtime
+    val worktree = if (source.has("worktree")) source.optBoolean("worktree", false) else current?.worktree ?: false
+    val cwd = source.optString("cwd").ifBlank { current?.cwd ?: "" }
     return PeerStatus(
         id = peer,
         activityState = source.optString("activity_state", "idle"),
@@ -5871,6 +5922,8 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
         goalState = goalState,
         source = peerSource,
         runtime = runtime,
+        worktree = worktree,
+        cwd = cwd,
     )
 }
 
@@ -5898,6 +5951,8 @@ internal fun peerStatusFromManaged(
         current = currentModel,
     )
     val runtime = managedAgent.optString("runtime", "embedded").ifBlank { "embedded" }
+    val worktree = if (managedAgent.has("worktree")) managedAgent.optBoolean("worktree", false) else current?.worktree ?: false
+    val cwd = managedAgent.optString("cwd").ifBlank { current?.cwd ?: "" }
     return PeerStatus(
         id = agentId,
         activityState = activityState,
@@ -5908,6 +5963,8 @@ internal fun peerStatusFromManaged(
         goalState = goalState,
         source = "router-managed",
         runtime = runtime,
+        worktree = worktree,
+        cwd = cwd,
     )
 }
 
@@ -5942,6 +5999,8 @@ internal fun mergeManagedPeers(
                     goalState = managed.goalState ?: tmux.goalState,
                     subagentCount = if (managed.subagentCount > 0) managed.subagentCount else tmux.subagentCount,
                     subagents = if (managed.subagents.isNotEmpty()) managed.subagents else tmux.subagents,
+                    worktree = managed.worktree,
+                    cwd = managed.cwd,
                 )
             )
         } else {
