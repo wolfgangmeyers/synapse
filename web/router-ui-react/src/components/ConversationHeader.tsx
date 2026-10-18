@@ -8,7 +8,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import { AlienText } from "./AlienText";
 import type { Arrival } from "../domain/arrivals";
 import type { PromptTemplate } from "../domain/prompt-templates";
-import type { RouterHttpClient } from "../transport/http-client";
+import type { RouterHttpClient, AgentMonitor } from "../transport/http-client";
 
 import type { Workflow } from "../domain/workflow-states";
 import { WorkflowLaunchModal } from "./WorkflowLaunchModal";
@@ -45,6 +45,7 @@ export interface ConversationHeaderProps {
   onToggleScrollLock?: (() => void) | undefined;
   chatOnly?: boolean | undefined;
   onToggleChatOnly?: (() => void) | undefined;
+  onOpenProgressHistory?: ((agentId: string) => void) | undefined;
 }
 
 
@@ -81,7 +82,7 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory }: ConversationHeaderProps): ReactElement {
 
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
@@ -114,6 +115,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const [launchModalWorkflow, setLaunchModalWorkflow] = useState<Workflow | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [showMonitorsDialog, setShowMonitorsDialog] = useState(false);
+  const [activeWatchersCount, setActiveWatchersCount] = useState<number>(0);
 
   const allowInlineTools = Boolean(agent?.allow_inline_tools ?? agent?.managed_agent?.allow_inline_tools);
 
@@ -137,6 +139,27 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     }).catch(() => {});
     return () => { mounted = false; };
   }, [client, agent?.agent_id, agent?.source]);
+
+  useEffect(() => {
+    if (!client || typeof client.listAgentMonitors !== "function" || !agent?.agent_id) {
+      setActiveWatchersCount(0);
+      return;
+    }
+    let mounted = true;
+    const updateMonitors = () => {
+      client.listAgentMonitors(agent.agent_id).then((monitors) => {
+        if (!mounted) return;
+        const count = Array.isArray(monitors) ? monitors.filter((m) => m.enabled).length : 0;
+        setActiveWatchersCount(count);
+      }).catch(() => {});
+    };
+    updateMonitors();
+    const interval = setInterval(updateMonitors, 5000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [client, agent?.agent_id, agent?.active_workflow_state_id, agent?.managed_agent?.active_workflow_state_id]);
 
   const activeWorkflowId = agent?.active_workflow_id || agent?.managed_agent?.active_workflow_id;
   const activeWorkflowStateId = agent?.active_workflow_state_id || agent?.managed_agent?.active_workflow_state_id;
@@ -282,10 +305,10 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
 ) : null}{agent && client ? (
   <button
     type="button"
-    className="icon-btn-round agent-monitors-header-button"
+    className={`icon-btn-round agent-monitors-header-button${activeWatchersCount > 0 ? " active" : ""}`}
     onClick={() => setShowMonitorsDialog(true)}
-    aria-label="System 1 Monitors"
-    title="System 1 Monitors"
+    aria-label={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
+    title={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
   >
     <i className="fa-solid fa-shield-halved" aria-hidden="true" />
   </button>
@@ -295,9 +318,9 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   </button>
 ) : null}{agent && onToggleScrollLock ? (
   <button type="button" className={`scroll-lock-button ${scrollLocked ? "active" : ""}`} onClick={onToggleScrollLock} aria-label="Toggle scroll lock" title={scrollLocked ? "Scroll locked (auto-scroll paused)" : "Lock scroll"}><i className={scrollLocked ? "fa-solid fa-lock" : "fa-solid fa-lock-open"} aria-hidden="true" /></button>
-) : null}</h2>{showContextUsage && contextUsage ? (
+) : null}</h2><div className="header-metrics-row">{showContextUsage && contextUsage ? (
   <div
-    className={`header-context-usage${onContextThresholds ? " clickable" : ""}`}
+    className={`header-metric-card context-card${onContextThresholds ? " clickable" : ""}`}
     title={`${contextTooltip}${onContextThresholds ? " (Click to configure thresholds)" : ""}`}
     aria-label={`Context usage: ${contextLabel}`}
     role={onContextThresholds ? "button" : undefined}
@@ -310,15 +333,66 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
       }
     }}
   >
-    <div className="context-usage-track">
-      <div
-        className={`context-usage-fill ${contextSeverity}`}
-        style={{ width: `${Math.min(100, Math.max(0, contextUsagePercent))}%` }}
-      />
+    <div className="header-metric-icon context-icon">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      </svg>
     </div>
-    <span className="context-usage-label">{contextLabel}</span>
+    <div className="header-metric-center">
+      <div className="header-metric-title">Context Used</div>
+      <div className="header-metric-track" role="progressbar" aria-valuenow={contextUsagePercent} aria-valuemin={0} aria-valuemax={100}>
+        <div
+          className={`header-metric-fill context-fill ${contextSeverity}`}
+          style={{ width: `${Math.min(100, Math.max(0, contextUsagePercent))}%` }}
+        />
+      </div>
+    </div>
+    <div className="header-metric-right">
+      <div className="header-metric-value">{Math.round(contextUsagePercent)}%</div>
+      <div className="header-metric-subvalue">of {contextUsage && contextUsage.context_window >= 1000000 ? `${Math.round(contextUsage.context_window / 1000000)}M` : contextUsage ? `${Math.round(contextUsage.context_window / 1000)}k` : "1M"}</div>
+    </div>
   </div>
-) : null}{agent ? <div className="header-alien-symbols"><AlienText input={(agent as { name?: string }).name || agent.agent_id} minLength={3} maxLength={7} /></div> : null}<p className="peer-activity">{managedFailure ? <span className="managed-failure-alert" role="alert"><i className="fa-solid fa-triangle-exclamation" role="img" aria-label="Warning" /><span>{failureMessage}</span>{managedFailure.last_error?.code ? <code className="managed-failure-code">{managedFailure.last_error.code}</code> : null}</span> : status ? <span className={terminating ? "managed-termination-state" : "operational-status"} role="status">{status}</span> : null}{agent ? <SubagentBadge count={displayedSubagentCount} subagents={displayedSubagents} expanded={expanded} listId={`conversation-header-subagents-${agent.agent_id}`} onToggle={onToggleSubagents} onStopSubagent={onStopSubagent} agentId={agent.agent_id} client={client} isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"} /> : null}{arrival ? <ArrivalIndicator arrival={arrival} header onOpen={onOpenArrival} onDismiss={onDismissArrival} /> : null}{!agent ? "Connected agents appear on the left." : null}</p></div>{showConversationViews ? <div className="conversation-view-tabs" role="tablist" aria-label={`Conversation view for ${humanName(agent.agent_id)}`}><button type="button" role="tab" aria-selected={conversationView === "quiet"} aria-controls="conversation-view-panel" className={conversationView === "quiet" ? "selected" : "secondary"} onClick={() => onConversationViewChange("quiet")} aria-label="Quiet messages" title="Quiet messages"><i className="fa-solid fa-comments" aria-hidden="true" /></button><button type="button" role="tab" aria-selected={conversationView === "complete"} aria-controls="conversation-view-panel" className={conversationView === "complete" ? "selected" : "secondary"} onClick={() => onConversationViewChange("complete")} aria-label="Complete messages and activity" title="Complete messages and activity"><i className="fa-solid fa-list" aria-hidden="true" /></button></div> : null}{promptControls ?? null}{modelControls ?? null}{launchModalWorkflow && agent && client ? (
+) : null}{agent?.progress ? (
+  <div
+    className="header-metric-card progress-card clickable"
+    role="button"
+    tabIndex={0}
+    title={`Goal Progress: ${agent.progress.percent}%${agent.progress.note ? ` - ${agent.progress.note}` : ""}`}
+    onClick={() => onOpenProgressHistory?.(agent.id || agent.agent_id || '')}
+    onKeyDown={(e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onOpenProgressHistory?.(agent.id || agent.agent_id || '');
+      }
+    }}
+  >
+    <div className="header-metric-icon progress-icon">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <circle cx="12" cy="12" r="6" />
+        <circle cx="12" cy="12" r="2" />
+        <path d="M12 2v4" />
+        <path d="M12 18v4" />
+        <path d="M2 12h4" />
+        <path d="M18 12h4" />
+      </svg>
+    </div>
+    <div className="header-metric-center">
+      <div className="header-metric-title">Goal Progress</div>
+      <div className="header-metric-track" role="progressbar" aria-valuenow={agent.progress.percent} aria-valuemin={0} aria-valuemax={100}>
+        <div
+          className="header-metric-fill progress-fill"
+          style={{ width: `${Math.min(100, Math.max(0, agent.progress.percent))}%` }}
+        />
+      </div>
+    </div>
+    <div className="header-metric-right">
+      <div className="header-metric-value">{agent.progress.percent}%</div>
+    </div>
+  </div>
+) : null}</div>{agent ? <div className="header-alien-symbols"><AlienText input={(agent as { name?: string }).name || agent.agent_id} minLength={3} maxLength={7} /></div> : null}<p className="peer-activity">{managedFailure ? <span className="managed-failure-alert" role="alert"><i className="fa-solid fa-triangle-exclamation" role="img" aria-label="Warning" /><span>{failureMessage}</span>{managedFailure.last_error?.code ? <code className="managed-failure-code">{managedFailure.last_error.code}</code> : null}</span> : status ? <span className={terminating ? "managed-termination-state" : "operational-status"} role="status">{status}</span> : null}{agent ? <SubagentBadge count={displayedSubagentCount} subagents={displayedSubagents} expanded={expanded} listId={`conversation-header-subagents-${agent.agent_id}`} onToggle={onToggleSubagents} onStopSubagent={onStopSubagent} agentId={agent.agent_id} client={client} isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"} /> : null}{arrival ? <ArrivalIndicator arrival={arrival} header onOpen={onOpenArrival} onDismiss={onDismissArrival} /> : null}{!agent ? "Connected agents appear on the left." : null}</p></div>{showConversationViews ? <div className="conversation-view-tabs" role="tablist" aria-label={`Conversation view for ${humanName(agent.agent_id)}`}><button type="button" role="tab" aria-selected={conversationView === "quiet"} aria-controls="conversation-view-panel" className={conversationView === "quiet" ? "selected" : "secondary"} onClick={() => onConversationViewChange("quiet")} aria-label="Quiet messages" title="Quiet messages"><i className="fa-solid fa-comments" aria-hidden="true" /></button><button type="button" role="tab" aria-selected={conversationView === "complete"} aria-controls="conversation-view-panel" className={conversationView === "complete" ? "selected" : "secondary"} onClick={() => onConversationViewChange("complete")} aria-label="Complete messages and activity" title="Complete messages and activity"><i className="fa-solid fa-list" aria-hidden="true" /></button></div> : null}{promptControls ?? null}{modelControls ?? null}{launchModalWorkflow && agent && client ? (
   <WorkflowLaunchModal
     open={true}
     workflow={launchModalWorkflow}
@@ -333,6 +407,10 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     isOpen={showMonitorsDialog}
     onClose={() => setShowMonitorsDialog(false)}
     client={client}
+    onMonitorsChange={(monitors: AgentMonitor[]) => {
+      const count = Array.isArray(monitors) ? monitors.filter((m) => m.enabled).length : 0;
+      setActiveWatchersCount(count);
+    }}
   />
 ) : null}</header>;
 }
