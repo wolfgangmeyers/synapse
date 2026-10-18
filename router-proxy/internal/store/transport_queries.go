@@ -196,6 +196,10 @@ func (s *Store) ConversationHistoryPaged(ctx context.Context, owner, peer string
 }
 
 func (s *Store) RecentAgentMessages(ctx context.Context, agentID string, limit int) ([]domain.ConversationMessage, error) {
+	return s.RecentAgentMessagesSince(ctx, agentID, 0, limit)
+}
+
+func (s *Store) RecentAgentMessagesSince(ctx context.Context, agentID string, sinceSeq int64, limit int) ([]domain.ConversationMessage, error) {
 	if agentID == "" {
 		return nil, errors.New("agentID is required")
 	}
@@ -203,10 +207,10 @@ func (s *Store) RecentAgentMessages(ctx context.Context, agentID string, limit i
 	var err error
 	if limit <= 0 {
 		rows, err = s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
-			FROM conversation_messages WHERE sender = ? OR recipient = ? ORDER BY conversation_sequence ASC`, agentID, agentID)
+			FROM conversation_messages WHERE (sender = ? OR recipient = ?) AND conversation_sequence > ? ORDER BY conversation_sequence ASC`, agentID, agentID, sinceSeq)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
-			FROM conversation_messages WHERE sender = ? OR recipient = ? ORDER BY conversation_sequence DESC LIMIT ?`, agentID, agentID, limit)
+			FROM conversation_messages WHERE (sender = ? OR recipient = ?) AND conversation_sequence > ? ORDER BY conversation_sequence DESC LIMIT ?`, agentID, agentID, sinceSeq, limit)
 	}
 	if err != nil {
 		return nil, err
