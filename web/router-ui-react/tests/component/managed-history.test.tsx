@@ -681,4 +681,80 @@ describe("Selected-agent conversation modes", () => {
     // Verify newer Epoch 2 activity is visible after the reset
     expect(screen.getByText("Ran write in Epoch 2")).toBeInTheDocument();
   });
+
+  it("deduplicates messages and activity entries for conversation between user and agent", () => {
+    const messages = [
+      {
+        id: "msg-1",
+        from: "wolfgang",
+        to: "conversation-refactor",
+        body: "I've restarted the router. Testing one, two, three.",
+        created_at: "2026-10-18T17:51:51.709Z",
+      },
+      {
+        id: "msg-2",
+        from: "conversation-refactor",
+        to: "wolfgang",
+        body: "Loud and clear! I'm here and ready. How are the messages and chat bubbles looking on your end now?",
+        created_at: "2026-10-18T17:51:56.031Z",
+      },
+    ];
+
+    const activityEntries = [
+      {
+        id: "complete:68986",
+        agent_id: "conversation-refactor",
+        message: "Message received",
+        sender_identity: "wolfgang",
+        at: "2026-10-18T17:51:51.940Z",
+        presentation: {
+          kind: "message" as const,
+          outcome: "success" as const,
+          from: "wolfgang",
+          to: "conversation-refactor",
+        },
+        message_content: "I've restarted the router. Testing one, two, three.",
+      },
+      {
+        id: "complete:68987",
+        agent_id: "conversation-refactor",
+        message: "Message sent",
+        sender_identity: "conversation-refactor",
+        at: "2026-10-18T17:51:56.031Z",
+        presentation: {
+          kind: "message" as const,
+          outcome: "success" as const,
+          from: "conversation-refactor",
+          to: "wolfgang",
+        },
+        message_content: "Loud and clear! I'm here and ready. How are the messages and chat bubbles looking on your end now?",
+      },
+    ];
+
+    const { container } = render(
+      <MessageList
+        peerId="conversation-refactor"
+        ownerId="wolfgang"
+        messages={messages}
+        activityEntries={activityEntries}
+      />
+    );
+
+    // Number of .bubble-wrap (or message bubbles) with the assistant's text is EXACTLY 1 (no duplicate assistant bubble).
+    const bubbles = Array.from(container.querySelectorAll(".bubble-wrap"));
+    const assistantBubbles = bubbles.filter((b) =>
+      b.textContent?.includes("Loud and clear! I'm here and ready.")
+    );
+    expect(assistantBubbles).toHaveLength(1);
+
+    // Number of activity cards with label "From wolfgang" is EXACTLY 0 (no duplicate activity envelope card for the user's message).
+    expect(screen.queryByText("From wolfgang")).not.toBeInTheDocument();
+
+    // Number of .bubble-wrap with user's text is EXACTLY 1.
+    const userBubbles = bubbles.filter((b) =>
+      b.textContent?.includes("I've restarted the router. Testing one, two, three.")
+    );
+    expect(userBubbles).toHaveLength(1);
+  });
 });
+

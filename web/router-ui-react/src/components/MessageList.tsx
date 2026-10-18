@@ -41,6 +41,13 @@ function activitySequence(entry: ManagedHistoryEntry): number {
 function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: string, allEntries?: readonly ManagedHistoryEntry[]): boolean {
   if (isContextResetEntry(entry)) return true;
   if (isMailboxSendToUser(entry, currentUser, allEntries) !== undefined) return true;
+  if (currentUser) {
+    const from = (entry.presentation?.from ?? entry.sender_identity)?.trim().toLowerCase();
+    const user = currentUser.trim().toLowerCase();
+    if (from && (from === user || from === "user") && entry.presentation?.kind === "message" && entry.message !== "Message sent" && entry.message !== "Reply sent") {
+      return false;
+    }
+  }
   // A managed child stays in the persistent active-subagents area until its
   // terminal update. Its actual subagent tool invocation remains a normal
   // Complete history entry because it has presentation.kind === "tool".
@@ -73,7 +80,29 @@ function dateLabel(timestamp: number): string | undefined {
 
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
   if (isContextResetEntry(entry)) return false;
-  return messages.some((m) => m.id === entry.id);
+  if (messages.some((m) => m.id === entry.id)) return true;
+
+  const content = (entry.message_content ?? entry.presentation?.summary)?.trim();
+  if (!content) return false;
+
+  const entryFrom = entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id;
+  const entryTo = entry.presentation?.to;
+  const entryTime = activityTime(entry);
+
+  return messages.some((m) => {
+    if (m.body?.trim() !== content) return false;
+    if (entryFrom && m.from && entryFrom.toLowerCase() !== m.from.toLowerCase()) {
+      return false;
+    }
+    if (entryTo && m.to && entryTo.toLowerCase() !== m.to.toLowerCase()) {
+      return false;
+    }
+    const mTime = messageTime(m, Number.MAX_SAFE_INTEGER);
+    if (entryTime !== Number.MAX_SAFE_INTEGER && mTime !== Number.MAX_SAFE_INTEGER) {
+      return Math.abs(entryTime - mTime) <= 120_000;
+    }
+    return true;
+  });
 }
 
 export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
@@ -101,6 +130,26 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
       if (userMail !== undefined) {
         if (isAlreadyInMessages(entry, messages)) {
           continue;
+        }
+        const thinkingText = getThinkingContent(entry);
+        if (thinkingText) {
+          rawItems.push({
+            type: "activity" as const,
+            id: `${entry.id}:thinking`,
+            timestamp: activityTime(entry) - 1,
+            sequence: activitySequence(entry),
+            entry: {
+              id: `${entry.id}:thinking`,
+              agent_id: entry.agent_id,
+              ...(entry.at !== undefined ? { at: entry.at } : {}),
+              presentation: {
+                kind: "thinking",
+                outcome: "success",
+                thinking: thinkingText,
+              },
+              thinking: thinkingText,
+            },
+          });
         }
         rawItems.push({
           type: "message",
