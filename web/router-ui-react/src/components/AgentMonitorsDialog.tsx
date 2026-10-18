@@ -8,6 +8,7 @@ export interface AgentMonitorsDialogProps {
   isOpen: boolean;
   onClose: () => void;
   client?: RouterHttpClient | undefined;
+  onMonitorsChange?: ((monitors: AgentMonitor[]) => void) | undefined;
 }
 
 const DEFAULT_NEW_MONITOR: CreateAgentMonitorPayload = {
@@ -31,6 +32,7 @@ export function AgentMonitorsDialog({
   isOpen,
   onClose,
   client,
+  onMonitorsChange,
 }: AgentMonitorsDialogProps): ReactElement | null {
   const [monitors, setMonitors] = useState<AgentMonitor[]>([]);
   const [loading, setLoading] = useState(false);
@@ -53,6 +55,7 @@ export function AgentMonitorsDialog({
     try {
       const data = await client.listAgentMonitors(agentId);
       setMonitors(data);
+      onMonitorsChange?.(data);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load agent monitors");
     } finally {
@@ -86,7 +89,11 @@ export function AgentMonitorsDialog({
       const updated = await client.updateAgentMonitor(agentId, mon.id, {
         enabled: !mon.enabled,
       });
-      setMonitors((prev) => prev.map((m) => (m.id === mon.id ? updated : m)));
+      setMonitors((prev) => {
+        const next = prev.map((m) => (m.id === mon.id ? updated : m));
+        onMonitorsChange?.(next);
+        return next;
+      });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to update monitor state");
     }
@@ -96,7 +103,11 @@ export function AgentMonitorsDialog({
     if (!client) return;
     try {
       await client.deleteAgentMonitor(agentId, monId);
-      setMonitors((prev) => prev.filter((m) => m.id !== monId));
+      setMonitors((prev) => {
+        const next = prev.filter((m) => m.id !== monId);
+        onMonitorsChange?.(next);
+        return next;
+      });
       if (evalResult?.monitor_id === monId) {
         setEvalResult(null);
       }
@@ -141,7 +152,11 @@ export function AgentMonitorsDialog({
     setError(null);
     try {
       const created = await client.createAgentMonitor(agentId, formData);
-      setMonitors((prev) => [...prev, created]);
+      setMonitors((prev) => {
+        const next = [...prev, created];
+        onMonitorsChange?.(next);
+        return next;
+      });
       // Reset form
       setFormData({ ...DEFAULT_NEW_MONITOR });
       setSelectedPresetId("");

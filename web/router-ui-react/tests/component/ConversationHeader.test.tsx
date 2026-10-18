@@ -63,18 +63,18 @@ describe("ConversationHeader context usage bar", () => {
     };
 
     const { container } = render(<ConversationHeader agent={agent} />);
-    const bar = container.querySelector(".header-context-usage");
+    const bar = container.querySelector(".header-metric-card.context-card");
     expect(bar).not.toBeNull();
     expect(bar?.getAttribute("title")).toBe("440,120 / 1,048,576 tokens (42.0%)");
     expect(bar?.getAttribute("aria-label")).toBe("Context usage: 42% of 1M");
 
-    const fill = container.querySelector(".context-usage-fill");
+    const fill = container.querySelector(".header-metric-fill.context-fill");
     expect(fill).not.toBeNull();
     expect(fill?.classList.contains("normal")).toBe(true);
     expect(fill?.getAttribute("style")).toContain("width: 42%");
 
-    const label = container.querySelector(".context-usage-label");
-    expect(label?.textContent).toBe("42% of 1M");
+    const value = container.querySelector(".header-metric-value");
+    expect(value?.textContent).toBe("42%");
   });
 
   it("renders context usage bar with warning severity (50-79%)", () => {
@@ -88,18 +88,18 @@ describe("ConversationHeader context usage bar", () => {
     };
 
     const { container } = render(<ConversationHeader agent={agent} />);
-    const bar = container.querySelector(".header-context-usage");
+    const bar = container.querySelector(".header-metric-card.context-card");
     expect(bar).not.toBeNull();
     expect(bar?.getAttribute("title")).toBe("130,000 / 200,000 tokens (65.0%)");
     expect(bar?.getAttribute("aria-label")).toBe("Context usage: 65% of 200k");
 
-    const fill = container.querySelector(".context-usage-fill");
+    const fill = container.querySelector(".header-metric-fill.context-fill");
     expect(fill).not.toBeNull();
     expect(fill?.classList.contains("warning")).toBe(true);
     expect(fill?.getAttribute("style")).toContain("width: 65%");
 
-    const label = container.querySelector(".context-usage-label");
-    expect(label?.textContent).toBe("65% of 200k");
+    const value = container.querySelector(".header-metric-value");
+    expect(value?.textContent).toBe("65%");
   });
 
   it("renders context usage bar with critical severity (>=80%)", () => {
@@ -113,17 +113,17 @@ describe("ConversationHeader context usage bar", () => {
     };
 
     const { container } = render(<ConversationHeader agent={agent} />);
-    const bar = container.querySelector(".header-context-usage");
+    const bar = container.querySelector(".header-metric-card.context-card");
     expect(bar).not.toBeNull();
     expect(bar?.getAttribute("title")).toBe("108,800 / 128,000 tokens (85.0%)");
 
-    const fill = container.querySelector(".context-usage-fill");
+    const fill = container.querySelector(".header-metric-fill.context-fill");
     expect(fill).not.toBeNull();
     expect(fill?.classList.contains("critical")).toBe(true);
     expect(fill?.getAttribute("style")).toContain("width: 85%");
 
-    const label = container.querySelector(".context-usage-label");
-    expect(label?.textContent).toBe("85% of 128k");
+    const value = container.querySelector(".header-metric-value");
+    expect(value?.textContent).toBe("85%");
   });
 
   it("omits context usage bar when agent has no context_usage (e.g. tmux worker)", () => {
@@ -134,7 +134,7 @@ describe("ConversationHeader context usage bar", () => {
     };
 
     const { container } = render(<ConversationHeader agent={agent} />);
-    const bar = container.querySelector(".header-context-usage");
+    const bar = container.querySelector(".header-metric-card.context-card");
     expect(bar).toBeNull();
   });
 
@@ -149,7 +149,7 @@ describe("ConversationHeader context usage bar", () => {
     };
 
     const { container } = render(<ConversationHeader agent={agent} />);
-    const bar = container.querySelector(".header-context-usage");
+    const bar = container.querySelector(".header-metric-card.context-card");
     expect(bar).toBeNull();
   });
 });
@@ -366,5 +366,52 @@ describe("ConversationHeader workflow controls", () => {
       expect(screen.getByText('Workflow "No Entry Workflow" has no entry state.')).toBeDefined();
     });
     expect(mockClient.setManagedAgentWorkflow).not.toHaveBeenCalled();
+  });
+
+  describe("Agent monitors / watchers button active styling", () => {
+    it("renders monitors button without active class and default title when no active monitors exist", async () => {
+      const mockClient = createMockClient({
+        listAgentMonitors: vi.fn().mockResolvedValue([
+          { id: "mon-1", name: "Monitor 1", enabled: false },
+        ]),
+      });
+
+      const { container } = render(
+        <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+      );
+
+      await waitFor(() => {
+        expect(mockClient.listAgentMonitors).toHaveBeenCalledWith("agent-1");
+      });
+
+      const monitorBtn = container.querySelector(".agent-monitors-header-button");
+      expect(monitorBtn).not.toBeNull();
+      expect(monitorBtn?.classList.contains("active")).toBe(false);
+      expect(monitorBtn?.getAttribute("title")).toBe("System 1 Monitors");
+      expect(monitorBtn?.getAttribute("aria-label")).toBe("System 1 Monitors");
+    });
+
+    it("renders monitors button with active class and count in tooltip when enabled monitors exist", async () => {
+      const mockClient = createMockClient({
+        listAgentMonitors: vi.fn().mockResolvedValue([
+          { id: "mon-1", name: "Monitor 1", enabled: true },
+          { id: "mon-2", name: "Monitor 2", enabled: false },
+          { id: "mon-3", name: "Monitor 3", enabled: true },
+        ]),
+      });
+
+      const { container } = render(
+        <ConversationHeader agent={routerManagedAgent} client={mockClient} />
+      );
+
+      await waitFor(() => {
+        const monitorBtn = container.querySelector(".agent-monitors-header-button");
+        expect(monitorBtn?.classList.contains("active")).toBe(true);
+      });
+
+      const monitorBtn = container.querySelector(".agent-monitors-header-button");
+      expect(monitorBtn?.getAttribute("title")).toBe("System 1 Monitors (2 active)");
+      expect(monitorBtn?.getAttribute("aria-label")).toBe("System 1 Monitors (2 active)");
+    });
   });
 });
