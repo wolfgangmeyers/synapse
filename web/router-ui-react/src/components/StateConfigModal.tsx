@@ -252,6 +252,9 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (showMonitorForm) {
+      return;
+    }
     if (!name.trim()) {
       setError("State name is required");
       return;
@@ -651,12 +654,294 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
           </div>
         ) : null}
 
+        {/* Workflow State Watchers section */}
+        <div className="form-section" style={{ marginBottom: "1.25rem", borderTop: "1px solid var(--border-color, #333)", paddingTop: "0.75rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <div style={{ fontWeight: 600 }}>Workflow State Watchers</div>
+            {!showMonitorForm ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={openAddMonitor}
+              >
+                <i className="fa-solid fa-plus" aria-hidden="true" /> Add Watcher
+              </button>
+            ) : null}
+          </div>
+
+          {monitors.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: "0.85em", margin: "0" }}>
+              No watchers configured for this state. Watchers evaluate agent turns in the background using System 1 decision criteria.
+            </p>
+          ) : (
+            <div className="monitors-list" style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {monitors.map((m, idx) => {
+                const thresholdNum = parseFloat(m.condition_threshold || "0.8");
+                const thresholdPct = Number.isFinite(thresholdNum) ? Math.round(thresholdNum * 100) : 80;
+                return (
+                  <div
+                    key={m.id || idx}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "6px",
+                      padding: "8px 10px",
+                      background: "rgba(255,255,255,0.04)",
+                      borderRadius: "4px",
+                      border: "1px solid var(--border-color, #444)",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontWeight: 600, fontSize: "0.9em" }}>{m.name}</span>
+                      <div style={{ display: "flex", gap: "4px" }}>
+                        <button
+                          type="button"
+                          className="btn-icon"
+                          onClick={() => openEditMonitor(idx)}
+                          title="Edit watcher"
+                        >
+                          <i className="fa-solid fa-pen" aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-icon btn-danger"
+                          onClick={() => removeMonitor(idx)}
+                          title="Delete watcher"
+                        >
+                          <i className="fa-solid fa-trash" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", fontSize: "0.75rem" }}>
+                      <span style={{ background: "rgba(255,255,255,0.08)", padding: "2px 6px", borderRadius: "4px" }}>
+                        Every {m.interval_seconds ?? 30}s
+                      </span>
+                      <span style={{ background: "rgba(255,255,255,0.08)", padding: "2px 6px", borderRadius: "4px" }}>
+                        Cooldown: {m.cooldown_seconds ?? 120}s
+                      </span>
+                      <span style={{ background: "rgba(255,255,255,0.08)", padding: "2px 6px", borderRadius: "4px" }}>
+                        Condition: noul &gt;= {thresholdPct}%
+                      </span>
+                    </div>
+                    {m.nudge_template ? (
+                      <div style={{ fontSize: "0.8rem", color: "var(--text-secondary, #bbb)", background: "rgba(0,0,0,0.2)", padding: "4px 8px", borderRadius: "4px" }}>
+                        <span style={{ color: "var(--text-muted, #888)", fontWeight: 500 }}>Nudge: </span>
+                        {m.nudge_template}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Inline Watcher Edit Form */}
+        {showMonitorForm ? (
+          <div
+            className="watcher-inline-form"
+            style={{
+              padding: "0.75rem",
+              background: "rgba(0,0,0,0.2)",
+              border: "1px solid var(--border-color, #444)",
+              borderRadius: "4px",
+              marginBottom: "1rem",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>
+              {editingMonitorIdx !== null ? "Edit Watcher" : "Add Watcher"}
+            </div>
+
+            {monitorFormError ? (
+              <div
+                className="alert alert-danger"
+                style={{
+                  color: "#f87171",
+                  backgroundColor: "rgba(127, 29, 29, 0.4)",
+                  border: "1px solid #991b1b",
+                  borderRadius: "6px",
+                  padding: "8px 12px",
+                  fontSize: "13px",
+                  marginBottom: "12px",
+                }}
+              >
+                {monitorFormError}
+              </div>
+            ) : null}
+
+            {/* Preset selector */}
+            <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+              <label htmlFor="watcher-preset-select" style={{ display: "block", marginBottom: "0.3rem", fontSize: "0.85rem", fontWeight: 600 }}>
+                Load From Preset
+              </label>
+              <select
+                id="watcher-preset-select"
+                className="form-control form-control-sm"
+                value={monitorSelectedPreset}
+                onChange={(e) => handleMonitorPresetSelect(e.target.value)}
+              >
+                <option value="">-- Choose a Preset --</option>
+                {MONITOR_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Watcher Name */}
+            <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+              <label htmlFor="watcher-name-input" style={{ display: "block", marginBottom: "0.3rem", fontSize: "0.85rem", fontWeight: 600 }}>
+                Watcher Name *
+              </label>
+              <input
+                id="watcher-name-input"
+                type="text"
+                className="form-control form-control-sm"
+                value={monitorName}
+                onChange={(e) => setMonitorName(e.target.value)}
+                placeholder="e.g. Loop & Stall Detector"
+                required
+              />
+            </div>
+
+            {/* Nudge Template */}
+            <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+              <label htmlFor="watcher-nudge-input" style={{ display: "block", marginBottom: "0.3rem", fontSize: "0.85rem", fontWeight: 600 }}>
+                Nudge Template * (injected into agent prompt when triggered)
+              </label>
+              <textarea
+                id="watcher-nudge-input"
+                className="form-control form-control-sm"
+                rows={2}
+                value={monitorNudge}
+                onChange={(e) => setMonitorNudge(e.target.value)}
+                placeholder="Instruction or steering message delivered to the agent..."
+                required
+              />
+            </div>
+
+            {/* Question Instructions */}
+            <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+              <label htmlFor="watcher-instructions-input" style={{ display: "block", marginBottom: "0.3rem", fontSize: "0.85rem", fontWeight: 600 }}>
+                Question Instructions * (System 1 decision criteria)
+              </label>
+              <textarea
+                id="watcher-instructions-input"
+                className="form-control form-control-sm"
+                rows={2}
+                value={monitorInstructions}
+                onChange={(e) => setMonitorInstructions(e.target.value)}
+                placeholder="Question evaluated by System 1 model (Clef) against recent transcript..."
+                required
+              />
+            </div>
+
+            {/* Condition: strictly noul (Yes/No) with confidence threshold slider */}
+            <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+              <label htmlFor="watcher-threshold-slider" style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.3rem", fontSize: "0.85rem", fontWeight: 600 }}>
+                <span>Condition: noul &gt;= threshold (Yes/No confidence)</span>
+                <span>{Math.round(parseFloat(monitorThreshold || "0.8") * 100)}%</span>
+              </label>
+              <input
+                id="watcher-threshold-slider"
+                type="range"
+                min="0.0"
+                max="1.0"
+                step="0.05"
+                className="form-range"
+                style={{ width: "100%" }}
+                value={monitorThreshold}
+                onChange={(e) => setMonitorThreshold(e.target.value)}
+              />
+            </div>
+
+            {/* Interval & Cooldown */}
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="watcher-interval-input" style={{ fontSize: "0.8em", display: "block", marginBottom: "0.2rem", fontWeight: 600 }}>
+                  Interval (seconds)
+                </label>
+                <input
+                  id="watcher-interval-input"
+                  type="number"
+                  min={5}
+                  className="form-control form-control-sm"
+                  value={monitorInterval}
+                  onChange={(e) => setMonitorInterval(Number(e.target.value))}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="watcher-cooldown-input" style={{ fontSize: "0.8em", display: "block", marginBottom: "0.2rem", fontWeight: 600 }}>
+                  Cooldown (seconds)
+                </label>
+                <input
+                  id="watcher-cooldown-input"
+                  type="number"
+                  min={0}
+                  className="form-control form-control-sm"
+                  value={monitorCooldown}
+                  onChange={(e) => setMonitorCooldown(Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            {/* Trailing messages count & Max alerts */}
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="watcher-trailing-input" style={{ fontSize: "0.8em", display: "block", marginBottom: "0.2rem", fontWeight: 600 }}>
+                  Trailing Messages Count
+                </label>
+                <input
+                  id="watcher-trailing-input"
+                  type="number"
+                  min={1}
+                  max={50}
+                  className="form-control form-control-sm"
+                  value={monitorTrailingCount}
+                  onChange={(e) => setMonitorTrailingCount(Number(e.target.value))}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="watcher-max-alerts-input" style={{ fontSize: "0.8em", display: "block", marginBottom: "0.2rem", fontWeight: 600 }}>
+                  Max Alerts (0 for unlimited)
+                </label>
+                <input
+                  id="watcher-max-alerts-input"
+                  type="number"
+                  min={0}
+                  className="form-control form-control-sm"
+                  value={monitorMaxAlerts}
+                  onChange={(e) => setMonitorMaxAlerts(Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowMonitorForm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={(e) => saveMonitor(e)}
+              >
+                Save Watcher
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {/* Action buttons */}
         <div className="dialog-actions workflow-dialog-actions" style={{ marginTop: "1rem" }}>
           <button type="button" className="btn btn-secondary" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn btn-primary" disabled={saving}>
+          <button type="submit" className="btn btn-primary" disabled={saving || showMonitorForm}>
             {saving ? "Saving..." : "Save State Settings"}
           </button>
         </div>
