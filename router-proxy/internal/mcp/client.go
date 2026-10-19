@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -101,8 +102,19 @@ func (c *Client) postJSONRPC(ctx context.Context, method string, params any) (*J
 	}
 
 	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
-		return nil, fmt.Errorf("decode json-rpc response: %w", err)
+	contentType := resp.Header.Get("Content-Type")
+	trimmed := bytes.TrimSpace(respBytes)
+
+	if strings.Contains(contentType, "text/event-stream") || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
+		parsed, parseErr := parseSSEJSONRPCResponse(respBytes, reqID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("decode sse json-rpc response: %w", parseErr)
+		}
+		rpcResp = *parsed
+	} else {
+		if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+			return nil, fmt.Errorf("decode json-rpc response: %w", err)
+		}
 	}
 
 	if rpcResp.Error != nil {
@@ -236,3 +248,78 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 
 	return &callResult, nil
 }
+
+// parseSSEJSONRPCResponse extracts and parses a JSON-RPC response from an SSE stream.
+func parseSSEJSONRPCResponse(body []byte, reqID uint64) (*JSONRPCResponse, error) {
+	lines := strings.Split(string(body), "\n")
+	var (
+		dataLines    []string
+		matchingResp *JSONRPCResponse
+		fallbackResp *JSONRPCResponse
+	)
+
+	processEvent := func() {
+		if len(dataLines) == 0 {
+			return
+		}
+		data := strings.Join(dataLines, "\n")
+		dataLines = nil
+
+		var candidate JSONRPCResponse
+		if err := json.Unmarshal([]byte(data), &candidate); err == nil && candidate.JSONRPC != "" {
+			switch id := candidate.ID.(type) {
+			case float64:
+				if uint64(id) == reqID {
+					matchingResp = &candidate
+				}
+			case string:
+				if fmt.Sprintf("%d", reqID) == id {
+					matchingResp = &candidate
+				}
+			case json.Number:
+				if n, err := id.Int64(); err == nil && n >= 0 && uint64(n) == reqID {
+					matchingResp = &candidate
+				}
+			default:
+				if candidate.ID == reqID {
+					matchingResp = &candidate
+				}
+			}
+
+			if matchingResp == nil && fallbackResp == nil && (len(candidate.Result) > 0 || candidate.Error != nil) {
+				fallbackResp = &candidate
+			}
+		}
+	}
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			processEvent()
+			if matchingResp != nil {
+				return matchingResp, nil
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			// SSE comment
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			val := strings.TrimPrefix(line, "data:")
+			val = strings.TrimPrefix(val, " ")
+			dataLines = append(dataLines, val)
+		}
+	}
+	processEvent()
+
+	if matchingResp != nil {
+		return matchingResp, nil
+	}
+	if fallbackResp != nil {
+		return fallbackResp, nil
+	}
+
+	return nil, fmt.Errorf("no valid json-rpc response found in sse stream")
+}
+

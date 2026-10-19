@@ -269,3 +269,50 @@ func TestClientJSONRPCError(t *testing.T) {
 		t.Errorf("expected Method not found error, got %v", err)
 	}
 }
+
+func TestClientSSEResponseDecoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if req.Method == "tools/call" {
+			res := ToolCallResult{
+				Content: []ToolCallContent{
+					{Type: "text", Text: "sse streamed tool result"},
+				},
+			}
+			rawRes, _ := json.Marshal(res)
+			rpcResp := JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  rawRes,
+			}
+			data, _ := json.Marshal(rpcResp)
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			// Send SSE format with comments and multiple events
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(data))
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	client := NewClient(server.URL, nil, http.DefaultClient)
+
+	res, err := client.CallTool(ctx, "stream_tool", map[string]any{"key": "val"})
+	if err != nil {
+		t.Fatalf("CallTool with SSE response failed: %v", err)
+	}
+
+	if len(res.Content) != 1 || res.Content[0].Text != "sse streamed tool result" {
+		t.Errorf("unexpected SSE tool call result: %+v", res)
+	}
+}
+
