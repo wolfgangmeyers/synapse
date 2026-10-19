@@ -222,7 +222,7 @@ At launch, record and send the worker a short delivery contract:
 
 **Deadline monitoring.** The 30-minute worker reminder must repeat the primary usable artifact and the next action toward it. The supervisor's monitoring check must inspect actual artifact evidence: files, build output, emulator/runtime state, or live E2E logs. A status report that names only supporting work is a miss, not progress. At the deadline, report the artifact's usable state and exact remaining gap, never a list of adjacent completed work.
 
-**Supervisor owns ALL state updates — workers NEVER touch state**: Workers communicate via mailbox only. They never run `state_update_*` scripts or record their own status. If you're about to tell a worker to run a state tool, stop — always wrong.
+**Supervisor owns ALL state updates — workers NEVER touch state**: Workers never run `state_update_*` scripts or record their own status. If you're about to tell a worker to run a state tool, stop — always wrong.
 
 **Worker reports usually need a reply.** When a worker sends a checkpoint, blocker, completion report, spec handoff, or status report, update state and then normally answer the worker with the next instruction, acknowledgement, correction, cleanup action, or parking instruction. Do not leave a worker sitting after a report just because you recorded state. Exceptions are narrow: the report is purely informational and the worker explicitly says it is continuing, a newer user instruction supersedes the thread, or the worker has already been parked/shut down. If no action is needed, say so explicitly. Before calling anything a follow-up, record its owner, concrete action, due time, and reminder or mailbox ID.
 

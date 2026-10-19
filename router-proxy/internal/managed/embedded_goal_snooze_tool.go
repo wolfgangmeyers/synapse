@@ -177,6 +177,9 @@ func (m *Manager) embeddedGoalSnoozeTool(owner embeddedOwner, turn func() store.
 		if replay {
 			return agent.AgentToolResult{}, errors.New("goal snooze outcome already recorded: SDK result unknown")
 		}
+		if policy.DueAt != "" {
+			_ = m.store.SetManagedGoalSnoozeUntil(ctx, owner.binding.AgentID, policy.DueAt)
+		}
 		if m.embeddedAfterGoalCommit != nil {
 			m.embeddedAfterGoalCommit(ctx)
 		}

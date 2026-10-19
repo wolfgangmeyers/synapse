@@ -2163,6 +2163,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	}
 	toolCalls := 0
 	hasText := false
+	calledGoalSnooze := false
 	for _, entry := range snapshot.Entries {
 		if entry.Sequence < p.turnSeq {
 			continue
@@ -2179,18 +2180,30 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			if m.ToolName != "goal" && m.ToolName != "goal_snooze" {
 				toolCalls++
 			}
+			if m.ToolName == "goal_snooze" {
+				calledGoalSnooze = true
+			}
 		case *ai.ToolResultMessage:
 			if m != nil && m.ToolName != "goal" && m.ToolName != "goal_snooze" {
 				toolCalls++
+			}
+			if m != nil && m.ToolName == "goal_snooze" {
+				calledGoalSnooze = true
 			}
 		case ai.AssistantMessage:
 			for _, part := range m.Content {
 				switch c := part.(type) {
 				case ai.ToolCall:
+					if c.Name == "goal_snooze" {
+						calledGoalSnooze = true
+					}
 					if c.Name != "goal" && c.Name != "goal_snooze" {
 						toolCalls++
 					}
 				case *ai.ToolCall:
+					if c != nil && c.Name == "goal_snooze" {
+						calledGoalSnooze = true
+					}
 					if c != nil && c.Name != "goal" && c.Name != "goal_snooze" {
 						toolCalls++
 					}
@@ -2213,10 +2226,16 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				for _, part := range m.Content {
 					switch c := part.(type) {
 					case ai.ToolCall:
+						if c.Name == "goal_snooze" {
+							calledGoalSnooze = true
+						}
 						if c.Name != "goal" && c.Name != "goal_snooze" {
 							toolCalls++
 						}
 					case *ai.ToolCall:
+						if c != nil && c.Name == "goal_snooze" {
+							calledGoalSnooze = true
+						}
 						if c != nil && c.Name != "goal" && c.Name != "goal_snooze" {
 							toolCalls++
 						}
@@ -2238,7 +2257,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 	}
 	lane := m.laneFor(binding.AgentID)
-	if toolCalls == 0 && !hasText {
+	if toolCalls == 0 && !hasText && !calledGoalSnooze {
 		lane.consecutiveEmptyTurns++
 		if lane.consecutiveEmptyTurns < 3 {
 			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns)

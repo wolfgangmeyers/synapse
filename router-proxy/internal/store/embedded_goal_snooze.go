@@ -74,8 +74,43 @@ type EmbeddedGoalSnoozePreference struct {
 	AgentID, SessionID, Generation, Role string
 	Epoch, PolicyVersion                 int64
 	CallID, DueAt                        string
+	SnoozeUntil                          string
 	DurationMS                           int64
 	Active                               bool
+}
+
+// CurrentEmbeddedGoalSnoozePreference returns the currently active snooze preference for an agent if any.
+func (s *Store) CurrentEmbeddedGoalSnoozePreference(ctx context.Context, agentID string) (*EmbeddedGoalSnoozePreference, error) {
+	if ctx == nil || agentID == "" {
+		return nil, errors.New("invalid arguments")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	var p EmbeddedGoalSnoozePreference
+	var result string
+	err := s.db.QueryRowContext(ctx, `SELECT p.agent_id,p.session_id,p.epoch,p.generation,p.role,p.user_seq,p.user_digest,p.goal_revision,p.policy_version,p.call_id,p.due_at,c.result_json
+ FROM embedded_goal_snooze_preferences p JOIN embedded_goal_snooze_calls c ON c.call_id=p.call_id
+ JOIN embedded_sessions e ON e.agent_id=p.agent_id AND e.session_id=p.session_id AND e.epoch=p.epoch AND e.generation=p.generation
+ JOIN managed_agent_policies m ON m.agent_id=p.agent_id
+ WHERE p.agent_id=? AND p.active=1 AND e.current=1 AND e.role=p.role AND m.goal_enabled=1 AND m.desired_revision=p.goal_revision
+ ORDER BY p.due_at DESC LIMIT 1`, agentID).Scan(&p.AgentID, &p.SessionID, &p.Epoch, &p.Generation, &p.Role, &p.UserSeq, &p.UserDigest, &p.GoalRevision, &p.PolicyVersion, &p.CallID, &p.DueAt, &result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var snapshot EmbeddedGoalSnoozePreference
+	if err := json.Unmarshal([]byte(result), &snapshot); err != nil {
+		return nil, err
+	}
+	p.DurationMS = snapshot.DurationMS
+	p.SnoozeUntil = p.DueAt
+	p.Active = true
+	return &p, nil
 }
 
 // EmbeddedGoalSnoozePreferenceFor returns only the current, active preference.
