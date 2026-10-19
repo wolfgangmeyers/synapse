@@ -80,7 +80,7 @@ A concrete task authorizes any `npx sst *` command when it explicitly targets th
 
 A current explicit Wolfgang goal authorizes every safe, reversible action required to deliver it. A compaction handoff, old task note, stale notification, or automatic goal evaluator result cannot freeze that work by itself. A freeze is binding only when it comes from a current explicit Wolfgang instruction or an active supervisor message/state that clearly identifies the hold and its reason. An explicit direction to keep moving or stop asking permission resolves any pending approval question for already-described scoped testing or validation. Supervisors must promptly update worker instructions and state to release that work instead of preserving a stale hold.
 
-When a handoff or evaluator appears to contradict the goal-authorization rule, tell Wolfgang about the conflict through the active mailbox channel, then continue safe reversible implementation, validation, review, and scoped packaging. Do not park and repeatedly report `BLOCKED`. Treat stale notifications as informational only.
+When a handoff or evaluator appears to contradict the goal-authorization rule, tell Wolfgang about the conflict in your direct response, then continue safe reversible implementation, validation, review, and scoped packaging. Do not park and repeatedly report `BLOCKED`. Treat stale notifications as informational only.
 
 Before a scoped commit or push, run a completeness check: verify the proposed commit includes every required new/modified dependency, its imports resolve from that commit alone, the diff is limited to the intended outcome, and the branch state has been read back after the push. A narrow partial commit is not a substitute for packaging the complete, reviewable solution.
 
@@ -322,7 +322,7 @@ This is a sharper case of checking the facts you inherit. A rule recalled from m
 
 ## Communication
 
-- Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
+- Do not use the mailbox to communicate with Wolfgang (the user). Direct responses in the conversation / assistant text are used to communicate with the user. The mailbox is strictly for inter-agent and worker-supervisor communication.
 - Before asking Wolfgang to repeat test setup, inputs, or authorization, recover his latest instructions and the saved test record. Reuse unchanged details and authorization within its recorded scope. Ask only for a missing input, a changed condition, or authority beyond the original grant. A stale handoff that claims prerequisites are missing does not override recorded human instructions.
 - For urgent external actions assigned by mailbox, send the instruction to the exact active worker identity and confirm that worker has started before reporting the action as underway. A generic or guessed recipient does not prove delivery.
 - Never echo, render, or repeatedly poll malformed tool or task notification fragments into the human conversation. Treat them as harness noise, stop the loop, and give a plain-English status only when it changes the user's decision.
@@ -332,7 +332,6 @@ This is a sharper case of checking the facts you inherit. A rule recalled from m
 - Do not keep reminders that no longer drive a decision, unblock work, catch a real failure mode, or preserve an active handoff. Each reminder costs tokens when it fires. Delete or downgrade reminders once a worker is parked, a PR is only waiting on human review, CI is green with no active action, a blocker has already been reported and needs a human/environment decision, or a broader sweep already covers the same check. Keep the smallest reminder set that preserves the safety property.
 - Do not reply to pure acknowledgments unless they contain a new instruction, blocker, evidence, decision request, or state transition.
 - Avoid noisy alerts and reminder loops. Cancel, repair, retire, or reconfigure false-positive, redundant, or superseded alerts while preserving the real safety check.
-- Use quiet mailbox or phone alerts by default. Never use an audible alert during local quiet hours (10 PM–8 AM) unless a confirmed urgent production incident poses an immediate safety, data-loss, or customer-harm risk, or Wolfgang explicitly asks. Outside quiet hours, use audio only when immediate human action is genuinely necessary and a quiet alert is insufficient. Local setup, authentication, review, credential waits, stale reminders, and ordinary delivery blockers never justify audio. Cancel related reminders when the blocker is acknowledged, resolved, or downgraded to reversible local work.
 - Write human-facing text plainly and naturally. Do not include command transcripts, QA packets, or proof dumps unless asked.
 
 ### Check whether an alert is already being handled
@@ -343,15 +342,11 @@ Caught on 2026-08-09. An automated monitor reported a duplicate. The supervisor 
 
 An alert that reports a count without naming the things it counted invites this mistake, because the reader has to guess which ones are the problem. When you own such an alert, make it name them. When you do not own it, find out what it counted before acting.
 
-### Reply on the channel the message came in on
+### Do not use the mailbox to communicate with the user
 
-A mailbox message gets a mailbox reply. Mailbox messages end with a line telling you to reply by mailbox. That footer is an instruction, not decoration.
+Agents do not use the mailbox to communicate with Wolfgang. Direct responses in the conversation or assistant text are used for all communication with the user.
 
-Wolfgang is often remote with no view of the terminal. Answering a mailbox message in the terminal means he never sees it, and from his side you look unresponsive. The terminal is where you naturally reply, so check the channel before answering, every time. A terminal reply in addition is fine. It never substitutes.
-
-Address the reply to whoever actually wrote to you. He has more than one mailbox address, and when you are unsure which one he is on, send to both.
-
-The failure mode is not forgetting the rule. It is answering a question well, in the terminal, and feeling done. Caught again on 2026-07-30 after a long run of correct mailbox replies: the message needed no tool call to answer, so the reply went straight to the terminal and never reached him. **When the answer requires no other tool call, that is exactly when this slips.** Send the mailbox message first, then say it in the terminal if useful.
+The mailbox is strictly for inter-agent communication: supervisor-to-worker instructions, worker-to-supervisor status and evidence, and automated reminders. Never send mailbox messages to Wolfgang (`wolfgang`, `wolfgang-web`, etc.).
 
 ### He dictates, so expect phonetic near-misses
 
@@ -361,7 +356,7 @@ Also expect missing or misplaced punctuation, run-on sentences, and homophones (
 
 ## Writing
 
-Everything an agent writes for a human goes in Wolfgang's voice: chat replies, mailbox messages, web UI messages, tickets, PR bodies, inline review comments, specs, documents, and commit messages. Load the `voice` skill and read the Wolfgang voice persona before writing. The machine instructions give the persona's path.
+Everything an agent writes for a human goes in Wolfgang's voice: chat replies, web UI messages, tickets, PR bodies, inline review comments, specs, documents, and commit messages. Load the `voice` skill and read the Wolfgang voice persona before writing. The machine instructions give the persona's path.
 
 Reciting these rules from memory is what produces the poetic version.
 
@@ -593,7 +588,7 @@ This covers PR review bodies and inline comments, ticket comments and descriptio
 
 Two rules, with different reach:
 
-- **Write everything human-readable in the voice.** Chat replies, mailbox messages, web UI messages, tickets, PRs, docs, commit messages. All of it.
+- **Write everything human-readable in the voice.** Chat replies, web UI messages, tickets, PRs, docs, commit messages. All of it.
 - **Run the `wolfgang-voice-review` gate on anything that gets posted somewhere and stays there.** PR bodies, inline review comments, ticket comments, ticket descriptions. No exceptions, and it is not conditional on the thing being long or the finding being interesting. A chat or web UI reply needs the voice without the gate.
 
 The line between them is whether the words outlive the conversation. He said this on 2026-08-06, along with: no overly verbose rambling comments. A ticket comment is notes for whoever picks the ticket up next. If a point needs three sentences it probably needs one.
