@@ -14,7 +14,23 @@ function objectValue(value: unknown): value is Record<string, unknown> { return 
 function canonicalTimestamp(value: unknown): value is string { if (typeof value !== "string" || !TIMESTAMP.test(value)) return false; try { return new Date(value).toISOString() === value; } catch { return false; } }
 export function isPortablePromptTemplateId(value: unknown): value is string { if (typeof value !== "string" || value.length === 0 || value.includes("\u0000") || textEncoder.encode(value).length > MAX_PROMPT_TEMPLATE_ID_BYTES) return false; for (let index = 0; index < value.length; index += 1) { const code = value.charCodeAt(index); if (code >= 0xD800 && code <= 0xDBFF) { const next = value.charCodeAt(index + 1); if (!(next >= 0xDC00 && next <= 0xDFFF)) return false; index += 1; } else if (code >= 0xDC00 && code <= 0xDFFF) return false; } return true; }
 export function promptTemplateExportPayload(templates: unknown): PromptTemplateExport { const values = Array.isArray(templates) ? templates : []; return { format: PROMPT_TEMPLATE_EXPORT_FORMAT, version: 1, templates: values.map((value) => { const input = objectValue(value) ? value : {}; const result: PromptTemplate = { name: String(input.name ?? ""), body: String(input.body ?? "") }; if (typeof input.id === "string") result.id = input.id; if (canonicalTimestamp(input.updated_at)) result.updated_at = input.updated_at; return result; }) }; }
-export function promptTemplateUpdatePayload(template: PromptTemplate): { name: string; body: string; id?: string; updated_at?: string } { return { ...(typeof template.id === "string" && template.id.trim() ? { id: template.id.trim() } : {}), name: template.name, body: template.body, ...(canonicalTimestamp(template.updated_at) ? { updated_at: template.updated_at } : {}) }; }
+export function promptTemplateUpdatePayload(template: PromptTemplate): { name: string; body: string; updated_at?: string } {
+  return {
+    name: template.name,
+    body: template.body,
+    ...(canonicalTimestamp(template.updated_at) ? { updated_at: template.updated_at } : {})
+  };
+}
+
+export function promptTemplateCreatePayload(template: PromptTemplate): { name: string; body: string; id?: string; updated_at?: string } {
+  const effectiveId = typeof template.id === "string" && template.id.trim() ? template.id.trim() : (template.name ? slugifyPromptTemplate(template.name) : undefined);
+  return {
+    name: template.name,
+    body: template.body,
+    ...(effectiveId ? { id: effectiveId } : {}),
+    ...(canonicalTimestamp(template.updated_at) ? { updated_at: template.updated_at } : {})
+  };
+}
 
 export function parsePromptTemplateImport(value: unknown): PromptTemplate[] { let parsed: unknown; try { parsed = JSON.parse(String(value)); } catch { throw new Error("Choose a valid prompt template JSON file."); } if (!objectValue(parsed) || parsed.format !== PROMPT_TEMPLATE_EXPORT_FORMAT || parsed.version !== 1 || !Array.isArray(parsed.templates) || parsed.templates.length > MAX_PROMPT_TEMPLATES) throw new Error("This is not a valid prompt template export file."); const names = new Set<string>(); const ids = new Set<string>(); const result: PromptTemplate[] = []; parsed.templates.forEach((value, index) => { if (!objectValue(value) || Object.keys(value).some((key) => !["name", "body", "id", "updated_at"].includes(key))) throw new Error(`Template ${index + 1} has invalid metadata.`); if (typeof value.name !== "string" || typeof value.body !== "string" || value.name.includes("\u0000") || value.body.includes("\u0000") || !value.name.trim() || !value.body.trim() || textEncoder.encode(value.name).length > MAX_PROMPT_TEMPLATE_NAME_BYTES || textEncoder.encode(value.body).length > MAX_PROMPT_TEMPLATE_BODY_BYTES) throw new Error(`Template ${index + 1} must have a valid name and body.`); if (Object.hasOwn(value, "id")) { if (!isPortablePromptTemplateId(value.id)) throw new Error(`Template ${index + 1} has invalid metadata.`); if (ids.has(value.id)) throw new Error(`The import contains duplicate template id \"${value.id}\".`); ids.add(value.id); } if (Object.hasOwn(value, "updated_at") && !canonicalTimestamp(value.updated_at)) throw new Error(`Template ${index + 1} has invalid metadata.`); if (names.has(value.name)) throw new Error(`The import contains duplicate template name \"${value.name}\".`); names.add(value.name); result.push({ ...(typeof value.id === "string" ? { id: value.id } : {}), name: value.name, body: value.body, ...(typeof value.updated_at === "string" ? { updated_at: value.updated_at } : {}) }); }); return result; }
 export function parsePromptTemplateTokens(

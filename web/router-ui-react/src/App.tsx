@@ -38,7 +38,7 @@ import { ArrivalDialog } from "./components/ArrivalDialog";
 import { ModelPicker } from "./components/ModelPicker";
 import type { ImageInput } from "./domain/images";
 import { routerDisplayName, type SavedRouter } from "./domain/router-manager";
-import { promptTemplateUpdatePayload, loadPromptTemplateUsage, recordPromptTemplateUsage, sortPromptTemplatesByMRU, type PromptTemplate } from "./domain/prompt-templates";
+import { promptTemplateCreatePayload, promptTemplateUpdatePayload, loadPromptTemplateUsage, recordPromptTemplateUsage, sortPromptTemplatesByMRU, type PromptTemplate } from "./domain/prompt-templates";
 import { runPromptTemplateImport, type PromptTemplateImportProgress, type PromptTemplateImportResult } from "./domain/prompt-template-import";
 import { DEFAULT_GOAL_STATE, goalErrorMessage, type GoalControlSettings, type GoalState } from "./domain/goals";
 import { withAbsoluteAttachmentUrls } from "./transport/attachment-urls";
@@ -605,12 +605,26 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
       setReminderStatus(reminderLockErrorMessage("router_reconnecting"));
     }
   };
-  const saveTemplate = async (template: PromptTemplate): Promise<void> => { if (template.id) await session.transport.http.updatePromptTemplate(template.id, promptTemplateUpdatePayload(template)); else await session.transport.http.createPromptTemplate(template); invalidateTemplateList(); await refreshTemplates(); };
+  const saveTemplate = async (template: PromptTemplate): Promise<void> => {
+    const isExisting = Boolean(template.id && session.state.templates.some((t) => t.id === template.id));
+    if (isExisting && template.id) {
+      await session.transport.http.updatePromptTemplate(
+        template.id,
+        promptTemplateUpdatePayload(template)
+      );
+    } else {
+      await session.transport.http.createPromptTemplate(
+        promptTemplateCreatePayload(template)
+      );
+    }
+    invalidateTemplateList();
+    await refreshTemplates();
+  };
   const deleteTemplate = async (id: string): Promise<void> => { await session.transport.http.deletePromptTemplate(id); invalidateTemplateList(); await refreshTemplates(); };
   const importTemplates = async (items: PromptTemplate[], overwrite: boolean): Promise<PromptTemplateImportResult> => {
     setPromptImportProgress({ completed: 0, total: items.length, interrupted: false });
     const result = await runPromptTemplateImport(items, overwrite, {
-      create: async (template) => { await session.transport.http.createPromptTemplate(template); },
+      create: async (template) => { await session.transport.http.createPromptTemplate(promptTemplateCreatePayload(template)); },
       update: async (id, template) => { await session.transport.http.updatePromptTemplate(id, promptTemplateUpdatePayload(template)); invalidateTemplateList(); },
       refresh: async () => { await refreshTemplates(); },
     }, setPromptImportProgress, { existingTemplates: sessionStateRef.current.templates });
