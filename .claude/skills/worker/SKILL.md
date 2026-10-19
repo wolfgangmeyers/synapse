@@ -23,10 +23,9 @@ If a supervisor reports a launcher failure, do not repair it by typing into tmux
 
 Your current tmux pane's window name is your agent ID. Use it when you need to identify yourself to the supervisor or other systems.
 
-## Mailbox
+## Communication
 
-Workers communicate with the supervisor via Mailbox V2 — for questions, blockers, status
-updates, and completion notifications.
+For questions, blockers, status updates, and completion notifications, communicate directly with the supervisor.
 
 In a Pi session with the Mailbox extension, use the native top-level tool first:
 

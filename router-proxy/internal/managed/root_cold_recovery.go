@@ -246,6 +246,11 @@ func (m *Manager) MaybeResumeEmbeddedGoal(agentID string) {
 		return
 	}
 	now := formatManagedTime(m.clock.Now())
+	if pref, err := m.store.CurrentEmbeddedGoalSnoozePreference(m.runCtx, agentID); err == nil && pref != nil {
+		if pref.SnoozeUntil != "" && pref.SnoozeUntil > now {
+			return
+		}
+	}
 	if !isEmbeddedGoalActive(policy, now) {
 		return
 	}

@@ -637,6 +637,18 @@ func (s *Store) SnoozeManagedGoalPolicy(ctx context.Context, fence ManagedRuntim
 	return policy, changed, err
 }
 
+// SetManagedGoalSnoozeUntil sets the SnoozedUntil timestamp on an agent's policy directly.
+func (s *Store) SetManagedGoalSnoozeUntil(ctx context.Context, agentID string, snoozeUntil string) error {
+	if ctx == nil || agentID == "" {
+		return errors.New("invalid arguments")
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET snoozed_until=?, updated_at=? WHERE agent_id=?`, snoozeUntil, now, agentID)
+		return err
+	})
+}
+
 // WakeSnoozedManagedGoalPolicy consumes only a due snooze for the current
 // fence. A stale timer cannot wake a reset, terminated, or reconfigured run.
 func (s *Store) WakeSnoozedManagedGoalPolicy(ctx context.Context, fence ManagedRuntimeFence) (*ManagedGoalPolicy, bool, error) {

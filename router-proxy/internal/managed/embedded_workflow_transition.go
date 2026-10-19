@@ -177,6 +177,9 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if targetState.Goal != "" {
 					goalText := m.store.SubstituteAndExpandText(ctx, targetState.Goal, workflowVars)
 					goalSettings := store.DefaultManagedGoalSettings()
+					if policy, err := m.store.ManagedGoalPolicyFor(ctx, owner.binding.AgentID); err == nil && policy != nil {
+						goalSettings = policy.Config.Settings
+					}
 					goalSettings.GoalLockEnabled = true
 					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
 						Enabled:  true,
@@ -185,6 +188,9 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 					})
 				} else {
 					goalSettings := store.DefaultManagedGoalSettings()
+					if policy, err := m.store.ManagedGoalPolicyFor(ctx, owner.binding.AgentID); err == nil && policy != nil {
+						goalSettings = policy.Config.Settings
+					}
 					goalSettings.GoalLockEnabled = false
 					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
 						Enabled:  false,
