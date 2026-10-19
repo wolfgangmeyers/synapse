@@ -482,6 +482,24 @@ export interface MCPServerDetailResponse {
   token?: unknown;
 }
 
+export interface ToolDefinitionItem {
+  tool_name: string;
+  category: string;
+  enabled: boolean;
+  mcp_server_id?: string | null;
+}
+
+export interface AgentToolItem extends ToolDefinitionItem {
+  effective_enabled: boolean;
+}
+
+export interface AgentToolsResponse {
+  agent_id: string;
+  workflow_override: boolean;
+  active_workflow_state: string;
+  tools: AgentToolItem[];
+}
+
 export interface RouterHttpClient {
   readonly routerUrl: string;
   request(path: string, init?: RequestInit): Promise<unknown>;
@@ -565,6 +583,10 @@ export interface RouterHttpClient {
   updateAgentMonitor(agentId: string, monitorId: string, payload: Partial<CreateAgentMonitorPayload>): Promise<AgentMonitor>;
   deleteAgentMonitor(agentId: string, monitorId: string): Promise<void>;
   evaluateAgentMonitor(agentId: string, monitorId: string): Promise<MonitorEvaluationResult>;
+  getToolDefaults(): Promise<ToolDefinitionItem[]>;
+  updateToolDefaults(payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }>;
+  getAgentTools(agentId: string): Promise<AgentToolsResponse>;
+  updateAgentTools(agentId: string, payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
   stopManagedSubagent(agentId: string, childId: string): Promise<void>;
@@ -886,6 +908,28 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         throw invalidResponse("Router returned an invalid evaluate monitor response", body);
       }
       return body as unknown as MonitorEvaluationResult;
+    },
+    getToolDefaults: async (): Promise<ToolDefinitionItem[]> => {
+      const res = await request("/v1/settings/tools", { method: "GET" });
+      const body = recordValue(res);
+      if (!body || !Array.isArray(body.tools)) return [];
+      return body.tools as ToolDefinitionItem[];
+    },
+    updateToolDefaults: async (payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }> => {
+      const res = await jsonRequest("/v1/settings/tools", "PUT", payload);
+      return (recordValue(res) ?? { ok: true }) as { ok: boolean };
+    },
+    getAgentTools: async (agentId: string): Promise<AgentToolsResponse> => {
+      const res = await request(`/v1/managed-agents/${encodeURIComponent(agentId)}/tools`, { method: "GET" });
+      const body = recordValue(res);
+      if (!body || !Array.isArray(body.tools)) {
+        return { agent_id: agentId, workflow_override: false, active_workflow_state: "", tools: [] };
+      }
+      return body as unknown as AgentToolsResponse;
+    },
+    updateAgentTools: async (agentId: string, payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }> => {
+      const res = await jsonRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/tools`, "PUT", payload);
+      return (recordValue(res) ?? { ok: true }) as { ok: boolean };
     },
   };
 }

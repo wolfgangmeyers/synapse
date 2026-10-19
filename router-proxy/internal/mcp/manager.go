@@ -504,6 +504,12 @@ func (m *Manager) SyncTools(ctx context.Context, serverID string) error {
 		return fmt.Errorf("save tools to store: %w", err)
 	}
 
+	toolNames := make([]string, 0, len(records))
+	for _, rec := range records {
+		toolNames = append(toolNames, rec.PrefixedName)
+	}
+	_ = m.store.RegisterMCPTools(ctx, server.ID, server.Name, toolNames)
+
 	server.ToolsCount = len(records)
 	server.Status = "connected"
 	server.LastError = nil

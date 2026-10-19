@@ -76,6 +76,8 @@ func TestEmbeddedReminderArgumentAliases(t *testing.T) {
 		require.Equal(t, "delayed reminder", parsed.Body)
 		require.NotEmpty(t, parsed.DueAt)
 		require.True(t, parsed.HasDueAt)
+		require.True(t, parsed.HasDelay)
+		require.Equal(t, int64(600000), parsed.DelayMS)
 
 		parsedTime, err := time.Parse("2006-01-02T15:04:05.000Z", parsed.DueAt)
 		require.NoError(t, err)

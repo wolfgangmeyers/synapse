@@ -854,6 +854,12 @@ export interface ContextUsage {
   percent: number | null;
 }
 
+export interface AgentProgress {
+  percent: number;
+  note: string | null;
+  updated_at: RouterTimestamp;
+}
+
 export interface ManagedAgent {
   agent_id: AgentId;
   source: "router-managed";
@@ -872,6 +878,7 @@ export interface ManagedAgent {
   worktree?: boolean;
   allow_inline_tools?: boolean | undefined;
   context_usage?: ContextUsage;
+  progress?: AgentProgress | null;
   goal_state?: GoalState & {
     desired_revision?: number;
     applied_revision?: number;

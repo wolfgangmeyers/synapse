@@ -26,6 +26,7 @@ type WorkflowStateExport struct {
 	AllowExit    bool                       `json:"allow_exit"`
 	AllowedTools []string                   `json:"allowed_tools"`
 	Reminders    []WorkflowReminderConfig   `json:"reminders"`
+	Monitors     []WorkflowMonitorConfig    `json:"monitors"`
 	UIPosX       float64                    `json:"ui_pos_x"`
 	UIPosY       float64                    `json:"ui_pos_y"`
 	Transitions  []WorkflowTransitionExport `json:"transitions"`
@@ -98,6 +99,10 @@ func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*Workflo
 		if reminders == nil {
 			reminders = []WorkflowReminderConfig{}
 		}
+		monitors := st.Monitors
+		if monitors == nil {
+			monitors = []WorkflowMonitorConfig{}
+		}
 		allowedTools := st.AllowedTools
 		if allowedTools == nil {
 			allowedTools = []string{}
@@ -113,6 +118,7 @@ func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*Workflo
 			AllowExit:    st.AllowExit,
 			AllowedTools: allowedTools,
 			Reminders:    reminders,
+			Monitors:     monitors,
 			UIPosX:       st.UIPosX,
 			UIPosY:       st.UIPosY,
 			Transitions:  exportedTransitions,
@@ -137,6 +143,72 @@ func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*Workflo
 	}
 
 	return bundle, nil
+}
+
+const (
+	maxWorkflowMonitorNameBytes         = 256
+	maxWorkflowMonitorDescriptionBytes  = 4096
+	maxWorkflowMonitorInstructionsBytes = 65536
+	maxWorkflowMonitorNudgeBytes        = 16384
+	maxWorkflowMonitorIntervalSeconds   = 2592000
+	maxWorkflowMonitorCooldownSeconds   = 2592000
+)
+
+func validateWorkflowMonitorConfig(prefix string, mon WorkflowMonitorConfig) *WorkflowValidationError {
+	name := strings.TrimSpace(mon.Name)
+	if name == "" {
+		return &WorkflowValidationError{Field: prefix + ".name", Message: "watcher name must not be empty"}
+	}
+	if len([]byte(name)) > maxWorkflowMonitorNameBytes {
+		return &WorkflowValidationError{Field: prefix + ".name", Message: "watcher name exceeds maximum byte length"}
+	}
+	if !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+		return &WorkflowValidationError{Field: prefix + ".name", Message: "watcher name contains invalid characters"}
+	}
+
+	if len([]byte(mon.Description)) > maxWorkflowMonitorDescriptionBytes {
+		return &WorkflowValidationError{Field: prefix + ".description", Message: "watcher description exceeds maximum byte length"}
+	}
+	if !utf8.ValidString(mon.Description) || strings.ContainsRune(mon.Description, 0) {
+		return &WorkflowValidationError{Field: prefix + ".description", Message: "watcher description contains invalid characters"}
+	}
+
+	inst := strings.TrimSpace(mon.QuestionInstructions)
+	if inst == "" {
+		return &WorkflowValidationError{Field: prefix + ".question_instructions", Message: "question instructions must not be empty"}
+	}
+	if len([]byte(inst)) > maxWorkflowMonitorInstructionsBytes {
+		return &WorkflowValidationError{Field: prefix + ".question_instructions", Message: "question instructions exceed maximum byte length"}
+	}
+	if !utf8.ValidString(inst) || strings.ContainsRune(inst, 0) {
+		return &WorkflowValidationError{Field: prefix + ".question_instructions", Message: "question instructions contain invalid characters"}
+	}
+
+	nudge := strings.TrimSpace(mon.NudgeTemplate)
+	if nudge == "" {
+		return &WorkflowValidationError{Field: prefix + ".nudge_template", Message: "nudge template must not be empty"}
+	}
+	if len([]byte(nudge)) > maxWorkflowMonitorNudgeBytes {
+		return &WorkflowValidationError{Field: prefix + ".nudge_template", Message: "nudge template exceeds maximum byte length"}
+	}
+	if !utf8.ValidString(nudge) || strings.ContainsRune(nudge, 0) {
+		return &WorkflowValidationError{Field: prefix + ".nudge_template", Message: "nudge template contains invalid characters"}
+	}
+
+	if mon.IntervalSeconds < 0 || mon.IntervalSeconds > maxWorkflowMonitorIntervalSeconds {
+		return &WorkflowValidationError{Field: prefix + ".interval_seconds", Message: "interval_seconds must be between 0 and 2592000"}
+	}
+	if mon.CooldownSeconds < 0 || mon.CooldownSeconds > maxWorkflowMonitorCooldownSeconds {
+		return &WorkflowValidationError{Field: prefix + ".cooldown_seconds", Message: "cooldown_seconds must be between 0 and 2592000"}
+	}
+	if mon.MaxAlerts < 0 {
+		return &WorkflowValidationError{Field: prefix + ".max_alerts", Message: "max_alerts must be >= 0"}
+	}
+	if mon.TrailingMessagesCount < 0 {
+		return &WorkflowValidationError{Field: prefix + ".trailing_messages_count", Message: "trailing_messages_count must be >= 0"}
+	}
+
+	return nil
 }
 
 // ValidateBundle checks that bundle structure, states, transitions, tools, and variables are valid.
@@ -242,6 +314,13 @@ func (s *Store) ValidateExportBundle(bundle WorkflowExportBundle) error {
 				if rem.IntervalSeconds == nil || *rem.IntervalSeconds < 1 {
 					return &WorkflowValidationError{Field: fmt.Sprintf("states[%d].reminders[%d].interval_seconds", i, ri), Message: "interval_seconds must be >= 1 for recurring"}
 				}
+			}
+		}
+
+		// Validate monitors
+		for mi, mon := range st.Monitors {
+			if err := validateWorkflowMonitorConfig(fmt.Sprintf("states[%d].monitors[%d]", i, mi), mon); err != nil {
+				return err
 			}
 		}
 
@@ -404,6 +483,15 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				return err
 			}
 
+			monitorsCopy := st.Monitors
+			if monitorsCopy == nil {
+				monitorsCopy = []WorkflowMonitorConfig{}
+			}
+			monitorsJSON, err := marshalWorkflowMonitors(monitorsCopy)
+			if err != nil {
+				return err
+			}
+
 			sanitizedTools, err := sanitizeWorkflowAllowedTools(st.AllowedTools)
 			if err != nil {
 				return err
@@ -423,8 +511,8 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				allowExitInt = 0
 			}
 
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)`,
-				newStateID, newWfID, st.Name, st.Description, st.EntryText, st.Goal, remindersJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newStateID, newWfID, st.Name, st.Description, st.EntryText, st.Goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
 			if err != nil {
 				return err
 			}
@@ -437,6 +525,7 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				EntryText:    st.EntryText,
 				Goal:         st.Goal,
 				Reminders:    st.Reminders,
+				Monitors:     monitorsCopy,
 				AllowedTools: sanitizedTools,
 				Transitions:  remappedTransitions,
 				AllowExit:    st.AllowExit,

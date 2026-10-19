@@ -112,6 +112,13 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		}
 	}
 
+	var monitors []store.WorkflowMonitorConfig
+	if raw, exists := payload["monitors"]; exists && len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &monitors); err != nil {
+			return store.WorkflowStateRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+	}
+
 	var allowedTools []string
 	if raw, exists := payload["allowed_tools"]; exists && len(raw) > 0 && string(raw) != "null" {
 		if err := json.Unmarshal(raw, &allowedTools); err != nil {
@@ -169,6 +176,7 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		EntryText:    entryText,
 		Goal:         goal,
 		Reminders:    reminders,
+		Monitors:     monitors,
 		AllowedTools: allowedTools,
 		Transitions:  transitions,
 		AllowExit:    allowExit,

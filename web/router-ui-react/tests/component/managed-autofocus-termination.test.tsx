@@ -213,5 +213,10 @@ describe("Managed agent auto-focus and termination fixes", () => {
 
     // And children query for terminating agent was skipped in refreshManaged!
     expect(childrenQueries).not.toContain("worker-to-kill");
+
+    // Terminated agent is unselected, resetting peer and showing Pick an agent
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 3, name: "Pick an agent" })).toBeInTheDocument();
+    });
   });
 });

@@ -43,12 +43,14 @@ export interface SidebarProps {
   onSystemOneConfig?: (() => void) | undefined;
   onContextThresholds?: (() => void) | undefined;
   onMCPServers?: (() => void) | undefined;
+  onToolDefaults?: (() => void) | undefined;
+  onOpenProgressHistory?: ((agentId: string) => void) | undefined;
 }
 function browserStorage(): StorageAdapter | undefined {
   try { return globalThis.localStorage; } catch { return undefined; }
 }
 
-export function Sidebar({ scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onRestartAllManaged, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers }: SidebarProps): ReactElement {
+export function Sidebar({ scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onRestartAllManaged, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onOpenProgressHistory }: SidebarProps): ReactElement {
   const [localFilter, setLocalFilter] = useState(filter ?? "");
   const persistence = useMemo(() => storage ?? browserStorage(), [storage]);
   const scopeKey = ownerScope(scope.routerUrl, scope.agentId);
@@ -74,7 +76,7 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
   const managedActionsId = useId();
   const managedActionsRef = useRef<HTMLDivElement>(null);
   const isConnected = connection === "connected";
-  const hasManagedActions = isConnected && Boolean(onLaunchManaged || onRestartAllManaged || onRestartRouter || onProviderSettings || onSystemOneConfig || onContextThresholds || onMCPServers);
+  const hasManagedActions = isConnected && Boolean(onLaunchManaged || onRestartAllManaged || onRestartRouter || onProviderSettings || onSystemOneConfig || onContextThresholds || onMCPServers || onToolDefaults);
   const activeFilter = filter ?? localFilter;
   const visible = useMemo(() => {
     const query = activeFilter.trim().toLowerCase();
@@ -137,6 +139,7 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
                 {onRestartRouter ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartRouter)}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" style={{ marginRight: 8 }} />Restart router</button> : null}
                 {onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}
                 {onMCPServers ? <button type="button" role="menuitem" onClick={() => runManagedAction(onMCPServers)}>MCP Servers</button> : null}
+                {onToolDefaults ? <button type="button" role="menuitem" onClick={() => runManagedAction(onToolDefaults)}>Tool Defaults</button> : null}
                 {onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}
                 {onContextThresholds ? <button type="button" role="menuitem" onClick={() => runManagedAction(onContextThresholds)}>Context Thresholds</button> : null}
               </div>
@@ -151,7 +154,7 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
             <small>{visible.length}</small>
           </div>
           <input className="agent-filter" type="search" value={activeFilter} onChange={(event) => changeFilter(event.currentTarget.value)} placeholder="Filter connected agents" autoComplete="off" aria-label="Filter connected agents" />
-          <AgentList listRef={agentListRef} client={client} agents={visible} selectedAgentId={selectedAgentId} arrivals={arrivals} reminderCounts={reminderCounts} expandedAgentIds={expandedAgentIds} onSelectAgent={selectAgent} onGoal={onGoal} onReminders={onReminders} onToggleSubagents={onToggleSubagents} onStopSubagent={onStopSubagent} onOpenArrival={onOpenArrival} onDismissArrival={onDismissArrival} />
+          <AgentList listRef={agentListRef} client={client} agents={visible} selectedAgentId={selectedAgentId} arrivals={arrivals} reminderCounts={reminderCounts} expandedAgentIds={expandedAgentIds} onSelectAgent={selectAgent} onGoal={onGoal} onReminders={onReminders} onToggleSubagents={onToggleSubagents} onStopSubagent={onStopSubagent} onOpenArrival={onOpenArrival} onDismissArrival={onDismissArrival} onOpenProgressHistory={onOpenProgressHistory} />
         </>
       ) : null}
     </div>

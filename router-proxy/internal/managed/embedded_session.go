@@ -1441,6 +1441,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 		}
 		tools = filteredTools
+	} else if filteredTools, err := m.filterToolsForAgent(ctx, binding.AgentID, baseTools); err == nil {
+		tools = filteredTools
 	}
 	if lane != nil {
 		lane.setTools(baseTools, tools)
