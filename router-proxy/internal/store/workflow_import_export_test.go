@@ -54,6 +54,18 @@ func TestWorkflowImportExport(t *testing.T) {
 				DelaySeconds: 120,
 			},
 		},
+		Monitors: []WorkflowMonitorConfig{
+			{
+				Name:                 "Build watcher",
+				Description:          "Watches compilation",
+				QuestionInstructions: "Is build failing?",
+				NudgeTemplate:        "Please fix build error",
+				IntervalSeconds:      60,
+				CooldownSeconds:      30,
+				MaxAlerts:            3,
+				TrailingMessagesCount: 5,
+			},
+		},
 	})
 	require.NoError(t, err)
 
@@ -80,6 +92,7 @@ func TestWorkflowImportExport(t *testing.T) {
 		Goal:         stateBuild.Goal,
 		AllowedTools: stateBuild.AllowedTools,
 		Reminders:    stateBuild.Reminders,
+		Monitors:     stateBuild.Monitors,
 		Transitions: []WorkflowTransitionConfig{
 			{
 				TargetStateID: stateDeploy.ID,
@@ -135,6 +148,15 @@ func TestWorkflowImportExport(t *testing.T) {
 	require.Equal(t, "Proceed to deploy", exportedBuild.Transitions[0].Description)
 	require.Len(t, exportedBuild.Reminders, 1)
 	require.Equal(t, "rem-1", exportedBuild.Reminders[0].ID)
+	require.Len(t, exportedBuild.Monitors, 1)
+	require.Equal(t, "Build watcher", exportedBuild.Monitors[0].Name)
+	require.Equal(t, "Watches compilation", exportedBuild.Monitors[0].Description)
+	require.Equal(t, "Is build failing?", exportedBuild.Monitors[0].QuestionInstructions)
+	require.Equal(t, "Please fix build error", exportedBuild.Monitors[0].NudgeTemplate)
+	require.Equal(t, 60, exportedBuild.Monitors[0].IntervalSeconds)
+	require.Equal(t, 30, exportedBuild.Monitors[0].CooldownSeconds)
+	require.Equal(t, 3, exportedBuild.Monitors[0].MaxAlerts)
+	require.Equal(t, 5, exportedBuild.Monitors[0].TrailingMessagesCount)
 
 	// 3. Import the workflow into the store
 	importedWf, importedStates, err := s.ImportWorkflow(ctx, *bundle)
@@ -172,6 +194,15 @@ func TestWorkflowImportExport(t *testing.T) {
 	require.Equal(t, []string{"bash"}, impDeploy.AllowedTools)
 	require.Len(t, impBuild.Reminders, 1)
 	require.Equal(t, "rem-1", impBuild.Reminders[0].ID)
+	require.Len(t, impBuild.Monitors, 1)
+	require.Equal(t, "Build watcher", impBuild.Monitors[0].Name)
+	require.Equal(t, "Watches compilation", impBuild.Monitors[0].Description)
+	require.Equal(t, "Is build failing?", impBuild.Monitors[0].QuestionInstructions)
+	require.Equal(t, "Please fix build error", impBuild.Monitors[0].NudgeTemplate)
+	require.Equal(t, 60, impBuild.Monitors[0].IntervalSeconds)
+	require.Equal(t, 30, impBuild.Monitors[0].CooldownSeconds)
+	require.Equal(t, 3, impBuild.Monitors[0].MaxAlerts)
+	require.Equal(t, 5, impBuild.Monitors[0].TrailingMessagesCount)
 
 	// Transitions remapped to the newly generated UUID of Deploy
 	require.Len(t, impBuild.Transitions, 1)

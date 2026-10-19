@@ -390,7 +390,7 @@ describe("App integration", () => {
 
     render(<App storage={storage} connect={false} />);
 
-    const selector = await screen.findByRole("button", { name: "Router Production router and provider sign-in settings" });
+    const selector = await screen.findByRole("button", { name: /Router Production router/i });
     expect(selector).toHaveTextContent("Production router");
     expect(selector).not.toHaveTextContent("persisted-router.test:43123");
   });

@@ -149,6 +149,12 @@ type ManagedAgentRecord struct {
 	WorktreeBranch string
 	// AllowInlineTools indicates whether inline tools (bash, edit, write) are allowed without allowance credits.
 	AllowInlineTools bool
+	// ProgressPercent records the agent's progress (0-100).
+	ProgressPercent *int
+	// ProgressNote records an optional status/update note.
+	ProgressNote string
+	// ProgressUpdatedAt records the timestamp of the last progress update.
+	ProgressUpdatedAt string
 	// ContextTokens is the estimated context token usage.
 	ContextTokens *int
 	// ContextWindow is the model context window.

@@ -13,6 +13,7 @@ import type { RouterHttpClient, AgentMonitor } from "../transport/http-client";
 import type { Workflow } from "../domain/workflow-states";
 import { WorkflowLaunchModal } from "./WorkflowLaunchModal";
 import { AgentMonitorsDialog } from "./AgentMonitorsDialog";
+import { WorkerToolsDialog } from "./WorkerToolsDialog";
 import { contextUsageSeverityClass, formatContextUsageLabel, formatContextUsageTooltip } from "../utils/format";
 
 export type ConversationView = "quiet" | "complete";
@@ -115,6 +116,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const [launchModalWorkflow, setLaunchModalWorkflow] = useState<Workflow | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [showMonitorsDialog, setShowMonitorsDialog] = useState(false);
+  const [showWorkerToolsDialog, setShowWorkerToolsDialog] = useState(false);
   const [activeWatchersCount, setActiveWatchersCount] = useState<number>(0);
 
   const allowInlineTools = Boolean(agent?.allow_inline_tools ?? agent?.managed_agent?.allow_inline_tools);
@@ -312,6 +314,16 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   >
     <i className="fa-solid fa-shield-halved" aria-hidden="true" />
   </button>
+) : null}{agent?.source === "router-managed" && client ? (
+  <button
+    type="button"
+    className="icon-btn-round worker-tools-header-button"
+    onClick={() => setShowWorkerToolsDialog(true)}
+    aria-label="Manage Worker Tools"
+    title="Manage Worker Tools"
+  >
+    <i className="fa-solid fa-wrench" aria-hidden="true" />
+  </button>
 ) : null}{agent && showAgentControls ? <button type="button" className="inline-tool-settings-button" onClick={onInlineToolSettings} aria-label="Inline tool settings" title="Inline tool settings"><i className="fa-solid fa-gear" aria-hidden="true" /></button> : null}{agent?.source === "router-managed" && onManageManaged ? <button type="button" className="managed-agent-header-button" onClick={onManageManaged} aria-label="Manage worker" title="Manage worker"><i className="fa-solid fa-gear" aria-hidden="true" /></button> : null}{agent && onToggleChatOnly ? (
   <button type="button" className={`chat-only-button ${chatOnly ? "active" : ""}`} onClick={onToggleChatOnly} aria-label="Toggle chat-only mode" title={chatOnly ? "Chat-only active (tools hidden)" : "Chat-only mode"}>
     <i className="fa-solid fa-comments" aria-hidden="true" />
@@ -411,6 +423,14 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
       const count = Array.isArray(monitors) ? monitors.filter((m) => m.enabled).length : 0;
       setActiveWatchersCount(count);
     }}
+  />
+) : null}{agent?.source === "router-managed" && client ? (
+  <WorkerToolsDialog
+    open={showWorkerToolsDialog}
+    agentId={agent.agent_id}
+    agentName={humanName(agent.agent_id)}
+    client={client}
+    onClose={() => setShowWorkerToolsDialog(false)}
   />
 ) : null}</header>;
 }

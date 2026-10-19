@@ -224,6 +224,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodPut && path == "/v1/settings/context-thresholds":
 		r.handleContextThresholdConfigPUT(w, req)
 		return
+	case path == "/v1/settings/tools":
+		r.handleSettingsTools(w, req)
+		return
 	case req.Method == http.MethodGet && path == "/v1/settings/systemone":
 		r.handleSystemOneConfigGET(w, req)
 		return
@@ -285,6 +288,14 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if agentID, monitorID, action, ok := agentMonitorRoute(path); ok {
 		r.handleAgentMonitorHTTP(w, req, agentID, monitorID, action)
+		return
+	}
+	if agentID, ok := managedAgentToolsRoute(path); ok {
+		r.handleManagedAgentTools(w, req, agentID)
+		return
+	}
+	if agentID, action, ok := agentProgressRoute(path); ok {
+		r.handleAgentProgressHTTP(w, req, agentID, action)
 		return
 	}
 	r.writeError(w, &httpError{status: 404, code: "not_found"})

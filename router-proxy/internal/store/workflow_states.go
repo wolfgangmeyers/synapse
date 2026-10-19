@@ -253,6 +253,12 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 		}
 	}
 
+	for mi, mon := range req.Monitors {
+		if err := validateWorkflowMonitorConfig(fmt.Sprintf("monitors[%d]", mi), mon); err != nil {
+			return &WorkflowStateValidationError{Field: err.Field, Message: err.Message}
+		}
+	}
+
 	if _, err := sanitizeWorkflowAllowedTools(req.AllowedTools); err != nil {
 		return err
 	}

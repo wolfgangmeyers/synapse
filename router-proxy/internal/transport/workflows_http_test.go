@@ -115,6 +115,18 @@ func TestWorkflowHTTP(t *testing.T) {
 		"workflow_id": wfID,
 		"ui_pos_x":    100.5,
 		"ui_pos_y":    200.5,
+		"monitors": []map[string]any{
+			{
+				"name":                  "State 1 Watcher",
+				"description":           "Checks state 1 health",
+				"question_instructions": "Is state 1 working?",
+				"nudge_template":        "Nudge message for state 1",
+				"interval_seconds":      120,
+				"cooldown_seconds":      60,
+				"max_alerts":            2,
+				"trailing_messages_count": 4,
+			},
+		},
 	}
 	body, _ = json.Marshal(stateCreatePayload)
 	res, err = client.Post(server.URL+"/v1/workflow-states", "application/json", bytes.NewReader(body))
@@ -290,6 +302,15 @@ func TestWorkflowHTTP(t *testing.T) {
 	require.Equal(t, 1, exportBundle.SchemaVersion)
 	require.Equal(t, "Cloned Workflow", exportBundle.Workflow.Name)
 	require.Len(t, exportBundle.States, 1)
+	require.Len(t, exportBundle.States[0].Monitors, 1)
+	require.Equal(t, "State 1 Watcher", exportBundle.States[0].Monitors[0].Name)
+	require.Equal(t, "Checks state 1 health", exportBundle.States[0].Monitors[0].Description)
+	require.Equal(t, "Is state 1 working?", exportBundle.States[0].Monitors[0].QuestionInstructions)
+	require.Equal(t, "Nudge message for state 1", exportBundle.States[0].Monitors[0].NudgeTemplate)
+	require.Equal(t, 120, exportBundle.States[0].Monitors[0].IntervalSeconds)
+	require.Equal(t, 60, exportBundle.States[0].Monitors[0].CooldownSeconds)
+	require.Equal(t, 2, exportBundle.States[0].Monitors[0].MaxAlerts)
+	require.Equal(t, 4, exportBundle.States[0].Monitors[0].TrailingMessagesCount)
 
 	// 12c. Import Workflow: POST /v1/workflows/import -> 201 Created
 	exportBundle.Workflow.Name = "Imported From Test"
@@ -312,6 +333,19 @@ func TestWorkflowHTTP(t *testing.T) {
 	require.NoError(t, json.NewDecoder(res.Body).Decode(&impGetRes))
 	res.Body.Close()
 	require.Len(t, impGetRes["states"].([]any), 1)
+	impStateObj := impGetRes["states"].([]any)[0].(map[string]any)
+	impMonitors, ok := impStateObj["monitors"].([]any)
+	require.True(t, ok)
+	require.Len(t, impMonitors, 1)
+	monMap := impMonitors[0].(map[string]any)
+	require.Equal(t, "State 1 Watcher", monMap["name"])
+	require.Equal(t, "Checks state 1 health", monMap["description"])
+	require.Equal(t, "Is state 1 working?", monMap["question_instructions"])
+	require.Equal(t, "Nudge message for state 1", monMap["nudge_template"])
+	require.Equal(t, float64(120), monMap["interval_seconds"])
+	require.Equal(t, float64(60), monMap["cooldown_seconds"])
+	require.Equal(t, float64(2), monMap["max_alerts"])
+	require.Equal(t, float64(4), monMap["trailing_messages_count"])
 
 	// 13. DELETE /v1/workflows/{id} -> 204 No Content
 	delReq, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/workflows/"+wfID, nil)

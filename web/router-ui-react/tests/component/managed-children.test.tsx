@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRow } from "../../src/components/AgentRow";
 import { ManagedChildList } from "../../src/components/ManagedChildList";
@@ -128,8 +128,11 @@ describe("ManagedChildList", () => {
     render(<AgentRow agent={row!} expanded />);
 
     // 6. Verify badge count label
-    const badge = screen.getByRole("group", { name: "2 subagents" });
+    const badge = screen.getByRole("button", { name: "2 subagents" });
     expect(badge).toBeInTheDocument();
+
+    // Open SubagentViewerDialog
+    fireEvent.click(badge);
 
     // 7. Verify descriptions are displayed (rather than task_id)
     expect(screen.getByText("Analyze code architecture")).toBeInTheDocument();
@@ -138,8 +141,8 @@ describe("ManagedChildList", () => {
     expect(screen.queryByText("task-opaque-key-2")).not.toBeInTheDocument();
 
     // 8. Verify running statuses are disclosed alongside descriptions
-    expect(screen.getByText("(running)")).toBeInTheDocument();
-    expect(screen.getByText("(queued)")).toBeInTheDocument();
+    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.getByText("queued")).toBeInTheDocument();
 
     // 9. Verify terminal subagent is hidden from active disclosure
     expect(screen.queryByText("Finished historical step")).not.toBeInTheDocument();

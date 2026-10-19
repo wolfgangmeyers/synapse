@@ -4319,6 +4319,38 @@ p:empty { display: none; }
 .switch-toggle input:checked + .switch-slider:before {
   transform: translateX(20px);
 }
+.switch-toggle input:disabled + .switch-slider {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Compact switch variant */
+.switch-toggle.compact {
+  width: 36px;
+  height: 20px;
+}
+.switch-toggle.compact .switch-slider {
+  border-radius: 20px;
+}
+.switch-toggle.compact .switch-slider:before {
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  bottom: 2px;
+}
+.switch-toggle.compact input:checked + .switch-slider:before {
+  transform: translateX(16px);
+}
+
+/* Tool Management Dialogs */
+.worker-tools-dialog,
+.tool-defaults-dialog {
+  width: min(840px, calc(100vw - 32px));
+}
+.tool-item-card:hover {
+  background: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+}
 
 /* Segmented Buttons */
 .segmented-toggle-group {

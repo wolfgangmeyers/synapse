@@ -21,6 +21,7 @@ export interface AgentRowProps {
   onStopSubagent?: ((childId: string) => void) | undefined;
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
+  onOpenProgressHistory?: ((agentId: string) => void) | undefined;
 }
 function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   return (agent.managed_children ?? []).flatMap((child) => {
@@ -30,7 +31,7 @@ function activeManagedSubagents(agent: Agent): SubagentSummary[] {
   });
 }
 
-export function AgentRow({ agent, client, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival }: AgentRowProps): ReactElement {
+export function AgentRow({ agent, client, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onOpenProgressHistory }: AgentRowProps): ReactElement {
   const working = agent.activity_state === "active";
   const compacting = agent.activity_state === "compacting";
   const managed = agent.source === "router-managed";
@@ -57,7 +58,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
   const hasGoal = agent.goal_state?.enabled || agent.goal?.enabled;
   const hasReminders = reminderCount > 0;
   const className = ["agent-row", selected ? "active" : "", working ? "working" : "", compacting ? "compacting" : "", failed ? "failed" : "", expanded ? "expanded" : "", hasSubagents ? "has-subagents" : ""].filter(Boolean).join(" ");
-  const stopActionPropagation = (event: React.SyntheticEvent<HTMLButtonElement>): void => { event.stopPropagation(); };
+  const stopActionPropagation = (event: React.SyntheticEvent): void => { event.stopPropagation(); };
 
   return <div role="listitem" className={className} aria-selected={selected} data-agent-id={agent.agent_id}
     data-managed-projection-version={managed ? agent.managedProjectionVersion : undefined}
@@ -78,6 +79,20 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
         {starting ? <span className="starting-indicator"><span className="starting-dot" aria-hidden="true" />Starting…</span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}
         {failed ? <span className="managed-failure-indicator" role="alert" aria-label="Managed worker failed"><i className="fa-solid fa-triangle-exclamation" aria-hidden="true" />Failed</span> : null}
+        {agent.progress ? (
+          <div
+            className="agent-row-progress"
+            title={`${agent.progress.percent}%${agent.progress.note ? `: ${agent.progress.note}` : ""}${agent.progress.updated_at ? ` (${agent.progress.updated_at})` : ""}`}
+          >
+            <div className="agent-row-progress-bar">
+              <div
+                className="agent-row-progress-fill"
+                style={{ width: `${Math.min(100, Math.max(0, agent.progress.percent))}%` }}
+              />
+            </div>
+            <span className="agent-row-progress-text">{agent.progress.percent}%</span>
+          </div>
+        ) : null}
       </span>
       {working ? <span className="working-indicator" aria-label="Working"><span /></span> : null}
     </div>

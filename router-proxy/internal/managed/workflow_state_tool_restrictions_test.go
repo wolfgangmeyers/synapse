@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -239,3 +240,110 @@ func TestWorkflowStateToolRestrictionsEndToEnd(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, strings.Contains(textPart.Text, "tool 'bash' is not allowed in active workflow state") || strings.Contains(textPart.Text, "Tool bash not found"), "expected rejection message, got: %s", textPart.Text)
 }
+
+func TestWorkerDisabledToolAdmissionBlocking(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	require.NoError(t, os.Chmod(root, 0700))
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	var attemptedBashResult atomic.Pointer[ai.ToolResultMessage]
+	stepNumber := 0
+
+	fauxStep := func(h ai.TranscriptContext, o *ai.SimpleStreamOptions, s *providers.FauxState, m *ai.Model) *ai.AssistantMessage {
+		stepNumber++
+		for _, msg := range h.Messages {
+			if r, ok := msg.(ai.ToolResultMessage); ok && r.ToolName == "bash" {
+				attemptedBashResult.Store(&r)
+			}
+		}
+
+		if stepNumber == 2 {
+			// In step 2, call bash which was disabled for worker
+			return providers.FauxAssistantMessage(ai.ContentList{
+				providers.FauxToolCall("bash", map[string]any{"command": "echo should-be-blocked"}, "call_bash_test_worker_disabled"),
+			}, ai.StopToolUse)
+		}
+
+		return providers.FauxAssistantMessage(ai.ContentList{
+			ai.TextContent{Text: "step done"},
+		}, ai.StopStop)
+	}
+
+	steps := make([]providers.FauxResponseStep, 10)
+	for i := range steps {
+		steps[i] = fauxStep
+	}
+	reg.SetResponses(steps)
+
+	manager, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		EmbeddedMailBackoff:   10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer manager.Close(ctx)
+
+	// Launch worker agent
+	launched, err := manager.Launch(ctx, LaunchRequest{
+		Name:               "test-worker-disabled-tools",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		RequestID:          "22222222-1111-4111-8111-111111111111",
+		InitialInstruction: "launch prompt",
+	})
+	require.NoError(t, err)
+	agentID := launched.Agent.AgentID
+
+	require.Eventually(t, func() bool {
+		a, e := db.ManagedAgent(ctx, agentID)
+		return e == nil && a.LifecycleState == "running" && a.ActivityState == "idle"
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Disable tool "bash" specifically for this agent
+	err = db.SetAgentTool(ctx, agentID, "bash", false)
+	require.NoError(t, err)
+
+	// Send message to trigger step 2 where faux model attempts to run bash
+	msgID := "33333333-1111-4111-8111-111111111111"
+	_, err = db.Enqueue(ctx, protocol.Envelope{
+		ID:        msgID,
+		From:      "supervisor",
+		To:        agentID,
+		Body:      "call bash please",
+		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}, store.EnqueueOptions{})
+	require.NoError(t, err)
+	_, err = db.ResolveMessageTarget(ctx, msgID)
+	require.NoError(t, err)
+	manager.OfferDirect(agentID)
+
+	require.Eventually(t, func() bool {
+		a, e := db.ManagedAgent(ctx, agentID)
+		return e == nil && a.LifecycleState == "running" && a.ActivityState == "idle"
+	}, 5*time.Second, 20*time.Millisecond)
+
+	bashResult := attemptedBashResult.Load()
+	require.NotNil(t, bashResult, "must receive tool result for bash call")
+	require.True(t, bashResult.IsError, "bash tool call must be an error result when disabled")
+	require.NotEmpty(t, bashResult.Content)
+	textPart, ok := bashResult.Content[0].(ai.TextContent)
+	require.True(t, ok)
+	expectedReason := fmt.Sprintf("tool \"bash\" is disabled for worker %q", agentID)
+	require.Contains(t, textPart.Text, expectedReason)
+}
+

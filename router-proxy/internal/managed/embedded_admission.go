@@ -55,9 +55,13 @@ func (m *Manager) validateEmbeddedWorkingDirectory(cwd string) error {
 	return nil
 }
 
-// admitWorkflowStateTool verifies whether the specified tool is permitted by the agent's current active workflow state.
-// If the agent has no active workflow state, or if AllowedTools is empty, all tools are permitted.
-// If AllowedTools is non-empty, only tools in AllowedTools (with alias resolution) are permitted.
+// admitWorkflowStateTool verifies whether the specified tool is permitted by the agent's current active workflow state or worker tool settings.
+// 1. Check if agent is currently in an active workflow state with allowed_tools defined:
+//    - If so: workflow state completely overrides. If tool is in allowed_tools (or required tool), allow. Otherwise block with reason.
+// 2. If agent is NOT in an active workflow state with allowed_tools:
+//    - Fetch agent tools using s.GetAgentTools(ctx, agentID).
+//    - Find the tool by name. If tool is present and !tool.Enabled:
+//      - Return fmt.Errorf("tool %q is disabled for worker %q", toolName, agentID)
 func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolName string) error {
 	if s == nil || agentID == "" {
 		return nil
@@ -68,11 +72,25 @@ func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolNa
 			state, _ = s.GetManagedAgentActiveWorkflowState(ctx, agent.ParentAgentID)
 		}
 	}
-	if state == nil || len(state.AllowedTools) == 0 {
+	if state != nil && len(state.AllowedTools) > 0 {
+		if !store.IsToolAllowedInWorkflowState(toolName, state.AllowedTools) {
+			return fmt.Errorf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)
+		}
 		return nil
 	}
-	if !store.IsToolAllowedInWorkflowState(toolName, state.AllowedTools) {
-		return fmt.Errorf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)
+
+	// Agent is not in an active workflow state with allowed_tools: check agent tool overrides/defaults
+	tools, err := s.GetAgentTools(ctx, agentID)
+	if err == nil && len(tools) > 0 {
+		for _, t := range tools {
+			if t.ToolName == toolName {
+				if !t.Enabled {
+					return fmt.Errorf("tool %q is disabled for worker %q", toolName, agentID)
+				}
+				break
+			}
+		}
 	}
+
 	return nil
 }

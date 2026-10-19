@@ -39,8 +39,10 @@ type EmbeddedOwnReminderArguments struct {
 	Action, Body, DueAt, ID        string
 	Subject                        string
 	IntervalMS                     int64
+	DelayMS                        int64
 	HasBody, HasDueAt, HasInterval bool
 	HasSubject                     bool
+	HasDelay                       bool
 }
 type EmbeddedOwnReminderItem struct{ ID, DueAt, State string }
 type EmbeddedOwnReminderResult struct {
@@ -226,25 +228,26 @@ func ParseEmbeddedOwnReminderArguments(raw []byte) (EmbeddedOwnReminderArguments
 
 	// delay_minutes / delayMinutes / delay_seconds
 	var delayDuration time.Duration
-	var hasDelay bool
 	for _, k := range []string{"delay_minutes", "delayMinutes"} {
 		if v, ok := fields[k]; ok {
 			if m, ok := rawToInt64(v); ok && m > 0 {
 				delayDuration = time.Duration(m) * time.Minute
-				hasDelay = true
+				a.DelayMS = delayDuration.Milliseconds()
+				a.HasDelay = true
 				break
 			}
 		}
 	}
-	if !hasDelay {
+	if !a.HasDelay {
 		if v, ok := fields["delay_seconds"]; ok {
 			if s, ok := rawToInt64(v); ok && s > 0 {
 				delayDuration = time.Duration(s) * time.Second
-				hasDelay = true
+				a.DelayMS = delayDuration.Milliseconds()
+				a.HasDelay = true
 			}
 		}
 	}
-	if !a.HasDueAt && hasDelay {
+	if !a.HasDueAt && a.HasDelay {
 		a.DueAt = time.Now().UTC().Add(delayDuration).Format("2006-01-02T15:04:05.000Z")
 		a.HasDueAt = true
 	}

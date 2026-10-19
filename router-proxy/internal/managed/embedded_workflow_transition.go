@@ -308,9 +308,81 @@ func (m *Manager) EmbeddedWorkflowTransitionToolForTest(agentID, identity, toolN
 	return m.embeddedWorkflowTransitionTool(owner, toolName)
 }
 
-// SyncEmbeddedWorkflowTools updates the active tools on the agent's lane and active session
-// according to the current active workflow state tool restrictions.
-func (m *Manager) SyncEmbeddedWorkflowTools(ctx context.Context, agentID string) error {
+// isSystemEscapeTool returns true if the tool should always be allowed through
+// regardless of worker tool disabled flags, such as workflow transitions and mailbox messaging/replies.
+func isSystemEscapeTool(toolName string) bool {
+	switch toolName {
+	case "mecha_workflow_transition", "workflow_transition":
+		return true
+	case "mecha_mailbox_send", "mecha_parent_message":
+		return true
+	case "mecha_tool_timeout", "extend_tool_timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+// filterToolsForAgent filters baseTools based on:
+// 1. If an active workflow state with AllowedTools exists, filter baseTools using store.IsToolAllowedInWorkflowState.
+// 2. Otherwise, fetch agent tools from store.GetAgentTools(ctx, agentID), and filter baseTools to include only tools
+//    where tool.Enabled == true, or system escape tools (workflow transition, mailbox replies, timeouts).
+func (m *Manager) filterToolsForAgent(ctx context.Context, agentID string, baseTools []agent.AgentTool) ([]agent.AgentTool, error) {
+	if m == nil || len(baseTools) == 0 {
+		return baseTools, nil
+	}
+
+	activeWorkflowState, err := m.store.GetManagedAgentActiveWorkflowState(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if activeWorkflowState != nil && len(activeWorkflowState.AllowedTools) > 0 {
+		var filteredTools []agent.AgentTool
+		for _, tool := range baseTools {
+			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
+				filteredTools = append(filteredTools, tool)
+			}
+		}
+		return filteredTools, nil
+	}
+
+	agentTools, err := m.store.GetAgentTools(ctx, agentID)
+	if err != nil {
+		// If agent tools cannot be retrieved (e.g. agent not found or DB error), default to baseTools or return err
+		var notFound *store.ManagedAgentNotFoundError
+		if errors.As(err, &notFound) {
+			return baseTools, nil
+		}
+		return nil, err
+	}
+
+	enabledMap := make(map[string]bool, len(agentTools))
+	for _, at := range agentTools {
+		enabledMap[at.ToolName] = at.Enabled
+	}
+
+	var filteredTools []agent.AgentTool
+	for _, tool := range baseTools {
+		if isSystemEscapeTool(tool.Name) {
+			filteredTools = append(filteredTools, tool)
+			continue
+		}
+		if enabled, exists := enabledMap[tool.Name]; exists {
+			if enabled {
+				filteredTools = append(filteredTools, tool)
+			}
+		} else {
+			// If not explicitly configured, default to enabled (keep in filteredTools)
+			filteredTools = append(filteredTools, tool)
+		}
+	}
+	return filteredTools, nil
+}
+
+// SyncEmbeddedAgentTools updates the active tools on the agent's lane and active session
+// according to active workflow state restrictions or configured agent tools.
+func (m *Manager) SyncEmbeddedAgentTools(ctx context.Context, agentID string) error {
 	if m == nil || agentID == "" {
 		return nil
 	}
@@ -324,20 +396,9 @@ func (m *Manager) SyncEmbeddedWorkflowTools(ctx context.Context, agentID string)
 		return nil
 	}
 
-	activeWorkflowState, err := m.store.GetManagedAgentActiveWorkflowState(ctx, agentID)
+	filteredTools, err := m.filterToolsForAgent(ctx, agentID, baseTools)
 	if err != nil {
 		return err
-	}
-
-	var filteredTools []agent.AgentTool
-	if activeWorkflowState == nil || len(activeWorkflowState.AllowedTools) == 0 {
-		filteredTools = append([]agent.AgentTool(nil), baseTools...)
-	} else {
-		for _, tool := range baseTools {
-			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
-				filteredTools = append(filteredTools, tool)
-			}
-		}
 	}
 
 	lane.activeMu.Lock()
@@ -349,5 +410,29 @@ func (m *Manager) SyncEmbeddedWorkflowTools(ctx context.Context, agentID string)
 		session.Agent.SetTools(filteredTools)
 	}
 
+	return nil
+}
+
+// SyncEmbeddedWorkflowTools updates the active tools on the agent's lane and active session
+// according to the current active workflow state tool restrictions.
+func (m *Manager) SyncEmbeddedWorkflowTools(ctx context.Context, agentID string) error {
+	return m.SyncEmbeddedAgentTools(ctx, agentID)
+}
+
+// SyncEmbeddedAllActiveLanes iterates over all active agent lanes and synchronizes their active tools.
+func (m *Manager) SyncEmbeddedAllActiveLanes(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	laneIDs := make([]string, 0, len(m.lanes))
+	for id := range m.lanes {
+		laneIDs = append(laneIDs, id)
+	}
+	m.mu.Unlock()
+
+	for _, id := range laneIDs {
+		_ = m.SyncEmbeddedAgentTools(ctx, id)
+	}
 	return nil
 }

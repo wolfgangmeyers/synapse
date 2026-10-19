@@ -14,11 +14,12 @@ export interface RouterManagerDialogProps {
   onRemove: (url: string) => void;
   onProviderSettings?: () => void;
   onMCPServers?: () => void;
+  onToolDefaults?: () => void;
 }
 
 type Editor = { mode: "add" | "edit"; previousUrl?: string };
 
-export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId = DEFAULT_AGENT_ID, onClose, onSave, onSelect, onRemove, onProviderSettings = () => undefined, onMCPServers = () => undefined }: RouterManagerDialogProps) {
+export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId = DEFAULT_AGENT_ID, onClose, onSave, onSelect, onRemove, onProviderSettings = () => undefined, onMCPServers = () => undefined, onToolDefaults = () => undefined }: RouterManagerDialogProps) {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [url, setUrl] = useState("");
   const [alias, setAlias] = useState("");
@@ -57,6 +58,7 @@ export function RouterManagerDialog({ open, routers, activeUrl, defaultAgentId =
         <div style={{ display: "flex", gap: "8px" }}>
           <button type="button" className="secondary" onClick={onProviderSettings}>Provider settings</button>
           <button type="button" className="secondary" onClick={onMCPServers}>MCP servers</button>
+          <button type="button" className="secondary" onClick={onToolDefaults}>Tool defaults</button>
         </div>
         <button type="button" aria-label="Add router" onClick={beginAdd}>Add router</button>
       </div>
