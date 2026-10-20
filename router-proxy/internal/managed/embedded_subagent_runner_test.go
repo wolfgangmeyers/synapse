@@ -1678,6 +1678,96 @@ func TestSubagentReleaseSlotStaleAttemptGuard(t *testing.T) {
 	require.Nil(t, mgr.subagentsActive[childID], "matching task release must free active slot")
 }
 
+func TestSubagentRunnerInactivityTimeout(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_inactivity.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-inactivity")
+	parentRecord, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(parentRecord.Cwd, "test.txt"), []byte("sample"), 0o600))
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	// Use tool calls to create continuous execution turns
+	steps := make([]providers.FauxResponseStep, 100)
+	for i := 0; i < 100; i++ {
+		idx := i + 1
+		steps[i] = func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			time.Sleep(50 * time.Millisecond)
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.ToolCall{ID: fmt.Sprintf("call-%d", idx), Name: "read", Arguments: map[string]any{"path": "test.txt"}},
+			}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(steps)
+
+	mgr := makeSubagentTestManager(t, db, reg, 1)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	childID := "subagent-inactivity-1"
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     childID,
+		Description: "hanging child",
+		Prompt:      "hang indefinitely",
+		Timeout:     10 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", res.Status)
+
+	// Wait until task is registered and active
+	var task *subagentTask
+	require.Eventually(t, func() bool {
+		mgr.subagentsMu.Lock()
+		defer mgr.subagentsMu.Unlock()
+		task = mgr.subagentsActive[childID]
+		return task != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Wind back lastActivity to exceed DefaultSubagentInactivityTimeout (3 minutes)
+	task.mu.Lock()
+	task.lastActivity = time.Now().Add(-4 * time.Minute)
+	task.mu.Unlock()
+
+	// Inactivity watchdog ticker or TimeoutExpiredSubagents will detect and abort
+	mgr.TimeoutExpiredSubagents(10 * time.Minute)
+	require.Eventually(t, func() bool {
+		rec, err := db.ManagedSubagent(ctx, parent, childID)
+		if err != nil {
+			return false
+		}
+		return rec.Status == "failed"
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rec, err := db.ManagedSubagent(ctx, parent, childID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", rec.Status)
+	require.Contains(t, rec.Error, "inactivity")
+	require.Contains(t, rec.ResultText, "inactivity")
+
+	// Also verify TimeoutExpiredSubagents logic directly marks inactivityTimedOut
+	task2 := &subagentTask{
+		childID:      "task-2",
+		startTime:    time.Now().Add(-1 * time.Minute),
+		lastActivity: time.Now().Add(-4 * time.Minute),
+		timeout:      10 * time.Minute,
+	}
+	mgr.subagentsMu.Lock()
+	mgr.subagentsActive["task-2"] = task2
+	mgr.subagentsMu.Unlock()
+
+	mgr.TimeoutExpiredSubagents(10 * time.Minute)
+
+	task2.mu.Lock()
+	require.True(t, task2.inactivityTimedOut)
+	require.True(t, task2.stopped)
+	task2.mu.Unlock()
+}
+
 func TestSubagentCompletionRecordedInCompleteHistory(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "subagent_history.db")
