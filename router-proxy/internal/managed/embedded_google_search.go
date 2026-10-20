@@ -17,7 +17,7 @@ import (
 
 var (
 	antigravityGroundingURL    = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
-	vertexGroundingURLTemplate = "https://%s-aiplatform.googleapis.com/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
+	vertexGroundingURLTemplate = "https://%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
 	geminiGroundingURLTemplate = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
 )
 
@@ -354,7 +354,7 @@ func (m *Manager) executeVertexGrounding(ctx context.Context, token, projectID, 
 		location = "us-central1"
 	}
 	model := "gemini-3.8-flash"
-	url := fmt.Sprintf(vertexGroundingURLTemplate, location, projectID, location, model)
+	url := fmt.Sprintf(vertexGroundingURLTemplate, vertexHost(location), projectID, location, model)
 
 	tools := []any{
 		map[string]any{"googleSearch": map[string]any{}},
