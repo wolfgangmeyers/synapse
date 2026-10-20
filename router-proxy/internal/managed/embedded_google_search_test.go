@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -177,7 +176,7 @@ func TestEmbeddedGoogleSearch_VertexIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "Bearer mock-vertex-token", capturedAuth)
-	require.Equal(t, "/us-central1-aiplatform.googleapis.com/vertex-test-project/us-central1/gemini-3.8-flash", capturedPath)
+	require.Equal(t, "/us-central1-aiplatform.googleapis.com/vertex-test-project/us-central1/gemini-2.5-flash", capturedPath)
 	require.Contains(t, res, "Vertex AI Search Result Content.")
 	require.Contains(t, res, "### Sources")
 	require.Contains(t, res, "[Vertex Docs](https://cloud.google.com/vertex-ai)")
@@ -242,7 +241,7 @@ func TestEmbeddedGoogleSearch_ConfiguredVertexGlobalGrounding(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, result, "Public web answer")
 	require.Contains(t, result, "[Public source](https://example.org/source)")
-	require.True(t, strings.HasPrefix(requestedPath, "/aiplatform.googleapis.com/v1beta1/projects/configured-project/locations/global/"), requestedPath)
+	require.Equal(t, "/aiplatform.googleapis.com/v1beta1/projects/configured-project/locations/global/publishers/google/models/gemini-2.5-flash:generateContent", requestedPath)
 	require.Equal(t, []any{map[string]any{"googleSearch": map[string]any{}}}, requestedBody["tools"])
 }
 
@@ -312,7 +311,7 @@ func TestEmbeddedGoogleSearch_ConfiguredVertexRegionalLocationUsesModelEndpoint(
 	require.NoError(t, err)
 	require.Contains(t, result, "Grounded answer")
 	require.Contains(t, result, "[Source](https://example.org)")
-	require.Equal(t, "/aiplatform.googleapis.com/v1beta1/projects/configured-project/locations/global/publishers/google/models/gemini-3.8-flash:generateContent", requestedPath)
+	require.Equal(t, "/us-central1-aiplatform.googleapis.com/v1beta1/projects/configured-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent", requestedPath)
 }
 
 func TestEmbeddedGoogleSearch_CredentialFailover(t *testing.T) {
