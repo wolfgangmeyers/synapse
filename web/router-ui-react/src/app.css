@@ -345,7 +345,8 @@ p:empty { display: none; }
 .prompt-template-dialog-status.error { color: var(--danger); }
 
 /* GitHub Sync Section */
-.prompt-github-sync {
+.prompt-github-sync,
+.workflows-github-sync {
   margin-bottom: 12px;
   padding: 10px 12px;
   background: var(--surface-raised);
@@ -355,7 +356,8 @@ p:empty { display: none; }
   flex-direction: column;
   gap: 8px;
 }
-.prompt-github-sync-header {
+.prompt-github-sync-header,
+.workflows-github-sync-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -363,29 +365,34 @@ p:empty { display: none; }
   font-weight: 700;
   color: var(--text-secondary);
 }
-.prompt-github-sync-header i {
+.prompt-github-sync-header i,
+.workflows-github-sync-header i {
   font-size: 15px;
   color: var(--text);
 }
-.prompt-github-sync-row {
+.prompt-github-sync-row,
+.workflows-github-sync-row {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.prompt-github-input-wrap {
+.prompt-github-input-wrap,
+.workflows-github-input-wrap {
   position: relative;
   flex: 1;
   display: flex;
   align-items: center;
 }
-.prompt-github-input-wrap .prompt-github-url-input {
+.prompt-github-input-wrap .prompt-github-url-input,
+.workflows-github-input-wrap .workflows-github-url-input {
   width: 100%;
   height: 32px;
   box-sizing: border-box;
   padding-right: 28px;
 }
-.prompt-github-input-clear {
+.prompt-github-input-clear,
+.workflows-github-input-clear {
   position: absolute;
   right: 6px;
   width: 20px;
@@ -406,11 +413,13 @@ p:empty { display: none; }
   font-size: 11px;
   transition: color 0.15s ease, background 0.15s ease;
 }
-.prompt-github-input-clear:hover {
+.prompt-github-input-clear:hover,
+.workflows-github-input-clear:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.12);
 }
-.prompt-github-save-btn {
+.prompt-github-save-btn,
+.workflows-github-save-btn {
   height: 32px;
   min-height: 32px;
   max-height: 32px;
@@ -430,16 +439,19 @@ p:empty { display: none; }
   box-sizing: border-box;
   transition: all 0.15s ease-in-out;
 }
-.prompt-github-save-btn:not(:disabled):hover {
+.prompt-github-save-btn:not(:disabled):hover,
+.workflows-github-save-btn:not(:disabled):hover {
   border-color: var(--primary);
   color: var(--primary);
 }
-.prompt-github-sync-actions {
+.prompt-github-sync-actions,
+.workflows-github-sync-actions {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.prompt-github-sync-actions .icon-btn-round {
+.prompt-github-sync-actions .icon-btn-round,
+.workflows-github-sync-actions .icon-btn-round {
   width: 32px !important;
   height: 32px !important;
   min-width: 32px !important;
@@ -452,10 +464,12 @@ p:empty { display: none; }
   justify-content: center;
   border-radius: 999px !important;
 }
-.prompt-github-sync-actions .icon-btn-round i {
+.prompt-github-sync-actions .icon-btn-round i,
+.workflows-github-sync-actions .icon-btn-round i {
   font-size: 13px;
 }
-.prompt-github-sync-btn {
+.prompt-github-sync-btn,
+.workflows-github-sync-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -469,11 +483,13 @@ p:empty { display: none; }
   border: 1px solid var(--line);
   cursor: pointer;
 }
-.prompt-github-sync-btn:not(:disabled):hover {
+.prompt-github-sync-btn:not(:disabled):hover,
+.workflows-github-sync-btn:not(:disabled):hover {
   border-color: var(--primary);
   color: var(--primary);
 }
-.prompt-github-sync-confirm {
+.prompt-github-sync-confirm,
+.workflows-github-sync-confirm {
   margin-top: 4px;
   padding: 10px 12px;
   background: rgba(255, 180, 171, 0.12);
@@ -483,18 +499,21 @@ p:empty { display: none; }
   flex-direction: column;
   gap: 8px;
 }
-.prompt-github-sync-confirm p {
+.prompt-github-sync-confirm p,
+.workflows-github-sync-confirm p {
   margin: 0;
   font-size: 13px;
   color: var(--danger);
   line-height: 1.4;
 }
-.prompt-github-sync-confirm-actions {
+.prompt-github-sync-confirm-actions,
+.workflows-github-sync-confirm-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
 }
-.prompt-github-sync-confirm-actions button {
+.prompt-github-sync-confirm-actions button,
+.workflows-github-sync-confirm-actions button {
   min-height: 30px;
   padding: 0 12px;
   border-radius: 8px;

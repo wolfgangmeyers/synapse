@@ -48,6 +48,191 @@ type WorkflowExportBundle struct {
 	States        []WorkflowStateExport `json:"states"`
 }
 
+// WorkflowsExportPayload models the full export payload for git sync.
+type WorkflowsExportPayload struct {
+	Format     string                 `json:"format"`
+	Version    int                    `json:"version"`
+	ExportedAt string                 `json:"exported_at"`
+	Workflows  []WorkflowExportBundle `json:"workflows"`
+}
+
+// ExportAllWorkflows exports all workflows as portable bundles.
+func (s *Store) ExportAllWorkflows(ctx context.Context) (*WorkflowsExportPayload, error) {
+	workflows, err := s.ListWorkflows(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	bundles := make([]WorkflowExportBundle, 0, len(workflows))
+	for _, wf := range workflows {
+		bundle, err := s.ExportWorkflow(ctx, wf.ID)
+		if err != nil {
+			return nil, err
+		}
+		if bundle != nil {
+			bundles = append(bundles, *bundle)
+		}
+	}
+
+	return &WorkflowsExportPayload{
+		Format:     "mecha-workflows",
+		Version:    1,
+		ExportedAt: formatTimestamp(s.clock.Now()),
+		Workflows:  bundles,
+	}, nil
+}
+
+// ReplaceAllWorkflows atomically replaces all existing workflows with the given bundles.
+func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExportBundle) error {
+	// 1. Validate all bundles upfront before entering the transaction
+	names := make(map[string]bool, len(bundles))
+	for i, bundle := range bundles {
+		if err := s.ValidateExportBundle(bundle); err != nil {
+			return err
+		}
+		name := strings.TrimSpace(bundle.Workflow.Name)
+		if names[name] {
+			return &WorkflowValidationError{
+				Field:   fmt.Sprintf("workflows[%d].name", i),
+				Message: fmt.Sprintf("duplicate workflow name %q in bundle list", name),
+			}
+		}
+		names[name] = true
+	}
+
+	// 2. Perform replacement in an immediate transaction
+	return s.runImmediate(ctx, func() error {
+		// Clean up existing workflows and states
+		// Deleting workflow_states explicitly first prevents any foreign key or constraint issues
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM workflow_states`); err != nil {
+			return fmt.Errorf("delete workflow_states: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM workflows`); err != nil {
+			return fmt.Errorf("delete workflows: %w", err)
+		}
+
+		now := formatTimestamp(s.clock.Now())
+
+		for _, bundle := range bundles {
+			newWfID, err := s.ids.Next()
+			if err != nil {
+				return err
+			}
+
+			// Generate new UUIDs for each state
+			keyToNewID := make(map[string]string, len(bundle.States))
+			for _, st := range bundle.States {
+				newID, err := s.ids.Next()
+				if err != nil {
+					return err
+				}
+				keyToNewID[st.Key] = newID
+			}
+
+			// Determine new entry_state_id
+			var newEntryStateID *string
+			if bundle.EntryStateKey != "" {
+				if id, ok := keyToNewID[bundle.EntryStateKey]; ok {
+					newEntryStateID = &id
+				}
+			}
+			if newEntryStateID == nil {
+				for _, st := range bundle.States {
+					if st.IsEntryState {
+						id := keyToNewID[st.Key]
+						newEntryStateID = &id
+						break
+					}
+				}
+			}
+
+			varsList := bundle.Workflow.Variables
+			if varsList == nil {
+				varsList = []WorkflowVariableDefinition{}
+			}
+			variablesJSON, err := marshalWorkflowVariables(varsList)
+			if err != nil {
+				return err
+			}
+
+			workflowName := strings.TrimSpace(bundle.Workflow.Name)
+			workflowDesc := strings.TrimSpace(bundle.Workflow.Description)
+
+			// Insert workflow first (with NULL entry_state_id to satisfy FK constraint)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?)`,
+				newWfID, workflowName, workflowDesc, variablesJSON, now, now)
+			if err != nil {
+				return fmt.Errorf("insert workflow %s: %w", workflowName, err)
+			}
+
+			// Insert all states
+			for _, st := range bundle.States {
+				newStateID := keyToNewID[st.Key]
+
+				remappedTransitions := make([]WorkflowTransitionConfig, 0, len(st.Transitions))
+				for _, tr := range st.Transitions {
+					mappedTargetID, ok := keyToNewID[tr.TargetStateKey]
+					if ok {
+						remappedTransitions = append(remappedTransitions, WorkflowTransitionConfig{
+							TargetStateID: mappedTargetID,
+							Description:   tr.Description,
+						})
+					}
+				}
+
+				remindersJSON, err := marshalWorkflowReminders(st.Reminders)
+				if err != nil {
+					return err
+				}
+
+				monitorsCopy := st.Monitors
+				if monitorsCopy == nil {
+					monitorsCopy = []WorkflowMonitorConfig{}
+				}
+				monitorsJSON, err := marshalWorkflowMonitors(monitorsCopy)
+				if err != nil {
+					return err
+				}
+
+				sanitizedTools, err := sanitizeWorkflowAllowedTools(st.AllowedTools)
+				if err != nil {
+					return err
+				}
+				allowedToolsJSON, err := marshalWorkflowAllowedTools(sanitizedTools)
+				if err != nil {
+					return err
+				}
+
+				transitionsJSON, err := marshalWorkflowTransitions(remappedTransitions)
+				if err != nil {
+					return err
+				}
+
+				allowExitInt := 1
+				if !st.AllowExit {
+					allowExitInt = 0
+				}
+
+				_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					newStateID, newWfID, st.Name, st.Description, st.EntryText, st.Goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
+				if err != nil {
+					return fmt.Errorf("insert workflow state %s: %w", st.Name, err)
+				}
+			}
+
+			// Update entry_state_id if set
+			if newEntryStateID != nil {
+				_, err = s.db.ExecContext(ctx, `UPDATE workflows SET entry_state_id = ? WHERE id = ?`, *newEntryStateID, newWfID)
+				if err != nil {
+					return fmt.Errorf("update entry_state_id for workflow %s: %w", workflowName, err)
+				}
+			}
+		}
+
+		return nil
+	})
+}
+
 // ExportWorkflow generates a portable bundle containing the workflow, its variables,
 // all child states, and relative transition links.
 func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*WorkflowExportBundle, error) {

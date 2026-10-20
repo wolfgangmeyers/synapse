@@ -35,14 +35,24 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
 
   const [importDialogOpen, setImportDialogOpen] = useState(false);
 
+  // GitHub Sync state
+  const [gitRepoUrl, setGitRepoUrl] = useState("");
+  const [savedRepoUrl, setSavedRepoUrl] = useState("");
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [savingTarget, setSavingTarget] = useState(false);
+  const [confirmPull, setConfirmPull] = useState(false);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<{ message: string; error?: boolean }>({ message: "" });
+
   const fetchWorkflows = async () => {
     try {
       setLoading(true);
       setError(undefined);
       const list = await client.listWorkflows();
-      setWorkflows(list);
+      setWorkflows(Array.isArray(list) ? list : []);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load workflows");
+      setWorkflows([]);
     } finally {
       setLoading(false);
     }
@@ -51,6 +61,106 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   useEffect(() => {
     void fetchWorkflows();
   }, []);
+
+  // Load git sync target on mount
+  useEffect(() => {
+    if (!client || typeof client.getGitSyncTarget !== "function") return;
+    let active = true;
+    client.getGitSyncTarget("workflows").then((res) => {
+      if (!active) return;
+      if (res && res.repo_url) {
+        setGitRepoUrl(res.repo_url);
+        setSavedRepoUrl(res.repo_url);
+      } else {
+        setGitRepoUrl("");
+        setSavedRepoUrl("");
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [client]);
+
+  const handleSaveRepoUrl = async (newUrl?: string): Promise<void> => {
+    const urlToSave = (newUrl !== undefined ? newUrl : gitRepoUrl).trim();
+    if (!client || typeof client.setGitSyncTarget !== "function" || savingTarget) return;
+    if (urlToSave === savedRepoUrl) return;
+    if (!urlToSave) {
+      void handleClearRepo();
+      return;
+    }
+    setSavingTarget(true);
+    try {
+      const res = await client.setGitSyncTarget("workflows", urlToSave);
+      setGitRepoUrl(res.repo_url);
+      setSavedRepoUrl(res.repo_url);
+      setSyncStatus({ message: "Repository URL saved." });
+    } catch (err) {
+      setSyncStatus({ message: err instanceof Error ? err.message : "Failed to save repository URL.", error: true });
+    } finally {
+      setSavingTarget(false);
+    }
+  };
+
+  const handleClearRepo = async (): Promise<void> => {
+    if (!client || savingTarget || syncLoading) return;
+    if (!savedRepoUrl && !gitRepoUrl) return;
+    setSavingTarget(true);
+    try {
+      if (savedRepoUrl && typeof client.clearGitSyncTarget === "function") {
+        await client.clearGitSyncTarget("workflows");
+      }
+      setGitRepoUrl("");
+      setSavedRepoUrl("");
+      setSyncStatus({ message: "Repository URL cleared." });
+    } catch (err) {
+      setSyncStatus({ message: err instanceof Error ? err.message : "Failed to clear repository URL.", error: true });
+    } finally {
+      setSavingTarget(false);
+    }
+  };
+
+  const handlePullConfirm = async (): Promise<void> => {
+    if (!client || typeof client.pullGitSync !== "function" || syncLoading) return;
+    setConfirmPull(false);
+    setSyncLoading(true);
+    setSyncWarning(null);
+    setSyncStatus({ message: "" });
+    try {
+      const res = await client.pullGitSync("workflows");
+      if (res.exists === false) {
+        setSyncWarning("No workflows.json found in this repository. Nothing was changed.");
+      } else if (res.success === false) {
+        setSyncStatus({ message: res.error || "Git pull failed.", error: true });
+      } else {
+        const count = typeof res.count === "number" ? res.count : 0;
+        setSyncStatus({ message: `Successfully pulled ${count} workflow${count === 1 ? "" : "s"} from GitHub.` });
+        await fetchWorkflows();
+      }
+    } catch (err) {
+      setSyncStatus({ message: err instanceof Error ? err.message : "Git pull failed.", error: true });
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const handlePush = async (): Promise<void> => {
+    if (!client || typeof client.pushGitSync !== "function" || syncLoading) return;
+    setSyncLoading(true);
+    setSyncWarning(null);
+    setSyncStatus({ message: "" });
+    try {
+      const res = await client.pushGitSync("workflows");
+      if (res.success === false) {
+        setSyncStatus({ message: res.error || "Git push failed.", error: true });
+      } else {
+        const count = typeof res.count === "number" ? res.count : workflows.length;
+        setSyncStatus({ message: `Successfully pushed ${count} workflow${count === 1 ? "" : "s"} to GitHub.` });
+      }
+    } catch (err) {
+      setSyncStatus({ message: err instanceof Error ? err.message : "Git push failed.", error: true });
+    } finally {
+      setSyncLoading(false);
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -211,6 +321,110 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
       ) : null}
 
       <div className="workflows-content">
+        <section className="workflows-github-sync" aria-label="GitHub Sync">
+          <div className="workflows-github-sync-header">
+            <i className="fa-brands fa-github" aria-hidden="true" />
+            <span>GitHub Sync</span>
+          </div>
+          <div className="workflows-github-sync-row">
+            <div className="workflows-github-input-wrap">
+              <input
+                type="text"
+                className="workflows-github-url-input"
+                placeholder="git@github.com:owner/repo.git or https://github.com/owner/repo.git"
+                value={gitRepoUrl}
+                disabled={syncLoading || savingTarget}
+                onChange={(e) => setGitRepoUrl(e.target.value)}
+                onBlur={() => { void handleSaveRepoUrl(); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleSaveRepoUrl(); } }}
+              />
+              {gitRepoUrl || savedRepoUrl ? (
+                <button
+                  type="button"
+                  className="workflows-github-input-clear"
+                  onClick={() => void handleClearRepo()}
+                  title="Clear repository URL"
+                  aria-label="Clear repository URL"
+                  disabled={syncLoading || savingTarget}
+                >
+                  <i className="fa-solid fa-xmark" aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="workflows-github-save-btn"
+              disabled={!gitRepoUrl.trim() || gitRepoUrl.trim() === savedRepoUrl || syncLoading || savingTarget}
+              onClick={() => void handleSaveRepoUrl()}
+            >
+              {savingTarget ? "Saving…" : "Save"}
+            </button>
+            <div className="workflows-github-sync-actions">
+              <button
+                type="button"
+                className="icon-btn-round"
+                title="Pull from GitHub"
+                aria-label="Pull from GitHub"
+                disabled={!savedRepoUrl || syncLoading || savingTarget}
+                onClick={() => setConfirmPull(true)}
+              >
+                <i className={`fa-solid ${syncLoading ? "fa-spinner fa-spin" : "fa-cloud-arrow-down"}`} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="icon-btn-round"
+                title="Push to GitHub"
+                aria-label="Push to GitHub"
+                disabled={!savedRepoUrl || syncLoading || savingTarget}
+                onClick={() => void handlePush()}
+              >
+                <i className={`fa-solid ${syncLoading ? "fa-spinner fa-spin" : "fa-cloud-arrow-up"}`} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+          {confirmPull ? (
+            <div className="workflows-github-sync-confirm" role="alert">
+              <p>This will replace all local workflows with the version from GitHub. Continue?</p>
+              <div className="workflows-github-sync-confirm-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={syncLoading}
+                  onClick={() => setConfirmPull(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  disabled={syncLoading}
+                  onClick={() => void handlePullConfirm()}
+                >
+                  {syncLoading ? "Pulling…" : "Confirm Pull"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {syncWarning ? (
+            <div className="workflows-github-sync-confirm" role="alert">
+              <p>{syncWarning}</p>
+              <div className="workflows-github-sync-confirm-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setSyncWarning(null)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {syncStatus.message ? (
+            <p className={`prompt-template-dialog-status${syncStatus.error ? " error" : ""}`} role={syncStatus.error ? "alert" : "status"}>
+              {syncStatus.message}
+            </p>
+          ) : null}
+        </section>
         {loading ? (
           <div className="workflows-loading">Loading workflows...</div>
         ) : workflows.length === 0 ? (
