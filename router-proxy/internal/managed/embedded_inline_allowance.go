@@ -15,7 +15,7 @@ import (
 const (
 	InlineToolPoolCapacity            = 3
 	InlineToolReplenishmentIntervalMS = 60_000
-	InlineToolBlockReason             = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround."
+	InlineToolBlockReason             = "Inline tool budget exhausted: you have used all available inline tool credits. Inline tools are intended only for quick, occasional actions; repeated inline tool use is disallowed. You must delegate this work to subagents instead. (Credits replenish at 1 credit per minute up to a maximum of 3, or inline tools can be toggled on.)"
 	InlineToolAllowanceToolName       = "mecha_request_inline_tool_allowance"
 	InlineToolAllowanceToolDesc       = "Request a temporary exception for genuinely necessary inline use of a named tool. This is an exception to the rule; subagents remain mandatory by default."
 )
