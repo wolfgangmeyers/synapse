@@ -93,7 +93,10 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
     </div>
   </div> : null;
   return <div className="model-controls">
-    <span className="model-label">{label}</span>
+    <span className="model-label">
+      <i className="fa-solid fa-cube" aria-hidden="true" style={{ marginRight: 6 }} />
+      {label}
+    </span>
     <div className="model-picker" onKeyDown={(event) => { if (event.key === "Escape" && open) close(); }}>
       <button ref={buttonRef} type="button" className="model-current" aria-haspopup="dialog" aria-expanded={open} aria-controls={listId} disabled={disabled} onClick={() => setOpen((value) => !value)}>{displayedModel ? modelKey(displayedModel) : emptyOption?.label ?? "Select model"}<i className="fa-solid fa-chevron-down" aria-hidden="true" /></button>
     </div>

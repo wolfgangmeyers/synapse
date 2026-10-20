@@ -22,7 +22,7 @@ describe("AppShell", () => {
     const header = screen.getByRole("banner");
     expect(header.querySelector("[data-testid='prompt-controls']")).toBeTruthy();
     expect(header.querySelector("[data-testid='model-controls']")).toBeTruthy();
-    expect(Array.from(header.children).map((child) => child.getAttribute("data-testid") ?? child.className)).toEqual(["avatar muted", "peer-heading", "prompt-controls", "model-controls"]);
+    expect(Array.from(header.children).map((child) => child.getAttribute("data-testid") ?? child.className)).toEqual(["conversation-header-avatar-col", "conversation-header-content"]);
   });
 
   it("keeps the selected agent name and model control in the narrow header contract", () => {
@@ -49,26 +49,19 @@ describe("AppShell", () => {
     expect(banner).toBeDefined();
     if (!banner) throw new Error("Selected header is missing");
     expect(banner).toHaveClass("conversation-header", "selected");
-    expect(banner.querySelector(".conversation-header-actions")).toBeNull();
+    const actions = banner.querySelector(".conversation-header-actions");
+    expect(actions).not.toBeNull();
 
     const heading = screen.getAllByRole("heading", { level: 2 }).find((candidate) => candidate.textContent?.includes("Fixture Peer"));
     expect(heading).toBeDefined();
     if (!heading) throw new Error("Selected peer heading is missing");
     expect(heading.querySelector(".peer-name-label")).toHaveTextContent("Fixture Peer");
-    expect(Array.from(heading.children).map((child) => child.className)).toEqual([
-      "peer-name-label",
-      "working-indicator inline",
-      "interrupt-worker-button header-button-interrupt",
-      "goal-header-button ",
-      "reminder-indicator empty",
-      "inline-tool-settings-button",
-    ]);
-    expect(heading.querySelector("button[aria-label='Set goal']")).toBeInTheDocument();
+    expect(actions?.querySelector("button[aria-label='Set goal']")).toBeInTheDocument();
 
     expect(banner.querySelector("button[aria-label='Add reminder']")).toBeInTheDocument();
     expect(banner.querySelector("button[aria-label='Inline tool settings']")).toBeInTheDocument();
-    expect(banner.querySelector(".peer-heading > p")).toHaveClass("peer-activity");
-    expect(banner.querySelector(".peer-heading > p")).not.toHaveTextContent("fixture-peer");
+    expect(banner.querySelector(".peer-activity")).toHaveClass("peer-activity");
+    expect(banner.querySelector(".peer-activity")).not.toHaveTextContent("fixture-peer");
   });
 
   it("uses compact semantic icons while retaining action labels", () => {
@@ -105,7 +98,7 @@ describe("AppShell", () => {
     const button = screen.getByRole("button", { name: "Manage worker" });
     expect(button).toHaveClass("managed-agent-header-button");
     expect(button.querySelector(".fa-gear")).toBeInTheDocument();
-    expect(button.closest("h2")).toBeInTheDocument();
+    expect(button.closest(".conversation-header-actions")).toBeInTheDocument();
     expect(screen.getByRole("banner").querySelector(".managed-agent-controls")).toBeNull();
     fireEvent.click(button);
     expect(onManageManaged).toHaveBeenCalledOnce();
@@ -126,11 +119,11 @@ describe("AppShell", () => {
       subagents: [{ id: "one", description: "Run tests" }, { id: "two", description: "Check types" }],
     };
     render(<ConversationHeader agent={agent} expanded onToggleSubagents={() => undefined} />);
-    const detail = screen.getByRole("banner").querySelector(".peer-heading > p");
+    const detail = screen.getByRole("banner").querySelector(".peer-activity");
     expect(detail).toHaveClass("peer-activity");
     expect(detail).not.toHaveTextContent("typescript-extensions");
     expect(detail).toHaveTextContent("2 subagents");
-    expect(screen.getByRole("heading", { name: /Working/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("Working")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "2 subagents" })).toHaveAttribute("aria-controls", "conversation-header-subagents-typescript-extensions");
     expect(document.getElementById("conversation-header-subagents-typescript-extensions")).toBeInTheDocument();
   });
@@ -145,6 +138,6 @@ describe("AppShell", () => {
   it("uses the shared compacting indicator in the header detail line", () => {
     const agent: Agent = { agent_id: "fixture-peer", activity_state: "compacting", subagent_count: 0, subagents: [] };
     render(<ConversationHeader agent={agent} />);
-    expect(screen.getByRole("banner").querySelector(".peer-heading > p")).toHaveTextContent("Compacting");
+    expect(screen.getByRole("banner").querySelector(".peer-activity")).toHaveTextContent("Compacting");
   });
 });

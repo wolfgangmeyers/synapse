@@ -1049,32 +1049,193 @@ p:empty { display: none; }
   overflow: hidden;
 }
 .conversation-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
   flex: 0 0 auto;
-  gap: 12px;
-  padding: 18px 11px 10px 11px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
+  gap: 18px;
+  padding: 14px 18px;
+  background: rgba(8, 14, 26, 0.85);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.18);
+  box-sizing: border-box;
 }
+
+.conversation-header-avatar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
 .conversation-header .avatar {
-  width: 99px;
-  height: 99px;
+  width: 76px;
+  height: 76px;
+  border-radius: 999px;
+  border: 2px solid rgba(56, 189, 248, 0.5);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.35);
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
 }
-.conversation-header .prompt-controls {
-  flex: 0 1 auto;
-  margin-left: auto;
-  padding-left: 28px;
-}
-.conversation-header .model-controls {
-  flex: 0 1 auto;
-  margin-left: 12px;
-}
-.peer-heading h2 { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.peer-name-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .header-alien-symbols {
   display: flex;
   align-items: center;
-  margin: 3px 0 2px;
+  justify-content: center;
+  margin: 0;
   line-height: 1;
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--secondary, #38bdf8);
+  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.5));
+}
+
+.conversation-header-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 10px;
+}
+
+.conversation-header-row-primary {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.peer-heading-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+
+.peer-title-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.peer-title-line h2 {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.peer-name-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-activity {
+  margin: 0;
+  padding: 0;
+  font-size: 0.82rem;
+  color: var(--muted, #94a3b8);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.conversation-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.conversation-header-row-secondary {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.header-controls-group {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(13, 17, 23, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  margin-left: auto;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  min-height: 54px;
+}
+
+.header-controls-group .prompt-controls,
+.header-controls-group .model-controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+}
+
+.header-controls-group .prompt-picker-group {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.header-controls-group .model-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 68px;
+  padding: 0;
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--muted, #94a3b8);
+}
+
+.header-controls-group .model-current {
+  min-height: 24px;
+  height: 24px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  width: min(15rem, 20vw);
+}
+
+.header-controls-group .prompt-manage-button {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 8px;
+  padding: 0;
+  font-size: 0.75rem;
 }
 /* ==========================================================================
    Header Metric Cards (Context Used & Goal Progress)
@@ -1098,6 +1259,8 @@ p:empty { display: none; }
   gap: 10px;
   padding: 6px 14px 6px 10px;
   border-radius: 12px;
+  min-height: 54px;
+  height: 54px;
   background: rgba(13, 17, 23, 0.7);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
