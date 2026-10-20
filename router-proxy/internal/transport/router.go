@@ -21,6 +21,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitsync"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -260,6 +261,7 @@ type Options struct {
 	// Production commands leave it nil.
 	TestOnlyHTTPHandler http.Handler
 	MCPManager          *mcp.Manager
+	GitSyncer           gitsync.Syncer
 	ExitFunc            func(int)
 	RestartDelay        time.Duration
 }
@@ -302,6 +304,7 @@ type Router struct {
 
 	systemOneClient *systemone.Client
 	mcpManager      *mcp.Manager
+	gitSyncer       gitsync.Syncer
 
 	mu sync.RWMutex
 	// lifecycleMu serializes listener startup with the transition to closed.
@@ -645,6 +648,7 @@ func New(options Options) (*Router, error) {
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
 	r.mcpManager = options.MCPManager
+	r.gitSyncer = options.GitSyncer
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
