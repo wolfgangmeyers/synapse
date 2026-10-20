@@ -283,3 +283,239 @@ func TestGitSyncHTTP_Validation(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
+
+func TestGitSyncHTTP_Workflows_PushAndPull(t *testing.T) {
+	ctx := context.Background()
+	s, _ := store.OpenTestStore(t)
+	mock := &mockGitSyncer{}
+	r, err := transport.New(transport.Options{
+		Store:     s,
+		GitSyncer: mock,
+	})
+	require.NoError(t, err)
+
+	// Configure target for workflows
+	_, err = s.SetGitSyncTarget(ctx, "workflows", "git@github.com:user/workflows-repo.git")
+	require.NoError(t, err)
+
+	// 1. Create a workflow in store
+	wf, err := s.CreateWorkflow(ctx, store.WorkflowRequest{
+		Name:        "Test Workflow",
+		Description: "A workflow for testing push and pull",
+		Variables: &[]store.WorkflowVariableDefinition{
+			{
+				Name:         "VAR1",
+				Label:        "Var 1",
+				Type:         store.WorkflowVariableTypeText,
+				DefaultValue: "val1",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	x1, y1 := 10.0, 20.0
+	st1, err := s.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		WorkflowID:   &wf.ID,
+		Name:         "State One",
+		Description:  "First state",
+		EntryText:    "Entering one",
+		Goal:         "Achieve one",
+		AllowedTools: []string{"bash"},
+		UIPosX:       &x1,
+		UIPosY:       &y1,
+	})
+	require.NoError(t, err)
+
+	x2, y2 := 100.0, 200.0
+	st2, err := s.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		WorkflowID:   &wf.ID,
+		Name:         "State Two",
+		Description:  "Second state",
+		EntryText:    "Entering two",
+		Goal:         "Achieve two",
+		AllowedTools: []string{"read"},
+		UIPosX:       &x2,
+		UIPosY:       &y2,
+	})
+	require.NoError(t, err)
+
+	// Add transition from st1 -> st2
+	_, err = s.UpdateWorkflowState(ctx, st1.ID, store.WorkflowStateRequest{
+		Name:        st1.Name,
+		Transitions: []store.WorkflowTransitionConfig{{TargetStateID: st2.ID, Description: "to state two"}},
+	})
+	require.NoError(t, err)
+
+	// Set entry state
+	_, err = s.UpdateWorkflow(ctx, wf.ID, store.WorkflowRequest{
+		Name:         wf.Name,
+		EntryStateID: &st1.ID,
+	})
+	require.NoError(t, err)
+
+	// 2. Test Push
+	var pushedFile string
+	var pushedBytes []byte
+	var pushedMsg string
+	mock.pushFn = func(ctx context.Context, repoURL, filename string, content []byte, commitMessage string) error {
+		require.Equal(t, "git@github.com:user/workflows-repo.git", repoURL)
+		pushedFile = filename
+		pushedBytes = content
+		pushedMsg = commitMessage
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/push", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var pushResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &pushResp))
+	require.Equal(t, "workflows", pushResp["target"])
+	require.Equal(t, true, pushResp["success"])
+	require.Equal(t, float64(1), pushResp["count"])
+
+	require.Equal(t, "workflows.json", pushedFile)
+	require.Equal(t, "Update workflows.json from app", pushedMsg)
+
+	var exportedPayload store.WorkflowsExportPayload
+	require.NoError(t, json.Unmarshal(pushedBytes, &exportedPayload))
+	require.Equal(t, "mecha-workflows", exportedPayload.Format)
+	require.Equal(t, 1, exportedPayload.Version)
+	require.Len(t, exportedPayload.Workflows, 1)
+	require.Equal(t, "Test Workflow", exportedPayload.Workflows[0].Workflow.Name)
+	require.Len(t, exportedPayload.Workflows[0].States, 2)
+
+	// 3. Test Pull - Not Found
+	mock.pullFn = func(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
+		require.Equal(t, "git@github.com:user/workflows-repo.git", repoURL)
+		require.Equal(t, "workflows.json", filename)
+		return nil, false, nil
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/pull", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var notFoundResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &notFoundResp))
+	require.Equal(t, "workflows", notFoundResp["target"])
+	require.Equal(t, false, notFoundResp["exists"])
+	require.Equal(t, "No workflows.json found in repository", notFoundResp["message"])
+
+	// 4. Test Pull - Invalid JSON
+	mock.pullFn = func(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
+		return []byte("{invalid-json"), true, nil
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/pull", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var errResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp))
+	require.Equal(t, false, errResp["success"])
+	require.Contains(t, errResp["error"], "Invalid JSON")
+
+	// 5. Test Pull - Unsupported Format / Version / Invalid Bundle
+	mock.pullFn = func(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
+		return []byte(`{"format":"unknown-format","version":1,"workflows":[]}`), true, nil
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/pull", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	mock.pullFn = func(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
+		return []byte(`{"format":"mecha-workflows","version":0,"workflows":[]}`), true, nil
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/pull", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	mock.pullFn = func(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
+		return []byte(`{"format":"mecha-workflows","version":1,"workflows":[{"workflow":{"name":""}}]}`), true, nil
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/pull", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	// 6. Test Pull - Successful Replace
+	newFileContent := `{
+		"format": "mecha-workflows",
+		"version": 1,
+		"exported_at": "2026-06-01T00:00:00Z",
+		"workflows": [
+			{
+				"schema_version": 1,
+				"exported_at": "2026-06-01T00:00:00Z",
+				"workflow": {
+					"name": "Pulled Workflow",
+					"description": "Pulled from remote git",
+					"variables": []
+				},
+				"entry_state_key": "step-alpha",
+				"states": [
+					{
+						"key": "step-alpha",
+						"name": "Alpha Step",
+						"description": "First step in pulled wf",
+						"entry_text": "Run alpha",
+						"goal": "Finish alpha",
+						"is_entry_state": true,
+						"allow_exit": true,
+						"allowed_tools": ["bash"],
+						"transitions": [
+							{
+								"target_state_key": "step-beta",
+								"description": "Next is beta"
+							}
+						]
+					},
+					{
+						"key": "step-beta",
+						"name": "Beta Step",
+						"description": "Second step in pulled wf",
+						"entry_text": "Run beta",
+						"goal": "Finish beta",
+						"is_entry_state": false,
+						"allow_exit": true,
+						"allowed_tools": ["read"]
+					}
+				]
+			}
+		]
+	}`
+
+	mock.pullFn = func(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
+		return []byte(newFileContent), true, nil
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/workflows/pull", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var pullSuccessResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &pullSuccessResp))
+	require.Equal(t, "workflows", pullSuccessResp["target"])
+	require.Equal(t, true, pullSuccessResp["exists"])
+	require.Equal(t, float64(1), pullSuccessResp["count"])
+
+	// Verify store state has only the pulled workflow
+	workflows, err := s.ListWorkflows(ctx)
+	require.NoError(t, err)
+	require.Len(t, workflows, 1)
+	require.Equal(t, "Pulled Workflow", workflows[0].Name)
+	require.Equal(t, "Pulled from remote git", workflows[0].Description)
+	require.Equal(t, 2, workflows[0].StateCount)
+	require.NotNil(t, workflows[0].EntryStateID)
+
+	pulledStates, err := s.ListWorkflowStatesByWorkflow(ctx, workflows[0].ID)
+	require.NoError(t, err)
+	require.Len(t, pulledStates, 2)
+}
+

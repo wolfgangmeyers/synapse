@@ -264,6 +264,71 @@ func (r *Router) handleGitSyncPull(w http.ResponseWriter, req *http.Request, tar
 			"templates": payload.Templates,
 		})
 
+	case "workflows":
+		filename := "workflows.json"
+		content, exists, err := syncer.Pull(ctx, targetConfig.RepoURL, filename)
+		if err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Git pull failed: %v", err),
+			})
+			return
+		}
+		if !exists {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"target":  "workflows",
+				"exists":  false,
+				"message": "No workflows.json found in repository",
+			})
+			return
+		}
+
+		var payload store.WorkflowsExportPayload
+		if err := json.Unmarshal(content, &payload); err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Invalid JSON in %s: %v", filename, err),
+			})
+			return
+		}
+
+		if payload.Format != "" && payload.Format != "mecha-workflows" {
+			r.writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "invalid_request",
+				"message": fmt.Sprintf("unsupported format %q, expected mecha-workflows", payload.Format),
+			})
+			return
+		}
+
+		if payload.Version < 1 {
+			r.writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "invalid_request",
+				"message": fmt.Sprintf("unsupported version %d, expected version >= 1", payload.Version),
+			})
+			return
+		}
+
+		for _, bundle := range payload.Workflows {
+			if err := r.store.ValidateExportBundle(bundle); err != nil {
+				r.writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error":   "invalid_request",
+					"message": fmt.Sprintf("Invalid workflow bundle %q: %v", bundle.Workflow.Name, err),
+				})
+				return
+			}
+		}
+
+		if err := r.store.ReplaceAllWorkflows(ctx, payload.Workflows); err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
+
+		r.writeJSON(w, http.StatusOK, map[string]any{
+			"target": "workflows",
+			"exists": true,
+			"count":  len(payload.Workflows),
+		})
+
 	default:
 		r.writeError(w, &httpError{status: http.StatusBadRequest, code: "unsupported_target"})
 	}
@@ -324,6 +389,36 @@ func (r *Router) handleGitSyncPush(w http.ResponseWriter, req *http.Request, tar
 		r.writeJSON(w, http.StatusOK, map[string]any{
 			"success": true,
 			"count":   len(templates),
+		})
+
+	case "workflows":
+		filename := "workflows.json"
+		payload, err := r.store.ExportAllWorkflows(ctx)
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
+
+		contentBytes, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+			return
+		}
+		contentBytes = append(contentBytes, '\n')
+
+		commitMsg := "Update workflows.json from app"
+		if err := syncer.Push(ctx, targetConfig.RepoURL, filename, contentBytes, commitMsg); err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Git push failed: %v", err),
+			})
+			return
+		}
+
+		r.writeJSON(w, http.StatusOK, map[string]any{
+			"target":  "workflows",
+			"success": true,
+			"count":   len(payload.Workflows),
 		})
 
 	default:

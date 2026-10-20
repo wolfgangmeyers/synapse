@@ -254,4 +254,108 @@ func TestWorkflowImportExport(t *testing.T) {
 		var notFound *WorkflowNotFoundError
 		require.ErrorAs(t, err, &notFound)
 	})
+
+	t.Run("ExportAllWorkflows and ReplaceAllWorkflows", func(t *testing.T) {
+		// Verify ExportAllWorkflows on existing store
+		payload, err := s.ExportAllWorkflows(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, payload)
+		require.Equal(t, "mecha-workflows", payload.Format)
+		require.Equal(t, 1, payload.Version)
+		require.NotEmpty(t, payload.ExportedAt)
+		// We have original wf and imported wf
+		require.Len(t, payload.Workflows, 2)
+
+		// Test ReplaceAllWorkflows with 1 new workflow bundle
+		newBundle := WorkflowExportBundle{
+			SchemaVersion: 1,
+			ExportedAt:    payload.ExportedAt,
+			Workflow: WorkflowInfoExport{
+				Name:        "Replaced Pipeline",
+				Description: "Brand new replacement pipeline",
+				Variables: []WorkflowVariableDefinition{
+					{
+						Name:         "STAGE",
+						Label:        "Stage",
+						Type:         WorkflowVariableTypeText,
+						DefaultValue: "prod",
+					},
+				},
+			},
+			EntryStateKey: "state-init",
+			States: []WorkflowStateExport{
+				{
+					Key:          "state-init",
+					Name:         "Init State",
+					Description:  "Initialize things",
+					EntryText:    "Initializing...",
+					Goal:         "Boot up",
+					IsEntryState: true,
+					AllowExit:    true,
+					AllowedTools: []string{"bash"},
+					Transitions: []WorkflowTransitionExport{
+						{
+							TargetStateKey: "state-final",
+							Description:    "To final",
+						},
+					},
+				},
+				{
+					Key:          "state-final",
+					Name:         "Final State",
+					Description:  "Final step",
+					EntryText:    "Done.",
+					Goal:         "Finish execution",
+					IsEntryState: false,
+					AllowExit:    true,
+					AllowedTools: []string{"read"},
+				},
+			},
+		}
+
+		err = s.ReplaceAllWorkflows(ctx, []WorkflowExportBundle{newBundle})
+		require.NoError(t, err)
+
+		// Check workflows in store
+		allWfs, err := s.ListWorkflows(ctx)
+		require.NoError(t, err)
+		require.Len(t, allWfs, 1)
+		require.Equal(t, "Replaced Pipeline", allWfs[0].Name)
+		require.Equal(t, "Brand new replacement pipeline", allWfs[0].Description)
+		require.Equal(t, 2, allWfs[0].StateCount)
+		require.NotNil(t, allWfs[0].EntryStateID)
+
+		states, err := s.ListWorkflowStatesByWorkflow(ctx, allWfs[0].ID)
+		require.NoError(t, err)
+		require.Len(t, states, 2)
+
+		var initSt, finalSt *WorkflowState
+		for i := range states {
+			if states[i].Name == "Init State" {
+				initSt = &states[i]
+			} else if states[i].Name == "Final State" {
+				finalSt = &states[i]
+			}
+		}
+		require.NotNil(t, initSt)
+		require.NotNil(t, finalSt)
+		require.Equal(t, *allWfs[0].EntryStateID, initSt.ID)
+		require.Len(t, initSt.Transitions, 1)
+		require.Equal(t, finalSt.ID, initSt.Transitions[0].TargetStateID)
+		require.Equal(t, "To final", initSt.Transitions[0].Description)
+
+		// Check validation failure with duplicate names in ReplaceAllWorkflows
+		duplicateBundle := newBundle
+		err = s.ReplaceAllWorkflows(ctx, []WorkflowExportBundle{newBundle, duplicateBundle})
+		require.Error(t, err)
+		var valErr *WorkflowValidationError
+		require.ErrorAs(t, err, &valErr)
+		require.Contains(t, valErr.Message, "duplicate workflow name")
+
+		// Verify prior state wasn't affected because validation happens before deletion
+		allWfsAfter, err := s.ListWorkflows(ctx)
+		require.NoError(t, err)
+		require.Len(t, allWfsAfter, 1)
+	})
 }
+
