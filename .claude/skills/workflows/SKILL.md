@@ -74,3 +74,43 @@ When writing or refining workflow bodies:
 ## Cleanup Note
 
 `cleanup_workflows.py` requires an explicit `--confirmed` flag to actually delete data. User confirmation is required before deletion.
+
+## Git Sync & Remote Backing (GitHub Sync)
+
+The router provides Git-backed persistence and synchronization for workflows and prompt templates via the `/v1/git-sync/{target}` API (`workflows` and `prompt_templates`).
+
+### Linking a Repository URL
+- Workflows can be linked to a remote Git repository (e.g. GitHub) via `PUT /v1/git-sync/workflows` with JSON payload `{"repo_url": "<url>"}` or configured directly through the Web UI Workflows page.
+- Supported URL schemes: HTTPS (`https://github.com/owner/repo.git`), SSH (`ssh://git@github.com/owner/repo.git`), and SCP-style SSH (`git@github.com:owner/repo.git`). Unsafe git protocol helpers (such as `ext::`) or URLs beginning with `-` are rejected.
+- To check the linked repository target, issue `GET /v1/git-sync/workflows`. To unlink, send `DELETE /v1/git-sync/workflows`.
+
+### Pushing and Pulling Behavior
+- **Target Files**:
+  - `workflows`: Synchronizes to/from `workflows.json` at the root of the remote repository.
+  - `prompt_templates`: Synchronizes to/from `prompt-templates.json` at the root of the remote repository.
+- **Push (`POST /v1/git-sync/workflows/push`)**:
+  - Serializes all workflows and states from the router database into portable JSON bundle format (`mecha-workflows`, version 1).
+  - Writes to `workflows.json` in the cached local git clone, commits ("Update workflows.json from app"), and pushes to `origin/main`.
+- **Pull (`POST /v1/git-sync/workflows/pull`)**:
+  - Fetches the latest commits from `origin/main` and resets to `origin/main`.
+  - Reads `workflows.json`, validates schema, format, and individual workflow bundles.
+  - Atomically replaces all workflows and states in the router database.
+
+### Conflict-Free Overwrite Policy on `main`
+- The Git backing engine operates strictly on the `main` branch.
+- Before reading or writing, the syncer performs `git fetch origin main`, `git checkout main`, and `git reset --hard origin/main`.
+- This ensures a conflict-free overwrite model where the latest remote state on `main` is authoritative during pull, and local changes cleanly apply on top of the tip of `main` during push.
+
+### Host Shell Git Auth & Identity
+- Synchronization uses the host machine's system `git` executable (`exec.CommandContext("git", ...)`).
+- All network authentication and credentials rely on the host environment:
+  - SSH keys configured in `~/.ssh` or running `ssh-agent` for `git@` and `ssh://` URLs.
+  - Credential helpers (`git-credential-manager`, `gh auth`, `.git-credentials`, etc.) for `https://` URLs.
+  - User identity (`user.name` and `user.email`) configured in the host's global or local `gitconfig`.
+- Clones are maintained in an isolated directory at `~/.mecha/git-sync/<hash>` with mode `0700`.
+
+### Missing-File Safety Behavior
+- When pulling: If `workflows.json` (or `prompt-templates.json`) does not exist in the remote repository or branch, the operation fails safely without corrupting or deleting existing local router database records.
+- Pull returns `{ "exists": false, "message": "No workflows.json found in repository" }` (or `"File not found"` for prompt templates) with HTTP status 200, leaving existing stored records intact.
+- If the file exists but has invalid JSON or invalid schema format/version, validation errors are returned without altering the database.
+
