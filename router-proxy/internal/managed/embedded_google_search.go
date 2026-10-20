@@ -353,7 +353,7 @@ func (m *Manager) executeVertexGrounding(ctx context.Context, token, projectID, 
 	if location == "" {
 		location = "us-central1"
 	}
-	model := "gemini-2.5-flash"
+	model := "gemini-3.8-flash"
 	url := fmt.Sprintf(vertexGroundingURLTemplate, location, projectID, location, model)
 
 	tools := []any{
@@ -416,7 +416,7 @@ func (m *Manager) executeVertexGrounding(ctx context.Context, token, projectID, 
 }
 
 func (m *Manager) executeGeminiAPIKeyGrounding(ctx context.Context, apiKey, query, instruction string, urls []string) (string, error) {
-	model := "gemini-2.5-flash"
+	model := "gemini-3.8-flash"
 	url := fmt.Sprintf(geminiGroundingURLTemplate, model, apiKey)
 
 	tools := []any{
