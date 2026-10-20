@@ -89,4 +89,58 @@ describe("Managed launch folder suggestions", () => {
     const dialog = screen.getByRole("dialog", { name: "Choose working folder" });
     expect(within(dialog).getByRole("option", { name: "Select folder /workspace/active-repo" })).toBeInTheDocument();
   });
+
+  it("uses worktree_base_path instead of worktree cwd for worktree agents", async () => {
+    const storage = new MemoryStorage();
+    const user = userEvent.setup();
+    const timestamp = "2030-01-01T00:00:00.000Z";
+    const worktreeAgent: ManagedAgent = {
+      agent_id: "worktree-worker",
+      source: "router-managed",
+      cwd: "/workspace/active-repo-feat-1234",
+      worktree: true,
+      worktree_base_path: "/workspace/active-repo",
+      model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+      desired_state: "running",
+      lifecycle_state: "running",
+      activity_state: "idle",
+      accepting_prompts: true,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 },
+      created_at: timestamp,
+      started_at: timestamp,
+      updated_at: timestamp,
+      last_error: null,
+    };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, ui_live_v1: false });
+      if (url.endsWith("/v1/managed-agents")) return jsonResponse({ generated_at: timestamp, projection_version: 1, agents: [worktreeAgent] });
+      if (url.endsWith(`/v1/managed-agents/${worktreeAgent.agent_id}/children`)) return jsonResponse({ agent_id: worktreeAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+      if (url.includes("/v1/history?")) return jsonResponse({ view: new URL(url).searchParams.get("view"), entries: [], next_before: null });
+      if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 0, default_model: null, models: [{ provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true }] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new TestSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Worktree Worker (worktree-worker)" })).toBeInTheDocument());
+
+    const menuButton = await screen.findByRole("button", { name: "Managed actions" });
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const toggleButton = screen.getByRole("button", { name: "Recent folders" });
+    await user.click(toggleButton);
+    const dialog = screen.getByRole("dialog", { name: "Choose working folder" });
+    expect(within(dialog).getByRole("option", { name: "Select folder /workspace/active-repo" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("option", { name: /active-repo-feat-1234/ })).not.toBeInTheDocument();
+  });
 });

@@ -69,6 +69,26 @@ func TestProjectionListKeepsEmptyLiveProjectionEmpty(t *testing.T) {
 	require.Empty(t, result["agents"])
 }
 
+func TestPublicAgentWorktreeBasePath(t *testing.T) {
+	agent := &store.ManagedAgentRecord{
+		AgentID:          "alpha",
+		Cwd:              "/tmp/repo-feat",
+		Worktree:         true,
+		WorktreeBasePath: "/tmp/repo",
+		SelectedModel:    store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"},
+		DesiredState:     "running",
+		LifecycleState:   "running",
+		ActivityState:    "idle",
+		ManifestRevision: 1,
+		ManifestHash:     strings.Repeat("a", 64),
+		CreatedAt:        "2026-01-01T00:00:00Z",
+		UpdatedAt:        "2026-01-01T00:00:00Z",
+	}
+	projection := PublicAgent(agent)
+	require.Equal(t, true, projection["worktree"])
+	require.Equal(t, "/tmp/repo", projection["worktree_base_path"])
+}
+
 func TestPublicProjectionKeepsAUsefulRedactedDurableCause(t *testing.T) {
 	agent := &store.ManagedAgentRecord{AgentID: "alpha", Cwd: "/work", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "failed", ActivityState: "failed", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64), LastErrorCode: "PROCESS_FAILED", LastErrorMessage: `/private/router/raw.log request failed token super-secret-value Bearer another-secret https://account:fourth-secret@host.invalid/path?access_token=third-secret /private/router/session.json cwd="/Users/wolfgang/project/output.log" cwd=&quot;/Users/wolfgang/project/output.log&quot; cwd="/Users/wolfgang/project/output log" file:///Users/wolfgang/project/output.log cwd="C:\Users\wolfgang\project\output log" permission denied`, LastErrorAt: "2026-01-01T00:00:00Z", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"}
 	projection := PublicAgent(agent)

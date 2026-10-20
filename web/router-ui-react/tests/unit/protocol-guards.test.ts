@@ -98,6 +98,8 @@ describe("protocol guards", () => {
     expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: null })).toBe(true);
     expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: 123 })).toBe(false);
     expect(isManagedAgent({ ...managedAgent, active_workflow_state_id: "a".repeat(129) })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, worktree: true, worktree_base_path: "/base/repo" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, worktree_base_path: 123 })).toBe(false);
     expect(isManagedAgent({ ...managedAgent, runtime: "embedded", active_workflow_state_id: "" })).toBe(true);
     expect(isManagedAgent({ ...managedAgent, runtime: "embedded", context_usage: { tokens: null, context_window: 1048576, percent: null } })).toBe(true);
     expect(isManagedAgent({ ...managedAgent, runtime: "embedded", context_usage: { tokens: 50000, context_window: 1048576, percent: 4.8 } })).toBe(true);

@@ -23,6 +23,8 @@ Manage git worktrees for isolated workstreams. Worktrees are created as **siblin
 
 ## Create
 
+Worktree creation automatically fetches and bases new branches on `origin/main` if present. If `origin/main` does not exist or fetch fails (e.g. offline or no remote), it falls back to creating the branch from the current HEAD.
+
 ```bash
 # From the main repo directory:
 cd <repo-path>
@@ -32,7 +34,7 @@ REPO_DIR=$(basename "$(pwd)")
 PARENT_DIR=$(dirname "$(pwd)")
 WORKTREE_PATH="$PARENT_DIR/$REPO_DIR-<alias>"
 
-# Create worktree with new branch
+# Create worktree with new branch (automated tools fetch origin main and base on origin/main when present)
 git worktree add -b wolfgang/<branch-description> "$WORKTREE_PATH"
 ```
 

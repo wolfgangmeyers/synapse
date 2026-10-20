@@ -239,15 +239,21 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const [managedHeaderModelsLoading, setManagedHeaderModelsLoading] = useState(false);
   const [managedHeaderModelError, setManagedHeaderModelError] = useState<string>();
   const [managedRecentFolders, setManagedRecentFolders] = useState(() => loadManagedRecentFolders(storage));
+
+  const extractManagedFolder = (agent: { cwd?: string; worktree?: boolean; worktree_base_path?: string } | undefined): string | undefined => {
+    if (!agent) return undefined;
+    return agent.worktree ? (agent.worktree_base_path?.trim() ? agent.worktree_base_path : undefined) : agent.cwd;
+  };
+
   const distinctRecentFolders = useMemo(() => {
-    const knownManagedFolders = (session.state.managedAgents ?? []).map((agent) => agent.cwd);
-    const peerManagedFolders = session.state.agents.map((agent) => agent.managed_agent?.cwd).filter((cwd): cwd is string => Boolean(cwd));
+    const knownManagedFolders = (session.state.managedAgents ?? []).map(extractManagedFolder).filter((cwd): cwd is string => Boolean(cwd));
+    const peerManagedFolders = session.state.agents.map((agent) => extractManagedFolder(agent.managed_agent)).filter((cwd): cwd is string => Boolean(cwd));
     return normalizeManagedRecentFolders([...managedRecentFolders, ...knownManagedFolders, ...peerManagedFolders]);
   }, [managedRecentFolders, session.state.managedAgents, session.state.agents]);
 
   useEffect(() => {
-    const knownManagedFolders = (session.state.managedAgents ?? []).map((agent) => agent.cwd);
-    const peerManagedFolders = session.state.agents.map((agent) => agent.managed_agent?.cwd).filter((cwd): cwd is string => Boolean(cwd));
+    const knownManagedFolders = (session.state.managedAgents ?? []).map(extractManagedFolder).filter((cwd): cwd is string => Boolean(cwd));
+    const peerManagedFolders = session.state.agents.map((agent) => extractManagedFolder(agent.managed_agent)).filter((cwd): cwd is string => Boolean(cwd));
     const knownFolders = [...knownManagedFolders, ...peerManagedFolders];
     if (knownFolders.length === 0) return;
     setManagedRecentFolders((current) => {
@@ -720,7 +726,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     try {
       const launched = await session.transport.http.launchManaged(input);
       const agentId = launched.agent?.agent_id ?? input.name;
-      const folder = launched.agent?.cwd ?? input.cwd;
+      const folder = extractManagedFolder(launched.agent) ?? input.cwd;
       setManagedRecentFolders((current) => {
         const next = recordManagedRecentFolder(current, folder);
         saveManagedRecentFolders(storage, next);
