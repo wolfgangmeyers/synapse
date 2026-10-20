@@ -352,7 +352,7 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
 const INLINE_ACTION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
 const INLINE_TOOL_POOL_CAPACITY = 3;
 const INLINE_TOOL_REPLENISHMENT_INTERVAL_MS = 60_000;
-const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround.";
+const INLINE_TOOL_BLOCK_REASON = "Inline tool budget exhausted: you have used all available inline tool credits. Inline tools are intended only for quick, occasional actions; repeated inline tool use is disallowed. You must delegate this work to subagents instead. (Credits replenish at 1 credit per minute up to a maximum of 3, or inline tools can be toggled on.)";
 // Keep the catalog bounded while allowing the configured Pi registry to reach
 // the UI instead of silently dropping the models after the first page.
 
