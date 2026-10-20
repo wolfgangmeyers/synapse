@@ -191,8 +191,6 @@ function normalizedToolName(toolName: string | undefined): string | undefined {
 export function isContextResetEntry(entry: ManagedHistoryEntry): boolean {
   const category = (entry as { category?: unknown }).category;
   if (category === "context_reset") return true;
-  const toolName = normalizedToolName(entry.presentation?.tool_name);
-  if (toolName === "context_reset" || toolName === "reset") return true;
   if (entry.presentation?.kind === "context_reset") return true;
   if (typeof entry.message === "string" && /^Context reset\b/i.test(entry.message.trim())) return true;
   return false;
