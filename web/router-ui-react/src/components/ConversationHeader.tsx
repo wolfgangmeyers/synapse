@@ -119,14 +119,23 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const [showWorkerToolsDialog, setShowWorkerToolsDialog] = useState(false);
   const [activeWatchersCount, setActiveWatchersCount] = useState<number>(0);
 
-  const allowInlineTools = Boolean(agent?.allow_inline_tools ?? agent?.managed_agent?.allow_inline_tools);
+  const [optimisticAllowInlineTools, setOptimisticAllowInlineTools] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setOptimisticAllowInlineTools(null);
+  }, [agent?.agent_id, agent?.allow_inline_tools, agent?.managed_agent?.allow_inline_tools]);
+
+  const allowInlineTools = optimisticAllowInlineTools !== null ? optimisticAllowInlineTools : Boolean(agent?.allow_inline_tools ?? agent?.managed_agent?.allow_inline_tools);
 
   const handleToggleAllowInlineTools = async () => {
     if (!client || !agent || allowInlineToolsUpdating) return;
+    const next = !allowInlineTools;
+    setOptimisticAllowInlineTools(next);
     setAllowInlineToolsUpdating(true);
     try {
-      await client.setManagedAgentAllowInlineTools(agent.agent_id, !allowInlineTools);
+      await client.setManagedAgentAllowInlineTools(agent.agent_id, next);
     } catch (e) {
+      setOptimisticAllowInlineTools(null);
       console.error("Failed to toggle allow inline tools", e);
     } finally {
       setAllowInlineToolsUpdating(false);

@@ -350,7 +350,7 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
   },
 });
 const INLINE_ACTION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
-const INLINE_TOOL_POOL_CAPACITY = 5;
+const INLINE_TOOL_POOL_CAPACITY = 3;
 const INLINE_TOOL_REPLENISHMENT_INTERVAL_MS = 60_000;
 const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround.";
 // Keep the catalog bounded while allowing the configured Pi registry to reach
@@ -367,8 +367,8 @@ function normalizeInlineToolName(toolName: string): InlineToolName {
 }
 
 function validateInlineAllowanceCount(usageCount: number): void {
-  if (!Number.isSafeInteger(usageCount) || usageCount < 1 || usageCount > 5) {
-    throw new TypeError("usageCount must be an integer from 1 through 5");
+  if (!Number.isSafeInteger(usageCount) || usageCount < 1 || usageCount > 3) {
+    throw new TypeError("usageCount must be an integer from 1 through 3");
   }
 }
 
@@ -432,7 +432,7 @@ export function createInlineToolPolicy({ now = Date.now }: InlineAllowanceOption
       if (availableWholeCredits < usageCount) {
         const exhaustedText = availableWholeCredits === 0 && poolRemainingMs === 0 ? " The pool is exhausted." : "";
 
-        const error = new Error(`Insufficient inline tool credits: requested ${usageCount} credit(s), but only ${availableWholeCredits} whole credit(s) are available (pool currently holds ${remainingPool} credit(s)).${exhaustedText} No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 5 credits.
+        const error = new Error(`Insufficient inline tool credits: requested ${usageCount} credit(s), but only ${availableWholeCredits} whole credit(s) are available (pool currently holds ${remainingPool} credit(s)).${exhaustedText} No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 3 credits.
           ATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool. You need to be using subagents instead.
 
           Read that again: YOU SHOULD BE USING SUBAGENTS INSTEAD. Continue to ignore this mandatory policy and the inline tool allowance will be disabled.`);
@@ -1051,7 +1051,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       required: ["toolName", "usageCount"],
       properties: {
         toolName: { type: "string", minLength: 1, maxLength: 64, description: "Canonical tool name (bash, edit, or write), or its functions.* alias." },
-        usageCount: { type: "integer", minimum: 1, maximum: 5, description: "Number of temporary uses to grant, from 1 through 5." },
+        usageCount: { type: "integer", minimum: 1, maximum: 3, description: "Number of temporary uses to grant, from 1 through 3." },
       },
     },
     async execute(_toolCallId: string, input: InlineAllowanceInput, _signal: AbortSignal | undefined, _onUpdate: (() => void) | undefined, toolContext: PiContext) {

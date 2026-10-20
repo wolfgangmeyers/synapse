@@ -21,20 +21,20 @@ func TestEmbeddedInlineAllowanceLane(t *testing.T) {
 	lane := &managedAgentLane{}
 	baseTime := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
-	// 1. Initial grant from full pool (5 credits capacity)
-	res, err := lane.grantInlineAllowance("bash", 3, baseTime)
+	// 1. Initial grant from full pool (3 credits capacity)
+	res, err := lane.grantInlineAllowance("bash", 2, baseTime)
 	require.NoError(t, err)
 	require.Equal(t, "bash", res.ToolName)
-	require.Equal(t, 3, res.GrantedCount)
-	require.Equal(t, 3, res.Remaining)
-	require.Equal(t, 2, res.AvailableWholeCredits) // 5 - 3 = 2 left in pool
-
-	// 2. Grant remaining 2 credits to "edit"
-	res, err = lane.grantInlineAllowance("edit", 2, baseTime)
-	require.NoError(t, err)
-	require.Equal(t, "edit", res.ToolName)
 	require.Equal(t, 2, res.GrantedCount)
 	require.Equal(t, 2, res.Remaining)
+	require.Equal(t, 1, res.AvailableWholeCredits) // 3 - 2 = 1 left in pool
+
+	// 2. Grant remaining 1 credit to "edit"
+	res, err = lane.grantInlineAllowance("edit", 1, baseTime)
+	require.NoError(t, err)
+	require.Equal(t, "edit", res.ToolName)
+	require.Equal(t, 1, res.GrantedCount)
+	require.Equal(t, 1, res.Remaining)
 	require.Equal(t, 0, res.AvailableWholeCredits) // 0 left in pool
 
 	// 3. Requesting when pool is empty (0 available) must fail with exact abuse message
@@ -42,6 +42,7 @@ func TestEmbeddedInlineAllowanceLane(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Insufficient inline tool credits: requested 1 credit(s), but only 0 whole credit(s) are available")
 	require.Contains(t, err.Error(), "The pool is exhausted.")
+	require.Contains(t, err.Error(), "Credits replenish at 1 credit per minute up to a maximum of 3 credits.")
 	require.Contains(t, err.Error(), "ATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool.")
 	require.Contains(t, err.Error(), "Read that again: YOU SHOULD BE USING SUBAGENTS INSTEAD.")
 
@@ -53,28 +54,41 @@ func TestEmbeddedInlineAllowanceLane(t *testing.T) {
 	require.Equal(t, 1, res.Remaining)
 	require.Equal(t, 0, res.AvailableWholeCredits)
 
-	// 5. Advance time by 10 minutes (should cap at 5 credits, not grow indefinitely)
+	// 5. Advance time by 10 minutes (should cap at 3 credits, not grow indefinitely)
 	tPlus10m := tPlus60s.Add(10 * time.Minute)
 	lane.activeMu.Lock()
 	lane.replenishInlinePool(tPlus10m)
 	available := int(lane.inlinePoolRemainingMs / InlineToolReplenishmentIntervalMS)
 	lane.activeMu.Unlock()
 	require.Equal(t, InlineToolPoolCapacity, available)
+	require.Equal(t, 3, available)
 
-	// 6. Test consumeInlineAllowance
-	require.Equal(t, 3, lane.getInlineAllowance("bash"))
-	require.True(t, lane.consumeInlineAllowance("bash"))
+	// 6. Test consumeInlineAllowance:
+	// bash has 2 explicit allowance credits, edit has 1, write has 1.
+	// Pool is currently full at 3 credits (from step 5).
 	require.Equal(t, 2, lane.getInlineAllowance("bash"))
-	require.True(t, lane.consumeInlineAllowance("bash"))
+	require.True(t, lane.consumeInlineAllowance("bash", tPlus10m))
 	require.Equal(t, 1, lane.getInlineAllowance("bash"))
-	require.True(t, lane.consumeInlineAllowance("bash"))
+	require.True(t, lane.consumeInlineAllowance("bash", tPlus10m))
 	require.Equal(t, 0, lane.getInlineAllowance("bash"))
-	require.False(t, lane.consumeInlineAllowance("bash"), "must return false when credits are 0")
 
-	// edit has 2 credits
-	require.True(t, lane.consumeInlineAllowance("edit"))
-	require.True(t, lane.consumeInlineAllowance("edit"))
-	require.False(t, lane.consumeInlineAllowance("edit"))
+	// bash has 0 explicit credits now, but pool has 3 credits. Direct pool consumption:
+	require.True(t, lane.consumeInlineAllowance("bash", tPlus10m), "should consume directly from pool")
+	lane.activeMu.Lock()
+	require.Equal(t, 2, int(lane.inlinePoolRemainingMs/InlineToolReplenishmentIntervalMS))
+	lane.activeMu.Unlock()
+
+	require.True(t, lane.consumeInlineAllowance("bash", tPlus10m), "should consume second credit from pool")
+	require.True(t, lane.consumeInlineAllowance("bash", tPlus10m), "should consume third credit from pool")
+
+	// Pool is now empty, and bash has 0 credits.
+	require.False(t, lane.consumeInlineAllowance("bash", tPlus10m), "must return false when both allowance credits and pool are exhausted")
+
+	// edit still has 1 granted credit
+	require.Equal(t, 1, lane.getInlineAllowance("edit"))
+	require.True(t, lane.consumeInlineAllowance("edit", tPlus10m), "can consume from its explicit credit even when pool is 0")
+	require.Equal(t, 0, lane.getInlineAllowance("edit"))
+	require.False(t, lane.consumeInlineAllowance("edit", tPlus10m))
 }
 
 func TestNormalizeInlineToolName(t *testing.T) {
@@ -159,9 +173,9 @@ func TestEmbeddedRequestInlineToolAllowanceTool(t *testing.T) {
 	require.Error(t, err)
 
 	// Test validation: usageCount out of range
-	res, err = tool.Execute(ctx, "call-2", map[string]any{"toolName": "bash", "usageCount": 6}, nil)
+	res, err = tool.Execute(ctx, "call-2", map[string]any{"toolName": "bash", "usageCount": 4}, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "usageCount must be an integer from 1 through 5")
+	require.Contains(t, err.Error(), "usageCount must be an integer from 1 through 3")
 
 	// Test successful grant
 	res, err = tool.Execute(ctx, "call-3", map[string]any{"toolName": "bash", "usageCount": 2}, nil)
@@ -270,7 +284,7 @@ func TestInlineToolExecutionGate(t *testing.T) {
 				return nil
 			}
 
-			if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
+			if lane != nil && lane.consumeInlineAllowance(normalizedToolName, clock.Now()) {
 				return nil
 			}
 			return &agent.BeforeToolCallResult{
@@ -296,6 +310,12 @@ func TestInlineToolExecutionGate(t *testing.T) {
 		{Name: InlineToolAllowanceToolName},
 	})
 
+	// Exhaust the remaining pool so that allowance credit consumption can be tested in isolation
+	lane.activeMu.Lock()
+	lane.inlinePoolUpdatedAt = clock.Now()
+	lane.inlinePoolRemainingMs = 0
+	lane.activeMu.Unlock()
+
 	// 1. allow_inline_tools == false and 0 credits: bash is BLOCKED
 	res := gateCheck("bash")
 	require.NotNil(t, res)
@@ -315,8 +335,21 @@ func TestInlineToolExecutionGate(t *testing.T) {
 	require.Nil(t, resRead)
 
 	// 2. Grant 2 credits for bash
-	_, err = lane.grantInlineAllowance("bash", 2, time.Now())
+	// Replenish pool first to allow granting
+	lane.activeMu.Lock()
+	lane.inlinePoolRemainingMs = InlineToolPoolCapacity * InlineToolReplenishmentIntervalMS
+	lane.inlinePoolUpdatedAt = clock.Now()
+	lane.activeMu.Unlock()
+
+	_, err = lane.grantInlineAllowance("bash", 2, clock.Now())
 	require.NoError(t, err)
+
+	// To test that credits exhaust and eventually block when pool is also empty,
+	// empty the pool remainder.
+	lane.activeMu.Lock()
+	lane.inlinePoolRemainingMs = 0
+	lane.inlinePoolUpdatedAt = clock.Now()
+	lane.activeMu.Unlock()
 
 	// First bash call consumes 1 credit and succeeds
 	res1 := gateCheck("bash")
@@ -328,7 +361,7 @@ func TestInlineToolExecutionGate(t *testing.T) {
 	require.Nil(t, res2, "second call should be allowed")
 	require.Equal(t, 0, lane.getInlineAllowance("bash"))
 
-	// Third bash call is blocked because credits are exhausted
+	// Third bash call is blocked because credits and pool are exhausted
 	res3 := gateCheck("bash")
 	require.NotNil(t, res3)
 	require.True(t, res3.Block)
@@ -440,7 +473,7 @@ func TestUnrestrictedInlineToolsReproduction(t *testing.T) {
 			if mgr.IsInlineToolsAllowed(ctx, agentID) {
 				return nil
 			}
-			if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
+			if lane != nil && lane.consumeInlineAllowance(normalizedToolName, time.Now()) {
 				return nil
 			}
 			return &agent.BeforeToolCallResult{
@@ -460,7 +493,7 @@ func TestUnrestrictedInlineToolsReproduction(t *testing.T) {
 	// 5. Verify mecha_request_inline_tool_allowance succeeds without error when unrestricted
 	owner := embeddedOwner{binding: store.EmbeddedBinding{AgentID: agentID, SessionID: "sess-1", Epoch: 1, Generation: "gen-1"}}
 	allowanceTool := mgr.embeddedRequestInlineToolAllowanceTool(owner)
-	res, err := allowanceTool.Execute(ctx, "call_1", map[string]any{"toolName": "bash", "usageCount": 5}, nil)
+	res, err := allowanceTool.Execute(ctx, "call_1", map[string]any{"toolName": "bash", "usageCount": 3}, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, res.Content)
 	require.Contains(t, res.Content[0].(ai.TextContent).Text, "unrestricted")

@@ -323,13 +323,13 @@ test("inline allowance normalizes functions aliases and leaves the pool unchange
   const allowance = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
   assert.ok(allowance);
 
-  const granted = await execute(fixture, INLINE_TOOL_ALLOWANCE_TOOL_NAME, { toolName: "functions.bash", usageCount: 4 });
+  const granted = await execute(fixture, INLINE_TOOL_ALLOWANCE_TOOL_NAME, { toolName: "functions.bash", usageCount: 2 });
   assert.equal(granted.details?.toolName, "bash");
   assert.equal(granted.details?.remainingPool, 1);
   const denied = await execute(fixture, INLINE_TOOL_ALLOWANCE_TOOL_NAME, { toolName: "bash", usageCount: 2 });
   assert.equal(denied.isError, true);
   assert.equal(denied.details?.remainingPool, 1);
-  assert.equal(policy.grant("edit", 1).remainingPool, 4);
+  assert.equal(policy.grant("edit", 1).remainingPool, 2);
 });
 
 test("mecha_context reports context reset and scratchpad status, and rejects compact action", async () => {

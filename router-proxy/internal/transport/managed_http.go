@@ -1527,6 +1527,7 @@ func (r *Router) handleManagedAgentAllowInlineTools(w http.ResponseWriter, req *
 	}
 	if r.managed != nil {
 		_ = r.managed.SyncDesiredInlinePolicy(req.Context(), agentID, allow)
+		r.managed.PublishProjection()
 	}
 	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
 		"agent_id":           agentID,

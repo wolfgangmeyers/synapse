@@ -133,6 +133,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           existing.cwd !== incoming.cwd ||
           existing.runtime !== incoming.runtime ||
           existing.last_error !== incoming.last_error ||
+          existing.allow_inline_tools !== incoming.allow_inline_tools ||
           JSON.stringify(existing.goal_state) !== JSON.stringify(goalState) ||
           JSON.stringify(existing.model) !== JSON.stringify(incoming.model);
 

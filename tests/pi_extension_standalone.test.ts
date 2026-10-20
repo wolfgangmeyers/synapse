@@ -229,8 +229,8 @@ test("function tool aliases grant usable credits and invalid names grant none", 
   const invalidGrant = await allowanceTool.execute("call-2", { toolName: "functions.read", usageCount: 1 });
   assert.equal(invalidGrant.isError, true);
   assert.match(invalidGrant.content[0].text, /unsupported.*tool/i);
-  const validGrant = await allowanceTool.execute("call-3", { toolName: "edit", usageCount: 5 });
-  assert.equal(validGrant.details.grantedCount, 5);
+  const validGrant = await allowanceTool.execute("call-3", { toolName: "edit", usageCount: 3 });
+  assert.equal(validGrant.details.grantedCount, 3);
   assertBlocked((await emitToolCalls(fixture, ["bash"]))[0]);
 });
 
@@ -265,53 +265,53 @@ test("write-ish top-level tools are blocked by default with mandatory-subagent g
   }
 });
 
-test("allowance tool is registered with a five-usage maximum and exceptional wording", async () => {
+test("allowance tool is registered with a three-usage maximum and exceptional wording", async () => {
   const fixture = createMessagingFixture();
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
   assert.ok(allowanceTool);
   assert.equal(allowanceTool.parameters.properties.toolName.type, "string");
-  assert.equal(allowanceTool.parameters.properties.usageCount.maximum, 5);
+  assert.equal(allowanceTool.parameters.properties.usageCount.maximum, 3);
   assert.match(allowanceTool.description, /exception/i);
   assert.match(allowanceTool.description, /subagents remain mandatory|mandatory by default/i);
 
-  const result = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
-  assert.equal(result.details.usageCount, 5);
+  const result = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
+  assert.equal(result.details.usageCount, 3);
   assert.match(result.content[0].text, /exception/i);
   assert.match(result.content[0].text, /subagents remain mandatory|mandatory by default/i);
 
   assert.deepEqual(
-    await emitToolCalls(fixture, Array.from({ length: 5 }, () => "edit")),
-    Array.from({ length: 5 }, () => undefined),
+    await emitToolCalls(fixture, Array.from({ length: 3 }, () => "edit")),
+    Array.from({ length: 3 }, () => undefined),
   );
   const [blocked] = await emitToolCalls(fixture, ["edit"]);
   assertBlocked(blocked);
 
-  const rejected = await allowanceTool.execute("call-2", { toolName: "edit", usageCount: 6 });
+  const rejected = await allowanceTool.execute("call-2", { toolName: "edit", usageCount: 4 });
   assert.equal(rejected.isError, true);
   assert.match(rejected.content[0].text, /usageCount/);
 });
 
-test("allowance requests start with five credits and report the pool", async () => {
+test("allowance requests start with three credits and report the pool", async () => {
   const fixture = createMessagingFixture({ nowImpl: () => 0 });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  const result = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
-  assert.equal(result.details.grantedCount, 5);
+  const result = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
+  assert.equal(result.details.grantedCount, 3);
   assert.equal(result.details.remainingPool, 0);
-  assert.equal(result.details.remaining, 5);
+  assert.equal(result.details.remaining, 3);
 });
 
-test("allowance pool replenishment is capped at five credits", async () => {
+test("allowance pool replenishment is capped at three credits", async () => {
   let now = 0;
   const fixture = createMessagingFixture({ nowImpl: () => now });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  const first = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
-  assert.equal(first.details.grantedCount, 3);
+  const first = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 2 });
+  assert.equal(first.details.grantedCount, 2);
   now = 10 * 60_000;
-  const second = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 5 });
-  assert.equal(second.details.grantedCount, 5);
+  const second = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 3 });
+  assert.equal(second.details.grantedCount, 3);
   assert.equal(second.details.remainingPool, 0);
 });
 
@@ -319,13 +319,13 @@ test("exhausted allowance pool returns a clear error without granting credits", 
   const fixture = createMessagingFixture({ nowImpl: () => 0 });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
   const denied = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 1 });
   assert.equal(denied.isError, true);
   assert.match(denied.content[0].text, /requested 1 credit/i);
   assert.match(denied.content[0].text, /0 whole credit.*available/i);
   assert.match(denied.content[0].text, /pool is exhausted/i);
-  assert.match(denied.content[0].text, /1 credit per minute.*maximum of 5 credits/i);
+  assert.match(denied.content[0].text, /1 credit per minute.*maximum of 3 credits/i);
   assert.equal(denied.details.grantedCount, 0);
   assert.equal(denied.details.availableWholeCredits, 0);
   assert.equal(denied.details.remainingPool, 0);
@@ -337,7 +337,7 @@ test("allowance pool virtually replenishes one credit after one minute", async (
   const fixture = createMessagingFixture({ nowImpl: () => now });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
   now = 60_000;
   const replenished = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 1 });
   assert.equal(replenished.details.grantedCount, 1);
@@ -349,7 +349,7 @@ test("allowance replenishment keeps exact minute boundaries after repeated updat
   const fixture = createMessagingFixture({ nowImpl: () => now });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
   for (let minute = 1; minute <= 5; minute += 1) {
     now = minute * 60_000;
     const replenished = await allowanceTool.execute(`call-${minute + 1}`, { toolName: "bash", usageCount: 1 });
@@ -364,7 +364,7 @@ test("insufficient partial pool denies the whole request and preserves fractiona
   const fixture = createMessagingFixture({ nowImpl: () => now });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
   now = 90_000;
   const denied = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 2 });
   assert.equal(denied.isError, true);
@@ -373,7 +373,7 @@ test("insufficient partial pool denies the whole request and preserves fractiona
   assert.equal(denied.details.remainingPool, 1.5);
   assert.match(denied.content[0].text, /requested 2 credit/i);
   assert.match(denied.content[0].text, /only 1 whole credit.*available/i);
-  assert.match(denied.content[0].text, /1 credit per minute.*maximum of 5 credits/i);
+  assert.match(denied.content[0].text, /1 credit per minute.*maximum of 3 credits/i);
   assertBlocked((await emitToolCalls(fixture, ["bash"]))[0]);
 
   const completed = await allowanceTool.execute("call-3", { toolName: "write", usageCount: 1 });
@@ -386,17 +386,17 @@ test("request larger than available whole credits is denied without partial allo
   const fixture = createMessagingFixture({ nowImpl: () => now });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
-  now = 2 * 60_000;
-  const denied = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 5 });
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
+  now = 1 * 60_000;
+  const denied = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 2 });
   assert.equal(denied.isError, true);
   assert.equal(denied.details.grantedCount, 0);
-  assert.equal(denied.details.availableWholeCredits, 2);
-  assert.equal(denied.details.remainingPool, 2);
+  assert.equal(denied.details.availableWholeCredits, 1);
+  assert.equal(denied.details.remainingPool, 1);
   assertBlocked((await emitToolCalls(fixture, ["bash"]))[0]);
 
-  const completed = await allowanceTool.execute("call-3", { toolName: "bash", usageCount: 2 });
-  assert.equal(completed.details.grantedCount, 2);
+  const completed = await allowanceTool.execute("call-3", { toolName: "bash", usageCount: 1 });
+  assert.equal(completed.details.grantedCount, 1);
   assert.equal(completed.details.remainingPool, 0);
 });
 
@@ -424,7 +424,7 @@ test("allowance credits persist across agent runs within a session", async () =>
 test("allowance pool persists across agent runs and resets for a new session", async () => {
   const fixture = createMessagingFixture({ nowImpl: () => 0 });
   const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
-  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 3 });
 
   for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
   const deniedDuringSameSession = await allowanceTool.execute("call-2", { toolName: "bash", usageCount: 1 });
@@ -433,8 +433,8 @@ test("allowance pool persists across agent runs and resets for a new session", a
 
   const newSessionContext = fixture.createContext("new-session");
   await sessionStart(fixture, newSessionContext);
-  const grantedInNewSession = await allowanceTool.execute("call-3", { toolName: "bash", usageCount: 5 });
-  assert.equal(grantedInNewSession.details.grantedCount, 5);
+  const grantedInNewSession = await allowanceTool.execute("call-3", { toolName: "bash", usageCount: 3 });
+  assert.equal(grantedInNewSession.details.grantedCount, 3);
   assert.equal(grantedInNewSession.details.remainingPool, 0);
 });
 
