@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
-import { CompleteTimelineEntry, isMailboxSendToUser } from "../../src/components/CompleteTimelineEntry";
+import { CompleteTimelineEntry, isContextResetEntry, isMailboxSendToUser } from "../../src/components/CompleteTimelineEntry";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation } from "../../src/protocol/types";
 
 const at = "2030-01-01T10:14:00.000Z";
@@ -664,7 +664,7 @@ describe("Complete timeline entry", () => {
           agent_id: "managed-worker",
           at,
           presentation: {
-            kind: "tool",
+            kind: "context_reset",
             tool_name: "context_reset",
             outcome: "success",
             summary: "Context reset to epoch 3",
@@ -678,5 +678,40 @@ describe("Complete timeline entry", () => {
     expect(toolDivider).toHaveAttribute("role", "separator");
     expect(toolDivider).toHaveAttribute("aria-label", "Context Reset (Epoch 3)");
     expect(toolContainer.querySelector(".timeline-context-reset-label")?.textContent).toContain("─── Context Reset (Epoch 3) ───");
+  });
+
+  it("correctly identifies context reset entries with isContextResetEntry", () => {
+    const ordinaryToolEntry: ManagedHistoryEntry = {
+      id: "complete:tool-context-reset",
+      agent_id: "managed-worker",
+      at,
+      message: "Ran context_reset",
+      presentation: {
+        kind: "tool",
+        tool_name: "context_reset",
+        outcome: "success",
+      },
+    };
+    expect(isContextResetEntry(ordinaryToolEntry)).toBe(false);
+
+    const kindResetEntry: ManagedHistoryEntry = {
+      id: "complete:reset-kind",
+      agent_id: "managed-worker",
+      at,
+      presentation: {
+        kind: "context_reset",
+        outcome: "success",
+      },
+    };
+    expect(isContextResetEntry(kindResetEntry)).toBe(true);
+
+    const categoryResetEntry: ManagedHistoryEntry = {
+      id: "complete:reset-category",
+      agent_id: "managed-worker",
+      at,
+      category: "context_reset",
+      message: "Epoch 2 started",
+    };
+    expect(isContextResetEntry(categoryResetEntry)).toBe(true);
   });
 });
