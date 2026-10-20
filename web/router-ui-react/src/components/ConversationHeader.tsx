@@ -249,11 +249,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   {agent ? humanName(agent.agent_id) : "Pick an agent"}
                 </span>
               </h2>
-              {visibleActivity === "active" ? (
-                <span className="working-indicator inline" aria-label="Working">
-                  <span />
-                </span>
-              ) : null}
             </div>
 
             <p className="peer-activity">
@@ -619,9 +614,9 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   </div>
 ) : null}
           {(promptControls || modelControls) ? (
-            <div className="header-controls-group">
-              {promptControls ?? null}
-              {modelControls ?? null}
+            <div className="header-pickers-stack">
+              {promptControls ? <div className="header-picker-card">{promptControls}</div> : null}
+              {modelControls ? <div className="header-picker-card">{modelControls}</div> : null}
             </div>
           ) : null}
         </div>
