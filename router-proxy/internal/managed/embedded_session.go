@@ -1397,6 +1397,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			tools = append(tools, m.embeddedGoogleSearchTool(owner))
 		}
 		tools = append(tools, m.EmbeddedSubagentPublicTools(binding)...)
+		tools = append(tools, m.embeddedProgressTool(owner))
 		tools = append(tools, m.buildSessionTools(&saved)...)
 	}
 	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {

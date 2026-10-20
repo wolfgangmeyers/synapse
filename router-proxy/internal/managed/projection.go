@@ -94,6 +94,13 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"manifest":                 map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":               agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
 	}
+	if agent.ProgressPercent != nil {
+		result["progress"] = map[string]any{
+			"percent":   *agent.ProgressPercent,
+			"note":      agent.ProgressNote,
+			"timestamp": agent.ProgressUpdatedAt,
+		}
+	}
 	if agent.StartedAt != "" {
 		result["started_at"] = agent.StartedAt
 	}
@@ -130,6 +137,15 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 			}
 			if usage != nil {
 				result["context_usage"] = usage
+			}
+		}
+	}
+	if defaultManagerInstance != nil && defaultManagerInstance.store != nil {
+		if percent, note, timestamp, _, err := defaultManagerInstance.store.GetAgentProgress(context.Background(), agent.AgentID); err == nil && percent != nil {
+			result["progress"] = map[string]any{
+				"percent":   *percent,
+				"note":      note,
+				"timestamp": timestamp,
 			}
 		}
 	}
