@@ -101,6 +101,27 @@ curl -s http://127.0.0.1:9876/v1/health
 
 Point clients at the proxy with `MECHA_ROUTER_URL=http://127.0.0.1:9876`.
 
+## Git Backing Sync (`/v1/git-sync`)
+
+The router includes a Git sync subsystem that synchronizes state with remote Git repositories (e.g. GitHub).
+
+### Supported Targets
+- `workflows`: syncs with `workflows.json` at the repository root.
+- `prompt_templates`: syncs with `prompt-templates.json` at the repository root.
+
+### Endpoints
+- `GET /v1/git-sync/{target}`: returns `{ "target": "{target}", "repo_url": "...", "updated_at": "..." }` or `404` if unconfigured.
+- `PUT /v1/git-sync/{target}`: configures or updates the target repository URL with `{"repo_url": "<url>"}`. An empty string unconfigures the target.
+- `DELETE /v1/git-sync/{target}`: unconfigures the target.
+- `POST /v1/git-sync/{target}/pull`: fetches the latest `origin/main`, checks out `main`, resets hard to `origin/main`, reads the target file, validates it, and replaces local store data.
+- `POST /v1/git-sync/{target}/push`: fetches `origin/main`, checks out `main`, resets hard to `origin/main`, serializes local data into the target file, commits ("Update <filename> from app"), and pushes to `origin/main`.
+
+### Key Policies & Operational Mechanics
+- **Repository URL Validation**: Supported formats are HTTPS (`https://`), SSH (`ssh://`), and SCP-style SSH (`git@host:owner/repo.git`). Flag prefixes (e.g. `-`) and git protocol helpers (such as `ext::`) are rejected.
+- **Conflict-free Overwrite on `main`**: All sync operations strictly use the `main` branch. Before pulling or pushing, the engine fetches and resets to `origin/main`, ensuring a deterministic, conflict-free overwrite model where remote `main` is authoritative on pull and local changes commit cleanly onto the latest `origin/main` on push.
+- **Host Git Auth & Identity**: The syncer runs the host's `git` binary. Remote operations inherit the host shell's SSH agent/keys (for SSH/SCP URLs) and credential helpers (for HTTPS URLs). Commits use the host git identity (`user.name`/`user.email`). Local clone caches are maintained at `~/.mecha/git-sync/<hash>` with `0700` permissions.
+- **Missing-File Safety**: If the target JSON file (`workflows.json` or `prompt-templates.json`) does not exist on remote `main`, the pull returns `{ "exists": false, "message": "..." }` without deleting or corrupting existing router store records.
+
 ## Notes
 
 - WebSocket upgrades on `/v1/agents` are forwarded without injecting an `Origin` header.
