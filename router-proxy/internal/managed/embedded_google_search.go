@@ -15,6 +15,8 @@ import (
 	"github.com/sky-valley/pi/ai"
 )
 
+const vertexGroundingModel = "gemini-2.5-flash"
+
 var (
 	antigravityGroundingURL    = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
 	vertexGroundingURLTemplate = "https://%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
@@ -45,7 +47,7 @@ func (m *Manager) hasGoogleSearchAuth(ctx context.Context) bool {
 	if apiKey, aErr := m.resolveGoogleAPIKey(ctx); aErr == nil && apiKey != "" {
 		return true
 	}
-	vToken, _, _, vErr := m.embeddedVertexAuth(ctx, false, "gemini-3.8-flash")
+	vToken, _, _, vErr := m.embeddedVertexAuth(ctx, false, vertexGroundingModel)
 	return vErr == nil && vToken != ""
 }
 
@@ -147,7 +149,7 @@ func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruc
 	}
 
 	// Fallback to Vertex AI
-	vToken, vProject, vLoc, vErr := m.embeddedVertexAuth(ctx, false, "gemini-3.8-flash")
+	vToken, vProject, vLoc, vErr := m.embeddedVertexAuth(ctx, false, vertexGroundingModel)
 	if vErr == nil && vToken != "" {
 		res, vExecErr := m.executeVertexGrounding(ctx, vToken, vProject, vLoc, query, instruction, urls)
 		if vExecErr == nil {
@@ -353,8 +355,7 @@ func (m *Manager) executeVertexGrounding(ctx context.Context, token, projectID, 
 	if location == "" {
 		location = "us-central1"
 	}
-	model := "gemini-3.8-flash"
-	url := fmt.Sprintf(vertexGroundingURLTemplate, vertexHost(location), projectID, location, model)
+	url := fmt.Sprintf(vertexGroundingURLTemplate, vertexHost(location), projectID, location, vertexGroundingModel)
 
 	tools := []any{
 		map[string]any{"googleSearch": map[string]any{}},
