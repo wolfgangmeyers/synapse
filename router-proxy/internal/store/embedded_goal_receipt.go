@@ -230,17 +230,33 @@ func (s *Store) embeddedGoalReceiptProducer(ctx context.Context, b EmbeddedBindi
 	if json.Unmarshal(intent, &call) != nil || json.Unmarshal([]byte(p.args), &command) != nil || call.ID != p.id || call.Name != "goal" || command.Action != p.action {
 		return ErrEmbeddedGoalSDKResultUnchecked
 	}
-	args := map[string]any{"action": command.Action}
 	if command.Action == "set" {
-		args["goal"] = command.Goal
-	}
-	want, _ = json.Marshal(args)
-	got, _ = json.Marshal(call.Arguments)
-	settings, _ := json.Marshal(command.Settings)
-	policySettings, _ := json.Marshal(p.policy.Config.Settings)
-	if !bytes.Equal(want, got) || command.Goal != p.policy.Config.Goal || (command.Action == "set") != p.policy.Config.Enabled ||
-		(command.Action == "set" && !bytes.Equal(settings, policySettings)) {
-		return ErrEmbeddedGoalSDKResultUnchecked
+		args := map[string]any{"action": command.Action, "goal": command.Goal}
+		want, _ := json.Marshal(args)
+		got, _ := json.Marshal(call.Arguments)
+		settings, _ := json.Marshal(command.Settings)
+		policySettings, _ := json.Marshal(p.policy.Config.Settings)
+		if !bytes.Equal(want, got) || command.Goal != p.policy.Config.Goal || !p.policy.Config.Enabled || !bytes.Equal(settings, policySettings) {
+			return ErrEmbeddedGoalSDKResultUnchecked
+		}
+	} else if command.Action == "off" {
+		if command.Goal != "" || command.Settings != (ManagedGoalSettings{}) || p.policy.Config.Enabled || p.policy.Config.Goal != "" {
+			return ErrEmbeddedGoalSDKResultUnchecked
+		}
+		act, _ := call.Arguments["action"].(string)
+		if act != "off" {
+			return ErrEmbeddedGoalSDKResultUnchecked
+		}
+		for k, v := range call.Arguments {
+			if k != "action" && k != "goal" {
+				return ErrEmbeddedGoalSDKResultUnchecked
+			}
+			if k == "goal" && v != nil {
+				if _, ok := v.(string); !ok {
+					return ErrEmbeddedGoalSDKResultUnchecked
+				}
+			}
+		}
 	}
 	// Validate that the session has the checked producer and successful SDK result.
 	// Do not fail closed over historical digest mismatches on past messages.

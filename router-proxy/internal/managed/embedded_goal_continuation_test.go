@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -89,6 +90,256 @@ func TestEmbeddedGoalContinuationDoneAndOffDoNotStart(t *testing.T) {
 			require.Zero(t, count)
 		})
 	}
+}
+
+func TestEmbeddedGoalOffOptionalArgumentsIntegrated(t *testing.T) {
+	for i, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{
+			name: "empty_goal_string",
+			args: map[string]any{"action": "off", "goal": ""},
+		},
+		{
+			name: "non_empty_goal_string",
+			args: map[string]any{"action": "off", "goal": "finished all tasks"},
+		},
+		{
+			name: "no_goal_arg",
+			args: map[string]any{"action": "off"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			path := filepath.Join(root, "router.db")
+			db, err := store.Open(ctx, path, store.Options{})
+			require.NoError(t, err)
+			defer db.Close()
+			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+			require.NoError(t, err)
+			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+			defer reg.Unregister()
+			var requests atomic.Int32
+			reg.SetResponses([]providers.FauxResponseStep{
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "finish tasks"}, "initial-set")}, ai.StopToolUse)
+				},
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("goal", tc.args, "turn-off")}, ai.StopToolUse)
+				},
+				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+					requests.Add(1)
+					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "off final"}}, ai.StopStop)
+				},
+			})
+			var evaluations atomic.Int32
+			m, err := NewManager(ManagerOptions{
+				Store:                 db,
+				Manifest:              manifest,
+				Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+				CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+				EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+				CodexCredentialStore:  testfixture.CodexAdmission(t),
+				EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
+					evaluations.Add(1)
+					return store.EmbeddedGoalEvaluationDone, "finished", nil
+				},
+			})
+			require.NoError(t, err)
+			defer m.Close(ctx)
+			setEmbeddedRecoveryGeneration(t, ctx, db, m)
+			launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+				Name:               "g5-off-opt-" + tc.name,
+				Cwd:                root,
+				Runtime:            "embedded",
+				Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+				InitialInstruction: "set and clear goal",
+				RequestID:          fmt.Sprintf("b5555555-5555-4555-8555-5555555555%02d", i+10),
+			})
+			require.NoError(t, err)
+
+			// 1. Session settles cleanly after 3 requests (set -> off -> final text)
+			require.Eventually(t, func() bool { return requests.Load() == 3 }, 3*time.Second, 10*time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
+			require.Equal(t, int32(3), requests.Load())
+
+			// 2. Goal continuation does NOT start / evaluations are 0
+			require.Zero(t, evaluations.Load())
+
+			readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+			require.NoError(t, err)
+			defer readOnly.Close()
+
+			var continuations int
+			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&continuations))
+			require.Zero(t, continuations)
+
+			// 3. Desired policy in store has Enabled == false and Goal == ""
+			policy, err := db.ManagedGoalPolicyFor(ctx, launched.Agent.AgentID)
+			require.NoError(t, err)
+			require.False(t, policy.Config.Enabled)
+			require.Empty(t, policy.Config.Goal)
+			require.EqualValues(t, 2, policy.DesiredRevision)
+			require.EqualValues(t, 2, policy.AppliedRevision)
+			require.Equal(t, "applied", policy.ProjectionState)
+
+			// 4. Receipt is recorded successfully
+			var receiptCount, receiptEnabled int
+			var receiptGoal string
+			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*), goal_enabled, goal_text FROM embedded_goal_applied_receipts WHERE agent_id=? AND goal_revision=2`, launched.Agent.AgentID).Scan(&receiptCount, &receiptEnabled, &receiptGoal))
+			require.Equal(t, 1, receiptCount)
+			require.Zero(t, receiptEnabled)
+			require.Empty(t, receiptGoal)
+
+			// 5. Tool call executes successfully (no error in session, tool result is produced)
+			var callState, resultJSON string
+			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT state, result_json FROM embedded_goal_calls WHERE call_id='turn-off'`).Scan(&callState, &resultJSON))
+			require.Equal(t, "complete", callState)
+			var toolResultPolicy store.ManagedGoalPolicy
+			require.NoError(t, json.Unmarshal([]byte(resultJSON), &toolResultPolicy))
+			require.False(t, toolResultPolicy.Config.Enabled)
+			require.Empty(t, toolResultPolicy.Config.Goal)
+
+			binding := store.EmbeddedBinding{
+				AgentID:    launched.Agent.AgentID,
+				SessionID:  launched.Agent.PiSessionID,
+				Epoch:      launched.Agent.SessionEpoch,
+				Generation: launched.Agent.RuntimeGeneration,
+			}
+			binding = inspectManagedOwnerBinding(t, path, binding)
+			snapshot, err := db.ReopenEmbedded(ctx, binding)
+			require.NoError(t, err)
+			var foundTurnOffResult bool
+			for _, entry := range snapshot.Entries {
+				if entry.Kind == "toolResult" || entry.Kind == "tool_result" {
+					msg, unmarshalErr := ai.UnmarshalMessage(entry.Body)
+					require.NoError(t, unmarshalErr)
+					if tr, ok := msg.(ai.ToolResultMessage); ok && tr.ToolCallID == "turn-off" {
+						foundTurnOffResult = true
+						require.False(t, tr.IsError)
+						var resPolicy store.ManagedGoalPolicy
+						require.NoError(t, json.Unmarshal([]byte(tr.Content[0].(ai.TextContent).Text), &resPolicy))
+						require.False(t, resPolicy.Config.Enabled)
+						require.Empty(t, resPolicy.Config.Goal)
+					}
+				}
+			}
+			require.True(t, foundTurnOffResult, "turn-off tool result must be present in session transcript")
+
+			// 6. Session settles cleanly (idle and running, no error)
+			var activity, lifecycle string
+			var errCode sql.NullString
+			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT activity_state, lifecycle_state, last_error_code FROM managed_agents WHERE agent_id=?`, launched.Agent.AgentID).Scan(&activity, &lifecycle, &errCode))
+			require.Equal(t, "idle", activity)
+			require.Equal(t, "running", lifecycle)
+			require.False(t, errCode.Valid && errCode.String != "", "last_error_code was non-empty: %s", errCode.String)
+		})
+	}
+}
+
+func TestEmbeddedGoalOffOptionalArgumentsStatusIntegrated(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "router.db")
+	db, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+	var requests atomic.Int32
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "persistent active goal"}, "initial-set")}, ai.StopToolUse)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall("goal", map[string]any{"action": "status", "goal": ""}, "status-check")}, ai.StopToolUse)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			requests.Add(1)
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "status done, goal active"}}, ai.StopStop)
+		},
+	})
+	var evaluations atomic.Int32
+	m, err := NewManager(ManagerOptions{
+		Store:                 db,
+		Manifest:              manifest,
+		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+		CodexCredentialStore:  testfixture.CodexAdmission(t),
+		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
+			evaluations.Add(1)
+			return store.EmbeddedGoalEvaluationDone, "finished", nil
+		},
+	})
+	require.NoError(t, err)
+	defer m.Close(ctx)
+	setEmbeddedRecoveryGeneration(t, ctx, db, m)
+	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+		Name:               "g5-status-opt-goal",
+		Cwd:                root,
+		Runtime:            "embedded",
+		Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+		InitialInstruction: "set and check status",
+		RequestID:          "b5555555-5555-4555-8555-555555555599",
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return requests.Load() == 3 }, 3*time.Second, 10*time.Millisecond)
+	// Because goal remained active and final turn finished with StopStop, evaluation runs.
+	require.Eventually(t, func() bool { return evaluations.Load() == 1 }, 3*time.Second, 10*time.Millisecond)
+
+	readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	require.NoError(t, err)
+	defer readOnly.Close()
+
+	// Verify status returns current policy and goal was active with the text
+	policy, err := db.ManagedGoalPolicyFor(ctx, launched.Agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "persistent active goal", policy.Config.Goal)
+	require.Equal(t, "done", policy.EvaluatorState)
+
+	binding := store.EmbeddedBinding{
+		AgentID:    launched.Agent.AgentID,
+		SessionID:  launched.Agent.PiSessionID,
+		Epoch:      launched.Agent.SessionEpoch,
+		Generation: launched.Agent.RuntimeGeneration,
+	}
+	binding = inspectManagedOwnerBinding(t, path, binding)
+	snapshot, err := db.ReopenEmbedded(ctx, binding)
+	require.NoError(t, err)
+	var foundStatusResult bool
+	for _, entry := range snapshot.Entries {
+		if entry.Kind == "toolResult" || entry.Kind == "tool_result" {
+			msg, unmarshalErr := ai.UnmarshalMessage(entry.Body)
+			require.NoError(t, unmarshalErr)
+			if tr, ok := msg.(ai.ToolResultMessage); ok && tr.ToolCallID == "status-check" {
+				foundStatusResult = true
+				require.False(t, tr.IsError)
+				var statusPolicy store.ManagedGoalPolicy
+				require.NoError(t, json.Unmarshal([]byte(tr.Content[0].(ai.TextContent).Text), &statusPolicy))
+				require.True(t, statusPolicy.Config.Enabled)
+				require.Equal(t, "persistent active goal", statusPolicy.Config.Goal)
+			}
+		}
+	}
+	require.True(t, foundStatusResult, "status-check tool result must be present in session transcript")
+
+	// Session settles cleanly (idle and running, no error)
+	var activity, lifecycle string
+	var errCode sql.NullString
+	require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT activity_state, lifecycle_state, last_error_code FROM managed_agents WHERE agent_id=?`, launched.Agent.AgentID).Scan(&activity, &lifecycle, &errCode))
+	require.Equal(t, "idle", activity)
+	require.Equal(t, "running", lifecycle)
+	require.False(t, errCode.Valid && errCode.String != "", "last_error_code was non-empty: %s", errCode.String)
 }
 
 func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
@@ -548,4 +799,3 @@ func TestEmbeddedGoalCircuitBreakerTurnErrorsHalt(t *testing.T) {
 		return err == nil && agent.ActivityState == "idle"
 	}, 3*time.Second, 10*time.Millisecond)
 }
-

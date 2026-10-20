@@ -41,9 +41,18 @@ func embeddedGoalCommand(args map[string]any) (store.EmbeddedGoalCommand, error)
 		}
 		c.Goal, c.Settings = text, store.DefaultManagedGoalSettings()
 	case "status", "off":
-		if len(args) != 1 {
-			return c, errors.New("goal action takes no text")
+		for k, v := range args {
+			if k != "action" && k != "goal" {
+				return c, errors.New("invalid goal arguments")
+			}
+			if k == "goal" && v != nil {
+				if _, isStr := v.(string); !isStr {
+					return c, errors.New("invalid goal text")
+				}
+			}
 		}
+		c.Goal = ""
+		c.Settings = store.ManagedGoalSettings{}
 	default:
 		return c, errors.New("invalid goal action")
 	}
