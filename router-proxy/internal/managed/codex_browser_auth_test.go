@@ -55,6 +55,36 @@ func cachedOrdinarySnapshot(run *fakeProviderAuthRun) fakeProviderAuthSnapshotHe
 	}, models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "stale-helper-model", Name: "Stale", Available: true}, {Provider: "google", ID: "google-fixture", Name: "Google fixture", Available: true}}}
 }
 
+func TestCodexBrowserSnapshotListsSolOnlyWhenSignedIn(t *testing.T) {
+	ctx := context.Background()
+	credentialDir, err := os.MkdirTemp(os.Getenv("HOME"), ".mecha-codex-snapshot-test-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(credentialDir)) })
+	credentials, err := store.OpenLocalCodexCredentialStore(filepath.Join(credentialDir, "codex.json"))
+	require.NoError(t, err)
+	require.NoError(t, credentials.Save(ctx, store.CodexCredential{AccessToken: "fake-owned-current", RefreshToken: "fake-owned-refresh", AccountID: "fake-account", ExpiresAt: time.Now().Add(time.Hour)}))
+	helper := cachedOrdinarySnapshot(newFakeProviderAuthRun())
+	auth := CodexBrowserAuth{Ordinary: helper, Credentials: credentials}
+	assertSol := func(want bool) {
+		t.Helper()
+		_, models, err := auth.Snapshot(ctx)
+		require.NoError(t, err)
+		found := false
+		for _, model := range models {
+			if model.Provider == "openai-codex" && model.ID == "gpt-6.1-sol" {
+				require.Equal(t, "GPT-6.1 Sol", model.Name)
+				require.True(t, model.Available)
+				found = true
+			}
+			require.NotEqual(t, "stale-helper-model", model.ID)
+		}
+		require.Equal(t, want, found)
+	}
+	assertSol(true)
+	require.NoError(t, credentials.Delete(ctx))
+	assertSol(false)
+}
+
 func TestCodexBrowserSnapshotCommitSerializesLogoutAndNewOwnedRevision(t *testing.T) {
 	ctx := context.Background()
 	durable, credentials, path := browserAuthStore(t)
