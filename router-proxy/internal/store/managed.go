@@ -4605,6 +4605,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedContextUsageTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedProgressTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4657,6 +4660,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedContextUsageTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedProgressTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -4768,6 +4774,27 @@ func loadManagedContextUsageTx(ctx context.Context, db *sql.DB, agent *ManagedAg
 	} else {
 		agent.ContextPercent = nil
 	}
+	return nil
+}
+
+func loadManagedProgressTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	hasCol, err := managedAgentColumnTx(ctx, db, "progress_percent")
+	if err != nil || !hasCol || agent == nil {
+		return err
+	}
+	var percent sql.NullInt64
+	var note, updatedAt sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT progress_percent, progress_note, progress_updated_at FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&percent, &note, &updatedAt); err != nil {
+		return err
+	}
+	if percent.Valid {
+		p := int(percent.Int64)
+		agent.ProgressPercent = &p
+	} else {
+		agent.ProgressPercent = nil
+	}
+	agent.ProgressNote = note.String
+	agent.ProgressUpdatedAt = updatedAt.String
 	return nil
 }
 
@@ -5128,6 +5155,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedContextUsageTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
+		if err := loadManagedProgressTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
 		if agent.Runtime == "embedded" {
 			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
 			if err != nil {
@@ -5254,6 +5284,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedContextUsageTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedProgressTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy
