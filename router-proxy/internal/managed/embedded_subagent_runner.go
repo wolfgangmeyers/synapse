@@ -19,7 +19,7 @@ import (
 	"github.com/sky-valley/pi/coding"
 )
 
-const DefaultSubagentInactivityTimeout = 3 * time.Minute
+const DefaultSubagentInactivityTimeout = 90 * time.Second
 
 type SubagentSpawnRequest struct {
 	AgentID      string
@@ -66,12 +66,35 @@ type subagentTask struct {
 	stopped         bool
 
 	lastActivity       time.Time
+	lastStage          string
+	lastStageTime      time.Time
 	inactivityTimedOut bool
 }
 
 func (t *subagentTask) touchActivity(now time.Time) {
 	t.mu.Lock()
 	t.lastActivity = now
+	t.mu.Unlock()
+}
+
+func (t *subagentTask) updateStage(stage string, now time.Time) {
+	t.mu.Lock()
+	t.lastActivity = now
+	t.lastStage = stage
+	t.lastStageTime = now
+	t.mu.Unlock()
+}
+
+func (t *subagentTask) abortExecution() {
+	t.mu.Lock()
+	t.stopped = true
+	t.hardAborted = true
+	if t.cancel != nil {
+		t.cancel()
+	}
+	if t.activeSession != nil {
+		t.activeSession.Abort()
+	}
 	t.mu.Unlock()
 }
 
@@ -222,7 +245,7 @@ func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 	if maxDuration <= 0 {
 		maxDuration = 1 * time.Hour
 	}
-	now := time.Now()
+	now := m.clock.Now()
 	m.subagentsMu.Lock()
 	var toAbort []*subagentTask
 	for _, task := range m.subagentsActive {
@@ -255,16 +278,7 @@ func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 	m.subagentsMu.Unlock()
 
 	for _, task := range toAbort {
-		task.mu.Lock()
-		task.stopped = true
-		task.hardAborted = true
-		if task.cancel != nil {
-			task.cancel()
-		}
-		if task.activeSession != nil {
-			task.activeSession.Abort()
-		}
-		task.mu.Unlock()
+		task.abortExecution()
 	}
 }
 
@@ -739,6 +753,25 @@ func (m *Manager) finalizeSubagent(task *subagentTask, terminalStatus, resultTex
 	finalTools := task.baseToolUses + task.toolUseCount
 	finalTokens := task.baseTokens + task.totalTokens
 	finalDuration := task.durationSeconds
+
+	if (terminalStatus == "failed" || terminalStatus == "timed_out") && task.lastStage != "" {
+		var stageDur time.Duration
+		if !task.lastStageTime.IsZero() {
+			stageDur = now.Sub(task.lastStageTime)
+		}
+		stageDurSec := int(stageDur.Round(time.Second).Seconds())
+		stageDiag := fmt.Sprintf("[%ds in stage: %s]", stageDurSec, task.lastStage)
+		if !strings.Contains(errorMsg, task.lastStage) {
+			if errorMsg != "" {
+				errorMsg = fmt.Sprintf("%s %s", errorMsg, stageDiag)
+			} else {
+				errorMsg = stageDiag
+			}
+		}
+		if resultText != "" && !strings.Contains(resultText, task.lastStage) {
+			resultText = fmt.Sprintf("%s %s", resultText, stageDiag)
+		}
+	}
 	task.mu.Unlock()
 
 	err := m.store.UpdateManagedSubagentAttempt(context.Background(), task.parent, task.childID, task.attempt, "running", store.ManagedSubagentResult{
@@ -981,7 +1014,8 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			return nil
 		},
 		BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
-			task.touchActivity(m.clock.Now())
+			now := m.clock.Now()
+			task.updateStage("executing_tool:"+call.ToolCall.Name, now)
 			if err := admitWorkflowStateTool(callCtx, m.store, childAgent.AgentID, call.ToolCall.Name); err != nil {
 				return &agent.PolicyDenial{Reason: err.Error()}
 			}
@@ -1031,8 +1065,17 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		resText := ""
 		if timedOut {
 			status = "failed"
-			errStr = "subagent execution timed out due to inactivity (no activity for 3 minutes)"
-			resText = "Subagent execution timed out due to inactivity (no activity for 3 minutes)."
+			stage := task.lastStage
+			if stage == "" {
+				stage = "initialized"
+			}
+			var stageDur time.Duration
+			if !task.lastStageTime.IsZero() {
+				stageDur = m.clock.Now().Sub(task.lastStageTime)
+			}
+			stageDurSec := int(stageDur.Round(time.Second).Seconds())
+			errStr = fmt.Sprintf("subagent execution timed out due to inactivity (no activity for %s, %ds in stage: %s)", DefaultSubagentInactivityTimeout, stageDurSec, stage)
+			resText = fmt.Sprintf("Subagent execution timed out due to inactivity (no activity for %s, %ds in stage: %s).", DefaultSubagentInactivityTimeout, stageDurSec, stage)
 		} else if isStopped || taskCtx.Err() != nil {
 			status = "stopped"
 			resText = "Subagent stopped."
@@ -1057,7 +1100,17 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	}()
 
 	unsubscribe := session.Subscribe(func(eventCtx context.Context, event agent.AgentEvent) error {
-		task.touchActivity(m.clock.Now())
+		now := m.clock.Now()
+		switch event.Type {
+		case agent.EvTurnStart, agent.EvMessageStart:
+			task.updateStage("waiting_for_model", now)
+		case agent.EvMessageUpdate:
+			task.updateStage("streaming_model_response", now)
+		case agent.EvTurnEnd:
+			task.updateStage("turn_completed", now)
+		default:
+			task.touchActivity(now)
+		}
 		if event.Type == agent.EvTurnEnd {
 			task.mu.Lock()
 			task.turnCount++
@@ -1101,8 +1154,8 @@ func (m *Manager) runSubagent(task *subagentTask) {
 				task.mu.Unlock()
 			}
 
-			// Hard limit check: maxTurns + 5 grace turns. If tools were called, abort before next turn
-			if maxTurns > 0 && currentTurns >= maxTurns+5 && len(event.ToolResults) > 0 {
+			// Hard limit check: maxTurns + 5 grace turns. Abort regardless of whether tools were called.
+			if maxTurns > 0 && currentTurns >= maxTurns+5 {
 				task.mu.Lock()
 				task.hardAborted = true
 				task.mu.Unlock()
@@ -1156,14 +1209,8 @@ func (m *Manager) runSubagent(task *subagentTask) {
 				timedOut := !last.IsZero() && m.clock.Now().Sub(last) >= DefaultSubagentInactivityTimeout
 				if timedOut && !task.stopped && !task.inactivityTimedOut {
 					task.inactivityTimedOut = true
-					task.stopped = true
-					if task.activeSession != nil {
-						task.activeSession.Abort()
-					}
-					if task.cancel != nil {
-						task.cancel()
-					}
 					task.mu.Unlock()
+					task.abortExecution()
 					return
 				}
 				task.mu.Unlock()
@@ -1191,8 +1238,17 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	inactivityTimedOut := task.inactivityTimedOut
 	if inactivityTimedOut {
 		terminalStatus = "failed"
-		errorMsg = "subagent execution timed out due to inactivity (no activity for 3 minutes)"
-		resultText = "Subagent execution timed out due to inactivity (no activity for 3 minutes)."
+		stage := task.lastStage
+		if stage == "" {
+			stage = "initialized"
+		}
+		var stageDur time.Duration
+		if !task.lastStageTime.IsZero() {
+			stageDur = m.clock.Now().Sub(task.lastStageTime)
+		}
+		stageDurSec := int(stageDur.Round(time.Second).Seconds())
+		errorMsg = fmt.Sprintf("subagent execution timed out due to inactivity (no activity for %s, %ds in stage: %s)", DefaultSubagentInactivityTimeout, stageDurSec, stage)
+		resultText = fmt.Sprintf("Subagent execution timed out due to inactivity (no activity for %s, %ds in stage: %s).", DefaultSubagentInactivityTimeout, stageDurSec, stage)
 	} else if task.hardAborted {
 		terminalStatus = "failed"
 		errorMsg = "hard turn limit reached: exceeded maximum turn limit and grace period without settling"

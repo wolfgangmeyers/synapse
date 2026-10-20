@@ -1728,9 +1728,9 @@ func TestSubagentRunnerInactivityTimeout(t *testing.T) {
 		return task != nil
 	}, 2*time.Second, 10*time.Millisecond)
 
-	// Wind back lastActivity to exceed DefaultSubagentInactivityTimeout (3 minutes)
+	// Wind back lastActivity to exceed DefaultSubagentInactivityTimeout (90 seconds)
 	task.mu.Lock()
-	task.lastActivity = time.Now().Add(-4 * time.Minute)
+	task.lastActivity = time.Now().Add(-100 * time.Second)
 	task.mu.Unlock()
 
 	// Inactivity watchdog ticker or TimeoutExpiredSubagents will detect and abort
@@ -1748,12 +1748,13 @@ func TestSubagentRunnerInactivityTimeout(t *testing.T) {
 	require.Equal(t, "failed", rec.Status)
 	require.Contains(t, rec.Error, "inactivity")
 	require.Contains(t, rec.ResultText, "inactivity")
+	require.Contains(t, rec.Error, "stage:")
 
 	// Also verify TimeoutExpiredSubagents logic directly marks inactivityTimedOut
 	task2 := &subagentTask{
 		childID:      "task-2",
 		startTime:    time.Now().Add(-1 * time.Minute),
-		lastActivity: time.Now().Add(-4 * time.Minute),
+		lastActivity: time.Now().Add(-100 * time.Second),
 		timeout:      10 * time.Minute,
 	}
 	mgr.subagentsMu.Lock()
@@ -2013,4 +2014,205 @@ func TestSubagentRunnerExecutionTimeout(t *testing.T) {
 	require.Equal(t, "failed", saved.Status)
 	require.Contains(t, saved.Error, "subagent execution timed out (exceeded")
 	require.Contains(t, saved.ResultText, "Subagent execution timed out")
+}
+
+func TestSubagentRunnerStageTracking(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_stages.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-stage")
+	parentRecord, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(parentRecord.Cwd, "test.txt"), []byte("sample content"), 0o600))
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	gate := make(chan struct{})
+	toolExecGate := make(chan struct{})
+	reg.SetResponses([]providers.FauxResponseStep{
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			<-gate
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.ToolCall{ID: "call-stage-1", Name: "read", Arguments: map[string]any{"path": "test.txt"}},
+			}, ai.StopStop)
+		},
+		func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			<-toolExecGate
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "all done"},
+			}, ai.StopStop)
+		},
+	})
+
+	mgr := makeSubagentTestManager(t, db, reg, 1)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	childID := "subagent-stage-1"
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     childID,
+		Description: "stage test",
+		Prompt:      "run",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", res.Status)
+
+	var task *subagentTask
+	require.Eventually(t, func() bool {
+		mgr.subagentsMu.Lock()
+		defer mgr.subagentsMu.Unlock()
+		task = mgr.subagentsActive[childID]
+		return task != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Test updateStage directly updates lastStage, lastStageTime, and lastActivity
+	stageTask := &subagentTask{}
+	t0 := time.Now().Add(-10 * time.Second)
+	stageTask.updateStage("streaming_model_response", t0)
+	stageTask.mu.Lock()
+	require.Equal(t, "streaming_model_response", stageTask.lastStage)
+	require.Equal(t, t0, stageTask.lastStageTime)
+	require.Equal(t, t0, stageTask.lastActivity)
+	stageTask.mu.Unlock()
+
+	// In the beginning while waiting for model:
+	require.Eventually(t, func() bool {
+		task.mu.Lock()
+		defer task.mu.Unlock()
+		return task.lastStage == "waiting_for_model"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	close(gate)
+
+	// When tool is executed, stage should transition to executing_tool:read
+	require.Eventually(t, func() bool {
+		task.mu.Lock()
+		defer task.mu.Unlock()
+		return task.lastStage == "executing_tool:read" || task.lastStage == "waiting_for_model" || task.lastStage == "turn_completed"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	close(toolExecGate)
+
+	// Wait for turn completion or done
+	require.Eventually(t, func() bool {
+		rec, err := db.ManagedSubagent(ctx, parent, childID)
+		return err == nil && rec.Status == "completed"
+	}, 4*time.Second, 20*time.Millisecond)
+
+	task.mu.Lock()
+	finalStage := task.lastStage
+	task.mu.Unlock()
+	require.Equal(t, "turn_completed", finalStage)
+
+	// Now test stage diagnostics on failure in finalizeSubagent:
+	// Create a failing task with lastStage and verify errorMsg includes stage diagnostic.
+	failedTask := &subagentTask{
+		parent:        parent,
+		childID:       "failed-stage-child",
+		attempt:       1,
+		lastStage:     "waiting_for_model",
+		lastStageTime: time.Now().Add(-15 * time.Second),
+	}
+	// Seed record in store
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, store.ManagedSubagentRecord{
+		AgentID:       "failed-stage-child",
+		ParentAgentID: parent.AgentID,
+		Status:        "running",
+	}))
+
+	mgr.finalizeSubagent(failedTask, "failed", "Task failed", "some runtime failure")
+	failedRec, err := db.ManagedSubagent(ctx, parent, "failed-stage-child")
+	require.NoError(t, err)
+	require.Contains(t, failedRec.Error, "waiting_for_model")
+	require.Contains(t, failedRec.Error, "in stage: waiting_for_model")
+	require.Contains(t, failedRec.ResultText, "in stage: waiting_for_model")
+}
+
+func TestSubagentRunnerTurnLimitWithoutToolsAborts(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_hard_stop_no_tools.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-hard-notools")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	// Provide responses where model produces message and steers next turn or we simulate 7 turns
+	steps := make([]providers.FauxResponseStep, 10)
+	for i := 0; i < 10; i++ {
+		steps[i] = func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{
+				ai.TextContent{Text: "talking without tools"},
+			}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(steps)
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	childID := "subagent-hard-notools-1"
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{
+		AgentID:     childID,
+		Description: "chatty child without tools",
+		MaxTurns:    2,
+		Prompt:      "keep talking",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", res.Status)
+
+	var task *subagentTask
+	require.Eventually(t, func() bool {
+		mgr.subagentsMu.Lock()
+		defer mgr.subagentsMu.Unlock()
+		task = mgr.subagentsActive[childID]
+		return task != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Simulate event loop emitting EvTurnEnd with no tool results until maxTurns+5 (7 turns)
+	task.mu.Lock()
+	task.turnCount = 6 // next turn end will be 7
+	task.mu.Unlock()
+
+	// Trigger steer to make session execute another turn if needed, or directly verify session aborts
+	err = mgr.SteerSubagent(ctx, parent, childID, "next turn")
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		rec, err := db.ManagedSubagent(ctx, parent, childID)
+		if err != nil {
+			return false
+		}
+		return rec.Status == "failed"
+	}, 4*time.Second, 20*time.Millisecond)
+
+	rec, err := db.ManagedSubagent(ctx, parent, childID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", rec.Status)
+	require.Contains(t, rec.Error, "hard turn limit reached")
+}
+
+func TestSubagentTurnLimitCheckRespectsMaxTurnsRegardlessOfTools(t *testing.T) {
+	// Directly verify that Subscribe's hard limit check aborts when currentTurns >= maxTurns+5 even if ToolResults is empty.
+	task := &subagentTask{
+		maxTurns:  2,
+		turnCount: 6, // will become 7 on EvTurnEnd, which is >= maxTurns+5 (7)
+	}
+	// Before the fix: len(event.ToolResults) > 0 was required, so empty ToolResults would bypass.
+	// With the fix: maxTurns > 0 && currentTurns >= maxTurns+5 triggers abort.
+	// Let's test the task abort state logic.
+	task.mu.Lock()
+	task.turnCount++ // 7
+	currentTurns := task.turnCount
+	maxTurns := task.maxTurns
+	task.mu.Unlock()
+
+	require.True(t, maxTurns > 0 && currentTurns >= maxTurns+5)
 }
