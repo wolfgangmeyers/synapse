@@ -876,6 +876,7 @@ export interface ManagedAgent {
   updated_at: RouterTimestamp;
   last_error: ManagedError | null;
   worktree?: boolean;
+  worktree_base_path?: string;
   allow_inline_tools?: boolean | undefined;
   context_usage?: ContextUsage;
   progress?: AgentProgress | null;

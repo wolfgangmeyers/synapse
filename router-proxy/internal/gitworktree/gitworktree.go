@@ -132,23 +132,34 @@ func CheckWorktree(ctx context.Context, path string) (WorktreeCheckResult, error
 	return result, nil
 }
 
+// refExists reports whether a git ref exists in the repository.
+func refExists(ctx context.Context, baseRepoPath, ref string) bool {
+	if baseRepoPath == "" || ref == "" {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", baseRepoPath, "show-ref", "--verify", "--quiet", ref)
+	return cmd.Run() == nil
+}
+
 // branchExists reports whether branchName exists locally (refs/heads/<branchName>)
 // or in remote tracking (refs/remotes/origin/<branchName>).
 func branchExists(ctx context.Context, baseRepoPath, branchName string) bool {
 	if baseRepoPath == "" || branchName == "" {
 		return false
 	}
-	cmdLocal := exec.CommandContext(ctx, "git", "-C", baseRepoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
-	if err := cmdLocal.Run(); err == nil {
+	if refExists(ctx, baseRepoPath, "refs/heads/"+branchName) {
 		return true
 	}
-	cmdRemote := exec.CommandContext(ctx, "git", "-C", baseRepoPath, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branchName)
-	return cmdRemote.Run() == nil
+	return refExists(ctx, baseRepoPath, "refs/remotes/origin/"+branchName)
 }
 
 // CreateWorktree runs `git -C <baseRepoPath> worktree add <worktreePath> <branchName>` if branchName
-// exists locally or in remote tracking, or `git -C <baseRepoPath> worktree add -b <branchName> <worktreePath>`
-// if it does not exist.
+// exists locally or in remote tracking.
+// For a new branch, it runs best-effort `git -C <baseRepoPath> fetch origin main` (ignoring errors).
+// If `refs/remotes/origin/main` exists, it creates the branch based on origin/main:
+// `git -C <baseRepoPath> worktree add -b <branchName> <worktreePath> origin/main`.
+// Otherwise, it falls back to:
+// `git -C <baseRepoPath> worktree add -b <branchName> <worktreePath>`.
 func CreateWorktree(ctx context.Context, baseRepoPath, branchName, worktreePath string) error {
 	if baseRepoPath == "" {
 		return errors.New("baseRepoPath cannot be empty")
@@ -164,7 +175,15 @@ func CreateWorktree(ctx context.Context, baseRepoPath, branchName, worktreePath 
 	if branchExists(ctx, baseRepoPath, branchName) {
 		cmd = exec.CommandContext(ctx, "git", "-C", baseRepoPath, "worktree", "add", worktreePath, branchName)
 	} else {
-		cmd = exec.CommandContext(ctx, "git", "-C", baseRepoPath, "worktree", "add", "-b", branchName, worktreePath)
+		// Best-effort fetch origin main before creating new branch
+		fetchCmd := exec.CommandContext(ctx, "git", "-C", baseRepoPath, "fetch", "origin", "main")
+		_ = fetchCmd.Run()
+
+		if refExists(ctx, baseRepoPath, "refs/remotes/origin/main") {
+			cmd = exec.CommandContext(ctx, "git", "-C", baseRepoPath, "worktree", "add", "-b", branchName, worktreePath, "origin/main")
+		} else {
+			cmd = exec.CommandContext(ctx, "git", "-C", baseRepoPath, "worktree", "add", "-b", branchName, worktreePath)
+		}
 	}
 
 	out, err := cmd.CombinedOutput()

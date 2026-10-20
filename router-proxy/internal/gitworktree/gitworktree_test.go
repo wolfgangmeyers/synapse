@@ -248,3 +248,95 @@ func TestCreateWorktree_ExistingBranch_AlreadyCheckedOut(t *testing.T) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
+
+func TestCreateWorktree_BasesOnOriginMainWhenPresent(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Create upstream origin repository
+	originDir := t.TempDir()
+	runGit(t, originDir, "init", "-b", "main")
+	runGit(t, originDir, "config", "user.name", "Origin User")
+	runGit(t, originDir, "config", "user.email", "origin@example.com")
+
+	initialFile := filepath.Join(originDir, "README.md")
+	if err := os.WriteFile(initialFile, []byte("# Commit 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, originDir, "add", "README.md")
+	runGit(t, originDir, "commit", "-m", "commit 1")
+
+	// 2. Clone to local repository
+	localDir := filepath.Join(t.TempDir(), "local")
+	cmdClone := exec.Command("git", "clone", originDir, localDir)
+	if out, err := cmdClone.CombinedOutput(); err != nil {
+		t.Fatalf("git clone failed: %v: %s", err, string(out))
+	}
+	runGit(t, localDir, "config", "user.name", "Local User")
+	runGit(t, localDir, "config", "user.email", "local@example.com")
+
+	// 3. Add a new commit to origin/main that local has NOT yet pulled
+	if err := os.WriteFile(initialFile, []byte("# Commit 2 upstream\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, originDir, "commit", "-am", "commit 2 upstream")
+	originLatestSHA := runGit(t, originDir, "rev-parse", "HEAD")
+
+	// Verify local main is still on commit 1
+	localMainSHA := runGit(t, localDir, "rev-parse", "HEAD")
+	if localMainSHA == originLatestSHA {
+		t.Fatalf("expected local main SHA to differ from origin latest SHA before fetch")
+	}
+
+	// 4. Create worktree in local repo for a new branch
+	wtPath, err := GenerateWorktreePath(localDir, "feat/based-on-origin-main")
+	if err != nil {
+		t.Fatalf("GenerateWorktreePath error: %v", err)
+	}
+	defer os.RemoveAll(wtPath)
+
+	err = CreateWorktree(ctx, localDir, "feat/based-on-origin-main", wtPath)
+	if err != nil {
+		t.Fatalf("CreateWorktree failed: %v", err)
+	}
+
+	// 5. Verify the new worktree branch's commit matches origin/main HEAD
+	wtSHA := runGit(t, wtPath, "rev-parse", "HEAD")
+	if wtSHA != originLatestSHA {
+		t.Errorf("expected worktree HEAD commit %s (origin/main), got %s", originLatestSHA, wtSHA)
+	}
+
+	// Clean up
+	if err := RemoveWorktree(ctx, localDir, wtPath, true); err != nil {
+		t.Fatalf("RemoveWorktree failed: %v", err)
+	}
+}
+
+func TestCreateWorktree_FallbackWhenNoOriginMain(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitRepo(t)
+
+	// repo was initialized locally with initGitRepo; it has NO remotes, so refs/remotes/origin/main does NOT exist.
+	localHeadSHA := runGit(t, repo, "rev-parse", "HEAD")
+
+	wtPath, err := GenerateWorktreePath(repo, "feat/no-origin-fallback")
+	if err != nil {
+		t.Fatalf("GenerateWorktreePath error: %v", err)
+	}
+	defer os.RemoveAll(wtPath)
+
+	err = CreateWorktree(ctx, repo, "feat/no-origin-fallback", wtPath)
+	if err != nil {
+		t.Fatalf("CreateWorktree failed: %v", err)
+	}
+
+	// Verify the new worktree HEAD commit matches local HEAD
+	wtSHA := runGit(t, wtPath, "rev-parse", "HEAD")
+	if wtSHA != localHeadSHA {
+		t.Errorf("expected worktree HEAD commit %s (local HEAD), got %s", localHeadSHA, wtSHA)
+	}
+
+	// Clean up
+	if err := RemoveWorktree(ctx, repo, wtPath, true); err != nil {
+		t.Fatalf("RemoveWorktree failed: %v", err)
+	}
+}
