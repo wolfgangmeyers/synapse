@@ -16,7 +16,7 @@ if (options.urls?.length) tools.push({ urlContext: {} });
 
 const request = {
   project: projectId,
-  model: "gemini-3-flash", // fallbacks: gemini-3.6-flash-low, gemini-2.5-flash
+  model: "gemini-3.8-flash", // fallbacks: gemini-3.8-flash-low, gemini-3.6-flash-low
   request: {
     systemInstruction: { role: "user", parts: [{ text: systemPrompt }] },
     contents: [{ role: "user", parts: [{ text: queryPrompt }] }],
