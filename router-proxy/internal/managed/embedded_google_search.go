@@ -45,7 +45,7 @@ func (m *Manager) hasGoogleSearchAuth(ctx context.Context) bool {
 	if apiKey, aErr := m.resolveGoogleAPIKey(ctx); aErr == nil && apiKey != "" {
 		return true
 	}
-	vToken, _, _, vErr := m.embeddedVertexAuth(ctx, false)
+	vToken, _, _, vErr := m.embeddedVertexAuth(ctx, false, "gemini-3.8-flash")
 	return vErr == nil && vToken != ""
 }
 
@@ -147,7 +147,7 @@ func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruc
 	}
 
 	// Fallback to Vertex AI
-	vToken, vProject, vLoc, vErr := m.embeddedVertexAuth(ctx, false)
+	vToken, vProject, vLoc, vErr := m.embeddedVertexAuth(ctx, false, "gemini-3.8-flash")
 	if vErr == nil && vToken != "" {
 		res, vExecErr := m.executeVertexGrounding(ctx, vToken, vProject, vLoc, query, instruction, urls)
 		if vExecErr == nil {
