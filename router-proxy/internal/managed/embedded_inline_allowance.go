@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	InlineToolPoolCapacity            = 5
+	InlineToolPoolCapacity            = 3
 	InlineToolReplenishmentIntervalMS = 60_000
 	InlineToolBlockReason             = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround."
 	InlineToolAllowanceToolName       = "mecha_request_inline_tool_allowance"
@@ -85,7 +85,7 @@ func (l *managedAgentLane) grantInlineAllowance(toolName string, usageCount int,
 		if availableWholeCredits == 0 && l.inlinePoolRemainingMs == 0 {
 			exhaustedText = " The pool is exhausted."
 		}
-		errMsg := fmt.Sprintf("Insufficient inline tool credits: requested %d credit(s), but only %d whole credit(s) are available (pool currently holds %v credit(s)).%s No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 5 credits.\nATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool. You need to be using subagents instead.\n\nRead that again: YOU SHOULD BE USING SUBAGENTS INSTEAD. Continue to ignore this mandatory policy and the inline tool allowance will be disabled.", usageCount, availableWholeCredits, remainingPool, exhaustedText)
+		errMsg := fmt.Sprintf("Insufficient inline tool credits: requested %d credit(s), but only %d whole credit(s) are available (pool currently holds %v credit(s)).%s No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 3 credits.\nATTENTION: you are probably getting this error because you are ABUSING the inline allowance escape hatch tool. You need to be using subagents instead.\n\nRead that again: YOU SHOULD BE USING SUBAGENTS INSTEAD. Continue to ignore this mandatory policy and the inline tool allowance will be disabled.", usageCount, availableWholeCredits, remainingPool, exhaustedText)
 		return InlineAllowanceDetails{
 			ToolName:              toolName,
 			UsageCount:            usageCount,
@@ -111,20 +111,24 @@ func (l *managedAgentLane) grantInlineAllowance(toolName string, usageCount int,
 	}, nil
 }
 
-func (l *managedAgentLane) consumeInlineAllowance(toolName string) bool {
+func (l *managedAgentLane) consumeInlineAllowance(toolName string, now time.Time) bool {
 	if l == nil {
 		return false
 	}
 	l.activeMu.Lock()
 	defer l.activeMu.Unlock()
 
-	if l.inlineAllowances == nil {
-		return false
-	}
-	if l.inlineAllowances[toolName] > 0 {
+	if l.inlineAllowances != nil && l.inlineAllowances[toolName] > 0 {
 		l.inlineAllowances[toolName]--
 		return true
 	}
+
+	l.replenishInlinePool(now)
+	if l.inlinePoolRemainingMs >= InlineToolReplenishmentIntervalMS {
+		l.inlinePoolRemainingMs -= InlineToolReplenishmentIntervalMS
+		return true
+	}
+
 	return false
 }
 
@@ -144,7 +148,7 @@ func embeddedRequestInlineToolAllowanceSchema() *ai.Schema {
 	closed := false
 	s := ai.Object(
 		ai.Prop("toolName", ai.String("Canonical tool name (bash, edit, or write), or its functions.* alias.")),
-		ai.Prop("usageCount", ai.Integer("Number of temporary uses to grant, from 1 through 5.")),
+		ai.Prop("usageCount", ai.Integer("Number of temporary uses to grant, from 1 through 3.")),
 	)
 	s.AdditionalAllowed = &closed
 	return s
@@ -208,8 +212,8 @@ func (m *Manager) embeddedRequestInlineToolAllowanceTool(owner embeddedOwner) ag
 				}, normErr
 			}
 
-			if usageCount < 1 || usageCount > 5 {
-				err := errors.New("usageCount must be an integer from 1 through 5")
+			if usageCount < 1 || usageCount > 3 {
+				err := errors.New("usageCount must be an integer from 1 through 3")
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
 						ai.TextContent{Text: err.Error()},

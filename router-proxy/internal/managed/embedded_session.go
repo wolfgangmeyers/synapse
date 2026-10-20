@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -1606,7 +1607,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 
 				// Otherwise, check allowance credits
 				lane := m.laneFor(binding.AgentID)
-				if lane != nil && lane.consumeInlineAllowance(normalizedToolName) {
+				if lane != nil && lane.consumeInlineAllowance(normalizedToolName, time.Now()) {
 					return nil
 				}
 				return &agent.BeforeToolCallResult{
