@@ -99,4 +99,150 @@ describe("PromptTemplateDialog", () => {
     expect(addBtn).toHaveClass("action-button");
     expect(addBtn.querySelector(".fa-plus")).toBeInTheDocument();
   });
+
+  describe("GitHub Sync", () => {
+    it("renders github sync controls when client is provided", async () => {
+      const mockClient = {
+        getGitSyncTarget: vi.fn().mockResolvedValue({ target: "prompt_templates", repo_url: "git@github.com:foo/bar.git" }),
+        setGitSyncTarget: vi.fn(),
+        pullGitSync: vi.fn(),
+        pushGitSync: vi.fn(),
+      } as any;
+
+      render(<PromptTemplateDialog {...base} client={mockClient} />);
+
+      expect(screen.getByRole("region", { name: "GitHub Sync" })).toBeInTheDocument();
+      await vi.waitFor(() => {
+        expect(screen.getByDisplayValue("git@github.com:foo/bar.git")).toBeInTheDocument();
+      });
+      expect(screen.getByRole("button", { name: /Pull from GitHub/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Push to GitHub/i })).toBeInTheDocument();
+    });
+
+    it("saves repository URL on save button click", async () => {
+      const user = userEvent.setup();
+      const mockClient = {
+        getGitSyncTarget: vi.fn().mockResolvedValue(null),
+        setGitSyncTarget: vi.fn().mockResolvedValue({ target: "prompt_templates", repo_url: "git@github.com:new/repo.git" }),
+        pullGitSync: vi.fn(),
+        pushGitSync: vi.fn(),
+      } as any;
+
+      render(<PromptTemplateDialog {...base} client={mockClient} />);
+
+      const input = screen.getByPlaceholderText(/git@github.com:owner\/repo.git/);
+      await user.type(input, "git@github.com:new/repo.git");
+
+      const saveBtn = screen.getByRole("button", { name: "Save" });
+      expect(saveBtn).not.toBeDisabled();
+      await user.click(saveBtn);
+
+      expect(mockClient.setGitSyncTarget).toHaveBeenCalledWith("prompt_templates", "git@github.com:new/repo.git");
+      expect(await screen.findByText("Repository URL saved.")).toBeInTheDocument();
+    });
+
+    it("prompts confirmation when Pull is clicked, and warns when file does not exist", async () => {
+      const user = userEvent.setup();
+      const mockClient = {
+        getGitSyncTarget: vi.fn().mockResolvedValue({ target: "prompt_templates", repo_url: "git@github.com:foo/bar.git" }),
+        setGitSyncTarget: vi.fn(),
+        pullGitSync: vi.fn().mockResolvedValue({ exists: false }),
+        pushGitSync: vi.fn(),
+      } as any;
+
+      render(<PromptTemplateDialog {...base} client={mockClient} />);
+
+      await vi.waitFor(() => {
+        expect(screen.getByDisplayValue("git@github.com:foo/bar.git")).toBeInTheDocument();
+      });
+
+      const pullBtn = screen.getByRole("button", { name: /Pull from GitHub/i });
+      await user.click(pullBtn);
+
+      // Destructive confirmation prompt appears
+      expect(screen.getByText(/This will replace all local prompt templates with the version from GitHub. Continue\?/i)).toBeInTheDocument();
+
+      const confirmBtn = screen.getByRole("button", { name: "Confirm Pull" });
+      await user.click(confirmBtn);
+
+      expect(mockClient.pullGitSync).toHaveBeenCalledWith("prompt_templates");
+      // Warning popup / toast appears
+      expect(await screen.findByText("No prompt-templates.json found in this repository. Nothing was changed.")).toBeInTheDocument();
+    });
+
+    it("calls onReloadTemplates and shows count on successful pull", async () => {
+      const user = userEvent.setup();
+      const onReloadTemplates = vi.fn();
+      const mockClient = {
+        getGitSyncTarget: vi.fn().mockResolvedValue({ target: "prompt_templates", repo_url: "git@github.com:foo/bar.git" }),
+        setGitSyncTarget: vi.fn(),
+        pullGitSync: vi.fn().mockResolvedValue({ exists: true, count: 5 }),
+        pushGitSync: vi.fn(),
+      } as any;
+
+      render(<PromptTemplateDialog {...base} client={mockClient} onReloadTemplates={onReloadTemplates} />);
+
+      await vi.waitFor(() => {
+        expect(screen.getByDisplayValue("git@github.com:foo/bar.git")).toBeInTheDocument();
+      });
+
+      const pullBtn = screen.getByRole("button", { name: /Pull from GitHub/i });
+      await user.click(pullBtn);
+
+      const confirmBtn = screen.getByRole("button", { name: "Confirm Pull" });
+      await user.click(confirmBtn);
+
+      expect(mockClient.pullGitSync).toHaveBeenCalledWith("prompt_templates");
+      expect(await screen.findByText("Successfully pulled 5 templates from GitHub.")).toBeInTheDocument();
+      expect(onReloadTemplates).toHaveBeenCalled();
+    });
+
+    it("pushes to github and shows success message", async () => {
+      const user = userEvent.setup();
+      const mockClient = {
+        getGitSyncTarget: vi.fn().mockResolvedValue({ target: "prompt_templates", repo_url: "git@github.com:foo/bar.git" }),
+        setGitSyncTarget: vi.fn(),
+        pullGitSync: vi.fn(),
+        pushGitSync: vi.fn().mockResolvedValue({ success: true, count: 1 }),
+      } as any;
+
+      render(<PromptTemplateDialog {...base} client={mockClient} />);
+
+      await vi.waitFor(() => {
+        expect(screen.getByDisplayValue("git@github.com:foo/bar.git")).toBeInTheDocument();
+      });
+
+      const pushBtn = screen.getByRole("button", { name: /Push to GitHub/i });
+      await user.click(pushBtn);
+
+      expect(mockClient.pushGitSync).toHaveBeenCalledWith("prompt_templates");
+      expect(await screen.findByText("Successfully pushed 1 template to GitHub.")).toBeInTheDocument();
+    });
+
+    it("clears repository URL when clear button is clicked", async () => {
+      const user = userEvent.setup();
+      const mockClient = {
+        getGitSyncTarget: vi.fn().mockResolvedValue({ target: "prompt_templates", repo_url: "git@github.com:foo/bar.git" }),
+        setGitSyncTarget: vi.fn(),
+        clearGitSyncTarget: vi.fn().mockResolvedValue(undefined),
+        pullGitSync: vi.fn(),
+        pushGitSync: vi.fn(),
+      } as any;
+
+      render(<PromptTemplateDialog {...base} client={mockClient} />);
+
+      await vi.waitFor(() => {
+        expect(screen.getByDisplayValue("git@github.com:foo/bar.git")).toBeInTheDocument();
+      });
+
+      const clearBtn = screen.getByRole("button", { name: "Clear repository URL" });
+      expect(clearBtn).toBeInTheDocument();
+      await user.click(clearBtn);
+
+      expect(mockClient.clearGitSyncTarget).toHaveBeenCalledWith("prompt_templates");
+      expect(await screen.findByText("Repository URL cleared.")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/git@github.com:owner\/repo.git/)).toHaveValue("");
+    });
+  });
 });
+

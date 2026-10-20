@@ -261,6 +261,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
 		return
 	}
+	if target, action, ok := gitSyncRoute(path); ok {
+		r.handleGitSync(w, req, target, action)
+		return
+	}
 	if serverID, subAction, subSub, ok := mcpServerRoute(path); ok {
 		r.handleMCPServerItem(w, req, serverID, subAction, subSub)
 		return

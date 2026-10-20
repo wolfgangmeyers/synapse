@@ -500,6 +500,27 @@ export interface AgentToolsResponse {
   tools: AgentToolItem[];
 }
 
+export interface GitSyncTarget {
+  target: string;
+  repo_url: string;
+  updated_at?: string;
+}
+
+export interface GitSyncPullResponse {
+  exists?: boolean;
+  message?: string;
+  success?: boolean;
+  error?: string;
+  count?: number;
+  templates?: PromptTemplate[];
+}
+
+export interface GitSyncPushResponse {
+  success?: boolean;
+  error?: string;
+  count?: number;
+}
+
 export interface RouterHttpClient {
   readonly routerUrl: string;
   request(path: string, init?: RequestInit): Promise<unknown>;
@@ -587,6 +608,11 @@ export interface RouterHttpClient {
   updateToolDefaults(payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }>;
   getAgentTools(agentId: string): Promise<AgentToolsResponse>;
   updateAgentTools(agentId: string, payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }>;
+  getGitSyncTarget(target: string): Promise<GitSyncTarget | null>;
+  setGitSyncTarget(target: string, repoUrl: string): Promise<GitSyncTarget>;
+  clearGitSyncTarget(target: string): Promise<void>;
+  pullGitSync(target: string): Promise<GitSyncPullResponse>;
+  pushGitSync(target: string): Promise<GitSyncPushResponse>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
   stopManagedSubagent(agentId: string, childId: string): Promise<void>;
@@ -930,6 +956,46 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     updateAgentTools: async (agentId: string, payload: { tool_name?: string; category?: string; enabled: boolean }): Promise<{ ok: boolean }> => {
       const res = await jsonRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/tools`, "PUT", payload);
       return (recordValue(res) ?? { ok: true }) as { ok: boolean };
+    },
+    getGitSyncTarget: async (target: string): Promise<GitSyncTarget | null> => {
+      try {
+        const res = await request(`/v1/git-sync/${encodeURIComponent(target)}`, { method: "GET" });
+        const body = recordValue(res);
+        if (!body || typeof body.target !== "string" || typeof body.repo_url !== "string") return null;
+        return {
+          target: body.target,
+          repo_url: body.repo_url,
+          ...(typeof body.updated_at === "string" ? { updated_at: body.updated_at } : {}),
+        };
+      } catch (err) {
+        if (err instanceof HttpRequestError && err.status === 404) {
+          return null;
+        }
+        throw err;
+      }
+    },
+    setGitSyncTarget: async (target: string, repoUrl: string): Promise<GitSyncTarget> => {
+      const res = await jsonRequest(`/v1/git-sync/${encodeURIComponent(target)}`, "PUT", { repo_url: repoUrl });
+      const body = recordValue(res);
+      if (!body || typeof body.target !== "string" || typeof body.repo_url !== "string") {
+        throw invalidResponse("Router returned an invalid git sync target response", body);
+      }
+      return {
+        target: body.target,
+        repo_url: body.repo_url,
+        ...(typeof body.updated_at === "string" ? { updated_at: body.updated_at } : {}),
+      };
+    },
+    clearGitSyncTarget: async (target: string): Promise<void> => {
+      await request(`/v1/git-sync/${encodeURIComponent(target)}`, { method: "DELETE" });
+    },
+    pullGitSync: async (target: string): Promise<GitSyncPullResponse> => {
+      const res = await jsonRequest(`/v1/git-sync/${encodeURIComponent(target)}/pull`, "POST", {});
+      return (recordValue(res) ?? {}) as GitSyncPullResponse;
+    },
+    pushGitSync: async (target: string): Promise<GitSyncPushResponse> => {
+      const res = await jsonRequest(`/v1/git-sync/${encodeURIComponent(target)}/push`, "POST", {});
+      return (recordValue(res) ?? {}) as GitSyncPushResponse;
     },
   };
 }

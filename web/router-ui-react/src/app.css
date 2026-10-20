@@ -342,6 +342,165 @@ p:empty { display: none; }
 .prompt-template-actions .danger-button { background: transparent; color: var(--danger); border: 1px solid rgba(255,180,171,0.28); }
 .prompt-delete-confirmation { color: var(--danger); }
 .prompt-template-dialog-status { min-height: 1.4em; color: var(--muted); }
+.prompt-template-dialog-status.error { color: var(--danger); }
+
+/* GitHub Sync Section */
+.prompt-github-sync {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prompt-github-sync-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+.prompt-github-sync-header i {
+  font-size: 15px;
+  color: var(--text);
+}
+.prompt-github-sync-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.prompt-github-input-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+.prompt-github-input-wrap .prompt-github-url-input {
+  width: 100%;
+  height: 32px;
+  box-sizing: border-box;
+  padding-right: 28px;
+}
+.prompt-github-input-clear {
+  position: absolute;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  min-height: 20px;
+  max-width: 20px;
+  max-height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.prompt-github-input-clear:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+.prompt-github-save-btn {
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  min-width: 64px;
+  padding: 6px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  transition: all 0.15s ease-in-out;
+}
+.prompt-github-save-btn:not(:disabled):hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.prompt-github-sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.prompt-github-sync-actions .icon-btn-round {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  min-height: 32px !important;
+  max-width: 32px !important;
+  max-height: 32px !important;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px !important;
+}
+.prompt-github-sync-actions .icon-btn-round i {
+  font-size: 13px;
+}
+.prompt-github-sync-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+.prompt-github-sync-btn:not(:disabled):hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.prompt-github-sync-confirm {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: rgba(255, 180, 171, 0.12);
+  border: 1px solid rgba(255, 180, 171, 0.35);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prompt-github-sync-confirm p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--danger);
+  line-height: 1.4;
+}
+.prompt-github-sync-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.prompt-github-sync-confirm-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
 /* Prompt template picker dialog */
 .prompt-picker-dialog {
   width: min(840px, calc(100vw - 32px));
@@ -1248,6 +1407,10 @@ p:empty { display: none; }
   flex: 1 1 auto;
 }
 
+.header-picker-card .prompt-picker-group .model-picker {
+  flex: 1 1 auto;
+}
+
 .header-picker-card .model-current {
   min-height: 26px;
   height: 26px;
@@ -1257,12 +1420,35 @@ p:empty { display: none; }
   font-weight: 500;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  width: 18rem;
+  width: 100%;
   box-sizing: border-box;
 }
 
 .header-picker-card .prompt-manage-button {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  margin: 0;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--muted, #94a3b8);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: all 0.15s ease-in-out;
+}
+
+.header-picker-card .prompt-manage-button:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text, #ffffff);
+  border-color: rgba(255, 255, 255, 0.25);
 }
 /* ==========================================================================
    Header Metric Cards (Context Used & Goal Progress)
