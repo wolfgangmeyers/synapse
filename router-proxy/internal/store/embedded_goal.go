@@ -176,20 +176,38 @@ func (s *Store) applyEmbeddedGoalCall(ctx context.Context, b EmbeddedBinding, ca
 			if err := json.Unmarshal(intent, &original); err != nil {
 				return errors.New("conflicting embedded goal call")
 			}
-			originalArgs, err := json.Marshal(original.Arguments)
-			if err != nil {
-				return err
-			}
-			expectedArgs := map[string]any{"action": c.Action}
-			if c.Action == "set" {
-				expectedArgs["goal"] = c.Goal
-			}
-			expected, err := json.Marshal(expectedArgs)
-			if err != nil {
-				return err
-			}
-			if effectAgent != b.AgentID || effectSession != b.SessionID || effectEpoch != b.Epoch || effectGeneration != b.Generation || original.ID != callID || original.Name != "goal" || !bytes.Equal(originalArgs, expected) || (c.Action == "set" && c.Settings != DefaultManagedGoalSettings()) {
+			if original.ID != callID || original.Name != "goal" {
 				return errors.New("conflicting embedded goal call")
+			}
+			if effectAgent != b.AgentID || effectSession != b.SessionID || effectEpoch != b.Epoch || effectGeneration != b.Generation {
+				return errors.New("conflicting embedded goal call")
+			}
+			origAction, _ := original.Arguments["action"].(string)
+			if origAction != c.Action {
+				return errors.New("conflicting embedded goal call")
+			}
+			if c.Action == "set" {
+				if c.Settings != DefaultManagedGoalSettings() || len(original.Arguments) != 2 {
+					return errors.New("conflicting embedded goal call")
+				}
+				origGoal, _ := original.Arguments["goal"].(string)
+				if origGoal != c.Goal {
+					return errors.New("conflicting embedded goal call")
+				}
+			} else {
+				if c.Goal != "" || c.Settings != (ManagedGoalSettings{}) {
+					return errors.New("conflicting embedded goal call")
+				}
+				for k, v := range original.Arguments {
+					if k != "action" && k != "goal" {
+						return errors.New("conflicting embedded goal call")
+					}
+					if k == "goal" && v != nil {
+						if _, ok := v.(string); !ok {
+							return errors.New("conflicting embedded goal call")
+						}
+					}
+				}
 			}
 			if !fresh {
 				return errors.New("embedded goal outcome unknown")
