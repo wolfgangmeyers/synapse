@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +244,75 @@ func TestEmbeddedGoogleSearch_ConfiguredVertexGlobalGrounding(t *testing.T) {
 	require.Contains(t, result, "[Public source](https://example.org/source)")
 	require.True(t, strings.HasPrefix(requestedPath, "/aiplatform.googleapis.com/v1beta1/projects/configured-project/locations/global/"), requestedPath)
 	require.Equal(t, []any{map[string]any{"googleSearch": map[string]any{}}}, requestedBody["tools"])
+}
+
+func TestEmbeddedGoogleSearch_ConfiguredVertexRegionalLocationUsesModelEndpoint(t *testing.T) {
+	vertexAuthMu.Lock()
+	previous := currentVertexToken
+	currentVertexToken = vertexTokenCache{}
+	vertexAuthMu.Unlock()
+	defer func() {
+		vertexAuthMu.Lock()
+		currentVertexToken = previous
+		vertexAuthMu.Unlock()
+	}()
+
+	var requestedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		requestedPath = r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer mock-token" {
+			http.Error(w, "wrong token", http.StatusUnauthorized)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if tools, ok := body["tools"].([]any); !ok || len(tools) != 1 || !reflect.DeepEqual(tools[0], map[string]any{"googleSearch": map[string]any{}}) {
+			http.Error(w, "missing public search grounding", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(generateContentResponse{Candidates: []searchCandidate{{
+			Content:           &candidateContent{Parts: []candidatePart{{Text: "Grounded answer"}}},
+			GroundingMetadata: &groundingMetadata{GroundingChunks: []groundingChunk{{Web: &groundingChunkWeb{URI: "https://example.org", Title: "Source"}}}},
+		}}})
+	}))
+	defer server.Close()
+	original := vertexGroundingURLTemplate
+	vertexGroundingURLTemplate = server.URL + "/%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
+	defer func() { vertexGroundingURLTemplate = original }()
+
+	home := t.TempDir()
+	adcPath := filepath.Join(home, "adc.json")
+	adc, err := json.Marshal(map[string]any{
+		"type": "authorized_user", "client_id": "client", "client_secret": "secret",
+		"refresh_token": "refresh", "token_uri": server.URL + "/token",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(adcPath, adc, 0600))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0700))
+	creds, err := json.Marshal(map[string]any{"google-vertex": map[string]any{"env": map[string]any{
+		"GOOGLE_APPLICATION_CREDENTIALS": adcPath, "GOOGLE_CLOUD_PROJECT": "configured-project", "GOOGLE_CLOUD_LOCATION": "us-central1",
+	}}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".pi", "agent", "auth.json"), creds, 0600))
+	t.Setenv("HOME", home)
+	t.Setenv("PI_AUTH_FILE", filepath.Join(home, "missing-auth.json"))
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+
+	mgr := &Manager{}
+	require.True(t, mgr.hasGoogleSearchAuth(context.Background()))
+	result, err := mgr.executeGoogleSearch(context.Background(), "public query", "", nil)
+	require.NoError(t, err)
+	require.Contains(t, result, "Grounded answer")
+	require.Contains(t, result, "[Source](https://example.org)")
+	require.Equal(t, "/aiplatform.googleapis.com/v1beta1/projects/configured-project/locations/global/publishers/google/models/gemini-3.8-flash:generateContent", requestedPath)
 }
 
 func TestEmbeddedGoogleSearch_CredentialFailover(t *testing.T) {
