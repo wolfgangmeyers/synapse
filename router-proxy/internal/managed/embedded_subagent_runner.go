@@ -19,6 +19,8 @@ import (
 	"github.com/sky-valley/pi/coding"
 )
 
+const DefaultSubagentInactivityTimeout = 3 * time.Minute
+
 type SubagentSpawnRequest struct {
 	AgentID      string
 	Description  string
@@ -62,6 +64,15 @@ type subagentTask struct {
 	wrapUpSteered   bool
 	hardAborted     bool
 	stopped         bool
+
+	lastActivity       time.Time
+	inactivityTimedOut bool
+}
+
+func (t *subagentTask) touchActivity(now time.Time) {
+	t.mu.Lock()
+	t.lastActivity = now
+	t.mu.Unlock()
 }
 
 func resolveSubagentSystemPrompt(subagentType string) string {
@@ -215,12 +226,28 @@ func (m *Manager) TimeoutExpiredSubagents(maxDuration time.Duration) {
 	m.subagentsMu.Lock()
 	var toAbort []*subagentTask
 	for _, task := range m.subagentsActive {
-		if task != nil && !task.startTime.IsZero() {
-			limit := task.timeout
-			if limit <= 0 {
-				limit = maxDuration
+		if task != nil {
+			task.mu.Lock()
+			started := !task.startTime.IsZero()
+			startTime := task.startTime
+			lastAct := task.lastActivity
+			taskTimeout := task.timeout
+			task.mu.Unlock()
+
+			if started {
+				limit := taskTimeout
+				if limit <= 0 {
+					limit = maxDuration
+				}
+				if now.Sub(startTime) > limit {
+					toAbort = append(toAbort, task)
+					continue
+				}
 			}
-			if now.Sub(task.startTime) > limit {
+			if !lastAct.IsZero() && now.Sub(lastAct) >= DefaultSubagentInactivityTimeout {
+				task.mu.Lock()
+				task.inactivityTimedOut = true
+				task.mu.Unlock()
 				toAbort = append(toAbort, task)
 			}
 		}
@@ -846,6 +873,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	task.mu.Lock()
 	task.cancel = cancel
 	task.startTime = m.clock.Now()
+	task.lastActivity = m.clock.Now()
 	task.mu.Unlock()
 	defer cancel()
 
@@ -934,6 +962,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		OrderedPersistence: p,
 		StreamFn:           stream,
 		BeforeToolCall: func(callCtx context.Context, c agent.BeforeToolCallContext) *agent.BeforeToolCallResult {
+			task.touchActivity(m.clock.Now())
 			if err := admitWorkflowStateTool(callCtx, m.store, childAgent.AgentID, c.ToolCall.Name); err != nil {
 				return &agent.BeforeToolCallResult{Block: true, Reason: err.Error()}
 			}
@@ -952,6 +981,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 			return nil
 		},
 		BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
+			task.touchActivity(m.clock.Now())
 			if err := admitWorkflowStateTool(callCtx, m.store, childAgent.AgentID, call.ToolCall.Name); err != nil {
 				return &agent.PolicyDenial{Reason: err.Error()}
 			}
@@ -994,11 +1024,16 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	if err := p.restore(taskCtx, session); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		task.mu.Lock()
 		isStopped := task.stopped
+		timedOut := task.inactivityTimedOut
 		task.mu.Unlock()
 		status := "failed"
 		errStr := fmt.Sprintf("restore history: %v", err)
 		resText := ""
-		if isStopped || taskCtx.Err() != nil {
+		if timedOut {
+			status = "failed"
+			errStr = "subagent execution timed out due to inactivity (no activity for 3 minutes)"
+			resText = "Subagent execution timed out due to inactivity (no activity for 3 minutes)."
+		} else if isStopped || taskCtx.Err() != nil {
 			status = "stopped"
 			resText = "Subagent stopped."
 			errStr = ""
@@ -1022,6 +1057,7 @@ func (m *Manager) runSubagent(task *subagentTask) {
 	}()
 
 	unsubscribe := session.Subscribe(func(eventCtx context.Context, event agent.AgentEvent) error {
+		task.touchActivity(m.clock.Now())
 		if event.Type == agent.EvTurnEnd {
 			task.mu.Lock()
 			task.turnCount++
@@ -1105,6 +1141,36 @@ func (m *Manager) runSubagent(task *subagentTask) {
 		initialPrompt = initialPrompt + "\n\nCRITICAL: You have the `goal` tool available. As your very first action, use the `goal` tool (with action='set') to set a clear, actionable goal for completing this task."
 	}
 
+	watchCtx, cancelWatch := context.WithCancel(taskCtx)
+	defer cancelWatch()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-ticker.C:
+				task.mu.Lock()
+				last := task.lastActivity
+				timedOut := !last.IsZero() && m.clock.Now().Sub(last) >= DefaultSubagentInactivityTimeout
+				if timedOut && !task.stopped && !task.inactivityTimedOut {
+					task.inactivityTimedOut = true
+					task.stopped = true
+					if task.activeSession != nil {
+						task.activeSession.Abort()
+					}
+					if task.cancel != nil {
+						task.cancel()
+					}
+					task.mu.Unlock()
+					return
+				}
+				task.mu.Unlock()
+			}
+		}
+	}()
+
 	if !hasUserOrTool {
 		_, runErr = session.Run(taskCtx, initialPrompt)
 	} else if lastRole == ai.RoleUser || lastRole == ai.RoleToolResult {
@@ -1122,7 +1188,12 @@ func (m *Manager) runSubagent(task *subagentTask) {
 
 	task.mu.Lock()
 	resultText = session.LastAssistantText()
-	if task.hardAborted {
+	inactivityTimedOut := task.inactivityTimedOut
+	if inactivityTimedOut {
+		terminalStatus = "failed"
+		errorMsg = "subagent execution timed out due to inactivity (no activity for 3 minutes)"
+		resultText = "Subagent execution timed out due to inactivity (no activity for 3 minutes)."
+	} else if task.hardAborted {
 		terminalStatus = "failed"
 		errorMsg = "hard turn limit reached: exceeded maximum turn limit and grace period without settling"
 		resultText = "Subagent aborted: exceeded maximum turn limit and grace period without settling."

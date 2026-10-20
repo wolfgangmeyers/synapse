@@ -257,11 +257,9 @@ test("write-ish top-level tools are blocked by default with mandatory-subagent g
   assert.equal(results.length, 3);
   for (const result of results) {
     assert.equal(result.block, true);
-    assert.match(result.reason, /subagents are mandatory/i);
-    assert.match(result.reason, new RegExp(INLINE_TOOL_ALLOWANCE_TOOL_NAME));
-    assert.match(result.reason, /genuinely necessary/);
-    assert.match(result.reason, /exceptional path/);
-    assert.match(result.reason, /not the normal workaround/);
+    assert.match(result.reason, /inline tool budget exhausted/i);
+    assert.match(result.reason, /delegate this work to subagents instead/i);
+    assert.match(result.reason, /replenish at 1 credit per minute up to a maximum of 3/i);
   }
 });
 
