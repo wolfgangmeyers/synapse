@@ -37,7 +37,10 @@ export function PromptControls({ templates, loaded = true, disabled = false, onM
   return (
     <div className="prompt-controls">
       <div className="prompt-picker-group">
-        <span className="model-label">Prompt</span>
+        <span className="model-label">
+          <i className="fa-regular fa-file-lines" aria-hidden="true" style={{ marginRight: 6 }} />
+          Prompt
+        </span>
         <div className="model-picker">
           <button
             ref={buttonRef}
