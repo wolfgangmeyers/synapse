@@ -628,6 +628,38 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     </div>
   </div>
 ) : null}
+          {agent ? (
+  <div
+    className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
+    role="button"
+    tabIndex={0}
+    title={`Subagents: ${activeSubagentsCount} active (${displayedSubagents.length} total). Click to view details.`}
+    onClick={() => setShowSubagentViewerDialog(true)}
+    onKeyDown={(e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        setShowSubagentViewerDialog(true);
+      }
+    }}
+  >
+    <div className="header-metric-icon subagents-icon">
+      <i className="fa-solid fa-robot" aria-hidden="true" />
+    </div>
+    <div className="header-metric-center">
+      <div className="header-metric-title">Subagents</div>
+      <div className="header-metric-track" role="progressbar" aria-valuenow={activeSubagentsCount} aria-valuemin={0} aria-valuemax={Math.max(1, displayedSubagents.length)}>
+        <div
+          className="header-metric-fill subagents-fill"
+          style={{ width: activeSubagentsCount > 0 ? `${Math.min(100, Math.max(25, (activeSubagentsCount / Math.max(1, displayedSubagents.length)) * 100))}%` : "0%" }}
+        />
+      </div>
+    </div>
+    <div className="header-metric-right">
+      <div className="header-metric-value">{activeSubagentsCount}</div>
+      <div className="header-metric-subvalue">{activeSubagentsCount > 0 ? "active" : "idle"}</div>
+    </div>
+  </div>
+) : null}
           {(promptControls || modelControls) ? (
             <div className="header-pickers-stack">
               {promptControls ? <div className="header-picker-card">{promptControls}</div> : null}

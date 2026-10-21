@@ -1528,6 +1528,52 @@ p:empty { display: none; }
   box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
 }
 
+.header-metric-card.subagents-card {
+  border-color: rgba(96, 165, 250, 0.35);
+  background: rgba(12, 22, 44, 0.65);
+  box-shadow: 0 0 16px rgba(96, 165, 250, 0.1);
+  cursor: pointer;
+}
+
+.header-metric-card.subagents-card:hover {
+  border-color: rgba(96, 165, 250, 0.6);
+  box-shadow: 0 0 20px rgba(96, 165, 250, 0.25);
+}
+
+.header-metric-card.subagents-card.active,
+.header-metric-card.subagents-card.header-metric-subagents--active {
+  border-color: rgba(56, 189, 248, 0.85);
+  background: rgba(10, 28, 48, 0.75);
+  animation: header-subagents-pulse 1.8s ease-in-out infinite alternate;
+}
+
+@keyframes header-subagents-pulse {
+  0% {
+    box-shadow: 0 0 14px rgba(56, 189, 248, 0.35), 0 0 28px rgba(56, 189, 248, 0.15);
+    border-color: rgba(56, 189, 248, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(56, 189, 248, 0.75), 0 0 44px rgba(56, 189, 248, 0.45);
+    border-color: rgba(120, 224, 205, 0.95);
+  }
+  100% {
+    box-shadow: 0 0 14px rgba(56, 189, 248, 0.35), 0 0 28px rgba(56, 189, 248, 0.15);
+    border-color: rgba(56, 189, 248, 0.6);
+  }
+}
+
+.header-metric-icon.subagents-icon {
+  color: #60a5fa;
+  font-size: 20px;
+  filter: drop-shadow(0 0 8px rgba(96, 165, 250, 0.55));
+}
+
+.subagents-card.active .header-metric-icon.subagents-icon,
+.subagents-card.header-metric-subagents--active .header-metric-icon.subagents-icon {
+  color: #78e0cd;
+  filter: drop-shadow(0 0 10px rgba(120, 224, 205, 0.75));
+}
+
 .header-metric-icon {
   display: flex;
   align-items: center;
@@ -1585,6 +1631,17 @@ p:empty { display: none; }
 .progress-card .header-metric-fill {
   background: linear-gradient(90deg, #2563eb, #38bdf8);
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
+}
+
+.subagents-card .header-metric-fill {
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
+}
+
+.subagents-card.active .header-metric-fill,
+.subagents-card.header-metric-subagents--active .header-metric-fill {
+  background: linear-gradient(90deg, #0d9488, #78e0cd);
+  box-shadow: 0 0 10px rgba(120, 224, 205, 0.7);
 }
 
 .header-metric-right {
