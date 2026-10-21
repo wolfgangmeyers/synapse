@@ -1250,8 +1250,8 @@ p:empty { display: none; }
 }
 
 .conversation-header .avatar {
-  width: 76px;
-  height: 76px;
+  width: 95px;
+  height: 95px;
   border-radius: 999px;
   border: 2px solid rgba(56, 189, 248, 0.5);
   box-shadow: 0 0 16px rgba(56, 189, 248, 0.35);
