@@ -506,3 +506,57 @@ func TestManagedSubagentsAcrossParentEpochReset(t *testing.T) {
 	require.Equal(t, child.AgentID, saved.AgentID)
 	require.Equal(t, int64(1), saved.ParentEpoch)
 }
+
+func TestManagedSubagentSettlesAcrossParentContextReset(t *testing.T) {
+	ctx := context.Background()
+	s, _ := embeddedRedStore(t)
+	parent := subagentParent(t, s, "parent-reset-settle")
+	child := ManagedSubagentRecord{
+		AgentID:       "subagent-reset-child",
+		ParentAgentID: parent.AgentID,
+		Description:   "runs while parent resets context",
+		SubagentType:  "general-purpose",
+		Status:        "queued",
+		MaxTurns:      5,
+	}
+	require.NoError(t, s.CreateManagedSubagent(ctx, parent, child))
+	require.NoError(t, s.UpdateManagedSubagent(ctx, parent, child.AgentID, "queued", ManagedSubagentResult{Status: "running"}))
+
+	// Transition parent to epoch 2 (simulating context reset while child is running)
+	parentEpoch2 := EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  parent.AgentID + "-session-epoch-2",
+		Epoch:      2,
+		Generation: parent.Generation,
+	}
+	require.NoError(t, s.ResetEmbeddedSessionEpoch(ctx, parent, parentEpoch2, "worker"))
+	parentEpoch2 = claimEmbeddedFixture(t, s, parentEpoch2)
+
+	// Child in epoch 1 reports progress while parent is now at epoch 2
+	progressErr := s.UpdateManagedSubagentProgress(ctx, parent, child.AgentID, 1, ManagedSubagentProgress{
+		TurnCount:       2,
+		ToolUseCount:    2,
+		TotalTokens:     100,
+		DurationSeconds: 15.0,
+	})
+	require.NoError(t, progressErr, "progress update must succeed even if parent advanced epoch")
+
+	// Child in epoch 1 finishes and settles terminal outcome
+	settleErr := s.UpdateManagedSubagentAttempt(ctx, parent, child.AgentID, 1, "running", ManagedSubagentResult{
+		Status:          "completed",
+		TurnCount:       3,
+		ToolUseCount:    3,
+		TotalTokens:     150,
+		DurationSeconds: 20.0,
+		ResultText:      "completed successfully despite parent context reset",
+	})
+	require.NoError(t, settleErr, "terminal settlement must succeed even if parent advanced epoch")
+
+	// Verify the completed record is stored cleanly and visible to the parent in epoch 2
+	rec, err := s.ManagedSubagent(ctx, parentEpoch2, child.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "completed", rec.Status)
+	require.Equal(t, "completed successfully despite parent context reset", rec.ResultText)
+	require.Equal(t, int64(1), rec.ParentEpoch)
+}
+
