@@ -532,12 +532,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   </div>
                   <div className="header-metric-center">
                     <div className="header-metric-title">Subagents</div>
-                    <div className="header-metric-track" role="progressbar" aria-valuenow={activeSubagentsCount} aria-valuemin={0} aria-valuemax={Math.max(1, displayedSubagents.length)}>
-                      <div
-                        className="header-metric-fill subagents-fill"
-                        style={{ width: activeSubagentsCount > 0 ? `${Math.min(100, Math.max(25, (activeSubagentsCount / Math.max(1, displayedSubagents.length)) * 100))}%` : "0%" }}
-                      />
-                    </div>
                   </div>
                   <div className="header-metric-right">
                     <div className="header-metric-value">{activeSubagentsCount}</div>
