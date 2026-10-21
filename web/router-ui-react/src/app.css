@@ -1533,6 +1533,11 @@ p:empty { display: none; }
   background: rgba(12, 22, 44, 0.65);
   box-shadow: 0 0 16px rgba(96, 165, 250, 0.1);
   cursor: pointer;
+  height: 40px;
+  min-height: 40px;
+  width: 208px;
+  border-radius: 9999px;
+  padding: 4px 14px 4px 10px;
 }
 
 .header-metric-card.subagents-card:hover {
