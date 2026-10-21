@@ -795,7 +795,7 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
         </div>
       </article>
     ) : null}
-    <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error" : ""}`} style={articleStyle} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} data-tool={presentation?.kind === "tool" && presentation.tool_name ? normalizedToolName(presentation.tool_name) : undefined} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
+    <article className={`activity-entry${isThinkingKind ? " thinking-trace-card" : ""}${isCompactRoutine ? " activity-entry--compact" : ""} activity-entry--${visual.tone}${terminalCompatibilityTone}${active ? " activity-entry--active activity-entry--state-running running status-running" : ""}${isSuccess ? " activity-entry--terminal-success activity-entry--state-success" : ""}${isFailure ? " activity-entry--terminal-danger activity-entry--state-error failed" : ""}`} style={articleStyle} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} data-status={isFailure ? "failed" : undefined} data-tool={presentation?.kind === "tool" && presentation.tool_name ? normalizedToolName(presentation.tool_name) : undefined} aria-label={accessibleName || visual.label} {...(hasDetails ? { role: "button", tabIndex: 0, "aria-haspopup": "dialog" as const, onClick, onKeyDown } : {})}>
       <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
       {isCompactRoutine ? <div className="activity-entry-content activity-entry-content--compact">
         <div className="activity-entry-compact-row">
@@ -808,6 +808,11 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
           <strong>{visual.label}</strong>
           {visual.subject ? <span className="activity-entry-subject" title={visual.subject}>{` • ${visual.subject}`}</span> : null}
           {time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}
+          {isFailure && hasDetails ? (
+            <span className="activity-entry-action-pill" aria-hidden="true">
+              View details &gt;
+            </span>
+          ) : null}
         </div>
         {visual.detail ? <p className="activity-entry-preview" title={visual.detail}>{visual.detail}</p> : null}
         {error?.detail_available === false && !safeClassifiedReason && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}
