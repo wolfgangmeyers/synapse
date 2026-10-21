@@ -3,6 +3,7 @@ import { MarkdownBody } from "../domain/markdown";
 import { isRecord } from "../protocol/guards";
 import { currentUsername } from "../persistence/settings-repository";
 import type { JsonValue, ManagedHistoryEntry, ManagedHistoryPresentation } from "../protocol/types";
+import { AgentAvatar } from "./AgentAvatar";
 import { ActivityDetailDialog } from "./ActivityDetailDialog";
 import { DialogShell } from "./DialogShell";
 import { colorForAction } from "../utils/alienText";
@@ -772,16 +773,25 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
     {thinkingText && !isThinkingKind ? <ThinkingTraceCard thinking={thinkingText} time={time} agentId={entry.agent_id} entry={entry} /> : null}
     {companionText ? (
       <article className="bubble-wrap incoming activity-companion-bubble">
-        <div className="bubble-label">
-          <strong>{entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id ?? "Assistant"}</strong>
-          {time.dateTime && time.label ? (
-            <time dateTime={time.dateTime} title={time.title}>
-              {time.label}
-            </time>
-          ) : null}
-        </div>
-        <div className="bubble">
-          <MarkdownBody body={companionText} />
+        <div className="bubble-row">
+          <div className="message-avatar message-avatar--agent" aria-hidden="true">
+            <span className="agent-avatar-circle" title={entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id ?? "Assistant"}>
+              <AgentAvatar agentId={entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id ?? "agent"} />
+            </span>
+          </div>
+          <div className="bubble-main">
+            <div className="bubble-label">
+              <strong>{entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id ?? "Assistant"}</strong>
+              {time.dateTime && time.label ? (
+                <time dateTime={time.dateTime} title={time.title}>
+                  {time.label}
+                </time>
+              ) : null}
+            </div>
+            <div className="bubble">
+              <MarkdownBody body={companionText} />
+            </div>
+          </div>
         </div>
       </article>
     ) : null}

@@ -44,13 +44,13 @@ export function SubagentBadge({
   const total = count !== undefined ? Math.max(0, count - stoppedCount) : runningCount;
 
   if (total < 1 && (!expanded || effectiveSubagents.length === 0)) return null;
-  const countLabel = total > 0 ? `${total} subagent${total === 1 ? "" : "s"}` : "Child history";
+  const countLabel = total > 0 ? `${total} subagent${total === 1 ? "" : "s"}` : "0 subagents";
   const label = ariaLabel ?? countLabel;
 
   if (isEmbeddedWorker) {
     const content = (
       <>
-        <span className="subagent-dot" aria-hidden="true" />
+        <span className={`subagent-dot ${total > 0 ? "active" : "inactive"}`} aria-hidden="true" />
         <span className="subagent-badge-content">{countLabel}</span>
       </>
     );
@@ -59,7 +59,7 @@ export function SubagentBadge({
       <>
         <button
           type="button"
-          className="subagent-indicator expandable"
+          className={`subagent-indicator expandable ${total > 0 ? "has-subagents" : "no-subagents"}`}
           onClick={() => setIsViewerOpen(true)}
           aria-label={label}
         >
@@ -80,10 +80,11 @@ export function SubagentBadge({
   }
 
   const canExpand = externalDisclosure || effectiveSubagents.length > 0;
-  const content = <><span className="subagent-dot" aria-hidden="true" /><span className="subagent-badge-content">{countLabel}</span></>;
-  if (!canExpand) return <span className="subagent-indicator" aria-label={label}>{content}</span>;
-  if (!expanded) return <button type="button" className="subagent-indicator expandable" onClick={onToggle} aria-expanded="false" {...(!externalDisclosure || listId === undefined ? {} : { "aria-controls": listId })} aria-label={label}>{content}</button>;
-  return <span className="subagent-indicator expandable expanded" role="group" aria-label={`${total} subagent${total === 1 ? "" : "s"}`}>
+  const content = <><span className={`subagent-dot ${total > 0 ? "active" : "inactive"}`} aria-hidden="true" /><span className="subagent-badge-content">{countLabel}</span></>;
+  if (!canExpand && total === 0) return <span className="subagent-indicator no-subagents" aria-label={label}>{content}</span>;
+  if (!canExpand) return <span className={`subagent-indicator ${total > 0 ? "has-subagents" : "no-subagents"}`} aria-label={label}>{content}</span>;
+  if (!expanded) return <button type="button" className={`subagent-indicator expandable ${total > 0 ? "has-subagents" : "no-subagents"}`} onClick={onToggle} aria-expanded="false" {...(!externalDisclosure || listId === undefined ? {} : { "aria-controls": listId })} aria-label={label}>{content}</button>;
+  return <span className={`subagent-indicator expandable expanded ${total > 0 ? "has-subagents" : "no-subagents"}`} role="group" aria-label={`${total} subagent${total === 1 ? "" : "s"}`}>
     <span className="subagent-dot" aria-hidden="true" />
     <span className="subagent-expanded"><button type="button" className="subagent-count-label" onClick={onToggle} aria-expanded="true" {...(listId === undefined ? {} : { "aria-controls": listId })}>{total} subagent{total === 1 ? "" : "s"}</button>{externalDisclosure ? null : <><span className="subagent-divider" aria-hidden="true" /><span className="subagent-list" id={listId}>{effectiveSubagents.map((subagent) => {
       const isRunning = !subagent.status || subagent.status === "running";
