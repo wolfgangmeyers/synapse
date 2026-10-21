@@ -55,6 +55,30 @@ describe("Composer", () => {
     expect(() => fireEvent.paste(screen.getByTestId("clipboard-paste-target"), { clipboardData: undefined })).not.toThrow();
   });
 
+  it("toggles expanded mode and changes enter key handling", () => {
+    const onSend = vi.fn();
+    render(<Composer enabled onSend={onSend} />);
+    const input = screen.getByRole("textbox", { name: /message/i });
+    const toggleBtn = screen.getByRole("button", { name: /expand composer/i });
+    expect(toggleBtn.querySelector(".fa-expand")).toBeInTheDocument();
+
+    // Expand
+    fireEvent.click(toggleBtn);
+    expect(screen.getByRole("button", { name: /collapse composer/i }).querySelector(".fa-compress")).toBeInTheDocument();
+
+    // In expanded mode, Enter does NOT send, but Ctrl+Enter sends
+    fireEvent.change(input, { target: { value: "expanded text" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(onSend).toHaveBeenCalledWith("expanded text", []);
+
+    // Escape collapses it
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.getByRole("button", { name: /expand composer/i })).toBeInTheDocument();
+  });
+
   it("keeps handling pasted image files", async () => {
     const image = { dataUrl: "data:image/png;base64,aGVsbG8=", name: "pasted.png", sizeBytes: 5, mimeType: "image/png" };
     render(<Composer enabled onSend={vi.fn()} convert={async () => image} />);

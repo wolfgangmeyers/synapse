@@ -26,6 +26,28 @@ export interface MessageListProps {
 
 type FeedItem = { type: "message"; id: string; timestamp: number; sequence: number; message: HistoryMessage } | { type: "activity"; id: string; timestamp: number; sequence: number; entry: ManagedHistoryEntry };
 
+export type TimelineOrbTone = "purple" | "cyan" | "danger" | "blue";
+
+export function getItemOrbTone(item: FeedItem): TimelineOrbTone {
+  if (item.type === "message") {
+    const outgoing = item.message.direction === "outgoing";
+    return outgoing ? "blue" : "purple";
+  }
+  const entry = item.entry;
+  const presentation = entry.presentation;
+  const isError = entry.level === "error" || presentation?.outcome === "error" || presentation?.outcome === "failed" || presentation?.outcome === "interrupted";
+  if (isError) return "danger";
+  if (presentation?.kind === "thinking" || entry.thinking) return "purple";
+  if (presentation?.kind === "tool") return "cyan";
+  if (presentation?.kind === "child" || presentation?.kind === "subagent" || presentation?.kind === "subagent_complete") return "cyan";
+  if (presentation?.kind === "state" && (entry.message?.toLowerCase().includes("workflow") || presentation.summary?.toLowerCase().includes("workflow"))) return "purple";
+  const visual = completeTimelineVisual(entry);
+  if (visual.tone === "danger") return "danger";
+  if (visual.tone === "purple") return "purple";
+  if (visual.tone === "blue") return "blue";
+  return "cyan";
+}
+
 function activityTime(entry: ManagedHistoryEntry): number {
   const parsed = Date.parse(entry.at ?? "");
   return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
@@ -257,10 +279,90 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   const hasItems = renderedItems.length > 0;
   const hasActivity = activityEntries !== undefined;
   let previousDate: string | undefined;
-  return <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>{peerId === undefined ? <EmptyState watermark title="Pick an agent" description="Select an agent from the sidebar to view activity and chat." /> : hasItems ? <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>{hasOlder && <li key="pagination:load-older" className="timeline-load-older-item"><button type="button" className="load-older-button" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? "Loading older history…" : "Load older history"}</button></li>}{renderedItems.map(({ item, suppressThinking, epoch }) => {
-    const currentDate = dateLabel(item.timestamp);
-    const separator = currentDate !== undefined && currentDate !== previousDate ? <li key={`date:${currentDate}:${item.id}`} className="timeline-date" aria-hidden="true">{currentDate}</li> : null;
-    previousDate = currentDate ?? previousDate;
-    return <Fragment key={`${item.type}:${item.id}`}>{separator}<li className={`timeline-item timeline-item--${item.type}${item.type === "activity" && isContextResetEntry(item.entry) ? " timeline-item--context-reset" : ""}`}>{item.type === "message" ? <MessageBubble message={item.message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})} /> : <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />}</li></Fragment>;
-  })}</ol> : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : <EmptyState title={hasActivity ? "No messages or activity yet" : "No messages yet"} description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."} />}{hasItems && error ? <p className="error" role="alert">{error}</p> : null}<p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p></div>;
+  return (
+    <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>
+      {peerId === undefined ? (
+        <EmptyState watermark title="Pick an agent" description="Select an agent from the sidebar to view activity and chat." />
+      ) : hasItems ? (
+        <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>
+          <div className="timeline-rail" aria-hidden="true" />
+          {hasOlder && (
+            <li key="pagination:load-older" className="timeline-load-older-item">
+              <button type="button" className="load-older-button" onClick={onLoadOlder} disabled={loadingOlder}>
+                {loadingOlder ? "Loading older history…" : "Load older history"}
+              </button>
+            </li>
+          )}
+          {renderedItems.map(({ item, suppressThinking, epoch }) => {
+            const currentDate = dateLabel(item.timestamp);
+            const separator = currentDate !== undefined && currentDate !== previousDate ? (
+              <li key={`date:${currentDate}:${item.id}`} className="timeline-date-item" role="separator" aria-label={`Date: ${currentDate}`}>
+                <div className="timeline-date-divider">
+                  <span className="timeline-date-line" aria-hidden="true" />
+                  <span className="timeline-date-label">
+                    <i className="fa-regular fa-calendar" aria-hidden="true" />
+                    {currentDate}
+                  </span>
+                  <span className="timeline-date-line" aria-hidden="true" />
+                </div>
+              </li>
+            ) : null;
+            previousDate = currentDate ?? previousDate;
+
+            const isContextReset = item.type === "activity" && isContextResetEntry(item.entry);
+            if (isContextReset) {
+              return (
+                <Fragment key={`${item.type}:${item.id}`}>
+                  {separator}
+                  <li className="timeline-item timeline-item--context-reset">
+                    <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />
+                  </li>
+                </Fragment>
+              );
+            }
+
+            const orbTone = getItemOrbTone(item);
+
+            return (
+              <Fragment key={`${item.type}:${item.id}`}>
+                {separator}
+                <li className={`timeline-item timeline-item--${item.type} timeline-item--tone-${orbTone}`}>
+                  <div className="timeline-node" aria-hidden="true">
+                    <span className={`timeline-dot timeline-dot--${orbTone}`} />
+                  </div>
+                  <div className="timeline-content">
+                    {item.type === "message" ? (
+                      <MessageBubble
+                        message={item.message}
+                        {...(ownerId !== undefined ? { ownerId } : {})}
+                        {...(routerUrl !== undefined ? { routerUrl } : {})}
+                        {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})}
+                      />
+                    ) : (
+                      <CompleteTimelineEntry
+                        entry={item.entry}
+                        suppressThinking={suppressThinking}
+                        {...(epoch !== undefined ? { epoch } : {})}
+                      />
+                    )}
+                  </div>
+                </li>
+              </Fragment>
+            );
+          })}
+        </ol>
+      ) : loading ? (
+        <EmptyState title="Loading conversation…" />
+      ) : error ? (
+        <p className="error" role="alert">{error}</p>
+      ) : (
+        <EmptyState
+          title={hasActivity ? "No messages or activity yet" : "No messages yet"}
+          description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."}
+        />
+      )}
+      {hasItems && error ? <p className="error" role="alert">{error}</p> : null}
+      <p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p>
+    </div>
+  );
 }

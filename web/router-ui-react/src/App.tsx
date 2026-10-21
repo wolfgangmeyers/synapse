@@ -801,8 +801,8 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     setReminderStatus(undefined); setDialog("reminders");
   };
   const restartAllManaged = (): void => { setManagedPending(true); setManagedError(undefined); void session.transport.http.restartAllManaged().then(refreshManaged).catch((cause: unknown) => setManagedError(managedRequestErrorMessage(cause, "Managed agents could not be restarted."))).finally(() => setManagedPending(false)); };
-  const restartRouter = (): void => {
-    void session.transport.http.restartRouter().catch((cause: unknown) => {
+  const restartRouter = (options?: { update?: boolean }): void => {
+    void session.transport.http.restartRouter(options).catch((cause: unknown) => {
       console.warn("restart router triggered:", cause);
     });
   };

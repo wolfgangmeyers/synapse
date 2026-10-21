@@ -29,7 +29,7 @@ const hiddenCommands = [
 ];
 const commands = [...hiddenCommands, "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"];
 const activeTools = [
-  "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent",
+  "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent",
   "goal", "goal_snooze", "mecha_context", "mecha_git", "mecha_mailbox_send", "mecha_parent_message",
   "mecha_pr", "mecha_priority", "mecha_recall", "mecha_reminder", "mecha_request_inline_tool_allowance",
   "mecha_router", "mecha_settled_notifications", "mecha_state", "mecha_verification_handoff", "mecha_worker",

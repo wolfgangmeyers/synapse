@@ -14,6 +14,7 @@ import type { Workflow } from "../domain/workflow-states";
 import { WorkflowLaunchModal } from "./WorkflowLaunchModal";
 import { AgentMonitorsDialog } from "./AgentMonitorsDialog";
 import { WorkerToolsDialog } from "./WorkerToolsDialog";
+import { SubagentViewerDialog } from "./SubagentViewerDialog";
 import { contextUsageSeverityClass, formatContextUsageLabel, formatContextUsageTooltip } from "../utils/format";
 
 export type ConversationView = "quiet" | "complete";
@@ -101,6 +102,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
         ? (agent.managed_children ?? []).filter(c => (c.status === "queued" || c.status === "running") && c.recovery?.state !== "interrupted_unknown").length
         : displayedSubagents.length)
     : agent?.subagent_count;
+  const activeSubagentsCount = displayedSubagentCount ?? 0;
 
   const contextUsage = agent?.context_usage ?? agent?.managed_agent?.context_usage;
   const showContextUsage = contextUsage !== undefined && contextUsage.context_window > 0;
@@ -117,6 +119,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const [notification, setNotification] = useState<string | null>(null);
   const [showMonitorsDialog, setShowMonitorsDialog] = useState(false);
   const [showWorkerToolsDialog, setShowWorkerToolsDialog] = useState(false);
+  const [showSubagentViewerDialog, setShowSubagentViewerDialog] = useState(false);
   const [activeWatchersCount, setActiveWatchersCount] = useState<number>(0);
 
   const [optimisticAllowInlineTools, setOptimisticAllowInlineTools] = useState<boolean | null>(null);
@@ -249,7 +252,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
 
       {/* Main Content Area: 2-Row Layout */}
       <div className="conversation-header-content">
-        {/* Row 1: Title + Subtitle on Left, Action Icon Buttons on Right */}
+        {/* Row 1: Title + Action Icon Buttons adjacent on Left, Subagents metric card */}
         <div className="conversation-header-row-primary">
           <div className="peer-heading-meta">
             <div className="peer-title-line">
@@ -258,22 +261,259 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   {agent ? humanName(agent.agent_id) : "Pick an agent"}
                 </span>
               </h2>
+
+              {/* Action Buttons Toolbar directly adjacent to title */}
+              <div className="conversation-header-actions">
+                {agent?.activity_state === "active" ? (
+                  <button
+                    type="button"
+                    className="icon-btn-round interrupt-worker-button header-button-interrupt"
+                    aria-label="Interrupt worker"
+                    title="Interrupt worker"
+                    onClick={() => {
+                      if (onInterrupt) onInterrupt();
+                      else if (client && agent) void client.interruptManagedAgent(agent.agent_id).catch(() => {});
+                    }}
+                  >
+                    <i className="fa-solid fa-square" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && showGoalControl ? (
+                  <button
+                    type="button"
+                    className={`icon-btn-round goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`}
+                    onClick={onGoal}
+                    aria-label="Set goal"
+                    title="Set goal"
+                  >
+                    <i className="fa-solid fa-flag" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent?.source === "router-managed" && client ? (
+                  <div className="workflow-header-control">
+                    <button
+                      type="button"
+                      className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
+                      onClick={() => setShowWorkflowDropdown((v) => !v)}
+                      aria-label="Workflow State"
+                      title={activeWorkflow ? `Active Workflow: ${activeWorkflow.name}` : "Set Workflow State"}
+                      disabled={workflowUpdating}
+                    >
+                      <i className="fa-solid fa-bolt" aria-hidden="true" />
+                    </button>
+                    {showWorkflowDropdown ? (
+                      <div className="workflow-header-dropdown" style={{ position: "absolute", top: "100%", right: 0, zIndex: 1000, background: "var(--bg-primary, #1e1e1e)", border: "1px solid var(--border-color, #444)", borderRadius: 6, minWidth: 220, padding: 4, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
+                        <div style={{ fontSize: "0.8em", padding: "4px 8px", color: "var(--text-muted, #888)", borderBottom: "1px solid var(--border-color, #333)", marginBottom: 4 }}>
+                          Workflows
+                        </div>
+                        {hasActiveWorkflow ? (
+                          <button
+                            type="button"
+                            className="workflow-dropdown-item deactivate"
+                            style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: "none", border: "none", cursor: "pointer", color: "var(--color-danger, #ff5555)", display: "flex", alignItems: "center", gap: 6, borderRadius: 4 }}
+                            onClick={() => void handleDeactivateWorkflow()}
+                          >
+                            <i className="fa-solid fa-xmark" aria-hidden="true" /> Deactivate Workflow
+                          </button>
+                        ) : null}
+                        {availableWorkflows.length === 0 ? (
+                          <div style={{ fontSize: "0.85em", padding: "6px 8px", color: "var(--text-muted, #888)" }}>No workflows available</div>
+                        ) : (
+                          availableWorkflows.map((w) => {
+                            const isMatch = w.id === activeWorkflowId;
+                            return (
+                              <button
+                                key={w.id}
+                                type="button"
+                                className={`workflow-dropdown-item ${isMatch ? "selected" : ""}`}
+                                style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: isMatch ? "var(--bg-secondary, #2a2a2a)" : "none", border: "none", cursor: "pointer", color: "inherit", display: "flex", flexDirection: "column", gap: 2, borderRadius: 4 }}
+                                onClick={() => void handleSelectWorkflow(w)}
+                              >
+                                <span style={{ fontWeight: isMatch ? "bold" : "normal", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                                  <span>{w.name}</span>
+                                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <span style={{ fontSize: "0.75rem", padding: "1px 6px", borderRadius: "10px", background: "var(--surface-raised, #333)", color: "var(--text-secondary, #aaa)" }}>
+                                      {w.state_count ?? 0} {w.state_count === 1 ? "state" : "states"}
+                                    </span>
+                                    {isMatch ? <i className="fa-solid fa-check" style={{ color: "var(--color-success, #4caf50)" }} aria-hidden="true" /> : null}
+                                  </span>
+                                </span>
+                                {w.description ? <span style={{ fontSize: "0.75em", opacity: 0.7 }}>{w.description}</span> : null}
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    ) : null}
+                    {notification ? (
+                      <div
+                        role="alert"
+                        style={{
+                          position: "absolute",
+                          top: "100%",
+                          right: 0,
+                          zIndex: 1001,
+                          marginTop: 4,
+                          padding: "6px 10px",
+                          background: "var(--bg-primary, #1e1e1e)",
+                          border: "1px solid var(--color-danger, #ff5555)",
+                          borderRadius: 6,
+                          color: "var(--color-danger, #ff5555)",
+                          fontSize: "0.8rem",
+                          whiteSpace: "nowrap",
+                          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                        }}
+                      >
+                        {notification}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {agent?.source === "router-managed" && client ? (
+                  <button
+                    type="button"
+                    className={`icon-btn-round inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
+                    onClick={() => void handleToggleAllowInlineTools()}
+                    aria-label={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
+                    title={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
+                    disabled={allowInlineToolsUpdating}
+                  >
+                    <i className="fa-solid fa-terminal" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && onScratchpad ? (
+                  <button
+                    type="button"
+                    className="icon-btn-round scratchpad-header-button"
+                    onClick={onScratchpad}
+                    aria-label="Scratchpad"
+                    title={`View scratchpad for ${humanName(agent.agent_id)}`}
+                  >
+                    <i className="fa-solid fa-note-sticky" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && (onReminders !== undefined || showAgentControls) ? (
+                  <button
+                    type="button"
+                    className={`icon-btn-round reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`}
+                    onClick={onReminders}
+                    aria-label="Add reminder"
+                    title="Add reminder"
+                  >
+                    <i className="fa-solid fa-clock" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && client ? (
+                  <button
+                    type="button"
+                    className={`icon-btn-round agent-monitors-header-button${activeWatchersCount > 0 ? " active" : ""}`}
+                    onClick={() => setShowMonitorsDialog(true)}
+                    aria-label={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
+                    title={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
+                  >
+                    <i className="fa-solid fa-shield-halved" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent?.source === "router-managed" && client ? (
+                  <button
+                    type="button"
+                    className="icon-btn-round worker-tools-header-button"
+                    onClick={() => setShowWorkerToolsDialog(true)}
+                    aria-label="Manage Worker Tools"
+                    title="Manage Worker Tools"
+                  >
+                    <i className="fa-solid fa-wrench" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && showAgentControls ? (
+                  <button
+                    type="button"
+                    className="icon-btn-round inline-tool-settings-button"
+                    onClick={onInlineToolSettings}
+                    aria-label="Inline tool settings"
+                    title="Inline tool settings"
+                  >
+                    <i className="fa-solid fa-gear" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent?.source === "router-managed" && onManageManaged ? (
+                  <button
+                    type="button"
+                    className="icon-btn-round managed-agent-header-button"
+                    onClick={onManageManaged}
+                    aria-label="Manage worker"
+                    title="Manage worker"
+                  >
+                    <i className="fa-solid fa-gear" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && onToggleChatOnly ? (
+                  <button
+                    type="button"
+                    className={`icon-btn-round chat-only-button ${chatOnly ? "active" : ""}`}
+                    onClick={onToggleChatOnly}
+                    aria-label="Toggle chat-only mode"
+                    title={chatOnly ? "Chat-only active (tools hidden)" : "Chat-only mode"}
+                  >
+                    <i className="fa-solid fa-comments" aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {agent && onToggleScrollLock ? (
+                  <button
+                    type="button"
+                    className={`icon-btn-round scroll-lock-button ${scrollLocked ? "active" : ""}`}
+                    onClick={onToggleScrollLock}
+                    aria-label="Toggle scroll lock"
+                    title={scrollLocked ? "Scroll locked (auto-scroll paused)" : "Lock scroll"}
+                  >
+                    <i className={scrollLocked ? "fa-solid fa-lock" : "fa-solid fa-lock-open"} aria-hidden="true" />
+                  </button>
+                ) : null}
+
+                {showConversationViews ? (
+                  <div className="conversation-view-tabs" role="tablist" aria-label={`Conversation view for ${humanName(agent.agent_id)}`}>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={conversationView === "quiet"}
+                      aria-controls="conversation-view-panel"
+                      className={conversationView === "quiet" ? "selected" : "secondary"}
+                      onClick={() => onConversationViewChange("quiet")}
+                      aria-label="Quiet messages"
+                      title="Quiet messages"
+                    >
+                      <i className="fa-solid fa-comments" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={conversationView === "complete"}
+                      aria-controls="conversation-view-panel"
+                      className={conversationView === "complete" ? "selected" : "secondary"}
+                      onClick={() => onConversationViewChange("complete")}
+                      aria-label="Complete messages and activity"
+                      title="Complete messages and activity"
+                    >
+                      <i className="fa-solid fa-list" aria-hidden="true" />
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
-            <p className="peer-activity">
-              {managedFailure ? (
-                <span className="managed-failure-alert" role="alert">
-                  <i className="fa-solid fa-triangle-exclamation" role="img" aria-label="Warning" />
-                  <span>{failureMessage}</span>
-                  {managedFailure.last_error?.code ? (
-                    <code className="managed-failure-code">{managedFailure.last_error.code}</code>
-                  ) : null}
-                </span>
-              ) : status ? (
-                <span className={terminating ? "managed-termination-state" : "operational-status"} role="status">
-                  {status}
-                </span>
-              ) : null}
+            {/* Row 2: Subagents Pill & Status / Activity */}
+            <div className="peer-row-subagents" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
               {agent ? (
                 <SubagentBadge
                   count={displayedSubagentCount}
@@ -287,264 +527,30 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"}
                 />
               ) : null}
-              {arrival ? (
-                <ArrivalIndicator arrival={arrival} header onOpen={onOpenArrival} onDismiss={onDismissArrival} />
-              ) : null}
-              {!agent ? "Connected agents appear on the left." : null}
-            </p>
-          </div>
-
-          {/* Action Buttons Toolbar on the Right */}
-          <div className="conversation-header-actions">
-            {agent?.activity_state === "active" ? (
-              <button
-                type="button"
-                className="icon-btn-round interrupt-worker-button header-button-interrupt"
-                aria-label="Interrupt worker"
-                title="Interrupt worker"
-                onClick={() => {
-                  if (onInterrupt) onInterrupt();
-                  else if (client && agent) void client.interruptManagedAgent(agent.agent_id).catch(() => {});
-                }}
-              >
-                <i className="fa-solid fa-square" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && showGoalControl ? (
-              <button
-                type="button"
-                className={`icon-btn-round goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`}
-                onClick={onGoal}
-                aria-label="Set goal"
-                title="Set goal"
-              >
-                <i className="fa-solid fa-flag" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent?.source === "router-managed" && client ? (
-<div className="workflow-header-control">
-    <button
-      type="button"
-      className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
-      onClick={() => setShowWorkflowDropdown((v) => !v)}
-      aria-label="Workflow State"
-      title={activeWorkflow ? `Active Workflow: ${activeWorkflow.name}` : "Set Workflow State"}
-      disabled={workflowUpdating}
-    >
-      <i className="fa-solid fa-bolt" aria-hidden="true" />
-    </button>
-    {showWorkflowDropdown ? (
-      <div className="workflow-header-dropdown" style={{ position: "absolute", top: "100%", right: 0, zIndex: 1000, background: "var(--bg-primary, #1e1e1e)", border: "1px solid var(--border-color, #444)", borderRadius: 6, minWidth: 220, padding: 4, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
-        <div style={{ fontSize: "0.8em", padding: "4px 8px", color: "var(--text-muted, #888)", borderBottom: "1px solid var(--border-color, #333)", marginBottom: 4 }}>
-          Workflows
-        </div>
-        {hasActiveWorkflow ? (
-          <button
-            type="button"
-            className="workflow-dropdown-item deactivate"
-            style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: "none", border: "none", cursor: "pointer", color: "var(--color-danger, #ff5555)", display: "flex", alignItems: "center", gap: 6, borderRadius: 4 }}
-            onClick={() => void handleDeactivateWorkflow()}
-          >
-            <i className="fa-solid fa-xmark" aria-hidden="true" /> Deactivate Workflow
-          </button>
-        ) : null}
-        {availableWorkflows.length === 0 ? (
-          <div style={{ fontSize: "0.85em", padding: "6px 8px", color: "var(--text-muted, #888)" }}>No workflows available</div>
-        ) : (
-          availableWorkflows.map((w) => {
-            const isMatch = w.id === activeWorkflowId;
-            return (
-              <button
-                key={w.id}
-                type="button"
-                className={`workflow-dropdown-item ${isMatch ? "selected" : ""}`}
-                style={{ width: "100%", textAlign: "left", padding: "6px 8px", background: isMatch ? "var(--bg-secondary, #2a2a2a)" : "none", border: "none", cursor: "pointer", color: "inherit", display: "flex", flexDirection: "column", gap: 2, borderRadius: 4 }}
-                onClick={() => void handleSelectWorkflow(w)}
-              >
-                <span style={{ fontWeight: isMatch ? "bold" : "normal", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span>{w.name}</span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: "0.75rem", padding: "1px 6px", borderRadius: "10px", background: "var(--surface-raised, #333)", color: "var(--text-secondary, #aaa)" }}>
-                      {w.state_count ?? 0} {w.state_count === 1 ? "state" : "states"}
-                    </span>
-                    {isMatch ? <i className="fa-solid fa-check" style={{ color: "var(--color-success, #4caf50)" }} aria-hidden="true" /> : null}
+              <p className="peer-activity" style={{ margin: 0 }}>
+                {managedFailure ? (
+                  <span className="managed-failure-alert" role="alert">
+                    <i className="fa-solid fa-triangle-exclamation" role="img" aria-label="Warning" />
+                    <span>{failureMessage}</span>
+                    {managedFailure.last_error?.code ? (
+                      <code className="managed-failure-code">{managedFailure.last_error.code}</code>
+                    ) : null}
                   </span>
-                </span>
-                {w.description ? <span style={{ fontSize: "0.75em", opacity: 0.7 }}>{w.description}</span> : null}
-              </button>
-            );
-          })
-        )}
-      </div>
-    ) : null}
-    {notification ? (
-      <div
-        role="alert"
-        style={{
-          position: "absolute",
-          top: "100%",
-          right: 0,
-          zIndex: 1001,
-          marginTop: 4,
-          padding: "6px 10px",
-          background: "var(--bg-primary, #1e1e1e)",
-          border: "1px solid var(--color-danger, #ff5555)",
-          borderRadius: 6,
-          color: "var(--color-danger, #ff5555)",
-          fontSize: "0.8rem",
-          whiteSpace: "nowrap",
-          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-        }}
-      >
-        {notification}
-      </div>
-    ) : null}
-  </div>
-) : null}
-
-            {agent?.source === "router-managed" && client ? (
-              <button
-                type="button"
-                className={`icon-btn-round inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
-                onClick={() => void handleToggleAllowInlineTools()}
-                aria-label={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
-                title={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
-                disabled={allowInlineToolsUpdating}
-              >
-                <i className="fa-solid fa-terminal" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && onScratchpad ? (
-              <button
-                type="button"
-                className="icon-btn-round scratchpad-header-button"
-                onClick={onScratchpad}
-                aria-label="Scratchpad"
-                title={`View scratchpad for ${humanName(agent.agent_id)}`}
-              >
-                <i className="fa-solid fa-note-sticky" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && (onReminders !== undefined || showAgentControls) ? (
-              <button
-                type="button"
-                className={`icon-btn-round reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`}
-                onClick={onReminders}
-                aria-label="Add reminder"
-                title="Add reminder"
-              >
-                <i className="fa-solid fa-clock" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && client ? (
-              <button
-                type="button"
-                className={`icon-btn-round agent-monitors-header-button${activeWatchersCount > 0 ? " active" : ""}`}
-                onClick={() => setShowMonitorsDialog(true)}
-                aria-label={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
-                title={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
-              >
-                <i className="fa-solid fa-shield-halved" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent?.source === "router-managed" && client ? (
-              <button
-                type="button"
-                className="icon-btn-round worker-tools-header-button"
-                onClick={() => setShowWorkerToolsDialog(true)}
-                aria-label="Manage Worker Tools"
-                title="Manage Worker Tools"
-              >
-                <i className="fa-solid fa-wrench" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && showAgentControls ? (
-              <button
-                type="button"
-                className="icon-btn-round inline-tool-settings-button"
-                onClick={onInlineToolSettings}
-                aria-label="Inline tool settings"
-                title="Inline tool settings"
-              >
-                <i className="fa-solid fa-gear" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent?.source === "router-managed" && onManageManaged ? (
-              <button
-                type="button"
-                className="icon-btn-round managed-agent-header-button"
-                onClick={onManageManaged}
-                aria-label="Manage worker"
-                title="Manage worker"
-              >
-                <i className="fa-solid fa-gear" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && onToggleChatOnly ? (
-              <button
-                type="button"
-                className={`icon-btn-round chat-only-button ${chatOnly ? "active" : ""}`}
-                onClick={onToggleChatOnly}
-                aria-label="Toggle chat-only mode"
-                title={chatOnly ? "Chat-only active (tools hidden)" : "Chat-only mode"}
-              >
-                <i className="fa-solid fa-comments" aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {agent && onToggleScrollLock ? (
-              <button
-                type="button"
-                className={`icon-btn-round scroll-lock-button ${scrollLocked ? "active" : ""}`}
-                onClick={onToggleScrollLock}
-                aria-label="Toggle scroll lock"
-                title={scrollLocked ? "Scroll locked (auto-scroll paused)" : "Lock scroll"}
-              >
-                <i className={scrollLocked ? "fa-solid fa-lock" : "fa-solid fa-lock-open"} aria-hidden="true" />
-              </button>
-            ) : null}
-
-            {showConversationViews ? (
-              <div className="conversation-view-tabs" role="tablist" aria-label={`Conversation view for ${humanName(agent.agent_id)}`}>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={conversationView === "quiet"}
-                  aria-controls="conversation-view-panel"
-                  className={conversationView === "quiet" ? "selected" : "secondary"}
-                  onClick={() => onConversationViewChange("quiet")}
-                  aria-label="Quiet messages"
-                  title="Quiet messages"
-                >
-                  <i className="fa-solid fa-comments" aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={conversationView === "complete"}
-                  aria-controls="conversation-view-panel"
-                  className={conversationView === "complete" ? "selected" : "secondary"}
-                  onClick={() => onConversationViewChange("complete")}
-                  aria-label="Complete messages and activity"
-                  title="Complete messages and activity"
-                >
-                  <i className="fa-solid fa-list" aria-hidden="true" />
-                </button>
-              </div>
-            ) : null}
+                ) : status ? (
+                  <span className={terminating ? "managed-termination-state" : "operational-status"} role="status">
+                    {status}
+                  </span>
+                ) : null}
+                {arrival ? (
+                  <ArrivalIndicator arrival={arrival} header onOpen={onOpenArrival} onDismiss={onDismissArrival} />
+                ) : null}
+                {!agent ? "Connected agents appear on the left." : null}
+              </p>
+            </div>
           </div>
         </div>
 
-        {/* Row 2: Context Card, Goal Progress Card, and Prompt/Model Controls */}
+        {/* Row 3: Context Card, Goal Progress Card, and Prompt/Model Controls */}
         <div className="conversation-header-row-secondary">
           {showContextUsage && contextUsage ? (
   <div
@@ -657,6 +663,15 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     agentName={humanName(agent.agent_id)}
     client={client}
     onClose={() => setShowWorkerToolsDialog(false)}
+  />
+) : null}{agent && showSubagentViewerDialog ? (
+  <SubagentViewerDialog
+    open={showSubagentViewerDialog}
+    onClose={() => setShowSubagentViewerDialog(false)}
+    agentId={agent.agent_id}
+    subagents={displayedSubagents}
+    client={client}
+    {...(onStopSubagent ? { onStopSubagent } : {})}
   />
 ) : null}
     </header>

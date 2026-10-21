@@ -594,7 +594,7 @@ export interface RouterHttpClient {
   syncMCPServer(id: string): Promise<{ server: MCPServer; tools?: unknown[]; error?: unknown }>;
   startMCPOAuth(id: string): Promise<{ authorization_url: string }>;
   revokeMCPServer(id: string): Promise<{ server: MCPServer }>;
-  restartRouter(): Promise<{ ok: boolean; restarting: boolean }>;
+  restartRouter(options?: { update?: boolean }): Promise<{ ok: boolean; restarting: boolean }>;
   routerLog(query: RouterLogQuery): Promise<RouterLogResponse>;
   routerLogForAgent(agentId: string, query: RouterLogQuery): Promise<RouterLogResponse>;
   scratchpadForAgent(agentId: string, limit?: number): Promise<ScratchpadResponse>;
@@ -867,8 +867,10 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
         server: rec?.server as MCPServer,
       };
     },
-    restartRouter: async () => {
-      const body = await jsonRequest("/v1/router/restart", "POST", {});
+    restartRouter: async (options?: { update?: boolean }) => {
+      const body = await jsonRequest("/v1/router/restart", "POST", {
+        update: Boolean(options?.update),
+      });
       const rec = recordValue(body);
       return {
         ok: Boolean(rec?.ok),
