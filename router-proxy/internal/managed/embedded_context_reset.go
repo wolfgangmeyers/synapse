@@ -63,8 +63,8 @@ func FormatContextResetWarningReminder(currentTokens, contextWindow, warningPct,
 	if contextWindow > 0 {
 		pct = float64(currentTokens) / float64(contextWindow) * 100.0
 	}
-	return fmt.Sprintf("Context usage warning: You have reached %d / %d tokens (%.1f%%), crossing the %d%% warning threshold. Please immediately update your scratchpad with all key findings, progress, and pending steps to remember going forward, then call the context_reset tool to reset your context window before automatic reset occurs at %d%%.",
-		currentTokens, contextWindow, pct, warningPct, resetPct)
+	return fmt.Sprintf("Context usage warning: You have reached %d / %d tokens (%.1f%%), crossing the %d%% warning threshold. Please immediately update your scratchpad with all key findings, progress, and pending steps, then call context_reset. Your turn will end immediately to reset context with fresh headroom.",
+		currentTokens, contextWindow, pct, warningPct)
 }
 
 func contextWarningThresholdExceeded(model Model, currentTokens, warningPct int) bool {
@@ -111,8 +111,9 @@ func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(s
 			requested(reason)
 			return agent.AgentToolResult{
 				Content: ai.ContentList{
-					ai.TextContent{Text: "Context reset initiated. The session will be reset with fresh headroom."},
+					ai.TextContent{Text: "Context reset initiated. Stopping turn to perform epoch rotation and bootstrap fresh context."},
 				},
+				Terminate: true,
 			}, nil
 		},
 	}
