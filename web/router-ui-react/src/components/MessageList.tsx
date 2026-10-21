@@ -328,9 +328,11 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
               <Fragment key={`${item.type}:${item.id}`}>
                 {separator}
                 <li className={`timeline-item timeline-item--${item.type}${isOutgoing ? " timeline-item--outgoing" : ""} timeline-item--tone-${orbTone}`}>
-                  <div className="timeline-node" aria-hidden="true">
-                    <span className={`timeline-dot timeline-dot--${orbTone}`} />
-                  </div>
+                  {!isOutgoing && (
+                    <div className="timeline-node" aria-hidden="true">
+                      <span className={`timeline-dot timeline-dot--${orbTone}`} />
+                    </div>
+                  )}
                   <div className="timeline-content">
                     {item.type === "message" ? (
                       <MessageBubble

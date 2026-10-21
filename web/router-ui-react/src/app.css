@@ -2291,28 +2291,7 @@ p:empty { display: none; }
 .activity-entry-label strong { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .activity-entry-subject { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-weight: 500; font-size: 0.82rem; }
 .activity-entry-label time { flex: 0 0 auto; margin-left: auto; padding-left: 6px; color: var(--muted); font-size: 0.75rem; font-weight: 400; white-space: nowrap; }
-.activity-entry-action-pill {
-  flex: 0 0 auto;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 12px;
-  border-radius: 9999px;
-  border: 1px solid rgba(244, 63, 94, 0.45);
-  background: rgba(244, 63, 94, 0.12);
-  color: #fca5a5;
-  font-size: 0.76rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
 
-.activity-entry-action-pill:hover {
-  background: rgba(244, 63, 94, 0.22);
-  border-color: rgba(244, 63, 94, 0.7);
-  color: #ffffff;
-}
 
 .activity-entry p,
 .activity-entry-preview { margin: 3px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.82rem; line-height: 1.35; }
@@ -5742,6 +5721,49 @@ select.form-control option,
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* Outgoing user message alignment */
+.timeline-item--outgoing {
+  display: flex !important;
+  justify-content: flex-end !important;
+  width: 100% !important;
+}
+
+.timeline-item--outgoing .timeline-rail {
+  visibility: hidden !important;
+  width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.timeline-item--outgoing .timeline-content {
+  display: flex !important;
+  justify-content: flex-end !important;
+  width: 100% !important;
+  padding-left: 0 !important;
+}
+
+.timeline-item--outgoing .bubble-wrap {
+  margin-left: auto !important;
+  max-width: min(680px, 75%) !important;
+  width: fit-content !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-end !important;
+}
+
+.timeline-item--outgoing .bubble-row {
+  display: flex !important;
+  flex-direction: row-reverse !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+}
+
+.timeline-item--outgoing .bubble-label {
+  display: flex !important;
+  justify-content: flex-end !important;
+  gap: 6px !important;
 }
 
 /* Shiny Composer Bar */
