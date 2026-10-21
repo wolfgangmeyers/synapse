@@ -1296,7 +1296,7 @@ p:empty { display: none; }
   flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
-  gap: 10px;
+  gap: 4px;
 }
 
 .conversation-header-row-primary {
