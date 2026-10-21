@@ -535,7 +535,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   </div>
                   <div className="header-metric-right">
                     <div className="header-metric-value">{activeSubagentsCount}</div>
-                    <div className="header-metric-subvalue">{activeSubagentsCount > 0 ? "active" : "idle"}</div>
                   </div>
                 </div>
               ) : null}
