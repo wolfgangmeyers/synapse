@@ -512,7 +512,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
             </div>
 
             {/* Row 2: Subagents Widget & Status / Activity */}
-            <div className="peer-row-subagents" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px', marginBottom: '6px' }}>
+            <div className="peer-row-subagents" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px', marginBottom: '0px' }}>
               {agent ? (
                 <div
                   className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
