@@ -28,9 +28,9 @@ type FeedItem = { type: "message"; id: string; timestamp: number; sequence: numb
 
 export type TimelineOrbTone = "purple" | "cyan" | "danger" | "blue";
 
-export function getItemOrbTone(item: FeedItem): TimelineOrbTone {
+export function getItemOrbTone(item: FeedItem, ownerId?: string): TimelineOrbTone {
   if (item.type === "message") {
-    const outgoing = item.message.direction === "outgoing";
+    const outgoing = item.message.direction === "outgoing" || (ownerId !== undefined && item.message.from === ownerId);
     return outgoing ? "blue" : "purple";
   }
   const entry = item.entry;
@@ -321,12 +321,13 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
               );
             }
 
-            const orbTone = getItemOrbTone(item);
+            const isOutgoing = item.type === "message" && (item.message.direction === "outgoing" || (ownerId !== undefined && item.message.from === ownerId));
+            const orbTone = getItemOrbTone(item, ownerId);
 
             return (
               <Fragment key={`${item.type}:${item.id}`}>
                 {separator}
-                <li className={`timeline-item timeline-item--${item.type} timeline-item--tone-${orbTone}`}>
+                <li className={`timeline-item timeline-item--${item.type}${isOutgoing ? " timeline-item--outgoing" : ""} timeline-item--tone-${orbTone}`}>
                   <div className="timeline-node" aria-hidden="true">
                     <span className={`timeline-dot timeline-dot--${orbTone}`} />
                   </div>
