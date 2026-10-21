@@ -13,7 +13,7 @@ export function MessageBubble({ message, ownerId, routerUrl, operationalAgentId 
   const outgoing = message.direction === "outgoing" || (ownerId !== undefined && message.from === ownerId);
   const receivedBySelectedAgent = operationalAgentId !== undefined && message.to === operationalAgentId;
   const sentBySelectedAgent = operationalAgentId !== undefined && message.from === operationalAgentId;
-  const communicationLabel = receivedBySelectedAgent ? "Received message" : sentBySelectedAgent ? "Sent message" : undefined;
+  const communicationLabel = outgoing ? null : receivedBySelectedAgent ? "Received message" : sentBySelectedAgent ? "Sent message" : undefined;
   const attachments = message.attachments && message.attachments.length > 0
     ? message.attachments
     : routerUrl === undefined ? [] : attachmentReferencesFromBody(textWithoutMarkdownImages(message.body), routerUrl);
@@ -34,7 +34,11 @@ export function MessageBubble({ message, ownerId, routerUrl, operationalAgentId 
         </div>
         <div className="bubble-main">
           <div className="bubble-label">
-            {communicationLabel ? (
+            {outgoing ? (
+              <span className="message-transport message-transport--sent">
+                <i className="fa-solid fa-paper-plane" aria-hidden="true" />
+              </span>
+            ) : communicationLabel ? (
               <span className={`message-transport message-transport--${receivedBySelectedAgent ? "received" : "sent"}`}>
                 <i className={`fa-solid ${receivedBySelectedAgent ? "fa-envelope" : "fa-paper-plane"}`} aria-hidden="true" />
                 {communicationLabel}
