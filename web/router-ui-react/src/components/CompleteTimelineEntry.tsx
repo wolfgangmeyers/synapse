@@ -808,11 +808,7 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
           <strong>{visual.label}</strong>
           {visual.subject ? <span className="activity-entry-subject" title={visual.subject}>{` • ${visual.subject}`}</span> : null}
           {time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}
-          {isFailure && hasDetails ? (
-            <span className="activity-entry-action-pill" aria-hidden="true">
-              View details &gt;
-            </span>
-          ) : null}
+
         </div>
         {visual.detail ? <p className="activity-entry-preview" title={visual.detail}>{visual.detail}</p> : null}
         {error?.detail_available === false && !safeClassifiedReason && !hasDetails ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}
