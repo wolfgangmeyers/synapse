@@ -251,10 +251,8 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
 
       {/* Main Content Area: 2-Row Layout */}
       <div className="conversation-header-content">
-        {/* Row 1: Title + Action Icon Buttons adjacent on Left, Subagents metric card */}
-        <div className="conversation-header-row-primary">
-          <div className="peer-heading-meta">
-            <div className="peer-title-line">
+        <div className="conversation-header-left">
+          <div className="peer-title-line">
               <h2>
                 <span className="peer-name-label">
                   {agent ? humanName(agent.agent_id) : "Pick an agent"}
@@ -511,59 +509,55 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
               </div>
             </div>
 
-            {/* Row 2: Subagents Widget & Status / Activity */}
-            <div className="peer-row-subagents" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px', marginBottom: '2px' }}>
-              {agent ? (
-                <div
-                  className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
-                  role="button"
-                  tabIndex={0}
-                  title={`Subagents: ${activeSubagentsCount} active (${displayedSubagents.length} total). Click to view details.`}
-                  onClick={() => setShowSubagentViewerDialog(true)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setShowSubagentViewerDialog(true);
-                    }
-                  }}
-                >
-                  <div className="header-metric-icon subagents-icon">
-                    <i className="fa-solid fa-robot" aria-hidden="true" />
-                  </div>
-                  <div className="header-metric-center">
-                    <div className="header-metric-title">Subagents</div>
-                  </div>
-                  <div className="header-metric-right">
-                    <div className="header-metric-value">{activeSubagentsCount}</div>
-                  </div>
-                </div>
-              ) : null}
-              <p className="peer-activity" style={{ margin: 0 }}>
-                {managedFailure ? (
-                  <span className="managed-failure-alert" role="alert">
-                    <i className="fa-solid fa-triangle-exclamation" role="img" aria-label="Warning" />
-                    <span>{failureMessage}</span>
-                    {managedFailure.last_error?.code ? (
-                      <code className="managed-failure-code">{managedFailure.last_error.code}</code>
-                    ) : null}
-                  </span>
-                ) : status ? (
-                  <span className={terminating ? "managed-termination-state" : "operational-status"} role="status">
-                    {status}
-                  </span>
-                ) : null}
-                {arrival ? (
-                  <ArrivalIndicator arrival={arrival} header onOpen={onOpenArrival} onDismiss={onDismissArrival} />
-                ) : null}
-                {!agent ? "Connected agents appear on the left." : null}
-              </p>
+          <div className="conversation-header-subagents-row">
+            {agent ? (
+            <div
+              className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
+              role="button"
+              tabIndex={0}
+              title={`Subagents: ${activeSubagentsCount} active (${displayedSubagents.length} total). Click to view details.`}
+              onClick={() => setShowSubagentViewerDialog(true)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setShowSubagentViewerDialog(true);
+                }
+              }}
+            >
+              <div className="header-metric-icon subagents-icon">
+                <i className="fa-solid fa-robot" aria-hidden="true" />
+              </div>
+              <div className="header-metric-center">
+                <div className="header-metric-title">Subagents</div>
+              </div>
+              <div className="header-metric-right">
+                <div className="header-metric-value">{activeSubagentsCount}</div>
+              </div>
             </div>
+          ) : null}
+          <p className="peer-activity" style={{ margin: 0 }}>
+            {managedFailure ? (
+              <span className="managed-failure-alert" role="alert">
+                <i className="fa-solid fa-triangle-exclamation" role="img" aria-label="Warning" />
+                <span>{failureMessage}</span>
+                {managedFailure.last_error?.code ? (
+                  <code className="managed-failure-code">{managedFailure.last_error.code}</code>
+                ) : null}
+              </span>
+            ) : status ? (
+              <span className={terminating ? "managed-termination-state" : "operational-status"} role="status">
+                {status}
+              </span>
+            ) : null}
+            {arrival ? (
+              <ArrivalIndicator arrival={arrival} header onOpen={onOpenArrival} onDismiss={onDismissArrival} />
+            ) : null}
+            {!agent ? "Connected agents appear on the left." : null}
+          </p>
           </div>
-        </div>
 
-        {/* Row 3: Context Card, Goal Progress Card, and Prompt/Model Controls */}
-        <div className="conversation-header-row-secondary">
-          {showContextUsage && contextUsage ? (
+          <div className="conversation-header-metrics-row">
+            {showContextUsage && contextUsage ? (
   <div
     className={`header-metric-card context-card${onContextThresholds ? " clickable" : ""}`}
     title={`${contextTooltip}${onContextThresholds ? " (Click to configure thresholds)" : ""}`}
@@ -639,6 +633,10 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     </div>
   </div>
 ) : null}
+          </div>
+        </div>
+
+        <div className="conversation-header-right">
           {(promptControls || modelControls) ? (
             <div className="header-pickers-stack">
               {promptControls ? <div className="header-picker-card">{promptControls}</div> : null}
