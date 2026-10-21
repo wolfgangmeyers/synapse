@@ -104,6 +104,34 @@ func (s *Store) subagentWriteFenceTx(ctx context.Context, parent EmbeddedBinding
 	return nil
 }
 
+// subagentSettleFenceTx validates that the parent agent still exists, is desired running,
+// and belongs to the same runtime generation. Unlike subagentWriteFenceTx, it does NOT
+// require the parent's current session epoch to match parent.Epoch: if a parent agent
+// executes a context reset (advancing its epoch) while a subagent is running, the subagent
+// must still be allowed to persist its progress and terminal outcome.
+func (s *Store) subagentSettleFenceTx(ctx context.Context, parent EmbeddedBinding) error {
+	if parent.AgentID == "" || parent.Generation == "" {
+		return errors.New("invalid embedded binding")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE agent_id=? AND runtime_generation=? AND runtime='embedded' AND desired_state='running'`, parent.AgentID, parent.Generation).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("stale managed embedded binding")
+	}
+	var role string
+	err = s.db.QueryRowContext(ctx, `SELECT role FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=?`, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation).Scan(&role)
+	if err != nil {
+		return err
+	}
+	if role != "root" && role != "worker" {
+		return errors.New("subagent parent requires root or worker role")
+	}
+	return nil
+}
+
 // CreateManagedSubagent reserves a slot-free embedded managed identity and its
 // metadata atomically under the exact parent runtime and owner fence. Child
 // session binding and execution belong to the later runtime slice.
@@ -259,7 +287,7 @@ func (s *Store) UpdateManagedSubagentAttempt(ctx context.Context, parent Embedde
 		return errors.New("invalid subagent status transition")
 	}
 	return s.runImmediate(ctx, func() error {
-		if err := s.subagentWriteFenceTx(ctx, parent); err != nil {
+		if err := s.subagentSettleFenceTx(ctx, parent); err != nil {
 			return err
 		}
 		now := formatTimestamp(s.clock.Now())
@@ -298,7 +326,7 @@ func (s *Store) UpdateManagedSubagentProgress(ctx context.Context, parent Embedd
 		return errors.New("invalid subagent progress")
 	}
 	return s.runImmediate(ctx, func() error {
-		if err := s.subagentWriteFenceTx(ctx, parent); err != nil {
+		if err := s.subagentSettleFenceTx(ctx, parent); err != nil {
 			return err
 		}
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_subagents SET turn_count=?,tool_use_count=?,total_tokens=?,duration_seconds=?,updated_at=? WHERE agent_id=? AND parent_agent_id=? AND parent_session_id=? AND parent_epoch=? AND parent_generation=? AND attempt=? AND status='running' AND turn_count<=? AND tool_use_count<=? AND total_tokens<=? AND duration_seconds<=?`, progress.TurnCount, progress.ToolUseCount, progress.TotalTokens, progress.DurationSeconds, formatTimestamp(s.clock.Now()), childID, parent.AgentID, parent.SessionID, parent.Epoch, parent.Generation, attempt, progress.TurnCount, progress.ToolUseCount, progress.TotalTokens, progress.DurationSeconds)
