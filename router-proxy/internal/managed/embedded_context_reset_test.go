@@ -417,11 +417,8 @@ func TestExplicitContextResetToolInvocation(t *testing.T) {
 					}, "call-reset-1"),
 				}, ai.StopToolUse)
 			}
-			if step == 2 {
-				// Turn 1 tool result continuation: worker acknowledges and stops
-				return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "Context reset tool call completed."}}, ai.StopStop)
-			}
-			// Subsequent turns: check for wake prompt
+			// When context_reset terminates the turn, step 2 does NOT continue in the same turn!
+			// Instead, the turn ends, ExecuteContextReset runs, and dispatches ContextResetWakePrompt.
 			if len(h.Messages) > 0 {
 				lastMsg := h.Messages[len(h.Messages)-1]
 				if u, ok := lastMsg.(ai.UserMessage); ok && len(u.Content) > 0 {
@@ -913,8 +910,8 @@ func TestMechaContextToolStatusAndRejectCompact(t *testing.T) {
 	statusText1M := resStatus1M.Content[0].(ai.TextContent).Text
 	require.Contains(t, statusText1M, `"session_id":"agent-1m-session"`)
 	require.Contains(t, statusText1M, `"epoch":1`)
-	require.Contains(t, statusText1M, `"warning_threshold_percent":40`)
-	require.Contains(t, statusText1M, `"reset_threshold_percent":50`)
+	require.Contains(t, statusText1M, `"warning_threshold_percent":10`)
+	require.Contains(t, statusText1M, `"reset_threshold_percent":20`)
 	require.Contains(t, statusText1M, `"system":"context_reset+scratchpad"`)
 	require.Contains(t, statusText1M, `"current_tokens":350000`)
 	require.Contains(t, statusText1M, `"context_window":1000000`)
@@ -953,14 +950,16 @@ func TestMechaContextToolStatusAndRejectCompact(t *testing.T) {
 	reminder1M := FormatContextResetWarningReminder(400_000, 1_000_000, 40, 50)
 	require.Contains(t, reminder1M, "400000 / 1000000 tokens (40.0%)")
 	require.Contains(t, reminder1M, "crossing the 40% warning threshold")
-	require.Contains(t, reminder1M, "automatic reset occurs at 50%")
+	require.Contains(t, reminder1M, "call context_reset")
+	require.Contains(t, reminder1M, "Your turn will end immediately to reset context with fresh headroom.")
 	require.Contains(t, reminder1M, "scratchpad")
 	require.NotContains(t, strings.ToLower(reminder1M), "compact")
 
 	reminderSmall := FormatContextResetWarningReminder(140_000, 200_000, 70, 80)
 	require.Contains(t, reminderSmall, "140000 / 200000 tokens (70.0%)")
 	require.Contains(t, reminderSmall, "crossing the 70% warning threshold")
-	require.Contains(t, reminderSmall, "automatic reset occurs at 80%")
+	require.Contains(t, reminderSmall, "call context_reset")
+	require.Contains(t, reminderSmall, "Your turn will end immediately to reset context with fresh headroom.")
 	require.Contains(t, reminderSmall, "scratchpad")
 	require.NotContains(t, strings.ToLower(reminderSmall), "compact")
 }
