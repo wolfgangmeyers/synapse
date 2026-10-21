@@ -2,7 +2,6 @@ import type { ReactElement, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { Agent } from "../state/agent-projection";
 import { humanName } from "../state/selectors";
-import { SubagentBadge } from "./SubagentBadge";
 import { ArrivalIndicator } from "./ArrivalIndicator";
 import { AgentAvatar } from "./AgentAvatar";
 import { AlienText } from "./AlienText";
@@ -512,20 +511,39 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
               </div>
             </div>
 
-            {/* Row 2: Subagents Pill & Status / Activity */}
+            {/* Row 2: Subagents Widget & Status / Activity */}
             <div className="peer-row-subagents" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
               {agent ? (
-                <SubagentBadge
-                  count={displayedSubagentCount}
-                  subagents={displayedSubagents}
-                  expanded={expanded}
-                  listId={`conversation-header-subagents-${agent.agent_id}`}
-                  onToggle={onToggleSubagents}
-                  onStopSubagent={onStopSubagent}
-                  agentId={agent.agent_id}
-                  client={client}
-                  isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"}
-                />
+                <div
+                  className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
+                  role="button"
+                  tabIndex={0}
+                  title={`Subagents: ${activeSubagentsCount} active (${displayedSubagents.length} total). Click to view details.`}
+                  onClick={() => setShowSubagentViewerDialog(true)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setShowSubagentViewerDialog(true);
+                    }
+                  }}
+                >
+                  <div className="header-metric-icon subagents-icon">
+                    <i className="fa-solid fa-robot" aria-hidden="true" />
+                  </div>
+                  <div className="header-metric-center">
+                    <div className="header-metric-title">Subagents</div>
+                    <div className="header-metric-track" role="progressbar" aria-valuenow={activeSubagentsCount} aria-valuemin={0} aria-valuemax={Math.max(1, displayedSubagents.length)}>
+                      <div
+                        className="header-metric-fill subagents-fill"
+                        style={{ width: activeSubagentsCount > 0 ? `${Math.min(100, Math.max(25, (activeSubagentsCount / Math.max(1, displayedSubagents.length)) * 100))}%` : "0%" }}
+                      />
+                    </div>
+                  </div>
+                  <div className="header-metric-right">
+                    <div className="header-metric-value">{activeSubagentsCount}</div>
+                    <div className="header-metric-subvalue">{activeSubagentsCount > 0 ? "active" : "idle"}</div>
+                  </div>
+                </div>
               ) : null}
               <p className="peer-activity" style={{ margin: 0 }}>
                 {managedFailure ? (
@@ -625,38 +643,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     </div>
     <div className="header-metric-right">
       <div className="header-metric-value">{agent.progress.percent}%</div>
-    </div>
-  </div>
-) : null}
-          {agent ? (
-  <div
-    className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
-    role="button"
-    tabIndex={0}
-    title={`Subagents: ${activeSubagentsCount} active (${displayedSubagents.length} total). Click to view details.`}
-    onClick={() => setShowSubagentViewerDialog(true)}
-    onKeyDown={(e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        setShowSubagentViewerDialog(true);
-      }
-    }}
-  >
-    <div className="header-metric-icon subagents-icon">
-      <i className="fa-solid fa-robot" aria-hidden="true" />
-    </div>
-    <div className="header-metric-center">
-      <div className="header-metric-title">Subagents</div>
-      <div className="header-metric-track" role="progressbar" aria-valuenow={activeSubagentsCount} aria-valuemin={0} aria-valuemax={Math.max(1, displayedSubagents.length)}>
-        <div
-          className="header-metric-fill subagents-fill"
-          style={{ width: activeSubagentsCount > 0 ? `${Math.min(100, Math.max(25, (activeSubagentsCount / Math.max(1, displayedSubagents.length)) * 100))}%` : "0%" }}
-        />
-      </div>
-    </div>
-    <div className="header-metric-right">
-      <div className="header-metric-value">{activeSubagentsCount}</div>
-      <div className="header-metric-subvalue">{activeSubagentsCount > 0 ? "active" : "idle"}</div>
     </div>
   </div>
 ) : null}
