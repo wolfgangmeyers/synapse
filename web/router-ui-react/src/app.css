@@ -1364,7 +1364,7 @@ p:empty { display: none; }
 .conversation-header-row-secondary {
   display: flex;
   flex-direction: row;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
   min-width: 0;
   flex-wrap: wrap;
