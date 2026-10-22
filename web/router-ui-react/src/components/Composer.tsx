@@ -30,7 +30,7 @@ export function Composer({ enabled = true, focusKey, value, draft, onChange, onD
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter") {
       // In expanded mode: Ctrl+Enter or Cmd+Enter sends; regular Enter inserts newline.
-      // In normal/collapsed mode: Enter sends; Shift+Enter inserts newline.
+      // In normal/collapsed mode: Enter sends; Shift+Enter inserts newline (default textarea behavior).
       if (expanded) {
         if (event.ctrlKey || event.metaKey) {
           event.preventDefault();
@@ -43,17 +43,8 @@ export function Composer({ enabled = true, focusKey, value, draft, onChange, onD
         submit();
         return;
       }
-      const textarea = event.currentTarget;
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const next = `${body.slice(0, start)}\n${body.slice(end)}`;
-      setBody(next);
-      reportSelection({ start: start + 1, end: start + 1 });
-      requestAnimationFrame(() => {
-        if (!textarea.isConnected) return;
-        textarea.selectionStart = start + 1;
-        textarea.selectionEnd = start + 1;
-      });
+      // When Shift+Enter is pressed in unexpanded mode, let the browser's default
+      // textarea behavior insert the newline naturally so it doesn't get doubled.
     } else if (event.key === "Escape" && expanded) {
       event.preventDefault();
       setExpanded(false);
@@ -75,7 +66,7 @@ export function Composer({ enabled = true, focusKey, value, draft, onChange, onD
           ref={textareaRef}
           data-testid="clipboard-paste-target"
           aria-label="Message"
-          rows={expanded ? 10 : 2}
+          rows={expanded ? 15 : 2}
           value={body}
           disabled={!enabled}
           onChange={(event) => { setBody(event.currentTarget.value); reportTextareaSelection(event.currentTarget); }}
