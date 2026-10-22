@@ -57,7 +57,8 @@ export function isMailboxSendToUser(
 ): { recipient: string; body: string; from: string } | undefined {
   const toolName = normalizedToolName(entry.presentation?.tool_name);
   const isWorkerSend = toolName === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send";
-  const isMailboxTool = toolName === "mecha_mailbox_send" || isWorkerSend;
+  const isImageSend = toolName === "mecha_send_image";
+  const isMailboxTool = toolName === "mecha_mailbox_send" || isWorkerSend || isImageSend;
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
     entry.presentation?.from === entry.agent_id
@@ -65,12 +66,19 @@ export function isMailboxSendToUser(
 
   if (!isMailboxTool && !isOutboundMessage) return undefined;
 
-  const mailboxDetails = getMailboxSendDetails(entry.tool_input);
-  const recipient = mailboxDetails?.recipient ?? entry.presentation?.to;
-  const rawBody = mailboxDetails?.body ?? entry.message_content;
+  let recipient: string | undefined;
+  let rawBody: string | undefined;
+  if (isImageSend && isRecord(entry.tool_input)) {
+    recipient = (typeof entry.tool_input.recipient === "string" && entry.tool_input.recipient.trim()) || "user";
+    rawBody = (typeof entry.tool_input.message === "string" ? entry.tool_input.message : typeof entry.tool_input.body === "string" ? entry.tool_input.body : "") || entry.message_content || "";
+  } else {
+    const mailboxDetails = getMailboxSendDetails(entry.tool_input);
+    recipient = mailboxDetails?.recipient ?? entry.presentation?.to;
+    rawBody = mailboxDetails?.body ?? entry.message_content;
+  }
   const body = rawBody?.trim();
 
-  if (!recipient || !body) return undefined;
+  if (!recipient || (!body && !isImageSend)) return undefined;
 
   const toolCallsExist = typeof entriesOrHasToolCalls === "boolean"
     ? entriesOrHasToolCalls
@@ -87,7 +95,7 @@ export function isMailboxSendToUser(
 
   if (normalizedRecipient === normalizedUser || normalizedRecipient === "user") {
     const from = entry.presentation?.from ?? entry.sender_identity ?? entry.agent_id;
-    return { recipient, body: rawBody ?? body, from };
+    return { recipient, body: rawBody ?? body ?? "", from };
   }
 
   return undefined;
@@ -250,6 +258,8 @@ function getToolIcon(toolName: string | undefined): string {
       return "fa-solid fa-diagram-project";
     case "mecha_context":
       return "fa-solid fa-compress";
+    case "mecha_send_image":
+      return "fa-solid fa-image";
     default:
       return "fa-solid fa-wrench";
   }
@@ -267,6 +277,22 @@ function toolVisual(presentation: ManagedHistoryPresentation, entry?: ManagedHis
   const unknown = presentation.outcome === "warning" || presentation.outcome === "unknown";
 
   const isWorkerSend = toolName === "mecha_worker" && isRecord(entry?.tool_input) && entry?.tool_input.action === "send";
+  if (toolName === "mecha_send_image") {
+    const input = isRecord(entry?.tool_input) ? entry.tool_input : undefined;
+    const recipient = typeof input?.recipient === "string" && input.recipient.trim() ? input.recipient.trim() : "user";
+    const body = typeof input?.message === "string" ? input.message : typeof input?.body === "string" ? input.body : undefined;
+    const path = typeof input?.path === "string" ? input.path : undefined;
+    const preview = cleanOneLine(body) ?? (path ? `Image: ${path}` : undefined) ?? cleanOneLine(presentation.summary) ?? (succeeded ? "Sent image" : "Failed to send image");
+    if (failed || interrupted) {
+      return { icon: "fa-solid fa-image", tone: "danger", label: "Send image failed", dialogTitle: "Send image failed", detail: cleanOneLine(presentation.summary) ?? "The operation could not be completed.", isHighValue: true };
+    }
+    if (active) {
+      const label = `Sending image to ${recipient}`;
+      return { icon: "fa-solid fa-image", tone: "blue", label, dialogTitle: "Sending image", detail: preview, isHighValue: false };
+    }
+    const label = `Sent image to ${recipient}`;
+    return { icon: "fa-solid fa-image", tone: "green", label, dialogTitle: "Sent image", detail: preview, isHighValue: false };
+  }
   if (toolName === "mecha_mailbox_send" || isWorkerSend) {
     const mailboxDetails = getMailboxSendDetails(entry?.tool_input);
     const to = mailboxDetails?.recipient ?? presentation.to;

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/sky-valley/pi/ai"
 )
@@ -147,7 +148,7 @@ func (s *Store) embeddedToolFenceTx(ctx context.Context, w *EmbeddedToolInvocati
 // Called only from the SDK BeforeToolExecute callback, after the original
 // assistant append. The current process and source are supplied by the runner.
 func (s *Store) RecordEmbeddedToolInvocation(ctx context.Context, b EmbeddedBinding, process, userSeq int64, userDigest, attempt string, call ai.ToolCall) (*EmbeddedToolInvocation, error) {
-	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_worker") {
+	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_worker" && call.Name != "mecha_send_image") {
 		return nil, errors.New("invalid managed tool call")
 	}
 	intent, err := json.Marshal(call)
@@ -357,9 +358,56 @@ func (s *Store) EnqueueEmbeddedToolMail(ctx context.Context, w *EmbeddedToolInvo
 	return result, err
 }
 
+func (s *Store) EnqueueEmbeddedToolImage(ctx context.Context, w *EmbeddedToolInvocation, envelope protocol.Envelope, rawAttachments []json.RawMessage, pending []attachments.Pending) (EnqueueResult, error) {
+	if w == nil {
+		return EnqueueResult{}, errors.New("missing mail producer")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.domainSettled {
+		return EnqueueResult{}, errors.New("mail admission already consumed")
+	}
+	result, err := s.enqueue(ctx, envelope, &EnqueueOptions{
+		Conversation: &ConversationOptions{
+			Body:        &envelope.Body,
+			Attachments: rawAttachments,
+			Source:      envelope.Source,
+		},
+	}, w)
+	if w.domainCommitted && w.domainConclusive && len(pending) > 0 {
+		var encodeErr error
+		w.domainContent, encodeErr = json.Marshal(map[string]any{
+			"status":        "accepted",
+			"message_id":    result.Message.ID,
+			"attachment_id": pending[0].Attachment.ID,
+			"url":           pending[0].Attachment.URL,
+			"recipient":     envelope.To,
+		})
+		err = errors.Join(err, encodeErr)
+	}
+	return result, err
+}
+
 func (s *Store) embeddedToolMailGuardTx(ctx context.Context, w *EmbeddedToolInvocation, envelope protocol.Envelope) error {
 	if err := s.admitEmbeddedToolTx(ctx, w); err != nil {
 		return err
+	}
+	if w.call.Name == "mecha_send_image" {
+		if envelope.From != w.origin.binding.AgentID {
+			return errors.New("image envelope sender differs from origin agent")
+		}
+		recipient, _ := w.call.Arguments["recipient"].(string)
+		recipient = strings.TrimSpace(recipient)
+		if recipient == "" {
+			recipient = "user"
+		}
+		if recipient != envelope.To {
+			return errors.New("image envelope recipient differs from tool call")
+		}
+		if envelope.ID == "" {
+			return errors.New("image envelope ID cannot be empty")
+		}
+		return nil
 	}
 	args := w.call.Arguments
 	recipient := args["recipient"]

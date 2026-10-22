@@ -320,6 +320,13 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
       "Call pi__mecha_mailbox_send through the Cursor pi bridge.",
     ],
   },
+  mecha_send_image: {
+    promptSnippet: "Send an image to the user or another recipient",
+    promptGuidelines: [
+      "Use mecha_send_image to send an image by local file path or data URL.",
+      "Call pi__mecha_send_image through the Cursor pi bridge.",
+    ],
+  },
   [INLINE_TOOL_ALLOWANCE_TOOL_NAME]: {
     promptSnippet: "Request a temporary exception to the inline tool guard",
     promptGuidelines: [
@@ -1032,6 +1039,52 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         }
         return {
           content: [{ type: "text", text: `Mailbox message accepted (${sent.id}, ${sent.state}).` }],
+          details: { message_id: sent.id, state: sent.state },
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: errorMessage(error) }], isError: true };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "mecha_send_image",
+    label: "Send image",
+    description: "Send an image to the user or another recipient via Mailbox V2.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_send_image,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", description: "Local path to the image file." },
+        data_url: { type: "string", description: "Base64 data URL for the image (data:image/...;base64,...)." },
+        message: { type: "string", description: "Optional text message to accompany the image." },
+        recipient: { type: "string", description: "Recipient agent ID or 'user' (defaults to 'user')." },
+      },
+    },
+    async execute(_toolCallId: string, input: { path?: string; data_url?: string; message?: string; recipient?: string }, _signal: AbortSignal | undefined, _onUpdate: (() => void) | undefined, toolContext: PiContext) {
+      try {
+        const path = input?.path;
+        const dataUrl = input?.data_url;
+        const message = input?.message;
+        const recipient = input?.recipient;
+
+        const sessionId = toolContext?.sessionManager?.getSessionId?.();
+        const mailboxClient = mailboxClientForSession(toolContext);
+        if (mailboxClient === undefined) {
+          if (children.has(sessionId) || childReplyClients.has(sessionId)) throw new Error("Mailbox v2 is not initialized for this native child session");
+          throw startupError ?? new Error("Mailbox v2 is not initialized");
+        }
+
+        const sent = await mailboxClient.sendImage({
+          to: recipient,
+          body: message,
+          path,
+          dataUrl,
+        });
+
+        return {
+          content: [{ type: "text", text: `Image message accepted (${sent.id}, ${sent.state}).` }],
           details: { message_id: sent.id, state: sent.state },
         };
       } catch (error) {

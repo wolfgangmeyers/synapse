@@ -320,7 +320,7 @@ func main() {
 		os.Exit(2)
 	}
 	manager, err := managed.NewManager(managed.ManagerOptions{
-		Store: durable, Config: config, Manifest: manifest,
+		Store: durable, Attachments: attachmentStore, Config: config, Manifest: manifest,
 		CatalogSource: acceptanceCatalogSource{store: durable, fallback: managed.Model{Provider: options.provider, ID: options.model, Name: "Managed RPC release fixture", Available: true}},
 	})
 	if err != nil {

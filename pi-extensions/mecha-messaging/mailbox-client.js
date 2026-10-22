@@ -2072,6 +2072,54 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             log(`MECHA_V2_REPLY accepted from=${agentId} to=${to} message=${payload.message.id}`);
             return payload.message;
         },
+        async sendImage({ to, body = "", path, dataUrl, name }) {
+            let resolvedDataUrl = dataUrl;
+            let fileName = name;
+            if (!resolvedDataUrl && path) {
+                const fs = await import("node:fs/promises");
+                const pathMod = await import("node:path");
+                const bytes = await fs.readFile(path);
+                fileName = fileName ?? pathMod.basename(path);
+                const ext = pathMod.extname(path).toLowerCase();
+                let mime = "image/png";
+                if (ext === ".jpg" || ext === ".jpeg")
+                    mime = "image/jpeg";
+                else if (ext === ".webp")
+                    mime = "image/webp";
+                else if (ext === ".gif")
+                    mime = "image/gif";
+                resolvedDataUrl = `data:${mime};base64,${bytes.toString("base64")}`;
+            }
+            if (!resolvedDataUrl) {
+                throw new Error("at least one of 'path' or 'data_url' is required");
+            }
+            const recipient = to && to.trim() !== "" ? to : "user";
+            const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/messages`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                signal: AbortSignal.timeout(DEFAULT_REPLY_TIMEOUT_MS),
+                body: JSON.stringify({
+                    id: generateId(),
+                    from: agentId,
+                    to: recipient,
+                    body: body || "",
+                    created_at: new Date().toISOString(),
+                    source: { kind: "agent" },
+                    attachments: [
+                        {
+                            type: "image",
+                            data_url: resolvedDataUrl,
+                            ...(fileName ? { name: fileName } : {}),
+                        },
+                    ],
+                }),
+            });
+            const payload = await response.json();
+            if (!response.ok || payload?.message?.state === undefined) {
+                throw new Error(`Mailbox v2 router rejected sendImage (${payload?.error?.code ?? response.status})`);
+            }
+            return payload.message;
+        },
         close() {
             if (stopped)
                 return;

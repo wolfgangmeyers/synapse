@@ -339,6 +339,7 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(startupResult(stageHelper, rootErr))
 		}
+		codexOptions.Attachments = attachmentsStore
 		codexOptions.Store = durable
 		codexOptions.EventSink = managedLogger
 		codexOptions.Config = options.managed
