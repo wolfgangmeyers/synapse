@@ -71,6 +71,29 @@ else
   MANAGED_UI_DIST=""
 fi
 
+sync_repo() {
+  if ! command -v git >/dev/null 2>&1; then
+    printf '%s\n' "run_router.sh: git command not found; skipping git pull" >&2
+    return 0
+  fi
+  if ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s\n' "run_router.sh: not a git repository; skipping git pull" >&2
+    return 0
+  fi
+  printf '%s\n' "run_router.sh: pulling latest changes..." >&2
+  local pull_output
+  if pull_output=$(git -C "$ROOT_DIR" pull 2>&1); then
+    if [[ -n "$pull_output" ]]; then
+      printf '%s\n' "$pull_output" >&2
+    fi
+  else
+    printf '%s\n' "run_router.sh: warning: git pull failed; proceeding anyway. Details:" >&2
+    if [[ -n "$pull_output" ]]; then
+      printf '%s\n' "$pull_output" >&2
+    fi
+  fi
+}
+
 usage() {
   printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Running tools/run_router.sh is mandatory for automatic restarts." "Router-managed Pi is enabled by default; set MECHA_ROUTER_MANAGED=false for legacy-only routing." ""
 }
@@ -135,6 +158,9 @@ case "${1:-}" in
       fi
       printf '%s\n' "run_router.sh: router exited with code $exit_code; restarting in 1s..." >&2
       sleep 1
+      if [[ "$exit_code" -eq 42 ]]; then
+        sync_repo
+      fi
       continue
     done
     ;;

@@ -82,10 +82,10 @@ func TestAppendEmbeddedFinalSuppressesReplyWhenMailboxSendToSenderUsed(t *testin
 	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "reply outbox must be suppressed when mecha_mailbox_send to sender was used")
 }
 
-func TestAppendEmbeddedFinalDoesNotSuppressReplyWhenNoMailboxSendUsed(t *testing.T) {
+func TestAppendEmbeddedFinalNeverAutoRepliesToOutbox(t *testing.T) {
 	ctx := context.Background()
 	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
-	path := filepath.Join(t.TempDir(), "no-reply-suppression.db")
+	path := filepath.Join(t.TempDir(), "no-auto-reply.db")
 	s, err := Open(ctx, path, Options{Clock: clock})
 	require.NoError(t, err)
 	defer s.Close()
@@ -117,72 +117,6 @@ func TestAppendEmbeddedFinalDoesNotSuppressReplyWhenNoMailboxSendUsed(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	// Outbox should have the reply for supervisor
-	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"))
-	reply, err := s.embeddedReplyTx(ctx, attempt.AttemptID)
-	require.NoError(t, err)
-	require.NotNil(t, reply)
-	require.Equal(t, "supervisor", reply.To)
-	require.Equal(t, "Direct text response", reply.Body)
-}
-
-func TestAppendEmbeddedFinalDoesNotSuppressReplyWhenMailboxSendSentToDifferentRecipient(t *testing.T) {
-	ctx := context.Background()
-	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
-	path := filepath.Join(t.TempDir(), "different-recipient.db")
-	s, err := Open(ctx, path, Options{Clock: clock})
-	require.NoError(t, err)
-	defer s.Close()
-
-	b := redBind(t, s, "reply-worker-3", "reply-session-3", 1, "reply-generation-3", "worker")
-
-	// Inbound mail from "supervisor"
-	mail := testEnvelope("mail-from-sup-3", "coordinate with peer")
-	mail.From = "supervisor"
-	mail.To = b.AgentID
-	_, err = s.Enqueue(ctx, mail)
-	require.NoError(t, err)
-
-	attempt := reserveEmbeddedMailTest(t, s, b, mail.ID)
-	require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, b, attempt.AttemptID, []byte(attempt.Body)))
-
-	_, err = s.ReopenEmbedded(ctx, b)
-	require.NoError(t, err)
-
-	// Tool call to mecha_mailbox_send to "other-worker" (NOT supervisor)
-	toolCall := ai.ToolCall{
-		ID:   "call-reply-diff",
-		Name: "mecha_mailbox_send",
-		Arguments: map[string]any{
-			"recipient": "other-worker",
-			"body":      "Hey peer",
-		},
-	}
-	assistantMsg := ai.AssistantMessage{
-		StopReason: ai.StopToolUse,
-		Content:    ai.ContentList{toolCall},
-	}
-	assistantBody, err := json.Marshal(assistantMsg)
-	require.NoError(t, err)
-
-	midEntry, err := s.AppendEmbeddedEntry(ctx, b, "assistant", assistantBody)
-	require.NoError(t, err)
-
-	// Final assistant message
-	finalMsg, err := json.Marshal(ai.AssistantMessage{
-		StopReason: ai.StopStop,
-		Content:    ai.ContentList{ai.TextContent{Text: "Messaged peer"}},
-	})
-	require.NoError(t, err)
-
-	finalEntry, err := s.AppendEmbeddedFinalAndReply(ctx, b, attempt.AttemptID, midEntry.Sequence, midEntry.Digest, finalMsg)
-	require.NoError(t, err)
-	require.Equal(t, "assistant", finalEntry.Kind)
-
-	// Outbox should STILL have the reply for supervisor
-	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"))
-	reply, err := s.embeddedReplyTx(ctx, attempt.AttemptID)
-	require.NoError(t, err)
-	require.NotNil(t, reply)
-	require.Equal(t, "supervisor", reply.To)
+	// Outbox should be zero: assistant text is NEVER automatically routed to the sender.
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "assistant text must never be automatically queued to outbox")
 }
