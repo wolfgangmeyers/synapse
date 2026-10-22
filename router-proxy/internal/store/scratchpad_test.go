@@ -393,19 +393,19 @@ func TestPinnedEntryLimit(t *testing.T) {
 	agentID := "agent-pin-limit"
 	otherAgent := "agent-pin-other"
 
-	// Append 10 pinned entries for agentID (all should succeed)
+	// Append 20 pinned entries for agentID (all should succeed)
 	var pinnedIDs []string
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= 20; i++ {
 		e, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("Pinned note %d", i), true)
 		require.NoError(t, err)
 		pinnedIDs = append(pinnedIDs, e.ID)
 	}
 
-	// 11th pinned append should fail with ErrPinnedLimitReached
-	_, err = db.AppendScratchpadEntry(ctx, agentID, "11th pinned note", true)
+	// 21st pinned append should fail with ErrPinnedLimitReached
+	_, err = db.AppendScratchpadEntry(ctx, agentID, "21st pinned note", true)
 	require.Error(t, err)
 	require.Equal(t, ErrPinnedLimitReached, err)
-	require.Equal(t, "pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
+	require.Equal(t, "pinned entry limit reached (maximum 20 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
 
 	// Append unpinned entry should succeed
 	unpinnedEntry, err := db.AppendScratchpadEntry(ctx, agentID, "Unpinned note", false)
@@ -428,7 +428,7 @@ func TestPinnedEntryLimit(t *testing.T) {
 	err = db.SetScratchpadPinned(ctx, agentID, unpinnedEntry.ID, true)
 	require.NoError(t, err)
 
-	// Pinned count is back to 10, so pinning pinnedIDs[0] again should fail
+	// Pinned count is back to 20, so pinning pinnedIDs[0] again should fail
 	err = db.SetScratchpadPinned(ctx, agentID, pinnedIDs[0], true)
 	require.Error(t, err)
 	require.Equal(t, ErrPinnedLimitReached, err)
@@ -480,16 +480,16 @@ func TestScratchpadBatchCRUD(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, unpinIDs, updated)
 
-	// 3. Batch pin limit enforcement (already have entry 2 pinned, creating 8 more makes 9 pinned)
-	for i := 6; i <= 13; i++ {
+	// 3. Batch pin limit enforcement (already have entry 2 pinned, creating 18 more makes 19 pinned)
+	for i := 6; i <= 23; i++ {
 		_, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("Note %d", i), true)
 		require.NoError(t, err)
 	}
-	// Currently 9 pinned. Pinning 2 more entries should fail limit (10).
+	// Currently 19 pinned. Pinning 2 more entries should fail limit (20).
 	_, err = db.SetScratchpadEntriesPinned(ctx, agentID, []string{entries[0].ID, entries[1].ID}, true)
 	require.ErrorIs(t, err, ErrPinnedLimitReached)
 
-	// Pinning just 1 more entry should succeed (9 + 1 = 10)
+	// Pinning just 1 more entry should succeed (19 + 1 = 20)
 	updated, err = db.SetScratchpadEntriesPinned(ctx, agentID, []string{entries[0].ID}, true)
 	require.NoError(t, err)
 	require.Equal(t, []string{entries[0].ID}, updated)

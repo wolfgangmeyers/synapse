@@ -19,7 +19,7 @@ type ScratchpadEntry struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-var ErrPinnedLimitReached = errors.New("pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one")
+var ErrPinnedLimitReached = errors.New("pinned entry limit reached (maximum 20 pinned entries); please unpin an obsolete entry before pinning a new one")
 
 func (s *Store) CountPinnedScratchpadEntries(ctx context.Context, agentID string) (int, error) {
 	if strings.TrimSpace(agentID) == "" {
@@ -45,7 +45,7 @@ func (s *Store) AppendScratchpadEntry(ctx context.Context, agentID, content stri
 		if err != nil {
 			return nil, err
 		}
-		if pinnedCount >= 10 {
+		if pinnedCount >= 20 {
 			return nil, ErrPinnedLimitReached
 		}
 	}
@@ -171,7 +171,7 @@ func (s *Store) PaginateScratchpad(ctx context.Context, agentID string, limit, o
 		return nil, 0, errors.New("agent_id must not be empty")
 	}
 	if limit <= 0 {
-		limit = 10
+		limit = 20
 	}
 	if offset < 0 {
 		offset = 0
@@ -279,7 +279,7 @@ func (s *Store) SetScratchpadPinned(ctx context.Context, agentID, entryID string
 			if err != nil {
 				return err
 			}
-			if pinnedCount >= 10 {
+			if pinnedCount >= 20 {
 				return ErrPinnedLimitReached
 			}
 		}
@@ -335,7 +335,7 @@ func (s *Store) DeleteScratchpadEntry(ctx context.Context, agentID, entryID stri
 
 // SetScratchpadEntriesPinned updates the pinned status of multiple scratchpad entries.
 // It returns the list of entry IDs that were actually updated, or an error if none were found
-// or if pinning would exceed the 10 pinned entry limit.
+// or if pinning would exceed the 20 pinned entry limit.
 func (s *Store) SetScratchpadEntriesPinned(ctx context.Context, agentID string, entryIDs []string, pinned bool) ([]string, error) {
 	if strings.TrimSpace(agentID) == "" {
 		return nil, errors.New("agent_id must not be empty")
@@ -396,7 +396,7 @@ func (s *Store) SetScratchpadEntriesPinned(ctx context.Context, agentID string, 
 		if err != nil {
 			return nil, err
 		}
-		if currentPinned+newPins > 10 {
+		if currentPinned+newPins > 20 {
 			return nil, ErrPinnedLimitReached
 		}
 	}

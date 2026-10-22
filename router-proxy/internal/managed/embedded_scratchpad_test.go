@@ -279,8 +279,8 @@ func TestEmbeddedScratchpadPinnedLimit(t *testing.T) {
 	mgr := &Manager{store: db}
 	tool := mgr.embeddedScratchpadTool(owner)
 
-	// Append 10 pinned notes
-	for i := 1; i <= 10; i++ {
+	// Append 20 pinned notes
+	for i := 1; i <= 20; i++ {
 		res, err := tool.Execute(ctx, fmt.Sprintf("call-append-%d", i), map[string]any{
 			"action":  "append",
 			"content": fmt.Sprintf("Pinned milestone note %d", i),
@@ -290,14 +290,14 @@ func TestEmbeddedScratchpadPinnedLimit(t *testing.T) {
 		require.Contains(t, res.Content[0].(ai.TextContent).Text, "pinned: true")
 	}
 
-	// 11th append with pinned: true must fail
-	_, err = tool.Execute(ctx, "call-append-11", map[string]any{
+	// 21st append with pinned: true must fail
+	_, err = tool.Execute(ctx, "call-append-21", map[string]any{
 		"action":  "append",
 		"content": "Exceeding pinned limit note",
 		"pinned":  true,
 	}, nil)
 	require.Error(t, err)
-	require.Equal(t, "pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
+	require.Equal(t, "pinned entry limit reached (maximum 20 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
 
 	// Append unpinned note must succeed
 	_, err = tool.Execute(ctx, "call-append-unpinned", map[string]any{
@@ -308,9 +308,9 @@ func TestEmbeddedScratchpadPinnedLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	// Get entries to locate unpinned and pinned IDs
-	entries, _, err := db.FetchScratchpadRecent(ctx, agentID, 20)
+	entries, _, err := db.FetchScratchpadRecent(ctx, agentID, 30)
 	require.NoError(t, err)
-	require.Len(t, entries, 11)
+	require.Len(t, entries, 21)
 
 	var unpinnedID string
 	var firstPinnedID string
@@ -325,13 +325,13 @@ func TestEmbeddedScratchpadPinnedLimit(t *testing.T) {
 	require.NotEmpty(t, unpinnedID)
 	require.NotEmpty(t, firstPinnedID)
 
-	// Pinning the unpinned note must fail because 10 are already pinned
+	// Pinning the unpinned note must fail because 20 are already pinned
 	_, err = tool.Execute(ctx, "call-pin-unpinned", map[string]any{
 		"action": "pin",
 		"id":     unpinnedID,
 	}, nil)
 	require.Error(t, err)
-	require.Equal(t, "pinned entry limit reached (maximum 10 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
+	require.Equal(t, "pinned entry limit reached (maximum 20 pinned entries); please unpin an obsolete entry before pinning a new one", err.Error())
 
 	// Unpin one note
 	res, err := tool.Execute(ctx, "call-unpin-1", map[string]any{

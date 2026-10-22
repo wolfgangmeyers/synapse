@@ -20,7 +20,7 @@ We are replacing lossy compaction entirely. Instead of automated summarization, 
 | **Pinned entries** | Pinned entries represent permanent working constraints, goals, or architectural facts. They are never dropped during fetch or handoff. |
 | **Tool interface** | Single `scratchpad` tool with five core actions: `append`, `fetch`, `paginate`, `search`, and `pin`/`unpin`. |
 | **Context reset behavior** | Clears conversation context to 0 tokens, injects system prompt, skills, and tools, ports over the last few messages (last 4–6 messages / recent turns) so the agent preserves recent actions and scratchpad updates, and automatically wakes the agent with a post-reset prompt: `"Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."` |
-| **Genesis handoff** | Injects all pinned entries plus a bounded window of recent entries (5–10 items) directly into the first turn after reset, alongside the ported recent messages. |
+| **Genesis handoff** | Injects all pinned entries plus a bounded window of recent entries (5–20 items) directly into the first turn after reset, alongside the ported recent messages. |
 | **Threshold monitoring** | Context threshold: **50% of context window for 1M+ models**, **80% for <1M models**. Auto-reset triggers when token threshold is hit, OR when worker invokes `context_reset` tool. |
 
 ---
@@ -49,10 +49,10 @@ The router exposes a dedicated `scratchpad` tool with the following actions:
   - Returns the created entry ID, timestamp, and status.
 - **T2. `fetch`:**
   - Retrieves active working context.
-  - Returns all `pinned` entries for the agent, plus the most recent unpinned entries up to a bounded limit (default 5–10 items).
+  - Returns all `pinned` entries for the agent, plus the most recent unpinned entries up to a bounded limit (default 5–20 items).
   - Pinned entries are highlighted or grouped at the top of the output.
 - **T3. `paginate`:**
-  - Parameters: `limit` (integer, default 10, max 50), `offset` (integer, default 0).
+  - Parameters: `limit` (integer, default 20, max 50), `offset` (integer, default 0).
   - Returns historical entries ordered chronologically or reverse-chronologically with pagination metadata (`total_count`, `has_more`).
 - **T4. `search`:**
   - Parameters: `query` (string, required), `regex` (boolean, optional, default `false`).
@@ -73,7 +73,7 @@ The router exposes a dedicated `scratchpad` tool with the following actions:
   - Before starting the fresh session turn, the runtime queries the scratchpad store for the agent.
   - It gathers:
     1. All entries where `pinned = true`.
-    2. The 5–10 most recent entries.
+    2. The 5–20 most recent entries.
   - It formats these entries into a structured session memory handoff note.
 - **R3. Genesis turn injection & auto-wake:**
   - The handoff note, genesis prompt, and ported recent messages are injected into the fresh context.
@@ -111,7 +111,7 @@ The router exposes a dedicated `scratchpad` tool with the following actions:
 - Implement clean context reset mechanism in `pi-go` / `router-proxy` (`ExecuteContextReset`).
 - Ensure conversation history is cleared down to 0 tokens while preserving system prompt, skills, and tools.
 - Port the last 4–6 messages / recent turns over to the new session epoch so recent actions and scratchpad updates are preserved.
-- Implement handoff note assembler that pulls pinned entries + 5–10 recent entries.
+- Implement handoff note assembler that pulls pinned entries + 5–20 recent entries.
 - Wire genesis turn injection so the handoff note and ported recent messages appear in the reset session.
 - Automatically wake the agent with: `"Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."`
 - Integration tests verifying context token reset, message porting, and auto-wake prompt.
