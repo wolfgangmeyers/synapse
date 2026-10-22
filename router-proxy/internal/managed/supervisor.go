@@ -502,6 +502,7 @@ type Manager struct {
 	embeddedBeforeToolDomain                   func()                              // test-only, after owner checks, before producer transaction
 	goalContinuationDelay                      time.Duration
 	contextResetRequested                      map[string]string
+	workerSelfTerminateRequested               map[string]workerSelfTerminateRequest
 	maxConsecutiveGoalContinuations            int
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
@@ -620,6 +621,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	manager.contextResetRequested = make(map[string]string)
+	manager.workerSelfTerminateRequested = make(map[string]workerSelfTerminateRequest)
 	defaultManagerInstance = manager
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
 	// every surviving active builtin row before any manager can expose history.

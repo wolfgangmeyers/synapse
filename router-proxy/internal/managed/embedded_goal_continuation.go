@@ -140,6 +140,10 @@ func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, k
 }
 
 func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, overridePrompt string) {
+	if m.isWorkerSelfTerminationPending(binding.AgentID) {
+		log.Printf("[embedded:%s] Suppressing goal continuation because self-termination is pending", binding.AgentID)
+		return
+	}
 	if m.hasActiveSubagents(binding.AgentID) {
 		log.Printf("[embedded:%s] Suppressing goal continuation because subagents are active", binding.AgentID)
 		return
@@ -148,6 +152,10 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
 	if m.runCtx.Err() != nil {
+		return
+	}
+	if m.isWorkerSelfTerminationPending(binding.AgentID) {
+		log.Printf("[embedded:%s] Suppressing goal continuation because self-termination is pending", binding.AgentID)
 		return
 	}
 	if m.hasActiveSubagents(binding.AgentID) {
