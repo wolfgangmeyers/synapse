@@ -16,6 +16,7 @@ interface DirectoryListing {
 export interface ManagedDirectoryPickerProps {
   value: string;
   recentFolders?: readonly string[];
+  isCheckingGit?: boolean;
   onChange(value: string): void;
   list(path: string): Promise<DirectoryListing>;
 }
@@ -62,7 +63,7 @@ async function localFolderFromDrop(transfer: DataTransfer): Promise<string | und
 
 // The launch form keeps its freeform input stable. Folder navigation belongs to
 // the separate native dialog, and selection is committed only from that dialog.
-export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, list }: ManagedDirectoryPickerProps): ReactElement {
+export function ManagedDirectoryPicker({ value, recentFolders = [], isCheckingGit = false, onChange, list }: ManagedDirectoryPickerProps): ReactElement {
   const inputID = useId();
   const searchID = useId();
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -233,7 +234,13 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
         </button>
       </div>
     </div>
-    <p className="managed-directory-drop-hint">Drop a folder from Finder.</p>
+    {isCheckingGit ? (
+      <p className="managed-directory-drop-hint managed-directory-git-checking">
+        Checking git… <i className="fa-solid fa-spinner fa-spin" aria-hidden="true" />
+      </p>
+    ) : (
+      <p className="managed-directory-drop-hint">Drop a folder from Finder.</p>
+    )}
     {error ? <p className="error" role="alert">{error}</p> : null}
     <DialogShell open={pickerOpen} title="Choose working folder" titleId="managed-directory-browser-title" description="Choose a folder, then select it to use it." onClose={resetPicker} closeLabel="Close folder browser" className="message-dialog managed-directory-browser">
       <div className="managed-directory-browser-body">

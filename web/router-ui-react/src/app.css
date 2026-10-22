@@ -3232,6 +3232,8 @@ dialog,
 .managed-directory-picker li button { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .managed-recent-folders li button { text-align: left; }
 .managed-directory-drop-hint { font-size: 12px; }
+.managed-directory-git-checking { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.managed-directory-git-checking i { font-size: 11px; }
 .managed-directory-browser { width: min(620px, calc(100vw - 32px)); }
 .managed-directory-browser-body { display: grid; gap: 12px; }
 .managed-directory-breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }

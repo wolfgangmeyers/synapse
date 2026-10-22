@@ -230,6 +230,34 @@ describe("ManagedAgentDialog", () => {
     });
   });
 
+  it("shows checking git indicator while worktreeCheck is running and restores hint after", async () => {
+    let resolveCheck: (val: { is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }) => void = () => {};
+    const onWorktreeCheck = vi.fn(() => new Promise<{ is_git_repo: boolean; is_main_worktree: boolean; has_uncommitted_changes: boolean }>((resolve) => {
+      resolveCheck = resolve;
+    }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onWorktreeCheck={onWorktreeCheck} />);
+
+    expect(screen.getByText("Drop a folder from Finder.")).toBeInTheDocument();
+    expect(screen.queryByText(/Checking git/i)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/repo" } });
+
+    // While debounce / check is active, "Checking git…" indicator replaces "Drop a folder from Finder."
+    expect(await screen.findByText(/Checking git…/i)).toBeInTheDocument();
+    expect(screen.queryByText("Drop a folder from Finder.")).not.toBeInTheDocument();
+
+    // Wait for the debounced call to happen
+    await waitFor(() => expect(onWorktreeCheck).toHaveBeenCalledWith("/allowed/repo"));
+
+    // Settle the check
+    resolveCheck({ is_git_repo: true, is_main_worktree: true, has_uncommitted_changes: false });
+
+    // After completion, indicator disappears, normal hint returns, and worktree toggle is rendered
+    expect(await screen.findByText("Drop a folder from Finder.")).toBeInTheDocument();
+    expect(screen.queryByText(/Checking git…/i)).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Create a worktree/i })).toBeInTheDocument();
+  });
+
   it("requires a deliberate termination confirmation", async () => {
     const user = userEvent.setup();
     const onAction = vi.fn(async () => undefined);

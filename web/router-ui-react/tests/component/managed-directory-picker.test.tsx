@@ -131,6 +131,21 @@ describe("ManagedDirectoryPicker", () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledWith("/allowed/item-folder"));
   });
 
+  it("supports checking git state replacing drop hint", () => {
+    const list = vi.fn(async (path: string) => ({ path, parent: "", directories: [] }));
+    const { rerender } = render(<ManagedDirectoryPicker value="/allowed/repo" onChange={() => {}} list={list} isCheckingGit={false} />);
+    expect(screen.getByText("Drop a folder from Finder.")).toBeInTheDocument();
+    expect(screen.queryByText(/Checking git/i)).not.toBeInTheDocument();
+
+    rerender(<ManagedDirectoryPicker value="/allowed/repo" onChange={() => {}} list={list} isCheckingGit={true} />);
+    expect(screen.getByText(/Checking git…/i)).toBeInTheDocument();
+    expect(screen.queryByText("Drop a folder from Finder.")).not.toBeInTheDocument();
+
+    rerender(<ManagedDirectoryPicker value="/allowed/repo" onChange={() => {}} list={list} isCheckingGit={false} />);
+    expect(screen.getByText("Drop a folder from Finder.")).toBeInTheDocument();
+    expect(screen.queryByText(/Checking git/i)).not.toBeInTheDocument();
+  });
+
   it("accepts an absolute path exposed by Finder's File payload", async () => {
     const onChange = vi.fn();
     const { container } = render(<ManagedDirectoryPicker value="" onChange={onChange} list={async (path) => ({ path, parent: "", directories: [] })} />);
