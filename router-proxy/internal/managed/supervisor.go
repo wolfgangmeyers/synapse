@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
@@ -57,6 +58,7 @@ type RestartPreparationHook func(context.Context, string) error
 type ProcessGroupLeaderVerifier func(ProcessIdentity) bool
 
 type ManagerOptions struct {
+	Attachments                       *attachments.Store
 	Store                             *store.Store
 	EventSink                         EventSink
 	Config                            Config
@@ -482,6 +484,7 @@ type Manager struct {
 	beforeTerminationArtifactCleanup           func(context.Context, string) error
 	restartAllDispatcher                       RestartAllDispatcher
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
+	attachments                                *attachments.Store
 	embeddedMailBackoff                        time.Duration
 	rootControlHandlers                        *RootControlHandlerRegistry
 	rootRecoveryOperatorOwner                  string
@@ -632,7 +635,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
 	manager.goalContinuationDelay = options.GoalContinuationDelay
 	manager.embeddedMailBackoff = options.EmbeddedMailBackoff
 	manager.restartExitTrigger = options.RestartExitTrigger
