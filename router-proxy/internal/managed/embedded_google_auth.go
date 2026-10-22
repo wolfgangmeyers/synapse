@@ -1249,11 +1249,20 @@ func (m *Manager) streamEmbeddedGoogle(requestCtx context.Context, requestModel 
 			maxOutputTokens = *opts.MaxTokens
 		}
 
+		thinkingCfg := map[string]any{"includeThoughts": true}
+		if opts != nil && (opts.Reasoning == "off" || opts.Reasoning == ai.ThinkingLevel("off")) {
+			if strings.Contains(requestModel.ID, "3.8") || strings.Contains(requestModel.ID, "3.7") || strings.Contains(requestModel.ID, "gemma") {
+				thinkingCfg = map[string]any{"thinkingLevel": "MINIMAL"}
+			} else {
+				thinkingCfg = map[string]any{"thinkingBudget": 0}
+			}
+		}
+
 		reqBody := map[string]any{
 			"contents": contents,
 			"generationConfig": map[string]any{
 				"maxOutputTokens": maxOutputTokens,
-				"thinkingConfig":  map[string]any{"includeThoughts": true},
+				"thinkingConfig":  thinkingCfg,
 			},
 		}
 		if len(systemParts) > 0 {

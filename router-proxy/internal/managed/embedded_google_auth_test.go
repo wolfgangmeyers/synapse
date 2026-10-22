@@ -749,6 +749,102 @@ func TestGoogleAuth_StreamUniqueToolCallIDsForDuplicateToolNames(t *testing.T) {
 	}
 }
 
+func TestGoogleAuth_StreamReasoningOff_ThinkingDisabled(t *testing.T) {
+	origTokenURL := googleTokenURL
+	origContentURL := googleGenerateContentURL
+	defer func() {
+		googleTokenURL = origTokenURL
+		googleGenerateContentURL = origContentURL
+	}()
+
+	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "token-test",
+			"expires_in":   3600,
+		})
+	}))
+	defer mockOAuth.Close()
+	googleTokenURL = mockOAuth.URL
+
+	var capturedReqBody map[string]any
+	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var envelope map[string]any
+		_ = json.Unmarshal(bodyBytes, &envelope)
+		if req, ok := envelope["request"].(map[string]any); ok {
+			capturedReqBody = req
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Response\"}],\"role\":\"model\"}}]}}\n\n"))
+	}))
+	defer mockAntigravityAPI.Close()
+	googleGenerateContentURL = mockAntigravityAPI.URL
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "auth.json")
+	initialAuth := map[string]any{
+		"antigravity": map[string]any{
+			"access":    "test-access-token",
+			"refresh":   "test-refresh-token",
+			"expires":   time.Now().UnixMilli() + 3600*1000,
+			"projectId": "test-project-123",
+		},
+	}
+	data, _ := json.Marshal(initialAuth)
+	_ = os.WriteFile(authPath, data, 0600)
+
+	m := &Manager{config: Config{PiAgentDir: tempDir}}
+	transcript := ai.TranscriptContext{
+		Messages: []ai.Message{
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Evaluate goal"},
+				},
+			},
+		},
+	}
+
+	opts := &ai.SimpleStreamOptions{
+		Reasoning: "off",
+	}
+
+	// 1. Test gemini-3.8-flash: thinkingLevel: "MINIMAL" and no includeThoughts
+	capturedReqBody = nil
+	stream38 := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, opts)
+	for event := range stream38.Events() {
+		if event.Type == ai.EventError {
+			t.Fatalf("stream encountered error: %v", event.Error)
+		}
+	}
+	require.NotNil(t, capturedReqBody)
+	genConfig38, ok := capturedReqBody["generationConfig"].(map[string]any)
+	require.True(t, ok)
+	thinkingConfig38, ok := genConfig38["thinkingConfig"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "MINIMAL", thinkingConfig38["thinkingLevel"])
+	_, hasInclude38 := thinkingConfig38["includeThoughts"]
+	require.False(t, hasInclude38, "gemini-3.8-flash with reasoning off must not include includeThoughts")
+
+	// 2. Test gemini-2.5-flash: thinkingBudget: 0 and no includeThoughts
+	capturedReqBody = nil
+	stream25 := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-2.5-flash", Provider: "antigravity"}, transcript, opts)
+	for event := range stream25.Events() {
+		if event.Type == ai.EventError {
+			t.Fatalf("stream encountered error: %v", event.Error)
+		}
+	}
+	require.NotNil(t, capturedReqBody)
+	genConfig25, ok := capturedReqBody["generationConfig"].(map[string]any)
+	require.True(t, ok)
+	thinkingConfig25, ok := genConfig25["thinkingConfig"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(0), thinkingConfig25["thinkingBudget"])
+	_, hasInclude25 := thinkingConfig25["includeThoughts"]
+	require.False(t, hasInclude25, "gemini-2.5-flash with reasoning off must not include includeThoughts")
+}
+
 func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
 	origURL := googleTokenURL
 	defer func() { googleTokenURL = origURL }()

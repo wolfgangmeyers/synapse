@@ -511,6 +511,35 @@ describe("Complete timeline entry", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Goal Evaluation" })).toBeInTheDocument();
   });
 
+  it("displays presentation.summary when kind is goal_evaluation even if message_content has long multiline response, and renders no companion bubble", () => {
+    const rawEvaluatorResponse = `Based on the review of the previous steps, here is the full evaluation breakdown:
+1. Criterion A: Passed
+2. Criterion B: Passed
+3. Criterion C: Passed
+Therefore, the user's requirements have been completely fulfilled.
+STATUS: DONE`;
+    const summary = "All criteria passed and requirements fulfilled.";
+
+    const { container } = render(<CompleteTimelineEntry entry={{
+      id: "complete:goal-eval-summary-priority",
+      agent_id: "managed-worker",
+      at,
+      message: "Goal Evaluation • DONE",
+      message_content: rawEvaluatorResponse,
+      presentation: {
+        kind: "goal_evaluation",
+        outcome: "done",
+        summary,
+      },
+    }} />);
+
+    const preview = container.querySelector(".activity-entry-preview");
+    expect(preview).toBeInTheDocument();
+    expect(preview).toHaveTextContent(summary);
+    expect(preview).not.toHaveTextContent("Based on the review of the previous steps");
+    expect(container.querySelector(".activity-companion-bubble")).not.toBeInTheDocument();
+  });
+
   it("renders workflow activation prompt with purple tone, bolt icon, and prompt preview", async () => {
     const user = userEvent.setup();
     const { container } = render(<CompleteTimelineEntry entry={{
