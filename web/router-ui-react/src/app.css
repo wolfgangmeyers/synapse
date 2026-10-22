@@ -6372,6 +6372,10 @@ select.form-control option,
   box-shadow: none;
 }
 
+.composer.expanded textarea {
+  max-height: 240px;
+}
+
 .composer textarea:focus {
   outline: none;
   box-shadow: none;

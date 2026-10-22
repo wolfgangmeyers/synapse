@@ -22,15 +22,16 @@ describe("Composer", () => {
     expect(onSelectionChange).toHaveBeenCalledWith({ start: 0, end: 0 });
   });
 
-  it("sends on Enter and keeps a newline for Shift+Enter", () => {
+  it("sends on Enter and keeps a newline for Shift+Enter", async () => {
     const onSend = vi.fn();
+    const user = userEvent.setup();
     render(<Composer enabled onSend={onSend} />);
     const input = screen.getByRole("textbox", { name: /message/i });
     fireEvent.change(input, { target: { value: "first" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onSend).toHaveBeenCalledWith("first", []);
     fireEvent.change(input, { target: { value: "first" } });
-    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    await user.type(input, "{Shift>}{Enter}{/Shift}");
     expect(input instanceof HTMLTextAreaElement).toBe(true);
     expect(input instanceof HTMLTextAreaElement ? input.value : "").toContain("\n");
   });
