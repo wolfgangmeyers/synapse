@@ -2287,7 +2287,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				reason := "Empty response without action"
 				_, changed, evalErr := m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
 				if evalErr == nil {
-					m.recordGoalEvaluationActivity(binding, key, outcome, reason)
+					m.recordGoalEvaluationActivity(binding, key, outcome, reason, reason)
 				}
 				lane.serial.Unlock()
 				if evalErr != nil || !changed {
@@ -2320,12 +2320,18 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		lane := m.laneFor(binding.AgentID)
 		lane.serial.Lock()
 		evaluator := m.embeddedGoalEvaluator
-		if evaluator == nil {
-			evaluator = func(evalCtx context.Context, evalKey store.EmbeddedGoalEvaluationKey) (string, string, error) {
-				return m.evaluateEmbeddedProductionGoal(evalCtx, binding, evalKey, snapshot, policy.Config.Goal, model, stream)
-			}
+		var outcome, reason, rawDetails string
+		var evalErr error
+		if evaluator != nil {
+			outcome, reason, evalErr = evaluator(m.runCtx, key)
+			rawDetails = reason
+		} else {
+			evalRes, err := m.evaluateEmbeddedProductionGoalWithDetails(m.runCtx, binding, key, snapshot, policy.Config.Goal, model, stream)
+			outcome = evalRes.verdict
+			reason = evalRes.reason
+			rawDetails = evalRes.rawContent
+			evalErr = err
 		}
-		outcome, reason, evalErr := evaluator(m.runCtx, key)
 		if evalErr != nil {
 			log.Printf("[embedded:%s] Goal evaluation error (%v); falling back to NOT_DONE to ensure worker never stalls", binding.AgentID, evalErr)
 			outcome = store.EmbeddedGoalEvaluationNotDone
@@ -2333,6 +2339,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			if len(reason) > 512 {
 				reason = reason[:512]
 			}
+			rawDetails = fmt.Sprintf("Goal evaluation failed: %v", evalErr)
 			evalErr = nil
 		}
 		changed := false
@@ -2340,7 +2347,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			_, changed, evalErr = m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
 		}
 		if evalErr == nil && (outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted || outcome == store.EmbeddedGoalEvaluationNotDone) {
-			m.recordGoalEvaluationActivity(binding, key, outcome, reason)
+			m.recordGoalEvaluationActivity(binding, key, outcome, reason, rawDetails)
 		}
 		if outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted {
 			lane.consecutiveContinuations = 0

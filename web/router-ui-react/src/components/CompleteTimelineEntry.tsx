@@ -520,7 +520,7 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
     const isDone = presentation.outcome === "done" || presentation.outcome === "completed" || presentation.outcome === "success" || (entry.message !== undefined && (entry.message.includes("DONE") || entry.message.includes("COMPLETED")) && !entry.message.includes("NOT_DONE"));
     const verdict = isDone ? (presentation.outcome === "completed" || entry.message?.includes("COMPLETED") ? "COMPLETED" : "DONE") : "NOT_DONE";
     const label = `Goal Evaluation • ${verdict}`;
-    const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary) ?? (isDone ? verdict : "Continue working on the current goal.");
+    const detail = cleanOneLine(presentation.summary) ?? cleanOneLine(entry.message_content) ?? (isDone ? verdict : "Continue working on the current goal.");
     return {
       icon: "fa-solid fa-flag",
       tone: isDone ? "green" : "blue",

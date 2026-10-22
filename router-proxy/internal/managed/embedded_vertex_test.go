@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -356,4 +357,125 @@ func TestEmbeddedMailStopErrorEmitsErrorReply(t *testing.T) {
 	require.Equal(t, "running", saved.LifecycleState)
 	require.Equal(t, "idle", saved.ActivityState)
 	require.True(t, saved.AcceptingPrompts)
+}
+
+func TestVertexStream_ReasoningOff_ThinkingDisabled(t *testing.T) {
+	tempDir := t.TempDir()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fake-vertex-token",
+			"expires_in":   3600,
+			"token_type":   "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+
+	adcContent := map[string]any{
+		"type":          "authorized_user",
+		"refresh_token": "fake-refresh-token",
+		"token_uri":     tokenServer.URL,
+		"project_id":    "vertex-proj-reasoning-test",
+	}
+	adcBytes, err := json.Marshal(adcContent)
+	require.NoError(t, err)
+	adcFile := filepath.Join(tempDir, "adc.json")
+	require.NoError(t, os.WriteFile(adcFile, adcBytes, 0o600))
+
+	var capturedReqBody map[string]any
+	vertexServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr)
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(bodyBytes, &body))
+		capturedReqBody = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok)
+
+		ssePayload := "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello without thinking\"}]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":5,\"totalTokenCount\":10}}}\n\n"
+		_, _ = w.Write([]byte(ssePayload))
+		flusher.Flush()
+	}))
+	defer vertexServer.Close()
+
+	origTemplate := vertexGenerateContentURLTemplate
+	defer func() { vertexGenerateContentURLTemplate = origTemplate }()
+	vertexGenerateContentURLTemplate = vertexServer.URL + "?location=%s&project=%s&location2=%s&model=%s"
+
+	authJSONContent := map[string]any{
+		"google-vertex": map[string]any{
+			"type": "api_key",
+			"env": map[string]any{
+				"GOOGLE_APPLICATION_CREDENTIALS": adcFile,
+				"GOOGLE_CLOUD_PROJECT":           "vertex-proj-reasoning-test",
+				"GOOGLE_CLOUD_LOCATION":          "us-central1",
+			},
+		},
+	}
+	authJSONBytes, err := json.Marshal(authJSONContent)
+	require.NoError(t, err)
+	piAgentDir := filepath.Join(tempDir, "agent")
+	require.NoError(t, os.MkdirAll(piAgentDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(piAgentDir, "auth.json"), authJSONBytes, 0o600))
+
+	m := &Manager{
+		config: Config{
+			PiAgentDir:  piAgentDir,
+			ManagedHome: tempDir,
+		},
+	}
+
+	currentVertexToken = vertexTokenCache{}
+
+	transcript := ai.TranscriptContext{
+		Messages: []ai.Message{
+			ai.UserMessage{
+				Content: []ai.Content{
+					ai.TextContent{Text: "Test reasoning off"},
+				},
+			},
+		},
+	}
+
+	opts := &ai.SimpleStreamOptions{
+		Reasoning: "off",
+	}
+
+	// 1. Test gemini-3.8-flash: thinkingLevel: "MINIMAL" and no includeThoughts
+	capturedReqBody = nil
+	stream38 := m.streamEmbeddedVertex(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "google-vertex"}, transcript, opts)
+	for event := range stream38.Events() {
+		if event.Type == ai.EventError {
+			t.Fatalf("stream encountered error: %v", event.Error)
+		}
+	}
+	require.NotNil(t, capturedReqBody)
+	genConfig38, ok := capturedReqBody["generationConfig"].(map[string]any)
+	require.True(t, ok)
+	thinkingConfig38, ok := genConfig38["thinkingConfig"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "MINIMAL", thinkingConfig38["thinkingLevel"])
+	_, hasInclude38 := thinkingConfig38["includeThoughts"]
+	require.False(t, hasInclude38, "gemini-3.8-flash with reasoning off must not include includeThoughts")
+
+	// 2. Test gemini-2.5-flash: thinkingBudget: 0 and no includeThoughts
+	capturedReqBody = nil
+	stream25 := m.streamEmbeddedVertex(context.Background(), &ai.Model{ID: "gemini-2.5-flash", Provider: "google-vertex"}, transcript, opts)
+	for event := range stream25.Events() {
+		if event.Type == ai.EventError {
+			t.Fatalf("stream encountered error: %v", event.Error)
+		}
+	}
+	require.NotNil(t, capturedReqBody)
+	genConfig25, ok := capturedReqBody["generationConfig"].(map[string]any)
+	require.True(t, ok)
+	thinkingConfig25, ok := genConfig25["thinkingConfig"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(0), thinkingConfig25["thinkingBudget"])
+	_, hasInclude25 := thinkingConfig25["includeThoughts"]
+	require.False(t, hasInclude25, "gemini-2.5-flash with reasoning off must not include includeThoughts")
 }

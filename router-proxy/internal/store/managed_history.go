@@ -506,6 +506,35 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	return page, nil
 }
 
+// GetManagedCompleteHistory returns complete history entries for an agent.
+func (s *Store) GetManagedCompleteHistory(ctx context.Context, agentID string) ([]ManagedHistoryEntry, error) {
+	page, err := s.ManagedHistoryPage(ctx, agentID, "complete", 0, maxManagedHistoryEntries)
+	if err == nil && len(page.Entries) > 0 {
+		return page.Entries, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id,sequence,category,occurred_at,level,message,COALESCE(presentation_json,''),message_content,sender_identity,tool_input_json FROM managed_complete_history WHERE agent_id=? ORDER BY sequence DESC`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []ManagedHistoryEntry
+	for rows.Next() {
+		var sequence int64
+		var entryAgentID, occurredAt, level, message, category string
+		var presentation, content, sender, toolInput sql.NullString
+		if err := rows.Scan(&entryAgentID, &sequence, &category, &occurredAt, &level, &message, &presentation, &content, &sender, &toolInput); err != nil {
+			return nil, err
+		}
+		entries = append(entries, managedHistoryEntry(sequence, entryAgentID, occurredAt, level, message, effectiveManagedHistoryPresentation(category, level, message, presentation.String), managedHistoryDetails{MessageContent: managedHistoryDetail(content), SenderIdentity: managedHistoryDetail(sender), ToolInputJSON: toolInput.String}))
+	}
+	return entries, rows.Err()
+}
+
 // ShouldRecordGoalEvaluation checks whether a goal evaluation should be recorded
 // or if it is a redundant consecutive NOT_DONE evaluation that would flood history.
 func (s *Store) ShouldRecordGoalEvaluation(ctx context.Context, agentID, outcome, summary string) (bool, error) {

@@ -114,7 +114,21 @@ func parseGoalEvaluationResponse(rawText string) (verdict string, reason string)
 	return verdict, reason
 }
 
+type embeddedGoalEvaluationResult struct {
+	verdict    string
+	reason     string
+	rawContent string
+}
+
 func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, snapshot store.EmbeddedSnapshot, goal string, model *ai.Model, stream agent.StreamFn) (verdict string, reason string, err error) {
+	res, err := m.evaluateEmbeddedProductionGoalWithDetails(ctx, binding, key, snapshot, goal, model, stream)
+	if err != nil {
+		return "", "", err
+	}
+	return res.verdict, res.reason, nil
+}
+
+func (m *Manager) evaluateEmbeddedProductionGoalWithDetails(ctx context.Context, binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, snapshot store.EmbeddedSnapshot, goal string, model *ai.Model, stream agent.StreamFn) (res embeddedGoalEvaluationResult, err error) {
 	defer func() {
 		if err != nil {
 			log.Printf("GOAL EVALUATION ERROR for %s: %v", binding.AgentID, err)
@@ -124,14 +138,14 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 	defer cancel()
 	current, err := m.store.ReopenEmbedded(ctx, binding)
 	if err != nil {
-		return "", "", err
+		return res, err
 	}
 	policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID)
 	if err != nil {
-		return "", "", err
+		return res, err
 	}
 	if !policy.Config.Enabled || policy.DesiredRevision != key.GoalRevision || policy.AppliedRevision != key.GoalRevision || policy.ProjectionState != "applied" {
-		return "", "", errors.New("goal evaluation canceled or superseded")
+		return res, errors.New("goal evaluation canceled or superseded")
 	}
 
 	entries := current.Entries
@@ -139,7 +153,7 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 		entries = snapshot.Entries
 	}
 	if len(entries) == 0 {
-		return "", "", errors.New("goal evaluation transcript empty")
+		return res, errors.New("goal evaluation transcript empty")
 	}
 	activeConversation := extractConversationTurns(entries)
 	userPrompt := fmt.Sprintf("Goal: %s\n\nActive conversation:\n%s\n\nReturn exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>.", goal, activeConversation)
@@ -147,13 +161,22 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 
 	request := ai.NormalizeContext(ai.Context{SystemPrompt: systemPrompt, Messages: []ai.Message{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: userPrompt}}}}})
 	if model == nil || model.ContextWindow <= 0 || coding.EstimateContextTokens(request.Messages) > model.ContextWindow-embeddedContextHeadroom {
-		return "", "", errors.New("goal evaluation context cannot fit fixed headroom")
+		return res, errors.New("goal evaluation context cannot fit fixed headroom")
 	}
 	maxTokens := embeddedGoalEvaluationMaxTokens
-	opts := &ai.SimpleStreamOptions{StreamOptions: ai.StreamOptions{ProviderRequestOptions: ai.ProviderRequestOptions{MaxRetries: 0}, MaxTokens: &maxTokens, SessionID: binding.SessionID, CacheRetention: ai.CacheNone}, ToolChoice: ai.ToolChoiceNone}
+	opts := &ai.SimpleStreamOptions{
+		StreamOptions: ai.StreamOptions{
+			ProviderRequestOptions: ai.ProviderRequestOptions{MaxRetries: 0},
+			MaxTokens:              &maxTokens,
+			SessionID:              binding.SessionID,
+			CacheRetention:         ai.CacheNone,
+		},
+		Reasoning:  ai.ThinkingLevel("off"),
+		ToolChoice: ai.ToolChoiceNone,
+	}
 	result := stream(context.WithValue(ctx, embeddedAuxiliaryRequestKey{}, true), model, request, opts).Result()
 	if ctx.Err() != nil || result == nil || result.StopReason != ai.StopStop {
-		return "", "", errors.New("goal evaluation did not produce a bounded verdict")
+		return res, errors.New("goal evaluation did not produce a bounded verdict")
 	}
 	var textBuilder strings.Builder
 	for _, c := range result.Content {
@@ -165,20 +188,32 @@ func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding st
 	}
 	rawText := textBuilder.String()
 	if rawText == "" {
-		return store.EmbeddedGoalEvaluationNotDone, "Inconclusive evaluator output; continuing progress on goal", nil
+		return embeddedGoalEvaluationResult{
+			verdict:    store.EmbeddedGoalEvaluationNotDone,
+			reason:     "Inconclusive evaluator output; continuing progress on goal",
+			rawContent: "Empty evaluator output",
+		}, nil
 	}
-	verdict, reason = parseGoalEvaluationResponse(rawText)
+	verdict, reason := parseGoalEvaluationResponse(rawText)
 	if verdict == "" {
 		log.Printf("GOAL EVALUATION WARNING for %s: unparseable verdict output: %q", binding.AgentID, rawText)
-		return store.EmbeddedGoalEvaluationNotDone, "Inconclusive evaluator output; continuing progress on goal", nil
+		return embeddedGoalEvaluationResult{
+			verdict:    store.EmbeddedGoalEvaluationNotDone,
+			reason:     "Inconclusive evaluator output; continuing progress on goal",
+			rawContent: rawText,
+		}, nil
 	}
 	if verdict != store.EmbeddedGoalEvaluationCompleted {
 		verdict = store.EmbeddedGoalEvaluationNotDone
 	}
-	return verdict, reason, nil
+	return embeddedGoalEvaluationResult{
+		verdict:    verdict,
+		reason:     reason,
+		rawContent: rawText,
+	}, nil
 }
 
-func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, outcome, reason string) {
+func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, outcome, reason string, details ...string) {
 	preview := reason
 	if preview == "" {
 		if outcome == store.EmbeddedGoalEvaluationNotDone {
@@ -196,6 +231,11 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 		return
 	}
 
+	rawContent := preview
+	if len(details) > 0 && strings.TrimSpace(details[0]) != "" {
+		rawContent = details[0]
+	}
+
 	eventKey := fmt.Sprintf("goal-evaluation:%s:%d:%d:%s", binding.AgentID, key.UserSeq, key.FinalSeq, outcome)
 	pres := &store.ManagedHistoryPresentation{
 		Kind:    "goal_evaluation",
@@ -203,7 +243,7 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 		Summary: summary,
 	}
 	msg := "Goal Evaluation • " + outcome
-	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(m.runCtx, binding.AgentID, "managed_goal_evaluation", "info", msg, eventKey, pres, nil, &preview)
+	entry, err := m.store.RecordManagedCompleteHistoryWithDetails(m.runCtx, binding.AgentID, "managed_goal_evaluation", "info", msg, eventKey, pres, nil, &rawContent)
 	if err != nil {
 		log.Printf("[embedded:%s] Failed to record goal evaluation history (%s): %v", binding.AgentID, eventKey, err)
 	} else {
