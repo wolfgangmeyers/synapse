@@ -241,7 +241,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 
 	// Append scratchpad entries (if any)
 	var scratchpadMsg *ai.UserMessage
-	scratchpadEntries, totalCount, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 10)
+	scratchpadEntries, totalCount, err := m.store.FetchScratchpadRecent(ctx, binding.AgentID, 20)
 	if err == nil && len(scratchpadEntries) > 0 {
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("### Persistent Scratchpad Memory (%d of %d entries shown):\n", len(scratchpadEntries), totalCount))
