@@ -222,14 +222,14 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		} else if len(strings.TrimSpace(replyBodyText)) == 0 {
 			return nil
 		}
-		// Automatic reply outbox is completely eliminated: outbound mailbox messages
-		// are only sent when an agent explicitly calls mecha_mailbox_send or mecha_worker(action="send").
-		// Assistant final text is only recorded in history, never auto-routed to the sender.
+		// Assistant final text is only recorded in history as ordinary assistant output.
+		// It is NEVER an outbound message or auto-reply to targetRecipient.
+		// Sending messages to other agents strictly requires mecha_mailbox_send or mecha_worker(action="send").
 		replyBody := replyBodyText
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
-		category := "managed_message"
-		messageText := "Message sent"
+		category := "assistant"
+		messageText := "Assistant response"
 		outcome := "success"
 		if assistant.StopReason == ai.StopError {
 			outcome = "error"
@@ -239,7 +239,11 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 			}
 			messageText = fmt.Sprintf("Turn failed: %s", errMsg)
 		}
-		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: outcome, From: b.AgentID, To: targetRecipient, Thinking: thinking.String()}
+		humanUser := s.lastHumanRecipientTx(ctx, b.AgentID)
+		if humanUser == "" || strings.EqualFold(humanUser, "system") {
+			humanUser = "user"
+		}
+		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: outcome, From: b.AgentID, To: humanUser, Thinking: thinking.String()}
 		presentationJSON, err := managedHistoryPresentationJSON(presentation)
 		if err != nil {
 			return err

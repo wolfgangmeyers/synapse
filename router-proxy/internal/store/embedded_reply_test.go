@@ -200,9 +200,9 @@ func TestEmbeddedReplyReminderRecordsHistoryWithoutOutbox(t *testing.T) {
 
 	// 4. Verify managed_complete_history DOES contain the assistant's reply
 	require.NotEmpty(t, historyEntry.ID, "historyEntry must have an ID")
-	require.Equal(t, "Message sent", historyEntry.Message)
+	require.Equal(t, "Assistant response", historyEntry.Message)
 	require.NotNil(t, historyEntry.Presentation)
-	require.Equal(t, "reminders", historyEntry.Presentation.To)
+	require.Equal(t, "user", historyEntry.Presentation.To)
 	require.Equal(t, b.AgentID, historyEntry.Presentation.From)
 	require.Equal(t, "message", historyEntry.Presentation.Kind)
 	require.NotNil(t, historyEntry.MessageContent)
@@ -213,7 +213,7 @@ func TestEmbeddedReplyReminderRecordsHistoryWithoutOutbox(t *testing.T) {
 	require.NotEmpty(t, page.Entries)
 	found := false
 	for _, h := range page.Entries {
-		if h.Presentation != nil && h.Presentation.To == "reminders" && h.MessageContent != nil && *h.MessageContent == replyText {
+		if h.Presentation != nil && h.Presentation.To == "user" && h.MessageContent != nil && *h.MessageContent == replyText {
 			found = true
 			break
 		}
