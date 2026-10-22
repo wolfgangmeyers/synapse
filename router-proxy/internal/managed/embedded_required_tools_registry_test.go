@@ -105,8 +105,7 @@ func requiredToolsCall(t *testing.T, m *Manager, db *store.Store, provider *prov
 	require.False(t, result.IsError, "tool must execute through the real registered SDK capability: %v", result.Content)
 	require.Eventually(t, func() bool {
 		mail, e := db.MessageFor(ctx, "inbound-"+callID)
-		replies, replyErr := db.PendingEmbeddedReplies(ctx, caller)
-		return e == nil && mail.State == domain.MessageAcknowledged && replyErr == nil && len(replies) == 1 && replies[0].To == "original-sender" && replies[0].Body == "sender-bound final"
+		return e == nil && mail.State == domain.MessageAcknowledged
 	}, 4*time.Second, 10*time.Millisecond)
 	return result
 }
@@ -141,8 +140,7 @@ func TestEmbeddedRequiredMailboxRegistry(t *testing.T) {
 			require.Equal(t, domain.MessageQueued, mail.State)
 			replies, err := db.PendingEmbeddedReplies(context.Background(), caller)
 			require.NoError(t, err)
-			require.Len(t, replies, 1)
-			require.NotEqual(t, id, replies[0].ReplyID, "explicit queue admission is independent of the automatic sender-bound reply")
+			require.Empty(t, replies, "automatic reply outbox was eliminated; outbound messages require explicit mecha_mailbox_send")
 		})
 	}
 }

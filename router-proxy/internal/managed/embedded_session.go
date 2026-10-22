@@ -1348,12 +1348,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			reminderExecutions[id] = reminderExecution{expected: &expected, replay: replay}
 			freshWorkerMu.Unlock()
 		}))
-		resetCB := func(reason string) {
+		resetCB := func(req contextResetRequest) {
 			m.mu.Lock()
 			if m.contextResetRequested == nil {
-				m.contextResetRequested = make(map[string]string)
+				m.contextResetRequested = make(map[string]contextResetRequest)
 			}
-			m.contextResetRequested[owner.binding.AgentID] = reason
+			m.contextResetRequested[owner.binding.AgentID] = req
 			m.mu.Unlock()
 		}
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))

@@ -502,7 +502,7 @@ type Manager struct {
 	embeddedBeforeToolHandoff                  func(*store.EmbeddedToolInvocation) // test-only, original committed handoff
 	embeddedBeforeToolDomain                   func()                              // test-only, after owner checks, before producer transaction
 	goalContinuationDelay                      time.Duration
-	contextResetRequested                      map[string]string
+	contextResetRequested                      map[string]contextResetRequest
 	workerSelfTerminateRequested               map[string]workerSelfTerminateRequest
 	maxConsecutiveGoalContinuations            int
 	artifacts                                  *sessionArtifactOwner
@@ -642,7 +642,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		manager.maxConsecutiveGoalContinuations = defaultMaxConsecutiveGoalContinuations
 	}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
-	manager.contextResetRequested = make(map[string]string)
+	manager.contextResetRequested = make(map[string]contextResetRequest)
 	manager.workerSelfTerminateRequested = make(map[string]workerSelfTerminateRequest)
 	defaultManagerInstance = manager
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close

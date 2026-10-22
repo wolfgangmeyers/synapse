@@ -2966,6 +2966,8 @@ p:empty { display: none; }
 .agent-row-signals:empty { display: none; }
 
 .connection-actions {
+  position: relative;
+  z-index: 100;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -3053,7 +3055,7 @@ p:empty { display: none; }
 .managed-actions-trigger:focus-visible, .managed-actions-menu button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .managed-actions-menu {
   position: absolute;
-  z-index: 30;
+  z-index: 1000 !important;
   top: calc(100% + 8px);
   right: 0;
   display: grid;

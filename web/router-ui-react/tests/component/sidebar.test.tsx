@@ -10,8 +10,7 @@ describe("Sidebar", () => {
   it("shows only the accessible brand logo in the branding area", () => {
     const { container } = render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[]} />);
     const brand = container.querySelector(".brand");
-    expect(brand).toContainElement(screen.getByRole("img", { name: "Mecha Developer" }));
-    expect(screen.getByRole("img", { name: "Mecha Developer" })).toHaveAttribute("src", "/logo.png");
+    expect(brand).toContainElement(screen.getByRole("heading", { name: "Mecha-Developer" }));
     expect(brand?.children).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Refresh agents" })).not.toBeInTheDocument();
     expect(screen.queryByText("Your agent network")).not.toBeInTheDocument();
@@ -22,7 +21,7 @@ describe("Sidebar", () => {
     render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);
     const routerBtn = screen.getByRole("button", { name: /local/i });
     expect(routerBtn).toHaveTextContent("local");
-    expect(routerBtn).toHaveTextContent("Connected");
+    expect(routerBtn).toHaveTextContent("Signed in as wolfgang");
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "alpha" } });
     expect(screen.getByRole("button", { name: /Alpha Bot/i })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Beta/i })).toBeNull();
@@ -44,7 +43,7 @@ describe("Sidebar", () => {
 
     const routerBtn = screen.getByRole("button", { name: /local/i });
     expect(routerBtn).toHaveTextContent("local");
-    expect(routerBtn).toHaveTextContent("Connected as wolfgang");
+    expect(routerBtn).toHaveTextContent("Signed in as wolfgang");
     const menuButton = screen.getByRole("button", { name: "Managed actions" });
     expect(routerBtn.parentElement).toContainElement(menuButton);
     expect(menuButton).toHaveAttribute("aria-haspopup", "menu");
