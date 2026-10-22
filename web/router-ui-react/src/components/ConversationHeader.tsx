@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { Agent } from "../state/agent-projection";
 import { humanName } from "../state/selectors";
 import { ArrivalIndicator } from "./ArrivalIndicator";
+import { HeaderActionButton } from "./HeaderActionButton";
 import { AgentAvatar } from "./AgentAvatar";
 import { AlienText } from "./AlienText";
 import type { Arrival } from "../domain/arrivals";
@@ -262,44 +263,44 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
               {/* Action Buttons Toolbar directly adjacent to title */}
               <div className="conversation-header-actions">
                 {agent?.activity_state === "active" ? (
-                  <button
-                    type="button"
-                    className="icon-btn-round interrupt-worker-button header-button-interrupt"
+                  <HeaderActionButton
+                    className="interrupt-worker-button header-button-interrupt"
                     aria-label="Interrupt worker"
                     title="Interrupt worker"
+                    icon="fa-solid fa-square"
+                    active
+                    activeTone="danger"
                     onClick={() => {
                       if (onInterrupt) onInterrupt();
                       else if (client && agent) void client.interruptManagedAgent(agent.agent_id).catch(() => {});
                     }}
-                  >
-                    <i className="fa-solid fa-square" aria-hidden="true" />
-                  </button>
+                  />
                 ) : null}
 
                 {agent && showGoalControl ? (
-                  <button
-                    type="button"
-                    className={`icon-btn-round goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`}
+                  <HeaderActionButton
+                    className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`}
                     onClick={onGoal}
                     aria-label="Set goal"
                     title="Set goal"
-                  >
-                    <i className="fa-solid fa-flag" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-flag"
+                    active={Boolean(agent.goal_state?.enabled || agent.goal?.enabled)}
+                    activeTone="pink"
+                  />
                 ) : null}
 
                 {agent?.source === "router-managed" && client ? (
                   <div className="workflow-header-control">
-                    <button
-                      type="button"
+                    <HeaderActionButton
                       className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
                       onClick={() => setShowWorkflowDropdown((v) => !v)}
                       aria-label="Workflow State"
                       title={activeWorkflow ? `Active Workflow: ${activeWorkflow.name}` : "Set Workflow State"}
                       disabled={workflowUpdating}
-                    >
-                      <i className="fa-solid fa-bolt" aria-hidden="true" />
-                    </button>
+                      icon="fa-solid fa-bolt"
+                      active={hasActiveWorkflow}
+                      activeTone="blue"
+                    />
                     {showWorkflowDropdown ? (
                       <div className="workflow-header-dropdown" style={{ position: "absolute", top: "100%", right: 0, zIndex: 1000, background: "var(--bg-primary, #1e1e1e)", border: "1px solid var(--border-color, #444)", borderRadius: 6, minWidth: 220, padding: 4, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
                         <div style={{ fontSize: "0.8em", padding: "4px 8px", color: "var(--text-muted, #888)", borderBottom: "1px solid var(--border-color, #333)", marginBottom: 4 }}>
@@ -370,112 +371,104 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                 ) : null}
 
                 {agent?.source === "router-managed" && client ? (
-                  <button
-                    type="button"
-                    className={`icon-btn-round inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
+                  <HeaderActionButton
+                    className={`inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
                     onClick={() => void handleToggleAllowInlineTools()}
                     aria-label={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
                     title={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
                     disabled={allowInlineToolsUpdating}
-                  >
-                    <i className="fa-solid fa-terminal" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-terminal"
+                    active={allowInlineTools}
+                    activeTone="green"
+                  />
                 ) : null}
 
                 {agent && onScratchpad ? (
-                  <button
-                    type="button"
-                    className="icon-btn-round scratchpad-header-button"
+                  <HeaderActionButton
+                    className="scratchpad-header-button"
                     onClick={onScratchpad}
                     aria-label="Scratchpad"
                     title={`View scratchpad for ${humanName(agent.agent_id)}`}
-                  >
-                    <i className="fa-solid fa-note-sticky" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-note-sticky"
+                  />
                 ) : null}
 
                 {agent && (onReminders !== undefined || showAgentControls) ? (
-                  <button
-                    type="button"
-                    className={`icon-btn-round reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`}
+                  <HeaderActionButton
+                    className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`}
                     onClick={onReminders}
                     aria-label="Add reminder"
-                    title="Add reminder"
-                  >
-                    <i className="fa-solid fa-clock" aria-hidden="true" />
-                  </button>
+                    title={activeReminderCount > 0 ? `Reminders (${activeReminderCount} active)` : "Add reminder"}
+                    icon="fa-solid fa-clock"
+                    active={activeReminderCount > 0}
+                    activeTone="teal"
+                  />
                 ) : null}
 
                 {agent && client ? (
-                  <button
-                    type="button"
-                    className={`icon-btn-round agent-monitors-header-button${activeWatchersCount > 0 ? " active" : ""}`}
+                  <HeaderActionButton
+                    className={`agent-monitors-header-button${activeWatchersCount > 0 ? " active" : ""}`}
                     onClick={() => setShowMonitorsDialog(true)}
                     aria-label={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
                     title={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
-                  >
-                    <i className="fa-solid fa-shield-halved" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-shield-halved"
+                    active={activeWatchersCount > 0}
+                    activeTone="blue"
+                  />
                 ) : null}
 
                 {agent?.source === "router-managed" && client ? (
-                  <button
-                    type="button"
-                    className="icon-btn-round worker-tools-header-button"
+                  <HeaderActionButton
+                    className="worker-tools-header-button"
                     onClick={() => setShowWorkerToolsDialog(true)}
                     aria-label="Manage Worker Tools"
                     title="Manage Worker Tools"
-                  >
-                    <i className="fa-solid fa-wrench" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-wrench"
+                  />
                 ) : null}
 
                 {agent && showAgentControls ? (
-                  <button
-                    type="button"
-                    className="icon-btn-round inline-tool-settings-button"
+                  <HeaderActionButton
+                    className="inline-tool-settings-button"
                     onClick={onInlineToolSettings}
                     aria-label="Inline tool settings"
                     title="Inline tool settings"
-                  >
-                    <i className="fa-solid fa-gear" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-gear"
+                  />
                 ) : null}
 
                 {agent?.source === "router-managed" && onManageManaged ? (
-                  <button
-                    type="button"
-                    className="icon-btn-round managed-agent-header-button"
+                  <HeaderActionButton
+                    className="managed-agent-header-button"
                     onClick={onManageManaged}
                     aria-label="Manage worker"
                     title="Manage worker"
-                  >
-                    <i className="fa-solid fa-gear" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-gear"
+                  />
                 ) : null}
 
                 {agent && onToggleChatOnly ? (
-                  <button
-                    type="button"
-                    className={`icon-btn-round chat-only-button ${chatOnly ? "active" : ""}`}
+                  <HeaderActionButton
+                    className={`chat-only-button ${chatOnly ? "active" : ""}`}
                     onClick={onToggleChatOnly}
                     aria-label="Toggle chat-only mode"
                     title={chatOnly ? "Chat-only active (tools hidden)" : "Chat-only mode"}
-                  >
-                    <i className="fa-solid fa-comments" aria-hidden="true" />
-                  </button>
+                    icon="fa-solid fa-comments"
+                    active={chatOnly}
+                    activeTone="teal"
+                  />
                 ) : null}
 
                 {agent && onToggleScrollLock ? (
-                  <button
-                    type="button"
-                    className={`icon-btn-round scroll-lock-button ${scrollLocked ? "active" : ""}`}
+                  <HeaderActionButton
+                    className={`scroll-lock-button ${scrollLocked ? "active" : ""}`}
                     onClick={onToggleScrollLock}
                     aria-label="Toggle scroll lock"
                     title={scrollLocked ? "Scroll locked (auto-scroll paused)" : "Lock scroll"}
-                  >
-                    <i className={scrollLocked ? "fa-solid fa-lock" : "fa-solid fa-lock-open"} aria-hidden="true" />
-                  </button>
+                    icon={scrollLocked ? "fa-solid fa-lock" : "fa-solid fa-lock-open"}
+                    active={scrollLocked}
+                    activeTone="teal"
+                  />
                 ) : null}
 
                 {showConversationViews ? (

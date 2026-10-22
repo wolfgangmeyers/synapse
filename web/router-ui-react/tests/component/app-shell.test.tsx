@@ -122,10 +122,9 @@ describe("AppShell", () => {
     const detail = screen.getByRole("banner").querySelector(".peer-activity");
     expect(detail).toHaveClass("peer-activity");
     expect(detail).not.toHaveTextContent("typescript-extensions");
-    expect(detail).toHaveTextContent("2 subagents");
-    expect(screen.getByLabelText("Working")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "2 subagents" })).toHaveAttribute("aria-controls", "conversation-header-subagents-typescript-extensions");
-    expect(document.getElementById("conversation-header-subagents-typescript-extensions")).toBeInTheDocument();
+    const subagentsCard = screen.getByRole("banner").querySelector(".subagents-card");
+    expect(subagentsCard).toHaveTextContent("2");
+    expect(screen.getByRole("banner").querySelector(".avatar.working")).toBeInTheDocument();
   });
 
   it("does not add managed-only ready or working language", () => {
