@@ -30,12 +30,15 @@ export function RouterSelector({
       aria-label={`Router ${label}, ${statusText}`}
       title={detail ? `Router ${label} (${statusText}: ${detail})` : `Router ${label} (${statusText})`}
     >
-      <span className="router-selector-host">
+      <span className="router-selector-icon" aria-hidden="true">
+        <i className="fa-solid fa-cube" />
+      </span>
+      <span className="router-selector-content">
+        <span className="router-selector-subtitle">Router &amp; sign-in</span>
         <strong>{label}</strong>
       </span>
-      <span className="router-selector-status">
-        <span className={`status-dot ${status}`} title={connectionLabels[status]} />
-        <span className="router-selector-status-text">{statusText}</span>
+      <span className="router-selector-chevron" aria-hidden="true">
+        <i className="fa-solid fa-chevron-down" />
       </span>
     </button>
   );
