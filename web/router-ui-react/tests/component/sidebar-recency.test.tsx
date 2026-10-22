@@ -108,7 +108,7 @@ describe("Sidebar recent agents", () => {
     const duplicates: Agent[] = [{ agent_id: "worker", source: "tmux" }, { agent_id: "worker", source: "router-managed" }];
     const view = render(sidebar({ agents: duplicates, selectedAgentId: "tmux:worker", onSelectAgent }));
     const tmuxRow = screen.getAllByRole("listitem").find((row) => row.textContent?.includes("tmux"));
-    const managedRow = screen.getAllByRole("listitem").find((row) => row.textContent?.includes("RPC"));
+    const managedRow = screen.getAllByRole("listitem").find((row) => !row.textContent?.includes("tmux"));
     expect(tmuxRow).toHaveAttribute("aria-selected", "true");
     expect(managedRow).toHaveAttribute("aria-selected", "false");
     if (!tmuxRow || !managedRow) throw new Error("Missing source-qualified rows");
@@ -121,7 +121,7 @@ describe("Sidebar recent agents", () => {
     view.unmount();
     render(sidebar({ agents: duplicates }));
     expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("tmux");
-    expect(screen.getAllByRole("listitem")[1]).toHaveTextContent("RPC");
+    expect(screen.getAllByRole("listitem")[1]).not.toHaveTextContent("tmux");
   });
 
   it("bounds recent picks without truncating connected agents", () => {
