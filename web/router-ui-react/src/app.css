@@ -5050,6 +5050,107 @@ p:empty { display: none; }
   background: rgba(37, 99, 235, 0.42) !important;
 }
 
+/* Header Action Button active tones */
+.header-action-button.active.header-action-button--active-teal,
+.reminder-indicator:not(.empty) {
+  border-color: rgba(45, 212, 191, 0.75) !important;
+  background: rgba(13, 148, 136, 0.32) !important;
+  color: #2dd4bf !important;
+  box-shadow: 0 0 10px rgba(45, 212, 191, 0.45) !important;
+}
+
+.header-action-button.active.header-action-button--active-teal i,
+.reminder-indicator:not(.empty) i {
+  color: #2dd4bf !important;
+}
+
+.header-action-button.active.header-action-button--active-teal:not(:disabled):hover,
+.reminder-indicator:not(.empty):not(:disabled):hover {
+  background: rgba(13, 148, 136, 0.48) !important;
+  border-color: rgba(45, 212, 191, 0.9) !important;
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.6) !important;
+}
+
+.header-action-button.active.header-action-button--active-pink,
+.goal-header-button.has-goal {
+  border-color: rgba(244, 114, 182, 0.75) !important;
+  background: rgba(190, 24, 93, 0.34) !important;
+  color: #f9a8d4 !important;
+  box-shadow: 0 0 10px rgba(244, 114, 182, 0.45) !important;
+}
+
+.header-action-button.active.header-action-button--active-pink i,
+.goal-header-button.has-goal i {
+  color: #f472b6 !important;
+}
+
+.header-action-button.active.header-action-button--active-pink:not(:disabled):hover,
+.goal-header-button.has-goal:not(:disabled):hover {
+  background: rgba(190, 24, 93, 0.5) !important;
+  border-color: rgba(244, 114, 182, 0.9) !important;
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.6) !important;
+}
+
+.header-action-button.active.header-action-button--active-blue,
+.workflow-header-button.has-workflow {
+  border-color: rgba(59, 130, 246, 0.75) !important;
+  background: rgba(37, 99, 235, 0.28) !important;
+  color: #60a5fa !important;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.45) !important;
+}
+
+.header-action-button.active.header-action-button--active-blue i,
+.workflow-header-button.has-workflow i {
+  color: #60a5fa !important;
+}
+
+.header-action-button.active.header-action-button--active-blue:not(:disabled):hover,
+.workflow-header-button.has-workflow:not(:disabled):hover {
+  background: rgba(37, 99, 235, 0.44) !important;
+  border-color: rgba(59, 130, 246, 0.9) !important;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6) !important;
+}
+
+.header-action-button.active.header-action-button--active-green,
+.inline-tools-toggle-button.allowed {
+  border-color: rgba(76, 175, 80, 0.75) !important;
+  background: rgba(46, 125, 50, 0.3) !important;
+  color: #4ade80 !important;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.45) !important;
+}
+
+.header-action-button.active.header-action-button--active-green i,
+.inline-tools-toggle-button.allowed i {
+  color: #4ade80 !important;
+}
+
+.header-action-button.active.header-action-button--active-green:not(:disabled):hover,
+.inline-tools-toggle-button.allowed:not(:disabled):hover {
+  background: rgba(46, 125, 50, 0.46) !important;
+  border-color: rgba(76, 175, 80, 0.9) !important;
+  box-shadow: 0 0 12px rgba(74, 222, 128, 0.6) !important;
+}
+
+.header-action-button.active.header-action-button--active-danger,
+.interrupt-worker-button {
+  border-color: rgba(239, 68, 68, 0.7) !important;
+  background: rgba(239, 68, 68, 0.22) !important;
+  color: #f87171 !important;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.4) !important;
+}
+
+.header-action-button.active.header-action-button--active-danger i,
+.interrupt-worker-button i {
+  color: #f87171 !important;
+}
+
+.header-action-button.active.header-action-button--active-danger:not(:disabled):hover,
+.interrupt-worker-button:hover {
+  background: rgba(239, 68, 68, 0.38) !important;
+  border-color: rgba(239, 68, 68, 0.9) !important;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.55) !important;
+}
+
 
 .workflow-card-meta {
   display: flex;
