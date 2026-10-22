@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -384,12 +386,10 @@ func (s *Store) embeddedToolMailGuardTx(ctx context.Context, w *EmbeddedToolInvo
 }
 
 func (s *Store) ListEmbeddedToolWorkers(ctx context.Context, w *EmbeddedToolInvocation) ([]*ManagedAgentRecord, error) {
-	if w == nil {
-		return nil, errors.New("missing worker list producer")
+	if w == nil || w.call.ID == "" {
+		return nil, errors.New("missing embedded tool admission invocation")
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	workers := []*ManagedAgentRecord{}
+	var workers []*ManagedAgentRecord
 	err := s.runImmediate(ctx, func() error {
 		if err := s.admitEmbeddedToolTx(ctx, w); err != nil {
 			return err
@@ -422,17 +422,60 @@ func (s *Store) ListEmbeddedToolWorkers(ctx context.Context, w *EmbeddedToolInvo
 				return err
 			}
 		}
-		return nil
-	})
-	if err == nil {
-		// Attest the exact saved worker IDs/states without exposing cwd/recipes.
+
+		seen := make(map[string]bool, len(workers))
 		items := make([]map[string]any, 0, len(workers))
 		for _, row := range workers {
-			items = append(items, map[string]any{"worker_id": row.AgentID, "lifecycle_state": row.LifecycleState, "desired_state": row.DesiredState})
+			seen[row.AgentID] = true
+			items = append(items, map[string]any{
+				"worker_id":       row.AgentID,
+				"kind":            "embedded",
+				"lifecycle_state": row.LifecycleState,
+				"desired_state":   row.DesiredState,
+			})
 		}
+
+		now := formatTimestamp(s.clock.Now())
+		const tmuxQuery = `
+SELECT r.recipient_name,
+       CASE WHEN l.lease_id IS NOT NULL AND l.expires_at > ? THEN 'running' ELSE 'idle' END as lifecycle_state
+FROM recipient_sources r
+LEFT JOIN agent_leases l ON l.agent_id = r.recipient_name AND l.expires_at > ?
+WHERE r.source_kind = 'tmux'
+  AND r.state IN ('active', 'reserved')
+  AND r.recipient_name NOT IN ('system', 'reminders', 'router', 'user', 'managed-runtime-readiness', 'reflex-router-proxy-launcher', 'supervisor', 'web_ui')
+ORDER BY r.recipient_name`
+
+		rows, queryErr := s.db.QueryContext(ctx, tmuxQuery, now, now)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var name, lifecycleState string
+				if scanErr := rows.Scan(&name, &lifecycleState); scanErr == nil {
+					if !seen[name] {
+						seen[name] = true
+						items = append(items, map[string]any{
+							"worker_id":       name,
+							"kind":            "tmux",
+							"lifecycle_state": lifecycleState,
+							"desired_state":   "running",
+						})
+					}
+				}
+			}
+		}
+
+		sort.Slice(items, func(i, j int) bool {
+			return fmt.Sprint(items[i]["worker_id"]) < fmt.Sprint(items[j]["worker_id"])
+		})
+
 		w.domainContent, err = json.Marshal(map[string]any{"workers": items})
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return workers, err
+	return workers, nil
 }
 
 func (s *Store) ReserveEmbeddedToolCleanup(ctx context.Context, reservation ManagedLifecycleReservation, w *EmbeddedToolInvocation) (ManagedLifecycleAdmission, error) {

@@ -87,18 +87,31 @@ func contextThresholdExceededWithPct(model Model, currentTokens, resetPct int) b
 	return currentTokens >= threshold
 }
 
+const (
+	DefaultPreservedContextWindow = 20
+	MaxPreservedContextWindow     = 100
+)
+
+type contextResetRequest struct {
+	reason string
+	window int
+}
+
 type managerContextKey struct{}
 
 var defaultManagerInstance *Manager
 
 func embeddedContextResetSchema() *ai.Schema {
 	closed := false
-	schema := ai.Object(ai.Prop("reason", ai.String("Optional reason for triggering context reset.")))
+	schema := ai.Object(
+		ai.Prop("reason", ai.String("Optional reason for triggering context reset.")),
+		ai.Prop("window", ai.Integer("Optional number of recent messages to preserve across the reset (default 20, max 100).")),
+	)
 	schema.AdditionalAllowed = &closed
 	return schema
 }
 
-func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(string), toolName string) agent.AgentTool {
+func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(contextResetRequest), toolName string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        toolName,
 		Description: "Trigger a clean context reset to wipe past conversation history down to 0 tokens with fresh headroom while preserving recent actions and scratchpad notes.",
@@ -108,7 +121,31 @@ func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(s
 			if r, ok := args["reason"].(string); ok && r != "" {
 				reason = r
 			}
-			requested(reason)
+			window := DefaultPreservedContextWindow
+			if w, ok := args["window"]; ok {
+				switch val := w.(type) {
+				case int:
+					if val > 0 {
+						window = val
+					}
+				case int64:
+					if val > 0 {
+						window = int(val)
+					}
+				case float64:
+					if val > 0 {
+						window = int(val)
+					}
+				case json.Number:
+					if n, err := val.Int64(); err == nil && n > 0 {
+						window = int(n)
+					}
+				}
+			}
+			if window > MaxPreservedContextWindow {
+				window = MaxPreservedContextWindow
+			}
+			requested(contextResetRequest{reason: reason, window: window})
 			return agent.AgentToolResult{
 				Content: ai.ContentList{
 					ai.TextContent{Text: "Context reset initiated. Stopping turn to perform epoch rotation and bootstrap fresh context."},
@@ -131,11 +168,11 @@ func messageContentText(msg ai.Message) string {
 }
 
 // ExecuteContextReset performs a clean context reset for the managed embedded agent:
-// - Extracts the last 4-6 messages from the current session context.
+// - Extracts the last recent messages (default 20, max 100) from the current session context.
 // - Starts a new session epoch in embedded_sessions (and updates managed_agents).
-// - Appends the genesis prompt + scratchpad entries (if any) + the ported last few messages.
+// - Appends the genesis prompt + scratchpad entries (if any) + the ported recent messages.
 // - Immediately dispatches a wake turn to the agent with ContextResetWakePrompt.
-func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, reason string) error {
+func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
 	saved, err := m.store.ManagedAgent(ctx, binding.AgentID)
 	if err != nil {
 		return fmt.Errorf("managed agent: %w", err)
@@ -157,12 +194,20 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		}
 	}
 
-	// Port the last few messages (last 4-6 messages / recent turns).
+	targetWindow := DefaultPreservedContextWindow
+	if len(window) > 0 && window[0] > 0 {
+		targetWindow = window[0]
+		if targetWindow > MaxPreservedContextWindow {
+			targetWindow = MaxPreservedContextWindow
+		}
+	}
+
+	// Port the last targetWindow messages (skipping an orphaned leading tool result).
 	var portedMessages []agent.AgentMessage
-	if len(sessionMessages) <= 6 {
+	if len(sessionMessages) <= targetWindow {
 		portedMessages = sessionMessages
 	} else {
-		startIdx := len(sessionMessages) - 6
+		startIdx := len(sessionMessages) - targetWindow
 		// Ensure we don't start on an orphaned tool result
 		for startIdx < len(sessionMessages) && sessionMessages[startIdx].MessageRole() == ai.RoleToolResult {
 			startIdx++
@@ -348,12 +393,12 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 }
 
 // Package-level ExecuteContextReset wrapper
-func ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, reason string) error {
+func ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
 	if m, ok := ctx.Value(managerContextKey{}).(*Manager); ok && m != nil {
-		return m.ExecuteContextReset(ctx, binding, reason)
+		return m.ExecuteContextReset(ctx, binding, reason, window...)
 	}
 	if defaultManagerInstance != nil {
-		return defaultManagerInstance.ExecuteContextReset(ctx, binding, reason)
+		return defaultManagerInstance.ExecuteContextReset(ctx, binding, reason, window...)
 	}
 	return errors.New("manager unavailable for ExecuteContextReset")
 }
@@ -364,14 +409,14 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 		return
 	}
 	m.mu.Lock()
-	resetReason, resetRequested := m.contextResetRequested[binding.AgentID]
+	req, resetRequested := m.contextResetRequested[binding.AgentID]
 	if resetRequested {
 		delete(m.contextResetRequested, binding.AgentID)
 	}
 	m.mu.Unlock()
 
 	if resetRequested {
-		if err := m.ExecuteContextReset(ctx, binding, resetReason); err != nil {
+		if err := m.ExecuteContextReset(ctx, binding, req.reason, req.window); err != nil {
 			log.Printf("[embedded:%s] context reset failed: %v", binding.AgentID, err)
 		}
 		return
@@ -391,7 +436,7 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 	if contextThresholdExceededWithPct(managedModel, currentTokens, resetPct) {
 		log.Printf("[embedded:%s] Context threshold exceeded: %d tokens (window: %d, reset: %d%%). Triggering auto-reset.",
 			binding.AgentID, currentTokens, model.ContextWindow, resetPct)
-		if err := m.ExecuteContextReset(ctx, binding, "threshold_exceeded"); err != nil {
+		if err := m.ExecuteContextReset(ctx, binding, "threshold_exceeded", DefaultPreservedContextWindow); err != nil {
 			log.Printf("[embedded:%s] auto context reset failed: %v", binding.AgentID, err)
 		}
 	} else if contextWarningThresholdExceeded(managedModel, currentTokens, warningPct) {

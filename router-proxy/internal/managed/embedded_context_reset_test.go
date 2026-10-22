@@ -173,30 +173,30 @@ func TestContextResetPortsLastFewMessages(t *testing.T) {
 	snap2, err := db.ReopenEmbedded(ctx, nextBinding)
 	require.NoError(t, err)
 
-	require.Equal(t, 9, len(snap2.Entries), "epoch 2 should have 6 ported + system + wake user + wake assistant = 9 entries")
+	require.Equal(t, 11, len(snap2.Entries), "epoch 2 should have 8 ported (all non-system messages since 8 <= 20) + system + wake user + wake assistant = 11 entries")
 
-	// Verify the ported messages match the tail of epoch 1 (entries 3..8 of snap1 correspond to entries 0..5 of snap2)
-	for i := 0; i < 6; i++ {
-		origMsg, err := ai.UnmarshalMessage(snap1.Entries[3+i].Body)
+	// Verify the ported messages match all non-system messages of epoch 1 (entries 1..8 of snap1 correspond to entries 0..7 of snap2)
+	for i := 0; i < 8; i++ {
+		origMsg, err := ai.UnmarshalMessage(snap1.Entries[1+i].Body)
 		require.NoError(t, err)
 		portedMsg, err := ai.UnmarshalMessage(snap2.Entries[0+i].Body)
 		require.NoError(t, err)
 		require.Equal(t, origMsg.MessageRole(), portedMsg.MessageRole(), "ported message role must match original")
 	}
 
-	// Verify Entry 7 is the system prompt injected for the new session
-	sysMsg, err := ai.UnmarshalMessage(snap2.Entries[6].Body)
+	// Verify Entry 9 is the system prompt injected for the new session
+	sysMsg, err := ai.UnmarshalMessage(snap2.Entries[8].Body)
 	require.NoError(t, err)
 	require.Equal(t, ai.RoleSystem, sysMsg.MessageRole())
 
-	// Verify Entry 8 is the post-reset wake prompt
-	wakeMsg, err := ai.UnmarshalMessage(snap2.Entries[7].Body)
+	// Verify Entry 10 is the post-reset wake prompt
+	wakeMsg, err := ai.UnmarshalMessage(snap2.Entries[9].Body)
 	require.NoError(t, err)
 	require.Equal(t, ai.RoleUser, wakeMsg.MessageRole())
 	require.Equal(t, ContextResetWakePrompt, messageContentText(wakeMsg))
 
-	// Verify Entry 9 is the assistant response
-	wakeResp, err := ai.UnmarshalMessage(snap2.Entries[8].Body)
+	// Verify Entry 11 is the assistant response
+	wakeResp, err := ai.UnmarshalMessage(snap2.Entries[10].Body)
 	require.NoError(t, err)
 	require.Equal(t, ai.RoleAssistant, wakeResp.MessageRole())
 
@@ -1268,4 +1268,193 @@ func TestContextResetWithBatchedToolCallsDoesNotPortOrphanedToolResults(t *testi
 		}
 	}
 }
+
+// TestContextResetWindowOptions verifies:
+// 1. Default window of 20 when window is not specified or 0.
+// 2. Explicit window parameter (e.g. 6) ports exactly that number of messages.
+// 3. Window clamping at 100 max.
+// 4. Calling context_reset tool with window argument properly carries over window to reset execution.
+func TestContextResetWindowOptions(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
+		Models: []providers.FauxModelDefinition{{
+			ID:            "window-test-model",
+			ContextWindow: 1_000_000,
+			MaxTokens:     4096,
+			Input:         []string{"text"},
+		}},
+	})
+	defer reg.Unregister()
+
+	steps := make([]providers.FauxResponseStep, 100)
+	for i := range steps {
+		steps[i] = func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "OK"}}, ai.StopStop)
+		}
+	}
+	reg.SetResponses(steps)
+
+	mgr := makeSubagentTestManager(t, db, reg, 4)
+	defer mgr.Close(ctx)
+
+	parent := subagentTestParent(t, db, "window-agent")
+	registerParentOwner(mgr, parent)
+
+	savedAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+
+	owner := embeddedOwner{binding: parent, identity: "fixture:" + parent.AgentID}
+	ownerCtx := context.WithValue(ctx, embeddedOwnerContextKey{}, owner)
+
+	// Run 15 turns in epoch 1 -> 31 entries total: 1 system + 15 user + 15 assistant = 30 non-system messages
+	for i := 1; i <= 15; i++ {
+		err = mgr.runEmbeddedSessionPrompt(ownerCtx, *savedAgent, fmt.Sprintf("Turn %d message", i))
+		require.NoError(t, err)
+	}
+
+	snap1, err := db.ReopenEmbedded(ctx, parent)
+	require.NoError(t, err)
+	require.Equal(t, 31, len(snap1.Entries))
+
+	// Test 1: Explicit window of 6
+	err = mgr.ExecuteContextReset(ownerCtx, parent, "explicit_window_6", 6)
+	require.NoError(t, err)
+
+	updatedAgent1, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	nextBinding1 := store.EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  updatedAgent1.PiSessionID,
+		Epoch:      2,
+		Generation: parent.Generation,
+		OwnerToken: 1,
+	}
+	snap2, err := db.ReopenEmbedded(ctx, nextBinding1)
+	require.NoError(t, err)
+
+	// In epoch 2: 6 ported messages + 1 system + 1 wake user + 1 wake assistant = 9 entries
+	require.Equal(t, 9, len(snap2.Entries), "with window=6, should have 6 ported + 3 session entries = 9 entries")
+
+	// Test 2: In epoch 2, run another 12 turns (24 messages) so epoch 2 has 6+24=30 messages
+	curAgent, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	mgr.mu.Lock()
+	owner2 := mgr.embeddedOwners[parent.AgentID]
+	mgr.mu.Unlock()
+	ownerCtx2 := context.WithValue(ctx, embeddedOwnerContextKey{}, owner2)
+
+	for i := 1; i <= 12; i++ {
+		err = mgr.runEmbeddedSessionPrompt(ownerCtx2, *curAgent, fmt.Sprintf("Epoch 2 Turn %d message", i))
+		require.NoError(t, err)
+	}
+
+	// Reset with default window (passing 0 or no window param)
+	err = mgr.ExecuteContextReset(ownerCtx2, owner2.binding, "default_window")
+	require.NoError(t, err)
+
+	updatedAgent2, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	nextBinding2 := store.EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  updatedAgent2.PiSessionID,
+		Epoch:      3,
+		Generation: parent.Generation,
+		OwnerToken: 1,
+	}
+	snap3, err := db.ReopenEmbedded(ctx, nextBinding2)
+	require.NoError(t, err)
+
+	// In epoch 3: DefaultPreservedContextWindow (20) ported messages + 1 system + 1 wake user + 1 wake assistant = 23 entries
+	require.Equal(t, 23, len(snap3.Entries), "with default window, should have 20 ported + 3 session entries = 23 entries")
+
+	// Test 3: Clamping max window > 100
+	// Requesting window=500 should be clamped to 100 (which ports all non-system messages since epoch 3 has < 100 messages)
+	mgr.mu.Lock()
+	owner3 := mgr.embeddedOwners[parent.AgentID]
+	mgr.mu.Unlock()
+	ownerCtx3 := context.WithValue(ctx, embeddedOwnerContextKey{}, owner3)
+
+	err = mgr.ExecuteContextReset(ownerCtx3, owner3.binding, "clamp_window", 500)
+	require.NoError(t, err)
+
+	updatedAgent3, err := db.ManagedAgent(ctx, parent.AgentID)
+	require.NoError(t, err)
+	nextBinding3 := store.EmbeddedBinding{
+		AgentID:    parent.AgentID,
+		SessionID:  updatedAgent3.PiSessionID,
+		Epoch:      4,
+		Generation: parent.Generation,
+		OwnerToken: 1,
+	}
+	snap4, err := db.ReopenEmbedded(ctx, nextBinding3)
+	require.NoError(t, err)
+	// snap3 had 23 entries (1 system + 20 ported + 1 wake user + 1 wake assistant = 22 non-system messages)
+	// Clamped window=100 will port all 22 messages. 22 ported + 1 system + 1 wake user + 1 wake assistant = 25 entries.
+	require.Equal(t, 25, len(snap4.Entries))
+}
+
+// TestEmbeddedContextResetToolWithWindow verifies that invoking the embeddedContextResetTool
+// correctly parses reason and window arguments and passes them to the callback.
+func TestEmbeddedContextResetToolWithWindow(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	mgr := &Manager{store: db}
+	owner := embeddedOwner{
+		binding:  store.EmbeddedBinding{AgentID: "tool-agent", SessionID: "s1", Epoch: 1},
+		identity: "fixture",
+	}
+
+	var capturedReq contextResetRequest
+	tool := mgr.embeddedContextResetTool(owner, func(req contextResetRequest) {
+		capturedReq = req
+	}, "context_reset")
+
+	// Call with default / missing args
+	res, err := tool.Execute(ctx, "c1", map[string]any{}, nil)
+	require.NoError(t, err)
+	require.True(t, res.Terminate)
+	require.Equal(t, "worker_requested", capturedReq.reason)
+	require.Equal(t, DefaultPreservedContextWindow, capturedReq.window)
+
+	// Call with custom reason and custom window
+	res, err = tool.Execute(ctx, "c2", map[string]any{
+		"reason": "clean_slate",
+		"window": 15,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "clean_slate", capturedReq.reason)
+	require.Equal(t, 15, capturedReq.window)
+
+	// Call with float64 window (common in JSON deserialization)
+	res, err = tool.Execute(ctx, "c3", map[string]any{
+		"reason": "clean_slate_float",
+		"window": float64(8),
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 8, capturedReq.window)
+
+	// Call with window > 100 clamped to 100
+	res, err = tool.Execute(ctx, "c4", map[string]any{
+		"window": 250,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, MaxPreservedContextWindow, capturedReq.window)
+
+	// Call with negative / zero window defaulted to 20
+	res, err = tool.Execute(ctx, "c5", map[string]any{
+		"window": -5,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, DefaultPreservedContextWindow, capturedReq.window)
+}
+
 

@@ -364,3 +364,51 @@ func TestEmbeddedToolRollbackAndInconclusiveCommitHaveNoAcceptance(t *testing.T)
 		})
 	}
 }
+
+func TestListEmbeddedToolWorkers_IncludesTmuxWorkers(t *testing.T) {
+	ctx := context.Background()
+	s, _ := embeddedRedStore(t)
+	b := goalBind(t, s, "addressed-store", "addressed-session", 1, "addressed-runtime", "root")
+	g, err := s.MintEmbeddedProcessGeneration(ctx, "addressed-store-process")
+	require.NoError(t, err)
+
+	call := providers.FauxToolCall("mecha_worker", map[string]any{"action": "list"}, "list-call-id")
+	user := receiptSDKAppend(t, s, b, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "ordinary addressed work"}}})
+	require.NoError(t, s.EnterEmbeddedNonMailProviderTurn(ctx, b, user.Sequence, user.Digest))
+	receiptSDKAppend(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
+
+	inv, err := s.RecordEmbeddedToolInvocation(ctx, b, g, user.Sequence, user.Digest, "", call)
+	require.NoError(t, err)
+	require.NoError(t, s.StartEmbeddedToolInvocation(ctx, inv, call))
+
+	// Register an embedded worker
+	_ = goalBind(t, s, "embedded-worker-alpha", "session-alpha", 1, "runtime-alpha", "worker")
+
+	// Register a tmux worker
+	_, err = s.ReserveTmuxRecipientSource(ctx, "worker-tmux-bravo", "tmux-source-v1:worker-tmux-bravo")
+	require.NoError(t, err)
+	require.NoError(t, s.ActivateTmuxRecipientSource(ctx, "worker-tmux-bravo", "tmux-source-v1:worker-tmux-bravo"))
+
+	// Register a reserved identity (should be filtered out)
+	_, err = s.ReserveTmuxRecipientSource(ctx, "supervisor", "tmux-source-v1:supervisor")
+	require.NoError(t, err)
+	require.NoError(t, s.ActivateTmuxRecipientSource(ctx, "supervisor", "tmux-source-v1:supervisor"))
+
+	workers, err := s.ListEmbeddedToolWorkers(ctx, inv)
+	require.NoError(t, err)
+	require.NotNil(t, workers)
+
+	var payload struct {
+		Workers []map[string]any `json:"workers"`
+	}
+	require.NoError(t, json.Unmarshal(inv.domainContent, &payload))
+
+	require.Len(t, payload.Workers, 2)
+	require.Equal(t, "embedded-worker-alpha", payload.Workers[0]["worker_id"])
+	require.Equal(t, "embedded", payload.Workers[0]["kind"])
+
+	require.Equal(t, "worker-tmux-bravo", payload.Workers[1]["worker_id"])
+	require.Equal(t, "tmux", payload.Workers[1]["kind"])
+	require.Equal(t, "idle", payload.Workers[1]["lifecycle_state"])
+}
+
