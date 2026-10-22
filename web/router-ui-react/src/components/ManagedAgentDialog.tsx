@@ -36,6 +36,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
   const [confirmTermination, setConfirmTermination] = useState(false);
 
   const [isMainWorktree, setIsMainWorktree] = useState(false);
+  const [isCheckingGit, setIsCheckingGit] = useState(false);
   const [worktreeEnabled, setWorktreeEnabled] = useState(false);
   const [worktreeBranch, setWorktreeBranch] = useState("");
   const [worktreeBranchUserEdited, setWorktreeBranchUserEdited] = useState(false);
@@ -48,6 +49,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
     setInstruction("");
     setConfirmTermination(false);
     setIsMainWorktree(false);
+    setIsCheckingGit(false);
     setWorktreeEnabled(false);
     setWorktreeBranch("");
     setWorktreeBranchUserEdited(false);
@@ -57,10 +59,12 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
   useEffect(() => {
     if (!open || agent || !onWorktreeCheck || !cwd.trim()) {
       setIsMainWorktree(false);
+      setIsCheckingGit(false);
       setWorktreeEnabled(false);
       return;
     }
     let cancelled = false;
+    setIsCheckingGit(true);
     const timer = setTimeout(() => {
       onWorktreeCheck(cwd.trim())
         .then((result) => {
@@ -76,12 +80,18 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
           if (cancelled) return;
           setIsMainWorktree(false);
           setWorktreeEnabled(false);
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsCheckingGit(false);
+          }
         });
     }, 500);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      setIsCheckingGit(false);
     };
   }, [cwd, open, agent, onWorktreeCheck]);
 
@@ -123,7 +133,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, recent
       {confirmTermination ? <div className="managed-confirmation" role="alert"><p>Terminate {agent.agent_id}?</p><button type="button" className="danger-button" disabled={pending} onClick={() => { void onAction(agent.agent_id, "terminate"); }}>Terminate agent</button><button type="button" className="secondary" onClick={() => setConfirmTermination(false)}>Cancel</button></div> : null}
     </section> : <form className="managed-agent-form" onSubmit={submit}>
       <label>Name<input required value={name} onChange={(event) => setName(event.currentTarget.value)} autoComplete="off" /></label>
-      <ManagedDirectoryPicker value={cwd} {...(recentFolders === undefined ? {} : { recentFolders })} onChange={setCwd} list={onListDirectories} />
+      <ManagedDirectoryPicker value={cwd} {...(recentFolders === undefined ? {} : { recentFolders })} isCheckingGit={isCheckingGit} onChange={setCwd} list={onListDirectories} />
       {isMainWorktree ? <div className="worktree-section">
         <button
           type="button"
