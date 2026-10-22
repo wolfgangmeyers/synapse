@@ -22,6 +22,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "mecha_reminder", Name: "mecha_reminder", Category: "lifecycle", Description: "Schedule reminders"},
 	{ID: "mecha_workflow_transition", Name: "mecha_workflow_transition", Category: "lifecycle", Description: "Transition workflow state or exit workflow"},
 	{ID: "context_reset", Name: "context_reset", Category: "lifecycle", Description: "Reset agent context"},
+	{ID: "mecha_worker_terminate", Name: "mecha_worker_terminate", Category: "lifecycle", Description: "Terminate self and optionally remove assigned worktree"},
 	{ID: "scratchpad", Name: "scratchpad", Category: "memory", Description: "Persistent scratchpad memory"},
 	{ID: "subagent", Name: "subagent", Category: "subagents", Description: "Launch background subagents"},
 	{ID: "get_subagent_result", Name: "get_subagent_result", Category: "subagents", Description: "Snapshot subagent outputs"},

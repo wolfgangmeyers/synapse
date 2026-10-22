@@ -979,6 +979,9 @@ const (
 )
 
 func (m *Manager) nudgeEmbeddedSessionIfNeeded(ctx context.Context, session *coding.Session, p *embeddedPersistence) {
+	if p != nil && m.isWorkerSelfTerminationPending(p.binding.AgentID) {
+		return
+	}
 	if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
 		_, _ = session.Run(ctx, embeddedSynthesisPrompt)
 	} else if !p.toolExecuted && !p.toolCallReceived && len(strings.TrimSpace(session.LastAssistantText())) == 0 && p.thinkingGenerated {
@@ -1062,9 +1065,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
 		}
 		m.publishProjection()
-		if mail == nil || turnErr == nil {
+		if (mail == nil || turnErr == nil) && !m.isWorkerSelfTerminationPending(binding.AgentID) {
 			m.OfferDirect(binding.AgentID)
 		}
+		m.checkWorkerSelfTerminationAfterTurn(context.Background(), binding.AgentID)
 	}()
 	// Restored selections are untrusted admission input too. Check the real
 	// SDK identity and private credential before any test substitution, tools,
@@ -1353,6 +1357,17 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			m.mu.Unlock()
 		}
 		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))
+		if role == "worker" {
+			terminateCB := func(req workerSelfTerminateRequest) {
+				m.mu.Lock()
+				if m.workerSelfTerminateRequested == nil {
+					m.workerSelfTerminateRequested = make(map[string]workerSelfTerminateRequest)
+				}
+				m.workerSelfTerminateRequested[owner.binding.AgentID] = req
+				m.mu.Unlock()
+			}
+			tools = append(tools, m.embeddedWorkerTerminateTool(owner, terminateCB))
+		}
 		tools = append(tools, m.embeddedScratchpadTool(owner))
 		tools = append(tools, m.embeddedKBSearchTool(owner))
 		tools = append(tools, m.embeddedKBReadTool(owner))
@@ -2102,6 +2117,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 // evaluateEmbeddedTurn runs only after a successful SDK turn. The receipt is
 // captured at the provider-request boundary, never inferred from desired state.
 func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.EmbeddedBinding, p *embeddedPersistence, receipt *store.EmbeddedGoalAppliedReceipt, model *ai.Model, stream agent.StreamFn) error {
+	if m.isWorkerSelfTerminationPending(binding.AgentID) {
+		return nil
+	}
 	if receipt == nil || !receipt.GoalEnabled ||
 		receipt.TurnEntrySeq != p.turnSeq || receipt.TurnEntryDigest != p.turnDigest {
 		return nil
