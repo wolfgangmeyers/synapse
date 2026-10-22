@@ -119,46 +119,33 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
           detail={connectionDetail}
           onClick={onRouterClick}
         />
-        <div className="connection-identity-row">
-          <div className="connection-identity-card" title={connectionIdentity ? `Connected as ${connectionIdentity}` : "Connected"}>
-            <span className="connection-identity-dot" aria-hidden="true" />
-            <div className="connection-identity-info">
-              <span className="connection-identity-name">
-                {connectionIdentity ? `Connected as ${connectionIdentity}` : "Connected"}
-              </span>
-              <span className="connection-identity-detail">
-                {connectionDetail || "GitHub · Personal Account"}
-              </span>
-            </div>
+        {hasManagedActions ? (
+          <div className="managed-actions" ref={managedActionsRef}>
+            <button
+              type="button"
+              className="managed-actions-trigger"
+              aria-label="Managed actions"
+              aria-haspopup="menu"
+              aria-expanded={managedActionsOpen}
+              aria-controls={`${managedActionsId}-menu`}
+              onClick={() => setManagedActionsOpen((open) => !open)}
+            >
+              <i className="fa-solid fa-ellipsis" aria-hidden="true" />
+            </button>
+            {managedActionsOpen ? (
+              <div id={`${managedActionsId}-menu`} className="managed-actions-menu" role="menu" aria-label="Managed actions">
+                {onLaunchManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onLaunchManaged)}>Launch managed agent</button> : null}
+                {onRestartAllManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartAllManaged)}>Restart all managed</button> : null}
+                {onRestartRouter ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartRouter)}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" style={{ marginRight: 8 }} />Restart router</button> : null}
+                {onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}
+                {onMCPServers ? <button type="button" role="menuitem" onClick={() => runManagedAction(onMCPServers)}>MCP Servers</button> : null}
+                {onToolDefaults ? <button type="button" role="menuitem" onClick={() => runManagedAction(onToolDefaults)}>Tool Defaults</button> : null}
+                {onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}
+                {onContextThresholds ? <button type="button" role="menuitem" onClick={() => runManagedAction(onContextThresholds)}>Context Thresholds</button> : null}
+              </div>
+            ) : null}
           </div>
-          {hasManagedActions ? (
-            <div className="managed-actions" ref={managedActionsRef}>
-              <button
-                type="button"
-                className="managed-actions-trigger"
-                aria-label="Managed actions"
-                aria-haspopup="menu"
-                aria-expanded={managedActionsOpen}
-                aria-controls={`${managedActionsId}-menu`}
-                onClick={() => setManagedActionsOpen((open) => !open)}
-              >
-                <i className="fa-solid fa-ellipsis" aria-hidden="true" />
-              </button>
-              {managedActionsOpen ? (
-                <div id={`${managedActionsId}-menu`} className="managed-actions-menu" role="menu" aria-label="Managed actions">
-                  {onLaunchManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onLaunchManaged)}>Launch managed agent</button> : null}
-                  {onRestartAllManaged ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartAllManaged)}>Restart all managed</button> : null}
-                  {onRestartRouter ? <button type="button" role="menuitem" onClick={() => runManagedAction(onRestartRouter)}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" style={{ marginRight: 8 }} />Restart router</button> : null}
-                  {onProviderSettings ? <button type="button" role="menuitem" onClick={() => runManagedAction(onProviderSettings)}>Provider settings</button> : null}
-                  {onMCPServers ? <button type="button" role="menuitem" onClick={() => runManagedAction(onMCPServers)}>MCP Servers</button> : null}
-                  {onToolDefaults ? <button type="button" role="menuitem" onClick={() => runManagedAction(onToolDefaults)}>Tool Defaults</button> : null}
-                  {onSystemOneConfig ? <button type="button" role="menuitem" onClick={() => runManagedAction(onSystemOneConfig)}>System 1 Config</button> : null}
-                  {onContextThresholds ? <button type="button" role="menuitem" onClick={() => runManagedAction(onContextThresholds)}>Context Thresholds</button> : null}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+        ) : null}
       </div>
       {isConnected ? (
         <>
