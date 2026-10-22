@@ -106,6 +106,9 @@ func (m *Manager) embeddedReminderTool(owner embeddedOwner, fresh func(string) b
 		if replay {
 			return fail(errors.New("reminder receipt predates fresh admission: SDK result unknown"))
 		}
+		if result.ReminderID != "" || result.Updated || result.Deleted || result.Canceled {
+			m.publishRemindersChanged(ctx)
+		}
 		payload, err := json.Marshal(result)
 		if err != nil {
 			return fail(err)

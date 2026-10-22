@@ -90,6 +90,10 @@ func TestEmbeddedReminderOwnAgentSDKRED(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer m.Close(ctx)
+			var reminderChangesPublished int
+			m.SetRemindersChangedPublisher(func(context.Context) {
+				reminderChangesPublished++
+			})
 			request := LaunchRequest{Name: tc.name, Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "remind me", RequestID: "a5555555-5555-4555-8555-555555555572"}
 			var launched LaunchResult
 			if tc.root {
@@ -171,6 +175,9 @@ func TestEmbeddedReminderOwnAgentSDKRED(t *testing.T) {
 			require.False(t, cancelled.result.IsError)
 			require.NoError(t, check.QueryRowContext(ctx, `SELECT COUNT(*) FROM reminders WHERE id=?`, id).Scan(&count))
 			require.Zero(t, count)
+
+			// 1 create + 1 delete (list and conflict don't mutate, replay was already admitted)
+			require.Equal(t, 2, reminderChangesPublished)
 		})
 	}
 }

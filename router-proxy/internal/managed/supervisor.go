@@ -498,6 +498,7 @@ type Manager struct {
 	directReplyPublisher                       DirectReplyPublisher
 	embeddedReplyPublisher                     func(context.Context, store.EmbeddedReply) error
 	embeddedMailPublisher                      func(store.EnqueueResult)
+	remindersChangedPublisher                  func(context.Context)
 	embeddedBeforeToolHandoff                  func(*store.EmbeddedToolInvocation) // test-only, original committed handoff
 	embeddedBeforeToolDomain                   func()                              // test-only, after owner checks, before producer transaction
 	goalContinuationDelay                      time.Duration
@@ -531,6 +532,27 @@ func (m *Manager) SetRouterURL(raw string) error {
 	defer m.mu.Unlock()
 	m.config.RouterURL = raw
 	return nil
+}
+
+// SetRemindersChangedPublisher installs the router-owned callback for reminder changes.
+func (m *Manager) SetRemindersChangedPublisher(publish func(context.Context)) {
+	m.mu.Lock()
+	m.remindersChangedPublisher = publish
+	m.mu.Unlock()
+}
+
+func (m *Manager) publishRemindersChanged(ctx context.Context) {
+	m.mu.Lock()
+	publish := m.remindersChangedPublisher
+	m.mu.Unlock()
+	if publish != nil {
+		publish(ctx)
+	}
+}
+
+// PublishRemindersChanged triggers the remindersChangedPublisher callback.
+func (m *Manager) PublishRemindersChanged(ctx context.Context) {
+	m.publishRemindersChanged(ctx)
 }
 
 func NewManager(options ManagerOptions) (*Manager, error) {

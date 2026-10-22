@@ -659,6 +659,10 @@ func New(options Options) (*Router, error) {
 		options.Managed.SetDirectReplyPublisher(r.persistManagedDirectReply)
 		options.Managed.SetEmbeddedReplyPublisher(r.persistEmbeddedReply)
 		options.Managed.SetEmbeddedMailPublisher(r.afterEnqueue)
+		options.Managed.SetRemindersChangedPublisher(func(ctx context.Context) {
+			r.sweepReminders(ctx)
+			r.broadcast(map[string]any{"type": "reminders_changed"})
+		})
 		if options.MCPManager != nil {
 			options.Managed.SetMCPManager(options.MCPManager)
 		}
