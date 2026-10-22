@@ -1331,6 +1331,7 @@ func (r *Router) handleReminderItem(w http.ResponseWriter, req *http.Request, id
 		if result.SchedulingChanged {
 			r.sweepReminders(req.Context())
 		}
+		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeJSON(w, 200, map[string]any{"reminder": result.Reminder})
 	case http.MethodDelete:
 		deleted, err := r.store.CancelReminder(req.Context(), id)
@@ -1342,6 +1343,7 @@ func (r *Router) handleReminderItem(w http.ResponseWriter, req *http.Request, id
 			r.writeError(w, &httpError{404, "not_found", 0})
 			return
 		}
+		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeNoContent(w)
 	default:
 		r.writeError(w, &httpError{404, "not_found", 0})

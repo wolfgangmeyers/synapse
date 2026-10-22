@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
@@ -555,7 +556,9 @@ func TestPostReminderBroadcastsLiveInvalidation(t *testing.T) {
 
 	server := httptest.NewServer(router)
 	defer server.Close()
-	payload := []byte(`{"id":"live-reminder","target":"reminder-target","creator":"creator","body":"body","created_at":"2026-08-29T12:00:00.000Z","next_due_at":"2026-08-29T12:01:00.000Z"}`)
+	dueAt := time.Now().Add(time.Hour).UTC().Format("2006-01-02T15:04:05.000Z")
+	createdAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	payload := []byte(fmt.Sprintf(`{"id":"live-reminder","target":"reminder-target","creator":"creator","body":"body","created_at":"%s","next_due_at":"%s"}`, createdAt, dueAt))
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/reminders", bytesReader(payload))
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
@@ -563,6 +566,70 @@ func TestPostReminderBroadcastsLiveInvalidation(t *testing.T) {
 	require.NoError(t, err)
 	response.Body.Close()
 	require.Equal(t, http.StatusCreated, response.StatusCode)
+
+	invalidation := readJSON(t, subscriber)
+	require.Equal(t, "v1", invalidation["version"])
+	require.NotEmpty(t, invalidation["frame_id"])
+	require.Equal(t, "reminders_changed", invalidation["type"])
+
+	// Test PATCH reminder broadcasts reminders_changed
+	patchPayload := []byte(`{"body":"updated body"}`)
+	patchReq, err := http.NewRequest(http.MethodPatch, server.URL+"/v1/reminders/live-reminder", bytesReader(patchPayload))
+	require.NoError(t, err)
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchResp, err := http.DefaultClient.Do(patchReq)
+	require.NoError(t, err)
+	patchResp.Body.Close()
+	require.Equal(t, http.StatusOK, patchResp.StatusCode)
+
+	patchInvalidation := readJSON(t, subscriber)
+	require.Equal(t, "v1", patchInvalidation["version"])
+	require.NotEmpty(t, patchInvalidation["frame_id"])
+	require.Equal(t, "reminders_changed", patchInvalidation["type"])
+
+	// Test DELETE reminder broadcasts reminders_changed
+	delReq, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/reminders/live-reminder", nil)
+	require.NoError(t, err)
+	delResp, err := http.DefaultClient.Do(delReq)
+	require.NoError(t, err)
+	delResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, delResp.StatusCode)
+
+	delInvalidation := readJSON(t, subscriber)
+	require.Equal(t, "v1", delInvalidation["version"])
+	require.NotEmpty(t, delInvalidation["frame_id"])
+	require.Equal(t, "reminders_changed", delInvalidation["type"])
+}
+
+func TestRouterManagedRemindersChangedWiring(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	mgr, err := managed.NewManager(managed.ManagerOptions{
+		Store:    durable,
+		Manifest: manifest,
+	})
+	require.NoError(t, err)
+	defer mgr.Close(context.Background())
+
+	router, err := transport.New(transport.Options{
+		Store:   durable,
+		Port:    0,
+		Managed: mgr,
+	})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	subscriber, _ := registerTestSession(t, wsURL, "reminder-subscriber-wiring", "instance", "v1")
+	defer subscriber.Close(websocket.StatusNormalClosure, "test done")
+
+	// Trigger the publisher via managed manager
+	mgr.PublishRemindersChanged(context.Background())
 
 	invalidation := readJSON(t, subscriber)
 	require.Equal(t, "v1", invalidation["version"])
