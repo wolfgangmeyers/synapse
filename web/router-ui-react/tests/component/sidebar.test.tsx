@@ -37,9 +37,8 @@ describe("Sidebar", () => {
   it("keeps managed actions in an accessible menu beside the connection badge", async () => {
     const user = userEvent.setup();
     const onLaunchManaged = vi.fn();
-    const onRestartAllManaged = vi.fn();
     const onProviderSettings = vi.fn();
-    render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onRestartAllManaged={onRestartAllManaged} onProviderSettings={onProviderSettings} />);
+    render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onProviderSettings={onProviderSettings} />);
 
     const routerBtn = screen.getByRole("button", { name: /local/i });
     expect(routerBtn).toHaveTextContent("local");
@@ -55,7 +54,6 @@ describe("Sidebar", () => {
     expect(menuButton).toHaveAttribute("aria-expanded", "true");
     const menu = screen.getByRole("menu", { name: "Managed actions" });
     expect(menu).toHaveTextContent("Launch managed agent");
-    expect(menu).toHaveTextContent("Restart all managed");
     expect(menu).toHaveTextContent("Provider settings");
     expect(menu).not.toHaveTextContent("History");
 
@@ -67,10 +65,6 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
     expect(onLaunchManaged).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
-
-    await user.click(menuButton);
-    await user.click(screen.getByRole("menuitem", { name: "Restart all managed" }));
-    expect(onRestartAllManaged).toHaveBeenCalledOnce();
 
     await user.click(menuButton);
     await user.click(screen.getByRole("menuitem", { name: "Provider settings" }));

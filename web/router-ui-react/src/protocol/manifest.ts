@@ -63,7 +63,6 @@ export const httpRoutes = [
   { methods: ["GET", "POST"], path: "/v1/managed-agents" },
   { methods: ["GET"], path: "/v1/managed-directories" },
   { methods: ["GET"], path: "/v1/history" },
-  { methods: ["POST"], path: "/v1/managed-agents/restart-all" },
   { methods: ["GET", "DELETE"], path: "/v1/managed-agents/{id}" },
   { methods: ["GET"], path: "/v1/managed-agents/{id}/children" },
   { methods: ["POST"], path: "/v1/managed-agents/{agent_id}/restart", actions: ["restart"] },

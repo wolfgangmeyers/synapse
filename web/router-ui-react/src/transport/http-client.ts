@@ -576,7 +576,6 @@ export interface RouterHttpClient {
   restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
   terminateManaged(id: string, options?: { cleanupWorktree?: boolean }): Promise<ManagedOperationResponse>;
-  restartAllManaged(): Promise<ManagedOperationResponse>;
   models(): Promise<ModelsResponse>;
   providerAuth(): Promise<ProviderAuthResponse>;
   startProviderAuth(provider: ProviderModel["provider"], action: "login" | "logout"): Promise<ManagedOperationResponse>;
@@ -746,7 +745,6 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       const query = options?.cleanupWorktree !== undefined ? `?cleanup_worktree=${options.cleanupWorktree}` : "";
       return managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}${query}`, "DELETE"));
     },
-    restartAllManaged: async () => managedOperation(await managedRequest("/v1/managed-agents/restart-all", "POST", {})),
     models: async () => models(await managedRequest("/v1/models", "GET")),
     providerAuth: async () => providerAuth(await managedRequest("/v1/provider-auth", "GET")),
     startProviderAuth: async (provider, action) => managedOperation(await managedRequest(`/v1/provider-auth/${provider}/${action}`, "POST", {})),
