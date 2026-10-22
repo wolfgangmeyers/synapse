@@ -327,16 +327,109 @@ p:empty { display: none; }
 }
 .router-dialog { width: min(720px, calc(100vw - 32px)); }
 .router-dialog .dialog-shell { max-height: calc(100dvh - 48px); overflow-y: auto; }
-.message-dialog {
-  width: min(680px, calc(100vw - 32px));
-  border: 1px solid var(--line);
-  border-radius: 28px;
-  background: var(--surface);
-  color: var(--text);
-  padding: 0;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.45);
+dialog,
+.dialog-backdrop,
+dialog::backdrop,
+.message-dialog::backdrop,
+.prompt-picker-dialog::backdrop {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  background: rgba(8, 12, 22, 0.75);
 }
-.message-dialog::backdrop { background: rgba(5,7,12,0.68); }
+
+dialog,
+.dialog-shell,
+.message-dialog,
+.prompt-picker-dialog {
+  color: var(--text);
+}
+
+.message-dialog,
+.prompt-picker-dialog {
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 16px;
+  background: rgba(13, 20, 36, 0.90);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65), 0 0 1px 1px rgba(255, 255, 255, 0.05) inset;
+}
+
+.dialog-shell header h2 {
+  font-size: 16px;
+  font-weight: 700;
+  color: #f8fafc;
+  margin: 0;
+}
+
+.dialog-shell header p {
+  color: #94a3b8;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.dialog-shell header .icon-btn-round {
+  flex-shrink: 0;
+}
+
+/* Dialog Form Controls & Buttons */
+.dialog-shell input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.dialog-shell textarea,
+.dialog-shell select {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: #f8fafc;
+}
+
+.dialog-shell input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
+.dialog-shell textarea:focus,
+.dialog-shell select:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+  outline: none;
+}
+
+.dialog-shell button:not(.icon-btn-round):not(.goal-toggle):not(.switch-toggle) {
+  border-radius: 8px;
+  transition: all 0.15s ease-in-out;
+}
+
+.dialog-shell button[type="submit"]:not(.secondary):not(.danger):not(.danger-button),
+.dialog-shell .dialog-actions button:not(.secondary):not(.danger):not(.danger-button),
+.dialog-shell .goal-editor-actions button:not(.secondary),
+.dialog-shell .reminder-lock-actions button[type="submit"],
+.dialog-shell .reminders-dialog-body > button {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border: none;
+  color: white;
+}
+
+.dialog-shell button[type="submit"]:not(.secondary):not(.danger):not(.danger-button):hover:not(:disabled),
+.dialog-shell .dialog-actions button:not(.secondary):not(.danger):not(.danger-button):hover:not(:disabled),
+.dialog-shell .goal-editor-actions button:not(.secondary):hover:not(:disabled),
+.dialog-shell .reminder-lock-actions button[type="submit"]:hover:not(:disabled),
+.dialog-shell .reminders-dialog-body > button:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.dialog-shell button.secondary,
+.dialog-shell .secondary,
+.dialog-shell .dialog-actions button.secondary,
+.dialog-shell .goal-editor-actions button.secondary,
+.dialog-shell .reminder-lock-actions button.secondary {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
+}
+
+.dialog-shell button.secondary:hover:not(:disabled),
+.dialog-shell .secondary:hover:not(:disabled),
+.dialog-shell .dialog-actions button.secondary:hover:not(:disabled),
+.dialog-shell .goal-editor-actions button.secondary:hover:not(:disabled),
+.dialog-shell .reminder-lock-actions button.secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+}
 #reminders-dialog { width: min(680px, calc(100vw - 32px)); }
 #reminders-dialog-body { max-height: min(52vh, 520px); overflow-y: auto; word-break: break-word; }
 #prompt-templates-dialog, #prompt-use-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); }
@@ -591,15 +684,7 @@ p:empty { display: none; }
 .prompt-picker-dialog {
   width: min(840px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
-  border: 1px solid var(--line);
-  border-radius: 28px;
-  background: var(--surface);
-  color: var(--text);
   padding: 0;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-}
-.prompt-picker-dialog::backdrop {
-  background: rgba(5, 7, 12, 0.68);
 }
 .prompt-picker-dialog .dialog-shell {
   max-height: calc(100dvh - 32px);
@@ -949,7 +1034,7 @@ p:empty { display: none; }
 .dialog-shell header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
 .dialog-actions { display: flex; gap: 8px; }
 .router-dialog-actions { justify-content: space-between; margin-bottom: 14px; }
-.dialog-shell header button { min-width: 44px; width: 44px; padding: 0; font-size: 24px; background: var(--surface-raised); color: var(--text); }
+
 .saved-routers { display: grid; gap: 10px; margin-bottom: 22px; }
 .router-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 14px; border-radius: 18px; background: var(--canvas); cursor: pointer; }
 .router-row.active { outline: 1px solid rgba(120,224,205,0.42); background: var(--surface-raised); }

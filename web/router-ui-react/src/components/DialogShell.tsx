@@ -95,7 +95,9 @@ export function DialogShell({
             <h2 id={headingId}>{title}</h2>
             {description ? <p>{description}</p> : null}
           </div>
-          <button type="button" aria-label={closeLabel} onClick={onClose}>×</button>
+          <button type="button" className="icon-btn-round" aria-label={closeLabel} onClick={onClose}>
+            <i className="fa-solid fa-xmark" aria-hidden="true" />
+          </button>
         </header>
         {children}
         {footer ? <footer>{footer}</footer> : null}
