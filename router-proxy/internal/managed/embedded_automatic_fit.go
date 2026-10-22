@@ -133,7 +133,7 @@ func unwrapEmbeddedMailText(text string) string {
 		Body   string `json:"Body"`
 	}
 	if err := json.Unmarshal([]byte(text), &mailEnv); err == nil && mailEnv.Sender != "" {
-		return fmt.Sprintf("[Direct message from %s]: %s\n\n(IMPORTANT: This is a direct message from %s. You MUST address and answer this message directly in your response text before taking any other action.)", mailEnv.Sender, mailEnv.Body, mailEnv.Sender)
+		return fmt.Sprintf("[Direct message from %s]: %s", mailEnv.Sender, mailEnv.Body)
 	}
 	return text
 }

@@ -137,7 +137,7 @@ func embeddedAddressedArguments(name string, args map[string]any) error {
 
 func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitted func(string) *store.EmbeddedToolInvocation, completed func(string, *store.EmbeddedToolInvocation), freshLaunch func(string) bool) agent.AgentTool {
 	schema := embeddedMailboxSchema()
-	description := "Queue an independently addressed mailbox message. Do not use this tool to reply to the sender of the current message; your direct assistant text is automatically returned to them as your reply. Returns acceptance, not delivery or an automatic reply."
+	description := "Queue an independently addressed mailbox message. Returns acceptance, not delivery or an automatic reply."
 	if name == "mecha_worker" {
 		schema = embeddedWorkerSchema()
 		description = "List, launch, send mail to or clean up independent embedded workers by their saved identity. Launch and cleanup return accepted operations, not readiness or completion."

@@ -222,15 +222,12 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		} else if len(strings.TrimSpace(replyBodyText)) == 0 {
 			return nil
 		}
+		// Automatic reply outbox is completely eliminated: outbound mailbox messages
+		// are only sent when an agent explicitly calls mecha_mailbox_send or mecha_worker(action="send").
+		// Assistant final text is only recorded in history, never auto-routed to the sender.
+		replyBody := replyBodyText
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])
-		if sourceKind != "reminder" {
-			_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_reply_outbox(attempt_id,entry_seq,entry_digest,reply_id,sender,recipient,body,created_at,state) VALUES(?,?,?,?,?,?,?,?,'pending')`, attemptID, entry.Sequence, entry.Digest, replyID, b.AgentID, targetRecipient, replyBodyText, formatTimestamp(s.clock.Now()))
-			if err != nil {
-				return err
-			}
-		}
-		replyBody := replyBodyText
 		category := "managed_message"
 		messageText := "Message sent"
 		outcome := "success"

@@ -151,12 +151,8 @@ func TestEmbeddedReplyThinkingFallbackWhenTextEmpty(t *testing.T) {
 	require.NoError(t, err, "assistant message with thinking content must finalize successfully")
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	// 3. Verify reply outbox HAS the thinking text as fallback
-	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"), "reply outbox must promote thinking content when text is empty")
-	reply, err := s.embeddedReplyTx(ctx, attempt.AttemptID)
-	require.NoError(t, err)
-	require.NotNil(t, reply)
-	require.Equal(t, "Analyzing commits and determined the issue is resolved.", reply.Body)
+	// 3. Verify reply outbox is ZERO (assistant text is never auto-routed to outbox)
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "reply outbox must never auto-reply")
 }
 
 func TestEmbeddedReplyReminderRecordsHistoryWithoutOutbox(t *testing.T) {
@@ -265,11 +261,8 @@ func TestEmbeddedReplySystemMessageRecordsHistoryWithoutOutbox(t *testing.T) {
 	require.NoError(t, err, "assistant reply to system notification must succeed")
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	// 3. Verify reply outbox does NOT target "system", but is routed to default user
-	var outboxRecipient string
-	err = s.db.QueryRowContext(ctx, `SELECT recipient FROM embedded_reply_outbox WHERE attempt_id=?`, attempt.AttemptID).Scan(&outboxRecipient)
-	require.NoError(t, err)
-	require.Equal(t, "user", outboxRecipient, "system turn must route to default user when no prior human message")
+	// 3. Verify reply outbox is ZERO (no outbound mailbox message auto-queued)
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "assistant text must never be automatically queued to outbox")
 
 	// 4. Verify managed_complete_history targets "user", NOT "system"
 	require.NotEmpty(t, historyEntry.ID, "historyEntry must have an ID")
@@ -334,12 +327,8 @@ func TestEmbeddedReplySystemMessageRoutesToLastHumanRecipient(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	// 4. Verify reply outbox is routed to "wolfgang", NOT "system"
-	var outboxRecipient, outboxBody string
-	err = s.db.QueryRowContext(ctx, `SELECT recipient, body FROM embedded_reply_outbox WHERE attempt_id=?`, attempt.AttemptID).Scan(&outboxRecipient, &outboxBody)
-	require.NoError(t, err)
-	require.Equal(t, "wolfgang", outboxRecipient, "system turn must route to last human recipient")
-	require.Equal(t, replyText, outboxBody)
+	// 4. Verify reply outbox is ZERO (no outbound mailbox message auto-queued)
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "assistant text must never be automatically queued to outbox")
 
 	// 5. Verify managed_complete_history targets "wolfgang", NOT "system"
 	require.NotEmpty(t, historyEntry.ID)
@@ -389,12 +378,7 @@ func TestEmbeddedReplyOnAssistantStopErrorEmitsErrorReply(t *testing.T) {
 	require.Equal(t, int64(2), finalEntry.Sequence)
 	require.Equal(t, "assistant", finalEntry.Kind)
 
-	require.Equal(t, 1, embeddedRedCount(t, s, "embedded_reply_outbox"))
-	var outboxRecipient, outboxBody string
-	err = s.db.QueryRowContext(ctx, `SELECT recipient, body FROM embedded_reply_outbox WHERE attempt_id=?`, attempt.AttemptID).Scan(&outboxRecipient, &outboxBody)
-	require.NoError(t, err)
-	require.Equal(t, "sender", outboxRecipient)
-	require.Equal(t, "Turn failed: vertex api error (status 404): model not found", outboxBody)
+	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"))
 
 	require.NotEmpty(t, historyEntry.ID)
 	require.Equal(t, "error", historyEntry.Presentation.Outcome)
