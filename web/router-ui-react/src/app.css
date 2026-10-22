@@ -316,6 +316,12 @@ p:empty { display: none; }
   font-size: 13px;
   flex: 0 0 auto;
 }
+.router-selector-actions {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
 .router-selector-status {
   display: none;
 }
