@@ -69,13 +69,17 @@ Rules for System 1 integrations:
 
 The backend must accept browser calls from arbitrary frontend URLs. Cross-origin browser routes need permissive, non-credentialed CORS transport headers, including the request headers used for idempotency and diagnostics. This is compatibility, not access control: never parse, allowlist, log as identity, or authorize by `Origin` or CORS headers, and never enable credentialed CORS, cookies, or session-based browser authority. Browser clients must omit credentials for direct managed-control calls. Test both a direct cross-origin browser launch and an arbitrary `Origin`; same-origin proxies are useful but never the only supported route.
 
+## Web UI Design System & Architecture
+
+Any work on the Web UI (`web/router-ui-react`) must strictly follow the comprehensive design system, component patterns, and architectural standards in `docs/web-ui-design-system.md`. This includes the dark glassmorphic styling, neon accent system, sidebar architecture, partitioned conversation header, unified `.icon-btn-round` action buttons, continuous timeline across context resets, and strict separation between list and form views in modal dialogs.
+
 ## UI Icon Button Styling
 
-Small icon-only action buttons across cards, headers, toolbars, and list items must use the compact circular icon button styling (`.icon-btn-round`: 24px x 24px, `border-radius: 999px`, subtle border and translucent background with hover states, as seen in the agent conversation header and agent list) rather than large blocky/rectangular buttons.
+Small icon-only action buttons across cards, headers, toolbars, and list items must use the compact circular icon button styling (`.icon-btn-round`: 24px x 24px, `border-radius: 999px`, subtle border and translucent background with hover states, as seen in the agent conversation header and agent list) rather than large blocky/rectangular buttons. See `docs/web-ui-design-system.md` for complete token and variant specifications.
 
 ## Config Dialog Layout Convention
 
-Configuration and management dialogs (such as MCP Servers, Routers, Providers, etc.) must follow the convention of cleanly separating the "add new item / edit item" form from the list view. The main view should be purely a list view showing configured items, empty state if none exist, and an "+ Add <Item>" action button in the header/toolbar. It must not clutter the list view with permanently visible inline input form fields. Clicking "+ Add" or "Edit" transitions to a dedicated form view (with Back/Cancel and Save/Submit actions) that returns to the list view upon completion or cancellation.
+Configuration and management dialogs (such as MCP Servers, Routers, Providers, etc.) must follow the convention of cleanly separating the "add new item / edit item" form from the list view. The main view should be purely a list view showing configured items, empty state if none exist, and an "+ Add <Item>" action button in the header/toolbar. It must not clutter the list view with permanently visible inline input form fields. Clicking "+ Add" or "Edit" transitions to a dedicated form view (with Back/Cancel and Save/Submit actions) that returns to the list view upon completion or cancellation. See `docs/web-ui-design-system.md` for full modal shell and view transition requirements.
 
 ## Maintenance
 
