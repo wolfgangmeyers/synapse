@@ -206,15 +206,18 @@ describe("AgentRow", () => {
     expect(tmuxBadge?.outerHTML).toBe(rpcBadge?.outerHTML);
     expect(rpcBadge).toHaveTextContent("Run the focused check");
     expect(rpcRow?.querySelector(".managed-child-list")).toBeNull();
-    expect(screen.getByText("RPC")).toBeInTheDocument();
+    expect(screen.queryByText("RPC")).not.toBeInTheDocument();
+    expect(screen.getByText("tmux")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Manage" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
   });
 
-  it("tags worker as Embedded when runtime is embedded", () => {
+  it("omits source tag when runtime is embedded or router-managed", () => {
     const managedAgent = { agent_id: "emb-1", source: "router-managed" as const, runtime: "embedded" as const, cwd: "/work", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
     render(<AgentRow agent={{ agent_id: "emb-1", source: "router-managed", managed_agent: managedAgent, activity_state: "idle" }} />);
-    expect(screen.getByText("Embedded")).toBeInTheDocument();
+    expect(screen.queryByText("Embedded")).not.toBeInTheDocument();
+    expect(screen.queryByText("RPC")).not.toBeInTheDocument();
+    expect(screen.queryByText("tmux")).not.toBeInTheDocument();
   });
 
   it("shows working and subagent state accessibly", () => {

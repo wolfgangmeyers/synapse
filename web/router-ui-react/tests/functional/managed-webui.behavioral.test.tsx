@@ -177,7 +177,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     expect(publicAgent).not.toHaveProperty("session_file");
     expect(publicAgent).not.toHaveProperty("runtime_generation");
 
-    expect(rowButton).toHaveTextContent("RPC");
+    expect(rowButton).not.toHaveTextContent("tmux");
     await userEvent.setup().click(rowButton);
     expect(screen.getByRole("listitem")).toHaveClass("active");
   }, 60_000);

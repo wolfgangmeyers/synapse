@@ -73,7 +73,7 @@ describe("ConversationHeader context usage bar", () => {
     expect(fill?.classList.contains("normal")).toBe(true);
     expect(fill?.getAttribute("style")).toContain("width: 42%");
 
-    const value = container.querySelector(".header-metric-value");
+    const value = bar?.querySelector(".header-metric-value");
     expect(value?.textContent).toBe("42%");
   });
 
@@ -98,7 +98,7 @@ describe("ConversationHeader context usage bar", () => {
     expect(fill?.classList.contains("warning")).toBe(true);
     expect(fill?.getAttribute("style")).toContain("width: 65%");
 
-    const value = container.querySelector(".header-metric-value");
+    const value = bar?.querySelector(".header-metric-value");
     expect(value?.textContent).toBe("65%");
   });
 
@@ -122,7 +122,7 @@ describe("ConversationHeader context usage bar", () => {
     expect(fill?.classList.contains("critical")).toBe(true);
     expect(fill?.getAttribute("style")).toContain("width: 85%");
 
-    const value = container.querySelector(".header-metric-value");
+    const value = bar?.querySelector(".header-metric-value");
     expect(value?.textContent).toBe("85%");
   });
 
