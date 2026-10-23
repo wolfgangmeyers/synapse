@@ -351,6 +351,9 @@ func main() {
 		if codexOptions.GoalContinuationDelay <= 0 {
 			codexOptions.GoalContinuationDelay = 10 * time.Second
 		}
+		if err := managed.LoadCodexModelsStore(options.managed.PiAgentDir); err != nil {
+			log.Printf("ordinary Pi model store unavailable: %v", err)
+		}
 		managedManager, err = managed.NewManager(codexOptions)
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
