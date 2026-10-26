@@ -18,7 +18,7 @@ export interface AgentControlsDropdownProps {
   onGoal?: (() => void) | undefined;
   onReminders?: (() => void) | undefined;
   onInlineToolSettings?: (() => void) | undefined;
-  onAction?: ((action: "restart" | "reset" | "terminate") => void) | undefined;
+  onAction?: ((action: "restart" | "reset") => void) | undefined;
   onConfirmTermination?: ((confirm: boolean) => void) | undefined;
   onWorkflow?: (() => void) | undefined;
   onToggleInlineTools?: (() => void) | undefined;
@@ -97,14 +97,15 @@ export function AgentControlsDropdown({
   const controls: AgentControlItem[] = [
     { id: "goal", label: "Set goal", icon: "fa-solid fa-flag", action: onGoal },
     { id: "reminders", label: "Reminders", icon: "fa-solid fa-clock", action: onReminders },
-    { id: "toolSettings", label: "Tool settings", icon: "fa-solid fa-gear", action: onInlineToolSettings },
     { id: "restart", label: "Restart", icon: "fa-solid fa-rotate-left", action: () => onAction?.("restart") },
     { id: "reset", label: "Reset", icon: "fa-solid fa-rotate", action: () => onAction?.("reset") },
     {
       id: "terminate",
       label: "Terminate",
       icon: "fa-regular fa-trash-can",
-      action: () => onConfirmTermination?.(true),
+      action: () => {
+        onConfirmTermination?.(true);
+      },
       danger: true,
     },
     { id: "workflow", label: "Workflow", icon: "fa-solid fa-bolt", action: onWorkflow },
