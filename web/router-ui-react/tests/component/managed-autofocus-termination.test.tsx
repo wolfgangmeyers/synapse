@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
@@ -192,23 +192,27 @@ describe("Managed agent auto-focus and termination fixes", () => {
     });
     await user.click(screen.getByRole("button", { name: /worker-to-kill/i }));
 
-    // Open manage dialog
-    const manageButton = await screen.findByRole("button", { name: "Manage worker" });
-    await user.click(manageButton);
+    // Click Terminate in toolbar/header or controls -> triggers TerminateConfirmationDialog
+    let terminateButton = screen.queryByRole("button", { name: "Terminate worker" });
+    if (!terminateButton) {
+      const moreControlsButton = screen.getByRole("button", { name: "More agent controls" });
+      await user.click(moreControlsButton);
+      terminateButton = await screen.findByRole("button", { name: "Terminate" });
+    }
+    await user.click(terminateButton);
 
-    const dialog = screen.getByRole("dialog", { name: "Manage worker-to-kill" });
+    const dialog = screen.getByRole("dialog", { name: "Terminate worker-to-kill?" });
     expect(dialog).toBeInTheDocument();
 
     // Reset childrenQueries tracking
     childrenQueries.length = 0;
 
-    // Click Terminate -> Click Terminate agent in confirmation
-    await user.click(screen.getByRole("button", { name: "Terminate" }));
-    await user.click(screen.getByRole("button", { name: "Terminate agent" }));
+    // Click Terminate in confirmation
+    await user.click(within(dialog).getByRole("button", { name: "Terminate" }));
 
     // Dialog must close immediately!
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Manage worker-to-kill" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Terminate worker-to-kill?" })).not.toBeInTheDocument();
     });
 
     // And children query for terminating agent was skipped in refreshManaged!

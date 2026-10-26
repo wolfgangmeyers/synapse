@@ -13,6 +13,7 @@ import { managedRequestErrorMessage } from "./transport/http-client";
 import { loadManagedGoalProjection } from "./transport/managed-goal-projection";
 import { uiLiveErrorMessage } from "./transport/ui-live-client";
 import { isRecord } from "./protocol/guards";
+import type { ManagedAgent } from "./protocol/types";
 import { secureUuid } from "./platform/secure-uuid";
 import { useRouterSession } from "./hooks/use-router-session";
 import { useAgentReconciliation } from "./hooks/use-agent-reconciliation";
@@ -29,7 +30,7 @@ import { ContextThresholdDialog } from "./components/ContextThresholdDialog";
 import { MCPServersDialog } from "./components/MCPServersDialog";
 import { ToolDefaultsDialog } from "./components/ToolDefaultsDialog";
 import { ManagedAgentDialog } from "./components/ManagedAgentDialog";
-import { ManagedControlDialog } from "./components/ManagedControlDialog";
+import { TerminateConfirmationDialog } from "./components/TerminateConfirmationDialog";
 import { GoalEditorDialog } from "./components/GoalEditorDialog";
 import { InlineToolSettingsDialog } from "./components/InlineToolSettingsDialog";
 import { ReminderDialog, type ReminderDialogState } from "./components/ReminderDialog";
@@ -70,7 +71,7 @@ export interface AppProps {
   onToggleSubagents?: ((agentId: string) => void) | undefined;
 }
 
-type Dialog = "routers" | "provider-settings" | "mcp-servers" | "tool-defaults" | "systemone-config" | "context-thresholds" | "goal" | "reminders" | "inline-tools" | "prompts" | "arrival" | "managed" | undefined;
+type Dialog = "routers" | "provider-settings" | "mcp-servers" | "tool-defaults" | "systemone-config" | "context-thresholds" | "goal" | "reminders" | "inline-tools" | "prompts" | "arrival" | "managed" | "terminate-confirmation" | undefined;
 
 interface RouterConfiguration {
   routerUrl: string;
@@ -265,7 +266,6 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
       return current;
     });
   }, [session.state.managedAgents, session.state.agents, storage]);
-  const [managedTerminationConfirmation, setManagedTerminationConfirmation] = useState(false);
   const [managedGoalState, setManagedGoalState] = useState<GoalState>();
   const [managedInlineToolsEnabled, setManagedInlineToolsEnabled] = useState<boolean>();
   const [progressModalAgentId, setProgressModalAgentId] = useState<string | null>(null);
@@ -334,7 +334,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     const persistedPeer = selectedPeerFor(settings, activeUrl, resolvedAgentId) || undefined;
     setSelectedPeer((current) => prior.routerUrl === activeUrl ? current ?? persistedPeer : persistedPeer);
     previousScope.current = scope;
-    setExpanded(new Set()); setDialog(undefined); setScratchpadOpen(false); setScratchpadAgentId(undefined); setProviderPrompt(undefined); setArrivalAgent(undefined); setManagedAgentID(undefined); setManagedError(undefined); setManagedLiveError(undefined); setManagedPending(false); setManagedTerminationConfirmation(false); setManagedGoalState(undefined); setManagedInlineToolsEnabled(undefined); setGoalError(undefined); setReminderStatus(undefined);
+    setExpanded(new Set()); setDialog(undefined); setScratchpadOpen(false); setScratchpadAgentId(undefined); setProviderPrompt(undefined); setArrivalAgent(undefined); setManagedAgentID(undefined); setManagedError(undefined); setManagedLiveError(undefined); setManagedPending(false); setManagedGoalState(undefined); setManagedInlineToolsEnabled(undefined); setGoalError(undefined); setReminderStatus(undefined);
     setGoalControlAvailable(false); setInlineToolControlAvailable(false); setInlineToolError(undefined); setTemplatesLoaded(false); setPromptImportProgress(undefined); setTemplateToUse(undefined); setPromptReturnDialog(undefined); setDialogAfterClose(undefined); setReminderTemplateToUse(undefined); setReminderSelection(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setComposerSelection(undefined);
     templateListGeneration.current += 1;
     templateListDirty.current = true;
@@ -433,6 +433,18 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const isManagedSelected = selectedSourceKey?.startsWith("router-managed:") || selectedAgent?.source === "router-managed" || selectedAgent?.managed_agent?.runtime === "embedded" || (selectedAgent as { runtime?: string })?.runtime === "embedded";
   const selectedLegacyPeer = isManagedSelected ? undefined : selectedAgent?.agent_id;
   const selectedManagedAgent = useMemo(() => managedAgentID === undefined ? undefined : (session.state.managedAgents ?? []).find((agent) => agent.agent_id === managedAgentID), [managedAgentID, session.state.managedAgents]);
+  const terminateTargetAgent = useMemo(() => {
+    if (managedAgentID) {
+      const found = (session.state.managedAgents ?? []).find((agent) => agent.agent_id === managedAgentID);
+      if (found) return found;
+    }
+    if (selectedAgent?.source === "router-managed") {
+      const found = (session.state.managedAgents ?? []).find((agent) => agent.agent_id === selectedAgent.agent_id);
+      if (found) return found;
+      if (selectedAgent.managed_agent) return selectedAgent.managed_agent as ManagedAgent;
+    }
+    return selectedManagedAgent;
+  }, [managedAgentID, selectedAgent, session.state.managedAgents, selectedManagedAgent]);
 
   useEffect(() => {
     if (selectedPeer === undefined) return;
@@ -754,7 +766,6 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
           session.dispatch({ type: "selection/set", scope });
         }
         setDialog(undefined);
-        setManagedTerminationConfirmation(false);
       }
       await refreshManaged();
     }
@@ -775,9 +786,13 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     }).finally(() => setManagedPending(false));
   };
   const openManagedInlineTools = (): void => {
-    if (selectedManagedAgent === undefined) return;
+    const targetAgentId = selectedAgent?.source === "router-managed" ? selectedAgent.agent_id : selectedManagedAgent?.agent_id;
+    if (targetAgentId === undefined) return;
+    if (selectedManagedAgent === undefined) {
+      setManagedAgentID(targetAgentId);
+    }
     setManagedPending(true); setManagedError(undefined); setInlineToolError(undefined);
-    void session.transport.http.managedInlineTools(selectedManagedAgent.agent_id).then((result) => {
+    void session.transport.http.managedInlineTools(targetAgentId).then((result) => {
       setManagedInlineToolsEnabled(result.enabled); setDialog("inline-tools");
     }).catch((cause: unknown) => {
       setManagedError(managedRequestErrorMessage(cause, "Managed inline-tool settings could not be loaded."));
@@ -848,15 +863,18 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
 
   return <>
     <AppShell
-      sidebar={<Sidebar scope={scope} client={session.transport.http} storage={storage} routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} agents={isConnected ? visibleAgents : []} {...(selectedSourceKey === undefined ? {} : { selectedAgentId: selectedSourceKey })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onStopSubagent={handleStopSubagent} onRefresh={() => { void reconciliation.refresh(); void refreshManaged().catch(() => undefined); void session.resync().catch(() => undefined); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} onOpenProgressHistory={(id) => setProgressModalAgentId(id)} {...(session.state.managedAvailable ? { onLaunchManaged: () => { setManagedAgentID(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); setDialog("managed"); }, onRestartRouter: restartRouter, onProviderSettings: () => { setManagedError(undefined); setDialog("provider-settings"); }, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } } : { onRestartRouter: restartRouter, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } })} />}
+      sidebar={<Sidebar scope={scope} client={session.transport.http} storage={storage} routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} agents={isConnected ? visibleAgents : []} {...(selectedSourceKey === undefined ? {} : { selectedAgentId: selectedSourceKey })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onStopSubagent={handleStopSubagent} onRefresh={() => { void reconciliation.refresh(); void refreshManaged().catch(() => undefined); void session.resync().catch(() => undefined); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} onOpenProgressHistory={(id) => setProgressModalAgentId(id)} {...(session.state.managedAvailable ? { onLaunchManaged: () => { setManagedAgentID(undefined); setManagedError(undefined); setDialog("managed"); }, onRestartRouter: restartRouter, onProviderSettings: () => { setManagedError(undefined); setDialog("provider-settings"); }, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } } : { onRestartRouter: restartRouter, onMCPServers: () => { setDialog("mcp-servers"); }, onToolDefaults: () => { setDialog("tool-defaults"); }, onSystemOneConfig: () => { setDialog("systemone-config"); }, onContextThresholds: () => { setDialog("context-thresholds"); } })} />}
       conversation={isConnected ? <div className="conversation-runtime"><Conversation client={session.transport.http} templates={session.state.templates} {...(selectedAgent ? { peer: selectedAgent } : {})} activeReminderCount={selectedAgentActiveReminderCount} ownerId={resolvedAgentId} routerUrl={activeUrl} messages={selectedAgent === undefined ? [] : mergeMessages(selectMessages(session.state, selectedConversationPeer), conversation.messages)} {...(isManagedSelected && selectedAgent ? { conversationView: "complete" as const, activityEntries: session.state.managedHistory?.[selectedAgent.agent_id]?.complete ?? [], activityHistoryReady: completeHistoryReadyAgent === selectedAgent.agent_id } : {})} composeEnabled={selectedConversationPeer !== undefined && (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts === true)} showAgentControls={selectedLegacyPeer !== undefined} showGoalControl={selectedLegacyPeer !== undefined || selectedAgent?.source === "router-managed"} scrollLocked={scrollLocked} onToggleScrollLock={() => setScrollLocked((prev) => !prev)} chatOnly={chatOnly} onToggleChatOnly={() => setChatOnly((prev) => !prev)} value={composerDraft} onChange={setComposerDraft} onSelectionChange={setComposerSelection} {...(selectedAgent && (selectedLegacyPeer !== undefined || selectedAgent.source === "router-managed") ? { modelControls: <ModelPicker models={modelOptions} {...(selectedModel ? { currentModel: selectedModel } : {})} isEmbedded={Boolean(selectedAgent && ('runtime' in selectedAgent ? (selectedAgent as any).runtime === 'embedded' : (selectedAgent as any).managed_agent?.runtime === 'embedded'))} pending={selectedAgent.source === "router-managed" ? pendingManagedModelChange : pendingModelControl} loading={selectedAgent.source === "router-managed" && managedHeaderModelsLoading} {...(selectedAgent.source === "router-managed" && managedHeaderModelError ? { emptyMessage: managedHeaderModelError } : {})} disabled={selectedAgent.source === "router-managed" ? selectedAgent.managed_agent?.accepting_prompts !== true || pendingManagedModelChange : session.state.connection !== "connected" || pendingModelControl} onChange={selectedAgent.source === "router-managed" ? changeManagedModel : chooseModel} /> } : {})} {...(selectedAgent ? { promptControls: <PromptControls templates={sortedPromptTemplates} usage={templateUsage} loaded={templatesLoaded} disabled={selectedAgent.source === "router-managed" ? selectedAgent.managed_agent?.accepting_prompts !== true : session.state.connection !== "connected"} onManage={() => setDialog("prompts")} onUse={(template) => { markTemplateUsed(template); setTemplateToUse(template); setDialog("prompts"); }} /> } : {})} loading={conversation.loading} {...(conversation.error ? { error: conversation.error.message } : {})} {...(selectedAgent && dialog === undefined && (managedError || (selectedAgent.source === "router-managed" && managedHeaderModelError)) ? { agentError: managedError || managedHeaderModelError, onDismissError: () => { setManagedError(undefined); setManagedHeaderModelError(undefined); } } : {})} {...(arrival ? { arrival } : {})} onSend={(body, images) => { if (selectedConversationPeer) void send(selectedConversationPeer, body, images).catch(() => undefined); }} onAction={(action) => {
   if (selectedAgent?.agent_id) void manageAction(selectedAgent.agent_id, action);
 }} onConfirmTermination={(confirm) => {
   if (confirm) {
-    setManagedTerminationConfirmation(true);
-    setDialog("managed");
+    const targetAgentId = selectedAgent?.source === "router-managed" ? selectedAgent.agent_id : selectedManagedAgent?.agent_id;
+    if (targetAgentId !== undefined) {
+      setManagedAgentID(targetAgentId);
+    }
+    setDialog("terminate-confirmation");
   }
-}} onManageManaged={() => { if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); setManagedError(undefined); setManagedTerminationConfirmation(false); setDialog("managed"); } }} onScratchpad={openScratchpadForSelectedAgent} onContextThresholds={() => setDialog("context-thresholds")} onGoal={() => { if (selectedLegacyPeer) { setDialog("goal"); externalGoal?.(selectedLegacyPeer); } else if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); loadManagedGoal(selectedAgent.agent_id); } }} onReminders={() => { if (selectedLegacyPeer) { setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setDialog("reminders"); externalReminders?.(selectedLegacyPeer); } else if (selectedAgent?.source === "router-managed") { openManagedReminders(); } }} onInlineToolSettings={() => {
+}} onManageManaged={() => { if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); setManagedError(undefined); setDialog("managed"); } }} onScratchpad={openScratchpadForSelectedAgent} onContextThresholds={() => setDialog("context-thresholds")} onGoal={() => { if (selectedLegacyPeer) { setDialog("goal"); externalGoal?.(selectedLegacyPeer); } else if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); loadManagedGoal(selectedAgent.agent_id); } }} onReminders={() => { if (selectedLegacyPeer) { setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setDialog("reminders"); externalReminders?.(selectedLegacyPeer); } else if (selectedAgent?.source === "router-managed") { openManagedReminders(); } }} onInlineToolSettings={() => {
   if (selectedLegacyPeer) {
     openInlineToolSettingsForAgent(selectedLegacyPeer);
   } else if (selectedAgent?.source === "router-managed") {
@@ -876,7 +894,8 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     {selectedLegacyPeer ? <ReminderDialog open={dialog === "reminders"} peer={selectedLegacyPeer} creator={resolvedAgentId} reminders={session.state.reminders} locks={Object.fromEntries(session.state.reminderLocks)} pendingIds={pendingReminderIds} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={lockReminder} /> : selectedManagedAgent ? <ReminderDialog open={dialog === "reminders"} peer={selectedManagedAgent.agent_id} creator={resolvedAgentId} reminders={session.state.reminders} locks={{}} pendingIds={new Set()} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={() => setReminderStatus("Reminder locking is not available for managed agents.")} /> : null}
     <PromptTemplateDialog client={session.transport.http} open={dialog === "prompts"} templates={sortedPromptTemplates} loaded={templatesLoaded} {...(promptImportProgress === undefined ? {} : { importProgress: promptImportProgress })} {...(reminderTemplateToUse ? { templateToUse: reminderTemplateToUse } : templateToUse ? { templateToUse } : {})} {...(reminderTemplateToUse && reminderSelection ? { selection: reminderSelection } : !reminderTemplateToUse && composerSelection ? { selection: composerSelection } : {})} onClose={closePromptTemplateDialog} onClosed={reopenDialogAfterPromptClose} onSave={(template) => saveTemplate(template)} onDelete={(id) => deleteTemplate(id)} onImport={(items, overwrite) => importTemplates(items, overwrite)} onReloadTemplates={refreshTemplates} onInsert={(value, selection) => { if (reminderTemplateToUse) { markTemplateUsed(reminderTemplateToUse); insertReminderTemplate(value, selection); } else if (templateToUse) { markTemplateUsed(templateToUse); insertTemplate(value, selection); } else { insertTemplate(value, selection); } }} />
     <ArrivalDialog open={dialog === "arrival"} {...(arrivalForDialog ? { arrival: arrivalForDialog } : {})} uiAgentId={resolvedAgentId} onClose={() => setDialog(undefined)} onDismiss={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} />
-    {selectedManagedAgent ? <ManagedControlDialog open={dialog === "managed"} agent={selectedManagedAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} confirmTermination={managedTerminationConfirmation} onConfirmTerminationChange={setManagedTerminationConfirmation} onClose={() => { setDialog(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); }} onAction={manageAction} onGoal={openManagedGoal} onReminders={openManagedReminders} onInlineTools={openManagedInlineTools} onWorktreeCheck={(path) => session.transport.http.worktreeCheck(path)} /> : <ManagedAgentDialog open={dialog === "managed"} recentFolders={distinctRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} onWorktreeCheck={(path) => session.transport.http.worktreeCheck(path)} />}
+    {terminateTargetAgent ? <TerminateConfirmationDialog open={dialog === "terminate-confirmation"} agent={terminateTargetAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onConfirm={(agentId, options) => manageAction(agentId, "terminate", options)} onWorktreeCheck={(path: string) => session.transport.http.worktreeCheck(path)} /> : null}
+    <ManagedAgentDialog open={dialog === "managed"} recentFolders={distinctRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} onWorktreeCheck={(path) => session.transport.http.worktreeCheck(path)} />
     {progressModalAgentId && <ProgressHistoryModal agentId={progressModalAgentId} onClose={() => setProgressModalAgentId(null)} />}
   </>;
 }

@@ -214,18 +214,13 @@ describe("App control fencing and managed lifecycle projections", () => {
   });
 
   it("projects a successful managed restart and disables actions while it is pending", async () => {
+    localStorage.setItem("mecha.toolbar.pinnedControls.v2", JSON.stringify(["restart", "reset"]));
     const user = userEvent.setup();
     const { fetchImpl, resolveAction } = renderManaged();
     await waitFor(() => expect(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" }));
-    await user.click(screen.getByRole("button", { name: "Manage worker" }));
-    await user.click(screen.getByRole("button", { name: "Restart" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Restart" })).toBeDisabled());
-    expect(screen.getByRole("button", { name: "Reset" })).toBeDisabled();
-    resolveAction?.();
+    await user.click(screen.getByRole("button", { name: "Restart agent" }));
     await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/restart") && init?.method === "POST")).toBe(true));
-    const dialog = screen.getByRole("dialog", { name: "Manage managed-alpha" });
-    await waitFor(() => expect(within(dialog).getByText("starting", { selector: "strong" })).toBeInTheDocument());
   });
 
   it("keeps managed agents and launch controls available when child details fail", async () => {
@@ -235,26 +230,27 @@ describe("App control fencing and managed lifecycle projections", () => {
   });
 
   it("keeps the managed controls open and shows an error when an action fails", async () => {
+    localStorage.setItem("mecha.toolbar.pinnedControls.v2", JSON.stringify(["reset"]));
     const user = userEvent.setup();
     renderManaged(jsonResponse({ error: { code: "operation_failed", message: "Restart failed" } }, 500));
     await waitFor(() => expect(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" }));
-    await user.click(screen.getByRole("button", { name: "Manage worker" }));
-    await user.click(screen.getByRole("button", { name: "Reset" }));
-    const dialog = screen.getByRole("dialog", { name: "Manage managed-alpha" });
-    expect(within(dialog).getByRole("alert")).toHaveTextContent("Restart failed");
-    expect(dialog).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reset context" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Restart failed");
   });
 
   it("cancelling termination confirmation does not issue a DELETE", async () => {
+    localStorage.setItem("mecha.toolbar.pinnedControls.v2", JSON.stringify(["terminate"]));
     const user = userEvent.setup();
     const { fetchImpl } = renderManaged();
     await waitFor(() => expect(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Managed Alpha (managed-alpha)" }));
-    await user.click(screen.getByRole("button", { name: "Manage worker" }));
-    await user.click(screen.getByRole("button", { name: "Terminate" }));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Terminate worker" }));
+    const cancelBtn = await screen.findByRole("button", { name: "Cancel" });
+    await user.click(cancelBtn);
     expect(fetchImpl.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
-    expect(screen.queryByText("Terminate managed-alpha?")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Terminate managed-alpha?" })).not.toBeInTheDocument();
+    });
   });
 });

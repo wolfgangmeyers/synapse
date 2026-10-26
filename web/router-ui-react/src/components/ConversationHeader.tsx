@@ -36,7 +36,7 @@ export interface ConversationHeaderProps {
   onGoal?: (() => void) | undefined;
   onReminders?: (() => void) | undefined;
   onInlineToolSettings?: (() => void) | undefined;
-  onAction?: ((action: "restart" | "reset" | "terminate") => void) | undefined;
+  onAction?: ((action: "restart" | "reset") => void) | undefined;
   onConfirmTermination?: ((confirm: boolean) => void) | undefined;
   onScratchpad?: (() => void) | undefined;
   onManageManaged?: (() => void) | undefined;
@@ -548,7 +548,9 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                 {agent && pinnedControls.includes("terminate") ? (
                   <HeaderActionButton
                     className="terminate-agent-header-button danger-button"
-                    onClick={() => onConfirmTermination?.(true) ?? onAction?.("terminate")}
+                    onClick={() => {
+                      onConfirmTermination?.(true);
+                    }}
                     aria-label="Terminate worker"
                     title="Terminate worker"
                     icon="fa-regular fa-trash-can"

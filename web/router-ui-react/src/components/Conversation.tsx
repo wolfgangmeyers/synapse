@@ -46,7 +46,7 @@ export interface ConversationProps {
   onGoal?: (() => void) | undefined;
   onReminders?: (() => void) | undefined;
   onInlineToolSettings?: (() => void) | undefined;
-  onAction?: ((action: "restart" | "reset" | "terminate") => void) | undefined;
+  onAction?: ((action: "restart" | "reset") => void) | undefined;
   onConfirmTermination?: ((confirm: boolean) => void) | undefined;
   onScratchpad?: (() => void) | undefined;
   onManageManaged?: (() => void) | undefined;
