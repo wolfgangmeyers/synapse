@@ -73,6 +73,16 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
           {hasReminders ? onReminders ? <button type="button" className="reminder-row-indicator" title="Add reminder" aria-label="Add reminder" onClick={(event) => { stopActionPropagation(event); onReminders(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-clock" aria-hidden="true" /></button> : <span className="reminder-row-indicator" title={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`} aria-label={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`}><i className="fa-solid fa-clock" aria-hidden="true" /></span> : null}
           {arrival ? <span className="agent-row-arrival" onClick={(event) => event.stopPropagation()}><ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /></span> : null}
           <strong>{humanName(agent.agent_id)}</strong>{agent.source !== "router-managed" ? <small className="agent-source">tmux</small> : null}
+          {agent.workflow_state ? (
+            <span
+              className="agent-row-workflow-badge"
+              title={`Workflow: ${agent.workflow_name || "Active"} • State: ${agent.workflow_state}`}
+              aria-label={`Workflow: ${agent.workflow_name || "Active"} • State: ${agent.workflow_state}`}
+            >
+              <i className="fa-solid fa-bolt" aria-hidden="true" />
+              <span className="agent-row-workflow-badge-text">{agent.workflow_state}</span>
+            </span>
+          ) : null}
         </span>
         {showSubagentBadge ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
           <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} onStopSubagent={onStopSubagent} client={client} agentId={agent.agent_id} isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"} />

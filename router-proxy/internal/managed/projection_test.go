@@ -1,6 +1,8 @@
 package managed
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,4 +103,51 @@ func TestPublicProjectionKeepsAUsefulRedactedDurableCause(t *testing.T) {
 	require.Contains(t, message, "permission denied")
 	require.Contains(t, message, "https://host.invalid/path")
 	require.LessOrEqual(t, len(message), 512)
+}
+
+func TestPublicAgentEnrichesWorkflowStateAndWorkflowName(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "projection_workflow_test.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	wf, err := db.CreateWorkflow(ctx, store.WorkflowRequest{
+		Name:        "Dev Workflow",
+		Description: "Workflow description",
+	})
+	require.NoError(t, err)
+
+	state, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		WorkflowID:  &wf.ID,
+		Name:        "Implementation",
+		Description: "State prompt",
+	})
+	require.NoError(t, err)
+
+	mgr := &Manager{store: db}
+	defaultManagerInstance = mgr
+	defer func() { defaultManagerInstance = nil }()
+
+	agent := &store.ManagedAgentRecord{
+		AgentID:               "workflow-agent",
+		Name:                  "workflow-agent",
+		Cwd:                   "/tmp/work",
+		SelectedModel:         store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"},
+		DesiredState:          "running",
+		LifecycleState:        "running",
+		ActivityState:         "idle",
+		ActiveWorkflowID:      wf.ID,
+		ActiveWorkflowStateID: state.ID,
+		ManifestRevision:      1,
+		ManifestHash:          strings.Repeat("a", 64),
+		CreatedAt:             "2026-01-01T00:00:00Z",
+		UpdatedAt:             "2026-01-01T00:00:00Z",
+	}
+
+	projection := PublicAgent(agent)
+	require.Equal(t, wf.ID, projection["active_workflow_id"])
+	require.Equal(t, state.ID, projection["active_workflow_state_id"])
+	require.Equal(t, "Dev Workflow", projection["workflow_name"])
+	require.Equal(t, "Implementation", projection["workflow_state"])
 }
