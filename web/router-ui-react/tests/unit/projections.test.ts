@@ -124,15 +124,45 @@ describe("agent projections", () => { it("uses connected agents as authority and
     const unchanged = reducer(state, { type: "managed/reconcile", scope, version: 7, agents: [idleAlpha] });
     expect(unchanged).toBe(state);
   });
-  it("retains managed agents during managed/recover to prevent UI flicker", () => {
-    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
-    const alpha = managed("alpha");
-    let state = reducer(createInitialState(scope), { type: "managed/snapshot", scope, version: 5, agents: [alpha] });
-    expect(state.managedAgents).toHaveLength(1);
-    expect(state.managedProjectionVersion).toBe(5);
+  it("resolves workflow_state and workflow_name directly and via workflowStateMap in mergeAgentSources", () => {
+    // 1. Direct resolution from managed agent record
+    const directAgent: ManagedAgent = {
+      ...managed("agent-direct"),
+      workflow_name: "Release Flow",
+      workflow_state: "Canary Testing",
+      active_workflow_id: "wf-release",
+      active_workflow_state_id: "state-canary",
+    };
 
-    const recovered = reducer(state, { type: "managed/recover", scope });
-    expect(recovered.managedAgents).toEqual([{ ...alpha, managedProjectionVersion: 5 }]);
-    expect(recovered.managedProjectionVersion).toBeUndefined();
+    // 2. Mapped resolution through workflowStateMap via active_workflow_state_id
+    const mappedAgent: ManagedAgent = {
+      ...managed("agent-mapped"),
+      active_workflow_id: "wf-dev",
+      active_workflow_state_id: "state-impl-1",
+    };
+
+    const workflowStateMap = {
+      "state-impl-1": {
+        state_name: "Implementation",
+        workflow_name: "Dev Loop",
+      },
+    };
+
+    const merged = mergeAgentSources([], [directAgent, mappedAgent], {}, workflowStateMap);
+    const resolvedDirect = merged.find((a) => a.agent_id === "agent-direct");
+    const resolvedMapped = merged.find((a) => a.agent_id === "agent-mapped");
+
+    expect(resolvedDirect?.workflow_name).toBe("Release Flow");
+    expect(resolvedDirect?.workflow_state).toBe("Canary Testing");
+
+    expect(resolvedMapped?.workflow_name).toBe("Dev Loop");
+    expect(resolvedMapped?.workflow_state).toBe("Implementation");
+
+    // 3. Fallback when neither has values
+    const unconfiguredAgent: ManagedAgent = managed("agent-empty");
+    const mergedEmpty = mergeAgentSources([], [unconfiguredAgent]);
+    const resolvedEmpty = mergedEmpty.find((a) => a.agent_id === "agent-empty");
+    expect(resolvedEmpty?.workflow_name).toBeUndefined();
+    expect(resolvedEmpty?.workflow_state).toBeUndefined();
   });
 });

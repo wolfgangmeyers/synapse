@@ -51,6 +51,7 @@ export interface ConversationHeaderProps {
   chatOnly?: boolean | undefined;
   onToggleChatOnly?: (() => void) | undefined;
   onOpenProgressHistory?: ((agentId: string) => void) | undefined;
+  onOpenWorkflow?: (() => void) | undefined;
 }
 
 
@@ -87,7 +88,7 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory, onOpenWorkflow }: ConversationHeaderProps): ReactElement {
 
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
@@ -345,6 +346,30 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   {agent ? humanName(agent.agent_id) : "Pick an agent"}
                 </span>
               </h2>
+
+              {agent?.workflow_state ? (
+                onOpenWorkflow ? (
+                  <button
+                    type="button"
+                    className="workflow-state-badge"
+                    onClick={onOpenWorkflow}
+                    title={`Workflow: ${agent.workflow_name || "Workflow"} (${agent.workflow_state}) - Click to manage`}
+                    aria-label={`Workflow state: ${agent.workflow_state}`}
+                  >
+                    <i className="fa-solid fa-bolt" aria-hidden="true" />
+                    <span className="workflow-state-badge-text">{agent.workflow_state}</span>
+                  </button>
+                ) : (
+                  <span
+                    className="workflow-state-badge"
+                    title={`Workflow: ${agent.workflow_name || "Workflow"} (${agent.workflow_state})`}
+                    aria-label={`Workflow state: ${agent.workflow_state}`}
+                  >
+                    <i className="fa-solid fa-bolt" aria-hidden="true" />
+                    <span className="workflow-state-badge-text">{agent.workflow_state}</span>
+                  </span>
+                )
+              ) : null}
 
               {/* Action Buttons Toolbar directly adjacent to title */}
               <div className="conversation-header-actions">

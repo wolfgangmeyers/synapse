@@ -180,6 +180,8 @@ export function isManagedAgent(value: unknown): value is ManagedAgent {
   if (Object.hasOwn(value, "runtime") && value.runtime !== undefined && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
   if (Object.hasOwn(value, "active_workflow_state_id") && value.active_workflow_state_id !== null && value.active_workflow_state_id !== undefined && !isSafeString(value.active_workflow_state_id, 0, 128)) return false;
   if (Object.hasOwn(value, "active_workflow_id") && value.active_workflow_id !== null && value.active_workflow_id !== undefined && !isSafeString(value.active_workflow_id, 0, 128)) return false;
+  if (Object.hasOwn(value, "workflow_name") && value.workflow_name !== null && value.workflow_name !== undefined && !isSafeString(value.workflow_name, 0, 256)) return false;
+  if (Object.hasOwn(value, "workflow_state") && value.workflow_state !== null && value.workflow_state !== undefined && !isSafeString(value.workflow_state, 0, 256)) return false;
   if (Object.hasOwn(value, "workflow_variables") && value.workflow_variables !== null && value.workflow_variables !== undefined) {
     if (!isRecord(value.workflow_variables)) return false;
     for (const [k, v] of Object.entries(value.workflow_variables)) {

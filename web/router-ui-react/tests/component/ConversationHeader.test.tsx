@@ -414,4 +414,54 @@ describe("ConversationHeader workflow controls", () => {
       expect(monitorBtn?.getAttribute("aria-label")).toBe("System 1 Monitors (2 active)");
     });
   });
+
+  describe("workflow state badge", () => {
+    it("renders workflow state badge when agent.workflow_state is provided", () => {
+      const agentWithState: Agent = {
+        ...routerManagedAgent,
+        workflow_state: "Implementation",
+        workflow_name: "Feature Loop",
+      };
+      const { container } = render(<ConversationHeader agent={agentWithState} />);
+      const badge = container.querySelector(".workflow-state-badge");
+      expect(badge).not.toBeNull();
+      expect(badge?.textContent).toContain("Implementation");
+      const icon = badge?.querySelector(".fa-bolt");
+      expect(icon).not.toBeNull();
+      expect(badge?.getAttribute("title")).toBe("Workflow: Feature Loop (Implementation)");
+    });
+
+    it("clicking the badge invokes onOpenWorkflow when provided", () => {
+      const onOpenWorkflow = vi.fn();
+      const agentWithState: Agent = {
+        ...routerManagedAgent,
+        workflow_state: "Plan review",
+      };
+      const { container } = render(
+        <ConversationHeader agent={agentWithState} onOpenWorkflow={onOpenWorkflow} />
+      );
+      const badge = container.querySelector(".workflow-state-badge");
+      expect(badge).not.toBeNull();
+      expect(badge?.tagName.toLowerCase()).toBe("button");
+      expect(badge?.getAttribute("title")).toBe("Workflow: Workflow (Plan review) - Click to manage");
+
+      fireEvent.click(badge!);
+      expect(onOpenWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it("omits workflow badge when agent.workflow_state is null, undefined, or empty", () => {
+      const { container: c1 } = render(<ConversationHeader agent={routerManagedAgent} />);
+      expect(c1.querySelector(".workflow-state-badge")).toBeNull();
+
+      const { container: c2 } = render(
+        <ConversationHeader agent={{ ...routerManagedAgent, workflow_state: "" }} />
+      );
+      expect(c2.querySelector(".workflow-state-badge")).toBeNull();
+
+      const { container: c3 } = render(
+        <ConversationHeader agent={{ ...routerManagedAgent, workflow_state: null }} />
+      );
+      expect(c3.querySelector(".workflow-state-badge")).toBeNull();
+    });
+  });
 });

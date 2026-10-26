@@ -130,6 +130,22 @@ describe("protocol guards", () => {
     expect(isManagedAgent({ ...managedAgent, workflow_variables: "not-a-record" })).toBe(false);
     expect(isManagedAgent({ ...managedAgent, workflow_variables: { INVALID: 123 } })).toBe(false);
 
+    // workflow_name validation (safe string, null/undefined acceptance, rejection of invalid types/length > 256)
+    expect(isManagedAgent({ ...managedAgent, workflow_name: "Feature Development" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_name: "" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_name: null })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_name: undefined })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_name: 123 })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, workflow_name: "a".repeat(257) })).toBe(false);
+
+    // workflow_state validation (safe string, null/undefined acceptance, rejection of invalid types/length > 256)
+    expect(isManagedAgent({ ...managedAgent, workflow_state: "Implementation" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_state: "" })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_state: null })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_state: undefined })).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, workflow_state: 123 })).toBe(false);
+    expect(isManagedAgent({ ...managedAgent, workflow_state: "a".repeat(257) })).toBe(false);
+
     // both workflow fields together
     expect(isManagedAgent({
       ...managedAgent,

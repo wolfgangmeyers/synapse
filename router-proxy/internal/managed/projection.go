@@ -89,11 +89,28 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"desired_state": agent.DesiredState, "lifecycle_state": agent.LifecycleState, "activity_state": agent.ActivityState,
 		"accepting_prompts":        agent.AcceptingPrompts,
 		"active_workflow_state_id": agent.ActiveWorkflowStateID,
+		"active_workflow_id":       agent.ActiveWorkflowID,
+		"workflow_name":            "",
+		"workflow_state":           "",
 		"worktree":                 agent.Worktree,
 		"worktree_base_path":        agent.WorktreeBasePath,
 		"allow_inline_tools":       allowInline,
 		"manifest":                 map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":               agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
+	}
+	// Enrich workflow_state and workflow_name from the backing store so UI projections
+	// display human-readable workflow metadata alongside active IDs without secondary lookups.
+	if defaultManagerInstance != nil && defaultManagerInstance.store != nil {
+		if agent.ActiveWorkflowStateID != "" {
+			if st, err := defaultManagerInstance.store.GetWorkflowState(context.Background(), agent.ActiveWorkflowStateID); err == nil && st != nil {
+				result["workflow_state"] = st.Name
+			}
+		}
+		if agent.ActiveWorkflowID != "" {
+			if wf, err := defaultManagerInstance.store.GetWorkflow(context.Background(), agent.ActiveWorkflowID); err == nil && wf != nil {
+				result["workflow_name"] = wf.Name
+			}
+		}
 	}
 	if agent.ProgressPercent != nil {
 		result["progress"] = map[string]any{

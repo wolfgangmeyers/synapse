@@ -327,4 +327,58 @@ describe("AgentRow", () => {
     fireEvent.click(stopButton);
     expect(stopManagedSubagent).toHaveBeenCalledWith("parent-agent", "child-stop-1");
   });
+
+  describe("workflow state badge", () => {
+    it("renders compact workflow badge in metadata line when workflow_state is provided", () => {
+      const { container } = render(
+        <AgentRow
+          agent={{
+            agent_id: "workflow-worker",
+            activity_state: "idle",
+            workflow_state: "Implementation",
+            workflow_name: "Feature Loop",
+          }}
+        />
+      );
+      const badge = container.querySelector(".agent-row-workflow-badge");
+      expect(badge).toBeInTheDocument();
+      expect(badge).toHaveTextContent("Implementation");
+      expect(badge?.querySelector(".fa-bolt")).toBeInTheDocument();
+      expect(badge).toHaveAttribute("title", "Workflow: Feature Loop • State: Implementation");
+    });
+
+    it("omits workflow badge when workflow_state is undefined, null, or empty", () => {
+      const { container: c1 } = render(
+        <AgentRow
+          agent={{
+            agent_id: "workflow-worker",
+            activity_state: "idle",
+          }}
+        />
+      );
+      expect(c1.querySelector(".agent-row-workflow-badge")).not.toBeInTheDocument();
+
+      const { container: c2 } = render(
+        <AgentRow
+          agent={{
+            agent_id: "workflow-worker",
+            activity_state: "idle",
+            workflow_state: "",
+          }}
+        />
+      );
+      expect(c2.querySelector(".agent-row-workflow-badge")).not.toBeInTheDocument();
+
+      const { container: c3 } = render(
+        <AgentRow
+          agent={{
+            agent_id: "workflow-worker",
+            activity_state: "idle",
+            workflow_state: null,
+          }}
+        />
+      );
+      expect(c3.querySelector(".agent-row-workflow-badge")).not.toBeInTheDocument();
+    });
+  });
 });

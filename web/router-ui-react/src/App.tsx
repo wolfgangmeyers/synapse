@@ -299,10 +299,50 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     const existing = sessionStateRef.current.messagesByPeer[peer] ?? [];
     replacePersistedConversation(peer, reconcileHistoryMessages(existing, messages, highWaterSequence));
   }, [replacePersistedConversation, scope, session.dispatch]);
+  // Background lookup map resolving workflow state IDs to human-readable state and workflow names.
+  // Periodically synchronizes so agent rows and conversation headers display named workflow states even
+  // when an agent projection only carries state IDs.
+  const [workflowStateMap, setWorkflowStateMap] = useState<Record<string, { state_name?: string | undefined; workflow_name?: string | undefined }>>({});
+
+  useEffect(() => {
+    if (!session.transport?.http?.workflowStates) return;
+    let mounted = true;
+    const fetchWorkflowData = async () => {
+      try {
+        const [statesRes, workflowsRes] = await Promise.allSettled([
+          session.transport.http.workflowStates(),
+          session.transport.http.listWorkflows(),
+        ]);
+        if (!mounted) return;
+        const states = statesRes.status === "fulfilled" ? statesRes.value.workflow_states || [] : [];
+        const workflows = workflowsRes.status === "fulfilled" ? workflowsRes.value || [] : [];
+        const wfMap = new Map(workflows.map((w) => [w.id, w.name]));
+        const mapping: Record<string, { state_name?: string | undefined; workflow_name?: string | undefined }> = {};
+        for (const st of states) {
+          mapping[st.id] = {
+            state_name: st.name,
+            workflow_name: st.workflow_id ? wfMap.get(st.workflow_id) : undefined,
+          };
+        }
+        setWorkflowStateMap(mapping);
+      } catch {
+        // ignore errors
+      }
+    };
+    void fetchWorkflowData();
+    const interval = setInterval(() => {
+      void fetchWorkflowData();
+    }, 10000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [session.transport]);
+
   const visibleAgents = useMemo(
-    () => mergeAgentSources(session.state.agents, session.state.managedAgents ?? [], session.state.managedChildren)
+    () => mergeAgentSources(session.state.agents, session.state.managedAgents ?? [], session.state.managedChildren, workflowStateMap)
       .filter((agent) => !(agent as { parent_agent_id?: string }).parent_agent_id && !(agent.managed_agent as { parent_agent_id?: string } | undefined)?.parent_agent_id),
-    [session.state.agents, session.state.managedAgents, session.state.managedChildren]
+    [session.state.agents, session.state.managedAgents, session.state.managedChildren, workflowStateMap]
   );
   // Saved selections from before source-qualified rows are legacy tmux IDs.
   const selectedSourceKey = selectedPeer === undefined ? undefined : selectedPeer.includes(":") ? selectedPeer : sourceAgentKey("tmux", selectedPeer);
@@ -880,7 +920,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   } else if (selectedAgent?.source === "router-managed") {
     openManagedInlineTools();
   }
-}} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} onToggleSubagents={() => { if (selectedAgent) { toggleSubagents(selectedAgent.agent_id); onToggleSubagents?.(selectedAgent.agent_id); } }} expanded={selectedAgent !== undefined && (expanded.has(selectedAgent.agent_id) || (selectedSourceKey !== undefined && expanded.has(selectedSourceKey)))} onStopSubagent={selectedAgent ? (childId: string) => void handleStopSubagent(selectedAgent.agent_id, childId) : undefined} onOpenProgressHistory={(id) => setProgressModalAgentId(id)} onLoadOlder={handleLoadOlder} hasOlder={conversation.hasOlder || Boolean(isManagedSelected && selectedAgent && managedHistoryNextBefore.current[selectedAgent.agent_id])} loadingOlder={conversation.loadingOlder} /></div> : <div className="conversation-disconnected"><div className="connection-overlay-card"><img src="/mecha-watermark.png" alt="" className={`mecha-watermark${session.state.connection === "reconnecting" ? " reconnecting" : ""}`} aria-hidden="true" /><div className="connection-overlay-indicator">{session.state.connection === "reconnecting" ? <span className="reconnecting-pulse-dot" aria-hidden="true" /> : session.state.connection === "connecting" ? <span className="connection-overlay-spinner" aria-hidden="true" /> : <span className="connection-overlay-dot error" aria-hidden="true" />}<h3>{session.state.connection === "reconnecting" ? "Reconnecting..." : session.state.connection === "connecting" ? `Connecting to ${routerLabel || "router"}...` : `Unable to connect to router at ${activeUrl}`}</h3></div><p className="connection-overlay-subtitle">{session.state.connection === "reconnecting" ? (activeUrl ? `Attempting to reconnect to ${routerLabel || activeUrl}` : undefined) : session.state.connection === "connecting" ? activeUrl : (reconciliation.error?.message || "Check that the router is running, or select another router above.")}</p></div></div>}
+}} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onOpenWorkflow={() => { window.location.hash = "#/workflows"; }} onDismissArrival={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} onToggleSubagents={() => { if (selectedAgent) { toggleSubagents(selectedAgent.agent_id); onToggleSubagents?.(selectedAgent.agent_id); } }} expanded={selectedAgent !== undefined && (expanded.has(selectedAgent.agent_id) || (selectedSourceKey !== undefined && expanded.has(selectedSourceKey)))} onStopSubagent={selectedAgent ? (childId: string) => void handleStopSubagent(selectedAgent.agent_id, childId) : undefined} onOpenProgressHistory={(id) => setProgressModalAgentId(id)} onLoadOlder={handleLoadOlder} hasOlder={conversation.hasOlder || Boolean(isManagedSelected && selectedAgent && managedHistoryNextBefore.current[selectedAgent.agent_id])} loadingOlder={conversation.loadingOlder} /></div> : <div className="conversation-disconnected"><div className="connection-overlay-card"><img src="/mecha-watermark.png" alt="" className={`mecha-watermark${session.state.connection === "reconnecting" ? " reconnecting" : ""}`} aria-hidden="true" /><div className="connection-overlay-indicator">{session.state.connection === "reconnecting" ? <span className="reconnecting-pulse-dot" aria-hidden="true" /> : session.state.connection === "connecting" ? <span className="connection-overlay-spinner" aria-hidden="true" /> : <span className="connection-overlay-dot error" aria-hidden="true" />}<h3>{session.state.connection === "reconnecting" ? "Reconnecting..." : session.state.connection === "connecting" ? `Connecting to ${routerLabel || "router"}...` : `Unable to connect to router at ${activeUrl}`}</h3></div><p className="connection-overlay-subtitle">{session.state.connection === "reconnecting" ? (activeUrl ? `Attempting to reconnect to ${routerLabel || activeUrl}` : undefined) : session.state.connection === "connecting" ? activeUrl : (reconciliation.error?.message || "Check that the router is running, or select another router above.")}</p></div></div>}
     />
     {scratchpadAgentId !== undefined ? <ScratchpadViewer open={scratchpadOpen} agentId={scratchpadAgentId} client={session.transport.http} onClose={() => setScratchpadOpen(false)} onClosed={() => setScratchpadAgentId(undefined)} /> : null}
     <RouterManagerDialog open={dialog === "routers"} routers={settings.routers.map((url) => ({ url, ...(settings.aliases[url] ? { alias: settings.aliases[url] } : {}), agentId: settings.agentIds[url] ?? (url === activeUrl ? resolvedAgentId : requestedAgentId ?? DEFAULT_AGENT_ID) }))} activeUrl={activeUrl} defaultAgentId={requestedAgentId ?? DEFAULT_AGENT_ID} onClose={() => setDialog(undefined)} onSave={saveRouter} onSelect={selectRouter} onRemove={removeRouter} onProviderSettings={() => setDialog("provider-settings")} onMCPServers={() => setDialog("mcp-servers")} onToolDefaults={() => setDialog("tool-defaults")} />
