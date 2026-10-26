@@ -670,7 +670,7 @@ When a canonical definition exists, hand the worker the definition. A summary wr
 
 ### The development loop is mandatory for production code
 
-There is a canonical `dev-loop` workflow and it is the source of truth. Do not paraphrase it. Every brief that produces production code tells the worker to load the `workflows` skill and fetch that workflow before substantive implementation.
+There is a canonical router-managed `dev-loop` workflow and it is the source of truth. Do not paraphrase it. Every brief that produces production code tells the worker to reference the `workflow-management` skill and follow the canonical `dev-loop` workflow before substantive implementation.
 
 Four phases: a spec the supervisor reviews, a plan reviewed by `robot-review`, implementation by TDD, then coverage and review. `pr-validate` runs on each reviewer's output **using a different persona than produced the review**, which is the part most easily lost. Across plan and implementation, run at most three Robot Review rounds. Stop when the reviewed target is clean. If valid Blocking or Should Address feedback remains after round 3, report it as unresolved; do not claim review success. The cap limits Robot Review rounds, not focused validation or honest blocker reporting.
 

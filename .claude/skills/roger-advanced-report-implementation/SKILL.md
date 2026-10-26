@@ -22,7 +22,7 @@ Use `roger-report-implementation` instead when the product contract is a dedicat
 
 ## Required process and subagent gates
 
-1. Load the `workflows` skill, retrieve `dev-loop` with `get_workflow.py dev-loop`, and follow it as the procedural source of truth. Load the target RogerEMR checkout's `AGENTS.md` and `TESTING_GUIDANCE.md` before planning or editing. State the RogerEMR pre-edit domain gate, target behavior/artifact, and planned verification.
+1. Reference the `workflow-management` skill, follow the canonical router-managed `dev-loop` workflow as the procedural source of truth. Load the target RogerEMR checkout's `AGENTS.md` and `TESTING_GUIDANCE.md` before planning or editing. State the RogerEMR pre-edit domain gate, target behavior/artifact, and planned verification.
 2. Inspect the current remote/base and the actual task worktree. Reporting has evolved quickly; do not infer frontend state from a stale checkout, an old planning document, or another report branch.
 3. Use separate background subagents for the heavy read-only lanes below. Give each the smallest observable outcome and explicit non-goals:
    - **architecture audit:** current registry → build/invalidation → manifest/serve → browser runner path;

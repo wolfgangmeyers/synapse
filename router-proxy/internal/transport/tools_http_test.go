@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -221,7 +222,7 @@ func TestToolsHTTP(t *testing.T) {
 		for _, tool := range bodyWf.Tools {
 			if tool.ToolName == "read" || tool.ToolName == "write" {
 				require.True(t, tool.EffectiveEnabled, "%s should be effective enabled", tool.ToolName)
-			} else if tool.ToolName == "mecha_workflow_transition" {
+			} else if tool.ToolName == "mecha_workflow_transition" || tool.ToolName == "mecha_tool_timeout" {
 				require.True(t, tool.EffectiveEnabled, "implicit control tool %s should be effective enabled", tool.ToolName)
 			} else {
 				require.False(t, tool.EffectiveEnabled, "%s should not be effective enabled under workflow override", tool.ToolName)
@@ -265,7 +266,7 @@ func TestToolsHTTP(t *testing.T) {
 		var body agentToolsResponse
 		require.NoError(t, json.NewDecoder(getResp.Body).Decode(&body))
 		for _, tool := range body.Tools {
-			if tool.ToolName == "bash" || tool.Category == "Worker Administration" {
+			if tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled)
 				require.False(t, tool.EffectiveEnabled)
 			} else {
@@ -297,7 +298,7 @@ func TestToolsHTTP(t *testing.T) {
 		var bodyCat agentToolsResponse
 		require.NoError(t, json.NewDecoder(getRespCat.Body).Decode(&bodyCat))
 		for _, tool := range bodyCat.Tools {
-			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" {
+			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -346,13 +347,20 @@ func TestToolsCatalog(t *testing.T) {
 	require.NotEmpty(t, result.Tools)
 	require.NotEmpty(t, result.Categories)
 
-	var foundBash, foundAdmin bool
+	var foundBash, foundAdmin, foundAllowance bool
 	for _, tool := range result.Tools {
 		if tool.ToolName == "bash" {
 			foundBash = true
 			require.Equal(t, "System & Shell", tool.Category)
 			require.False(t, tool.IsAdmin)
 			require.True(t, tool.DefaultEnabled)
+		}
+		if tool.ToolName == "mecha_request_inline_tool_allowance" {
+			foundAllowance = true
+			require.Equal(t, "System & Shell", tool.Category)
+			require.False(t, tool.IsAdmin)
+			require.True(t, tool.DefaultEnabled)
+			require.Equal(t, "Request a temporary exception for genuinely necessary inline use of a named tool", tool.Description)
 		}
 		if tool.Category == "Worker Administration" || tool.IsAdmin {
 			foundAdmin = true
@@ -361,5 +369,6 @@ func TestToolsCatalog(t *testing.T) {
 	}
 	require.True(t, foundBash)
 	require.True(t, foundAdmin)
+	require.True(t, foundAllowance)
 }
 

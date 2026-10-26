@@ -9,7 +9,7 @@ Use this skill for the report-specific parts of creating a RogerEMR report. It s
 
 ## Required process and model gates
 
-1. Load the `workflows` skill, retrieve the canonical `dev-loop` workflow with `get_workflow.py dev-loop`, and follow it as the procedural source of truth. Do not paste or recreate the workflow in a worker handoff.
+1. Reference the `workflow-management` skill, follow the canonical router-managed `dev-loop` workflow as the procedural source of truth. Do not paste or recreate the workflow in a worker handoff.
 2. Use managed Pi workers and subagents on OpenAI Codex GPT-5.6 Terra. Use another model only when the task explicitly requires it. Complete the evidence-gathering pass before creating the final specification and plan from the researched report contract, source evidence, comparable code, field lineage, stack/base recommendation, and known open questions. For a complex report, run a separate independent pass over the specification and plan for omissions, unsupported assumptions, and spec-to-plan coverage before the normal plan-review gate.
 3. “Worker” means a persistent tmux/Pi worker. If Wolfgang asks for a worker, do not substitute a native subagent. Use background subagents only for bounded lanes that do not need durable ownership.
 4. Load the RogerEMR repository `AGENTS.md` and `TESTING_GUIDANCE.md`, plus any domain skill triggered by the report. Before final readiness, load and follow `roger-report-review` as the report-specific independent review gate.

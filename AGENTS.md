@@ -136,7 +136,7 @@ Wolfgang has authorized all ordinary scoped work in the current task. A concrete
 
 ## Production Code Workflow
 
-For any production-code implementation or change, the canonical `dev-loop` workflow is mandatory. The worker or implementing agent must load the `workflows` skill and fetch the source-of-truth workflow with `get_workflow.py dev-loop` before substantive implementation. Do not authorize production code, mark it complete, or open/advance a PR without dev-loop evidence for specification/plan, implementation, validation, coverage, and review.
+For any production-code implementation or change, the canonical `dev-loop` workflow is mandatory. The worker or implementing agent must reference the `workflow-management` skill and follow the canonical router-managed `dev-loop` workflow before substantive implementation. Do not authorize production code, mark it complete, or open/advance a PR without dev-loop evidence for specification/plan, implementation, validation, coverage, and review.
 
 ## Automated testing policy
 

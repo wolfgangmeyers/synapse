@@ -16,6 +16,41 @@ type ToolDefinition struct {
 	MCPServerID *string `json:"mcp_server_id,omitempty"`
 }
 
+// SyncNativeToolDefaults synchronizes the native tool catalog into managed_tool_defaults.
+func (s *Store) SyncNativeToolDefaults(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	// Verify table exists (handles old migration test baselines)
+	var tableName string
+	err := s.db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name='managed_tool_defaults'").Scan(&tableName)
+	if err != nil || tableName == "" {
+		return nil
+	}
+	stmt, err := s.db.PrepareContext(ctx, `
+		INSERT INTO managed_tool_defaults (tool_name, category, enabled, mcp_server_id, updated_at)
+		VALUES (?, ?, ?, NULL, CURRENT_TIMESTAMP)
+		ON CONFLICT(tool_name) DO UPDATE SET
+			category = excluded.category
+		WHERE mcp_server_id IS NULL;
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, t := range NativeToolCatalog {
+		enabledInt := 0
+		if t.DefaultEnabled {
+			enabledInt = 1
+		}
+		if _, err := stmt.ExecContext(ctx, t.ToolName, t.Category, enabledInt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetToolDefaults retrieves all global tool defaults ordered by category and tool_name.
 func (s *Store) GetToolDefaults(ctx context.Context) ([]ToolDefinition, error) {
 	rows, err := s.db.QueryContext(ctx, `

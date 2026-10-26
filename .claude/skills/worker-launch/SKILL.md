@@ -118,7 +118,7 @@ python3 ~/.claude/skills/supervisor/tools/state_update_field.py "$ALIAS" worker_
 python3 ~/.claude/skills/supervisor/tools/worker_send_requirements.py --alias "$ALIAS"
 ```
 
-For production-service changes, explicitly instruct the worker to load the `workflows` skill and fetch `dev-loop` with `get_workflow.py dev-loop`. The canonical workflow is the source of truth. Do not paste a summary of it into the task.
+For production-service changes, explicitly instruct the worker to reference the `workflow-management` skill and follow the canonical router-managed `dev-loop` workflow. The canonical workflow is the source of truth. Do not paste a summary of it into the task.
 
 For feature or bug work, point Context at `~/.mecha-developer/kb/start-here.md`. The worker must read that page and its always-read links before planning. Do not paste those topics into the task.
 
@@ -130,7 +130,7 @@ For non-production work, the fallback loop is: tests or checks first where meani
 
 Codex workers need especially explicit launch-time handling because they do not support Claude Code skill slash commands such as `/review-pr`, and the current launcher starts bare Codex without a Mailbox V2 delivery sidecar or initial prompt injection. Mail sent to a Codex worker may queue but never reach the pane unless a separate delivery mechanism is installed and verified. Do not launch a fresh Codex worker for work that depends on post-launch Mailbox delivery; prefer Pi or Claude. Use Codex only when the session already has the needed task context, or after you have installed and verified a separate delivery bridge. Use plain skill names such as `robot-review` instead of `/robot-review`, and make sure the reachable task context includes exact paths, acceptance criteria, test/check commands, source branch and push target when relevant, and a clear completion trigger. For existing PR fixes, tell Codex to push with `git push origin HEAD:<source-branch>` only through a context path proven to reach the Codex session.
 
-Do not ask Codex for an upfront plan unless the task truly needs a planning phase. If the canonical `dev-loop` applies, tell it to load the `workflows` skill and fetch the workflow record directly.
+Do not ask Codex for an upfront plan unless the task truly needs a planning phase. If the canonical `dev-loop` applies, tell it to reference the `workflow-management` skill and follow the canonical router-managed `dev-loop` workflow directly.
 
 Detailed Codex launch/session/config rules:
 

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,12 +58,12 @@ func TestManagedTools(t *testing.T) {
 	t.Run("GetToolDefaults verifies initial seed", func(t *testing.T) {
 		defaults, err := s.GetToolDefaults(ctx)
 		require.NoError(t, err)
-		require.Len(t, defaults, 29)
+		require.Len(t, defaults, len(NativeToolCatalog))
 
 		categoryCounts := make(map[string]int)
 		for _, tool := range defaults {
-			if tool.Category == "Worker Administration" {
-				require.False(t, tool.Enabled, "admin tools should be disabled by default")
+			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && !tool.Enabled) {
+				require.False(t, tool.Enabled, "admin and workflow management tools should be disabled by default")
 			} else {
 				require.True(t, tool.Enabled, "all non-admin initial tools should be enabled by default")
 			}
@@ -71,10 +72,10 @@ func TestManagedTools(t *testing.T) {
 		}
 
 		require.Equal(t, 3, categoryCounts["File Operations"])
-		require.Equal(t, 1, categoryCounts["System & Shell"])
+		require.Equal(t, 4, categoryCounts["System & Shell"])
 		require.Equal(t, 5, categoryCounts["Subagent Lifecycle"])
-		require.Equal(t, 3, categoryCounts["Messaging & Routing"])
-		require.Equal(t, 7, categoryCounts["Workflow Management"])
+		require.Equal(t, 5, categoryCounts["Messaging & Routing"])
+		require.Equal(t, 12, categoryCounts["Workflow Management"])
 		require.Equal(t, 5, categoryCounts["Knowledge Base & Search"])
 		require.Equal(t, 5, categoryCounts["Worker Administration"])
 	})
@@ -122,7 +123,7 @@ func TestManagedTools(t *testing.T) {
 		for _, tool := range defaults {
 			if tool.Category == "File Operations" {
 				require.False(t, tool.Enabled, "file ops tool %s should be disabled", tool.ToolName)
-			} else if tool.Category == "Worker Administration" {
+			} else if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled, "admin tool %s should remain disabled", tool.ToolName)
 			} else {
 				require.True(t, tool.Enabled, "other category %s tool %s should remain enabled", tool.Category, tool.ToolName)
@@ -152,7 +153,7 @@ func TestManagedTools(t *testing.T) {
 
 		defaults, err := s.GetToolDefaults(ctx)
 		require.NoError(t, err)
-		require.Len(t, defaults, 31) // 29 + 2
+		require.Len(t, defaults, len(NativeToolCatalog)+2) // native tools + 2
 
 		var foundCount int
 		for _, tool := range defaults {
@@ -188,7 +189,7 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, tool := range agentTools {
-			if tool.Category == "Worker Administration" {
+			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -203,7 +204,7 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, tool := range agentTools {
-			if tool.ToolName == "bash" || tool.Category == "Worker Administration" {
+			if tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled, "%s should be disabled for this agent", tool.ToolName)
 			} else {
 				require.True(t, tool.Enabled, "other tool %s should remain enabled", tool.ToolName)
@@ -226,7 +227,7 @@ func TestManagedTools(t *testing.T) {
 		agentTools, err = s.GetAgentTools(ctx, agentID)
 		require.NoError(t, err)
 		for _, tool := range agentTools {
-			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" {
+			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -240,7 +241,7 @@ func TestManagedTools(t *testing.T) {
 		agentTools, err = s.GetAgentTools(ctx, agentID)
 		require.NoError(t, err)
 		for _, tool := range agentTools {
-			if tool.Category == "Worker Administration" {
+			if tool.Category == "Worker Administration" || (tool.Category == "Workflow Management" && strings.HasPrefix(tool.ToolName, "workflow_")) {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled, "tool %s should be restored to default enabled", tool.ToolName)
@@ -300,4 +301,24 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 0, count)
 	})
+
+	t.Run("SyncNativeToolDefaults syncs all catalog tools including inline allowance", func(t *testing.T) {
+		defaults, err := s.GetToolDefaults(ctx)
+		require.NoError(t, err)
+
+		foundInlineAllowance := false
+		for _, tool := range defaults {
+			if tool.ToolName == "mecha_request_inline_tool_allowance" {
+				foundInlineAllowance = true
+				require.Equal(t, "System & Shell", tool.Category)
+				require.True(t, tool.Enabled)
+			}
+		}
+		require.True(t, foundInlineAllowance, "mecha_request_inline_tool_allowance must be present in defaults")
+
+		// Re-running SyncNativeToolDefaults is idempotent
+		err = s.SyncNativeToolDefaults(ctx)
+		require.NoError(t, err)
+	})
 }
+

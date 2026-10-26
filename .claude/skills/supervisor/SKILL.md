@@ -497,7 +497,7 @@ Mandatory obligations that remain here:
 - Verify launch/resume with `worker_capture.py` after the agent has had time to register. A prompt or auto-suggestion is not task acceptance.
 - After every launch or follow-up handoff, do the post-delegation reflection from `worker-launch`: check whether the worker has the requirements, acceptance criteria, test/check commands, review expectations, edge cases, repo context, and standing orders it needs. Mail any missing context immediately.
 - Set or keep artifact-focused reminder coverage for active worker momentum. Cancel or downgrade it only when the artifact is delivered, Wolfgang defers it, the worker is parked on a real external/environment decision, or the worker is shut down.
-- For production-service changes, instruct the worker to load the `workflows` skill and fetch `dev-loop` with `get_workflow.py dev-loop`. Do not paste a summary of the workflow.
+- For production-service changes, instruct the worker to reference the `workflow-management` skill and follow the canonical router-managed `dev-loop` workflow. Do not paste a summary of the workflow.
 - Keep `TASK.md` task-specific and use the exact four-section contract from `worker-launch`: `Context`, `Task`, `Completion Protocol`, and `If Compacted`. Generic worker rules belong in `worker/SKILL.md`.
 - On worker completion, park first with `worker_park.py`, then interrogate missing evidence by mail, verify requirements, evidence, diff scope, review/coverage gates, and the mandatory background explain overview pass from `worker-launch` before accepting completion.
 - Follow `worker-launch` for Codex launch/session/config details and the supervisor-owned review fallback when Codex subagents are unavailable.

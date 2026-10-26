@@ -223,6 +223,10 @@ func (r *Router) handleToolsCatalog(w http.ResponseWriter, req *http.Request) {
 		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
 		return
 	}
+	nativeDefMap := make(map[string]store.NativeToolDef)
+	for _, nt := range store.NativeToolCatalog {
+		nativeDefMap[nt.ToolName] = nt
+	}
 	canonMap := make(map[string]string)
 	for _, ct := range store.CanonicalWorkflowTools {
 		canonMap[ct.ID] = ct.Description
@@ -233,10 +237,16 @@ func (r *Router) handleToolsCatalog(w http.ResponseWriter, req *http.Request) {
 	var categories []string
 	for _, td := range defaults {
 		desc := canonMap[td.ToolName]
+		isAdmin := td.Category == "Worker Administration" || strings.HasPrefix(td.ToolName, "worker_")
+		if nt, ok := nativeDefMap[td.ToolName]; ok {
+			if nt.Description != "" {
+				desc = nt.Description
+			}
+			isAdmin = nt.IsAdmin
+		}
 		if desc == "" {
 			desc = td.ToolName
 		}
-		isAdmin := td.Category == "Worker Administration" || strings.HasPrefix(td.ToolName, "worker_")
 		catalogTools = append(catalogTools, CatalogToolItem{
 			ToolName:       td.ToolName,
 			Category:       td.Category,
