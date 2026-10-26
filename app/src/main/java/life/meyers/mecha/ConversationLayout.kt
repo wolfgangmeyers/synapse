@@ -26,14 +26,38 @@ internal enum class ConversationControlAction { GOAL, MODEL, REMINDERS, PROMPT, 
 internal fun conversationControlMenuActions(
     goalAvailable: Boolean,
     modelAvailable: Boolean,
+    managed: Boolean = true,
 ): List<ConversationControlAction> = buildList {
     if (goalAvailable) add(ConversationControlAction.GOAL)
     if (modelAvailable) add(ConversationControlAction.MODEL)
     add(ConversationControlAction.REMINDERS)
     add(ConversationControlAction.PROMPT)
     add(ConversationControlAction.MANAGE_PROMPTS)
-    add(ConversationControlAction.TERMINATE)
+    if (managed) add(ConversationControlAction.TERMINATE)
 }
 
 /** A TalkBack activation opens or closes the same menu as a touch activation. */
 internal fun toggleConversationControlMenu(expanded: Boolean): Boolean = !expanded
+
+internal data class AgentToolbarAction(val key: String, val label: String)
+
+internal fun agentToolbarActions(managed: Boolean, active: Boolean): List<AgentToolbarAction> = buildList {
+    if (managed) {
+        if (active) add(AgentToolbarAction("interrupt", "Interrupt"))
+        add(AgentToolbarAction("goal", "Goal"))
+        add(AgentToolbarAction("workflow", "Workflow"))
+        add(AgentToolbarAction("permission", "Inline permission"))
+        add(AgentToolbarAction("scratchpad", "Scratchpad"))
+        add(AgentToolbarAction("monitors", "Monitors"))
+        add(AgentToolbarAction("tools", "Worker tools"))
+        add(AgentToolbarAction("inline-tools", "Inline tool selection"))
+        add(AgentToolbarAction("children", "Children"))
+        add(AgentToolbarAction("history", "Progress history"))
+        add(AgentToolbarAction("manage", "Manage worker"))
+    }
+}
+
+internal fun <T> filterChatTimeline(entries: List<T>, chatOnly: Boolean, isChat: (T) -> Boolean): List<T> =
+    if (chatOnly) entries.filter(isChat) else entries
+
+internal fun shouldFollowTranscript(locked: Boolean, size: Int): Boolean = !locked && size > 0

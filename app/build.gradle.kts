@@ -24,6 +24,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    sourceSets.getByName("main").assets.srcDir("../web/router-ui-react/avatars")
     buildFeatures { compose = true; buildConfig = true }
     buildTypes {
         debug { enableUnitTestCoverage = true }
