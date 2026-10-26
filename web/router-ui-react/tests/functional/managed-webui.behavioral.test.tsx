@@ -252,7 +252,7 @@ describe("real managed router to React WebUI behavioral seam", () => {
     router = await startManagedGoRouter();
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
     await launch(router, "functional-compaction");
-    await screen.findByText(/Connected as/);
+    await screen.findByText(/Signed in as/);
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Compaction (functional-compaction)" }));
     let initialChildren: { response: Response; body: JsonRecord } | undefined;
     await waitFor(async () => {

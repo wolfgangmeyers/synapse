@@ -1177,6 +1177,12 @@ dialog,
   border: 1.5px solid #c084fc !important;
   box-shadow: 0 0 18px rgba(192, 132, 252, 0.42), inset 0 0 14px rgba(192, 132, 252, 0.18) !important;
 }
+.agent-row.terminating { background: rgba(15, 23, 42, 0.55) !important; }
+.agent-row.active.terminating {
+  background: rgba(20, 28, 55, 0.68) !important;
+  border: 1.5px solid #ef4444 !important;
+  box-shadow: 0 0 18px rgba(239, 68, 68, 0.42), inset 0 0 14px rgba(239, 68, 68, 0.18) !important;
+}
 .agent-row.failed {
   background: rgba(239, 68, 68, 0.15) !important;
   border: 1px solid rgba(239, 68, 68, 0.4);
@@ -1192,7 +1198,8 @@ dialog,
 }
 .agent-row.working::after,
 .agent-row.compacting::after,
-.agent-row.has-subagents:not(.working):not(.compacting)::after {
+.agent-row.terminating::after,
+.agent-row.has-subagents:not(.working):not(.compacting):not(.terminating)::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -1211,11 +1218,16 @@ dialog,
 .agent-row.compacting::after {
   background: conic-gradient(from var(--agent-border-angle), rgba(192,132,252,0) 0deg, rgba(192,132,252,0.18) 6deg, rgba(192,132,252,0.95) 22deg 98deg, rgba(192,132,252,0.18) 114deg, rgba(192,132,252,0) 120deg 360deg);
 }
+.agent-row.terminating::after {
+  opacity: 1;
+  background: conic-gradient(from var(--agent-border-angle), rgba(239,68,68,0) 0deg, rgba(248,113,113,0.18) 6deg, rgba(239,68,68,0.95) 22deg 98deg, rgba(248,113,113,0.18) 114deg, rgba(239,68,68,0) 120deg 360deg);
+}
 .agent-row.expanded { align-items: center; flex-wrap: wrap; }
 .agent-row-text { min-width: 0; overflow: hidden; flex: 1 1 auto; display: block; }
 .agent-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arrival-indicator,
 .compacting-indicator,
+.terminating-indicator,
 .starting-indicator,
 .subagent-indicator {
   display: inline-flex;
@@ -1274,6 +1286,8 @@ dialog,
 }
 .compacting-indicator { color: #f2e8ff; background: rgba(126,34,206,0.28); border-color: rgba(192,132,252,0.44); cursor: default; }
 .compacting-indicator.inline { margin-top: 0; font-size: 12px; }
+.terminating-indicator { color: #fecaca; background: rgba(239,68,68,0.22); border-color: rgba(239,68,68,0.44); cursor: default; }
+.terminating-indicator.inline { margin-top: 0; font-size: 12px; }
 .starting-indicator { color: #ffd166; background: rgba(255,209,102,0.18); border-color: rgba(255,209,102,0.34); cursor: default; }
 .starting-indicator.inline { margin-top: 0; font-size: 12px; }
 .subagent-indicator.expanded { align-items: flex-start; max-width: min(100%, 360px); padding: 7px 10px 9px; border-radius: 12px; }
@@ -1281,6 +1295,7 @@ dialog,
 .subagent-indicator.expandable::after { content: "▾"; font-size: 9px; opacity: 0.8; transform: translateY(-1px); flex: 0 0 auto; }
 .agent-row.expanded .subagent-indicator.expandable::after { content: "▴"; transform: translateY(2px); }
 .compacting-dot,
+.terminating-dot,
 .starting-dot,
 .subagent-dot {
   width: 7px;
@@ -1292,6 +1307,7 @@ dialog,
   flex: 0 0 7px;
 }
 .compacting-dot { background: var(--purple); box-shadow: 0 0 0 0 rgba(192,132,252,0.72); animation-name: compacting-pulse; }
+.terminating-dot { background: #ef4444; box-shadow: 0 0 0 0 rgba(239,68,68,0.72); animation-name: terminating-pulse; }
 .starting-dot { background: var(--yellow); box-shadow: 0 0 0 0 rgba(255,209,102,0.72); animation-name: subagent-pulse; }
 .subagent-badge-content { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-indicator.expanded .subagent-badge-content { overflow: visible; }
@@ -1415,6 +1431,7 @@ dialog,
 @keyframes working-pulse { 0% { box-shadow: 0 0 0 0 rgba(120,224,205,0.55); } 100% { box-shadow: 0 0 0 10px rgba(120,224,205,0); } }
 @keyframes subagent-pulse { 0% { box-shadow: 0 0 0 0 rgba(96,165,250,0.72); } 100% { box-shadow: 0 0 0 8px rgba(96,165,250,0); } }
 @keyframes compacting-pulse { 0% { box-shadow: 0 0 0 0 rgba(192,132,252,0.72); } 100% { box-shadow: 0 0 0 8px rgba(192,132,252,0); } }
+@keyframes terminating-pulse { 0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.72); } 100% { box-shadow: 0 0 0 8px rgba(239,68,68,0); } }
 .conversation {
   min-width: 0;
   max-width: 100%;
@@ -1436,6 +1453,9 @@ dialog,
   box-sizing: border-box;
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  position: relative;
+  overflow: visible;
+  z-index: 100;
 }
 
 .conversation-header-avatar-col {
@@ -5569,6 +5589,9 @@ dialog,
 }
 
 .subagent-card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 14px;
   font-weight: 600;
   margin: 0;
@@ -5577,6 +5600,27 @@ dialog,
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+  min-width: 0;
+}
+
+.subagent-card-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.subagent-card-robot-icon {
+  font-size: 13px;
+  color: #60a5fa;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.subagent-card.active .subagent-card-robot-icon {
+  color: #78e0cd;
+  filter: drop-shadow(0 0 6px rgba(120, 224, 205, 0.6));
 }
 
 .subagent-status-pill {
@@ -6444,6 +6488,177 @@ select.form-control option,
   box-shadow: 0 0 20px rgba(139, 92, 246, 0.8) !important;
   transform: translateY(-1px);
 }
+
+/* ==========================================================================
+   Agent Controls Dropdown & Dynamic Pinning
+   ========================================================================== */
+
+.agent-controls-dropdown-wrapper {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 10000;
+}
+
+.agent-controls-dropdown {
+  width: 320px;
+  background: #0f172a !important;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: dropdown-fade-in 0.15s ease-out;
+  z-index: 10001;
+}
+
+@keyframes dropdown-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.agent-controls-dropdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.agent-controls-dropdown-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted, #94a3b8);
+}
+
+.agent-controls-dropdown-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.agent-control-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  transition: all 0.15s ease;
+  overflow: hidden;
+}
+
+.agent-control-tile:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.agent-control-tile.pinned {
+  border-color: rgba(157, 168, 255, 0.4);
+  background: rgba(157, 168, 255, 0.08);
+  box-shadow: 0 0 10px rgba(157, 168, 255, 0.15);
+}
+
+.agent-control-tile.danger {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.agent-control-tile.danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.agent-control-tile-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 38px;
+  padding: 8px 30px 8px 10px;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text, #f1f5f9) !important;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.agent-control-tile-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.agent-control-tile-icon {
+  font-size: 0.95rem;
+  color: var(--text-secondary, #c2c8dc);
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+
+.agent-control-tile.pinned .agent-control-tile-icon {
+  color: var(--primary, #9da8ff);
+}
+
+.agent-control-tile.danger .agent-control-tile-icon,
+.agent-control-tile.danger .agent-control-tile-label {
+  color: var(--danger, #ffb4ab) !important;
+}
+
+.agent-control-tile-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-control-pin-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.25);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.agent-control-pin-btn:hover {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+.agent-control-pin-btn.pinned {
+  color: var(--primary, #9da8ff);
+  text-shadow: 0 0 6px rgba(157, 168, 255, 0.6);
+}
+
+.agent-control-pin-btn.pinned:hover {
+  color: #fff;
+}
+
 
 
 

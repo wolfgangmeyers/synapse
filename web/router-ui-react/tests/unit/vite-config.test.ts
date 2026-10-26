@@ -21,7 +21,7 @@ describe("Vite development proxy", () => {
     try {
       const loaded = await loadConfigFromFile({ command: "serve", mode: "test" }, resolve(process.cwd(), "vite.config.ts"));
       expect(loaded?.config.server?.proxy).toMatchObject({ "/v1": { target: routerUrl, changeOrigin: true, ws: true } });
-      expect(loaded?.config.server?.allowedHosts).toEqual(["preview.example.test"]);
+      expect(loaded?.config.server?.allowedHosts).toBe(true);
     } finally {
       restoreEnvironment("MECHA_WEBUI_ROUTER_URL", previousWebUiUrl);
       restoreEnvironment("MECHA_ROUTER_URL", previousRouterUrl);

@@ -67,6 +67,50 @@ describe("AgentRow", () => {
     expect(startingIndicator).toHaveTextContent("Starting…");
   });
 
+  it("renders a terminating agent with Terminating indicator and terminating class", () => {
+    const managedAgent: ManagedAgent = {
+      agent_id: "managed-stopping",
+      source: "router-managed",
+      cwd: "/tmp/project",
+      model: { provider: "antigravity", id: "gemini-3.8-flash" },
+      desired_state: "stopped",
+      lifecycle_state: "terminating",
+      activity_state: "idle",
+      accepting_prompts: false,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+      created_at: "2030-01-01T00:00:00.000Z",
+      started_at: null,
+      updated_at: "2030-01-01T00:00:00.000Z",
+      last_error: null,
+    };
+    const [row] = mergeAgentSources([], [managedAgent]);
+    expect(row).toBeDefined();
+
+    const { container } = render(<AgentRow agent={row!} />);
+    const rowElement = container.querySelector(".agent-row");
+    expect(rowElement).toHaveClass("terminating");
+    const terminatingIndicator = container.querySelector(".terminating-indicator");
+    expect(terminatingIndicator).toBeInTheDocument();
+    expect(terminatingIndicator).toHaveTextContent("Terminating");
+    expect(container.querySelector(".avatar")).toHaveClass("terminating");
+  });
+
+  it("renders a terminating agent directly when lifecycle_state is terminating", () => {
+    const { container } = render(
+      <AgentRow
+        agent={{
+          agent_id: "test-terminating",
+          activity_state: "idle",
+          lifecycle_state: "terminating",
+        }}
+      />
+    );
+    const rowElement = container.querySelector(".agent-row");
+    expect(rowElement).toHaveClass("terminating");
+    expect(screen.getByText("Terminating")).toBeInTheDocument();
+    expect(container.querySelector(".avatar")).toHaveClass("terminating");
+  });
+
   it("keeps private managed runtime identity out of DOM output", () => {
     const managedAgent = {
       agent_id: "managed-build", source: "router-managed" as const, cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "ready", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.000Z", started_at: null, updated_at: "2030-01-01T00:00:00.000Z", last_error: null,

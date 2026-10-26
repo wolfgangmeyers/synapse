@@ -46,7 +46,7 @@ describe("Selected-agent conversation modes", () => {
   });
 
   it("marks mail by the selected managed agent's transport direction without creating activity duplicates", () => {
-    const { container } = render(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} ownerId="supervisor" conversationView="complete" messages={[
+    const { container } = render(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} ownerId="other-user" conversationView="complete" messages={[
       { id: "received", from: "supervisor", to: "managed-worker", body: "Please start", created_at: "2030-01-01T10:00:00.000Z" },
       { id: "sent", from: "managed-worker", to: "supervisor", body: "Started", created_at: "2030-01-01T10:01:00.000Z" },
     ]} activityEntries={[]} />);
@@ -240,7 +240,11 @@ describe("Selected-agent conversation modes", () => {
     render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "active", managed_agent: managedAgent }} onManageManaged={onManageManaged} />);
 
     expect(screen.getByRole("status")).toHaveTextContent("Terminating…");
-    await user.click(screen.getByRole("button", { name: "Manage worker" }));
+    const manageButton = screen.getByRole("button", { name: "More agent controls" });
+    await user.click(manageButton);
+    const menu = screen.getByRole("menu", { name: "Agent controls menu" });
+    const manageWorkerTile = within(menu).getByRole("button", { name: "Manage worker" });
+    await user.click(manageWorkerTile);
     expect(onManageManaged).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
   });

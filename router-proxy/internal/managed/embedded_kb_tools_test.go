@@ -207,3 +207,79 @@ func TestKBTools_SystemOneSearch(t *testing.T) {
 	require.Contains(t, resultText, "doc1.md")
 	require.NotContains(t, resultText, "doc2.md")
 }
+
+func TestKBTools_SystemOneSearch_FallbackOnError(t *testing.T) {
+	tempKB := t.TempDir()
+	t.Setenv("MECHA_KB_DIR", tempKB)
+
+	// Write two test files
+	_ = os.WriteFile(filepath.Join(tempKB, "doc1.md"), []byte("# Golang Guide\n\n## Summary\nConcurrency patterns in Go.\n\n## Content\nGoroutines and channels."), 0o644)
+	_ = os.WriteFile(filepath.Join(tempKB, "doc2.md"), []byte("# Cooking Recipe\n\n## Summary\nHow to bake bread.\n\n## Content\nFlour, water, yeast."), 0o644)
+
+	// Mock System 1 HTTP server that returns 502 Bad Gateway
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error": "ollama connection failed"}`))
+	}))
+	defer mockServer.Close()
+
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	hostPort := strings.TrimPrefix(mockServer.URL, "http://")
+	parts := strings.Split(hostPort, ":")
+	require.Len(t, parts, 2)
+	port := 0
+	for _, ch := range parts[1] {
+		port = port*10 + int(ch-'0')
+	}
+
+	err = db.SetSystemOneConfig(context.Background(), store.SystemOneConfig{
+		Host:    parts[0],
+		Port:    port,
+		Enabled: true,
+	})
+	require.NoError(t, err)
+
+	mgr := &Manager{
+		store: db,
+	}
+
+	owner := embeddedOwner{
+		binding: store.EmbeddedBinding{
+			AgentID:    "test-worker",
+			SessionID:  "test-session",
+			Epoch:      1,
+			Generation: "1",
+		},
+		identity: "test-identity",
+	}
+
+	searchTool := mgr.embeddedKBSearchTool(owner)
+
+	// Search should gracefully fall back to keyword search and include error details
+	resSearch, err := searchTool.Execute(context.Background(), "call-fallback", map[string]any{
+		"query":     "Golang goroutines and channels",
+		"threshold": 0.2,
+	}, nil)
+	require.NoError(t, err)
+	resultText := resSearch.Content[0].(ai.TextContent).Text
+	require.Contains(t, resultText, "keyword matching fallback; system 1 error:")
+	require.Contains(t, resultText, "doc1.md")
+
+	details, ok := resSearch.Details.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, details["fallback"])
+	require.NotEmpty(t, details["fallback_error"])
+
+	// Test zero results case includes fallback note and error
+	resEmpty, err := searchTool.Execute(context.Background(), "call-empty", map[string]any{
+		"query":     "astronomy telescope stars galaxy",
+		"threshold": 0.8,
+	}, nil)
+	require.NoError(t, err)
+	emptyText := resEmpty.Content[0].(ai.TextContent).Text
+	require.Contains(t, emptyText, "using keyword matching fallback; system 1 error:")
+}
+

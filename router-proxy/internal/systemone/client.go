@@ -139,7 +139,7 @@ type Client struct {
 // NewClient creates a new System 1 client.
 func NewClient(client *http.Client) *Client {
 	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
+		client = &http.Client{Timeout: 90 * time.Second}
 	}
 	return &Client{HTTPClient: client}
 }

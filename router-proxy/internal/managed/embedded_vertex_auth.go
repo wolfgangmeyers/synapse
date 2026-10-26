@@ -36,7 +36,7 @@ func vertexHost(location string) string {
 
 func vertexModelRequiresGlobal(modelID string) bool {
 	m := strings.ToLower(strings.TrimSpace(modelID))
-	return strings.Contains(m, "3.8") || strings.Contains(m, "gemini-3")
+	return strings.Contains(m, "3.8") || strings.Contains(m, "gemini-3") || strings.Contains(m, "gemini-4") || strings.Contains(m, "argon")
 }
 
 type vertexTokenCache struct {

@@ -203,3 +203,56 @@ func (r *Router) handleManagedAgentTools(w http.ResponseWriter, req *http.Reques
 		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
 	}
 }
+
+type CatalogToolItem struct {
+	ToolName       string  `json:"tool_name"`
+	Category       string  `json:"category"`
+	Description    string  `json:"description"`
+	DefaultEnabled bool    `json:"default_enabled"`
+	IsAdmin        bool    `json:"is_admin"`
+	MCPServerID    *string `json:"mcp_server_id,omitempty"`
+}
+
+func (r *Router) handleToolsCatalog(w http.ResponseWriter, req *http.Request) {
+	if r.store == nil {
+		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+		return
+	}
+	defaults, err := r.store.GetToolDefaults(req.Context())
+	if err != nil {
+		r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "internal_error"})
+		return
+	}
+	canonMap := make(map[string]string)
+	for _, ct := range store.CanonicalWorkflowTools {
+		canonMap[ct.ID] = ct.Description
+		canonMap[ct.Name] = ct.Description
+	}
+	var catalogTools []CatalogToolItem
+	categorySet := make(map[string]struct{})
+	var categories []string
+	for _, td := range defaults {
+		desc := canonMap[td.ToolName]
+		if desc == "" {
+			desc = td.ToolName
+		}
+		isAdmin := td.Category == "Worker Administration" || strings.HasPrefix(td.ToolName, "worker_")
+		catalogTools = append(catalogTools, CatalogToolItem{
+			ToolName:       td.ToolName,
+			Category:       td.Category,
+			Description:    desc,
+			DefaultEnabled: td.Enabled,
+			IsAdmin:        isAdmin,
+			MCPServerID:    td.MCPServerID,
+		})
+		if _, exists := categorySet[td.Category]; !exists {
+			categorySet[td.Category] = struct{}{}
+			categories = append(categories, td.Category)
+		}
+	}
+	r.writeJSON(w, http.StatusOK, map[string]any{
+		"tools":      catalogTools,
+		"categories": categories,
+	})
+}
+

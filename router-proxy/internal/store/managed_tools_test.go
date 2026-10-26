@@ -57,11 +57,15 @@ func TestManagedTools(t *testing.T) {
 	t.Run("GetToolDefaults verifies initial seed", func(t *testing.T) {
 		defaults, err := s.GetToolDefaults(ctx)
 		require.NoError(t, err)
-		require.Len(t, defaults, 24)
+		require.Len(t, defaults, 29)
 
 		categoryCounts := make(map[string]int)
 		for _, tool := range defaults {
-			require.True(t, tool.Enabled, "all initial tools should be enabled by default")
+			if tool.Category == "Worker Administration" {
+				require.False(t, tool.Enabled, "admin tools should be disabled by default")
+			} else {
+				require.True(t, tool.Enabled, "all non-admin initial tools should be enabled by default")
+			}
 			require.Nil(t, tool.MCPServerID, "initial native tools should have nil MCPServerID")
 			categoryCounts[tool.Category]++
 		}
@@ -72,6 +76,7 @@ func TestManagedTools(t *testing.T) {
 		require.Equal(t, 3, categoryCounts["Messaging & Routing"])
 		require.Equal(t, 7, categoryCounts["Workflow Management"])
 		require.Equal(t, 5, categoryCounts["Knowledge Base & Search"])
+		require.Equal(t, 5, categoryCounts["Worker Administration"])
 	})
 
 	t.Run("SetToolDefault enables and disables", func(t *testing.T) {
@@ -117,6 +122,8 @@ func TestManagedTools(t *testing.T) {
 		for _, tool := range defaults {
 			if tool.Category == "File Operations" {
 				require.False(t, tool.Enabled, "file ops tool %s should be disabled", tool.ToolName)
+			} else if tool.Category == "Worker Administration" {
+				require.False(t, tool.Enabled, "admin tool %s should remain disabled", tool.ToolName)
 			} else {
 				require.True(t, tool.Enabled, "other category %s tool %s should remain enabled", tool.Category, tool.ToolName)
 			}
@@ -145,7 +152,7 @@ func TestManagedTools(t *testing.T) {
 
 		defaults, err := s.GetToolDefaults(ctx)
 		require.NoError(t, err)
-		require.Len(t, defaults, 26) // 24 + 2
+		require.Len(t, defaults, 31) // 29 + 2
 
 		var foundCount int
 		for _, tool := range defaults {
@@ -181,7 +188,11 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, tool := range agentTools {
-			require.True(t, tool.Enabled)
+			if tool.Category == "Worker Administration" {
+				require.False(t, tool.Enabled)
+			} else {
+				require.True(t, tool.Enabled)
+			}
 		}
 
 		// Override single tool for agent
@@ -192,8 +203,8 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, tool := range agentTools {
-			if tool.ToolName == "bash" {
-				require.False(t, tool.Enabled, "bash should be disabled for this agent")
+			if tool.ToolName == "bash" || tool.Category == "Worker Administration" {
+				require.False(t, tool.Enabled, "%s should be disabled for this agent", tool.ToolName)
 			} else {
 				require.True(t, tool.Enabled, "other tool %s should remain enabled", tool.ToolName)
 			}
@@ -215,7 +226,7 @@ func TestManagedTools(t *testing.T) {
 		agentTools, err = s.GetAgentTools(ctx, agentID)
 		require.NoError(t, err)
 		for _, tool := range agentTools {
-			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" {
+			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -229,7 +240,11 @@ func TestManagedTools(t *testing.T) {
 		agentTools, err = s.GetAgentTools(ctx, agentID)
 		require.NoError(t, err)
 		for _, tool := range agentTools {
-			require.True(t, tool.Enabled, "tool %s should be restored to default enabled", tool.ToolName)
+			if tool.Category == "Worker Administration" {
+				require.False(t, tool.Enabled)
+			} else {
+				require.True(t, tool.Enabled, "tool %s should be restored to default enabled", tool.ToolName)
+			}
 		}
 	})
 

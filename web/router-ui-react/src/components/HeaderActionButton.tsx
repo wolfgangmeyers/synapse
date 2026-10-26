@@ -1,6 +1,6 @@
 import type { ButtonHTMLAttributes, ReactElement, ReactNode } from "react";
 
-export type HeaderActionTone = "pink" | "teal" | "blue" | "green" | "danger" | "amber" | "default";
+export type HeaderActionTone = "pink" | "teal" | "blue" | "green" | "danger" | "amber" | "red" | "default";
 
 export interface HeaderActionButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   icon?: string | undefined;

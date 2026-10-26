@@ -193,7 +193,7 @@ func (m *Manager) evaluateSingleMonitor(ctx context.Context, mon *store.ManagedA
 		return false, nil
 	}
 
-	client := systemone.NewClient(&http.Client{Timeout: 5 * time.Second})
+	client := systemone.NewClient(&http.Client{Timeout: 90 * time.Second})
 	cfg := systemone.Config{
 		Host:    sysCfg.Host,
 		Port:    sysCfg.Port,
