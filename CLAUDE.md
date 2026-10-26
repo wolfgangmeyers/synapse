@@ -67,5 +67,5 @@ could affect files, external communication, or destructive operations.
 | `worker` | Worker agent instructions — provided by the supervisor when launching or resuming a managed worker. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Supervisors instruct workers to read it through the runtime's verified delivery path; do not invoke manually. |
 | `worker-launch` | Managed worker launch, resume, follow-up handoff, parking, shutdown, and Mailbox V2 coordination guidance for supervisors. |
 | `wolfgang-voice-review` | Private final gate for rewriting validated PR review findings into Wolfgang's review voice before posting. |
-| `workflows` | Manage and execute plain-English workflow templates. Load whenever a workflow is mentioned by name — even casually — before acting on it. |
+| `workflow-management` | Manage and inspect router-owned durable workflow state graphs, transitions, and bundle schemas. Trigger: user asks about workflows, workflow definitions, bundle schemas, or states. |
 | `worktree` | Create, list, or remove git worktrees for isolated workstreams as sibling directories of the main repo. |

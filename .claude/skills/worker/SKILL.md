@@ -202,7 +202,7 @@ Follow every always-read link on that page. Then read `/Users/wolfgang/.mecha-de
 
 ## Workflow
 
-For production-code work, load the `workflows` skill and fetch `dev-loop` with `get_workflow.py dev-loop` before substantive implementation. The canonical dev-loop is the source of truth for phase ordering and exit gates; these local mechanics supplement it and do not override it. Keep specification and plan review early. Before implementation review, directly validate the scoped primary behavior on the exact target; robot-review validates that working candidate and does not replace behavior proof.
+For production-code work, reference the `workflow-management` skill and follow the canonical router-managed `dev-loop` workflow before substantive implementation. The canonical dev-loop is the source of truth for phase ordering and exit gates; these local mechanics supplement it and do not override it. Keep specification and plan review early. Before implementation review, directly validate the scoped primary behavior on the exact target; robot-review validates that working candidate and does not replace behavior proof.
 
 ### Local planning mechanics (after canonical Phase 1 approval)
 

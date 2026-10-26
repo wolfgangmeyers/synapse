@@ -191,28 +191,7 @@ for d in .claude/skills/*/; do
 done
 ```
 
-### 5. Symlink Workflows
-
-The workflows database lives at `~/.mecha-developer/workflows.json` at runtime, but the canonical copy is in the repo. Symlink it so all machines share the same workflows and additions are committed back automatically.
-
-```bash
-mkdir -p ~/.mecha-developer
-
-WORKFLOWS_SRC="$(pwd)/.claude/skills/workflows/workflows.json"
-WORKFLOWS_LINK="$HOME/.mecha-developer/workflows.json"
-
-if [ -L "$WORKFLOWS_LINK" ]; then
-  ln -sf "$WORKFLOWS_SRC" "$WORKFLOWS_LINK"
-  echo "updated: $WORKFLOWS_LINK -> $WORKFLOWS_SRC"
-elif [ -e "$WORKFLOWS_LINK" ]; then
-  echo "skipped: $WORKFLOWS_LINK already exists (not a symlink)"
-else
-  ln -s "$WORKFLOWS_SRC" "$WORKFLOWS_LINK"
-  echo "linked: $WORKFLOWS_LINK -> $WORKFLOWS_SRC"
-fi
-```
-
-### 6. Symlink Skills for Codex
+### 5. Symlink Skills for Codex
 
 Codex looks for skills in `~/.agents/skills/`. Create a symlink so it finds the same skills as Claude Code.
 
@@ -230,7 +209,7 @@ else
 fi
 ```
 
-### 7. Symlink CLI Scripts
+### 6. Symlink CLI Scripts
 
 Create `~/.local/bin/` if needed and symlink CLI entry points:
 

@@ -241,6 +241,9 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := store.applyMigrations(ctx, migrations); err != nil {
 		return closeOnError(err)
 	}
+	if err := store.SyncNativeToolDefaults(ctx); err != nil {
+		return closeOnError(err)
+	}
 	if err := store.backfillPromptTemplateSlugs(ctx); err != nil {
 		return closeOnError(err)
 	}

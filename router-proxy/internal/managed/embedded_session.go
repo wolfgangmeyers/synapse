@@ -1417,6 +1417,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedProgressTool(owner))
 		tools = append(tools, m.buildSessionTools(&saved)...)
 		tools = append(tools, m.embeddedSessionTools(owner)...)
+		tools = append(tools, m.embeddedWorkflowManagementTools(owner)...)
 	}
 	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {
 		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted, func(id string) bool {
