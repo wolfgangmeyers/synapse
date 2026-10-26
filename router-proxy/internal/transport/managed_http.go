@@ -564,11 +564,16 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for key := range payload {
-		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" && key != "worktree" && key != "worktree_branch" && key != "allow_inline_tools" {
+		if key != "name" && key != "cwd" && key != "model" && key != "initial_instruction" && key != "runtime" && key != "worktree" && key != "worktree_branch" && key != "allow_inline_tools" && key != "admin" && key != "tool_preset" {
 			r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
 			return
 		}
 	}
+	var adminVal bool
+	if raw, ok := payload["admin"]; ok {
+		_ = json.Unmarshal(raw, &adminVal)
+	}
+	presetVal, _ := managedString(payload, "tool_preset", false)
 	var allowInlineTools bool
 	if raw, ok := payload["allow_inline_tools"]; ok {
 		if json.Unmarshal(raw, &allowInlineTools) != nil {
@@ -654,6 +659,9 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		}
 		r.writeManagedError(w, req, managedLaunchError(launchErr))
 		return
+	}
+	if adminVal || presetVal == "admin" {
+		_ = r.store.SetAgentCategoryTools(req.Context(), result.Agent.AgentID, "Worker Administration", true)
 	}
 	body, _ := json.Marshal(map[string]any{"operation_id": requestID, "agent": managed.PublicAgent(result.Agent)})
 	r.writeManagedRaw(w, req, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)

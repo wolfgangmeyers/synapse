@@ -118,6 +118,34 @@ func TestResolveModelCanonical(t *testing.T) {
 	require.Equal(t, 1048576, agFallback.ContextWindow)
 	require.Equal(t, 8192, agFallback.MaxTokens)
 
+	// 3b. Gemini-4-argon synthesized metadata
+	argonGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "gemini-4-argon"})
+	require.NoError(t, err)
+	require.NotNil(t, argonGoogle)
+	require.Equal(t, "google", argonGoogle.Provider)
+	require.Equal(t, "gemini-4-argon", argonGoogle.ID)
+	require.Equal(t, "google-generative-ai", argonGoogle.Api)
+	require.Equal(t, 1048576, argonGoogle.ContextWindow)
+	require.Equal(t, 65536, argonGoogle.MaxTokens)
+
+	argonVertex, err := ResolveModel(store.ManagedModel{Provider: "google-vertex", ID: "gemini-4-argon"})
+	require.NoError(t, err)
+	require.NotNil(t, argonVertex)
+	require.Equal(t, "google-vertex", argonVertex.Provider)
+	require.Equal(t, "gemini-4-argon", argonVertex.ID)
+	require.Equal(t, "google-vertex", argonVertex.Api)
+	require.Equal(t, 1048576, argonVertex.ContextWindow)
+	require.Equal(t, 65536, argonVertex.MaxTokens)
+
+	argonAG, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-4-argon"})
+	require.NoError(t, err)
+	require.NotNil(t, argonAG)
+	require.Equal(t, "antigravity", argonAG.Provider)
+	require.Equal(t, "gemini-4-argon", argonAG.ID)
+	require.Equal(t, "google-generative-ai", argonAG.Api)
+	require.Equal(t, 1048576, argonAG.ContextWindow)
+	require.Equal(t, 65536, argonAG.MaxTokens)
+
 	// 4. Missing model under non-antigravity provider: returns error, does NOT fall back to openai-codex
 	missingGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "nonexistent-model"})
 	require.Error(t, err)

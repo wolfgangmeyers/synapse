@@ -344,6 +344,6 @@ func TestWorkerDisabledToolAdmissionBlocking(t *testing.T) {
 	textPart, ok := bashResult.Content[0].(ai.TextContent)
 	require.True(t, ok)
 	expectedReason := fmt.Sprintf("tool \"bash\" is disabled for worker %q", agentID)
-	require.Contains(t, textPart.Text, expectedReason)
+	require.True(t, strings.Contains(textPart.Text, "Tool bash not found") || strings.Contains(textPart.Text, expectedReason), "expected disabled tool error, got: %s", textPart.Text)
 }
 

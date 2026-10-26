@@ -124,12 +124,46 @@ function isValidVertexRegion(region) {
   return REGION_LABEL_PATTERN.test(region);
 }
 
+function ensureArgonModel(models, provider, api, baseUrl) {
+  if (!Array.isArray(models)) return models;
+  if (models.some((m) => m?.id === "gemini-4-argon")) return models;
+  const template = models.find((m) => m?.id === "gemini-3.8-flash") || models[0];
+  const argon = {
+    ...template,
+    id: "gemini-4-argon",
+    name: "Gemini 4 Argon",
+    api: api || template?.api,
+    provider: provider || template?.provider,
+    baseUrl: baseUrl || template?.baseUrl,
+    reasoning: true,
+    thinkingLevelMap: template?.thinkingLevelMap || {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null,
+    },
+    input: ["text", "image"],
+    cost: template?.cost || { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  };
+  return [...models, argon];
+}
+
 function registerGoogleProvider(runtime) {
   const google = runtime.getProvider("google");
   if (!google) return;
 
+  const originalGetModels = google.getModels;
   runtime.registerNativeProvider({
     ...google,
+    getModels: () => {
+      const models = originalGetModels ? originalGetModels() : (google.models || []);
+      return ensureArgonModel(models, "google", "google-generative-ai", google.baseUrl);
+    },
     auth: {
       apiKey: {
         name: "Gemini API key",
@@ -159,8 +193,13 @@ function registerVertexAdcProvider(runtime) {
   const vertex = runtime.getProvider("google-vertex");
   if (!vertex) return;
 
+  const originalGetModels = vertex.getModels;
   runtime.registerNativeProvider({
     ...vertex,
+    getModels: () => {
+      const models = originalGetModels ? originalGetModels() : (vertex.models || []);
+      return ensureArgonModel(models, "google-vertex", "google-vertex", vertex.baseUrl);
+    },
     auth: {
       apiKey: {
         name: "Google Cloud credentials",

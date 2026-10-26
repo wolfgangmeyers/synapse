@@ -2,7 +2,10 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 import { AppShell } from "../../src/components/AppShell";
 import { avatarForAgent } from "../../src/components/AgentAvatar";
 import { ConversationHeader } from "../../src/components/ConversationHeader";
@@ -43,8 +46,9 @@ describe("AppShell", () => {
   });
 
   it("keeps selected-peer actions inside the heading after the status", () => {
+    localStorage.setItem("mecha.toolbar.pinnedControls", JSON.stringify(["goal", "reminders", "toolSettings"]));
     const agent: Agent = { agent_id: "fixture-peer", activity_state: "active", subagent_count: 0, subagents: [] };
-    render(<ConversationHeader agent={agent} onGoal={() => undefined} onReminders={() => undefined} />);
+    render(<ConversationHeader agent={agent} onGoal={() => undefined} onReminders={() => undefined} onInlineToolSettings={() => undefined} />);
     const banner = screen.getAllByRole("banner").at(-1);
     expect(banner).toBeDefined();
     if (!banner) throw new Error("Selected header is missing");
@@ -65,6 +69,7 @@ describe("AppShell", () => {
   });
 
   it("uses compact semantic icons while retaining action labels", () => {
+    localStorage.setItem("mecha.toolbar.pinnedControls", JSON.stringify(["goal", "reminders", "toolSettings"]));
     const agent: Agent = { agent_id: "fixture-peer", activity_state: "idle", subagent_count: 0, subagents: [] };
     render(<ConversationHeader agent={agent} onGoal={() => undefined} onReminders={() => undefined} onInlineToolSettings={() => undefined} />);
 
@@ -92,12 +97,13 @@ describe("AppShell", () => {
   });
 
   it("keeps the managed-worker control in the header action row", () => {
+    localStorage.setItem("mecha.toolbar.pinnedControls", JSON.stringify(["manageWorker"]));
     const onManageManaged = vi.fn();
     const agent: Agent = { agent_id: "managed-peer", source: "router-managed", activity_state: "idle", subagent_count: 0, subagents: [] };
     render(<ConversationHeader agent={agent} onManageManaged={onManageManaged} />);
     const button = screen.getByRole("button", { name: "Manage worker" });
-    expect(button).toHaveClass("managed-agent-header-button");
-    expect(button.querySelector(".fa-gear")).toBeInTheDocument();
+    expect(button).toHaveClass("manage-worker-header-button");
+    expect(button.querySelector(".fa-sliders")).toBeInTheDocument();
     expect(button.closest(".conversation-header-actions")).toBeInTheDocument();
     expect(screen.getByRole("banner").querySelector(".managed-agent-controls")).toBeNull();
     fireEvent.click(button);

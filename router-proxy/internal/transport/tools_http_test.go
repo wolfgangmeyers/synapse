@@ -265,7 +265,7 @@ func TestToolsHTTP(t *testing.T) {
 		var body agentToolsResponse
 		require.NoError(t, json.NewDecoder(getResp.Body).Decode(&body))
 		for _, tool := range body.Tools {
-			if tool.ToolName == "bash" {
+			if tool.ToolName == "bash" || tool.Category == "Worker Administration" {
 				require.False(t, tool.Enabled)
 				require.False(t, tool.EffectiveEnabled)
 			} else {
@@ -297,7 +297,7 @@ func TestToolsHTTP(t *testing.T) {
 		var bodyCat agentToolsResponse
 		require.NoError(t, json.NewDecoder(getRespCat.Body).Decode(&bodyCat))
 		for _, tool := range bodyCat.Tools {
-			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" {
+			if tool.Category == "Subagent Lifecycle" || tool.ToolName == "bash" || tool.Category == "Worker Administration" {
 				require.False(t, tool.Enabled)
 			} else {
 				require.True(t, tool.Enabled)
@@ -318,3 +318,48 @@ func TestToolsHTTP(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 }
+
+func TestToolsCatalog(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "router.sqlite")
+
+	s, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer s.Close()
+
+	router, err := New(Options{Store: s})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/v1/tools/catalog")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result struct {
+		Tools      []CatalogToolItem `json:"tools"`
+		Categories []string          `json:"categories"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.NotEmpty(t, result.Tools)
+	require.NotEmpty(t, result.Categories)
+
+	var foundBash, foundAdmin bool
+	for _, tool := range result.Tools {
+		if tool.ToolName == "bash" {
+			foundBash = true
+			require.Equal(t, "System & Shell", tool.Category)
+			require.False(t, tool.IsAdmin)
+			require.True(t, tool.DefaultEnabled)
+		}
+		if tool.Category == "Worker Administration" || tool.IsAdmin {
+			foundAdmin = true
+			require.True(t, tool.IsAdmin)
+		}
+	}
+	require.True(t, foundBash)
+	require.True(t, foundAdmin)
+}
+

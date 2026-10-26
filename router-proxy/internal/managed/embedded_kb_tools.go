@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -269,12 +270,17 @@ func (m *Manager) embeddedKBSearchTool(owner embeddedOwner) agent.AgentTool {
 				}, nil
 			}
 
-			// Try System 1 evaluation first in batches of up to 15-20 filenames
+			// Try System 1 evaluation first in batches of up to 10 filenames
 			scoredResults, err := m.scoreWithSystemOne(ctx, query, entries)
 			usedFallback := false
+			var fallbackErr error
 			if err != nil || len(scoredResults) == 0 {
 				// Fall back to keyword/substring match
 				usedFallback = true
+				if err != nil {
+					fallbackErr = err
+					log.Printf("[embedded:kb_search] System 1 scoring failed, falling back to keyword search (query: %q): %v", query, err)
+				}
 				scoredResults = scoreWithKeywordFallback(query, entries)
 			}
 
@@ -302,7 +308,11 @@ func (m *Manager) embeddedKBSearchTool(owner embeddedOwner) agent.AgentTool {
 			if len(filtered) == 0 {
 				note := ""
 				if usedFallback {
-					note = " (using keyword matching fallback)"
+					if fallbackErr != nil {
+						note = fmt.Sprintf(" (using keyword matching fallback; system 1 error: %v)", fallbackErr)
+					} else {
+						note = " (using keyword matching fallback)"
+					}
 				}
 				return agent.AgentToolResult{
 					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("No relevant documents found matching query %q (threshold: %.2f)%s.", query, threshold, note)}},
@@ -313,7 +323,11 @@ func (m *Manager) embeddedKBSearchTool(owner embeddedOwner) agent.AgentTool {
 			var sb strings.Builder
 			sb.WriteString(fmt.Sprintf("Knowledge base search results for: %q\n", query))
 			if usedFallback {
-				sb.WriteString("(Evaluation method: keyword matching fallback)\n\n")
+				if fallbackErr != nil {
+					sb.WriteString(fmt.Sprintf("(Evaluation method: keyword matching fallback; system 1 error: %v)\n\n", fallbackErr))
+				} else {
+					sb.WriteString("(Evaluation method: keyword matching fallback)\n\n")
+				}
 			} else {
 				sb.WriteString("(Evaluation method: System 1 calibrated relevance)\n\n")
 			}
@@ -325,19 +339,24 @@ func (m *Manager) embeddedKBSearchTool(owner embeddedOwner) agent.AgentTool {
 				}
 			}
 
+			details := map[string]any{
+				"query":    query,
+				"results":  filtered,
+				"fallback": usedFallback,
+			}
+			if fallbackErr != nil {
+				details["fallback_error"] = fallbackErr.Error()
+			}
+
 			return agent.AgentToolResult{
 				Content: ai.ContentList{ai.TextContent{Text: strings.TrimRight(sb.String(), "\n")}},
-				Details: map[string]any{
-					"query":    query,
-					"results":  filtered,
-					"fallback": usedFallback,
-				},
+				Details: details,
 			}, nil
 		},
 	}
 }
 
-// scoreWithSystemOne calls System 1 via local router or configured backend in batches of up to 15 files.
+// scoreWithSystemOne calls System 1 via local router or configured backend in batches of up to 10 files.
 func (m *Manager) scoreWithSystemOne(ctx context.Context, query string, entries []kbFileEntry) ([]KBSearchResult, error) {
 	// Discover System 1 connection via Store
 	sysCfg, cfgErr := m.store.GetSystemOneConfig(ctx)
@@ -345,14 +364,14 @@ func (m *Manager) scoreWithSystemOne(ctx context.Context, query string, entries 
 		return nil, fmt.Errorf("system one not configured")
 	}
 
-	client := systemone.NewClient(&http.Client{Timeout: 5 * time.Second})
+	client := systemone.NewClient(&http.Client{Timeout: 90 * time.Second})
 	cfg := systemone.Config{
 		Host:    sysCfg.Host,
 		Port:    sysCfg.Port,
 		Enabled: sysCfg.Enabled,
 	}
 
-	const batchSize = 15
+	const batchSize = 10
 	var allResults []KBSearchResult
 
 	for i := 0; i < len(entries); i += batchSize {

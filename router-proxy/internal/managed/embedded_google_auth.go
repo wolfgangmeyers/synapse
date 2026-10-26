@@ -261,6 +261,8 @@ func (m *Manager) resolveGoogleAPIKey(ctx context.Context) (string, error) {
 
 func antigravityWireModel(id string) string {
 	switch id {
+	case "gemini-4-argon":
+		return "gemini-4-argon-low"
 	case "gemini-3.8-flash":
 		return "gemini-3.8-flash-low"
 	case "gemini-3.7-flash":

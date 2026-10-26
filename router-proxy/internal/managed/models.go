@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
@@ -176,13 +177,30 @@ func ResolveModel(saved store.ManagedModel) (*ai.Model, error) {
 	if model == nil && (saved.Provider == "antigravity" || saved.Provider == "google") {
 		model = ai.GetModel("google", saved.ID)
 	}
+	if model == nil && (saved.Provider == "google" || saved.Provider == "google-vertex") && strings.HasPrefix(saved.ID, "gemini-") {
+		api := "google-generative-ai"
+		if saved.Provider == "google-vertex" {
+			api = "google-vertex"
+		}
+		model = &ai.Model{
+			ID:            saved.ID,
+			Provider:      saved.Provider,
+			Api:           api,
+			ContextWindow: 1048576,
+			MaxTokens:     65536,
+		}
+	}
 	if model == nil && saved.Provider == "antigravity" {
+		maxTokens := 8192
+		if strings.HasPrefix(saved.ID, "gemini-4-") || saved.ID == "gemini-4-argon" {
+			maxTokens = 65536
+		}
 		model = &ai.Model{
 			ID:            saved.ID,
 			Provider:      "antigravity",
 			Api:           "google-generative-ai",
 			ContextWindow: 1048576,
-			MaxTokens:     8192,
+			MaxTokens:     maxTokens,
 		}
 	}
 	if model == nil {

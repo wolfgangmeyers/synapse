@@ -15,6 +15,7 @@ import { WorkflowLaunchModal } from "./WorkflowLaunchModal";
 import { AgentMonitorsDialog } from "./AgentMonitorsDialog";
 import { WorkerToolsDialog } from "./WorkerToolsDialog";
 import { SubagentViewerDialog } from "./SubagentViewerDialog";
+import { AgentControlsDropdown } from "./AgentControlsDropdown";
 import { contextUsageSeverityClass, formatContextUsageLabel, formatContextUsageTooltip } from "../utils/format";
 
 export type ConversationView = "quiet" | "complete";
@@ -35,6 +36,8 @@ export interface ConversationHeaderProps {
   onGoal?: (() => void) | undefined;
   onReminders?: (() => void) | undefined;
   onInlineToolSettings?: (() => void) | undefined;
+  onAction?: ((action: "restart" | "reset" | "terminate") => void) | undefined;
+  onConfirmTermination?: ((confirm: boolean) => void) | undefined;
   onScratchpad?: (() => void) | undefined;
   onManageManaged?: (() => void) | undefined;
   onContextThresholds?: (() => void) | undefined;
@@ -84,7 +87,7 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory }: ConversationHeaderProps): ReactElement {
 
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
@@ -179,6 +182,89 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const activeWorkflowStateId = agent?.active_workflow_state_id || agent?.managed_agent?.active_workflow_state_id;
   const hasActiveWorkflow = Boolean(activeWorkflowId || activeWorkflowStateId);
   const activeWorkflow = availableWorkflows.find((w) => w.id === activeWorkflowId);
+
+  const DEFAULT_PINNED = [
+    "goal",
+    "reminders",
+    "workflow",
+    "inlineTools",
+    "scratchpad",
+    "monitors",
+    "workerTools",
+    "manageWorker",
+  ];
+
+  const PINNED_STORAGE_KEY = "mecha.toolbar.pinnedControls.v2";
+
+  const [pinnedControls, setPinnedControls] = useState<string[]>(() => {
+    try {
+      const storedV2 = localStorage.getItem(PINNED_STORAGE_KEY);
+      if (storedV2) {
+        const parsed = JSON.parse(storedV2);
+        if (Array.isArray(parsed)) return parsed;
+      }
+      const storedV1 = localStorage.getItem("mecha.toolbar.pinnedControls");
+      if (storedV1) {
+        const parsed = JSON.parse(storedV1);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // fallback to default
+    }
+    return DEFAULT_PINNED;
+  });
+
+  const [showControlsDropdown, setShowControlsDropdown] = useState(false);
+
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      if ((event.key === PINNED_STORAGE_KEY || event.key === "mecha.toolbar.pinnedControls") && event.newValue) {
+        try {
+          const parsed = JSON.parse(event.newValue);
+          if (Array.isArray(parsed)) setPinnedControls(parsed);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const handleCustomChange = (event: Event) => {
+      const customEvent = event as CustomEvent<string[]>;
+      if (Array.isArray(customEvent.detail)) {
+        setPinnedControls(customEvent.detail);
+      } else {
+        try {
+          const stored = localStorage.getItem(PINNED_STORAGE_KEY) || localStorage.getItem("mecha.toolbar.pinnedControls");
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) setPinnedControls(parsed);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("mecha:pinned-controls-changed", handleCustomChange);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("mecha:pinned-controls-changed", handleCustomChange);
+    };
+  }, []);
+
+  const handleTogglePin = (controlId: string) => {
+    const next = pinnedControls.includes(controlId)
+      ? pinnedControls.filter((id) => id !== controlId)
+      : [...pinnedControls, controlId];
+    setPinnedControls(next);
+    try {
+      localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent("mecha:pinned-controls-changed", { detail: next }));
+    } catch (e) {
+      console.error("Failed to save pinned controls to localStorage", e);
+    }
+  };
 
   const handleDeactivateWorkflow = async () => {
     if (!client || !agent || workflowUpdating) return;
@@ -277,7 +363,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && showGoalControl ? (
+                {agent && (showGoalControl || pinnedControls.includes("goal")) && ((agent.goal_state?.enabled || agent.goal?.enabled) || pinnedControls.includes("goal")) ? (
                   <HeaderActionButton
                     className={`goal-header-button ${agent.goal_state?.enabled || agent.goal?.enabled ? "has-goal" : ""}`}
                     onClick={onGoal}
@@ -289,19 +375,19 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent?.source === "router-managed" && client ? (
+                {agent && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
                   <div className="workflow-header-control">
                     <HeaderActionButton
                       className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
                       onClick={() => setShowWorkflowDropdown((v) => !v)}
                       aria-label="Workflow State"
                       title={activeWorkflow ? `Active Workflow: ${activeWorkflow.name}` : "Set Workflow State"}
-                      disabled={workflowUpdating}
+                      disabled={workflowUpdating || !client || agent.source !== "router-managed"}
                       icon="fa-solid fa-bolt"
                       active={hasActiveWorkflow}
                       activeTone="blue"
                     />
-                    {showWorkflowDropdown ? (
+                    {showWorkflowDropdown && agent?.source === "router-managed" && client ? (
                       <div className="workflow-header-dropdown" style={{ position: "absolute", top: "100%", right: 0, zIndex: 1000, background: "var(--bg-primary, #1e1e1e)", border: "1px solid var(--border-color, #444)", borderRadius: 6, minWidth: 220, padding: 4, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>
                         <div style={{ fontSize: "0.8em", padding: "4px 8px", color: "var(--text-muted, #888)", borderBottom: "1px solid var(--border-color, #333)", marginBottom: 4 }}>
                           Workflows
@@ -370,20 +456,20 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   </div>
                 ) : null}
 
-                {agent?.source === "router-managed" && client ? (
+                {agent && (allowInlineTools || pinnedControls.includes("inlineTools")) ? (
                   <HeaderActionButton
                     className={`inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
                     onClick={() => void handleToggleAllowInlineTools()}
                     aria-label={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
                     title={allowInlineTools ? "Inline tools allowed (click to restrict)" : "Inline tools restricted (click to allow)"}
-                    disabled={allowInlineToolsUpdating}
+                    disabled={allowInlineToolsUpdating || !client || agent.source !== "router-managed"}
                     icon="fa-solid fa-terminal"
                     active={allowInlineTools}
                     activeTone="green"
                   />
                 ) : null}
 
-                {agent && onScratchpad ? (
+                {agent && onScratchpad && pinnedControls.includes("scratchpad") ? (
                   <HeaderActionButton
                     className="scratchpad-header-button"
                     onClick={onScratchpad}
@@ -393,7 +479,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && (onReminders !== undefined || showAgentControls) ? (
+                {agent && (onReminders !== undefined || showAgentControls) && (activeReminderCount > 0 || pinnedControls.includes("reminders")) ? (
                   <HeaderActionButton
                     className={`reminder-indicator${activeReminderCount === 0 ? " empty" : ""}`}
                     onClick={onReminders}
@@ -405,29 +491,31 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && client ? (
+                {agent && (activeWatchersCount > 0 || pinnedControls.includes("monitors")) ? (
                   <HeaderActionButton
                     className={`agent-monitors-header-button${activeWatchersCount > 0 ? " active" : ""}`}
                     onClick={() => setShowMonitorsDialog(true)}
                     aria-label={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
                     title={activeWatchersCount > 0 ? `System 1 Monitors (${activeWatchersCount} active)` : "System 1 Monitors"}
+                    disabled={!client}
                     icon="fa-solid fa-shield-halved"
                     active={activeWatchersCount > 0}
                     activeTone="blue"
                   />
                 ) : null}
 
-                {agent?.source === "router-managed" && client ? (
+                {agent && pinnedControls.includes("workerTools") ? (
                   <HeaderActionButton
                     className="worker-tools-header-button"
                     onClick={() => setShowWorkerToolsDialog(true)}
                     aria-label="Manage Worker Tools"
                     title="Manage Worker Tools"
+                    disabled={!client || agent.source !== "router-managed"}
                     icon="fa-solid fa-wrench"
                   />
                 ) : null}
 
-                {agent && showAgentControls ? (
+                {agent && pinnedControls.includes("toolSettings") ? (
                   <HeaderActionButton
                     className="inline-tool-settings-button"
                     onClick={onInlineToolSettings}
@@ -437,17 +525,48 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent?.source === "router-managed" && onManageManaged ? (
+                {agent && pinnedControls.includes("restart") ? (
                   <HeaderActionButton
-                    className="managed-agent-header-button"
-                    onClick={onManageManaged}
-                    aria-label="Manage worker"
-                    title="Manage worker"
-                    icon="fa-solid fa-gear"
+                    className="restart-agent-header-button"
+                    onClick={() => onAction?.("restart")}
+                    aria-label="Restart agent"
+                    title="Restart agent"
+                    icon="fa-solid fa-rotate-left"
                   />
                 ) : null}
 
-                {agent && onToggleChatOnly ? (
+                {agent && pinnedControls.includes("reset") ? (
+                  <HeaderActionButton
+                    className="reset-agent-header-button"
+                    onClick={() => onAction?.("reset")}
+                    aria-label="Reset context"
+                    title="Reset context"
+                    icon="fa-solid fa-rotate"
+                  />
+                ) : null}
+
+                {agent && pinnedControls.includes("terminate") ? (
+                  <HeaderActionButton
+                    className="terminate-agent-header-button danger-button"
+                    onClick={() => onConfirmTermination?.(true) ?? onAction?.("terminate")}
+                    aria-label="Terminate worker"
+                    title="Terminate worker"
+                    icon="fa-regular fa-trash-can"
+                    activeTone="red"
+                  />
+                ) : null}
+
+                {agent && pinnedControls.includes("manageWorker") && onManageManaged ? (
+                  <HeaderActionButton
+                    className="manage-worker-header-button"
+                    onClick={onManageManaged}
+                    aria-label="Manage worker"
+                    title="Manage worker"
+                    icon="fa-solid fa-sliders"
+                  />
+                ) : null}
+
+                {agent && (chatOnly || pinnedControls.includes("chatOnly")) ? (
                   <HeaderActionButton
                     className={`chat-only-button ${chatOnly ? "active" : ""}`}
                     onClick={onToggleChatOnly}
@@ -459,7 +578,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && onToggleScrollLock ? (
+                {agent && (scrollLocked || pinnedControls.includes("scrollLock")) ? (
                   <HeaderActionButton
                     className={`scroll-lock-button ${scrollLocked ? "active" : ""}`}
                     onClick={onToggleScrollLock}
@@ -469,6 +588,54 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                     active={scrollLocked}
                     activeTone="teal"
                   />
+                ) : null}
+
+                {agent ? (
+                  <div style={{ position: "relative" }}>
+                    <HeaderActionButton
+                      className="agent-controls-more-button"
+                      onClick={() => {
+                        setShowControlsDropdown((v) => !v);
+                      }}
+                      aria-label="More agent controls"
+                      title="More agent controls"
+                      icon="fa-solid fa-ellipsis"
+                    />
+                    <AgentControlsDropdown
+                      open={showControlsDropdown}
+                      onClose={() => setShowControlsDropdown(false)}
+                      agent={agent}
+                      pinnedControls={pinnedControls}
+                      onTogglePin={handleTogglePin}
+                      onGoal={onGoal}
+                      onReminders={onReminders}
+                      onInlineToolSettings={onInlineToolSettings}
+                      onAction={onAction}
+                      onConfirmTermination={onConfirmTermination}
+                      onWorkflow={() => {
+                        setShowWorkflowDropdown((v) => !v);
+                      }}
+                      onToggleInlineTools={() => {
+                        void handleToggleAllowInlineTools();
+                      }}
+                      onScratchpad={onScratchpad}
+                      onMonitors={() => {
+                        setShowMonitorsDialog(true);
+                      }}
+                      onWorkerTools={() => {
+                        setShowWorkerToolsDialog(true);
+                      }}
+                      onManageManaged={onManageManaged}
+                      onToggleChatOnly={onToggleChatOnly}
+                      onToggleScrollLock={onToggleScrollLock}
+                      scrollLocked={scrollLocked}
+                      allowInlineTools={allowInlineTools}
+                      chatOnly={chatOnly}
+                      hasActiveWorkflow={hasActiveWorkflow}
+                      activeReminderCount={activeReminderCount}
+                      activeWatchersCount={activeWatchersCount}
+                    />
+                  </div>
                 ) : null}
 
                 {showConversationViews ? (

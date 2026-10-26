@@ -534,7 +534,8 @@ export function SubagentViewerDialog({
                     >
                       <div className="subagent-card-header">
                         <h3 className="subagent-card-title" title={subagent.description || "Subagent"}>
-                          {subagent.description || "Subagent"}
+                          <i className="fa-solid fa-robot subagent-card-robot-icon" aria-hidden="true" />
+                          <span className="subagent-card-title-text">{subagent.description || "Subagent"}</span>
                         </h3>
                         <span className={`subagent-status-pill status-${subagent.status || "unknown"}`}>
                           {isActive && <span className="subagent-dot" aria-hidden="true" />}

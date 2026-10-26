@@ -29,6 +29,11 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "steer_subagent", Name: "steer_subagent", Category: "subagents", Description: "Send steering messages to subagents"},
 	{ID: "list_subagents", Name: "list_subagents", Category: "subagents", Description: "List background subagents"},
 	{ID: "mecha_worker", Name: "mecha_worker", Category: "subagents", Description: "Launch independent workers"},
+	{ID: "worker_spawn", Name: "worker_spawn", Category: "admin", Description: "Spawn a new independent managed worker"},
+	{ID: "worker_terminate", Name: "worker_terminate", Category: "admin", Description: "Terminate a running managed worker"},
+	{ID: "worker_set_model", Name: "worker_set_model", Category: "admin", Description: "Change the model of a managed worker"},
+	{ID: "worker_set_goal", Name: "worker_set_goal", Category: "admin", Description: "Set, inspect, or clear the goal of a managed worker"},
+	{ID: "worker_status", Name: "worker_status", Category: "admin", Description: "Inspect detailed state and active subagents of managed workers"},
 }
 
 // ValidWorkflowTools is derived directly from CanonicalWorkflowTools, including interchangeable aliases.

@@ -128,7 +128,7 @@ describe("App control fencing and managed lifecycle projections", () => {
     const user = userEvent.setup();
     const { socket, setAgent, agentRefreshCount, holdAgentRefresh } = renderLegacy();
     await user.click(await screen.findByRole("button", { name: "Worker One (worker-one)" }));
-    await waitFor(() => expect(screen.getByText(/Connected as/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Signed in as/)).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Set goal" }));
     await user.click(screen.getByRole("button", { name: "Goal: OFF" }));
     await user.type(screen.getByRole("textbox", { name: "What should this agent work toward?" }), "Old goal");
@@ -162,7 +162,7 @@ describe("App control fencing and managed lifecycle projections", () => {
     const user = userEvent.setup();
     const { socket, setAgent } = renderLegacy();
     await user.click(await screen.findByRole("button", { name: "Worker One (worker-one)" }));
-    await waitFor(() => expect(screen.getByText(/Connected as/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Signed in as/)).toBeInTheDocument());
     const newer = goalState({ enabled: true, goal: "Current goal", snooze_enabled: false, snooze_duration_ms: 120_000, outcome_counts: { COMPLETED: 4, NOT_DONE: 2 } });
     setAgent({ goal_state: newer });
     socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "goal-status", type: "agent_goal_state", agent_id: "worker-one", instance_id: "peer-instance", goal_state: newer, generated_at: "2030-01-01T00:00:01.000Z" }) });
@@ -178,7 +178,7 @@ describe("App control fencing and managed lifecycle projections", () => {
     const user = userEvent.setup();
     const { socket, setAgent, agentRefreshCount } = renderLegacy();
     await user.click(await screen.findByRole("button", { name: "Worker One (worker-one)" }));
-    await waitFor(() => expect(screen.getByText(/Connected as/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Signed in as/)).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "openai-codex/gpt-5.6-terra" }));
     await user.click(screen.getByRole("option", { name: /Gemini 2.5 Pro/ }));
     const oldControl = socket.frame("model_control");

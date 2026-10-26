@@ -212,6 +212,16 @@ func (s *Store) UpdateManagedGoalConfig(ctx context.Context, agentID string, con
 	return result, err
 }
 
+// SetManagedGoalDesiredState updates a managed agent's goal desired state.
+func (s *Store) SetManagedGoalDesiredState(ctx context.Context, agentID string, enabled bool, goal string) (*ManagedGoalPolicy, error) {
+	config := ManagedGoalConfig{
+		Enabled:  enabled,
+		Goal:     goal,
+		Settings: DefaultManagedGoalSettings(),
+	}
+	return s.UpdateManagedGoalConfig(ctx, agentID, config)
+}
+
 // UpdateManagedGoalPolicy is the atomic desired-state transition. Pi delivery
 // happens only after it commits; a failed delivery cannot erase the pending
 // policy or cause a stale acknowledgement to apply a superseded revision.

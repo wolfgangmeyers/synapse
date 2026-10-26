@@ -52,6 +52,10 @@ describe("SubagentViewerDialog", () => {
     expect(cards[1]).toHaveTextContent("Task at 5:39 AM");
     expect(cards[2]).toHaveTextContent("Task at 5:33 AM");
     expect(cards[3]).toHaveTextContent("Task at 5:06 AM");
+
+    // Verify robot icon is rendered in subagent card title
+    const robotIcon = cards[0]?.querySelector(".subagent-card-title i.fa-solid.fa-robot");
+    expect(robotIcon).toBeInTheDocument();
   });
 
   it("renders assistant messages using MarkdownBody in subagent-message-entry", async () => {
