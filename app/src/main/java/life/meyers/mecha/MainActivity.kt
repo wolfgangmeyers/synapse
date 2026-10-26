@@ -216,6 +216,7 @@ internal data class PeerStatus(
     val runtime: String? = null,
     val worktree: Boolean = false,
     val cwd: String = "",
+    val contextUsageLabel: String? = null,
 ) {
     val active get() = activityState == "active"
     val compacting get() = activityState == "compacting"
@@ -3397,8 +3398,8 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
 
     @Composable
     private fun MechaApp() {
-        var showLaunchWorkerDialog by remember { mutableStateOf(false) }
-        var peerToTerminate by remember { mutableStateOf<PeerStatus?>(null) }
+        var showLaunchWorkerDialog by remember(activeRouter) { mutableStateOf(false) }
+        var peerToTerminate by remember(activeRouter) { mutableStateOf<PeerStatus?>(null) }
         val colors = MaterialTheme.colorScheme.copy(
             background = Ink,
             surface = SurfaceDark,
@@ -3441,6 +3442,7 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                     )
                     else -> {
                         BackHandler(onBack = ::returnHome)
+                        androidx.compose.runtime.key(activeRouter, selectedPeer) {
                         Conversation(
                             peers.firstOrNull { it.id == selectedPeer } ?: PeerStatus(selectedPeer),
                             messages,
@@ -3488,6 +3490,7 @@ private var liveEventsByAgent by mutableStateOf<Map<String, List<AgentTimelineEv
                             imageLoader,
                             routerHttp(),
                         )
+                        }
                     }
                 }
                 if (showProfileEditor) UsernameDialog(agentId, ::saveAgentId, { showProfileEditor = false })
@@ -3941,6 +3944,10 @@ private fun Conversation(
     routerBase: String,
 ) {
     val peer = peerStatus.id
+    val managed = peerStatus.source == "router-managed"
+    var agentAction by remember(routerBase, peer) { mutableStateOf<String?>(null) }
+    var chatOnly by remember(routerBase, peer) { mutableStateOf(false) }
+    var scrollLocked by remember(routerBase, peer) { mutableStateOf(false) }
     val context = LocalContext.current
     var modelPickerOpen by remember(peer) { mutableStateOf(false) }
     var goalEditorOpen by remember(peer) { mutableStateOf(false) }
@@ -3986,13 +3993,19 @@ private fun Conversation(
             }
         }
     }
-    val timelineEntries = remember(messages, agentEvents) {
+    val timelineEntries = remember(messages, agentEvents, chatOnly) {
         (messages.map { ConversationTimelineEntry.Chat(it) } +
-         agentEvents.map { ConversationTimelineEntry.Event(it) })
+         filterChatTimeline(agentEvents, chatOnly) { false }.map { ConversationTimelineEntry.Event(it) })
             .sortedBy { it.timestamp }
     }
-    LaunchedEffect(timelineEntries.lastOrNull()?.key) {
-        if (timelineEntries.isNotEmpty()) transcriptState.animateScrollToItem(timelineEntries.lastIndex)
+    LaunchedEffect(timelineEntries.lastOrNull()?.key, scrollLocked) {
+        if (shouldFollowTranscript(scrollLocked, timelineEntries.size)) transcriptState.animateScrollToItem(timelineEntries.lastIndex)
+    }
+    agentAction?.let { action ->
+        androidx.compose.runtime.key(routerBase, peer, action) {
+            AgentControlsDialog(baseUrl = routerBase, agentId = peer, action = action,
+                onDismiss = { agentAction = null }, onTerminate = { agentAction = null; onTerminate() })
+        }
     }
     val orbit = activityOrbitFor(peerStatus)
     Column(Modifier.fillMaxSize()) {
@@ -4017,6 +4030,8 @@ private fun Conversation(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            AgentAvatar(peer, 40.dp)
+                            Spacer(Modifier.width(8.dp))
                             Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (peerStatus.isEmbedded) {
                                 Spacer(Modifier.width(6.dp))
@@ -4042,6 +4057,7 @@ private fun Conversation(
                             }
                         }
                         PeerActivityIndicators(peerStatus, compact = true)
+                        peerStatus.contextUsageLabel?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = TextMuted) }
                         ArrivalIndicator(arrival, onArrival, onDismissArrival, header = true)
                     }
                     if (useOverflow) {
@@ -4058,9 +4074,10 @@ private fun Conversation(
                         }
                         ConversationHeaderOverflowMenu(
                             capabilities = capabilities,
+                            managed = managed,
                             goalEnabled = peerStatus.goalState?.enabled == true,
                             currentModel = peerStatus.modelCatalog.current?.key,
-                            onGoal = { goalEditorOpen = true },
+                            onGoal = { if (capabilities.goalControlV1) goalEditorOpen = true else agentAction = "goal" },
                             onModel = { modelPickerOpen = true },
                             onReminders = {
                                 reminderCreateOpen = visibleRemindersForPeer(reminders, peer).isEmpty()
@@ -4076,8 +4093,8 @@ private fun Conversation(
                             onTerminate = onTerminate,
                         )
                     } else {
-                        if (capabilities.goalControlV1) {
-                            TextButton(onClick = { goalEditorOpen = true }, modifier = Modifier.height(44.dp)) {
+                        if (capabilities.goalControlV1 || managed) {
+                            TextButton(onClick = { if (capabilities.goalControlV1) goalEditorOpen = true else agentAction = "goal" }, modifier = Modifier.height(44.dp)) {
                                 Text(if (peerStatus.goalState?.enabled == true) "Goal" else "Set goal", color = if (peerStatus.goalState?.enabled == true) Teal else Periwinkle)
                             }
                         }
@@ -4105,13 +4122,24 @@ private fun Conversation(
                         TextButton(onClick = { promptManagerOpen = true; onLoadPromptTemplates() }, modifier = Modifier.height(44.dp)) {
                             Text("Manage", color = TextMuted)
                         }
-                        TextButton(onClick = onTerminate, modifier = Modifier.height(44.dp)) {
+                        if (managed) TextButton(onClick = onTerminate, modifier = Modifier.height(48.dp)) {
                             Text("Terminate", color = Color(0xFFFF8A80))
                         }
                     }
                 }
             }
         }
+        }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(SurfaceDark)) {
+            agentToolbarActions(managed, peerStatus.active).forEach { action ->
+                TextButton(onClick = { agentAction = action.key }, modifier = Modifier.height(48.dp)) { Text(action.label) }
+            }
+            TextButton(onClick = { chatOnly = !chatOnly }, modifier = Modifier.height(48.dp)) {
+                Text(if (chatOnly) "Show activity" else "Chat only")
+            }
+            TextButton(onClick = { scrollLocked = !scrollLocked }, modifier = Modifier.height(48.dp)) {
+                Text(if (scrollLocked) "Resume scrolling" else "Lock scrolling")
+            }
         }
         HorizontalDivider(color = SurfaceRaised)
         if (historyState.status == HistoryStatus.ERROR) {
@@ -4269,6 +4297,7 @@ private fun Conversation(
 @Composable
 private fun ConversationHeaderOverflowMenu(
     capabilities: ControlCapabilities,
+    managed: Boolean,
     goalEnabled: Boolean,
     currentModel: String?,
     onGoal: () -> Unit,
@@ -4289,7 +4318,7 @@ private fun ConversationHeaderOverflowMenu(
             containerColor = SurfaceDark,
         ) {
             val menuColors = MenuDefaults.itemColors(textColor = TextPrimary)
-            conversationControlMenuActions(capabilities.goalControlV1, capabilities.modelControlV1).forEach { action ->
+            conversationControlMenuActions(capabilities.goalControlV1 || managed, capabilities.modelControlV1, managed).forEach { action ->
                 when (action) {
                     ConversationControlAction.GOAL -> DropdownMenuItem(
                         text = { Text(if (goalEnabled) "Goal" else "Set goal") },
@@ -5248,11 +5277,7 @@ private fun RouterManagement(
 
 @Composable
 private fun Avatar(id: String, size: androidx.compose.ui.unit.Dp = 44.dp) {
-    val palette = listOf(Periwinkle, Teal, Color(0xFFF5B2D1), Color(0xFFFFC57C))
-    val color = palette[(id.hashCode().and(0x7fffffff)) % palette.size]
-    Box(Modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
-        Text(id.firstOrNull()?.uppercase() ?: "?", color = Ink, fontWeight = FontWeight.Bold)
-    }
+    AgentAvatar(id, size)
 }
 
 @Composable
@@ -5924,6 +5949,9 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
         runtime = runtime,
         worktree = worktree,
         cwd = cwd,
+        contextUsageLabel = source.optJSONObject("context_usage")?.let { usage ->
+            "Context: ${usage.optDouble("percent", 0.0)}% (${usage.optLong("tokens")} / ${usage.optLong("context_window")})"
+        } ?: current?.contextUsageLabel?.takeIf { sameInstance },
     )
 }
 
