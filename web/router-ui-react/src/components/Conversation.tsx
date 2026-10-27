@@ -76,8 +76,8 @@ export function Conversation({ peer, agent, client, templates, activeReminderCou
 
   const selected = peer ?? agent;
   const isManaged = isManagedAgent(selected);
-  const effectiveConversationView = isManaged ? "complete" : conversationView;
-  const isComplete = isManaged || conversationView === "complete";
+  const effectiveConversationView = "complete";
+  const isComplete = true;
   const filteredActivityEntries = chatOnly
     ? activityEntries.filter((entry) => {
         const category = (entry as { category?: unknown }).category;
