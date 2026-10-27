@@ -100,11 +100,19 @@ function dateLabel(timestamp: number): string | undefined {
   return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+function normalizeMessageBodyForComparison(body: string | undefined): string {
+  if (!body) return "";
+  return body
+    .replace(/(?:\r?\n\r?\n)?Attached images?:\s*(?:\d+\.\s*[^\r\n]+\s*)+$/gi, "")
+    .trim();
+}
+
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
   if (isContextResetEntry(entry)) return false;
   if (messages.some((m) => m.id === entry.id)) return true;
 
-  const content = (entry.message_content ?? entry.presentation?.summary)?.trim();
+  const rawContent = entry.message_content ?? entry.presentation?.summary;
+  const content = normalizeMessageBodyForComparison(rawContent);
   if (!content) return false;
 
   const entryFrom = entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id;
@@ -112,7 +120,8 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
   const entryTime = activityTime(entry);
 
   return messages.some((m) => {
-    if (m.body?.trim() !== content) return false;
+    const mBody = normalizeMessageBodyForComparison(m.body);
+    if (mBody !== content) return false;
     if (entryFrom && m.from && entryFrom.toLowerCase() !== m.from.toLowerCase()) {
       return false;
     }

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Conversation } from "../../src/components/Conversation";
 import { MessageList } from "../../src/components/MessageList";
 import type { ConversationView } from "../../src/components/ConversationHeader";
+import type { ManagedHistoryEntry } from "../../src/protocol/types";
 
 afterEach(cleanup);
 
@@ -755,5 +756,53 @@ describe("Selected-agent conversation modes", () => {
     );
     expect(userBubbles).toHaveLength(1);
   });
+
+  it("deduplicates user messages with image attachment footer in history", () => {
+    const messages = [
+      {
+        id: "msg-user-img",
+        sequence: 1,
+        from: "wolfgang",
+        to: "worker-1",
+        body: "Look at this screenshot",
+        created_at: "2030-01-01T10:00:00.000Z",
+        attachments: [{ url: "/v1/attachments/test.png", name: "test.png" }],
+      },
+    ];
+
+    const activityEntries: ManagedHistoryEntry[] = [
+      {
+        id: "complete:1",
+        agent_id: "worker-1",
+        sender_identity: "wolfgang",
+        at: "2030-01-01T10:00:00.000Z",
+        message: "Message received",
+        message_content: "Look at this screenshot\n\nAttached image:\n1. /v1/attachments/test.png",
+        presentation: {
+          kind: "message",
+          from: "wolfgang",
+          to: "worker-1",
+          outcome: "success",
+        },
+      },
+    ];
+
+    const { container } = render(
+      <MessageList
+        peerId="worker-1"
+        ownerId="wolfgang"
+        messages={messages}
+        activityEntries={activityEntries}
+      />
+    );
+
+    const bubbles = Array.from(container.querySelectorAll(".bubble-wrap"));
+    const userBubbles = bubbles.filter((b) =>
+      b.textContent?.includes("Look at this screenshot")
+    );
+    expect(userBubbles).toHaveLength(1);
+    expect(screen.queryByText("From wolfgang")).not.toBeInTheDocument();
+  });
 });
+
 
