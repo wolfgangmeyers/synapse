@@ -92,6 +92,14 @@ export function isMailboxSendToUser(
     return undefined;
   }
 
+  const normalizedRecipient = (recipient || entry.presentation?.to || "").trim().toLowerCase();
+  const normalizedUser = (currentUserId || "user").trim().toLowerCase();
+  const isToUser = normalizedRecipient === normalizedUser || normalizedRecipient === "user" || normalizedRecipient === "wolfgang";
+
+  if (!isToUser && isMailboxTool) {
+    return undefined;
+  }
+
   const finalRecipient = recipient || entry.presentation?.to || "user";
   const from = entry.presentation?.from || entry.agent_id;
   return { recipient: finalRecipient, body: rawBody ?? bodyText ?? "", from };

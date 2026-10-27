@@ -287,8 +287,8 @@ function isManagedHistoryPresentation(value: unknown): boolean {
   if (!isRecord(value) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth", "thinking", "goal_evaluation", "subagent_complete", "subagent", "context_reset"].includes(value.kind)) return false;
   if (value.tool_name !== undefined && !isPatternString(value.tool_name, /^[A-Za-z][A-Za-z0-9_.-]*$/, 1, 128)) return false;
   if (value.outcome !== undefined && (typeof value.outcome !== "string" || !["active", "success", "warning", "error", "unknown", "compacting", "completed", "failed", "interrupted", "aborted", "reconciled_unknown", "done", "not_done"].includes(value.outcome))) return false;
-  if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 48)) return false;
-  if (value.to !== undefined && !isSafeManagedHistoryString(value.to, 1, 48)) return false;
+  if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 128)) return false;
+  if (value.to !== undefined && !isSafeManagedHistoryString(value.to, 1, 128)) return false;
   if (value.child_label !== undefined && !isSafeManagedHistoryString(value.child_label, 1, 160)) return false;
   if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown", "cancelled"].includes(value.child_state))) return false;
   if (value.thinking !== undefined && typeof value.thinking !== "string") return false;
