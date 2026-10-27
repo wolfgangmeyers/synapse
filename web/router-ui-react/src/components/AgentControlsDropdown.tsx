@@ -25,7 +25,6 @@ export interface AgentControlsDropdownProps {
   onScratchpad?: (() => void) | undefined;
   onMonitors?: (() => void) | undefined;
   onWorkerTools?: (() => void) | undefined;
-  onManageManaged?: (() => void) | undefined;
   onToggleChatOnly?: (() => void) | undefined;
   onToggleScrollLock?: (() => void) | undefined;
   scrollLocked?: boolean | undefined;
@@ -52,7 +51,6 @@ export function AgentControlsDropdown({
   onScratchpad,
   onMonitors,
   onWorkerTools,
-  onManageManaged,
   onToggleChatOnly,
   onToggleScrollLock,
   scrollLocked,
@@ -113,7 +111,6 @@ export function AgentControlsDropdown({
     { id: "scratchpad", label: "Scratchpad", icon: "fa-solid fa-note-sticky", action: onScratchpad },
     { id: "monitors", label: "Monitors", icon: "fa-solid fa-shield-halved", action: onMonitors },
     { id: "workerTools", label: "Worker tools", icon: "fa-solid fa-wrench", action: onWorkerTools },
-    ...(onManageManaged ? [{ id: "manageWorker", label: "Manage worker", icon: "fa-solid fa-gear", action: onManageManaged }] : []),
     { id: "chatOnly", label: "Chat only", icon: "fa-solid fa-comments", action: onToggleChatOnly },
     {
       id: "scrollLock",

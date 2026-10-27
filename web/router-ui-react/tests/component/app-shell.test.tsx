@@ -96,20 +96,6 @@ describe("AppShell", () => {
     expect(onScratchpad).toHaveBeenCalledOnce();
   });
 
-  it("keeps the managed-worker control in the header action row", () => {
-    localStorage.setItem("mecha.toolbar.pinnedControls", JSON.stringify(["manageWorker"]));
-    const onManageManaged = vi.fn();
-    const agent: Agent = { agent_id: "managed-peer", source: "router-managed", activity_state: "idle", subagent_count: 0, subagents: [] };
-    render(<ConversationHeader agent={agent} onManageManaged={onManageManaged} />);
-    const button = screen.getByRole("button", { name: "Manage worker" });
-    expect(button).toHaveClass("manage-worker-header-button");
-    expect(button.querySelector(".fa-sliders")).toBeInTheDocument();
-    expect(button.closest(".conversation-header-actions")).toBeInTheDocument();
-    expect(screen.getByRole("banner").querySelector(".managed-agent-controls")).toBeNull();
-    fireEvent.click(button);
-    expect(onManageManaged).toHaveBeenCalledOnce();
-  });
-
   it("marks the reminder button active when the selected agent has a reminder", () => {
     const agent: Agent = { agent_id: "fixture-peer", activity_state: "idle", subagent_count: 0, subagents: [] };
     render(<ConversationHeader agent={agent} activeReminderCount={1} />);
