@@ -23,7 +23,7 @@ var ErrManagedCrashRecoveryUnavailable = errors.New("managed crash recovery tabl
 
 var managedIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var managedModelIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@/:-]{0,255}$`)
-var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var managedSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var managedCanonicalUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
