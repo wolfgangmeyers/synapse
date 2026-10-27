@@ -1,8 +1,5 @@
 package life.meyers.mecha
 
-/** Keep the full header controls visible on wide layouts and put them behind one reachable control on phones. */
-internal fun conversationHeaderUsesOverflow(widthDp: Float): Boolean = widthDp < 600f
-
 /** The prompt manager's three primary actions need their own row in a phone-sized dialog. */
 internal fun promptManagerUsesStackedActions(widthDp: Float): Boolean = widthDp < 420f
 

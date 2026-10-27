@@ -12,7 +12,6 @@ class AndroidTransportSecurityTest {
 
         assertTrue(source.contains("Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = \"Back\""))
         assertFalse(source.contains("Text(\"Back\")"))
-        assertTrue(source.contains("Icon(Icons.Default.Edit, contentDescription = \"Use prompt template\""))
         assertTrue(source.contains("containerColor = SurfaceDark"))
         assertTrue(source.contains("MenuDefaults.itemColors(textColor = TextPrimary)"))
         assertTrue(source.contains("items(routers, key = { it.identity })"))

@@ -79,6 +79,17 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.AccountTree
@@ -3978,6 +3989,7 @@ private fun Conversation(
             } ?: error("Unable to export prompt templates.")
         }.onFailure { onPromptExportFailure() }
     }
+    // ponytail: index zero is the newest row, including the first layout after history arrives.
     val transcriptState = rememberLazyListState()
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) onImages(uris)
@@ -3999,7 +4011,7 @@ private fun Conversation(
             .sortedBy { it.timestamp }
     }
     LaunchedEffect(timelineEntries.lastOrNull()?.key, scrollLocked) {
-        if (shouldFollowTranscript(scrollLocked, timelineEntries.size)) transcriptState.animateScrollToItem(timelineEntries.lastIndex)
+        if (shouldFollowTranscript(scrollLocked, timelineEntries.size)) transcriptState.scrollToItem(0)
     }
     agentAction?.let { action ->
         androidx.compose.runtime.key(routerBase, peer, action) {
@@ -4017,7 +4029,6 @@ private fun Conversation(
             cornerRadius = 0.dp,
         ) {
             BoxWithConstraints(Modifier.fillMaxWidth().background(SurfaceDark)) {
-            val useOverflow = conversationHeaderUsesOverflow(maxWidth.value)
             Column(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
@@ -4060,18 +4071,6 @@ private fun Conversation(
                         peerStatus.contextUsageLabel?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = TextMuted) }
                         ArrivalIndicator(arrival, onArrival, onDismissArrival, header = true)
                     }
-                    if (useOverflow) {
-                        // Keep prompt invocation visible on phones. The overflow menu remains available for the other controls.
-                        IconButton(
-                            onClick = {
-                                promptSelection = PromptTemplateSelection(draftValue.selection.start, draftValue.selection.end)
-                                promptPickerOpen = true
-                                onLoadPromptTemplates()
-                            },
-                            modifier = Modifier.size(48.dp),
-                        ) {
-                            Icon(Icons.Default.Edit, contentDescription = "Use prompt template", tint = Periwinkle)
-                        }
                         ConversationHeaderOverflowMenu(
                             capabilities = capabilities,
                             managed = managed,
@@ -4091,55 +4090,17 @@ private fun Conversation(
                             },
                             onManagePrompts = { promptManagerOpen = true; onLoadPromptTemplates() },
                             onTerminate = onTerminate,
+                            active = peerStatus.active,
+                            chatOnly = chatOnly,
+                            scrollLocked = scrollLocked,
+                            onAgentAction = { agentAction = it },
+                            onChatOnly = { chatOnly = !chatOnly },
+                            onScrollLock = { scrollLocked = !scrollLocked },
                         )
-                    } else {
-                        if (capabilities.goalControlV1 || managed) {
-                            TextButton(onClick = { if (capabilities.goalControlV1) goalEditorOpen = true else agentAction = "goal" }, modifier = Modifier.height(44.dp)) {
-                                Text(if (peerStatus.goalState?.enabled == true) "Goal" else "Set goal", color = if (peerStatus.goalState?.enabled == true) Teal else Periwinkle)
-                            }
-                        }
-                        if (capabilities.modelControlV1) {
-                            TextButton(onClick = { modelPickerOpen = true }, modifier = Modifier.height(44.dp)) {
-                                Text(peerStatus.modelCatalog.current?.key ?: "Model", color = Periwinkle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                        TextButton(
-                            onClick = {
-                                reminderCreateOpen = visibleRemindersForPeer(reminders, peer).isEmpty()
-                                reminderDialogOpen = true
-                                onRefreshReminders()
-                            },
-                            modifier = Modifier.height(44.dp),
-                        ) { Text("Reminders", color = if (visibleRemindersForPeer(reminders, peer).isEmpty()) TextMuted else Teal) }
-                        TextButton(
-                            onClick = {
-                                promptSelection = PromptTemplateSelection(draftValue.selection.start, draftValue.selection.end)
-                                promptPickerOpen = true
-                                onLoadPromptTemplates()
-                            },
-                            modifier = Modifier.height(44.dp),
-                        ) { Text("Prompt", color = Periwinkle) }
-                        TextButton(onClick = { promptManagerOpen = true; onLoadPromptTemplates() }, modifier = Modifier.height(44.dp)) {
-                            Text("Manage", color = TextMuted)
-                        }
-                        if (managed) TextButton(onClick = onTerminate, modifier = Modifier.height(48.dp)) {
-                            Text("Terminate", color = Color(0xFFFF8A80))
-                        }
-                    }
+
                 }
             }
         }
-        }
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(SurfaceDark)) {
-            agentToolbarActions(managed, peerStatus.active).forEach { action ->
-                TextButton(onClick = { agentAction = action.key }, modifier = Modifier.height(48.dp)) { Text(action.label) }
-            }
-            TextButton(onClick = { chatOnly = !chatOnly }, modifier = Modifier.height(48.dp)) {
-                Text(if (chatOnly) "Show activity" else "Chat only")
-            }
-            TextButton(onClick = { scrollLocked = !scrollLocked }, modifier = Modifier.height(48.dp)) {
-                Text(if (scrollLocked) "Resume scrolling" else "Lock scrolling")
-            }
         }
         HorizontalDivider(color = SurfaceRaised)
         if (historyState.status == HistoryStatus.ERROR) {
@@ -4164,11 +4125,12 @@ private fun Conversation(
         } else {
             LazyColumn(
                 state = transcriptState,
+                reverseLayout = true,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(timelineEntries, key = { it.key }) { entry ->
+                items(timelineEntries.asReversed(), key = { it.key }) { entry ->
                     when (entry) {
                         is ConversationTimelineEntry.Chat -> MessageBubble(entry.message, routerBase, imageLoader)
                         is ConversationTimelineEntry.Event -> AgentEventChip(entry.event)
@@ -4294,6 +4256,19 @@ private fun Conversation(
     }
 }
 
+private fun agentActionIcon(key: String): ImageVector = when (key) {
+    "interrupt" -> Icons.Default.Stop
+    "workflow" -> Icons.Default.AccountTree
+    "permission" -> Icons.Default.Security
+    "scratchpad" -> Icons.Default.Description
+    "monitors" -> Icons.Default.MonitorHeart
+    "tools" -> Icons.Default.Build
+    "inline-tools" -> Icons.Default.Checklist
+    "children" -> Icons.Default.Groups
+    "history" -> Icons.Default.History
+    else -> Icons.Default.Settings
+}
+
 @Composable
 private fun ConversationHeaderOverflowMenu(
     capabilities: ControlCapabilities,
@@ -4306,6 +4281,12 @@ private fun ConversationHeaderOverflowMenu(
     onPrompt: () -> Unit,
     onManagePrompts: () -> Unit,
     onTerminate: () -> Unit = {},
+    active: Boolean,
+    chatOnly: Boolean,
+    scrollLocked: Boolean,
+    onAgentAction: (String) -> Unit,
+    onChatOnly: () -> Unit,
+    onScrollLock: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -4323,35 +4304,61 @@ private fun ConversationHeaderOverflowMenu(
                     ConversationControlAction.GOAL -> DropdownMenuItem(
                         text = { Text(if (goalEnabled) "Goal" else "Set goal") },
                         onClick = { expanded = false; onGoal() },
+                        leadingIcon = { Icon(Icons.Default.Flag, contentDescription = null, tint = Periwinkle) },
                         colors = menuColors,
                     )
                     ConversationControlAction.MODEL -> DropdownMenuItem(
                         text = { Text(currentModel?.let { "Model: $it" } ?: "Model") },
                         onClick = { expanded = false; onModel() },
+                        leadingIcon = { Icon(Icons.Default.SmartToy, contentDescription = null, tint = Periwinkle) },
                         colors = menuColors,
                     )
                     ConversationControlAction.REMINDERS -> DropdownMenuItem(
                         text = { Text("Reminders") },
                         onClick = { expanded = false; onReminders() },
+                        leadingIcon = { Icon(Icons.Default.Schedule, contentDescription = null, tint = Periwinkle) },
                         colors = menuColors,
                     )
                     ConversationControlAction.PROMPT -> DropdownMenuItem(
                         text = { Text("Prompt") },
                         onClick = { expanded = false; onPrompt() },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = Periwinkle) },
                         colors = menuColors,
                     )
                     ConversationControlAction.MANAGE_PROMPTS -> DropdownMenuItem(
                         text = { Text("Manage prompts") },
                         onClick = { expanded = false; onManagePrompts() },
+                        leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, tint = Periwinkle) },
                         colors = menuColors,
                     )
                     ConversationControlAction.TERMINATE -> DropdownMenuItem(
                         text = { Text("Terminate worker", color = Color(0xFFFF8A80)) },
                         onClick = { expanded = false; onTerminate() },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = Periwinkle) },
                         colors = menuColors,
                     )
                 }
             }
+            agentToolbarActions(managed, active).filter { it.key != "goal" }.forEach { action ->
+                DropdownMenuItem(
+                    text = { Text(action.label) },
+                    leadingIcon = { Icon(agentActionIcon(action.key), contentDescription = null, tint = Periwinkle) },
+                    onClick = { expanded = false; onAgentAction(action.key) },
+                    colors = menuColors,
+                )
+            }
+            DropdownMenuItem(
+                text = { Text(if (chatOnly) "Show activity" else "Chat only") },
+                leadingIcon = { Icon(Icons.Default.Chat, contentDescription = null, tint = Periwinkle) },
+                onClick = { expanded = false; onChatOnly() },
+                colors = menuColors,
+            )
+            DropdownMenuItem(
+                text = { Text(if (scrollLocked) "Resume scrolling" else "Lock scrolling") },
+                leadingIcon = { Icon(if (scrollLocked) Icons.Default.LockOpen else Icons.Default.Lock, contentDescription = null, tint = Periwinkle) },
+                onClick = { expanded = false; onScrollLock() },
+                colors = menuColors,
+            )
         }
     }
 }

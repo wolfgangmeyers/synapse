@@ -65,5 +65,5 @@ internal fun AgentAvatar(id: String, size: Dp = 44.dp) {
         assets.open(key.substringAfterLast('/')).use { BitmapFactory.decodeStream(it).asImageBitmap() }
     }
     Image(bitmap, contentDescription = null, modifier = Modifier.size(size),
-        colorFilter = ColorFilter.tint(Color(android.graphics.Color.parseColor(avatarColor(id))), BlendMode.Color))
+        colorFilter = ColorFilter.tint(Color(android.graphics.Color.parseColor(avatarColor(id))), BlendMode.Modulate))
 }
