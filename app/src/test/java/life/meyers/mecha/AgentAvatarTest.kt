@@ -14,4 +14,9 @@ class AgentAvatarTest {
         }
     }
     @Test(expected = IllegalArgumentException::class) fun emptyAssetsFailClearly() { avatarAssetKey("worker", emptyList()) }
+    @Test fun recolorUsesModulateTintSoSourceAlphaIsRetained() {
+        val source = listOf(File("src/main/java/life/meyers/mecha/AgentAvatar.kt"), File("app/src/main/java/life/meyers/mecha/AgentAvatar.kt")).first { it.isFile }.readText().filterNot { it.isWhitespace() }
+        assertTrue(source.contains("ColorFilter.tint(Color(android.graphics.Color.parseColor(avatarColor(id))),BlendMode.Modulate)"))
+        assertFalse(Regex("""BlendMode\.Color\b""").containsMatchIn(source))
+    }
 }
