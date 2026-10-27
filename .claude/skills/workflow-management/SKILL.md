@@ -195,6 +195,117 @@ When deactivated:
 - Goal lock is disabled.
 - Tool filtering resets to default agent toolset.
 
+### 6. `workflow_state_list`
+
+Lists states belonging to a specific workflow as summaries.
+
+Parameters:
+- `workflow_id` (string, required): Workflow ID or exact unique name.
+
+Returns:
+```json
+{
+  "status": "ok",
+  "workflow_id": "01838059-86d4-48af-a0b2-0cb006582728",
+  "workflow_name": "test workflow",
+  "states": [
+    {
+      "id": "112d9b4b-5044-4db1-aa25-77b743b8f0ca",
+      "workflow_id": "01838059-86d4-48af-a0b2-0cb006582728",
+      "name": "initial",
+      "description": "Initial setup state",
+      "goal": "Complete setup",
+      "allow_exit": true,
+      "allowed_tools": ["bash", "read"],
+      "reminder_count": 0,
+      "monitor_count": 0,
+      "transition_count": 0,
+      "created_at": "2026-10-27T19:18:16.308Z",
+      "updated_at": "2026-10-27T19:18:16.308Z"
+    }
+  ]
+}
+```
+
+### 7. `workflow_state_get`
+
+Retrieves full details for an individual workflow state.
+
+Parameters:
+- `state_id` (string, optional): Workflow state ID.
+- `workflow_id` (string, optional): Workflow ID or exact unique name (when looking up state by name or ID within a workflow).
+- `state_name` (string, optional): Workflow state name (when `workflow_id` is provided).
+- `state_id_or_name` (string, optional): Workflow state ID or name (when `workflow_id` is provided).
+
+> Note: Either `state_id` or `workflow_id` + `state_name`/`state_id_or_name` must be provided.
+
+Returns:
+```json
+{
+  "status": "ok",
+  "state": {
+    "id": "112d9b4b-5044-4db1-aa25-77b743b8f0ca",
+    "workflow_id": "01838059-86d4-48af-a0b2-0cb006582728",
+    "name": "initial",
+    "description": "Initial setup state",
+    "entry_text": "You are setting things up",
+    "goal": "Complete setup",
+    "reminders": [],
+    "monitors": [],
+    "allowed_tools": ["bash", "read"],
+    "transitions": [],
+    "allow_exit": true,
+    "ui_pos_x": 0.0,
+    "ui_pos_y": 0.0,
+    "created_at": "2026-10-27T19:18:16.308Z",
+    "updated_at": "2026-10-27T19:18:16.308Z"
+  }
+}
+```
+
+### 8. `workflow_state_save`
+
+Creates or updates an individual workflow state.
+
+Parameters:
+- `workflow_id` (string, required): Workflow ID or exact unique name.
+- `state_id` (string, optional): State ID to update (creates a new state if omitted).
+- `name` (string, optional): State name (required when creating a new state).
+- `description` (string, optional): State description.
+- `entry_text` (string, optional): Instructions injected into agent turn on state entry.
+- `goal` (string, optional): State goal (enforced and locked when agent is in state).
+- `allow_exit` (boolean, optional): Whether exiting the workflow is allowed from this state.
+- `allowed_tools` (array of strings, optional): Tool whitelist for this state.
+- `reminders` (array of objects, optional): State-scoped reminder configs.
+- `monitors` (array of objects, optional): State-scoped monitor configs.
+- `transitions` (array of objects, optional): Allowed forward transitions (`[{"target_state_id": "...", "description": "..."}]`).
+- `ui_pos_x` (number, optional): UI canvas X coordinate.
+- `ui_pos_y` (number, optional): UI canvas Y coordinate.
+
+Returns:
+```json
+{
+  "status": "ok",
+  "state": { ... }
+}
+```
+
+### 9. `workflow_state_delete`
+
+Deletes an individual workflow state.
+
+Parameters:
+- `state_id` (string, required): Workflow state ID to delete.
+
+Returns:
+```json
+{
+  "status": "ok",
+  "deleted": true,
+  "state_id": "50698d6f-abd3-45d9-b87d-cfebd384afc4"
+}
+```
+
 ---
 
 ## The Workflow Format (`mecha-workflows` v1 Bundle Schema)

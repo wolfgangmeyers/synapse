@@ -376,6 +376,30 @@ func TestWorkflowStateGoalCRUD(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, wfStates, 1)
 	require.Equal(t, goal3, wfStates[0].Goal)
+
+	// 5. Test ListWorkflowStateSummariesByWorkflow & FindWorkflowStateByIDOrName
+	summaries, err := s.ListWorkflowStateSummariesByWorkflow(ctx, wf.ID)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	require.Equal(t, stInWf.ID, summaries[0].ID)
+	require.Equal(t, "wf-state-goal", summaries[0].Name)
+	require.Equal(t, goal3, summaries[0].Goal)
+	require.False(t, summaries[0].HasMonitors)
+	require.False(t, summaries[0].HasReminders)
+
+	foundByID, err := s.FindWorkflowStateByIDOrName(ctx, wf.ID, stInWf.ID)
+	require.NoError(t, err)
+	require.NotNil(t, foundByID)
+	require.Equal(t, stInWf.ID, foundByID.ID)
+
+	foundByName, err := s.FindWorkflowStateByIDOrName(ctx, wf.ID, "wf-state-goal")
+	require.NoError(t, err)
+	require.NotNil(t, foundByName)
+	require.Equal(t, stInWf.ID, foundByName.ID)
+
+	foundNonExistent, err := s.FindWorkflowStateByIDOrName(ctx, wf.ID, "does-not-exist")
+	require.NoError(t, err)
+	require.Nil(t, foundNonExistent)
 }
 
 func TestWorkflowStateAllowedTools(t *testing.T) {

@@ -47,6 +47,10 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "workflow_save", Category: "Workflow Management", Description: "Create or update a workflow from an export bundle or fields. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
 	{ToolName: "workflow_delete", Category: "Workflow Management", Description: "Delete a workflow and its associated states. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
 	{ToolName: "workflow_assign", Category: "Workflow Management", Description: "Activate or deactivate a workflow on a managed agent. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
+	{ToolName: "workflow_state_list", Category: "Workflow Management", Description: "List states for a specific workflow as summaries. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
+	{ToolName: "workflow_state_get", Category: "Workflow Management", Description: "Retrieve full details for an individual workflow state. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
+	{ToolName: "workflow_state_save", Category: "Workflow Management", Description: "Create or update an individual workflow state. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
+	{ToolName: "workflow_state_delete", Category: "Workflow Management", Description: "Delete an individual workflow state. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.", DefaultEnabled: false, IsAdmin: true},
 
 	// Knowledge Base & Search
 	{ToolName: "kb_search", Category: "Knowledge Base & Search", Description: "Search the persistent knowledge base", DefaultEnabled: true},
