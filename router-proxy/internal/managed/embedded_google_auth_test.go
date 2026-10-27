@@ -1271,6 +1271,40 @@ func TestGoogleAuth_ConvertMessagesToGoogleContents_EmptyAssistantPreservesAlter
 	require.Equal(t, "user", contents3[0]["role"])
 }
 
+func TestGoogleAuth_ConvertMessagesToGoogleContents_AssistantThinkingOnlyPreserved(t *testing.T) {
+	// When an assistant message contains ONLY thinking tokens (e.g. Gemini 3.8 Flash internal reasoning),
+	// it must NOT be dropped, preserving valid turn alternation in the Google contents array.
+	messages := []ai.Message{
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Please think about this problem."},
+			},
+		},
+		ai.AssistantMessage{
+			Content: []ai.Content{
+				ai.ThinkingContent{Thinking: "Analyzing requirements deeply before responding..."},
+			},
+		},
+		ai.UserMessage{
+			Content: []ai.Content{
+				ai.TextContent{Text: "Here is additional context."},
+			},
+		},
+	}
+
+	contents := convertMessagesToGoogleContents(messages)
+	require.Len(t, contents, 3, "thinking-only assistant message must not be dropped")
+	require.Equal(t, "user", contents[0]["role"])
+	require.Equal(t, "model", contents[1]["role"])
+	require.Equal(t, "user", contents[2]["role"])
+
+	modelParts := contents[1]["parts"].([]any)
+	require.Len(t, modelParts, 1)
+	partMap := modelParts[0].(map[string]any)
+	require.Equal(t, true, partMap["thought"])
+	require.Equal(t, "Analyzing requirements deeply before responding...", partMap["text"])
+}
+
 func TestGoogleAuth_ConvertMessagesToGoogleContents_ConsecutiveTurns(t *testing.T) {
 	// 1. Consecutive text user messages (should merge)
 	textMsgs := []ai.Message{

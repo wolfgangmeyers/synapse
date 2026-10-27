@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 )
 
-const maxManagedHistoryEntries = 200
+const maxManagedHistoryEntries = 5000
 
 type ManagedHistoryError struct {
 	Code            string `json:"code"`

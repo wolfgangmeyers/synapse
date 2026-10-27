@@ -229,7 +229,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
         updated[existingIndex] = action.entry;
         return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: updated } } };
       }
-      const nextEntries = [...entries, action.entry].sort(compareManagedHistoryEntries).slice(-200);
+      const nextEntries = [...entries, action.entry].sort(compareManagedHistoryEntries).slice(-5000);
       return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: nextEntries } } };
     }
     case "message/append": {

@@ -912,6 +912,7 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 		} else if am, ok := asAssistantMsg(msg); ok {
 			toolCallCount := 0
 			hasNonEmptyText := false
+			hasThinking := false
 			for _, c := range am.Content {
 				switch part := c.(type) {
 				case ai.ToolCall:
@@ -932,9 +933,17 @@ func convertMessagesToGoogleContents(messages []ai.Message, args ...any) []map[s
 							hasNonEmptyText = true
 						}
 					}
+				case ai.ThinkingContent:
+					if strings.TrimSpace(part.Thinking) != "" {
+						hasThinking = true
+					}
+				case *ai.ThinkingContent:
+					if part != nil && strings.TrimSpace(part.Thinking) != "" {
+						hasThinking = true
+					}
 				}
 			}
-			if toolCallCount == 0 && !hasNonEmptyText {
+			if toolCallCount == 0 && !hasNonEmptyText && !hasThinking {
 				continue
 			}
 

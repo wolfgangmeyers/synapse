@@ -25,14 +25,14 @@ func TestManagedHistoryKeepsQuietEligibilityAtWriteAndCapsComplete(t *testing.T)
 	require.Equal(t, []ManagedHistoryEntry{{ID: "quiet-message", AgentID: "worker", At: result.ConversationMessage.RecordedAt, Level: "message", Message: body}}, page.Entries)
 
 	for index := 0; index < maxManagedHistoryEntries+1; index++ {
-		_, err := durable.AppendManagedCompleteHistory(ctx, "worker", "test", "info", fmt.Sprintf("event-%03d", index))
+		_, err := durable.AppendManagedCompleteHistory(ctx, "worker", "test", "info", fmt.Sprintf("event-%04d", index))
 		require.NoError(t, err)
 	}
 	complete, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, maxManagedHistoryEntries-1)
 	require.NoError(t, err)
 	require.Len(t, complete.Entries, maxManagedHistoryEntries-1)
-	require.Equal(t, "event-200", complete.Entries[0].Message)
-	require.Equal(t, "event-002", complete.Entries[len(complete.Entries)-1].Message)
+	require.Equal(t, fmt.Sprintf("event-%04d", maxManagedHistoryEntries), complete.Entries[0].Message)
+	require.Equal(t, "event-0002", complete.Entries[len(complete.Entries)-1].Message)
 	require.NotNil(t, complete.NextBefore)
 	_, err = durable.ManagedHistoryPage(ctx, "worker", "complete", *complete.NextBefore, 10)
 	require.NoError(t, err)
