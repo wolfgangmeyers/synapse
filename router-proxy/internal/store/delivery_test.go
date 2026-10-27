@@ -582,7 +582,7 @@ func TestRetireManagedRecipientSourceForTerminationValidatesBeforeMutation(t *te
 	fixture := newDirectTerminationFixture(t)
 	before := directTerminationLedger(t, fixture.store, fixture.fence.AgentID, fixture.fence.AgentID)
 	longAgent := strings.Repeat("a", 129)
-	longRecipient := strings.Repeat("a", 65)
+	longRecipient := strings.Repeat("a", 129)
 	for _, candidate := range []struct{ agent, recipient string }{
 		{"", fixture.fence.AgentID}, {"-invalid", fixture.fence.AgentID}, {"bad/agent", fixture.fence.AgentID}, {longAgent, fixture.fence.AgentID},
 		{fixture.fence.AgentID, ""}, {fixture.fence.AgentID, "-invalid"}, {fixture.fence.AgentID, "bad/recipient"}, {fixture.fence.AgentID, longRecipient},
