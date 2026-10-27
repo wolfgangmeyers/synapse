@@ -25,7 +25,7 @@ describe('ProgressHistoryModal', () => {
       { percent: 25, note: 'Step 1', timestamp: '2026-10-18T00:00:00Z' },
       { percent: 75, note: 'Step 2', timestamp: '2026-10-18T01:00:00Z' },
     ];
-    (global.fetch as any).mockResolvedValueOnce({
+    (globalThis.fetch as any).mockResolvedValueOnce({
       ok: true,
       json: async () => mockData,
     });
@@ -42,7 +42,7 @@ describe('ProgressHistoryModal', () => {
   });
 
   it('renders empty message when history is empty', async () => {
-    (global.fetch as any).mockResolvedValueOnce({
+    (globalThis.fetch as any).mockResolvedValueOnce({
       ok: true,
       json: async () => [],
     });
@@ -55,7 +55,7 @@ describe('ProgressHistoryModal', () => {
   });
 
   it('calls onClose when close button clicked or Escape pressed', async () => {
-    (global.fetch as any).mockResolvedValueOnce({
+    (globalThis.fetch as any).mockResolvedValueOnce({
       ok: true,
       json: async () => [],
     });

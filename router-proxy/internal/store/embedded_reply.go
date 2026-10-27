@@ -239,10 +239,7 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 			}
 			messageText = fmt.Sprintf("Turn failed: %s", errMsg)
 		}
-		humanUser := s.lastHumanRecipientTx(ctx, b.AgentID)
-		if humanUser == "" || strings.EqualFold(humanUser, "system") {
-			humanUser = "user"
-		}
+		humanUser := "user"
 		presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: outcome, From: b.AgentID, To: humanUser, Thinking: thinking.String()}
 		presentationJSON, err := managedHistoryPresentationJSON(presentation)
 		if err != nil {

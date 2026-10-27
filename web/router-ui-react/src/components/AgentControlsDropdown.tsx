@@ -25,11 +25,9 @@ export interface AgentControlsDropdownProps {
   onScratchpad?: (() => void) | undefined;
   onMonitors?: (() => void) | undefined;
   onWorkerTools?: (() => void) | undefined;
-  onToggleChatOnly?: (() => void) | undefined;
   onToggleScrollLock?: (() => void) | undefined;
   scrollLocked?: boolean | undefined;
   allowInlineTools?: boolean | undefined;
-  chatOnly?: boolean | undefined;
   hasActiveWorkflow?: boolean | undefined;
   activeReminderCount?: number | undefined;
   activeWatchersCount?: number | undefined;
@@ -51,11 +49,9 @@ export function AgentControlsDropdown({
   onScratchpad,
   onMonitors,
   onWorkerTools,
-  onToggleChatOnly,
   onToggleScrollLock,
   scrollLocked,
   allowInlineTools: _allowInlineTools,
-  chatOnly: _chatOnly,
   hasActiveWorkflow: _hasActiveWorkflow,
   activeReminderCount: _activeReminderCount,
   activeWatchersCount: _activeWatchersCount,
@@ -111,7 +107,6 @@ export function AgentControlsDropdown({
     { id: "scratchpad", label: "Scratchpad", icon: "fa-solid fa-note-sticky", action: onScratchpad },
     { id: "monitors", label: "Monitors", icon: "fa-solid fa-shield-halved", action: onMonitors },
     { id: "workerTools", label: "Worker tools", icon: "fa-solid fa-wrench", action: onWorkerTools },
-    { id: "chatOnly", label: "Chat only", icon: "fa-solid fa-comments", action: onToggleChatOnly },
     {
       id: "scrollLock",
       label: "Scroll lock",

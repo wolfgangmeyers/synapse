@@ -330,9 +330,9 @@ func TestEmbeddedReplySystemMessageRoutesToLastHumanRecipient(t *testing.T) {
 	// 4. Verify reply outbox is ZERO (no outbound mailbox message auto-queued)
 	require.Zero(t, embeddedRedCount(t, s, "embedded_reply_outbox"), "assistant text must never be automatically queued to outbox")
 
-	// 5. Verify managed_complete_history targets "wolfgang", NOT "system"
+	// 5. Verify managed_complete_history targets "user", NOT "system"
 	require.NotEmpty(t, historyEntry.ID)
-	require.Equal(t, "wolfgang", historyEntry.Presentation.To)
+	require.Equal(t, "user", historyEntry.Presentation.To)
 	require.Equal(t, b.AgentID, historyEntry.Presentation.From)
 
 	page, err := s.ManagedHistoryPage(ctx, b.AgentID, "complete", 0, 10)

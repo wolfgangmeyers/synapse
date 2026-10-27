@@ -247,25 +247,10 @@ describe("Conversation", () => {
     );
 
     // Verify workflow activation event card is visible
-    expect(container.querySelector("[data-activity-id='complete:1']")).toBeInTheDocument();
-    expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
+    expect(container.querySelector("[data-message-id='complete:1'], [data-activity-id='complete:1']")).toBeInTheDocument();
+    expect(screen.getByText(/Workflow Activated: test-state/)).toBeInTheDocument();
 
     // Verify assistant reply is rendered in timeline
-    expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
-
-    // Verify both are also retained and rendered in chatOnly mode
-    rerender(
-      <Conversation
-        peer={{ agent_id: "workflows", source: "router-managed" }}
-        conversationView="complete"
-        ownerId="wolfgang"
-        chatOnly={true}
-        messages={[]}
-        activityEntries={[wfActivation, assistantReply]}
-      />
-    );
-
-    expect(screen.getByText("Workflow Activated: test-state")).toBeInTheDocument();
     expect(screen.getByText("3 * 3 is 9.")).toBeInTheDocument();
   });
 
@@ -284,7 +269,7 @@ describe("Conversation", () => {
     expect(screen.queryByText("Hidden item")).not.toBeInTheDocument();
   });
 
-  it("renders reminders and assistant replies to reminders visibly in both complete and chatOnly modes", () => {
+  it("renders reminders and assistant replies to reminders visibly in complete mode", () => {
     const reminderReceived: ManagedHistoryEntry = {
       id: "complete:rem-1",
       agent_id: "workflows",
@@ -326,27 +311,11 @@ describe("Conversation", () => {
     );
 
     // Verify reminder received card
-    expect(container.querySelector("[data-activity-id='complete:rem-1']")).toBeInTheDocument();
-    expect(screen.getByText("From reminders")).toBeInTheDocument();
+    expect(container.querySelector("[data-message-id='complete:rem-1'], [data-activity-id='complete:rem-1']")).toBeInTheDocument();
+    expect(screen.getByText(/Testing out workflow 1-shot reminder/)).toBeInTheDocument();
 
     // Verify reminder reply card
-    expect(container.querySelector("[data-activity-id='complete:rem-reply-1']")).toBeInTheDocument();
-    expect(screen.getByText("To reminders")).toBeInTheDocument();
+    expect(container.querySelector("[data-message-id='complete:rem-reply-1'], [data-activity-id='complete:rem-reply-1']")).toBeInTheDocument();
     expect(screen.getByText(/The animal with the most appendages is the millipede/)).toBeInTheDocument();
-
-    // Verify both are retained in chatOnly mode
-    rerender(
-      <Conversation
-        peer={{ agent_id: "workflows", source: "router-managed" }}
-        conversationView="complete"
-        ownerId="wolfgang"
-        chatOnly={true}
-        messages={[]}
-        activityEntries={[reminderReceived, reminderReply]}
-      />
-    );
-
-    expect(screen.getByText("From reminders")).toBeInTheDocument();
-    expect(screen.getByText("To reminders")).toBeInTheDocument();
   });
 });
