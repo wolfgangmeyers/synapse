@@ -2244,6 +2244,14 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 							hasText = true
 						}
 					}
+				case ai.ThinkingContent:
+					if strings.TrimSpace(c.Thinking) != "" {
+						hasText = true
+					}
+				case *ai.ThinkingContent:
+					if c != nil && strings.TrimSpace(c.Thinking) != "" {
+						hasText = true
+					}
 				}
 			}
 		case *ai.AssistantMessage:
@@ -2275,6 +2283,14 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 							if t != "" && t != "(empty response)" {
 								hasText = true
 							}
+						}
+					case ai.ThinkingContent:
+						if strings.TrimSpace(c.Thinking) != "" {
+							hasText = true
+						}
+					case *ai.ThinkingContent:
+						if c != nil && strings.TrimSpace(c.Thinking) != "" {
+							hasText = true
 						}
 					}
 				}

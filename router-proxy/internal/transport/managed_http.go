@@ -1197,7 +1197,7 @@ func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Reques
 	}
 	if raw := query.Get("limit"); raw != "" {
 		limit, err = strconv.Atoi(raw)
-		if err != nil || limit < 1 || limit > 200 {
+		if err != nil || limit < 1 || limit > 5000 {
 			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
 			return
 		}

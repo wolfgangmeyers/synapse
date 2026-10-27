@@ -1,4 +1,4 @@
-export const HISTORY_LIMIT = 200;
+export const HISTORY_LIMIT = 5000;
 export const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const THUMBNAIL_LIMIT = 600;
 export const THUMBNAIL_RETENTION_MS = HISTORY_RETENTION_MS;

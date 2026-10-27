@@ -23,7 +23,7 @@ describe("history retention", () => {
     const retained = pruneHistoryMessages(messages, now);
 
     expect(retained).toHaveLength(HISTORY_LIMIT);
-    expect(retained[0]?.id).toBe("message-199");
+    expect(retained[0]?.id).toBe(`message-${HISTORY_LIMIT - 1}`);
     expect(retained.at(-1)?.id).toBe("message-0");
     expect(retained.some((message) => message.id === "old")).toBe(false);
   });
