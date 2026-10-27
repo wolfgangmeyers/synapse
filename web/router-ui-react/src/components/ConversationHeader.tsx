@@ -39,7 +39,6 @@ export interface ConversationHeaderProps {
   onAction?: ((action: "restart" | "reset") => void) | undefined;
   onConfirmTermination?: ((confirm: boolean) => void) | undefined;
   onScratchpad?: (() => void) | undefined;
-  onManageManaged?: (() => void) | undefined;
   onContextThresholds?: (() => void) | undefined;
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
@@ -88,7 +87,7 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
-export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onManageManaged, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory, onOpenWorkflow }: ConversationHeaderProps): ReactElement {
+export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, scrollLocked, onToggleScrollLock, chatOnly, onToggleChatOnly, onOpenProgressHistory, onOpenWorkflow }: ConversationHeaderProps): ReactElement {
 
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
@@ -192,7 +191,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     "scratchpad",
     "monitors",
     "workerTools",
-    "manageWorker",
   ];
 
   const PINNED_STORAGE_KEY = "mecha.toolbar.pinnedControls.v2";
@@ -583,16 +581,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && pinnedControls.includes("manageWorker") && onManageManaged ? (
-                  <HeaderActionButton
-                    className="manage-worker-header-button"
-                    onClick={onManageManaged}
-                    aria-label="Manage worker"
-                    title="Manage worker"
-                    icon="fa-solid fa-sliders"
-                  />
-                ) : null}
-
                 {agent && (chatOnly || pinnedControls.includes("chatOnly")) ? (
                   <HeaderActionButton
                     className={`chat-only-button ${chatOnly ? "active" : ""}`}
@@ -652,7 +640,6 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                       onWorkerTools={() => {
                         setShowWorkerToolsDialog(true);
                       }}
-                      onManageManaged={onManageManaged}
                       onToggleChatOnly={onToggleChatOnly}
                       onToggleScrollLock={onToggleScrollLock}
                       scrollLocked={scrollLocked}

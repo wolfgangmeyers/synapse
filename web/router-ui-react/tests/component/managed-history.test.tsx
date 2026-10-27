@@ -234,18 +234,13 @@ describe("Selected-agent conversation modes", () => {
 
   it("shows managed controls and terminating progress without a raw State popup action", async () => {
     const user = userEvent.setup();
-    const onManageManaged = vi.fn();
     const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "terminated", lifecycle_state: "terminating", activity_state: "active", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
 
-    render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "active", managed_agent: managedAgent }} onManageManaged={onManageManaged} />);
+    render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "active", managed_agent: managedAgent }} />);
 
     expect(screen.getByRole("status")).toHaveTextContent("Terminating…");
     const manageButton = screen.getByRole("button", { name: "More agent controls" });
     await user.click(manageButton);
-    const menu = screen.getByRole("menu", { name: "Agent controls menu" });
-    const manageWorkerTile = within(menu).getByRole("button", { name: "Manage worker" });
-    await user.click(manageWorkerTile);
-    expect(onManageManaged).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
   });
 
