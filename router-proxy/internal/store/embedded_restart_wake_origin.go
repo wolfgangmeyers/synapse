@@ -20,7 +20,7 @@ type embeddedWakeOrigin struct {
 // appends remain untagged; neither path can retroactively tag a keyed entry.
 func (s *Store) AppendEmbeddedRestartWakeFinalAt(ctx context.Context, b EmbeddedBinding, g int64, id string, expectedSeq int64, expectedDigest, key string, body []byte) (EmbeddedEntry, error) {
 	var entry EmbeddedEntry
-	if g <= 0 || id == "" || len(id) > 256 || key == "" || len(key) > 256 || expectedSeq < 0 || expectedDigest == "" || !embeddedCheckedStop("assistant", body) {
+	if g <= 0 || id == "" || len(id) > 256 || key == "" || len(key) > 1024 || expectedSeq < 0 || expectedDigest == "" || !embeddedCheckedStop("assistant", body) {
 		return entry, errors.New("invalid checked wake final")
 	}
 	err := s.runImmediate(ctx, func() error {

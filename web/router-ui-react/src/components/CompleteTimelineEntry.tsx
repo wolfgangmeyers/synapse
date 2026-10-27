@@ -59,10 +59,12 @@ export function isMailboxSendToUser(
   const isWorkerSend = toolName === "mecha_worker" && isRecord(entry.tool_input) && entry.tool_input.action === "send";
   const isImageSend = toolName === "mecha_send_image";
   const isMailboxTool = toolName === "mecha_mailbox_send" || isWorkerSend || isImageSend;
-  const isOutboundMessage = entry.presentation?.kind === "message" && (
-    entry.message === "Message sent" || entry.message === "Reply sent" ||
-    entry.presentation?.from === entry.agent_id
-  );
+  const isOutboundMessage =
+    entry.presentation?.kind === "message" ||
+    entry.category === "assistant" ||
+    entry.message === "Assistant response" ||
+    entry.message === "Message sent" ||
+    entry.message === "Reply sent";
 
   if (!isMailboxTool && !isOutboundMessage) return undefined;
 
@@ -73,12 +75,12 @@ export function isMailboxSendToUser(
     rawBody = (typeof entry.tool_input.message === "string" ? entry.tool_input.message : typeof entry.tool_input.body === "string" ? entry.tool_input.body : "") || entry.message_content || "";
   } else {
     const mailboxDetails = getMailboxSendDetails(entry.tool_input);
-    recipient = mailboxDetails?.recipient ?? entry.presentation?.to;
-    rawBody = mailboxDetails?.body ?? entry.message_content;
+    recipient = entry.presentation?.to || mailboxDetails?.recipient;
+    rawBody = entry.message_content || entry.presentation?.summary || mailboxDetails?.body;
   }
-  const body = rawBody?.trim();
+  const bodyText = rawBody?.trim();
 
-  if (!recipient || (!body && !isImageSend)) return undefined;
+  if (!bodyText && !isImageSend) return undefined;
 
   const toolCallsExist = typeof entriesOrHasToolCalls === "boolean"
     ? entriesOrHasToolCalls
@@ -86,19 +88,13 @@ export function isMailboxSendToUser(
       ? entriesOrHasToolCalls.some((e) => e.presentation?.kind === "tool" || (e as { category?: unknown }).category === "managed_tool")
       : true;
 
-  if (body === "(Action completed without additional text)" && toolCallsExist) {
+  if (bodyText === "(Action completed without additional text)" && toolCallsExist) {
     return undefined;
   }
 
-  const normalizedRecipient = recipient.trim().toLowerCase();
-  const normalizedUser = (currentUserId || currentUsername()).trim().toLowerCase();
-
-  if (normalizedRecipient === normalizedUser || normalizedRecipient === "user") {
-    const from = entry.presentation?.from ?? entry.sender_identity ?? entry.agent_id;
-    return { recipient, body: rawBody ?? body ?? "", from };
-  }
-
-  return undefined;
+  const finalRecipient = recipient || entry.presentation?.to || "user";
+  const from = entry.presentation?.from || entry.agent_id;
+  return { recipient: finalRecipient, body: rawBody ?? bodyText ?? "", from };
 }
 
 export function getThinkingContent(entry: ManagedHistoryEntry): string | undefined {

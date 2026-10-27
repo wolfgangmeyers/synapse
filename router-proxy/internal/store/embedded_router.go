@@ -860,7 +860,7 @@ func (s *Store) AppendEmbeddedEntry(ctx context.Context, b EmbeddedBinding, kind
 // binding, expected head, kind and payload match the original append.
 func (s *Store) AppendEmbeddedEntryAt(ctx context.Context, b EmbeddedBinding, expectedSeq int64, expectedDigest, key, kind string, body []byte) (EmbeddedEntry, error) {
 	var entry EmbeddedEntry
-	if key == "" || len(key) > 256 || expectedSeq < 0 {
+	if key == "" || len(key) > 1024 || expectedSeq < 0 {
 		return entry, errors.New("invalid append expectation or key")
 	}
 	err := s.runImmediate(ctx, func() error {
@@ -877,7 +877,7 @@ func (s *Store) AppendEmbeddedEntryAt(ctx context.Context, b EmbeddedBinding, ex
 // A nil origin is explicitly untagged. No retry may attach an origin later.
 func (s *Store) appendEmbeddedKeyedTx(ctx context.Context, b EmbeddedBinding, expectedSeq int64, expectedDigest, key, kind string, body []byte, origin *embeddedWakeOrigin) (EmbeddedEntry, error) {
 	var entry EmbeddedEntry
-	if key == "" || len(key) > 256 || expectedSeq < 0 {
+	if key == "" || len(key) > 1024 || expectedSeq < 0 {
 		return entry, errors.New("invalid append expectation or key")
 	}
 	var seq int64

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +182,16 @@ func TestEmbeddedRouterExpectedHeadAndStableAppendKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, first.Digest, second.ParentDigest)
 	require.Len(t, redReopen(t, s, b).Entries, 2)
+
+	// Keys up to 1024 bytes are accepted; keys exceeding 1024 bytes are rejected
+	longKey := strings.Repeat("k", 1024)
+	third, err := s.AppendEmbeddedEntryAt(context.Background(), b, second.Sequence, second.Digest, longKey, "user", []byte("prompt-3"))
+	require.NoError(t, err)
+	require.Equal(t, int64(3), third.Sequence)
+
+	tooLongKey := strings.Repeat("k", 1025)
+	_, err = s.AppendEmbeddedEntryAt(context.Background(), b, third.Sequence, third.Digest, tooLongKey, "user", []byte("prompt-4"))
+	require.Error(t, err)
 }
 
 func TestEmbeddedRouterObservedEffectIsImmutable(t *testing.T) {
