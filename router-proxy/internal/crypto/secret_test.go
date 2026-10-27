@@ -50,6 +50,7 @@ func TestDeriveKeyFromFile(t *testing.T) {
 	t.Setenv("MECHA_SECRET_KEY", "")
 
 	tempDir := t.TempDir()
+	require.NoError(t, os.Chmod(tempDir, 0o755))
 	stateDir := filepath.Join(tempDir, "state")
 
 	// File doesn't exist yet -> DeriveKey creates it with 0600

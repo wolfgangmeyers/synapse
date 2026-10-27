@@ -49,6 +49,10 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "workflow_save", Name: "workflow_save", Category: "admin", Description: "Create or update a workflow from an export bundle or fields"},
 	{ID: "workflow_delete", Name: "workflow_delete", Category: "admin", Description: "Delete a workflow and its associated states"},
 	{ID: "workflow_assign", Name: "workflow_assign", Category: "admin", Description: "Activate or deactivate a workflow on a managed agent"},
+	{ID: "workflow_state_list", Name: "workflow_state_list", Category: "admin", Description: "List states for a specific workflow as summaries"},
+	{ID: "workflow_state_get", Name: "workflow_state_get", Category: "admin", Description: "Retrieve full details for an individual workflow state"},
+	{ID: "workflow_state_save", Name: "workflow_state_save", Category: "admin", Description: "Create or update an individual workflow state"},
+	{ID: "workflow_state_delete", Name: "workflow_state_delete", Category: "admin", Description: "Delete an individual workflow state"},
 }
 
 // ValidWorkflowTools is derived directly from CanonicalWorkflowTools, including interchangeable aliases.

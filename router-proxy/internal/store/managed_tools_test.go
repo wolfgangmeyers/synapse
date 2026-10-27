@@ -75,7 +75,7 @@ func TestManagedTools(t *testing.T) {
 		require.Equal(t, 4, categoryCounts["System & Shell"])
 		require.Equal(t, 5, categoryCounts["Subagent Lifecycle"])
 		require.Equal(t, 5, categoryCounts["Messaging & Routing"])
-		require.Equal(t, 12, categoryCounts["Workflow Management"])
+		require.Equal(t, 16, categoryCounts["Workflow Management"])
 		require.Equal(t, 5, categoryCounts["Knowledge Base & Search"])
 		require.Equal(t, 5, categoryCounts["Worker Administration"])
 	})

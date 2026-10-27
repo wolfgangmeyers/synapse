@@ -53,7 +53,7 @@ func TestWorkflowAdminTools_RegistrationAndFiltering(t *testing.T) {
 
 	ctx := context.Background()
 	wfTools := mgr.embeddedWorkflowManagementTools(owner)
-	require.Len(t, wfTools, 5)
+	require.Len(t, wfTools, 9)
 
 	toolNames := make(map[string]bool)
 	for _, tool := range wfTools {
@@ -258,4 +258,87 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 	delWf, err := db.GetWorkflow(ctx, wfID)
 	require.NoError(t, err)
 	require.Nil(t, delWf)
+
+	// 8. Workflow State Tools: state_list, state_save, state_get, state_delete
+	stateListTool := mgr.embeddedWorkflowStateListTool(owner)
+	stateGetTool := mgr.embeddedWorkflowStateGetTool(owner)
+	stateSaveTool := mgr.embeddedWorkflowStateSaveTool(owner)
+	stateDeleteTool := mgr.embeddedWorkflowStateDeleteTool(owner)
+
+	// List states in importedWfID (should have state_init and state_finish)
+	resStateList, err := stateListTool.Execute(ctx, "c10", map[string]any{"workflow_id": importedWfID}, nil)
+	require.NoError(t, err)
+	var stateListResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resStateList.Content[0].(ai.TextContent).Text), &stateListResp))
+	require.Equal(t, "ok", stateListResp["status"])
+	require.Equal(t, importedWfID, stateListResp["workflow_id"])
+	statesList, ok := stateListResp["states"].([]any)
+	require.True(t, ok)
+	require.Len(t, statesList, 2)
+
+	// Create a new state via workflow_state_save
+	resStateSave, err := stateSaveTool.Execute(ctx, "c11", map[string]any{
+		"workflow_id": importedWfID,
+		"name":        "Intermediate State",
+		"description": "Performs intermediate actions",
+		"goal":        "Process items",
+		"entry_text":  "Please process the items now.",
+		"allow_exit":  false,
+		"allowed_tools": []any{"read", "edit"},
+	}, nil)
+	require.NoError(t, err)
+	var stateSaveResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resStateSave.Content[0].(ai.TextContent).Text), &stateSaveResp))
+	require.Equal(t, "ok", stateSaveResp["status"])
+	newStateObj := stateSaveResp["state"].(map[string]any)
+	newStateID := newStateObj["id"].(string)
+	require.NotEmpty(t, newStateID)
+	require.Equal(t, "Intermediate State", newStateObj["name"])
+
+	// Get by state_id
+	resStateGetID, err := stateGetTool.Execute(ctx, "c12", map[string]any{"state_id": newStateID}, nil)
+	require.NoError(t, err)
+	var stateGetIDResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resStateGetID.Content[0].(ai.TextContent).Text), &stateGetIDResp))
+	require.Equal(t, "ok", stateGetIDResp["status"])
+	require.Equal(t, newStateID, stateGetIDResp["state"].(map[string]any)["id"])
+
+	// Get by workflow_id and state_name
+	resStateGetName, err := stateGetTool.Execute(ctx, "c13", map[string]any{
+		"workflow_id": importedWfID,
+		"state_name":  "Intermediate State",
+	}, nil)
+	require.NoError(t, err)
+	var stateGetNameResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resStateGetName.Content[0].(ai.TextContent).Text), &stateGetNameResp))
+	require.Equal(t, "ok", stateGetNameResp["status"])
+	require.Equal(t, newStateID, stateGetNameResp["state"].(map[string]any)["id"])
+
+	// Update the state via workflow_state_save
+	resStateUpdate, err := stateSaveTool.Execute(ctx, "c14", map[string]any{
+		"workflow_id": importedWfID,
+		"state_id":    newStateID,
+		"name":        "Intermediate State Updated",
+		"goal":        "Process items thoroughly",
+	}, nil)
+	require.NoError(t, err)
+	var stateUpdateResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resStateUpdate.Content[0].(ai.TextContent).Text), &stateUpdateResp))
+	require.Equal(t, "ok", stateUpdateResp["status"])
+	require.Equal(t, "Intermediate State Updated", stateUpdateResp["state"].(map[string]any)["name"])
+	require.Equal(t, "Process items thoroughly", stateUpdateResp["state"].(map[string]any)["goal"])
+
+	// Delete state via workflow_state_delete
+	resStateDelete, err := stateDeleteTool.Execute(ctx, "c15", map[string]any{"state_id": newStateID}, nil)
+	require.NoError(t, err)
+	var stateDeleteResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resStateDelete.Content[0].(ai.TextContent).Text), &stateDeleteResp))
+	require.Equal(t, "ok", stateDeleteResp["status"])
+	require.True(t, stateDeleteResp["deleted"].(bool))
+	require.Equal(t, newStateID, stateDeleteResp["state_id"])
+
+	// Verify state is gone
+	delState, err := db.GetWorkflowState(ctx, newStateID)
+	require.NoError(t, err)
+	require.Nil(t, delState)
 }

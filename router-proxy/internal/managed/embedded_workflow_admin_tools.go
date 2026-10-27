@@ -15,13 +15,17 @@ import (
 // WorkflowManagementCategory is the tool category for workflow management tools.
 const WorkflowManagementCategory = "Workflow Management"
 
-// WorkflowAdminToolNames lists the 5 administrative tools for workflow management.
+// WorkflowAdminToolNames lists the 9 administrative tools for workflow management.
 var WorkflowAdminToolNames = []string{
 	"workflow_list",
 	"workflow_get",
 	"workflow_save",
 	"workflow_delete",
 	"workflow_assign",
+	"workflow_state_list",
+	"workflow_state_get",
+	"workflow_state_save",
+	"workflow_state_delete",
 }
 
 // ----------------------------------------------------------------------
@@ -584,7 +588,400 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 	}
 }
 
-// embeddedWorkflowManagementTools returns the 5 workflow management tools for an embedded session.
+// ----------------------------------------------------------------------
+// 6. workflow_state_list
+// ----------------------------------------------------------------------
+
+func embeddedWorkflowStateListSchema() *ai.Schema {
+	closed := false
+	schema := ai.Object(
+		ai.Prop("workflow_id", ai.String("Workflow ID or exact unique name.")),
+	)
+	schema.AdditionalAllowed = &closed
+	return schema
+}
+
+func (m *Manager) embeddedWorkflowStateListTool(owner embeddedOwner) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "workflow_state_list",
+		Description: "List states for a specific workflow as summaries. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.",
+		Parameters:  embeddedWorkflowStateListSchema(),
+		Execute: func(ctx context.Context, callID string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if m == nil || m.store == nil {
+				return agent.AgentToolResult{}, errors.New("manager store is unavailable")
+			}
+			if owner.binding.AgentID != "" && owner.identity != "" {
+				if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			}
+
+			idOrName, ok := args["workflow_id"].(string)
+			if !ok || strings.TrimSpace(idOrName) == "" {
+				return agent.AgentToolResult{}, errors.New("invalid or missing workflow_id")
+			}
+			idOrName = strings.TrimSpace(idOrName)
+
+			wf, err := m.store.FindWorkflowByIDOrName(ctx, idOrName)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			if wf == nil {
+				return agent.AgentToolResult{}, fmt.Errorf("workflow %q not found", idOrName)
+			}
+
+			summaries, err := m.store.ListWorkflowStateSummariesByWorkflow(ctx, wf.ID)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			respBytes, err := json.Marshal(map[string]any{
+				"status":        "ok",
+				"workflow_id":   wf.ID,
+				"workflow_name": wf.Name,
+				"states":        summaries,
+			})
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+		},
+	}
+}
+
+// ----------------------------------------------------------------------
+// 7. workflow_state_get
+// ----------------------------------------------------------------------
+
+func embeddedWorkflowStateGetSchema() *ai.Schema {
+	closed := false
+	schema := ai.Object(
+		ai.Opt("state_id", ai.String("Workflow state ID.")),
+		ai.Opt("workflow_id", ai.String("Workflow ID or exact unique name (when looking up state by name).")),
+		ai.Opt("state_name", ai.String("Workflow state name (when workflow_id is provided).")),
+		ai.Opt("state_id_or_name", ai.String("Workflow state ID or name (when workflow_id is provided).")),
+	)
+	schema.AdditionalAllowed = &closed
+	return schema
+}
+
+func (m *Manager) embeddedWorkflowStateGetTool(owner embeddedOwner) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "workflow_state_get",
+		Description: "Retrieve full details for an individual workflow state. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.",
+		Parameters:  embeddedWorkflowStateGetSchema(),
+		Execute: func(ctx context.Context, callID string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if m == nil || m.store == nil {
+				return agent.AgentToolResult{}, errors.New("manager store is unavailable")
+			}
+			if owner.binding.AgentID != "" && owner.identity != "" {
+				if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			}
+
+			var stateID string
+			if rawID, ok := args["state_id"].(string); ok && strings.TrimSpace(rawID) != "" {
+				stateID = strings.TrimSpace(rawID)
+			}
+
+			var wfID string
+			if rawWfID, ok := args["workflow_id"].(string); ok && strings.TrimSpace(rawWfID) != "" {
+				trimmedWfID := strings.TrimSpace(rawWfID)
+				wf, err := m.store.FindWorkflowByIDOrName(ctx, trimmedWfID)
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				if wf == nil {
+					return agent.AgentToolResult{}, fmt.Errorf("workflow %q not found", trimmedWfID)
+				}
+				wfID = wf.ID
+			}
+
+			var stateNameOrID string
+			if rawName, ok := args["state_name"].(string); ok && strings.TrimSpace(rawName) != "" {
+				stateNameOrID = strings.TrimSpace(rawName)
+			} else if rawIDOrName, ok := args["state_id_or_name"].(string); ok && strings.TrimSpace(rawIDOrName) != "" {
+				stateNameOrID = strings.TrimSpace(rawIDOrName)
+			}
+
+			var st *store.WorkflowState
+			var err error
+
+			if stateID != "" {
+				st, err = m.store.GetWorkflowState(ctx, stateID)
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			} else if stateNameOrID != "" {
+				st, err = m.store.FindWorkflowStateByIDOrName(ctx, wfID, stateNameOrID)
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			} else {
+				return agent.AgentToolResult{}, errors.New("either state_id or workflow_id + state_name/state_id_or_name must be provided")
+			}
+
+			if st == nil {
+				ident := stateID
+				if ident == "" {
+					ident = stateNameOrID
+				}
+				return agent.AgentToolResult{}, fmt.Errorf("workflow state %q not found", ident)
+			}
+
+			respBytes, err := json.Marshal(map[string]any{
+				"status": "ok",
+				"state":  st,
+			})
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+		},
+	}
+}
+
+// ----------------------------------------------------------------------
+// 8. workflow_state_save
+// ----------------------------------------------------------------------
+
+func embeddedWorkflowStateSaveSchema() *ai.Schema {
+	closed := false
+	schema := ai.Object(
+		ai.Prop("workflow_id", ai.String("Workflow ID or exact unique name.")),
+		ai.Opt("state_id", ai.String("Optional state ID when updating an existing state.")),
+		ai.Opt("name", ai.String("State name.")),
+		ai.Opt("description", ai.String("State description.")),
+		ai.Opt("entry_text", ai.String("Entry instructions text.")),
+		ai.Opt("goal", ai.String("Goal for this state.")),
+		ai.Opt("reminders", &ai.Schema{Type: "array", Description: "State reminder configs."}),
+		ai.Opt("monitors", &ai.Schema{Type: "array", Description: "State monitor configs."}),
+		ai.Opt("allowed_tools", &ai.Schema{Type: "array", Description: "Allowed tool names list."}),
+		ai.Opt("transitions", &ai.Schema{Type: "array", Description: "Transition configs list."}),
+		ai.Opt("allow_exit", ai.Boolean("Whether exiting workflow is allowed from this state.")),
+		ai.Opt("ui_pos_x", ai.Number("UI X position.")),
+		ai.Opt("ui_pos_y", ai.Number("UI Y position.")),
+	)
+	schema.AdditionalAllowed = &closed
+	return schema
+}
+
+func (m *Manager) embeddedWorkflowStateSaveTool(owner embeddedOwner) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "workflow_state_save",
+		Description: "Create or update an individual workflow state. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.",
+		Parameters:  embeddedWorkflowStateSaveSchema(),
+		Execute: func(ctx context.Context, callID string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if m == nil || m.store == nil {
+				return agent.AgentToolResult{}, errors.New("manager store is unavailable")
+			}
+			if owner.binding.AgentID != "" && owner.identity != "" {
+				if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			}
+
+			rawWfID, ok := args["workflow_id"].(string)
+			if !ok || strings.TrimSpace(rawWfID) == "" {
+				return agent.AgentToolResult{}, errors.New("invalid or missing workflow_id")
+			}
+			rawWfID = strings.TrimSpace(rawWfID)
+
+			wf, err := m.store.FindWorkflowByIDOrName(ctx, rawWfID)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			if wf == nil {
+				return agent.AgentToolResult{}, fmt.Errorf("workflow %q not found", rawWfID)
+			}
+			workflowID := wf.ID
+
+			var stateID string
+			if rawID, ok := args["state_id"].(string); ok && strings.TrimSpace(rawID) != "" {
+				stateID = strings.TrimSpace(rawID)
+			}
+
+			var existingState *store.WorkflowState
+			if stateID != "" {
+				existingState, err = m.store.GetWorkflowState(ctx, stateID)
+				if err != nil {
+					return agent.AgentToolResult{}, err
+				}
+				if existingState == nil {
+					return agent.AgentToolResult{}, fmt.Errorf("workflow state %q not found", stateID)
+				}
+			}
+
+			req := store.WorkflowStateRequest{
+				WorkflowID: &workflowID,
+			}
+
+			if existingState != nil {
+				req.Name = existingState.Name
+				req.Description = existingState.Description
+				req.EntryText = existingState.EntryText
+				req.Goal = existingState.Goal
+				req.Reminders = existingState.Reminders
+				req.Monitors = existingState.Monitors
+				req.AllowedTools = existingState.AllowedTools
+				req.Transitions = existingState.Transitions
+				allowExitVal := existingState.AllowExit
+				req.AllowExit = &allowExitVal
+				xVal := existingState.UIPosX
+				yVal := existingState.UIPosY
+				req.UIPosX = &xVal
+				req.UIPosY = &yVal
+			}
+
+			if name, ok := args["name"].(string); ok {
+				req.Name = strings.TrimSpace(name)
+			}
+			if desc, ok := args["description"].(string); ok {
+				req.Description = desc
+			}
+			if entry, ok := args["entry_text"].(string); ok {
+				req.EntryText = entry
+			}
+			if goal, ok := args["goal"].(string); ok {
+				req.Goal = goal
+			}
+			if allowExit, ok := args["allow_exit"].(bool); ok {
+				req.AllowExit = &allowExit
+			}
+			if posX, ok := args["ui_pos_x"].(float64); ok {
+				req.UIPosX = &posX
+			}
+			if posY, ok := args["ui_pos_y"].(float64); ok {
+				req.UIPosY = &posY
+			}
+
+			if rawReminders, ok := args["reminders"]; ok && rawReminders != nil {
+				remBytes, err := json.Marshal(rawReminders)
+				if err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid reminders format: %w", err)
+				}
+				var reminders []store.WorkflowReminderConfig
+				if err := json.Unmarshal(remBytes, &reminders); err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid reminders schema: %w", err)
+				}
+				req.Reminders = reminders
+			}
+
+			if rawMonitors, ok := args["monitors"]; ok && rawMonitors != nil {
+				monBytes, err := json.Marshal(rawMonitors)
+				if err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid monitors format: %w", err)
+				}
+				var monitors []store.WorkflowMonitorConfig
+				if err := json.Unmarshal(monBytes, &monitors); err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid monitors schema: %w", err)
+				}
+				req.Monitors = monitors
+			}
+
+			if rawTools, ok := args["allowed_tools"]; ok && rawTools != nil {
+				toolBytes, err := json.Marshal(rawTools)
+				if err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid allowed_tools format: %w", err)
+				}
+				var tools []string
+				if err := json.Unmarshal(toolBytes, &tools); err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid allowed_tools schema: %w", err)
+				}
+				req.AllowedTools = tools
+			}
+
+			if rawTransitions, ok := args["transitions"]; ok && rawTransitions != nil {
+				transBytes, err := json.Marshal(rawTransitions)
+				if err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid transitions format: %w", err)
+				}
+				var transitions []store.WorkflowTransitionConfig
+				if err := json.Unmarshal(transBytes, &transitions); err != nil {
+					return agent.AgentToolResult{}, fmt.Errorf("invalid transitions schema: %w", err)
+				}
+				req.Transitions = transitions
+			}
+
+			var savedState *store.WorkflowState
+			if existingState != nil {
+				savedState, err = m.store.UpdateWorkflowState(ctx, existingState.ID, req)
+			} else {
+				if req.Name == "" {
+					return agent.AgentToolResult{}, errors.New("name is required when creating a new state")
+				}
+				savedState, err = m.store.CreateWorkflowState(ctx, req)
+			}
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			respBytes, err := json.Marshal(map[string]any{
+				"status": "ok",
+				"state":  savedState,
+			})
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+		},
+	}
+}
+
+// ----------------------------------------------------------------------
+// 9. workflow_state_delete
+// ----------------------------------------------------------------------
+
+func embeddedWorkflowStateDeleteSchema() *ai.Schema {
+	closed := false
+	schema := ai.Object(
+		ai.Prop("state_id", ai.String("State ID to delete.")),
+	)
+	schema.AdditionalAllowed = &closed
+	return schema
+}
+
+func (m *Manager) embeddedWorkflowStateDeleteTool(owner embeddedOwner) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "workflow_state_delete",
+		Description: "Delete an individual workflow state. For workflow system architecture, concepts, and bundle format details, see the workflow-management skill.",
+		Parameters:  embeddedWorkflowStateDeleteSchema(),
+		Execute: func(ctx context.Context, callID string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if m == nil || m.store == nil {
+				return agent.AgentToolResult{}, errors.New("manager store is unavailable")
+			}
+			if owner.binding.AgentID != "" && owner.identity != "" {
+				if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+					return agent.AgentToolResult{}, err
+				}
+			}
+
+			stateID, ok := args["state_id"].(string)
+			if !ok || strings.TrimSpace(stateID) == "" {
+				return agent.AgentToolResult{}, errors.New("invalid or missing state_id")
+			}
+			stateID = strings.TrimSpace(stateID)
+
+			deleted, err := m.store.DeleteWorkflowState(ctx, stateID)
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			respBytes, err := json.Marshal(map[string]any{
+				"status":   "ok",
+				"deleted":  deleted,
+				"state_id": stateID,
+			})
+			if err != nil {
+				return agent.AgentToolResult{}, err
+			}
+			return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: string(respBytes)}}}, nil
+		},
+	}
+}
+
+// embeddedWorkflowManagementTools returns the 9 workflow management tools for an embedded session.
 func (m *Manager) embeddedWorkflowManagementTools(owner embeddedOwner) []agent.AgentTool {
 	return []agent.AgentTool{
 		m.embeddedWorkflowListTool(owner),
@@ -592,5 +989,9 @@ func (m *Manager) embeddedWorkflowManagementTools(owner embeddedOwner) []agent.A
 		m.embeddedWorkflowSaveTool(owner),
 		m.embeddedWorkflowDeleteTool(owner),
 		m.embeddedWorkflowAssignTool(owner),
+		m.embeddedWorkflowStateListTool(owner),
+		m.embeddedWorkflowStateGetTool(owner),
+		m.embeddedWorkflowStateSaveTool(owner),
+		m.embeddedWorkflowStateDeleteTool(owner),
 	}
 }

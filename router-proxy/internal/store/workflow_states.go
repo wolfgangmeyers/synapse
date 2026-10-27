@@ -26,6 +26,20 @@ const (
 	maxWorkflowTransitionDescriptionBytes = 1024
 )
 
+type WorkflowStateSummary struct {
+	ID           string   `json:"id"`
+	WorkflowID   *string  `json:"workflow_id,omitempty"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Goal         string   `json:"goal,omitempty"`
+	AllowExit    bool     `json:"allow_exit"`
+	Transitions  []string `json:"transitions"` // Target state IDs or names from transitions
+	AllowedTools []string `json:"allowed_tools"`
+	HasMonitors  bool     `json:"has_monitors"`
+	HasReminders bool     `json:"has_reminders"`
+	UpdatedAt    string   `json:"updated_at"`
+}
+
 type WorkflowTransitionConfig struct {
 	TargetStateID string `json:"target_state_id"`
 	Description   string `json:"description"`
@@ -394,6 +408,81 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 	state.Transitions = unmarshalWorkflowTransitions(transitionsJSON.String)
 	state.AllowExit = (allowExitInt == 1)
 	return &state, nil
+}
+
+// ListWorkflowStateSummariesByWorkflow returns summaries of states for a specific workflow.
+func (s *Store) ListWorkflowStateSummariesByWorkflow(ctx context.Context, workflowID string) ([]WorkflowStateSummary, error) {
+	states, err := s.ListWorkflowStatesByWorkflow(ctx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make([]WorkflowStateSummary, 0, len(states))
+	for _, st := range states {
+		trans := make([]string, 0, len(st.Transitions))
+		for _, tr := range st.Transitions {
+			trans = append(trans, tr.TargetStateID)
+		}
+		allowedTools := st.AllowedTools
+		if allowedTools == nil {
+			allowedTools = []string{}
+		}
+		summaries = append(summaries, WorkflowStateSummary{
+			ID:           st.ID,
+			WorkflowID:   st.WorkflowID,
+			Name:         st.Name,
+			Description:  st.Description,
+			Goal:         st.Goal,
+			AllowExit:    st.AllowExit,
+			Transitions:  trans,
+			AllowedTools: allowedTools,
+			HasMonitors:  len(st.Monitors) > 0,
+			HasReminders: len(st.Reminders) > 0,
+			UpdatedAt:    st.UpdatedAt,
+		})
+	}
+	return summaries, nil
+}
+
+// FindWorkflowStateByIDOrName finds a workflow state within a workflow by its exact ID or unique name.
+func (s *Store) FindWorkflowStateByIDOrName(ctx context.Context, workflowID string, idOrName string) (*WorkflowState, error) {
+	trimmed := strings.TrimSpace(idOrName)
+	if trimmed == "" {
+		return nil, errors.New("state identifier or name cannot be empty")
+	}
+
+	// Try by ID first
+	st, err := s.GetWorkflowState(ctx, trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if st != nil {
+		// If workflowID is specified, verify it belongs to this workflow (unless workflowID is empty)
+		if workflowID != "" {
+			if st.WorkflowID != nil && *st.WorkflowID == workflowID {
+				return st, nil
+			}
+			// If st.WorkflowID doesn't match, we still continue to search by name within workflowID
+		} else {
+			return st, nil
+		}
+	}
+
+	// Try by name in workflow
+	var id string
+	if workflowID != "" {
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE workflow_id = ? AND name = ?`, workflowID, trimmed).Scan(&id)
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM workflow_states WHERE name = ?`, trimmed).Scan(&id)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return s.GetWorkflowState(ctx, id)
 }
 
 func marshalWorkflowTransitions(transitions []WorkflowTransitionConfig) (string, error) {
