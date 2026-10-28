@@ -6790,7 +6790,7 @@ select.form-control option,
   line-height: 22px;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
-  animation: blocked-warning-pulse 1.8s ease-in-out infinite;
+  animation: blocked-warning-pulse 0.9s ease-in-out infinite;
   flex-shrink: 0;
 }
 
@@ -6826,7 +6826,7 @@ select.form-control option,
   border: 1px solid rgba(239, 68, 68, 0.45);
   line-height: 1;
   cursor: pointer;
-  animation: blocked-warning-pulse 1.8s ease-in-out infinite;
+  animation: blocked-warning-pulse 0.9s ease-in-out infinite;
   white-space: nowrap;
   flex-shrink: 0;
   max-width: 100%;
