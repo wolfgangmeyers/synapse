@@ -103,6 +103,8 @@ function dateLabel(timestamp: number): string | undefined {
   return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+// Normalizes prefixed identifiers (e.g., 'msg:<peer>:<id>', 'hist:complete:<id>')
+// to their underlying raw message/activity ID so timeline events and live WS frames deduplicate cleanly.
 function extractRawId(id: string): string {
   if (id.startsWith("msg:")) {
     const parts = id.split(":");
@@ -548,6 +550,8 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
   const oldestItem = renderedItems[0]?.item;
   const oldestItemKey = oldestItem === undefined ? undefined : `${oldestItem.type}\u001f${oldestItem.id}`;
 
+  // Preserve scroll viewport position when prepending older history at the top,
+  // preventing the conversation feed from jumping or snapping to 0.
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element || prevScrollHeightRef.current === null || prevScrollTopRef.current === null) return;

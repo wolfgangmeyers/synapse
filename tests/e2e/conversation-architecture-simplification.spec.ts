@@ -121,13 +121,13 @@ test.describe("Conversation Architecture Simplification E2E", () => {
 
     const assistantBubble = page.locator('.bubble-wrap.incoming').filter({
       hasText: assistantReply,
-    });
-    await expect(assistantBubble.first()).toBeVisible({ timeout: 8000 });
+    }).first();
+    await expect(assistantBubble).toBeVisible({ timeout: 8000 });
 
     // Verify avatar contains the agent avatar circle and image/recolor
-    const agentAvatar = assistantBubble.locator('.message-avatar--agent .agent-avatar-circle');
+    const agentAvatar = assistantBubble.locator('.message-avatar--agent .agent-avatar-circle').first();
     await expect(agentAvatar).toBeVisible();
-    await expect(agentAvatar.locator('.agent-avatar-image')).toBeVisible();
+    await expect(agentAvatar.locator('.agent-avatar-image').first()).toBeVisible();
 
     // Verify it is a true speech bubble and NOT an envelope card (.activity-entry)
     await expect(assistantBubble.locator('.activity-entry')).toHaveCount(0);

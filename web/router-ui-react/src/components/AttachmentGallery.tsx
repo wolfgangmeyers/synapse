@@ -3,6 +3,8 @@ import type { MessageAttachment } from "../domain/history";
 import { cachedImage } from "../persistence/history-repository";
 
 export interface AttachmentGalleryProps { attachments?: MessageAttachment[] | undefined; routerUrl?: string | undefined }
+// Resolves attachment URLs: leaves data/blob/http URLs intact, but prefixes
+// server-relative router endpoints (/v1/attachments/...) with the active router base URL.
 function urlFor(attachment: MessageAttachment, routerUrl?: string): string {
   const value = attachment.url ?? (attachment.id ? `/v1/attachments/${attachment.id}` : "");
   if (value.startsWith("data:")) return value;
