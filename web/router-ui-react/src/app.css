@@ -1024,7 +1024,7 @@ dialog,
   align-items: center;
   min-width: 0;
   overflow: visible;
-  padding: 2px 0;
+  padding: 4px 0;
   margin-top: 3px;
 }
 .agent-meta-line .agent-row-signals {
@@ -1038,15 +1038,41 @@ dialog,
   height: 20px;
   min-height: 20px;
   line-height: 1;
-  padding: 0 8px;
+  padding: 0 7px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   box-sizing: border-box;
   vertical-align: middle;
   border-radius: 9999px;
+}
+.subagent-indicator i.subagent-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+.subagent-indicator .subagent-badge-count {
+  font-size: 11px;
+  line-height: 1;
+}
+.subagent-indicator.expandable::after {
+  display: none !important;
+}
+.subagent-indicator.has-subagents.active {
+  animation: subagent-badge-pulse 1.8s ease-in-out infinite;
+}
+@keyframes subagent-badge-pulse {
+  0%, 100% {
+    background-color: rgba(38, 106, 255, 0.26);
+    border-color: rgba(96, 165, 250, 0.34);
+    box-shadow: 0 0 0 rgba(96, 165, 250, 0);
+  }
+  50% {
+    background-color: rgba(38, 106, 255, 0.6);
+    border-color: rgba(96, 165, 250, 0.9);
+    box-shadow: 0 0 12px rgba(96, 165, 250, 0.7);
+  }
 }
 .reminder-list-item { padding: 12px 14px; border-radius: 16px; background: var(--canvas); }
 .reminder-editor-form { display: grid; gap: 12px; }
@@ -1171,7 +1197,7 @@ dialog,
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   position: relative;
   gap: 10px;
   text-align: left;
@@ -1254,7 +1280,7 @@ dialog,
   background: conic-gradient(from var(--agent-border-angle), rgba(239,68,68,0) 0deg, rgba(248,113,113,0.18) 6deg, rgba(239,68,68,0.95) 22deg 98deg, rgba(248,113,113,0.18) 114deg, rgba(239,68,68,0) 120deg 360deg);
 }
 .agent-row.expanded { align-items: center; flex-wrap: wrap; }
-.agent-row-text { min-width: 0; overflow: hidden; flex: 1 1 auto; display: block; }
+.agent-row-text { min-width: 0; overflow: visible; flex: 1 1 auto; display: block; }
 .agent-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arrival-indicator,
 .compacting-indicator,
@@ -3094,7 +3120,7 @@ dialog,
 .status-message.error, .error { color: var(--danger); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; } }
 .agent-row { display: flex; }
-.agent-row-select { position: static; display: flex; flex: 1 1 auto; align-items: center; gap: 10px; width: auto; min-width: 0; min-height: 0; padding: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; }
+.agent-row-select { position: static; display: flex; flex: 1 1 auto; align-items: center; gap: 10px; width: auto; min-width: 0; min-height: 0; padding: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; overflow: visible; }
 .agent-row-select:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .agent-row-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .agent-row-actions button { appearance: none; margin: 0; cursor: pointer; }
