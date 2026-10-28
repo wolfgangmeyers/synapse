@@ -360,7 +360,13 @@ describe("App integration", () => {
     const lifecycleAgent = (agentId: string, version: number, count: number, subagents: Array<{ id: string; description: string }>) => ({ agent_id: agentId, subagent_version: version, subagent_count: count, subagents });
     socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "replay-18249", type: "subagent_state_replay", router_version: 18249, updates: [lifecycleAgent("supervisor", 18249, 1, [{ id: "child", description: "Supervisor child" }])] }) });
     for (const release of releaseInitialAgents) release(jsonResponse({ agents: [supervisor, peer] }));
-    await waitFor(() => expect(document.querySelector('[data-agent-id="supervisor"]')).toHaveTextContent("1 subagent"));
+    await waitFor(() => {
+      const row = document.querySelector('[data-agent-id="supervisor"]');
+      expect(row).toBeInTheDocument();
+      const badge = row?.querySelector('.subagent-indicator');
+      expect(badge).toBeInTheDocument();
+      expect(badge?.querySelector('.subagent-badge-count')).toHaveTextContent("1");
+    });
   });
 
   it("restores the persisted active router when bootstrapping after reload", async () => {

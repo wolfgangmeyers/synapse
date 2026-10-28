@@ -222,8 +222,10 @@ describe("AgentRow", () => {
 
   it("shows a count-only subagent badge without an expand control", () => {
     render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", subagent_count: 2 }} expanded />);
-    const badge = screen.getByText("2 subagents");
-    expect(badge.closest(".subagent-indicator")).not.toHaveClass("expandable");
+    const badge = screen.getByLabelText("2 subagents");
+    expect(badge).toHaveClass("subagent-indicator");
+    expect(badge).not.toHaveClass("expandable");
+    expect(badge.querySelector(".subagent-badge-count")).toHaveTextContent("2");
     expect(screen.queryByRole("button", { name: "2 subagents" })).not.toBeInTheDocument();
   });
 
@@ -268,12 +270,12 @@ describe("AgentRow", () => {
     const onSelect = vi.fn();
     render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "active", subagent_count: 2, subagents: [{ id: "one", description: "Run tests" }, { id: "two", description: "Check types" }] }} onSelect={onSelect} />);
     expect(screen.getByLabelText("Working")).toBeTruthy();
-    expect(screen.getByText("2 subagents")).toBeTruthy();
+    expect(screen.getByLabelText("2 subagents")).toBeTruthy();
     const nameLine = screen.getByText("Build Agent").parentElement;
     expect(nameLine?.className).toBe("agent-name-line");
     expect(nameLine?.querySelector(".working-indicator")).toBeNull();
     expect(screen.getByLabelText("Working").parentElement).toHaveClass("agent-row-select");
-    expect(screen.getByText("2 subagents").closest(".agent-row-signals")).toBeTruthy();
+    expect(screen.getByLabelText("2 subagents").closest(".agent-row-signals")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Build Agent/i }));
     expect(onSelect).toHaveBeenCalledWith("build-agent");
   });
