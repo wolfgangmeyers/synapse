@@ -401,108 +401,88 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     if (effectiveEvents && effectiveEvents.length > 0) {
       for (const ev of effectiveEvents) {
         seenIds.add(ev.id);
-        // Also index normalized msg ID without prefix if it has msg:<agent>:<id> form
-        const idParts = ev.id.split(":");
-        if (idParts.length >= 3 && idParts[0] === "msg") {
-          seenIds.add(idParts.slice(2).join(":"));
-        }
         const converted = timelineEventToFeedItems(ev, currentUser, ownerId, peerId);
         for (const item of converted) {
           seenIds.add(item.id);
           rawItems.push(item);
         }
       }
+    }
 
-      // When timeline is active, only include pending in-flight messages from user
-      for (const message of messages ?? []) {
-        if (!message.pending) continue;
-        const key = messageKey(message);
-        if (seenIds.has(key) || seenIds.has(message.id)) continue;
-        seenIds.add(key);
-        seenIds.add(message.id);
-        rawItems.push({
-          type: "message" as const,
-          id: key,
-          timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
-          sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
-          message,
-        });
-      }
-    } else {
-      // Legacy fallback when effectiveEvents is not available
-      for (const message of messages ?? []) {
-        const key = messageKey(message);
-        if (seenIds.has(key) || seenIds.has(message.id)) continue;
-        seenIds.add(key);
-        seenIds.add(message.id);
-        rawItems.push({
-          type: "message" as const,
-          id: key,
-          timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
-          sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
-          message,
-        });
-      }
+    // Include live or pending messages (from WebSocket) not already captured
+    for (const message of messages ?? []) {
+      const key = messageKey(message);
+      if (seenIds.has(key) || seenIds.has(message.id)) continue;
+      seenIds.add(key);
+      seenIds.add(message.id);
+      rawItems.push({
+        type: "message" as const,
+        id: key,
+        timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
+        sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
+        message,
+      });
+    }
 
-      for (const entry of activityEntries ?? []) {
-        if (seenIds.has(entry.id) || seenIds.has(`hist:${entry.id}`) || seenIds.has(`hist:complete:${entry.id}`)) continue;
-        if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) continue;
-        const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
-        if (userMail !== undefined) {
-          if (isAlreadyInMessages(entry, messages ?? [])) continue;
-          const thinkingText = getThinkingContent(entry);
-          if (thinkingText) {
-            const thinkingId = `${entry.id}:thinking`;
-            if (!seenIds.has(thinkingId)) {
-              seenIds.add(thinkingId);
-              rawItems.push({
-                type: "activity" as const,
-                id: thinkingId,
-                timestamp: activityTime(entry) - 1,
-                sequence: activitySequence(entry),
-                entry: {
-                  id: thinkingId,
-                  agent_id: entry.agent_id,
-                  ...(entry.at !== undefined ? { at: entry.at } : {}),
-                  presentation: { kind: "thinking", outcome: "success", thinking: thinkingText },
-                  thinking: thinkingText,
-                },
-              });
-            }
-          }
-          const msgId = `activity-msg-${entry.id}`;
-          if (!seenIds.has(msgId)) {
-            seenIds.add(msgId);
-            seenIds.add(entry.id);
+    // Include live activity entries (from WebSocket) not already captured
+    for (const entry of activityEntries ?? []) {
+      if (seenIds.has(entry.id) || seenIds.has(`hist:${entry.id}`) || seenIds.has(`hist:complete:${entry.id}`)) continue;
+      if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) continue;
+      const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
+      if (userMail !== undefined) {
+        if (isAlreadyInMessages(entry, messages ?? [])) continue;
+        const thinkingText = getThinkingContent(entry);
+        if (thinkingText) {
+          const thinkingId = `${entry.id}:thinking`;
+          if (!seenIds.has(thinkingId)) {
+            seenIds.add(thinkingId);
             rawItems.push({
-              type: "message" as const,
-              id: msgId,
-              timestamp: activityTime(entry),
+              type: "activity" as const,
+              id: thinkingId,
+              timestamp: activityTime(entry) - 1,
               sequence: activitySequence(entry),
-              message: {
-                id: entry.id,
-                from: userMail.from,
-                to: userMail.recipient,
-                body: userMail.body,
-                direction: "incoming",
-                ...(entry.at !== undefined ? { recorded_at: entry.at, created_at: entry.at } : {}),
-                ...(entry.presentation?.outcome === "failed" || entry.presentation?.outcome === "error" ? { failed: true } : {}),
-                ...(entry.presentation?.outcome === "active" ? { pending: true } : {}),
+              entry: {
+                id: thinkingId,
+                agent_id: entry.agent_id,
+                ...(entry.at !== undefined ? { at: entry.at } : {}),
+                presentation: { kind: "thinking", outcome: "success", thinking: thinkingText },
+                thinking: thinkingText,
               },
             });
           }
-          continue;
         }
-        if (isAlreadyInMessages(entry, messages ?? [])) continue;
-        seenIds.add(entry.id);
-        rawItems.push({
-          type: "activity" as const,
-          id: entry.id,
-          timestamp: activityTime(entry),
-          sequence: activitySequence(entry),
-          entry,
-        });
+        const msgId = `activity-msg-${entry.id}`;
+        if (!seenIds.has(msgId)) {
+          seenIds.add(msgId);
+          seenIds.add(entry.id);
+          rawItems.push({
+            type: "message" as const,
+            id: msgId,
+            timestamp: activityTime(entry),
+            sequence: activitySequence(entry),
+            message: {
+              id: entry.id,
+              from: userMail.from,
+              to: userMail.recipient,
+              body: userMail.body,
+              direction: "incoming",
+              ...(entry.at !== undefined ? { recorded_at: entry.at, created_at: entry.at } : {}),
+              ...(entry.presentation?.outcome === "failed" || entry.presentation?.outcome === "error" ? { failed: true } : {}),
+              ...(entry.presentation?.outcome === "active" ? { pending: true } : {}),
+            },
+          });
+        }
+        continue;
       }
+      if (isAlreadyInMessages(entry, messages ?? [])) continue;
+      seenIds.add(entry.id);
+      rawItems.push({
+        type: "activity" as const,
+        id: entry.id,
+        timestamp: activityTime(entry),
+        sequence: activitySequence(entry),
+        entry,
+      });
     }
 
     return rawItems.sort(
