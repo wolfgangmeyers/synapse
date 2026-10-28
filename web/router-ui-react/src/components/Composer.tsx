@@ -27,37 +27,90 @@ export function Composer({ enabled = true, focusKey, value, draft, onChange, onD
   const lastSelection = useRef<{ start: number; end: number } | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Sync external value changes (e.g. agent switch or template insertion)
-  const lastExternalValue = useRef(value);
-  useEffect(() => {
-    if (value !== lastExternalValue.current) {
-      lastExternalValue.current = value;
-      setLocalBody(value ?? draft ?? "");
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+
+  const previousValueProp = useRef(value);
+  const previousDraftProp = useRef(draft);
+  const lastDispatchedValue = useRef<string | null>(null);
+  const lastFocusKey = useRef(focusKey);
+  const pendingDraftRef = useRef<string | null>(null);
+  const debouncedTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushDebounce = (): void => {
+    if (debouncedTimeout.current) {
+      clearTimeout(debouncedTimeout.current);
+      debouncedTimeout.current = null;
+      const pending = pendingDraftRef.current;
+      if (pending !== null) {
+        lastDispatchedValue.current = pending;
+        onChangeRef.current?.(pending);
+        onDraftChangeRef.current?.(pending);
+      }
     }
-  }, [value, draft]);
+  };
+
+  // Sync external changes (e.g. agent switch or template insertion)
+  useEffect(() => {
+    if (focusKey !== lastFocusKey.current) {
+      lastFocusKey.current = focusKey;
+      if (debouncedTimeout.current) {
+        clearTimeout(debouncedTimeout.current);
+        debouncedTimeout.current = null;
+      }
+      pendingDraftRef.current = null;
+      lastDispatchedValue.current = null;
+      previousValueProp.current = value;
+      previousDraftProp.current = draft;
+      setLocalBody(value ?? draft ?? "");
+      if (focusKey !== undefined) {
+        textareaRef.current?.focus();
+      }
+      return;
+    }
+
+    if (value !== undefined) {
+      if (value === previousValueProp.current) return;
+      previousValueProp.current = value;
+
+      // Ignore echoes of what we dispatched to the parent
+      if (value === lastDispatchedValue.current || value === localBody) {
+        return;
+      }
+
+      setLocalBody(value);
+    } else if (draft !== undefined && draft !== previousDraftProp.current) {
+      previousDraftProp.current = draft;
+      if (draft === lastDispatchedValue.current || draft === localBody) {
+        return;
+      }
+      setLocalBody(draft);
+    }
+  }, [focusKey, value, draft, localBody]);
 
   const body = localBody;
   const images = controlledImages ?? localImages;
 
   useEffect(() => { if (focusKey !== undefined) textareaRef.current?.focus(); }, [focusKey]);
 
-  // Debounced parent notification for draft persistence
-  const debouncedTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Debounced parent notification for draft persistence (1s debounce)
   const setBody = (next: string): void => {
     setLocalBody(next);
-    lastExternalValue.current = next;
+    pendingDraftRef.current = next;
     if (debouncedTimeout.current) clearTimeout(debouncedTimeout.current);
     debouncedTimeout.current = setTimeout(() => {
-      onChange?.(next);
-      onDraftChange?.(next);
-    }, 300);
+      debouncedTimeout.current = null;
+      lastDispatchedValue.current = next;
+      onChangeRef.current?.(next);
+      onDraftChangeRef.current?.(next);
+    }, 1000);
   };
 
   useEffect(() => {
     return () => {
-      if (debouncedTimeout.current) {
-        clearTimeout(debouncedTimeout.current);
-      }
+      flushDebounce();
     };
   }, []);
 
@@ -71,7 +124,36 @@ export function Composer({ enabled = true, focusKey, value, draft, onChange, onD
   };
   const setImages = (next: ImageInput[]): void => { setLocalImages(next); onImagesChange?.(next); };
   const addFiles = async (files: FileList | File[]): Promise<void> => { const candidates = Array.from(files).filter((file) => file.type.startsWith("image/")); if (!candidates.length) return; if (images.length + candidates.length > 3) { setError("Attach up to three images."); return; } try { const added: ImageInput[] = []; for (const file of candidates) added.push(await convert(file)); const problem = validateImageBatch([...images, ...added]); if (problem) { setError(problem); return; } setError(undefined); setImages([...images, ...added]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Image could not be attached."); } };
-  const submit = (event?: FormEvent): void => { event?.preventDefault(); const normalized = normalizeNewlines(body); if (!enabled || !hasSendableContent(normalized, images)) { setError("Enter a message or attach an image."); return; } const problem = validateImageBatch(images); if (problem) { setError(problem); return; } setError(undefined); try { void Promise.resolve(onSend(normalized, images)).catch(() => undefined); } catch (cause) { setError(cause instanceof Error ? cause.message : "Message could not be sent."); return; } setBody(""); setImages([]); };
+  const submit = (event?: FormEvent): void => {
+    event?.preventDefault();
+    const normalized = normalizeNewlines(body);
+    if (!enabled || !hasSendableContent(normalized, images)) {
+      setError("Enter a message or attach an image.");
+      return;
+    }
+    const problem = validateImageBatch(images);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setError(undefined);
+    try {
+      void Promise.resolve(onSend(normalized, images)).catch(() => undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Message could not be sent.");
+      return;
+    }
+    if (debouncedTimeout.current) {
+      clearTimeout(debouncedTimeout.current);
+      debouncedTimeout.current = null;
+    }
+    pendingDraftRef.current = null;
+    lastDispatchedValue.current = "";
+    setLocalBody("");
+    onChangeRef.current?.("");
+    onDraftChangeRef.current?.("");
+    setImages([]);
+  };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter") {
       // In expanded mode: Ctrl+Enter or Cmd+Enter sends; regular Enter inserts newline.
@@ -115,6 +197,7 @@ export function Composer({ enabled = true, focusKey, value, draft, onChange, onD
           value={body}
           disabled={!enabled}
           onChange={(event) => { setBody(event.currentTarget.value); reportTextareaSelection(event.currentTarget); }}
+          onBlur={flushDebounce}
           onSelect={(event) => reportTextareaSelection(event.currentTarget)}
           onClick={(event) => reportTextareaSelection(event.currentTarget)}
           onKeyDown={onKeyDown}

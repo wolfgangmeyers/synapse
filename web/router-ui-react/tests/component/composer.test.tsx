@@ -87,4 +87,90 @@ describe("Composer", () => {
     fireEvent.paste(screen.getByTestId("clipboard-paste-target"), { clipboardData: { files: [file] } });
     await waitFor(() => expect(screen.getByRole("img", { name: "pasted.png" })).toBeInTheDocument());
   });
+
+  it("does not drop keystrokes when parent re-renders with debounced echo", () => {
+    vi.useFakeTimers();
+    let parentDraft = "";
+    const onChange = vi.fn((val: string) => {
+      parentDraft = val;
+    });
+
+    const { rerender } = render(
+      <Composer enabled value={parentDraft} onChange={onChange} onSend={vi.fn()} />
+    );
+
+    const input = screen.getByRole("textbox", { name: /message/i });
+
+    // User types 'a'
+    fireEvent.change(input, { target: { value: "a" } });
+    expect((input as HTMLTextAreaElement).value).toBe("a");
+
+    // Debounce fires after 1000ms
+    vi.advanceTimersByTime(1000);
+    expect(onChange).toHaveBeenCalledWith("a");
+
+    // While parent re-renders, user types 'b' (value becomes "ab")
+    fireEvent.change(input, { target: { value: "ab" } });
+    expect((input as HTMLTextAreaElement).value).toBe("ab");
+
+    // Parent re-renders with the echo of the first keystroke ("a")
+    rerender(<Composer enabled value="a" onChange={onChange} onSend={vi.fn()} />);
+
+    // MUST NOT snap back to "a"! Must remain "ab"
+    expect((input as HTMLTextAreaElement).value).toBe("ab");
+
+    // Debounce fires for "ab"
+    vi.advanceTimersByTime(1000);
+    expect(onChange).toHaveBeenCalledWith("ab");
+
+    // Parent re-renders with "ab"
+    rerender(<Composer enabled value="ab" onChange={onChange} onSend={vi.fn()} />);
+    expect((input as HTMLTextAreaElement).value).toBe("ab");
+
+    vi.useRealTimers();
+  });
+
+  it("accepts genuine external template insertion", () => {
+    let parentDraft = "";
+    const onChange = vi.fn((val: string) => {
+      parentDraft = val;
+    });
+
+    const { rerender } = render(
+      <Composer enabled value={parentDraft} onChange={onChange} onSend={vi.fn()} />
+    );
+
+    const input = screen.getByRole("textbox", { name: /message/i });
+    expect((input as HTMLTextAreaElement).value).toBe("");
+
+    rerender(<Composer enabled value="[Template] Hello" onChange={onChange} onSend={vi.fn()} />);
+    expect((input as HTMLTextAreaElement).value).toBe("[Template] Hello");
+  });
+
+  it("switches draft when focusKey changes to a new agent", () => {
+    const { rerender } = render(
+      <Composer enabled focusKey="agent-1" value="draft 1" onSend={vi.fn()} />
+    );
+
+    const input = screen.getByRole("textbox", { name: /message/i });
+    expect((input as HTMLTextAreaElement).value).toBe("draft 1");
+
+    rerender(<Composer enabled focusKey="agent-2" value="draft 2" onSend={vi.fn()} />);
+    expect((input as HTMLTextAreaElement).value).toBe("draft 2");
+  });
+
+  it("flushes pending draft immediately on blur", () => {
+    vi.useFakeTimers();
+    const onChange = vi.fn();
+    render(<Composer enabled onChange={onChange} onSend={vi.fn()} />);
+
+    const input = screen.getByRole("textbox", { name: /message/i });
+    fireEvent.change(input, { target: { value: "pending test" } });
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.blur(input);
+    expect(onChange).toHaveBeenCalledWith("pending test");
+
+    vi.useRealTimers();
+  });
 });
