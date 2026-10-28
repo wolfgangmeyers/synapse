@@ -471,6 +471,15 @@ func (s *Store) recordTimelineHistoryTx(ctx context.Context, agentID, category, 
 		content = &message
 	}
 
+	// Avoid double-inserting assistant turns that are already recorded via recordTimelineMessageTx
+	if isAssistantTurn && content != nil {
+		var exists int
+		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_timeline WHERE agent_id = ? AND kind = 'message' AND role = 'assistant' AND content = ?`, agentID, *content).Scan(&exists)
+		if exists > 0 {
+			return nil
+		}
+	}
+
 	id := fmt.Sprintf("hist:%s", entry.ID)
 	if entry.ID == "" {
 		id = ""
