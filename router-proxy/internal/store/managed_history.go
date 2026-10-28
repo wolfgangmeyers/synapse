@@ -413,6 +413,9 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 			entry.MessageContent = managedHistoryDetail(effectiveContent)
 			entry.SenderIdentity = managedHistoryDetail(storedSender)
 			entry.ToolInput = rawManagedHistoryJSON(effectiveToolInput)
+			if err := s.recordTimelineHistoryTx(ctx, agentID, storedCategory, entry.Level, entry.Message, entry); err != nil {
+				return ManagedHistoryEntry{}, err
+			}
 			return entry, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -434,7 +437,11 @@ func (s *Store) recordManagedCompleteHistoryTx(ctx context.Context, agentID, cat
 	if err := s.pruneManagedCompleteHistoryTx(ctx, agentID); err != nil {
 		return ManagedHistoryEntry{}, err
 	}
-	return managedHistoryEntry(sequence, agentID, occurredAt, level, message, presentation, detail), nil
+	entry = managedHistoryEntry(sequence, agentID, occurredAt, level, message, presentation, detail)
+	if err := s.recordTimelineHistoryTx(ctx, agentID, category, level, message, entry); err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	return entry, nil
 }
 
 // ManagedHistoryPage is an independent cursor read for the two browser views.

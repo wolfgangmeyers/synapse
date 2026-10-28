@@ -91,6 +91,7 @@ export function AgentControlsDropdown({
   const controls: AgentControlItem[] = [
     { id: "goal", label: "Set goal", icon: "fa-solid fa-flag", action: onGoal },
     { id: "reminders", label: "Reminders", icon: "fa-solid fa-clock", action: onReminders },
+    { id: "toolSettings", label: "Inline tool settings", icon: "fa-solid fa-gear", action: onInlineToolSettings },
     { id: "restart", label: "Restart", icon: "fa-solid fa-rotate-left", action: () => onAction?.("restart") },
     { id: "reset", label: "Reset", icon: "fa-solid fa-rotate", action: () => onAction?.("reset") },
     {

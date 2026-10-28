@@ -1,15 +1,18 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
-import type { ManagedHistoryEntry } from "../protocol/types";
+import type { ManagedHistoryEntry, ManagedHistoryPresentation, ManagedHistoryOutcome } from "../protocol/types";
 import { currentUsername } from "../persistence/settings-repository";
 import { shouldFollowToBottom } from "../state/conversation-projection";
+import { fetchConversationTimeline, type ConversationTimelineEvent } from "../services/api";
 import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
 
 export interface MessageListProps {
   id?: string | undefined;
-  messages: HistoryMessage[];
+  messages?: HistoryMessage[];
+  events?: ConversationTimelineEvent[] | undefined;
+  timelineEvents?: ConversationTimelineEvent[] | undefined;
   activityEntries?: ManagedHistoryEntry[] | undefined;
   activityHistoryReady?: boolean | undefined;
   peerId?: string | undefined;
@@ -107,6 +110,200 @@ function normalizeMessageBodyForComparison(body: string | undefined): string {
     .trim();
 }
 
+function timelineEventToFeedItems(
+  event: ConversationTimelineEvent,
+  currentUser?: string,
+  ownerId?: string,
+  peerId?: string
+): FeedItem[] {
+  const meta = event.metadata ?? {};
+  const fromMeta = typeof meta.from === "string" ? meta.from : undefined;
+  const toMeta = typeof meta.to === "string" ? meta.to : undefined;
+
+  // 1. Subagent completion notifications / system messages:
+  // If sender is system or content has [Direct message from system] / [Subagent Completed],
+  // NEVER render as a user chat bubble!
+  if (
+    fromMeta === "system" ||
+    event.content?.startsWith("[Direct message from system]") ||
+    event.content?.startsWith("[Subagent Completed]")
+  ) {
+    const entry: ManagedHistoryEntry = {
+      id: event.id,
+      agent_id: event.agent_id,
+      at: new Date(event.created_at).toISOString(),
+      category: "system",
+      level: "info",
+      ...(event.content !== undefined ? { message: event.content } : {}),
+      presentation: {
+        kind: "notification",
+        summary: event.content?.split("\n")[0] ?? "System notification",
+        outcome: "success",
+      },
+    };
+    return [{
+      type: "activity",
+      id: event.id,
+      timestamp: event.created_at,
+      sequence: event.seq,
+      entry,
+    }];
+  }
+
+  // 2. Messages
+  if (event.kind === "message") {
+    // Inter-agent mailbox message check:
+    // If explicitly addressed between agents (neither sender nor recipient is user/owner),
+    // render as envelope activity card!
+    const isInterAgent = Boolean(
+      fromMeta &&
+      toMeta &&
+      fromMeta !== ownerId &&
+      toMeta !== ownerId &&
+      fromMeta !== "user" &&
+      toMeta !== "user" &&
+      (currentUser === undefined || (fromMeta !== currentUser && toMeta !== currentUser))
+    );
+
+    if (isInterAgent) {
+      const entry: ManagedHistoryEntry = {
+        id: event.id,
+        agent_id: event.agent_id,
+        at: new Date(event.created_at).toISOString(),
+        category: "managed_message",
+        ...(event.content !== undefined ? { message: event.content } : {}),
+        presentation: {
+          kind: "mailbox_message",
+          sender: fromMeta ?? "agent",
+          recipient: toMeta ?? "agent",
+          ...(typeof meta.subject === "string" ? { subject: meta.subject } : {}),
+          outcome: "success",
+        },
+      };
+      return [{
+        type: "activity",
+        id: event.id,
+        timestamp: event.created_at,
+        sequence: event.seq,
+        entry,
+      }];
+    }
+
+    // Direct operator <-> assistant conversation:
+    // outgoing if from user / owner or role === "user"; incoming assistant bubble otherwise
+    const isOutgoing = (ownerId !== undefined && fromMeta === ownerId) ||
+                       (currentUser !== undefined && fromMeta === currentUser) ||
+                       (event.role === "user" && fromMeta === undefined);
+    const from = fromMeta ?? (isOutgoing ? (ownerId ?? currentUser ?? "user") : (peerId ?? event.agent_id));
+    const to = toMeta ?? (isOutgoing ? (peerId ?? event.agent_id) : (ownerId ?? currentUser ?? "user"));
+    const rawAttachments = meta.attachments ?? (event as any).attachments ?? meta.images;
+    const message: HistoryMessage = {
+      id: event.id,
+      body: event.content ?? "",
+      direction: isOutgoing ? "outgoing" : "incoming",
+      from,
+      to,
+      sequence: event.seq,
+      created_at: new Date(event.created_at).toISOString(),
+      recorded_at: new Date(event.created_at).toISOString(),
+      ...(Array.isArray(rawAttachments) ? { attachments: rawAttachments } : {}),
+      ...meta,
+    };
+    return [{
+      type: "message",
+      id: event.id,
+      timestamp: event.created_at,
+      sequence: event.seq,
+      message,
+    }];
+  }
+
+  // 3. Activity / Tools / Context Reset / Thinking
+  const metaCategory = typeof meta.category === "string" ? meta.category : undefined;
+  const metaLevel = typeof meta.level === "string" ? meta.level : undefined;
+  const metaSender = typeof meta.sender === "string" ? meta.sender : fromMeta;
+  const metaToolName = typeof meta.tool_name === "string" ? meta.tool_name : undefined;
+  const rawOutcome = (meta.presentation as any)?.outcome ?? meta.outcome;
+  const metaOutcome = rawOutcome === "success" || rawOutcome === "failed" || rawOutcome === "error" || rawOutcome === "active" || rawOutcome === "interrupted" || rawOutcome === "completed"
+    ? rawOutcome
+    : undefined;
+  const metaSummary = typeof meta.summary === "string" ? meta.summary : undefined;
+  const metaThinking = typeof meta.thinking === "string" ? meta.thinking : undefined;
+
+  let presentation: ManagedHistoryPresentation | undefined;
+  if (event.kind === "context_reset" || meta.kind === "context_reset") {
+    presentation = { kind: "context_reset" };
+  } else if (event.kind === "tool" || meta.kind === "tool" || metaToolName !== undefined) {
+    const isFinished = metaOutcome === "success" || metaOutcome === "completed" || metaOutcome === "failed" || metaOutcome === "error";
+    presentation = {
+      kind: "tool",
+      tool_name: metaToolName ?? "tool",
+      outcome: isFinished ? (metaOutcome === "failed" || metaOutcome === "error" ? "failed" : "success") : (metaOutcome ?? "success"),
+      ...(event.content !== undefined ? { summary: event.content } : metaSummary !== undefined ? { summary: metaSummary } : {}),
+    };
+  }
+
+  const entry: ManagedHistoryEntry = {
+    id: event.id,
+    agent_id: event.agent_id,
+    at: new Date(event.created_at).toISOString(),
+    ...(metaCategory !== undefined ? { category: metaCategory } : event.kind === "tool" ? { category: "managed_tool" } : {}),
+    ...(metaLevel !== undefined ? { level: metaLevel } : { level: "info" }),
+    ...(event.content !== undefined ? { message: event.content } : {}),
+    ...(presentation !== undefined ? { presentation } : {}),
+    ...(metaSender !== undefined ? { sender_identity: metaSender } : {}),
+    ...(metaThinking !== undefined ? { thinking: metaThinking } : event.kind === "thinking" && event.content !== undefined ? { thinking: event.content } : {}),
+  };
+
+  const userMail = isMailboxSendToUser(entry, currentUser, undefined);
+  if (userMail !== undefined) {
+    const rawItems: FeedItem[] = [];
+    const thinkingText = getThinkingContent(entry);
+    if (thinkingText) {
+      rawItems.push({
+        type: "activity",
+        id: `${entry.id}:thinking`,
+        timestamp: event.created_at - 1,
+        sequence: event.seq,
+        entry: {
+          id: `${entry.id}:thinking`,
+          agent_id: entry.agent_id,
+          ...(entry.at !== undefined ? { at: entry.at } : {}),
+          presentation: {
+            kind: "thinking",
+            outcome: "success",
+            thinking: thinkingText,
+          },
+          thinking: thinkingText,
+        },
+      });
+    }
+    rawItems.push({
+      type: "message",
+      id: `activity-msg-${entry.id}`,
+      timestamp: event.created_at,
+      sequence: event.seq,
+      message: {
+        id: entry.id,
+        from: userMail.from,
+        to: userMail.recipient,
+        body: userMail.body,
+        direction: "incoming",
+        ...(entry.at !== undefined ? { at: entry.at, created_at: entry.at } : {}),
+      },
+    });
+    return rawItems;
+  }
+
+  return [{
+    type: "activity",
+    id: entry.id,
+    timestamp: event.created_at,
+    sequence: event.seq,
+    entry,
+  }];
+}
+
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
   if (isContextResetEntry(entry)) return false;
   if (messages.some((m) => m.id === entry.id)) return true;
@@ -117,7 +314,6 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
 
   const entryFrom = entry.sender_identity ?? entry.presentation?.from ?? entry.agent_id;
   const entryTo = entry.presentation?.to;
-  const entryTime = activityTime(entry);
 
   return messages.some((m) => {
     const mBody = normalizeMessageBodyForComparison(m.body);
@@ -128,81 +324,158 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
     if (entryTo && m.to && entryTo.toLowerCase() !== m.to.toLowerCase()) {
       return false;
     }
-    const mTime = messageTime(m, Number.MAX_SAFE_INTEGER);
-    if (entryTime !== Number.MAX_SAFE_INTEGER && mTime !== Number.MAX_SAFE_INTEGER) {
-      return Math.abs(entryTime - mTime) <= 120_000;
-    }
     return true;
   });
 }
 
-export function MessageList({ id, messages, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
+export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
   const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
   const [announcement, setAnnouncement] = useState("");
   const announcedActivity = useRef(new Set<string>());
   const activityLiveInitialized = useRef(false);
+
+  const [internalEvents, setInternalEvents] = useState<ConversationTimelineEvent[]>([]);
+  const [internalHasOlder, setInternalHasOlder] = useState(false);
+  const [internalLoadingOlder, setInternalLoadingOlder] = useState(false);
+  const [internalLoading, setInternalLoading] = useState(false);
+
+  useEffect(() => {
+    if (timelineEvents !== undefined || events !== undefined || (messages !== undefined && messages.length > 0) || !peerId) {
+      return;
+    }
+    let active = true;
+    setInternalLoading(true);
+    fetchConversationTimeline(peerId, 50, undefined, routerUrl)
+      .then((resp) => {
+        if (!active) return;
+        setInternalEvents(resp.events);
+        setInternalHasOlder(Boolean(resp.next_before_seq && resp.next_before_seq > 0));
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setInternalLoading(false);
+      });
+    return () => { active = false; };
+  }, [peerId, routerUrl, timelineEvents, events, messages]);
+
+  const effectiveEvents = timelineEvents ?? events ?? (internalEvents.length > 0 ? internalEvents : undefined);
+  const effectiveHasOlder = hasOlder ?? internalHasOlder;
+  const effectiveLoadingOlder = loadingOlder ?? internalLoadingOlder;
+
+  const prevScrollHeightRef = useRef<number | null>(null);
+  const prevScrollTopRef = useRef<number | null>(null);
+  const isPrependingRef = useRef(false);
+
+  const handleInternalLoadOlder = useCallback(() => {
+    const element = ref.current;
+    if (element) {
+      prevScrollHeightRef.current = element.scrollHeight;
+      prevScrollTopRef.current = element.scrollTop;
+      isPrependingRef.current = true;
+    }
+    if (onLoadOlder) {
+      onLoadOlder();
+      return;
+    }
+    if (!peerId || internalLoadingOlder) return;
+    const oldestSeq = internalEvents[0]?.seq;
+    if (!oldestSeq || oldestSeq <= 0) return;
+    setInternalLoadingOlder(true);
+    fetchConversationTimeline(peerId, 50, oldestSeq, routerUrl)
+      .then((resp) => {
+        setInternalEvents((prev) => [...resp.events, ...prev]);
+        setInternalHasOlder(Boolean(resp.next_before_seq && resp.next_before_seq > 0));
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        setInternalLoadingOlder(false);
+      });
+  }, [onLoadOlder, peerId, internalLoadingOlder, internalEvents, routerUrl]);
+
   const items = useMemo<FeedItem[]>(() => {
-    const rawItems: FeedItem[] = [
-      ...messages.map((message) => ({
+    const seenIds = new Set<string>();
+    const rawItems: FeedItem[] = [];
+
+    if (effectiveEvents && effectiveEvents.length > 0) {
+      for (const ev of effectiveEvents) {
+        seenIds.add(ev.id);
+        const converted = timelineEventToFeedItems(ev, currentUser, ownerId, peerId);
+        for (const item of converted) {
+          seenIds.add(item.id);
+          rawItems.push(item);
+        }
+      }
+    }
+
+    // Include live or pending messages (from WebSocket) not already captured
+    for (const message of messages ?? []) {
+      const key = messageKey(message);
+      if (seenIds.has(key) || seenIds.has(message.id)) continue;
+      seenIds.add(key);
+      seenIds.add(message.id);
+      rawItems.push({
         type: "message" as const,
-        id: messageKey(message),
+        id: key,
         timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
         sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
         message,
-      })),
-    ];
+      });
+    }
+
+    // Include live activity entries (from WebSocket) not already captured
     for (const entry of activityEntries ?? []) {
-      if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) {
-        continue;
-      }
+      if (seenIds.has(entry.id) || seenIds.has(`hist:${entry.id}`) || seenIds.has(`hist:complete:${entry.id}`)) continue;
+      if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) continue;
       const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
       if (userMail !== undefined) {
-        if (isAlreadyInMessages(entry, messages)) {
-          continue;
-        }
+        if (isAlreadyInMessages(entry, messages ?? [])) continue;
         const thinkingText = getThinkingContent(entry);
         if (thinkingText) {
-          rawItems.push({
-            type: "activity" as const,
-            id: `${entry.id}:thinking`,
-            timestamp: activityTime(entry) - 1,
-            sequence: activitySequence(entry),
-            entry: {
-              id: `${entry.id}:thinking`,
-              agent_id: entry.agent_id,
-              ...(entry.at !== undefined ? { at: entry.at } : {}),
-              presentation: {
-                kind: "thinking",
-                outcome: "success",
+          const thinkingId = `${entry.id}:thinking`;
+          if (!seenIds.has(thinkingId)) {
+            seenIds.add(thinkingId);
+            rawItems.push({
+              type: "activity" as const,
+              id: thinkingId,
+              timestamp: activityTime(entry) - 1,
+              sequence: activitySequence(entry),
+              entry: {
+                id: thinkingId,
+                agent_id: entry.agent_id,
+                ...(entry.at !== undefined ? { at: entry.at } : {}),
+                presentation: { kind: "thinking", outcome: "success", thinking: thinkingText },
                 thinking: thinkingText,
               },
-              thinking: thinkingText,
+            });
+          }
+        }
+        const msgId = `activity-msg-${entry.id}`;
+        if (!seenIds.has(msgId)) {
+          seenIds.add(msgId);
+          seenIds.add(entry.id);
+          rawItems.push({
+            type: "message" as const,
+            id: msgId,
+            timestamp: activityTime(entry),
+            sequence: activitySequence(entry),
+            message: {
+              id: entry.id,
+              from: userMail.from,
+              to: userMail.recipient,
+              body: userMail.body,
+              direction: "incoming",
+              ...(entry.at !== undefined ? { recorded_at: entry.at, created_at: entry.at } : {}),
+              ...(entry.presentation?.outcome === "failed" || entry.presentation?.outcome === "error" ? { failed: true } : {}),
+              ...(entry.presentation?.outcome === "active" ? { pending: true } : {}),
             },
           });
         }
-        rawItems.push({
-          type: "message",
-          id: `activity-msg-${entry.id}`,
-          timestamp: activityTime(entry),
-          sequence: activitySequence(entry),
-          message: {
-            id: entry.id,
-            from: userMail.from,
-            to: userMail.recipient,
-            body: userMail.body,
-            direction: "incoming",
-            ...(entry.at !== undefined ? { recorded_at: entry.at, created_at: entry.at } : {}),
-            ...(entry.presentation?.outcome === "failed" || entry.presentation?.outcome === "error" ? { failed: true } : {}),
-            ...(entry.presentation?.outcome === "active" ? { pending: true } : {}),
-          },
-        });
         continue;
       }
-      if (isAlreadyInMessages(entry, messages)) {
-        continue;
-      }
+      if (isAlreadyInMessages(entry, messages ?? [])) continue;
+      seenIds.add(entry.id);
       rawItems.push({
         type: "activity" as const,
         id: entry.id,
@@ -211,13 +484,14 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
         entry,
       });
     }
+
     return rawItems.sort(
       (left, right) =>
         left.timestamp - right.timestamp ||
         left.sequence - right.sequence ||
         left.id.localeCompare(right.id)
     );
-  }, [activityEntries, currentUser, messages]);
+  }, [effectiveEvents, messages, activityEntries, currentUser, ownerId, peerId]);
   const renderedItems = useMemo(() => {
     let lastThinking: string | undefined;
     let currentEpoch = 1;
@@ -255,12 +529,30 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
   }, [items]);
   const latestItem = renderedItems.at(-1)?.item;
   const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;
+  const oldestItem = renderedItems[0]?.item;
+  const oldestItemKey = oldestItem === undefined ? undefined : `${oldestItem.type}\u001f${oldestItem.id}`;
+
   useLayoutEffect(() => {
-    if (scrollLocked) return;
+    const element = ref.current;
+    if (!element || prevScrollHeightRef.current === null || prevScrollTopRef.current === null) return;
+    const heightDelta = element.scrollHeight - prevScrollHeightRef.current;
+    if (heightDelta > 0) {
+      element.scrollTop = prevScrollTopRef.current + heightDelta;
+    }
+    prevScrollHeightRef.current = null;
+    prevScrollTopRef.current = null;
+    isPrependingRef.current = false;
+  }, [oldestItemKey]);
+
+  useLayoutEffect(() => {
+    if (scrollLocked || isPrependingRef.current) return;
     const element = ref.current;
     if (!element) return;
     element.scrollTop = element.scrollHeight;
-    const frame = requestAnimationFrame(() => { element.scrollTop = element.scrollHeight; });
+    const frame = requestAnimationFrame(() => {
+      if (isPrependingRef.current) return;
+      element.scrollTop = element.scrollHeight;
+    });
     return () => cancelAnimationFrame(frame);
   }, [conversationKey, latestItemKey, scrollLocked]);
   // Retained history belongs to the newly selected agent; it is not a live
@@ -284,10 +576,20 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
     for (const activity of activities) announcedActivity.current.add(activity.id);
     setAnnouncement(newHighValue.slice(-3).map((activity) => completeTimelineVisual(activity.entry).label).join(". "));
   }, [activityHistoryReady, renderedItems]);
-  const onScroll = (): void => { const element = ref.current; if (!element) return; onNearBottomChange?.(shouldFollowToBottom(element.scrollTop, element.clientHeight, element.scrollHeight)); };
+  const onScroll = (): void => {
+    const element = ref.current;
+    if (!element) return;
+    onNearBottomChange?.(shouldFollowToBottom(element.scrollTop, element.clientHeight, element.scrollHeight));
+    const isScrollable = element.scrollHeight > element.clientHeight + 20;
+    if (isScrollable && element.scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder) {
+      handleInternalLoadOlder();
+    }
+  };
   const hasItems = renderedItems.length > 0;
-  const hasActivity = activityEntries !== undefined;
+  const hasActivity = activityEntries !== undefined || (effectiveEvents !== undefined && effectiveEvents.some((e) => e.kind !== "message"));
+  const effectiveLoading = loading || internalLoading;
   let previousDate: string | undefined;
+
   return (
     <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>
       {peerId === undefined ? (
@@ -295,17 +597,18 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
       ) : hasItems ? (
         <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>
           <div className="timeline-rail" aria-hidden="true" />
-          {hasOlder && (
+          {effectiveHasOlder && (
             <li key="pagination:load-older" className="timeline-load-older-item">
-              <button type="button" className="load-older-button" onClick={onLoadOlder} disabled={loadingOlder}>
-                {loadingOlder ? "Loading older history…" : "Load older history"}
+              <button type="button" className="load-older-button" onClick={handleInternalLoadOlder} disabled={effectiveLoadingOlder}>
+                {effectiveLoadingOlder ? "Loading older history…" : "Load older history"}
               </button>
             </li>
           )}
           {renderedItems.map(({ item, suppressThinking, epoch }) => {
+            const itemKey = `${item.type}:${item.id}`;
             const currentDate = dateLabel(item.timestamp);
             const separator = currentDate !== undefined && currentDate !== previousDate ? (
-              <li key={`date:${currentDate}:${item.id}`} className="timeline-date-item" role="separator" aria-label={`Date: ${currentDate}`}>
+              <li key={`date:${currentDate}:${itemKey}`} className="timeline-date-item" role="separator" aria-label={`Date: ${currentDate}`}>
                 <div className="timeline-date-divider">
                   <span className="timeline-date-line" aria-hidden="true" />
                   <span className="timeline-date-label">
@@ -321,7 +624,7 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
             const isContextReset = item.type === "activity" && isContextResetEntry(item.entry);
             if (isContextReset) {
               return (
-                <Fragment key={`${item.type}:${item.id}`}>
+                <Fragment key={itemKey}>
                   {separator}
                   <li className="timeline-item timeline-item--context-reset">
                     <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />
@@ -334,7 +637,7 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
             const orbTone = getItemOrbTone(item, ownerId);
 
             return (
-              <Fragment key={`${item.type}:${item.id}`}>
+              <Fragment key={itemKey}>
                 {separator}
                 <li className={`timeline-item timeline-item--${item.type}${isOutgoing ? " timeline-item--outgoing" : ""} timeline-item--tone-${orbTone}`}>
                   {!isOutgoing && (
@@ -363,7 +666,7 @@ export function MessageList({ id, messages, activityEntries, activityHistoryRead
             );
           })}
         </ol>
-      ) : loading ? (
+      ) : effectiveLoading ? (
         <EmptyState title="Loading conversation…" />
       ) : error ? (
         <p className="error" role="alert">{error}</p>

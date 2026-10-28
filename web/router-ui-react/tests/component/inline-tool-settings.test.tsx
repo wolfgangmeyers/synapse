@@ -95,7 +95,8 @@ describe("inline tool settings", () => {
     const onOpen = vi.fn();
     const onSave = vi.fn();
     render(<ConversationHeader agent={{ agent_id: "worker-one", activity_state: "idle" }} onInlineToolSettings={onOpen} />);
-    await user.click(screen.getByRole("button", { name: "Inline tool settings" }));
+    await user.click(screen.getByRole("button", { name: /more agent controls/i }));
+    await user.click(screen.getByRole("button", { name: /^inline tool settings$/i }));
     expect(onOpen).toHaveBeenCalledOnce();
     render(<InlineToolSettingsDialog open peer="worker-one" enabled={false} capabilityAvailable onClose={vi.fn()} onSave={onSave} />);
     await user.click(screen.getByRole("button", { name: "Allow inline tools: OFF" }));
@@ -147,7 +148,8 @@ describe("inline tool settings", () => {
     renderInlineToolApp("reject", false);
     await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Worker One (worker-one)" }));
-    await user.click(screen.getByRole("button", { name: "Inline tool settings" }));
+    await user.click(screen.getByRole("button", { name: /more agent controls/i }));
+    await user.click(screen.getByRole("button", { name: /^inline tool settings$/i }));
     expect(await screen.findByRole("status")).toHaveTextContent("not available");
     expect(screen.getByRole("button", { name: "Allow inline tools: OFF" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
@@ -158,7 +160,8 @@ describe("inline tool settings", () => {
     const { socket } = renderInlineToolApp("reject");
     await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Worker One (worker-one)" }));
-    await user.click(screen.getByRole("button", { name: "Inline tool settings" }));
+    await user.click(screen.getByRole("button", { name: /more agent controls/i }));
+    await user.click(screen.getByRole("button", { name: /^inline tool settings$/i }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Allow inline tools: OFF" })).not.toBeDisabled());
     await user.click(screen.getByRole("button", { name: "Allow inline tools: OFF" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -172,7 +175,8 @@ describe("inline tool settings", () => {
     const { socket } = renderInlineToolApp("disconnect");
     await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Worker One (worker-one)" }));
-    await user.click(screen.getByRole("button", { name: "Inline tool settings" }));
+    await user.click(screen.getByRole("button", { name: /more agent controls/i }));
+    await user.click(screen.getByRole("button", { name: /^inline tool settings$/i }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Allow inline tools: OFF" })).not.toBeDisabled());
     await user.click(screen.getByRole("button", { name: "Allow inline tools: OFF" }));
     await user.click(screen.getByRole("button", { name: "Save" }));

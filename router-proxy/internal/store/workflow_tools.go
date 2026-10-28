@@ -34,6 +34,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "mecha_restart_router", Name: "mecha_restart_router", Category: "system", Description: "Request a controlled restart of the mailbox router"},
 	{ID: "mecha_send_image", Name: "mecha_send_image", Category: "lifecycle", Description: "Send an image to the user or another recipient"},
 	{ID: "mecha_progress", Name: "mecha_progress", Category: "lifecycle", Description: "Track and report measurable task progress"},
+	{ID: "mecha_blocked", Name: "mecha_blocked", Category: "lifecycle", Description: "Set or clear blocked execution state when external assistance is required"},
 	{ID: "stop_subagent", Name: "stop_subagent", Category: "subagents", Description: "Stop a running background subagent"},
 	{ID: "kb_search", Name: "kb_search", Category: "memory", Description: "Search the persistent knowledge base"},
 	{ID: "kb_read", Name: "kb_read", Category: "memory", Description: "Read the content of a topic or markdown document"},

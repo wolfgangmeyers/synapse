@@ -97,6 +97,13 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"allow_inline_tools":       allowInline,
 		"manifest":                 map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":               agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
+		"blocked":                  agent.Blocked,
+		"blocked_reason":           nil,
+		"blocked_at":               nil,
+	}
+	if agent.Blocked {
+		result["blocked_reason"] = agent.BlockedReason
+		result["blocked_at"] = agent.BlockedAt
 	}
 	// Enrich workflow_state and workflow_name from the backing store so UI projections
 	// display human-readable workflow metadata alongside active IDs without secondary lookups.

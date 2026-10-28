@@ -2,6 +2,16 @@
 
 This repo holds dev-tooling skills for Wolfgang's AI agent workflow. Skills live in `.claude/skills/<name>/SKILL.md`.
 
+## Mandatory behavioral specifications and E2E testing policy
+
+Any behavioral change, feature implementation, or bugfix in `mecha-developer` must adhere to the behavioral specification and testing standards defined in `docs/behavioral-specification-standard.md`.
+
+- **Specification First**: Before writing or changing code that affects system behavior, a behavioral specification in `docs/specs/` must clearly document the expected behavior from the user's point of view, structured into user scenarios (covering both happy paths and edge/error paths).
+- **Mandatory Spec Backfill**: When doing development or bugfixes on areas of the codebase where no behavioral specification exists yet, agents MUST backfill complete behavioral specifications for those affected areas before modifying or adding production code.
+- **Mandatory Fast, Frictionless E2E Tests**: Behavioral changes must be backed by fast, reliable, non-flaky Playwright end-to-end tests in `tests/e2e/`. These tests must exercise real system boundaries—headless browser, WebSockets, REST API, router-proxy, and SQLite store—with LLM calls replaced by deterministic local mocks.
+- **Retire Redundant Brittle Tests**: Integration tests that merely mock internal JavaScript functions or duplicate E2E test coverage without testing real end-to-end boundaries should be eliminated.
+- **Specification Index**: The complete catalog of active behavioral specifications is maintained in `docs/specs/INDEX.md`.
+
 ## Mandatory portable policy
 
 All Wolfgang-managed supervisors and workers must read `docs/wolfgang-agent-operating-policy.md` before substantive work. A machine-level `~/AGENTS.md` must include a mandatory reference to that file, or to the installed copy of that file on that machine, so the policy is loaded before role-specific supervisor or worker instructions.

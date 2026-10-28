@@ -194,7 +194,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodGet && path == "/v1/conversations":
 		r.handleConversation(w, req)
 		return
-	case req.Method == http.MethodGet && strings.HasPrefix(path, "/v1/attachments/"):
+	case req.Method == http.MethodGet && path == "/v1/conversation":
+		r.handleConversationTimeline(w, req)
+		return
+	case (req.Method == http.MethodGet || req.Method == http.MethodHead) && strings.HasPrefix(path, "/v1/attachments/"):
 		r.handleAttachment(w, req)
 		return
 	case req.Method == http.MethodPost && path == "/v1/messages":
@@ -567,6 +570,47 @@ func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 		resp["next_before"] = *nextBefore
 	} else {
 		resp["next_before"] = nil
+	}
+	r.writeJSON(w, 200, resp)
+}
+
+func (r *Router) handleConversationTimeline(w http.ResponseWriter, req *http.Request) {
+	agentID := req.URL.Query().Get("agent_id")
+	if agentID == "" {
+		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+		return
+	}
+
+	limit := 50
+	if raw := req.URL.Query().Get("limit"); raw != "" {
+		if val, err := strconv.Atoi(raw); err == nil && val > 0 {
+			if val > 500 {
+				val = 500
+			}
+			limit = val
+		}
+	}
+
+	var beforeSeq *int64
+	if raw := req.URL.Query().Get("before_seq"); raw != "" {
+		if val, err := strconv.ParseInt(raw, 10, 64); err == nil && val > 0 {
+			beforeSeq = &val
+		}
+	}
+
+	events, nextBeforeSeq, err := r.store.GetConversationTimeline(req.Context(), agentID, limit, beforeSeq)
+	if err != nil {
+		r.writeError(w, &httpError{status: 500, code: "internal_error"})
+		return
+	}
+	if events == nil {
+		events = []store.ConversationTimelineEvent{}
+	}
+
+	resp := map[string]any{
+		"agent_id":        agentID,
+		"events":          events,
+		"next_before_seq": nextBeforeSeq,
 	}
 	r.writeJSON(w, 200, resp)
 }
@@ -987,6 +1031,18 @@ func (r *Router) handleAttachment(w http.ResponseWriter, req *http.Request) {
 		r.writeError(w, &httpError{status: 404, code: "not_found"})
 		return
 	}
+	if req.Method == http.MethodHead {
+		item, err := r.attachments.Stat(id)
+		if err != nil {
+			r.writeError(w, &httpError{status: 404, code: "not_found"})
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", item.MIMEType)
+		w.Header().Set("Content-Length", strconv.Itoa(item.SizeBytes))
+		w.WriteHeader(200)
+		return
+	}
 	data, item, err := r.attachments.Read(id)
 	if err != nil {
 		r.writeError(w, &httpError{status: 404, code: "not_found"})
@@ -994,6 +1050,7 @@ func (r *Router) handleAttachment(w http.ResponseWriter, req *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", item.MIMEType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(200)
 	_, _ = w.Write(data)
 }

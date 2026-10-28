@@ -890,6 +890,9 @@ export interface ManagedAgent {
   workflow_name?: string | null;
   workflow_state?: string | null;
   workflow_variables?: Record<string, string> | null;
+  blocked?: boolean;
+  blocked_reason?: string | null;
+  blocked_at?: string | null;
 }
 
 export interface ManagedAgentLaunchPayload {
@@ -940,7 +943,7 @@ export interface ManagedChildrenProjection {
   recovery_state: "current" | "reconstructing";
   children: ManagedChild[];
 }
-export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking" | "goal_evaluation" | "subagent_complete" | "subagent" | "context_reset";
+export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth" | "thinking" | "goal_evaluation" | "subagent_complete" | "subagent" | "context_reset" | "notification" | "mailbox_message";
 export type ManagedHistoryOutcome = "active" | "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "interrupted" | "aborted" | "reconciled_unknown" | "done" | "not_done";
 export interface ManagedHistoryError {
   code: string;
@@ -958,6 +961,9 @@ export interface ManagedHistoryPresentation {
   outcome?: ManagedHistoryOutcome;
   from?: string;
   to?: string;
+  sender?: string;
+  recipient?: string;
+  subject?: string;
   child_label?: string;
   child_state?: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "confirmed" | "interrupted_unknown" | "cancelled";
   summary?: string;

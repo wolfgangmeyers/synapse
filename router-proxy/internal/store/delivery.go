@@ -309,6 +309,13 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 			return errors.New("message disappeared after enqueue")
 		}
 		result = EnqueueResult{Created: true, Message: *message}
+		msgWithAtts := *message
+		if conversation != nil && len(conversation.Attachments) > 0 {
+			msgWithAtts.Attachments = conversation.Attachments
+		}
+		if err := s.recordTimelineMessageTx(ctx, msgWithAtts, source); err != nil {
+			return err
+		}
 		if conversation != nil {
 			row, err := s.insertConversation(ctx, conversation, message.MessageIncarnationID, now, message)
 			if err != nil {

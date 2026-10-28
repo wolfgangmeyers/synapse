@@ -148,6 +148,10 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 		log.Printf("[embedded:%s] Suppressing goal continuation because subagents are active", binding.AgentID)
 		return
 	}
+	if curAgent, err := m.store.ManagedAgent(m.runCtx, binding.AgentID); err == nil && curAgent != nil && curAgent.Blocked {
+		log.Printf("[embedded:%s] Suppressing goal continuation because agent is blocked: %s", binding.AgentID, curAgent.BlockedReason)
+		return
+	}
 	lane := m.laneFor(binding.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
@@ -160,6 +164,10 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	}
 	if m.hasActiveSubagents(binding.AgentID) {
 		log.Printf("[embedded:%s] Suppressing goal continuation because subagents are active", binding.AgentID)
+		return
+	}
+	if curAgent, err := m.store.ManagedAgent(m.runCtx, binding.AgentID); err == nil && curAgent != nil && curAgent.Blocked {
+		log.Printf("[embedded:%s] Suppressing goal continuation because agent is blocked: %s", binding.AgentID, curAgent.BlockedReason)
 		return
 	}
 	maxContinuations := m.maxConsecutiveGoalContinuations
@@ -277,6 +285,10 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	curAgent, err := m.store.ManagedAgent(m.runCtx, agentID)
 	if err != nil || curAgent == nil || curAgent.ActivityState != "idle" || curAgent.LifecycleState != "running" || curAgent.DesiredState != "running" {
+		return
+	}
+	if curAgent.Blocked {
+		log.Printf("[embedded:%s] Suppressing idle goal continuation because agent is blocked: %s", agentID, curAgent.BlockedReason)
 		return
 	}
 

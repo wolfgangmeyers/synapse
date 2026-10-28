@@ -381,4 +381,78 @@ describe("AgentRow", () => {
       expect(c3.querySelector(".agent-row-workflow-badge")).not.toBeInTheDocument();
     });
   });
+
+  describe("blocked state badge", () => {
+    it("renders compact blocked badge in metadata line when blocked is true", () => {
+      const { container } = render(
+        <AgentRow
+          agent={{
+            agent_id: "blocked-worker",
+            activity_state: "idle",
+            blocked: true,
+            blocked_reason: "Awaiting AWS production credentials",
+          }}
+        />
+      );
+      const badge = container.querySelector(".agent-row-blocked-badge");
+      expect(badge).toBeInTheDocument();
+      expect(badge).toHaveTextContent("Blocked");
+      expect(badge?.querySelector(".fa-hand")).toBeInTheDocument();
+      expect(badge).toHaveAttribute("title", "Blocked: Awaiting AWS production credentials");
+    });
+
+    it("renders fallback title when blocked_reason is missing", () => {
+      const { container } = render(
+        <AgentRow
+          agent={{
+            agent_id: "blocked-worker",
+            activity_state: "idle",
+            blocked: true,
+          }}
+        />
+      );
+      const badge = container.querySelector(".agent-row-blocked-badge");
+      expect(badge).toBeInTheDocument();
+      expect(badge).toHaveAttribute("title", "Blocked: External assistance required");
+    });
+
+    it("renders both workflow badge and blocked badge simultaneously when both are present", () => {
+      const { container } = render(
+        <AgentRow
+          agent={{
+            agent_id: "blocked-worker",
+            activity_state: "idle",
+            workflow_state: "Dev Loop",
+            blocked: true,
+            blocked_reason: "Need API key",
+          }}
+        />
+      );
+      expect(container.querySelector(".agent-row-workflow-badge")).toBeInTheDocument();
+      expect(container.querySelector(".agent-row-blocked-badge")).toBeInTheDocument();
+    });
+
+    it("omits blocked badge when blocked is false or undefined", () => {
+      const { container: c1 } = render(
+        <AgentRow
+          agent={{
+            agent_id: "normal-worker",
+            activity_state: "idle",
+          }}
+        />
+      );
+      expect(c1.querySelector(".agent-row-blocked-badge")).not.toBeInTheDocument();
+
+      const { container: c2 } = render(
+        <AgentRow
+          agent={{
+            agent_id: "normal-worker",
+            activity_state: "idle",
+            blocked: false,
+          }}
+        />
+      );
+      expect(c2.querySelector(".agent-row-blocked-badge")).not.toBeInTheDocument();
+    });
+  });
 });

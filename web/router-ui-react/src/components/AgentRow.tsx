@@ -83,6 +83,16 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
               <span className="agent-row-workflow-badge-text">{agent.workflow_state}</span>
             </span>
           ) : null}
+          {agent.blocked ? (
+            <span
+              className="agent-row-blocked-badge"
+              title={`Blocked: ${agent.blocked_reason || "External assistance required"}`}
+              aria-label={`Blocked: ${agent.blocked_reason || "External assistance required"}`}
+            >
+              <i className="fa-solid fa-hand" aria-hidden="true" />
+              <span className="agent-row-blocked-badge-text">Blocked</span>
+            </span>
+          ) : null}
         </span>
         {showSubagentBadge ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
           <SubagentBadge count={subagentCount} subagents={subagents} expanded={expanded} listId={subagentListID} onToggle={() => onToggleSubagents?.(agent.agent_id)} onStopSubagent={onStopSubagent} client={client} agentId={agent.agent_id} isEmbedded={agent.runtime === "embedded" || agent.managed_agent?.runtime === "embedded"} />

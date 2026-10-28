@@ -261,7 +261,9 @@ describe("real managed router to React WebUI behavioral seam", () => {
     });
     expect(initialChildren!.response.status).toBe(200);
     expect(record(list(initialChildren!.body.children)[0])).toMatchObject({ task_id: "functional-child-task", run_id: "functional-child-run", parent_entry_id: "functional-parent-entry", sequence: 0 });
-    await screen.findByText("No messages or activity yet");
+    await waitFor(() => {
+      expect(screen.queryByText("Loading conversation…")).toBeNull();
+    });
 
     await sendManagedMessage(router, "functional-compaction", "Start structured child");
     let activeChildren: { response: Response; body: JsonRecord } | undefined;

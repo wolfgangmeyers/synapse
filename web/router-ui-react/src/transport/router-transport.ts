@@ -6,7 +6,7 @@ import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { ModelSummary } from "../domain/models";
 import type { GoalControlSettings } from "../domain/goals";
-import type { RouterHttpClient } from "./http-client";
+import type { RouterHttpClient, ConversationTimelineResponse } from "./http-client";
 import { createHttpClient } from "./http-client";
 import { absoluteAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 import { createControlRegistry, matchesPendingControl, type ControlKind, type PendingControl } from "./control-correlations";
@@ -109,6 +109,7 @@ export interface RouterTransport {
   refreshAgents(): Promise<void>;
   refreshReminders(): Promise<void>;
   conversation(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }>;
+  fetchConversationTimeline?(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
   sendMessage(message: unknown): Promise<Record<string, unknown>>;
   sendActivity(activityState: "active" | "settled" | "compacting", details?: Pick<Agent, "subagent_count" | "subagents" | "goal" | "current_model">): boolean;
   sendModelControl(targetAgentId: string, targetInstanceId: string, model: ModelSummary, controlId?: string): boolean;
@@ -323,6 +324,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     refreshAgents,
     refreshReminders,
     conversation: (owner, peer, options) => http.conversations(owner, peer, options),
+    fetchConversationTimeline: (agentId, limit, beforeSeq) => http.fetchConversationTimeline(agentId, limit, beforeSeq),
     async sendMessage(message) { const result = await http.sendMessage(message); void refreshAgents(); return result; },
     sendActivity(activityState, details = {}) { if (!socket.registered) return false; return socket.send(buildActivityFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, activityState, ...details })); },
     sendModelControl(targetAgentId, targetInstanceId, model, requestedControlId = controlId()) { if (!socket.registered) return false; const frame = buildModelControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: requestedControlId, model }); return sendControl(frame, controlFor("model", requestedControlId, targetAgentId, targetInstanceId, socket.identity)); },
