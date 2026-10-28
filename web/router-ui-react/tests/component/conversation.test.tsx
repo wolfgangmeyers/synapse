@@ -59,11 +59,11 @@ describe("Conversation", () => {
     expect(list.scrollTop).toBe(200);
   });
 
-  it("renders distinct message incarnations with the same message ID as separate bubbles", () => {
+  it("deduplicates messages with the same message ID", () => {
     const { container } = render(<MessageList peerId="one" messages={[{ id: "same-id", message_incarnation_id: "first", body: "First incarnation" }, { id: "same-id", message_incarnation_id: "second", body: "Second incarnation" }]} />);
-    expect(container.querySelectorAll('[data-message-id="same-id"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-message-id="same-id"]')).toHaveLength(1);
     expect(screen.getByText("First incarnation")).toBeTruthy();
-    expect(screen.getByText("Second incarnation")).toBeTruthy();
+    expect(screen.queryByText("Second incarnation")).toBeNull();
   });
 
   it("keeps a selected message subtree and browser selection stable across routine updates", () => {

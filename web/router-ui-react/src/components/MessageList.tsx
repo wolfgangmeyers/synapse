@@ -103,6 +103,17 @@ function dateLabel(timestamp: number): string | undefined {
   return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+function extractRawId(id: string): string {
+  if (id.startsWith("msg:")) {
+    const parts = id.split(":");
+    return parts.length >= 3 ? parts.slice(2).join(":") : id;
+  }
+  if (id.startsWith("hist:")) {
+    return id.replace(/^hist:(?:complete:)?/, "");
+  }
+  return id;
+}
+
 function normalizeMessageBodyForComparison(body: string | undefined): string {
   if (!body) return "";
   return body
@@ -396,22 +407,19 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
 
   const items = useMemo<FeedItem[]>(() => {
     const seenIds = new Set<string>();
+    const markSeen = (id: string) => {
+      seenIds.add(id);
+      const raw = extractRawId(id);
+      if (raw) seenIds.add(raw);
+    };
     const rawItems: FeedItem[] = [];
 
     if (effectiveEvents && effectiveEvents.length > 0) {
       for (const ev of effectiveEvents) {
-        seenIds.add(ev.id);
-        if (ev.id.startsWith("msg:")) {
-          const parts = ev.id.split(":");
-          if (parts.length >= 3) {
-            const rawId = parts.slice(2).join(":");
-            seenIds.add(rawId);
-            seenIds.add(`msg:${rawId}`);
-          }
-        }
+        markSeen(ev.id);
         const converted = timelineEventToFeedItems(ev, currentUser, ownerId, peerId);
         for (const item of converted) {
-          seenIds.add(item.id);
+          markSeen(item.id);
           rawItems.push(item);
         }
       }
@@ -419,20 +427,13 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
 
     // Include live or pending messages (from WebSocket) not already captured
     for (const message of messages ?? []) {
-      const key = messageKey(message);
-      if (
-        seenIds.has(key) ||
-        seenIds.has(message.id) ||
-        seenIds.has(`msg:${peerId}:${message.id}`) ||
-        seenIds.has(`msg:${ownerId}:${message.id}`)
-      ) {
+      if (seenIds.has(message.id) || seenIds.has(messageKey(message))) {
         continue;
       }
-      seenIds.add(key);
-      seenIds.add(message.id);
+      markSeen(message.id);
       rawItems.push({
         type: "message" as const,
-        id: key,
+        id: message.id,
         timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
         sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
         message,
@@ -450,7 +451,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
         if (thinkingText) {
           const thinkingId = `${entry.id}:thinking`;
           if (!seenIds.has(thinkingId)) {
-            seenIds.add(thinkingId);
+            markSeen(thinkingId);
             rawItems.push({
               type: "activity" as const,
               id: thinkingId,
@@ -467,9 +468,9 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
           }
         }
         const msgId = `activity-msg-${entry.id}`;
-        if (!seenIds.has(msgId)) {
-          seenIds.add(msgId);
-          seenIds.add(entry.id);
+        if (!seenIds.has(msgId) && !seenIds.has(entry.id)) {
+          markSeen(msgId);
+          markSeen(entry.id);
           rawItems.push({
             type: "message" as const,
             id: msgId,
@@ -490,7 +491,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
         continue;
       }
       if (isAlreadyInMessages(entry, messages ?? [])) continue;
-      seenIds.add(entry.id);
+      markSeen(entry.id);
       rawItems.push({
         type: "activity" as const,
         id: entry.id,

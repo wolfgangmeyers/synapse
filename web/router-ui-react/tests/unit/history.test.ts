@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { mergeMessages, pruneHistoryMessages, reconcileHistoryMessages, settlePendingMessages, stripDataUrls } from "../../src/domain/history";
 const message = (id: string, sequence: number, incarnation = "") => ({ id, sequence, message_incarnation_id: incarnation, created_at: "2026-01-01T00:00:00.000Z", body: id });
 describe("history", () => {
-  it("keeps incarnation identities and sequence order", () => { expect(mergeMessages([message("b", 2)], [message("a", 1), message("b", 3, "new")]).map((item) => item.id)).toEqual(["a", "b", "b"]); });
+  it("deduplicates by message id and merges with latest properties", () => {
+    const merged = mergeMessages([message("b", 2)], [message("a", 1), message("b", 3, "new")]);
+    expect(merged.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(merged.find((item) => item.id === "b")?.sequence).toBe(3);
+    expect(merged.find((item) => item.id === "b")?.message_incarnation_id).toBe("new");
+  });
   it("retains live messages beyond snapshot high water", () => { expect(reconcileHistoryMessages([message("live", 9), message("old", 1)], [message("snap", 2)], 2).map((item) => item.id)).toEqual(["snap", "live"]); });
   it("replaces an optimistic pending row when canonical history has a different id", () => {
     const createdAt = "2026-01-01T00:00:00.000Z";

@@ -183,7 +183,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         if (peer !== undefined && addressed !== peer) return current;
         const lastSeq = current.length > 0 ? (current[current.length - 1]?.seq ?? 0) : 0;
         const liveEvt: ConversationTimelineEvent = {
-          id: message.id,
+          id: `msg:${peer ?? ""}:${message.id}`,
           agent_id: peer ?? "",
           seq: message.sequence ?? (lastSeq + 1),
           kind: "message",
@@ -200,6 +200,9 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       });
       setMessages((current) => {
         if (peer !== undefined && addressed !== peer) return current;
+        if (current.some((m) => m.id === message.id)) {
+          return current.map((m) => m.id === message.id ? { ...m, ...message } : m);
+        }
         const useFreshMessages = freshHistoryScope.current === scopeKey;
         const next = appendConversation({ messages: useFreshMessages ? [] : current, highWaterSequence: 0, followMessages: true }, message).messages;
         if (addressed === peer) onPersist?.(addressed, useFreshMessages ? [message] : next);
