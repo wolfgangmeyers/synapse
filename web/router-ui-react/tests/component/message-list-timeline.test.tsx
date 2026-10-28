@@ -422,5 +422,56 @@ describe("MessageList", () => {
       expect(screen.getByText("To agent-2")).toBeInTheDocument();
       expect(screen.getByText(/Work update/)).toBeInTheDocument();
     });
+
+    it("deduplicates messages between timeline events and live messages without dropping new live messages", () => {
+      const events: ConversationTimelineEvent[] = [
+        {
+          id: "msg:conversation-simplification:embedded-mail-0a8d",
+          agent_id: "conversation-simplification",
+          kind: "message",
+          role: "assistant",
+          seq: 1,
+          content: "Historical message from timeline",
+          created_at: 1700000000000,
+        },
+      ];
+
+      const messages: HistoryMessage[] = [
+        // Duplicate of the event above with raw message id
+        {
+          id: "embedded-mail-0a8d",
+          body: "Historical message from timeline",
+          direction: "incoming",
+          from: "conversation-simplification",
+          to: "user",
+          sequence: 1,
+        },
+        // Fresh live incoming message not yet in timeline events
+        {
+          id: "embedded-mail-live-1234",
+          body: "Brand new live message",
+          direction: "incoming",
+          from: "conversation-simplification",
+          to: "user",
+        },
+      ];
+
+      render(
+        <MessageList
+          peerId="conversation-simplification"
+          ownerId="user"
+          events={events}
+          messages={messages}
+        />
+      );
+
+      // Verify the duplicated message is only rendered once
+      const historicalElements = screen.getAllByText("Historical message from timeline");
+      expect(historicalElements).toHaveLength(1);
+
+      // Verify the live message is preserved and rendered
+      expect(screen.getByText("Brand new live message")).toBeInTheDocument();
+    });
   });
 });
+

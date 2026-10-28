@@ -401,6 +401,14 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     if (effectiveEvents && effectiveEvents.length > 0) {
       for (const ev of effectiveEvents) {
         seenIds.add(ev.id);
+        if (ev.id.startsWith("msg:")) {
+          const parts = ev.id.split(":");
+          if (parts.length >= 3) {
+            const rawId = parts.slice(2).join(":");
+            seenIds.add(rawId);
+            seenIds.add(`msg:${rawId}`);
+          }
+        }
         const converted = timelineEventToFeedItems(ev, currentUser, ownerId, peerId);
         for (const item of converted) {
           seenIds.add(item.id);
@@ -412,7 +420,14 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     // Include live or pending messages (from WebSocket) not already captured
     for (const message of messages ?? []) {
       const key = messageKey(message);
-      if (seenIds.has(key) || seenIds.has(message.id)) continue;
+      if (
+        seenIds.has(key) ||
+        seenIds.has(message.id) ||
+        seenIds.has(`msg:${peerId}:${message.id}`) ||
+        seenIds.has(`msg:${ownerId}:${message.id}`)
+      ) {
+        continue;
+      }
       seenIds.add(key);
       seenIds.add(message.id);
       rawItems.push({
