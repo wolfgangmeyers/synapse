@@ -22,7 +22,7 @@ export interface HistoryMessage {
 }
 
 export function messageKey(message: Pick<HistoryMessage, "id" | "message_incarnation_id">): string {
-  return `${message.id}\u001f${message.message_incarnation_id ?? ""}`;
+  return message.id;
 }
 
 export function messageTime(message: Pick<HistoryMessage, "recorded_at" | "created_at" | "createdAt">, fallback = Date.now()): number {
@@ -35,8 +35,8 @@ export function compareMessages(left: HistoryMessage, right: HistoryMessage): nu
 }
 
 export function mergeMessages(existing: HistoryMessage[], incoming: HistoryMessage[]): HistoryMessage[] {
-  const byKey = new Map(existing.map((message) => [messageKey(message), message]));
-  for (const message of incoming) byKey.set(messageKey(message), { ...byKey.get(messageKey(message)), ...message });
+  const byKey = new Map(existing.map((message) => [message.id, message]));
+  for (const message of incoming) byKey.set(message.id, { ...byKey.get(message.id), ...message });
   return [...byKey.values()].sort(compareMessages);
 }
 
