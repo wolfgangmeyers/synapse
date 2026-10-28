@@ -145,7 +145,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
 
         if (targetAgentId) {
           try {
-            const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 5000 });
+            const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 50 });
             if (active) {
               for (const entry of [...historyPage.entries].reverse()) {
                 dispatch({ type: "managed/history", scope: scopeRef.current, view: "complete", entry });
@@ -237,7 +237,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
 
           if (targetAgentId) {
             try {
-              const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 5000 });
+              const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 50 });
               if (active) {
                 for (const entry of [...historyPage.entries].reverse()) {
                   dispatch({ type: "managed/history", scope: currentScope, view: "complete", entry });
@@ -247,7 +247,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
               // history can be reloaded on next selection
             }
             try {
-              const quietPage = await transport.http.managedHistory(targetAgentId, "quiet", { limit: 5000 });
+              const quietPage = await transport.http.managedHistory(targetAgentId, "quiet", { limit: 50 });
               if (active) {
                 for (const entry of [...quietPage.entries].reverse()) {
                   dispatch({ type: "managed/history", scope: currentScope, view: "quiet", entry });

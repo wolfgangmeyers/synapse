@@ -121,6 +121,14 @@ export function persistedActiveRouter(storage: StorageAdapter | undefined = stor
   }
 }
 
+export function activeRouterUrl(storage: StorageAdapter | undefined = storageOrUndefined()): string {
+  try {
+    return loadSettings(storage).activeRouter;
+  } catch {
+    return DEFAULT_ROUTER_URL;
+  }
+}
+
 export function loadSettings(storage: StorageAdapter | undefined = storageOrUndefined(), defaultRouter = DEFAULT_ROUTER_URL): SettingsState {
   const fallback = emptySettings(defaultRouter);
   if (fallback.activeRouter.includes(":8787")) {

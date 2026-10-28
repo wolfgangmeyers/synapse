@@ -183,6 +183,9 @@ func (s *Store) BeginManagedToolInvocation(ctx context.Context, fence ManagedRun
 			return err
 		}
 		entry = managedHistoryEntry(sequence, fence.AgentID, now, level, message, presentation, managedHistoryDetails{ToolInputJSON: toolInputJSON})
+		if err := s.recordTimelineHistoryTx(ctx, fence.AgentID, "managed_builtin_tool", level, message, entry); err != nil {
+			return err
+		}
 		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
 			return err
 		}
@@ -274,6 +277,9 @@ func (s *Store) finishManagedToolInvocation(ctx context.Context, fence ManagedRu
 		}
 		entry.At = occurredAt
 		entry.ToolInput = rawManagedHistoryJSON(toolInput.String)
+		if err := s.recordTimelineHistoryTx(ctx, fence.AgentID, "managed_builtin_tool", level, message, entry); err != nil {
+			return err
+		}
 		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
 			return err
 		}

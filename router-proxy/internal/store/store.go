@@ -538,6 +538,11 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 					return err
 				}
 			}
+			if migration.ID == "112_conversation_timeline" {
+				if err := s.migrateToConversationTimelineTx(ctx); err != nil {
+					return err
+				}
+			}
 			if _, err := s.db.ExecContext(ctx,
 				"INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
 				migration.ID, formatTimestamp(s.clock.Now())); err != nil {

@@ -1,4 +1,4 @@
-import { normalizeRouterUrl } from "../persistence/settings-repository";
+import { normalizeRouterUrl, activeRouterUrl } from "../persistence/settings-repository";
 import { secureUuid } from "../platform/secure-uuid";
 import { httpRoutes } from "../protocol/manifest";
 import { isAgentId, isConversationMessage, isManagedAgent, isManagedChildrenProjection, isManagedCompleteHistoryEntry, isManagedHistoryEntry, isModelSummary, isRecord, isRouterUtcTimestamp } from "../protocol/guards";
@@ -15,6 +15,21 @@ export interface Capabilities extends Record<string, unknown> {}
 export interface HealthResponse { status: string; version: string; schema_migrations?: string[] }
 export interface AgentListResponse { agents: Agent[]; generated_at?: string; activity_snapshot_version?: number }
 export interface ConversationResponse { owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }
+export interface ConversationTimelineEvent {
+  id: string;
+  agent_id: string;
+  seq: number;
+  kind: string;
+  role?: string;
+  content?: string;
+  metadata?: Record<string, unknown> | null;
+  created_at: number;
+}
+export interface ConversationTimelineResponse {
+  agent_id: string;
+  events: ConversationTimelineEvent[];
+  next_before_seq: number | null;
+}
 export interface ReminderResponse { reminders: Reminder[] }
 export interface ReminderWriteResponse { reminder: Reminder }
 export interface PromptTemplateResponse { prompt_templates: PromptTemplate[] }
@@ -297,6 +312,38 @@ function conversation(value: unknown, routerUrl: string): ConversationResponse {
   const nextBefore = typeof root.next_before === "number" && Number.isSafeInteger(root.next_before) && root.next_before > 0 ? root.next_before : null;
   return { owner: root.owner, peer: root.peer, high_water_sequence: root.high_water_sequence, messages, next_before: nextBefore };
 }
+function conversationTimeline(value: unknown): ConversationTimelineResponse {
+  const root = recordValue(value);
+  if (!root || !nonEmptyString(root.agent_id) || (root.events !== null && !Array.isArray(root.events))) {
+    throw invalidResponse("Router returned an invalid conversation timeline", value);
+  }
+  const events: ConversationTimelineEvent[] = [];
+  for (const raw of root.events ?? []) {
+    const item = recordValue(raw);
+    if (!item || !nonEmptyString(item.id) || !nonEmptyString(item.agent_id) || typeof item.seq !== "number" || !nonEmptyString(item.kind) || typeof item.created_at !== "number") {
+      throw invalidResponse("Router returned an invalid conversation timeline event", raw);
+    }
+    const metaRecord = recordValue(item.metadata);
+    events.push({
+      id: item.id,
+      agent_id: item.agent_id,
+      seq: item.seq,
+      kind: item.kind,
+      ...(typeof item.role === "string" ? { role: item.role } : {}),
+      ...(typeof item.content === "string" ? { content: item.content } : {}),
+      ...(metaRecord !== undefined ? { metadata: metaRecord } : {}),
+      created_at: item.created_at,
+    });
+  }
+  const nextBeforeSeq = typeof root.next_before_seq === "number" && Number.isSafeInteger(root.next_before_seq) && root.next_before_seq > 0
+    ? root.next_before_seq
+    : null;
+  return {
+    agent_id: root.agent_id,
+    events,
+    next_before_seq: nextBeforeSeq,
+  };
+}
 function reminders(value: unknown): ReminderResponse {
   const root = recordValue(value); const rawReminders = root?.reminders;
   // Go's JSON encoder emits a nil empty slice as null. Normalize that valid wire response at the boundary.
@@ -528,6 +575,7 @@ export interface RouterHttpClient {
   capabilities(): Promise<Capabilities>;
   agents(options?: { includeModels?: boolean } | boolean): Promise<AgentListResponse>;
   conversations(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<ConversationResponse>;
+  fetchConversationTimeline(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
   sendMessage(message: unknown): Promise<Record<string, unknown>>;
   message(id: string): Promise<unknown>;
   retryMessage(id: string): Promise<unknown>;
@@ -663,6 +711,12 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       if (options.before !== undefined && options.before > 0) params.set("before", String(options.before));
       if (options.limit !== undefined && options.limit > 0) params.set("limit", String(options.limit));
       return conversation(await request(`/v1/conversations?${params.toString()}`), base);
+    },
+    fetchConversationTimeline: async (agentId, limit = 50, beforeSeq) => {
+      const params = new URLSearchParams({ agent_id: agentId });
+      if (limit !== undefined && limit > 0) params.set("limit", String(limit));
+      if (beforeSeq !== undefined && beforeSeq > 0) params.set("before_seq", String(beforeSeq));
+      return conversationTimeline(await request(`/v1/conversation?${params.toString()}`));
     },
     sendMessage: async (message) => messageWrite(await jsonRequest("/v1/messages", "POST", message)),
     message: (id) => request(`/v1/messages/${encodeURIComponent(id)}`),
@@ -998,6 +1052,16 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       return (recordValue(res) ?? {}) as GitSyncPushResponse;
     },
   };
+}
+
+export async function fetchConversationTimeline(
+  agentId: string,
+  limit = 50,
+  beforeSeq?: number,
+  baseUrl?: string
+): Promise<ConversationTimelineResponse> {
+  const client = createHttpClient(baseUrl ?? activeRouterUrl());
+  return client.fetchConversationTimeline(agentId, limit, beforeSeq);
 }
 
 export { httpRoutes };

@@ -287,6 +287,30 @@ func (s *Store) Finalize(p Pending) error {
 	return syncDirectory(s.directory)
 }
 
+func (s *Store) Stat(id string) (Attachment, error) {
+	if err := validateID(id); err != nil {
+		return Attachment{}, err
+	}
+	if err := s.ensureDirectory(false); err != nil {
+		return Attachment{}, err
+	}
+	path := filepath.Join(s.directory, id)
+	link, err := os.Lstat(path)
+	if err != nil {
+		return Attachment{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil || !link.Mode().IsRegular() || !info.Mode().IsRegular() {
+		return Attachment{}, os.ErrNotExist
+	}
+	referenced, _ := s.referenceState(id)
+	if !s.retained(info.ModTime()) && !referenced {
+		return Attachment{}, os.ErrNotExist
+	}
+	mime, _ := mimeForID(id)
+	return Attachment{ID: id, URL: "/v1/attachments/" + id, MIMEType: mime, SizeBytes: int(info.Size())}, nil
+}
+
 func (s *Store) Read(id string) ([]byte, Attachment, error) {
 	if err := validateID(id); err != nil {
 		return nil, Attachment{}, err

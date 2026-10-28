@@ -37,6 +37,7 @@ type Message struct {
 	ExpiresAt            string                       `json:"expires_at"`
 	MessageIncarnationID string                       `json:"message_incarnation_id"`
 	State                string                       `json:"state"`
+	Attachments          []json.RawMessage            `json:"attachments,omitempty"`
 	Sentinel             *protocol.SentinelDescriptor `json:"sentinel,omitempty"`
 	Source               protocol.MessageSource       `json:"source"`
 }

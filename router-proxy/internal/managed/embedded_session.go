@@ -1415,6 +1415,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		tools = append(tools, m.EmbeddedSubagentPublicTools(binding)...)
 		tools = append(tools, m.embeddedProgressTool(owner))
+		tools = append(tools, m.embeddedBlockedTool(owner))
 		tools = append(tools, m.buildSessionTools(&saved)...)
 		tools = append(tools, m.embeddedSessionTools(owner)...)
 		tools = append(tools, m.embeddedWorkflowManagementTools(owner)...)
@@ -2123,6 +2124,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 // captured at the provider-request boundary, never inferred from desired state.
 func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.EmbeddedBinding, p *embeddedPersistence, receipt *store.EmbeddedGoalAppliedReceipt, model *ai.Model, stream agent.StreamFn) error {
 	if m.isWorkerSelfTerminationPending(binding.AgentID) {
+		return nil
+	}
+	if curAgent, err := m.store.ManagedAgent(ctx, binding.AgentID); err == nil && curAgent != nil && curAgent.Blocked {
+		log.Printf("[embedded:%s] Suppressing goal evaluation because agent is blocked: %s", binding.AgentID, curAgent.BlockedReason)
 		return nil
 	}
 	if receipt == nil || !receipt.GoalEnabled ||

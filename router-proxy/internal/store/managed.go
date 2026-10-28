@@ -163,6 +163,12 @@ type ManagedAgentRecord struct {
 	ContextPercent *float64
 	// ContextUsage optionally holds in-memory context usage info attached at projection time.
 	ContextUsage any
+	// Blocked indicates whether the agent is blocked awaiting external assistance.
+	Blocked bool
+	// BlockedReason explains why the agent is blocked and what assistance is required.
+	BlockedReason string
+	// BlockedAt is the timestamp when the agent was marked blocked.
+	BlockedAt string
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -4608,6 +4614,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedProgressTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedBlockedTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4663,6 +4672,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedProgressTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedBlockedTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -5158,6 +5170,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedProgressTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
+		if err := loadManagedBlockedTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
 		if agent.Runtime == "embedded" {
 			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
 			if err != nil {
@@ -5287,6 +5302,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedProgressTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedBlockedTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy

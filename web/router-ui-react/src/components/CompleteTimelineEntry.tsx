@@ -475,21 +475,28 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
       const dialogTitle = label;
       return { icon: "fa-solid fa-bolt", tone: "purple", label, subject, dialogTitle, detail, isHighValue: true };
     }
-    const isPrompt = entry.message?.toLowerCase().includes("prompt") || presentation.summary?.toLowerCase().includes("prompt");
-    if (isPrompt) {
-      const sender = entry.sender_identity ?? presentation.from;
-      const label = sender ? `Prompt from ${sender}` : "Prompt";
-      const subject = extractSubject(entry, entry.message_content);
-      const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
-      const dialogTitle = entry.message || "Prompt";
-      return { icon: "fa-solid fa-terminal", tone: "blue", label, subject, dialogTitle, detail, isHighValue: false };
-    }
     const sender = entry.sender_identity ?? presentation.from;
     const label = sender ? `From ${sender}` : reminder ? "Reminder received" : "Message received";
     const subject = extractSubject(entry, entry.message_content);
     const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
     const dialogTitle = reminder ? "Reminder received" : (entry.message && entry.message !== "Message acknowledged" ? entry.message : "Message received");
     return { icon: reminder ? "fa-solid fa-clock" : "fa-solid fa-envelope", tone: reminder ? "yellow" : "blue", label, subject, dialogTitle, detail, isHighValue: false };
+  }
+  if (presentation.kind === "mailbox_message") {
+    const sender = presentation.sender ?? entry.sender_identity ?? entry.agent_id;
+    const recipient = presentation.recipient ?? presentation.to;
+    const label = recipient ? `To ${recipient}` : sender ? `From ${sender}` : "Mailbox message";
+    const subject = presentation.subject ?? extractSubject(entry, entry.message);
+    const detail = cleanOneLine(entry.message) ?? cleanOneLine(presentation.summary);
+    return {
+      icon: "fa-solid fa-envelope",
+      tone: "blue",
+      label,
+      subject,
+      dialogTitle: "Mailbox message",
+      detail,
+      isHighValue: false,
+    };
   }
   if (presentation.kind === "message") {
     const isWorkflow = entry.message?.toLowerCase().includes("workflow") || presentation.summary?.toLowerCase().includes("workflow") || entry.message_content?.startsWith("[Workflow Activated:");
@@ -498,14 +505,6 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
       const subject = extractSubject(entry, entry.message_content);
       const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
       return { icon: "fa-solid fa-bolt", tone: "purple", label, subject, dialogTitle: label, detail, isHighValue: true };
-    }
-    const isPrompt = entry.message?.toLowerCase().includes("prompt") || presentation.summary?.toLowerCase().includes("prompt");
-    if (isPrompt) {
-      const sender = entry.sender_identity ?? presentation.from;
-      const label = sender ? `Prompt from ${sender}` : "Prompt";
-      const subject = extractSubject(entry, entry.message_content);
-      const detail = cleanOneLine(entry.message_content) ?? cleanOneLine(presentation.summary);
-      return { icon: "fa-solid fa-terminal", tone: "blue", label, subject, dialogTitle: entry.message || "Prompt", detail, isHighValue: false };
     }
     const isOutbound = entry.message === "Message sent" || entry.message === "Reply sent" || presentation.from === entry.agent_id;
     let label: string;

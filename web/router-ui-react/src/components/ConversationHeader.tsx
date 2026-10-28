@@ -1,5 +1,5 @@
 import type { ReactElement, ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Agent } from "../state/agent-projection";
 import { humanName } from "../state/selectors";
 import { ArrivalIndicator } from "./ArrivalIndicator";
@@ -111,6 +111,29 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const contextSeverity = contextUsageSeverityClass(contextUsage?.percent);
   const contextTooltip = contextUsage ? formatContextUsageTooltip(contextUsage) : "";
   const contextLabel = contextUsage ? formatContextUsageLabel(contextUsage) : "";
+
+  const [showBlockedPopover, setShowBlockedPopover] = useState(false);
+  const blockedPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showBlockedPopover) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (blockedPopoverRef.current && !blockedPopoverRef.current.contains(event.target as Node)) {
+        setShowBlockedPopover(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowBlockedPopover(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showBlockedPopover]);
 
   const [availableWorkflows, setAvailableWorkflows] = useState<Workflow[]>([]);
   const [showWorkflowDropdown, setShowWorkflowDropdown] = useState(false);
@@ -365,6 +388,49 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                     <span className="workflow-state-badge-text">{agent.workflow_state}</span>
                   </span>
                 )
+              ) : null}
+
+              {agent?.blocked ? (
+                <div className="blocked-popover-anchor" ref={blockedPopoverRef}>
+                  <button
+                    type="button"
+                    className="blocked-state-badge"
+                    onClick={() => setShowBlockedPopover((prev) => !prev)}
+                    title={`Blocked: ${agent.blocked_reason || "External assistance required"}`}
+                    aria-label={`Agent blocked: ${agent.blocked_reason || "External assistance required"}`}
+                    aria-expanded={showBlockedPopover}
+                  >
+                    <i className="fa-solid fa-hand" aria-hidden="true" />
+                    <span className="blocked-state-badge-text">Blocked</span>
+                  </button>
+                  {showBlockedPopover ? (
+                    <div className="blocked-reason-popover" role="dialog" aria-modal="false" aria-label="Agent Blocked Reason">
+                      <div className="blocked-popover-header">
+                        <div className="blocked-popover-title-row">
+                          <i className="fa-solid fa-hand" aria-hidden="true" />
+                          <span>Agent Blocked</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="blocked-popover-close-btn"
+                          onClick={() => setShowBlockedPopover(false)}
+                          aria-label="Close blocked details"
+                          title="Close"
+                        >
+                          <i className="fa-solid fa-xmark" aria-hidden="true" />
+                        </button>
+                      </div>
+                      {agent.blocked_at ? (
+                        <div className="blocked-popover-timestamp">
+                          Blocked: {new Date(agent.blocked_at).toLocaleString()}
+                        </div>
+                      ) : null}
+                      <div className="blocked-popover-content">
+                        {agent.blocked_reason || "External assistance required"}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
 
               {/* Action Buttons Toolbar directly adjacent to title */}

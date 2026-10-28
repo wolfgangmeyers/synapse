@@ -22,5 +22,5 @@ describe("history", () => {
     const pending = { id: "local-id", from: "web", to: "peer", body: "hello", pending: true, direction: "outgoing" as const };
     expect(settlePendingMessages([pending], "local-id", false)).toEqual([{ ...pending, pending: false, failed: true }]);
   });
-  it("bounds age and count and strips data URLs", () => { const now = Date.parse("2026-02-01T00:00:00.000Z"); const many = Array.from({ length: 201 }, (_, i) => ({ ...message(String(i), i), created_at: new Date(now).toISOString() })); expect(pruneHistoryMessages(many, now)).toHaveLength(200); expect(stripDataUrls({ ...message("x", 1), attachments: [{ url: "data:image/jpeg;base64,x" }, { url: "/v1/attachments/x.jpg" }] }).attachments).toHaveLength(1); });
+  it("bounds age and count and strips data URLs", () => { const now = Date.parse("2026-02-01T00:00:00.000Z"); const many = Array.from({ length: 5001 }, (_, i) => ({ ...message(String(i), i), created_at: new Date(now).toISOString() })); expect(pruneHistoryMessages(many, now)).toHaveLength(5000); expect(stripDataUrls({ ...message("x", 1), attachments: [{ url: "data:image/jpeg;base64,x" }, { url: "/v1/attachments/x.jpg" }] }).attachments).toHaveLength(1); });
 });

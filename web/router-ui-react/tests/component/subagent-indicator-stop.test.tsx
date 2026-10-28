@@ -140,7 +140,10 @@ describe("Subagent indicator stop behavior", () => {
       />
     );
 
-    const stopButton = screen.getByRole("button", { name: "Stop subagent" });
+    const subagentsCard = screen.getByRole("button", { name: /subagents/i });
+    fireEvent.click(subagentsCard);
+
+    const stopButton = screen.getByRole("button", { name: "Stop" });
     expect(stopButton).toBeInTheDocument();
 
     fireEvent.click(stopButton);

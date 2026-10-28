@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"io"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,7 +79,18 @@ func TestHTTPImageAttachmentResponseAndDeliveredBodyMatchNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, getResponse.StatusCode)
 	require.Equal(t, "image/png", getResponse.Header.Get("Content-Type"))
+	require.Equal(t, strconv.Itoa(len(pngBytes(2, 3))), getResponse.Header.Get("Content-Length"))
 	require.NoError(t, getResponse.Body.Close())
+
+	headResponse, err := http.Head(server.URL + attachment["url"].(string))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, headResponse.StatusCode)
+	require.Equal(t, "image/png", headResponse.Header.Get("Content-Type"))
+	require.Equal(t, strconv.Itoa(len(pngBytes(2, 3))), headResponse.Header.Get("Content-Length"))
+	bodyBytes, err := io.ReadAll(headResponse.Body)
+	require.NoError(t, err)
+	require.Empty(t, bodyBytes)
+	require.NoError(t, headResponse.Body.Close())
 
 	traversal, err := http.Get(server.URL + "/v1/attachments/" + url.PathEscape("../"+attachmentID))
 	require.NoError(t, err)

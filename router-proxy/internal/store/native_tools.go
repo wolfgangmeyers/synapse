@@ -39,6 +39,7 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "goal_snooze", Category: "Workflow Management", Description: "Set a delay preference for current goal", DefaultEnabled: true},
 	{ToolName: "scratchpad", Category: "Workflow Management", Description: "Persistent scratchpad memory for notes and milestones", DefaultEnabled: true},
 	{ToolName: "mecha_progress", Category: "Workflow Management", Description: "Track and report measurable task progress", DefaultEnabled: true},
+	{ToolName: "mecha_blocked", Category: "Execution Control", Description: "Set or clear blocked execution state when external assistance is required", DefaultEnabled: true},
 	{ToolName: "mecha_workflow_transition", Category: "Workflow Management", Description: "Inspect and execute workflow state transitions", DefaultEnabled: true},
 	{ToolName: "context_reset", Category: "Workflow Management", Description: "Trigger a clean context reset", DefaultEnabled: true},
 	{ToolName: "mecha_context", Category: "Workflow Management", Description: "Read session context usage and threshold warnings", DefaultEnabled: true},

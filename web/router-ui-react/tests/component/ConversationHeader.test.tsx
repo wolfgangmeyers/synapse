@@ -464,4 +464,89 @@ describe("ConversationHeader workflow controls", () => {
       expect(c3.querySelector(".workflow-state-badge")).toBeNull();
     });
   });
+
+  describe("blocked state badge and popover", () => {
+    it("renders blocked state badge when agent.blocked is true", () => {
+      const blockedAgent: Agent = {
+        ...routerManagedAgent,
+        blocked: true,
+        blocked_reason: "Missing production Stripe test API key",
+        blocked_at: "2026-10-27T16:00:00.000Z",
+      };
+      const { container } = render(<ConversationHeader agent={blockedAgent} />);
+      const badge = container.querySelector(".blocked-state-badge");
+      expect(badge).not.toBeNull();
+      expect(badge?.textContent).toContain("Blocked");
+      expect(badge?.querySelector(".fa-hand")).not.toBeNull();
+      expect(badge?.getAttribute("title")).toBe("Blocked: Missing production Stripe test API key");
+    });
+
+    it("omits blocked state badge when agent.blocked is false or undefined", () => {
+      const { container: c1 } = render(<ConversationHeader agent={routerManagedAgent} />);
+      expect(c1.querySelector(".blocked-state-badge")).toBeNull();
+
+      const { container: c2 } = render(
+        <ConversationHeader agent={{ ...routerManagedAgent, blocked: false }} />
+      );
+      expect(c2.querySelector(".blocked-state-badge")).toBeNull();
+    });
+
+    it("clicking the blocked badge toggles popover showing header, timestamp, and full reason", () => {
+      const blockedAgent: Agent = {
+        ...routerManagedAgent,
+        blocked: true,
+        blocked_reason: "Database connection failed due to missing credentials in env",
+        blocked_at: "2026-10-27T16:00:00.000Z",
+      };
+      const { container } = render(<ConversationHeader agent={blockedAgent} />);
+      const badge = container.querySelector(".blocked-state-badge")!;
+      expect(badge).not.toBeNull();
+
+      // Popover should initially be closed
+      expect(container.querySelector(".blocked-reason-popover")).toBeNull();
+
+      // Click badge to open
+      fireEvent.click(badge);
+      const popover = container.querySelector(".blocked-reason-popover");
+      expect(popover).not.toBeNull();
+      expect(popover?.querySelector(".blocked-popover-title-row")?.textContent).toContain("Agent Blocked");
+      expect(popover?.querySelector(".blocked-popover-timestamp")?.textContent).toContain("Blocked:");
+      expect(popover?.querySelector(".blocked-popover-content")?.textContent).toBe("Database connection failed due to missing credentials in env");
+
+      // Click close button inside popover
+      const closeBtn = popover?.querySelector(".blocked-popover-close-btn")!;
+      expect(closeBtn).not.toBeNull();
+      fireEvent.click(closeBtn);
+      expect(container.querySelector(".blocked-reason-popover")).toBeNull();
+    });
+
+    it("dismisses popover on Escape key and click outside", () => {
+      const blockedAgent: Agent = {
+        ...routerManagedAgent,
+        blocked: true,
+        blocked_reason: "API quota exceeded",
+      };
+      const { container } = render(
+        <div>
+          <div data-testid="outside-element">Outside</div>
+          <ConversationHeader agent={blockedAgent} />
+        </div>
+      );
+      const badge = container.querySelector(".blocked-state-badge")!;
+
+      // Open popover
+      fireEvent.click(badge);
+      expect(container.querySelector(".blocked-reason-popover")).not.toBeNull();
+
+      // Press Escape
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(container.querySelector(".blocked-reason-popover")).toBeNull();
+
+      // Open again and click outside
+      fireEvent.click(badge);
+      expect(container.querySelector(".blocked-reason-popover")).not.toBeNull();
+      fireEvent.mouseDown(screen.getByTestId("outside-element"));
+      expect(container.querySelector(".blocked-reason-popover")).toBeNull();
+    });
+  });
 });

@@ -3,7 +3,7 @@ import type { HistoryMessage } from "../domain/history";
 import { messageTime } from "../domain/history";
 import { MarkdownBody } from "../domain/markdown";
 import { AttachmentGallery } from "./AttachmentGallery";
-import { attachmentReferencesFromBody } from "../domain/images";
+import { attachmentReferencesFromBody, stripAttachmentFooter } from "../domain/images";
 import { textWithoutMarkdownImages } from "../domain/markdown";
 
 import { AgentAvatar } from "./AgentAvatar";
@@ -51,7 +51,7 @@ export function MessageBubble({ message, ownerId, routerUrl, operationalAgentId 
             {message.pending ? <span>Sending…</span> : message.failed ? <span className="error">Failed</span> : null}
           </div>
           <div className="bubble">
-            <MarkdownBody body={message.body ?? ""} />
+            <MarkdownBody body={stripAttachmentFooter(message.body)} />
             <AttachmentGallery attachments={attachments} {...(routerUrl !== undefined ? { routerUrl } : {})} />
           </div>
         </div>

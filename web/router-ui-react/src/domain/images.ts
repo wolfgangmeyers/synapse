@@ -13,15 +13,20 @@ export function canAddImages(existing: ImageInput[], additional: number): boolea
 export function pendingAttachmentText(images: Pick<ImageInput, "name">[]): string {
   return `Attached image${images.length === 1 ? "" : "s"}:\n${images.map((image, index) => `${index + 1}. ${image.name || "image.jpg"}`).join("\n")}`;
 }
+export function stripAttachmentFooter(body: string | undefined): string {
+  if (!body) return "";
+  return body.replace(/(?:(?:\r?\n)+\s*|^)Attached images?:\s*(?:\r?\n\s*\d+\.\s*[^\r\n]+)+\s*$/i, "").trimEnd();
+}
 export function hasSendableContent(body: string, images: ImageInput[]): boolean { return body.trim() !== "" || images.length > 0; }
 export function attachmentReferencesFromBody(body: string, routerUrl: string): ImageAttachment[] {
   const result: ImageAttachment[] = [];
-  const pattern = /\/v1\/attachments\/([A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif))/gi;
+  // Matches /v1/attachments/<id>, router.sqlite.attachments/<id>, or /.../router.sqlite.attachments/<id>
+  const pattern = /(?:\/v1\/attachments\/|(?:[\w./-]*[/.])?attachments\/)([A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif))/gi;
   for (const match of body.matchAll(pattern)) {
-    const path = match[0];
-    const name = match[1];
+    const filename = match[1];
+    const path = `/v1/attachments/${filename}`;
     const url = resolveAttachmentUrl(routerUrl, path);
-    if (name !== undefined && url) result.push({ url, name });
+    if (filename !== undefined && url) result.push({ url, name: filename, id: filename });
   }
   return result;
 }

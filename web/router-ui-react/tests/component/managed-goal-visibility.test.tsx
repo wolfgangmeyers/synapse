@@ -94,8 +94,7 @@ describe("managed goal visibility", () => {
 
     render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory }} />);
     await user.click(await screen.findByRole("button", { name: "Managed Goal (managed-goal)" }));
-    await user.click(screen.getByRole("button", { name: "Manage worker" }));
-    await user.click(within(screen.getByRole("dialog", { name: "Manage managed-goal" })).getByRole("button", { name: "Set goal" }));
+    await user.click(screen.getByRole("button", { name: "Set goal" }));
     await user.click(await screen.findByRole("button", { name: "Goal: OFF" }));
     await user.type(screen.getByRole("textbox", { name: "What should this agent work toward?" }), "Finish the visible managed goal");
     await user.click(screen.getByRole("button", { name: "Save" }));
