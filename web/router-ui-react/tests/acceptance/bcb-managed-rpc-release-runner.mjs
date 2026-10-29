@@ -20,7 +20,7 @@ const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT = resolve(HERE, "../..");
 const REPOSITORY = resolve(PROJECT, "../..");
-const BCB_SOURCE = process.env.MECHA_BCB_ROOT ?? "/Users/wolfgang/code/browser-console-bridge";
+const BCB_SOURCE = process.env.MECHA_BCB_ROOT ?? resolve(process.env.HOME || "", "code/browser-console-bridge");
 const TIMEOUT = 45_000;
 const CHILD_AGENT = "managed-rpc-release";
 // The browser accepts only production provider identifiers in /v1/models. This

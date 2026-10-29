@@ -98,7 +98,7 @@ export async function recoveryPreflight(environment = process.env) {
   const subagentsVersion = await execFileAsync("git", ["-C", subagentsRepository, "describe", "--always", "--dirty"])
     .then(({ stdout }) => stdout.trim() || null)
     .catch(() => null);
-  const bcbSource = environment.MECHA_BCB_ROOT ?? "/Users/wolfgang/code/browser-console-bridge";
+  const bcbSource = environment.MECHA_BCB_ROOT ?? resolve(process.env.HOME || "", "code/browser-console-bridge");
   const python = await requireRecoveryFile(environment.MECHA_BCB_PYTHON ?? join(bcbSource, ".venv", "bin", "python3"), "BCB Python", true);
   await requireRecoveryFile(join(bcbSource, "server", "bridge_server.py"), "BCB server");
   await requireRecoveryFile(join(bcbSource, "extension", "background.js"), "BCB extension");

@@ -17,15 +17,15 @@ class DraftStoreTest {
     fun restoresEachRouterAndPeerDraftAfterStoreRecreation() {
         val preferences = FakeSharedPreferences()
         DraftStore(preferences).apply {
-            save("donuts:8765", "supervisor", "supervisor draft")
-            save("donuts:8765", "worker", "worker draft")
+            save("router.example.internal:8765", "supervisor", "supervisor draft")
+            save("router.example.internal:8765", "worker", "worker draft")
             save("other:8765", "supervisor", "other router draft")
         }
 
         val restarted = DraftStore(preferences)
 
-        assertEquals("supervisor draft", restarted.get("donuts:8765", "supervisor"))
-        assertEquals("worker draft", restarted.get("donuts:8765", "worker"))
+        assertEquals("supervisor draft", restarted.get("router.example.internal:8765", "supervisor"))
+        assertEquals("worker draft", restarted.get("router.example.internal:8765", "worker"))
         assertEquals("other router draft", restarted.get("other:8765", "supervisor"))
     }
 
@@ -33,54 +33,54 @@ class DraftStoreTest {
     fun clearsOnlyTheSentDraft() {
         val preferences = FakeSharedPreferences()
         val drafts = DraftStore(preferences)
-        drafts.save("donuts:8765", "supervisor", "send this")
-        drafts.save("donuts:8765", "worker", "keep this")
+        drafts.save("router.example.internal:8765", "supervisor", "send this")
+        drafts.save("router.example.internal:8765", "worker", "keep this")
 
-        drafts.clear("donuts:8765", "supervisor")
+        drafts.clear("router.example.internal:8765", "supervisor")
 
-        assertEquals("", drafts.get("donuts:8765", "supervisor"))
-        assertEquals("keep this", drafts.get("donuts:8765", "worker"))
+        assertEquals("", drafts.get("router.example.internal:8765", "supervisor"))
+        assertEquals("keep this", drafts.get("router.example.internal:8765", "worker"))
     }
 
     @Test
     fun successfulSendClearsOnlyTheUnchangedDraft() {
         val drafts = DraftStore(FakeSharedPreferences())
-        drafts.save("donuts:8765", "supervisor", "sent text")
-        assertEquals(true, drafts.clearIfUnchanged("donuts:8765", "supervisor", "sent text"))
-        assertEquals("", drafts.get("donuts:8765", "supervisor"))
+        drafts.save("router.example.internal:8765", "supervisor", "sent text")
+        assertEquals(true, drafts.clearIfUnchanged("router.example.internal:8765", "supervisor", "sent text"))
+        assertEquals("", drafts.get("router.example.internal:8765", "supervisor"))
 
-        drafts.save("donuts:8765", "supervisor", "newer edit")
-        assertEquals(false, drafts.clearIfUnchanged("donuts:8765", "supervisor", "sent text"))
-        assertEquals("newer edit", drafts.get("donuts:8765", "supervisor"))
+        drafts.save("router.example.internal:8765", "supervisor", "newer edit")
+        assertEquals(false, drafts.clearIfUnchanged("router.example.internal:8765", "supervisor", "sent text"))
+        assertEquals("newer edit", drafts.get("router.example.internal:8765", "supervisor"))
     }
 
     @Test
     fun successfulSendClearsLegacyEscapedNewlineDraft() {
         val drafts = DraftStore(FakeSharedPreferences())
-        drafts.save("donuts:8765", "supervisor", "first\\nsecond")
+        drafts.save("router.example.internal:8765", "supervisor", "first\\nsecond")
 
-        assertEquals(true, drafts.clearIfUnchanged("donuts:8765", "supervisor", "first\nsecond"))
-        assertEquals("", drafts.get("donuts:8765", "supervisor"))
+        assertEquals(true, drafts.clearIfUnchanged("router.example.internal:8765", "supervisor", "first\nsecond"))
+        assertEquals("", drafts.get("router.example.internal:8765", "supervisor"))
     }
 
     @Test
     fun clearIfUnchangedKeepsLiteralSentTextDistinctFromStoredNewlines() {
         val drafts = DraftStore(FakeSharedPreferences())
-        drafts.save("donuts:8765", "supervisor", "first\nsecond")
+        drafts.save("router.example.internal:8765", "supervisor", "first\nsecond")
 
-        assertEquals(false, drafts.clearIfUnchanged("donuts:8765", "supervisor", "first\\nsecond"))
-        assertEquals("first\nsecond", drafts.get("donuts:8765", "supervisor"))
+        assertEquals(false, drafts.clearIfUnchanged("router.example.internal:8765", "supervisor", "first\\nsecond"))
+        assertEquals("first\nsecond", drafts.get("router.example.internal:8765", "supervisor"))
     }
 
     @Test
     fun retainsOnlyTheMostRecentFiftyDraftsPerRouter() {
         val drafts = DraftStore(FakeSharedPreferences())
         drafts.save("other:8765", "peer-1", "other router draft")
-        (1..51).forEach { drafts.save("donuts:8765", "peer-$it", "draft-$it") }
+        (1..51).forEach { drafts.save("router.example.internal:8765", "peer-$it", "draft-$it") }
 
-        assertEquals("", drafts.get("donuts:8765", "peer-1"))
-        assertEquals("draft-2", drafts.get("donuts:8765", "peer-2"))
-        assertEquals("draft-51", drafts.get("donuts:8765", "peer-51"))
+        assertEquals("", drafts.get("router.example.internal:8765", "peer-1"))
+        assertEquals("draft-2", drafts.get("router.example.internal:8765", "peer-2"))
+        assertEquals("draft-51", drafts.get("router.example.internal:8765", "peer-51"))
         assertEquals("other router draft", drafts.get("other:8765", "peer-1"))
     }
 }

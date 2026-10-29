@@ -15,7 +15,7 @@ import { clipboardPasteScript } from "../support/bcb-proof-fixtures.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT = resolve(HERE, "../..");
 const REPOSITORY = resolve(PROJECT, "../..");
-const BCB_SOURCE = process.env.MECHA_BCB_ROOT ?? "/Users/wolfgang/code/browser-console-bridge";
+const BCB_SOURCE = process.env.MECHA_BCB_ROOT ?? resolve(process.env.HOME || "", "code/browser-console-bridge");
 const TIMEOUTS = Object.freeze({ startup: 30_000, browser: 20_000, flow: 60_000, shutdown: 10_000 });
 export const UI_AGENT = "wolfgang";
 const PEER_AGENT = "bcb-fixture-peer";
