@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { Conversation } from "../../src/components/Conversation";
 import { MessageList } from "../../src/components/MessageList";
 import type { ManagedHistoryEntry } from "../../src/protocol/types";
@@ -318,4 +318,59 @@ describe("Conversation", () => {
     expect(container.querySelector("[data-message-id='complete:rem-reply-1'], [data-activity-id='complete:rem-reply-1']")).toBeInTheDocument();
     expect(screen.getByText(/The animal with the most appendages is the millipede/)).toBeInTheDocument();
   });
+
+  it("renders TimelineLoadingSkeleton with aria-busy='true' when loading={true} and no items exist", () => {
+    const { container } = render(
+      <Conversation
+        peer={{ agent_id: "ui-tweaks" }}
+        messages={[]}
+        loading={true}
+      />
+    );
+
+    const skeleton = container.querySelector(".timeline-loading-skeleton");
+    expect(skeleton).toBeInTheDocument();
+    expect(skeleton).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByLabelText("Loading conversation timeline")).toBeInTheDocument();
+  });
+
+  it("renders AgentWelcomeCard with agent name, avatar, and description when agent is selected and history is empty", () => {
+    const { container, rerender } = render(
+      <Conversation
+        peer={{ agent_id: "ui-tweaks" }}
+        events={[]}
+        messages={[]}
+        loading={false}
+      />
+    );
+
+    const welcomeCard = screen.getByRole("region", { name: "Welcome to Ui Tweaks" });
+    expect(welcomeCard).toBeInTheDocument();
+    expect(within(welcomeCard).getByRole("heading", { level: 2, name: "Ui Tweaks" })).toBeInTheDocument();
+    expect(welcomeCard.querySelector(".welcome-avatar-wrapper")).toBeInTheDocument();
+    expect(within(welcomeCard).getByText(/This conversation has no prior messages/i)).toBeInTheDocument();
+
+    // Verify it also renders when using agent prop instead of peer
+    rerender(
+      <Conversation
+        agent={{ agent_id: "ui-tweaks" }}
+        events={[]}
+        messages={[]}
+        loading={false}
+      />
+    );
+    const rerenderedWelcome = screen.getByRole("region", { name: "Welcome to Ui Tweaks" });
+    expect(rerenderedWelcome).toBeInTheDocument();
+    expect(within(rerenderedWelcome).getByRole("heading", { level: 2, name: "Ui Tweaks" })).toBeInTheDocument();
+  });
+
+  it("renders the 'Pick an agent' watermark empty state when peer is undefined", () => {
+    const { container } = render(<Conversation peer={undefined} messages={[]} />);
+
+    expect(screen.getByRole("heading", { level: 3, name: "Pick an agent" })).toBeInTheDocument();
+    expect(screen.getByText("Select an agent from the sidebar to view activity and chat.")).toBeInTheDocument();
+    expect(container.querySelector(".empty-state.with-watermark")).toBeInTheDocument();
+    expect(container.querySelector("img.mecha-watermark")).toBeInTheDocument();
+  });
 });
+

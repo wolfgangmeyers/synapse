@@ -30,6 +30,9 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
   const requestGeneration = useRef(0);
   const previousScope = useRef({ routerUrl: scope.routerUrl, agentId: scope.agentId, peer });
   const freshHistoryScope = useRef<string | undefined>(undefined);
+  const lastRenderedPeer = useRef(peer);
+  const effectiveLoading = (lastRenderedPeer.current !== peer && peer !== undefined && peer !== "") || loading;
+  lastRenderedPeer.current = peer;
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -73,6 +76,8 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         return;
       } catch {
         // Fall back to transport.conversation for backwards compatibility
+      } finally {
+        if (generation === requestGeneration.current) setLoading(false);
       }
     }
 
@@ -162,6 +167,9 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       setTimelineEvents([]);
       setNextBefore(undefined);
       setNextBeforeSeq(undefined);
+      if (peer !== undefined && peer !== "") {
+        setLoading(true);
+      }
     }
     freshHistoryScope.current = sameConversation && prior.agentId !== scope.agentId ? scopeKey : undefined;
     previousScope.current = { routerUrl: scope.routerUrl, agentId: scope.agentId, peer };
@@ -205,8 +213,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       });
     });
     void refresh();
-    const timer = peer === undefined ? undefined : setTimeout(() => { void refresh(); }, 500);
-    return () => { active = false; requestGeneration.current += 1; unsubscribe(); if (timer !== undefined) clearTimeout(timer); };
+    return () => { active = false; requestGeneration.current += 1; unsubscribe(); };
   }, [transport, scopeKey, scope.routerUrl, scope.agentId, peer, refresh]);
 
   const send = useCallback(async (message: unknown): Promise<Record<string, unknown>> => transport.sendMessage(message), [transport]);
@@ -216,7 +223,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     messages: messagesScopeKey === scopeKey ? messages : [],
     timelineEvents: messagesScopeKey === scopeKey ? timelineEvents : [],
     events: messagesScopeKey === scopeKey ? timelineEvents : [],
-    loading,
+    loading: effectiveLoading,
     loadingOlder,
     hasOlder,
     ...(scopedError === undefined ? {} : { error: scopedError }),
