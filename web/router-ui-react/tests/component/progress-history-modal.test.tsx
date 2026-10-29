@@ -229,5 +229,30 @@ describe('ProgressHistoryModal', () => {
     expect(mockClient.progressHistory).toHaveBeenCalledWith('agent-custom');
     expect(screen.getByText('Client entry')).toBeDefined();
   });
+
+  it('renders X-axis markers formatted as 24-hour clock time in local timezone', async () => {
+    const baseDate = new Date(2026, 9, 18, 14, 0, 0);
+    const laterDate = new Date(2026, 9, 18, 15, 0, 0);
+    const mockData = [
+      { percent: 20, note: 'Start', timestamp: baseDate.toISOString() },
+      { percent: 80, note: 'End', timestamp: laterDate.toISOString() },
+    ];
+    (globalThis.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockData,
+    });
+
+    render(<ProgressHistoryModal agentId="agent-1" isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Loading progress history...')).toBeNull();
+    });
+
+    const axisLabels = Array.from(document.querySelectorAll('.progress-chart-axis-label')).map(
+      (el) => el.textContent
+    );
+    expect(axisLabels).toContain('14:00');
+    expect(axisLabels).toContain('15:00');
+  });
 });
 
