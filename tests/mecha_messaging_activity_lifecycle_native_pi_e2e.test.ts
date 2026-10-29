@@ -19,7 +19,7 @@ import {
 const CHILD_FLAG = "--mecha-messaging-native-pi-lifecycle-child";
 const PI_VERSION = "0.85.0";
 const NATIVE_VERSION = "19.2.2";
-const NATIVE_SOURCE_ROOT = "/Users/wolfgang/code/pi-packages";
+const NATIVE_SOURCE_ROOT = resolve(process.env.HOME || "", "code/pi-packages");
 const NATIVE_SOURCE_COMMIT = "5b362aaa6b65204ace95c62b5089b6ad5a801b4a";
 // The current source checkout intentionally carries the approved diagnostics instrumentation as
 // uncommitted changes. Keep this digest tied to that exact source, so stale packages still fail.

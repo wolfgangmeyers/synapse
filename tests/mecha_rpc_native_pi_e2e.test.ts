@@ -13,7 +13,7 @@ import { CUSTOM_MESSAGE_TYPES, encodeHiddenEnvelope } from "../pi-extensions/mec
 
 const ROOT = resolve(import.meta.dirname, "..");
 const EXTENSION = join(ROOT, "pi-extensions/mecha-rpc/index.ts");
-const SUBAGENTS_EXTENSION = "/Users/wolfgang/code/pi-packages/packages/pi-subagents/src/index.ts";
+const SUBAGENTS_EXTENSION = join(resolve(process.env.HOME || "", "code/pi-packages"), "packages/pi-subagents/src/index.ts");
 const REGISTRATION_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-registration-probe.ts");
 const TRANSITION_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-transition-probe.ts");
 const AC090_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-ac090-probe.ts");

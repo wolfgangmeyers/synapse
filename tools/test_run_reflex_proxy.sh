@@ -24,9 +24,9 @@ assert_args() {
   fi
 }
 
-expected_default_args=$'--upstream-host\n192.168.0.167\n--upstream-port\n8765\n--listen-port\n19876'
+expected_default_args=$'--upstream-host\n192.168.1.100\n--upstream-port\n8765\n--listen-port\n19876'
 CAPTURED_ARGS="$CAPTURED_ARGS" MECHA_REFLEX_PROXY_BINARY="$FAKE_PROXY" \
-  "$LAUNCHER" 192.168.0.167
+  "$LAUNCHER" 192.168.1.100
 assert_args "$expected_default_args"
 
 expected_upstream_only_args=$'--upstream-host\n10.0.0.9\n--upstream-port\n9000\n--listen-port\n19876'

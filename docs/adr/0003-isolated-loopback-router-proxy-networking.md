@@ -25,12 +25,12 @@ Implement a multi-tier isolated networking topology centered on a loopback-bound
    - The primary router binds strictly to `127.0.0.1:8765`.
    - It is never exposed directly to external network interfaces.
 2. **Dedicated TCP Router Proxy**:
-   - For LAN/remote access, `router-proxy` forwards traffic to the upstream router (e.g. reflex upstream `192.168.0.167:8765`).
+   - For LAN/remote access, `router-proxy` forwards traffic to the upstream router (e.g. reflex upstream `192.168.1.100:8765`).
    - The proxy listens locally on `127.0.0.1:19876`.
-   - Start pattern: `systemd-run --user --unit=router-proxy-reflex ... /home/wolfgang/code/mecha-developer/router-proxy/router-proxy --upstream-host 192.168.0.167 --upstream-port 8765 --listen-host 127.0.0.1 --listen-port 19876`.
+   - Start pattern: `systemd-run --user --unit=router-proxy-reflex ... /path/to/mecha-developer/router-proxy/router-proxy --upstream-host 192.168.1.100 --upstream-port 8765 --listen-host 127.0.0.1 --listen-port 19876`.
 3. **Tailscale Serve Integration**:
    - Tailscale Serve maps tailnet port `9876` to the local proxy: `sudo tailscale serve --tcp=9876 --bg tcp://127.0.0.1:19876`.
-   - External tailnet hostname: `magical-hippie.tailcdfd89.ts.net:9876`.
+   - External tailnet hostname: `router.your-tailnet.ts.net:9876`.
    - Remote web clients point `localStorage.mecha.web.activeRouter` to this URL.
 4. **Permissive Non-Credentialed CORS**:
    - The backend accepts cross-origin browser calls from arbitrary web origins.
