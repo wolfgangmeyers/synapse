@@ -1,0 +1,1 @@
+DROP TRIGGER IF EXISTS embedded_goal_evaluation_immutable_delete;
