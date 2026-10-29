@@ -1,9 +1,0 @@
-ordinary output that must not be parsed
-<task-notification>
-<summary>Subagent "private prompt text" running</summary>
-</task-notification>
-● Agents
-├─ ⠋ General-purpose  inspect router state · ↻2 · 3 tool uses · 1.0s
-│  ⎿  reading
-└─ ⠙ General-purpose  check API mapping · ↻1 · 1 tool use · 0.4s
-   ⎿  running command

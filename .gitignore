@@ -40,6 +40,9 @@ web/router-ui-react/coverage/
 # Local router proxy build
 router-proxy/router-proxy
 
+# Test artifacts
+test-results/
+
 # Go build caches
 .cache/
 .config/

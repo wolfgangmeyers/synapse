@@ -92,9 +92,11 @@ func supervisorToolsDirectory() (string, error) {
 		return "", err
 	}
 	for _, root := range []string{cwd, filepath.Dir(cwd)} {
-		candidate := filepath.Join(root, ".claude", "skills", "supervisor", "tools")
-		if info, statErr := os.Stat(filepath.Join(candidate, managedRootControlRunner)); statErr == nil && !info.IsDir() {
-			return candidate, nil
+		for _, sub := range []string{"tools", filepath.Join(".claude", "skills", "supervisor", "tools")} {
+			candidate := filepath.Join(root, sub)
+			if info, statErr := os.Stat(filepath.Join(candidate, managedRootControlRunner)); statErr == nil && !info.IsDir() {
+				return candidate, nil
+			}
 		}
 	}
 	return "", errors.New("managed root control runner is unavailable")
