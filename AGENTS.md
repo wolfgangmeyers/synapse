@@ -12,14 +12,6 @@ Any behavioral change, feature implementation, or bugfix in `mecha-developer` mu
 - **Retire Redundant Brittle Tests**: Integration tests that merely mock internal JavaScript functions or duplicate E2E test coverage without testing real end-to-end boundaries should be eliminated.
 - **Specification Index**: The complete catalog of active behavioral specifications is maintained in `docs/specs/INDEX.md`.
 
-## Mandatory portable policy
-
-All Wolfgang-managed supervisors and workers must read `docs/wolfgang-agent-operating-policy.md` before substantive work. A machine-level `~/AGENTS.md` must include a mandatory reference to that file, or to the installed copy of that file on that machine, so the policy is loaded before role-specific supervisor or worker instructions.
-
-When adding that reference on a machine, do a one-time extraction pass: move any broadly portable Wolfgang agent policies discovered in that machine's `~/AGENTS.md` into `docs/wolfgang-agent-operating-policy.md` and push them upstream. Going forward, new portable policy decisions should be added directly to the policy file rather than accumulating only in machine-local instructions.
-
-Keep this policy portable. Put role mechanics in the supervisor/worker skills and put machine, project, credential, and incident facts in the KB or repo-specific instructions.
-
 ## How skills work
 
 A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, Cursor) reads `SKILL.md` and follows the instructions. Skills can reference other skills, but the file is always authoritative — never assume what a skill does, look it up.

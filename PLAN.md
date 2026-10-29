@@ -1,1 +1,0 @@
-docs/specs/router-mcp-oauth-tools-plan.md
