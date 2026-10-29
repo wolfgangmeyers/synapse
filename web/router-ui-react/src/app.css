@@ -2214,7 +2214,6 @@ dialog,
 .peer-heading h2 .inline-tools-toggle-button,
 .peer-heading h2 .interrupt-worker-button,
 .peer-heading h2 .header-button-interrupt,
-.peer-heading h2 .scroll-lock-button,
 .peer-heading h2 .workflow-header-control,
 .peer-heading h2 .workflow-header-button,
 .peer-heading h2 .chat-only-button { flex: 0 0 24px; }
@@ -2367,7 +2366,6 @@ dialog,
   font-size: 11px;
   line-height: 1;
 }
-.scroll-lock-button,
 .chat-only-button {
   display: inline-flex;
   align-items: center;
@@ -2385,26 +2383,19 @@ dialog,
   font-size: 11px;
   line-height: 1;
 }
-.scroll-lock-button i,
 .chat-only-button i { font-size: 11px; }
-.scroll-lock-button:disabled,
 .chat-only-button:disabled { opacity: 0.55; cursor: default; }
-.scroll-lock-button:not(:disabled):hover,
 .chat-only-button:not(:disabled):hover { background: rgba(181,188,208,0.22); }
-.scroll-lock-button:focus-visible,
 .chat-only-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.scroll-lock-button.active,
 .chat-only-button.active {
   border-color: rgba(45, 212, 191, 0.7);
   background: rgba(13, 148, 136, 0.3);
   color: #2dd4bf;
   box-shadow: 0 0 8px rgba(45, 212, 191, 0.4);
 }
-.scroll-lock-button.active i,
 .chat-only-button.active i {
   color: #2dd4bf;
 }
-.scroll-lock-button.active:not(:disabled):hover,
 .chat-only-button.active:not(:disabled):hover {
   background: rgba(13, 148, 136, 0.45);
 }

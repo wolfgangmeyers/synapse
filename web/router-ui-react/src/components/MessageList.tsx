@@ -3,7 +3,7 @@ import { messageKey, messageTime, type HistoryMessage } from "../domain/history"
 import type { ManagedHistoryEntry, ManagedHistoryPresentation, ManagedHistoryOutcome } from "../protocol/types";
 import type { Agent } from "../state/agent-projection";
 import { currentUsername } from "../persistence/settings-repository";
-import { shouldFollowToBottom } from "../state/conversation-projection";
+import { DEFAULT_AUTO_SCROLL_THRESHOLD, shouldFollowToBottom } from "../state/conversation-projection";
 import { fetchConversationTimeline, type ConversationTimelineEvent } from "../services/api";
 import { AgentWelcomeCard } from "./AgentWelcomeCard";
 import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
@@ -24,7 +24,6 @@ export interface MessageListProps {
   loading?: boolean | undefined;
   error?: string | undefined;
   onNearBottomChange?: ((nearBottom: boolean) => void) | undefined;
-  scrollLocked?: boolean | undefined;
   onLoadOlder?: (() => void) | undefined;
   hasOlder?: boolean | undefined;
   loadingOlder?: boolean | undefined;
@@ -454,10 +453,12 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
   });
 }
 
-export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, peerId, agent, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
+export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, peerId, agent, ownerId, routerUrl, loading = false, error, onNearBottomChange, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
   const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
+  const isNearBottomRef = useRef(true);
+  const prevConversationKeyRef = useRef<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const announcedActivity = useRef(new Set<string>());
   const activityLiveInitialized = useRef(false);
@@ -683,16 +684,39 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
   }, [oldestItemKey]);
 
   useLayoutEffect(() => {
-    if (scrollLocked || isPrependingRef.current) return;
+    if (isPrependingRef.current) return;
     const element = ref.current;
     if (!element) return;
+
+    const isConversationSwitch = prevConversationKeyRef.current !== conversationKey;
+    prevConversationKeyRef.current = conversationKey;
+
+    // Sticky auto-scroll model:
+    // - Scrolls to bottom if user is within DEFAULT_AUTO_SCROLL_THRESHOLD (180px) of bottom
+    // - Locks viewport position when user scrolls up to read history
+    // - Forces scroll to bottom on peer/agent switch
+    // - Uses double-rAF (initial synchronous layout scroll + requestAnimationFrame) for DOM layout settlement
+    if (isConversationSwitch) {
+      isNearBottomRef.current = true;
+      element.scrollTop = element.scrollHeight;
+      const frame = requestAnimationFrame(() => {
+        if (isPrependingRef.current) return;
+        element.scrollTop = element.scrollHeight;
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+
+    if (!isNearBottomRef.current) {
+      return;
+    }
+
     element.scrollTop = element.scrollHeight;
     const frame = requestAnimationFrame(() => {
       if (isPrependingRef.current) return;
       element.scrollTop = element.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [conversationKey, latestItemKey, scrollLocked]);
+  }, [conversationKey, latestItemKey]);
   // Retained history belongs to the newly selected agent; it is not a live
   // announcement just because this component was already mounted for another.
   useEffect(() => {
@@ -717,9 +741,12 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
   const onScroll = (): void => {
     const element = ref.current;
     if (!element) return;
-    onNearBottomChange?.(shouldFollowToBottom(element.scrollTop, element.clientHeight, element.scrollHeight));
-    const isScrollable = element.scrollHeight > element.clientHeight + 20;
-    if (isScrollable && element.scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder) {
+    const { scrollTop, scrollHeight, clientHeight } = element;
+    const nearBottom = shouldFollowToBottom({ scrollTop, scrollHeight, clientHeight }, DEFAULT_AUTO_SCROLL_THRESHOLD);
+    isNearBottomRef.current = nearBottom;
+    onNearBottomChange?.(nearBottom);
+    const isScrollable = scrollHeight > clientHeight + 20;
+    if (isScrollable && scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder) {
       handleInternalLoadOlder();
     }
   };

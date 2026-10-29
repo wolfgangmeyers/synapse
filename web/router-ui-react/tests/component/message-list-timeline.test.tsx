@@ -81,7 +81,7 @@ describe("MessageList", () => {
     expect(contextResetItem).toBeInTheDocument();
   });
 
-  it("anchors scroll to bottom when not locked", () => {
+  it("anchors scroll to bottom when near bottom (<= 180px)", () => {
     const messages: HistoryMessage[] = [
       { id: "msg-1", body: "First message" },
       { id: "msg-2", body: "Second message" },
@@ -99,6 +99,8 @@ describe("MessageList", () => {
 
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+    // User is at bottom (500 - (300 + 200) = 0 <= 180)
+    list.scrollTop = 300;
 
     rerender(
       <MessageList
@@ -107,11 +109,11 @@ describe("MessageList", () => {
       />
     );
 
-    // When not locked, scroll moves to scrollHeight
+    // Moves to new scrollHeight because near bottom
     expect(list.scrollTop).toBe(500);
   });
 
-  it("does not force scroll to bottom when scrollLocked is true", () => {
+  it("locks viewport position when user scrolls up (> 180px from bottom)", () => {
     const messages: HistoryMessage[] = [
       { id: "msg-1", body: "First message" },
     ];
@@ -120,7 +122,6 @@ describe("MessageList", () => {
       <MessageList
         peerId="agent-1"
         messages={messages}
-        scrollLocked={true}
       />
     );
 
@@ -128,19 +129,94 @@ describe("MessageList", () => {
     if (!list) throw new Error("Messages container not found");
 
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1000 });
+    // User scrolled up: scrollTop = 50 -> distance to bottom = 1000 - (50 + 200) = 750 > 180
     list.scrollTop = 50;
+    fireEvent.scroll(list);
 
     rerender(
       <MessageList
         peerId="agent-1"
         messages={[...messages, { id: "msg-2", body: "Second message" }]}
-        scrollLocked={true}
       />
     );
 
-    // Position remains untouched because scrollLocked is true
+    // Reading position remains preserved at 50
     expect(list.scrollTop).toBe(50);
+  });
+
+  it("resumes auto-scrolling when user scrolls back down within threshold", () => {
+    const messages: HistoryMessage[] = [
+      { id: "msg-1", body: "First message" },
+    ];
+
+    const { container, rerender } = render(
+      <MessageList
+        peerId="agent-1"
+        messages={messages}
+      />
+    );
+
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Messages container not found");
+
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1000 });
+
+    // Scroll up first
+    list.scrollTop = 50;
+    fireEvent.scroll(list);
+
+    // Scroll back down near bottom: 1000 - (700 + 200) = 100 <= 180
+    list.scrollTop = 700;
+    fireEvent.scroll(list);
+
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1200 });
+
+    rerender(
+      <MessageList
+        peerId="agent-1"
+        messages={[...messages, { id: "msg-2", body: "Second message" }]}
+      />
+    );
+
+    // Resumes auto-scrolling to bottom
+    expect(list.scrollTop).toBe(1200);
+  });
+
+  it("resets and forces scroll to bottom on conversation switch", () => {
+    const messages: HistoryMessage[] = [
+      { id: "msg-1", body: "First message" },
+    ];
+
+    const { container, rerender } = render(
+      <MessageList
+        peerId="agent-1"
+        messages={messages}
+      />
+    );
+
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Messages container not found");
+
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1000 });
+
+    // User scrolled up in agent-1
+    list.scrollTop = 50;
+    fireEvent.scroll(list);
+
+    // Switch to agent-2
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 800 });
+    rerender(
+      <MessageList
+        peerId="agent-2"
+        messages={[{ id: "msg-2-1", body: "Hello from agent 2" }]}
+      />
+    );
+
+    // Forced scroll to bottom on switch
+    expect(list.scrollTop).toBe(800);
   });
 
   it("renders from unified timeline events", () => {
