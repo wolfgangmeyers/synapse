@@ -193,19 +193,9 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const resolvedAgentId = settingsRepository.agentId(settings, activeUrl, requestedAgentId ?? DEFAULT_AGENT_ID);
   const initialState = useMemo(() => suppliedState ?? createInitialState({ routerUrl: activeUrl, agentId: resolvedAgentId }), [activeUrl, resolvedAgentId, suppliedState]);
   const scope = useMemo(() => ({ routerUrl: activeUrl, agentId: resolvedAgentId }), [activeUrl, resolvedAgentId]);
-  const historyRepository = useMemo(() => new HistoryRepository(undefined, storage), [storage]);
   const [providerPrompt, setProviderPrompt] = useState<import("./protocol/types").ProviderAuthPromptFrame>();
   const [providerRefresh, setProviderRefresh] = useState(0);
-  const persistDelivery = useCallback(async (messages: readonly HistoryMessage[]): Promise<void> => {
-    const grouped = new Map<string, HistoryMessage[]>();
-    for (const message of messages) {
-      const peer = message.from === resolvedAgentId ? message.to : message.from;
-      if (typeof peer !== "string" || peer === "" || peer === resolvedAgentId) continue;
-      grouped.set(peer, [...(grouped.get(peer) ?? []), message]);
-    }
-    await Promise.all([...grouped].map(([peer, entries]) => historyRepository.savePeer(peer, scope, entries)));
-  }, [historyRepository, resolvedAgentId, scope]);
-  const session = useRouterSession({ routerUrl: activeUrl, agentId: resolvedAgentId, defaultAgentId: resolvedAgentId, initialState, connect, ...transportOptions, persistDelivery, onProviderAuthFrame: (frame) => { if (frame.type === "provider_auth_prompt") setProviderPrompt(frame); else setProviderRefresh((current) => current + 1); }, onUILiveError: (error) => setManagedLiveError(uiLiveErrorMessage(error)) });
+  const session = useRouterSession({ routerUrl: activeUrl, agentId: resolvedAgentId, defaultAgentId: resolvedAgentId, initialState, connect, ...transportOptions, onProviderAuthFrame: (frame) => { if (frame.type === "provider_auth_prompt") setProviderPrompt(frame); else setProviderRefresh((current) => current + 1); }, onUILiveError: (error) => setManagedLiveError(uiLiveErrorMessage(error)) });
   const sessionStateRef = useRef(session.state);
   sessionStateRef.current = session.state;
   const reconciliation = useAgentReconciliation(session.transport, scope);
@@ -291,13 +281,9 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const templateListDirty = useRef(false);
   const latestTemplateRequest = useRef(0);
 
-  const persistConversation = useCallback((peer: string, messages: HistoryMessage[]): void => { void historyRepository.savePeer(peer, scope, messages).catch(() => undefined); }, [historyRepository, scope]);
-  const replacePersistedConversation = useCallback((peer: string, messages: HistoryMessage[]): void => { void historyRepository.replacePeer(peer, scope, messages).catch(() => undefined); }, [historyRepository, scope]);
   const reconcileConversationState = useCallback((peer: string, messages: HistoryMessage[], highWaterSequence: number): void => {
     session.dispatch({ type: "history/reconcile", scope, peer, snapshot: messages, highWaterSequence });
-    const existing = sessionStateRef.current.messagesByPeer[peer] ?? [];
-    replacePersistedConversation(peer, reconcileHistoryMessages(existing, messages, highWaterSequence));
-  }, [replacePersistedConversation, scope, session.dispatch]);
+  }, [scope, session.dispatch]);
   // Background lookup map resolving workflow state IDs to human-readable state and workflow names.
   // Periodically synchronizes so agent rows and conversation headers display named workflow states even
   // when an agent projection only carries state IDs.
@@ -347,7 +333,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const selectedSourceKey = selectedPeer === undefined ? undefined : selectedPeer.includes(":") ? selectedPeer : sourceAgentKey("tmux", selectedPeer);
   const selectedAgent = useMemo(() => visibleAgents.find((agent) => sourceAgentKey(agent.source, agent.agent_id) === selectedSourceKey), [visibleAgents, selectedSourceKey]);
   const selectedConversationPeer = selectedAgent === undefined ? undefined : selectedPeer === undefined ? undefined : selectedPeer.startsWith("tmux:") ? selectedPeer.slice("tmux:".length) : selectedPeer.startsWith("router-managed:") ? selectedPeer.slice("router-managed:".length) : selectedPeer;
-  const conversation = useConversation(session.transport, scope, selectedConversationPeer, persistConversation, reconcileConversationState);
+  const conversation = useConversation(session.transport, scope, selectedConversationPeer, reconcileConversationState);
   const refreshTemplates = useCallback(async (): Promise<void> => {
     const requestId = ++latestTemplateRequest.current;
     const generation = templateListGeneration.current;
@@ -398,11 +384,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   useEffect(() => {
     if (selectedPeer === undefined && session.state.selectedPeer !== undefined) setSelectedPeer(session.state.selectedPeer);
   }, [selectedPeer, session.state.selectedPeer]);
-  useEffect(() => {
-    let active = true;
-    void historyRepository.load(scope).then((messages) => { if (!active) return; for (const [peer, records] of Object.entries(messages)) { const snapshot = records.filter((message): message is import("./domain/history").HistoryMessage => typeof message.id === "string"); session.dispatch({ type: "history/reconcile", scope, peer, snapshot, highWaterSequence: 0 }); } }).catch(() => undefined);
-    return () => { active = false; };
-  }, [historyRepository, scope, session.dispatch]);
+  // Conversation messages are ephemeral and loaded on demand from the router; no local IndexedDB history reconcile on startup.
   useEffect(() => {
     if (session.state.connection !== "connected") return;
     void session.transport.refreshReminders().catch((cause: unknown) => setReminderStatus(cause instanceof Error ? cause.message : "Reminders could not be loaded."));
@@ -560,7 +542,6 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     const payload = { id: localId, from: resolvedAgentId, to: peer, body, created_at: new Date().toISOString(), source: { kind: "web_ui" }, ...(images.length > 0 ? { attachments: images.map((image) => ({ type: "image", data_url: image.dataUrl, ...(image.name === undefined ? {} : { name: image.name }) })) } : {}) };
     const pending = pendingMessage(body, peer, resolvedAgentId, images.map((image) => ({ url: image.dataUrl, mime_type: image.mimeType, size_bytes: image.sizeBytes, ...(image.name === undefined ? {} : { name: image.name }) })), localId);
     session.dispatch({ type: "message/append", scope, peer, message: pending });
-    persistConversation(peer, [pending]);
     try {
       if (externalSend) await externalSend(peer, body, images);
       const result = await conversation.send(payload);
@@ -568,14 +549,10 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
       if (accepted === undefined) throw new Error("Router returned an invalid message response");
       const cachedAccepted = await cacheAcceptedImages(peer, scope, accepted, pending);
       session.dispatch({ type: "send/replace", scope, peer, localId, message: cachedAccepted });
-      persistConversation(peer, [cachedAccepted]);
       setManagedError(undefined);
       setManagedHeaderModelError(undefined);
     } catch (cause) {
       session.dispatch({ type: "send/settle", scope, peer, localId, ok: false });
-      // Keep the visible failure state after a reload; the optimistic pending row
-      // must not remain persisted once the send has settled unsuccessfully.
-      persistConversation(peer, settlePendingMessages([pending], localId, false));
       throw cause;
     }
   };

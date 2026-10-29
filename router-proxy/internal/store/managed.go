@@ -857,6 +857,7 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_launch_recipes WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_crash_recovery WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_history_boundaries WHERE agent_id = ?`, existingID)
+				_, _ = s.db.ExecContext(ctx, `DELETE FROM conversation_timeline WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `UPDATE recipient_sources SET state='retired' WHERE recipient_name = ?`, agent.Name)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id = ?`, existingID)
 			}
@@ -1559,6 +1560,15 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		// history for a same-name relaunch to discover. Delete only rows owned by
 		// this exact agent ID; other participants' independent history remains.
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM conversation_messages WHERE sender=? OR recipient=?`, action.AgentID, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM conversation_timeline WHERE agent_id = ?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM scratchpad_entries WHERE agent_id = ?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_progress_history WHERE agent_id = ?`, action.AgentID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id=?`, action.AgentID); err != nil {

@@ -123,6 +123,74 @@ function normalizeMessageBodyForComparison(body: string | undefined): string {
     .trim();
 }
 
+function isHumanOrOperator(identity?: string, currentUser?: string, ownerId?: string): boolean {
+  if (!identity) return false;
+  const norm = identity.trim().toLowerCase();
+  const humanAliases = new Set(
+    [currentUser, ownerId, "wolfgang", "user"]
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      .map((x) => x.trim().toLowerCase())
+  );
+  return humanAliases.has(norm);
+}
+
+function messageToFeedItem(
+  message: HistoryMessage,
+  currentUser?: string,
+  ownerId?: string,
+  peerId?: string
+): FeedItem {
+  const from = message.from?.trim();
+  const to = message.to?.trim();
+  const normalizedFrom = from?.toLowerCase();
+  const isFromHuman = isHumanOrOperator(from, currentUser, ownerId);
+  const isToHuman = isHumanOrOperator(to, currentUser, ownerId);
+
+  // System or router automated messages always render as envelope activity cards
+  const isSystemOrRouterSender = normalizedFrom === "system" || normalizedFrom === "router";
+
+  // An inter-agent message is strictly between two non-human agents (neither from nor to human)
+  const isInterAgentSender = Boolean(
+    from &&
+    to &&
+    !isFromHuman &&
+    !isToHuman
+  );
+
+  if (isSystemOrRouterSender || isInterAgentSender) {
+    const entry: ManagedHistoryEntry = {
+      id: message.id,
+      agent_id: peerId ?? message.to ?? "agent",
+      ...(message.created_at ? { at: message.created_at } : message.recorded_at ? { at: message.recorded_at } : {}),
+      category: isSystemOrRouterSender ? "system" : "managed_message",
+      level: "info",
+      ...(message.body !== undefined ? { message: message.body, message_content: message.body, body: message.body } : {}),
+      presentation: {
+        kind: "mailbox_message",
+        sender: from ?? "system",
+        recipient: to ?? peerId ?? "agent",
+        ...(typeof message.subject === "string" ? { subject: message.subject } : {}),
+        outcome: "success",
+      },
+    };
+    return {
+      type: "activity",
+      id: message.id,
+      timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
+      sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
+      entry,
+    };
+  }
+
+  return {
+    type: "message",
+    id: message.id,
+    timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
+    sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
+    message,
+  };
+}
+
 function timelineEventToFeedItems(
   event: ConversationTimelineEvent,
   currentUser?: string,
@@ -133,11 +201,12 @@ function timelineEventToFeedItems(
   const fromMeta = typeof meta.from === "string" ? meta.from : undefined;
   const toMeta = typeof meta.to === "string" ? meta.to : undefined;
 
-  // 1. Subagent completion notifications / system messages:
-  // If sender is system or content has [Direct message from system] / [Subagent Completed],
-  // NEVER render as a user chat bubble!
+  // 1. Subagent completion notifications / system messages / router messages:
+  // If sender is system or router, or content has [Direct message from system] / [Subagent Completed],
+  // NEVER render as a user chat bubble! Render as mailbox envelope card!
   if (
     fromMeta === "system" ||
+    fromMeta === "router" ||
     event.content?.startsWith("[Direct message from system]") ||
     event.content?.startsWith("[Subagent Completed]")
   ) {
@@ -149,8 +218,10 @@ function timelineEventToFeedItems(
       level: "info",
       ...(event.content !== undefined ? { message: event.content } : {}),
       presentation: {
-        kind: "notification",
-        summary: event.content?.split("\n")[0] ?? "System notification",
+        kind: "mailbox_message",
+        sender: fromMeta ?? "system",
+        recipient: toMeta ?? peerId ?? event.agent_id,
+        ...(typeof meta.subject === "string" ? { subject: meta.subject } : {}),
         outcome: "success",
       },
     };
@@ -165,30 +236,33 @@ function timelineEventToFeedItems(
 
   // 2. Messages
   if (event.kind === "message") {
-    // Inter-agent mailbox message check:
-    // If explicitly addressed between agents (neither sender nor recipient is user/owner),
-    // render as envelope activity card!
+    const normalizedFrom = fromMeta?.trim().toLowerCase();
+    const isFromHuman = isHumanOrOperator(fromMeta, currentUser, ownerId);
+    const isToHuman = isHumanOrOperator(toMeta, currentUser, ownerId);
+
+    // Automated system/router messages render as mailbox envelope cards
+    const isSystemOrRouterSender = normalizedFrom === "system" || normalizedFrom === "router";
+
+    // Inter-agent mailbox messages are between two non-human agents (neither from nor to human)
+    // If toMeta is explicitly another agent (!isToHuman && toMeta !== undefined), it's inter-agent mail!
     const isInterAgent = Boolean(
       fromMeta &&
       toMeta &&
-      fromMeta !== ownerId &&
-      toMeta !== ownerId &&
-      fromMeta !== "user" &&
-      toMeta !== "user" &&
-      (currentUser === undefined || (fromMeta !== currentUser && toMeta !== currentUser))
+      !isFromHuman &&
+      !isToHuman
     );
 
-    if (isInterAgent) {
+    if (isSystemOrRouterSender || isInterAgent) {
       const entry: ManagedHistoryEntry = {
         id: event.id,
         agent_id: event.agent_id,
         at: new Date(event.created_at).toISOString(),
-        category: "managed_message",
-        ...(event.content !== undefined ? { message: event.content } : {}),
+        category: isSystemOrRouterSender ? "system" : "managed_message",
+        ...(event.content !== undefined ? { message: event.content, message_content: event.content, body: event.content } : {}),
         presentation: {
           kind: "mailbox_message",
-          sender: fromMeta ?? "agent",
-          recipient: toMeta ?? "agent",
+          sender: fromMeta ?? "system",
+          recipient: toMeta ?? peerId ?? event.agent_id,
           ...(typeof meta.subject === "string" ? { subject: meta.subject } : {}),
           outcome: "success",
         },
@@ -204,9 +278,7 @@ function timelineEventToFeedItems(
 
     // Direct operator <-> assistant conversation:
     // outgoing if from user / owner or role === "user"; incoming assistant bubble otherwise
-    const isOutgoing = (ownerId !== undefined && fromMeta === ownerId) ||
-                       (currentUser !== undefined && fromMeta === currentUser) ||
-                       (event.role === "user" && fromMeta === undefined);
+    const isOutgoing = isFromHuman || (event.role === "user" && fromMeta === undefined);
     const from = fromMeta ?? (isOutgoing ? (ownerId ?? currentUser ?? "user") : (peerId ?? event.agent_id));
     const to = toMeta ?? (isOutgoing ? (peerId ?? event.agent_id) : (ownerId ?? currentUser ?? "user"));
     const rawAttachments = meta.attachments ?? (event as any).attachments ?? meta.images;
@@ -433,13 +505,9 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
         continue;
       }
       markSeen(message.id);
-      rawItems.push({
-        type: "message" as const,
-        id: message.id,
-        timestamp: messageTime(message, Number.MAX_SAFE_INTEGER),
-        sequence: message.sequence ?? Number.MAX_SAFE_INTEGER,
-        message,
-      });
+      const item = messageToFeedItem(message, currentUser, ownerId, peerId);
+      markSeen(item.id);
+      rawItems.push(item);
     }
 
     // Include live activity entries (from WebSocket) not already captured

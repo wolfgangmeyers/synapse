@@ -759,11 +759,12 @@ export function CompleteTimelineEntry({ entry, suppressThinking = false, epoch }
   const error = entry.presentation?.error;
   const safeClassifiedReason = hasSafeClassifiedReason(entry.presentation);
   const presentation = entry.presentation;
+  const isMailbox = presentation?.kind === "mailbox_message";
   const isTool = presentation?.kind === "tool";
   const isGoalEval = presentation?.kind === "goal_evaluation";
   const isSubagentComplete = presentation?.kind === "subagent_complete" || (presentation?.kind === "subagent" && (presentation?.outcome === "completed" || presentation?.outcome === "failed" || presentation?.outcome === "success" || presentation?.outcome === "error"));
   const thinkingText = suppressThinking ? undefined : getThinkingContent(entry);
-  const hasDetails = isThinkingKind || thinkingText !== undefined || isGoalEval || isSubagentComplete || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
+  const hasDetails = isMailbox || isThinkingKind || thinkingText !== undefined || isGoalEval || isSubagentComplete || entry.message_content !== undefined || entry.sender_identity !== undefined || entry.tool_input !== undefined || (isTool && error?.detail_available !== false);
   const accessibleName = [
     visual.dialogTitle && visual.dialogTitle !== visual.label ? visual.dialogTitle : undefined,
     visual.label,

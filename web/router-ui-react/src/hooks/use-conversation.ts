@@ -17,7 +17,7 @@ export interface ConversationHook {
   loadOlder(): Promise<void>;
   send(message: unknown): Promise<Record<string, unknown>>;
 }
-export function useConversation(transport: RouterTransport, scope: RouterScope, peer: string | undefined, onPersist?: (peer: string, messages: HistoryMessage[]) => void, onReconcile?: (peer: string, messages: HistoryMessage[], highWaterSequence: number) => void): ConversationHook {
+export function useConversation(transport: RouterTransport, scope: RouterScope, peer: string | undefined, onReconcile?: (peer: string, messages: HistoryMessage[], highWaterSequence: number) => void): ConversationHook {
   const scopeKey = `${scope.routerUrl}\u001f${scope.agentId}\u001f${peer ?? ""}`;
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [timelineEvents, setTimelineEvents] = useState<ConversationTimelineEvent[]>([]);
@@ -67,7 +67,6 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
           const reconciled = reconcileConversation({ messages: useFreshHistory ? [] : current, highWaterSequence: 0, followMessages: true }, projectedMessages, 0).messages;
           if (useFreshHistory) freshHistoryScope.current = undefined;
           onReconcile?.(peer, reconciled, 0);
-          onPersist?.(peer, reconciled);
           return reconciled;
         });
         setError(undefined);
@@ -85,7 +84,6 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         const reconciled = reconcileConversation({ messages: useFreshHistory ? [] : current, highWaterSequence: 0, followMessages: true }, result.messages, result.high_water_sequence).messages;
         if (useFreshHistory) freshHistoryScope.current = undefined;
         onReconcile?.(peer, reconciled, result.high_water_sequence);
-        onPersist?.(peer, reconciled);
         return reconciled;
       });
       setError(undefined);
@@ -95,7 +93,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     } finally {
       if (generation === requestGeneration.current) setLoading(false);
     }
-  }, [transport, peer, scope.routerUrl, scope.agentId, scopeKey, onPersist, onReconcile]);
+  }, [transport, peer, scope.routerUrl, scope.agentId, scopeKey, onReconcile]);
 
   const loadOlder = useCallback(async () => {
     if (peer === undefined || peer === "" || loadingOlder) return;
@@ -129,7 +127,6 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
 
           setMessages((current) => {
             const reconciled = reconcileConversation({ messages: current, highWaterSequence: 0, followMessages: true }, olderMessages, 0).messages;
-            onPersist?.(peer, reconciled);
             return reconciled;
           });
           return;
@@ -148,7 +145,6 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       setNextBefore(result.next_before ?? null);
       setMessages((current) => {
         const reconciled = reconcileConversation({ messages: current, highWaterSequence: 0, followMessages: true }, result.messages, result.high_water_sequence).messages;
-        onPersist?.(peer, reconciled);
         return reconciled;
       });
     } catch {
@@ -156,7 +152,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     } finally {
       setLoadingOlder(false);
     }
-  }, [peer, nextBefore, nextBeforeSeq, timelineEvents, loadingOlder, transport, scope.agentId, onPersist]);
+  }, [peer, nextBefore, nextBeforeSeq, timelineEvents, loadingOlder, transport, scope.agentId]);
 
   useEffect(() => {
     const prior = previousScope.current;
@@ -205,15 +201,13 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         }
         const useFreshMessages = freshHistoryScope.current === scopeKey;
         const next = appendConversation({ messages: useFreshMessages ? [] : current, highWaterSequence: 0, followMessages: true }, message).messages;
-        if (addressed === peer) onPersist?.(addressed, useFreshMessages ? [message] : next);
         return useFreshMessages ? appendConversation({ messages: current, highWaterSequence: 0, followMessages: true }, message).messages : next;
       });
-      if (addressed !== peer) onPersist?.(addressed, [message]);
     });
     void refresh();
     const timer = peer === undefined ? undefined : setTimeout(() => { void refresh(); }, 500);
     return () => { active = false; requestGeneration.current += 1; unsubscribe(); if (timer !== undefined) clearTimeout(timer); };
-  }, [transport, scopeKey, scope.routerUrl, scope.agentId, peer, refresh, onPersist]);
+  }, [transport, scopeKey, scope.routerUrl, scope.agentId, peer, refresh]);
 
   const send = useCallback(async (message: unknown): Promise<Record<string, unknown>> => transport.sendMessage(message), [transport]);
   const scopedError = messagesScopeKey === scopeKey ? error : undefined;

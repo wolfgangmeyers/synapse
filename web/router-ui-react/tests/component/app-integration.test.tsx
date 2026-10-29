@@ -435,7 +435,6 @@ describe("App integration", () => {
     expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(intendedRouter);
     expect(JSON.parse(storage.getItem(ROUTERS_KEY) ?? "[]")).toEqual([intendedRouter]);
     expect(JSON.parse(storage.getItem(SELECTED_PEERS_KEY) ?? "{}")).toEqual({ [owner]: "worker-one" });
-    expect((await new HistoryRepository(undefined, storage).load({ routerUrl: intendedRouter, agentId: "wolfgang" }))["worker-one"]).toEqual([expect.objectContaining({ body: "Keep this conversation" })]);
   });
 
   it("keeps each router identity and its history when adding another router", async () => {
@@ -465,8 +464,6 @@ describe("App integration", () => {
     expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe("http://second-router.test:43124");
     expect(JSON.parse(storage.getItem(ROUTERS_KEY) ?? "[]")).toEqual(["http://first-router.test:43123", "http://second-router.test:43124"]);
     expect(JSON.parse(storage.getItem(AGENT_IDS_KEY) ?? "{}")).toEqual({ "http://first-router.test:43123": "user", "http://second-router.test:43124": "backup-web" });
-    expect((await new HistoryRepository(undefined, storage).load({ routerUrl: firstRouter, agentId: "wolfgang-web" }))["worker-one"]).toEqual([expect.objectContaining({ body: "History survives router setup" })]);
-    expect((await new HistoryRepository(undefined, storage).load({ routerUrl: firstRouter, agentId: "backup-web" }))["worker-one"]).toBeUndefined();
     await waitFor(() => expect(screen.getByRole("button", { name: /Router second-router.test:43124/ })).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Close routers" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Router second-router.test:43124/ }));

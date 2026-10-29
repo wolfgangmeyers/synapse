@@ -588,7 +588,7 @@ func (s *Store) reserveManagedGoalWakeupTx(ctx context.Context, fence ManagedRun
 	if _, err = s.db.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES (?,?) ON CONFLICT(agent_id) DO NOTHING`, fence.AgentID, now); err != nil {
 		return err
 	}
-	if _, err = s.db.ExecContext(ctx, `INSERT INTO messages(id,sender,recipient,body,created_at,expires_at,message_incarnation_id,source_kind,state) VALUES (?,?,?,?,?,?,?,?, 'queued')`, messageID, "router", fence.AgentID, body, now, expires, incarnation, "system"); err != nil {
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO messages(id,sender,recipient,body,created_at,expires_at,message_incarnation_id,source_kind,state) VALUES (?,?,?,?,?,?,?,?, 'queued')`, messageID, "system", fence.AgentID, body, now, expires, incarnation, "system"); err != nil {
 		return err
 	}
 	var sourceKind, owner string

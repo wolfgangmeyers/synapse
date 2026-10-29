@@ -51,11 +51,9 @@ describe("Selected-agent conversation modes", () => {
       { id: "received", from: "supervisor", to: "managed-worker", body: "Please start", created_at: "2030-01-01T10:00:00.000Z" },
       { id: "sent", from: "managed-worker", to: "supervisor", body: "Started", created_at: "2030-01-01T10:01:00.000Z" },
     ]} activityEntries={[]} />);
-    expect(screen.getByText("Received message")).toBeInTheDocument();
-    expect(screen.getByText("Sent message")).toBeInTheDocument();
-    expect(container.querySelector(".message-transport--received .fa-envelope")).toBeInTheDocument();
-    expect(container.querySelector(".message-transport--sent .fa-paper-plane")).toBeInTheDocument();
-    expect(container.querySelectorAll("[data-activity-id]")).toHaveLength(0);
+    expect(screen.getByText("Please start")).toBeInTheDocument();
+    expect(screen.getByText("Started")).toBeInTheDocument();
+    expect(container.querySelectorAll(".activity-entry")).toHaveLength(2);
   });
 
   it("does not announce retained Complete history after the selected agent changes", () => {
