@@ -9,7 +9,7 @@ const sources = {
   goal: resolve(root, "pi-extensions/mecha-goal/index.ts"),
   messaging: resolve(root, "pi-extensions/mecha-messaging/index.ts"),
   operational: resolve(root, "pi-extensions/mecha-messaging/operational-tools.ts"),
-  rootControl: resolve(root, ".claude/skills/supervisor/tools/managed_root_control.py"),
+  rootControl: resolve(root, "tools/managed_root_control.py"),
 };
 
 function canonicalize(value) {

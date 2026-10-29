@@ -1,4 +1,0 @@
-interface:
-  display_name: "Wolfgang Voice Review"
-  short_description: "Rewrite PR comments in Wolfgang voice"
-  default_prompt: "Use $wolfgang-voice-review to review and rewrite these draft PR review comments before posting."
