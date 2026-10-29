@@ -150,5 +150,84 @@ describe('ProgressHistoryModal', () => {
     expect(coords[1]?.x).toBeGreaterThanOrEqual(44);
     expect(coords[2]?.x).toBeGreaterThanOrEqual(44);
   });
+
+  it('supports keyboard navigation expanding notes with Enter and Space keys', async () => {
+    const mockData = [
+      { percent: 50, note: 'Keyboard toggleable note', timestamp: '2026-10-18T00:00:00Z' },
+    ];
+    (globalThis.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockData,
+    });
+
+    render(<ProgressHistoryModal agentId="agent-1" isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Loading progress history...')).toBeNull();
+    });
+
+    const entry = screen.getByRole('button', { name: /50%/i });
+    const note = entry.querySelector('.note');
+    expect(note).toHaveClass('note-collapsed');
+
+    // Press Enter to expand
+    fireEvent.keyDown(entry, { key: 'Enter' });
+    expect(note).toHaveClass('note-expanded');
+
+    // Press Enter to collapse
+    fireEvent.keyDown(entry, { key: 'Enter' });
+    expect(note).toHaveClass('note-collapsed');
+
+    // Press Space to expand
+    fireEvent.keyDown(entry, { key: ' ' });
+    expect(note).toHaveClass('note-expanded');
+
+    // Press Space to collapse
+    fireEvent.keyDown(entry, { key: ' ' });
+    expect(note).toHaveClass('note-collapsed');
+  });
+
+  it('renders error state banner when fetch rejects or returns non-ok response', async () => {
+    // 1. Rejection / network failure
+    (globalThis.fetch as any).mockRejectedValueOnce(new Error('Network error loading history'));
+
+    const { unmount } = render(<ProgressHistoryModal agentId="agent-1" isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Network error loading history')).toBeDefined();
+    });
+    unmount();
+
+    // 2. Non-ok response
+    (globalThis.fetch as any).mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+    });
+
+    render(<ProgressHistoryModal agentId="agent-1" isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to load progress history: Internal Server Error')).toBeDefined();
+    });
+  });
+
+  it('uses injected client if provided', async () => {
+    const mockData = [
+      { percent: 80, note: 'Client entry', timestamp: '2026-10-18T01:00:00Z' },
+    ];
+    const mockClient = {
+      progressHistory: vi.fn().mockResolvedValue(mockData),
+    };
+
+    render(<ProgressHistoryModal agentId="agent-custom" isOpen={true} onClose={() => {}} client={mockClient as any} />);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Loading progress history...')).toBeNull();
+    });
+
+    expect(mockClient.progressHistory).toHaveBeenCalledWith('agent-custom');
+    expect(screen.getByText('Client entry')).toBeDefined();
+  });
 });
 

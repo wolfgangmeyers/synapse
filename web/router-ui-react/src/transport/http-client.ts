@@ -51,6 +51,11 @@ export interface ScratchpadResponse {
   entries: ScratchpadEntry[];
   total_count: number;
 }
+export interface ProgressHistoryEntry {
+  percent: number;
+  note: string | null;
+  timestamp: string;
+}
 export interface AgentMonitor {
   id: string;
   agent_id: string;
@@ -660,6 +665,7 @@ export interface RouterHttpClient {
   clearGitSyncTarget(target: string): Promise<void>;
   pullGitSync(target: string): Promise<GitSyncPullResponse>;
   pushGitSync(target: string): Promise<GitSyncPushResponse>;
+  progressHistory(agentId: string): Promise<ProgressHistoryEntry[]>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
   stopManagedSubagent(agentId: string, childId: string): Promise<void>;
@@ -1050,6 +1056,13 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     pushGitSync: async (target: string): Promise<GitSyncPushResponse> => {
       const res = await jsonRequest(`/v1/git-sync/${encodeURIComponent(target)}/push`, "POST", {});
       return (recordValue(res) ?? {}) as GitSyncPushResponse;
+    },
+    progressHistory: async (agentId: string): Promise<ProgressHistoryEntry[]> => {
+      const res = await request(`/v1/agents/${encodeURIComponent(agentId)}/progress/history`, { method: "GET", credentials: "omit" });
+      if (!Array.isArray(res)) {
+        throw invalidResponse("Router returned an invalid progress history response", res);
+      }
+      return res as ProgressHistoryEntry[];
     },
   };
 }

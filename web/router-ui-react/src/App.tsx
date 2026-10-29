@@ -890,7 +890,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     <ArrivalDialog open={dialog === "arrival"} {...(arrivalForDialog ? { arrival: arrivalForDialog } : {})} uiAgentId={resolvedAgentId} onClose={() => setDialog(undefined)} onDismiss={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} />
     {terminateTargetAgent ? <TerminateConfirmationDialog open={dialog === "terminate-confirmation"} agent={terminateTargetAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onConfirm={(agentId, options) => manageAction(agentId, "terminate", options)} onWorktreeCheck={(path: string) => session.transport.http.worktreeCheck(path)} /> : null}
     <ManagedAgentDialog open={dialog === "managed"} recentFolders={distinctRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} onWorktreeCheck={(path) => session.transport.http.worktreeCheck(path)} />
-    {progressModalAgentId && <ProgressHistoryModal agentId={progressModalAgentId} onClose={() => setProgressModalAgentId(null)} />}
+    {progressModalAgentId && <ProgressHistoryModal agentId={progressModalAgentId} client={session.transport.http} onClose={() => setProgressModalAgentId(null)} />}
   </>;
 }
 
