@@ -100,4 +100,55 @@ describe('ProgressHistoryModal', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  it('verifies polyline includes earlier entry extending off-screen to the left (X < 44) with clipPath', async () => {
+    // 1h window duration is 3600*1000 ms.
+    // Latest entry at 12:00:00.
+    // minTime for 1h is 11:00:00.
+    // Entry inside window at 11:30:00.
+    // Entry prior to window at 10:00:00 (1 hour prior to window start).
+    const mockData = [
+      { percent: 10, note: 'Prior entry', timestamp: '2026-10-18T10:00:00Z' },
+      { percent: 50, note: 'Window entry 1', timestamp: '2026-10-18T11:30:00Z' },
+      { percent: 90, note: 'Window entry 2', timestamp: '2026-10-18T12:00:00Z' },
+    ];
+
+    (globalThis.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockData,
+    });
+
+    render(<ProgressHistoryModal agentId="agent-1" isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Loading progress history...')).toBeNull();
+    });
+
+    const polyline = document.querySelector('polyline');
+    expect(polyline).not.toBeNull();
+    expect(
+      polyline?.getAttribute('clipPath') ?? polyline?.getAttribute('clip-path')
+    ).toBe('url(#chart-plot-clip)');
+
+    const points = polyline?.getAttribute('points');
+    expect(points).toBeTruthy();
+
+    const coords = points!.trim().split(/\s+/).map((pt) => {
+      const [x, y] = pt.split(',').map(Number);
+      return { x, y };
+    });
+
+    // Should include prior entry plus the 2 window entries (3 total)
+    expect(coords.length).toBe(3);
+
+    // Prior entry timestamp is 1 hour before window start (window duration is 1 hour, width is 436px).
+    // ratio = (10:00 - 11:00) / 1hr = -1.
+    // X = 44 + (-1) * 436 = -392.
+    // It should extend to the left of the plot area (X < 44).
+    expect(coords[0]?.x).toBeLessThan(44);
+    // And window entries should have X >= 44
+    expect(coords[1]?.x).toBeGreaterThanOrEqual(44);
+    expect(coords[2]?.x).toBeGreaterThanOrEqual(44);
+  });
 });
+

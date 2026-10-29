@@ -126,9 +126,9 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
   }, [history]);
 
   // Proportional timeline calculations
-  const { windowStart, windowEnd, windowEntries, xTicks } = useMemo(() => {
+  const { windowStart, windowEnd, windowEntries, priorEntry, xTicks } = useMemo(() => {
     if (history.length === 0) {
-      return { windowStart: 0, windowEnd: 0, windowEntries: [], xTicks: [] };
+      return { windowStart: 0, windowEnd: 0, windowEntries: [], priorEntry: null, xTicks: [] };
     }
 
     const times = history.map((e) => new Date(e.timestamp).getTime());
@@ -155,6 +155,17 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
       return t >= minTime && t <= maxTime;
     });
 
+    // Find the latest entry that occurs strictly before minTime (if any)
+    let prior: ProgressHistoryEntry | null = null;
+    if (timeWindow !== 'all') {
+      const earlier = history.filter((e) => new Date(e.timestamp).getTime() < minTime);
+      if (earlier.length > 0) {
+        prior = earlier.reduce((prev, curr) =>
+          new Date(curr.timestamp).getTime() > new Date(prev.timestamp).getTime() ? curr : prev
+        );
+      }
+    }
+
     // 5 X-axis relative tick markers across the window (0%, 25%, 50%, 75%, 100%)
     const ticks = [0, 0.25, 0.5, 0.75, 1].map((pct) => {
       const offsetMs = windowDuration * (1 - pct);
@@ -167,6 +178,7 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
       windowStart: minTime,
       windowEnd: maxTime,
       windowEntries: filtered,
+      priorEntry: prior,
       xTicks: ticks,
     };
   }, [history, timeWindow]);
@@ -187,6 +199,20 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     const ratio = (clampedT - windowStart) / (windowEnd - windowStart);
     return PADDING_LEFT + ratio * PLOT_WIDTH;
   };
+
+  const getPolylineX = (timestamp: string) => {
+    if (windowEnd <= windowStart) return PADDING_LEFT + PLOT_WIDTH;
+    const t = new Date(timestamp).getTime();
+    const ratio = (t - windowStart) / (windowEnd - windowStart);
+    return PADDING_LEFT + ratio * PLOT_WIDTH;
+  };
+
+  const polylineEntries = useMemo(() => {
+    if (priorEntry) {
+      return [priorEntry, ...windowEntries];
+    }
+    return windowEntries;
+  }, [priorEntry, windowEntries]);
 
   const getY = (percent: number) => {
     const clampedPct = Math.max(0, Math.min(100, percent));
@@ -245,6 +271,12 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
           <div className="progress-history-body">
             <div className="progress-history-chart-container">
               <svg className="progress-history-chart" viewBox="0 0 500 215" preserveAspectRatio="none">
+                <defs>
+                  <clipPath id="chart-plot-clip">
+                    <rect x={PADDING_LEFT} y="0" width={500 - PADDING_LEFT} height="215" />
+                  </clipPath>
+                </defs>
+
                 {/* Horizontal reference grid lines */}
                 <line x1={PADDING_LEFT} y1={getY(100)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(100)} stroke="rgba(255, 255, 255, 0.1)" strokeDasharray="3 3" />
                 <line x1={PADDING_LEFT} y1={getY(75)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(75)} stroke="rgba(255, 255, 255, 0.07)" strokeDasharray="3 3" />
@@ -272,16 +304,17 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
                   </g>
                 ))}
 
-                {/* Polyline curve connecting proportional points */}
-                {windowEntries.length > 1 && (
+                {/* Polyline curve connecting proportional points, extending off to the left if prior points exist */}
+                {polylineEntries.length > 1 && (
                   <polyline
                     fill="none"
                     stroke="#38bdf8"
                     strokeWidth="2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
-                    points={windowEntries
-                      .map((d) => `${getX(d.timestamp)},${getY(d.percent)}`)
+                    clipPath="url(#chart-plot-clip)"
+                    points={polylineEntries
+                      .map((d) => `${getPolylineX(d.timestamp)},${getY(d.percent)}`)
                       .join(' ')}
                   />
                 )}
