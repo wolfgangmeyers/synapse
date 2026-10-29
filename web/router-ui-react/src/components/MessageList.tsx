@@ -1,9 +1,11 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation, ManagedHistoryOutcome } from "../protocol/types";
+import type { Agent } from "../state/agent-projection";
 import { currentUsername } from "../persistence/settings-repository";
 import { shouldFollowToBottom } from "../state/conversation-projection";
 import { fetchConversationTimeline, type ConversationTimelineEvent } from "../services/api";
+import { AgentWelcomeCard } from "./AgentWelcomeCard";
 import { CompleteTimelineEntry, completeTimelineVisual, extractEpoch, getThinkingContent, isActiveManagedSubagentLifecycle, isContextResetEntry, isMailboxSendToUser } from "./CompleteTimelineEntry";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
@@ -16,6 +18,7 @@ export interface MessageListProps {
   activityEntries?: ManagedHistoryEntry[] | undefined;
   activityHistoryReady?: boolean | undefined;
   peerId?: string | undefined;
+  agent?: Agent | undefined;
   ownerId?: string | undefined;
   routerUrl?: string | undefined;
   loading?: boolean | undefined;
@@ -25,6 +28,44 @@ export interface MessageListProps {
   onLoadOlder?: (() => void) | undefined;
   hasOlder?: boolean | undefined;
   loadingOlder?: boolean | undefined;
+}
+
+export function TimelineLoadingSkeleton(): ReactElement {
+  return (
+    <div
+      className="timeline-loading-skeleton"
+      aria-busy="true"
+      aria-label="Loading conversation timeline"
+    >
+      <div className="skeleton-rail" aria-hidden="true" />
+      <div className="skeleton-item skeleton-item--incoming">
+        <div className="skeleton-dot" aria-hidden="true" />
+        <div className="skeleton-bubble">
+          <div className="skeleton-line skeleton-line--title" />
+          <div className="skeleton-line skeleton-line--body" />
+          <div className="skeleton-line skeleton-line--short" />
+        </div>
+      </div>
+      <div className="skeleton-item skeleton-item--tool">
+        <div className="skeleton-dot skeleton-dot--tool" aria-hidden="true" />
+        <div className="skeleton-pill">
+          <div className="skeleton-line skeleton-line--pill-text" />
+        </div>
+      </div>
+      <div className="skeleton-item skeleton-item--outgoing">
+        <div className="skeleton-bubble skeleton-bubble--outgoing">
+          <div className="skeleton-line skeleton-line--body" />
+        </div>
+      </div>
+      <div className="skeleton-item skeleton-item--incoming">
+        <div className="skeleton-dot" aria-hidden="true" />
+        <div className="skeleton-bubble">
+          <div className="skeleton-line skeleton-line--body" />
+          <div className="skeleton-line skeleton-line--short" />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 type FeedItem = { type: "message"; id: string; timestamp: number; sequence: number; message: HistoryMessage } | { type: "activity"; id: string; timestamp: number; sequence: number; entry: ManagedHistoryEntry };
@@ -413,7 +454,7 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
   });
 }
 
-export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, peerId, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
+export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, peerId, agent, ownerId, routerUrl, loading = false, error, onNearBottomChange, scrollLocked, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
   const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const ref = useRef<HTMLDivElement>(null);
   const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
@@ -764,13 +805,13 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
           })}
         </ol>
       ) : effectiveLoading ? (
-        <EmptyState title="Loading conversation…" />
+        <TimelineLoadingSkeleton />
       ) : error ? (
         <p className="error" role="alert">{error}</p>
       ) : (
-        <EmptyState
-          title={hasActivity ? "No messages or activity yet" : "No messages yet"}
-          description={hasActivity ? "Messages and operational activity will appear here." : "Send a message to start the conversation."}
+        <AgentWelcomeCard
+          agentId={peerId}
+          {...(agent !== undefined ? { agent } : {})}
         />
       )}
       {hasItems && error ? <p className="error" role="alert">{error}</p> : null}

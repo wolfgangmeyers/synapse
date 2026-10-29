@@ -106,15 +106,27 @@ Crucially, **real-time updates must flow directly into the conversation view wit
   - A red danger status tag "Failed" appears next to the bubble timestamp.
   - The message body does not disappear, allowing the user to copy or retry.
 
-#### Scenario: [SCN-FEED-007] Agent encounters tool execution failure
-- **User Goal**: Inspect error details when an internal tool execution fails.
+#### Scenario: [SCN-FEED-008] Empty conversation with selected agent welcome card
+- **User Goal**: See a clean, inviting agent welcome state when selecting an agent that has no prior messages or activity, rather than a hung loading badge.
 - **Given**:
-  - Conversation view is open for `test-worker`.
+  - Wolfgang selects an agent from the sidebar that has no prior conversation history or activity entries.
 - **When**:
-  - A tool execution fails with a non-zero exit code or error output.
+  - The initial conversation fetch completes with 0 events.
 - **Then**:
-  - The tool entry in the timeline displays a red/amber failure badge.
-  - Expanding the tool card exposes the error diagnostics and stderr output without crashing or disrupting the surrounding chat feed.
+  - The conversation view renders an Agent Welcome Card featuring the agent's avatar, formatted name, and readiness status.
+  - The view indicates the agent is ready for prompts and invites the user to start a conversation.
+  - The view does not remain stuck on "Loading conversation…".
+
+#### Scenario: [SCN-FEED-009] Transient conversation timeline loading state
+- **User Goal**: Receive subtle, non-disruptive feedback while conversation history is being fetched from the router.
+- **Given**:
+  - An agent is selected and history is actively being fetched over the network.
+- **When**:
+  - The timeline query is in flight (`loading === true`).
+- **Then**:
+  - The timeline renders a sleek timeline loading shimmer/indicator instead of a static modal-like empty state box.
+  - Once the fetch completes, the loading indicator cleanly resolves to either the conversation timeline (if items exist) or the agent welcome state (if empty).
+
 
 ---
 
