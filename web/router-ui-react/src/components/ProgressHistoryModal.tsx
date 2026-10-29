@@ -28,6 +28,21 @@ export const TIME_WINDOW_OPTIONS: { key: TimeWindow; label: string }[] = [
 ];
 
 /**
+ * Formats a Date or timestamp into a local 24-hour clock string (e.g., "14:30").
+ * When includeDate is true (e.g. for multi-day views), prepends MM/DD (e.g., "10/29 14:30").
+ */
+export function format24HourClock(date: Date, includeDate: boolean = false): string {
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  if (includeDate) {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${month}/${day} ${hours}:${minutes}`;
+  }
+  return `${hours}:${minutes}`;
+}
+
+/**
  * Formats a time offset in milliseconds relative to the latest timestamp in the window
  * into human-readable relative duration strings (e.g., "Latest", "-15m", "-2h", "-1d4h").
  */
@@ -178,12 +193,13 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
       }
     }
 
-    // 5 X-axis relative tick markers across the window (0%, 25%, 50%, 75%, 100%)
+    // 5 X-axis 24-hour clock time markers across the window (0%, 25%, 50%, 75%, 100%) in local timezone
+    const includeDate = windowDuration > 24 * 3600 * 1000;
     const ticks = [0, 0.25, 0.5, 0.75, 1].map((pct) => {
-      const offsetMs = windowDuration * (1 - pct);
-      const label = formatRelativeOffset(offsetMs);
+      const tickMs = minTime + pct * windowDuration;
+      const label = format24HourClock(new Date(tickMs), includeDate);
       const x = 44 + pct * 436; // 44 to 480
-      return { x, label, offsetMs };
+      return { x, label, tickMs };
     });
 
     return {
@@ -307,7 +323,7 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
                 <text x={PADDING_LEFT - 6} y={getY(50) + 4} textAnchor="end" className="progress-chart-axis-label">50%</text>
                 <text x={PADDING_LEFT - 6} y={getY(0) + 4} textAnchor="end" className="progress-chart-axis-label">0%</text>
 
-                {/* X-axis relative offset markers */}
+                {/* X-axis 24-hour local clock markers */}
                 {xTicks.map((tick, i) => (
                   <g key={i}>
                     <line x1={tick.x} y1={PLOT_BOTTOM} x2={tick.x} y2={PLOT_BOTTOM + 4} stroke="rgba(255, 255, 255, 0.2)" />
