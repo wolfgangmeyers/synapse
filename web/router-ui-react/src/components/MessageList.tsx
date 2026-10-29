@@ -488,11 +488,20 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     };
     const rawItems: FeedItem[] = [];
 
+    const isSeen = (id: string): boolean => {
+      if (seenIds.has(id)) return true;
+      const raw = extractRawId(id);
+      return !!raw && seenIds.has(raw);
+    };
+
     if (effectiveEvents && effectiveEvents.length > 0) {
+      const seenEventIds = new Set<string>();
       for (const ev of effectiveEvents) {
-        markSeen(ev.id);
+        if (seenEventIds.has(ev.id)) continue;
+        seenEventIds.add(ev.id);
         const converted = timelineEventToFeedItems(ev, currentUser, ownerId, peerId);
         for (const item of converted) {
+          if (isSeen(item.id)) continue;
           markSeen(item.id);
           rawItems.push(item);
         }
