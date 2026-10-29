@@ -80,14 +80,16 @@ The `RouterSelector` consolidates router connection state, active user identity,
 - **Compacting State**: purple glow border (`#c084fc`) with breathing animation.
 
 ### Composer Input Bar (`Composer.tsx`)
-- The composer container (`.composer`) removes solid backgrounds and outer borders (`background: transparent`, `border-top: none`) to keep the bottom clean and integrated.
-- The input area (`.composer-row`) adopts the translucent card aesthetic:
+- The composer container (`.composer`) floats over the bottom of the conversation view using `position: absolute; bottom: 0; left: 0; right: 0; z-index: 50; pointer-events: none;`, allowing the conversation list (`.messages`) to take full height and scroll underneath it.
+- `.messages` has bottom padding (`padding: 24px 24px 96px 24px`) to ensure the final message can be scrolled completely into view above the composer.
+- The input area (`.composer-row`) adopts the translucent card aesthetic with `pointer-events: auto`:
   - `background: rgba(15, 23, 42, 0.55)`
   - `backdrop-filter: blur(12px)` and `-webkit-backdrop-filter: blur(12px)`
   - `border: 1px solid rgba(255, 255, 255, 0.08)`
   - `box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25)`
   - `border-radius: 16px`
   - Subtle neon glow on `:focus-within` (`border-color: rgba(99, 102, 241, 0.5)`, `box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 12px rgba(99, 102, 241, 0.2)`).
+- The translucent blurred background cleanly diffuses conversation bubbles and activity cards as they scroll behind the input bar.
 
 ### Embedded Default & Agent Tagging Policy
 - Router-managed/embedded agents are the default system mode. Redundant "Embedded" or "RPC" tags are omitted from agent cards.
