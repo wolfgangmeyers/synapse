@@ -6,6 +6,29 @@ export function reconcileConversation(state: ConversationState, snapshot: Histor
 export function replacePendingConversation(state: ConversationState, localId: string, accepted: HistoryMessage): ConversationState { return appendConversation({ ...state, messages: state.messages.filter((message) => message.id !== localId) }, { ...accepted, direction: "outgoing" }); }
 export function settlePendingConversation(state: ConversationState, localId: string, ok: boolean): ConversationState { return { ...state, messages: state.messages.map((message) => message.id === localId ? { ...message, pending: false, failed: !ok } : message) }; }
 export function addressedPeer(message: HistoryMessage, ownerId: string): string | undefined { if (message.from === ownerId) return message.to; if (message.to === ownerId) return message.from; return undefined; }
-export function shouldFollowToBottom(scrollTop: number, clientHeight: number, scrollHeight: number, threshold = 80): boolean { return scrollHeight - (scrollTop + clientHeight) <= threshold; }
+export const DEFAULT_AUTO_SCROLL_THRESHOLD = 180;
+
+export interface ScrollMetrics {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+}
+
+export function shouldFollowToBottom(
+  metricsOrScrollTop: ScrollMetrics | number,
+  clientHeightOrThreshold: number = DEFAULT_AUTO_SCROLL_THRESHOLD,
+  scrollHeight?: number,
+  threshold: number = DEFAULT_AUTO_SCROLL_THRESHOLD
+): boolean {
+  if (typeof metricsOrScrollTop === "object" && metricsOrScrollTop !== null) {
+    const { scrollTop, clientHeight, scrollHeight: sHeight } = metricsOrScrollTop;
+    const thresh = clientHeightOrThreshold !== undefined ? clientHeightOrThreshold : DEFAULT_AUTO_SCROLL_THRESHOLD;
+    return sHeight - (scrollTop + clientHeight) <= thresh;
+  }
+  const scrollTop = metricsOrScrollTop;
+  const clientHeight = clientHeightOrThreshold;
+  const sHeight = scrollHeight ?? 0;
+  return sHeight - (scrollTop + clientHeight) <= threshold;
+}
 export function shouldRequestHistory(selectedPeer: string | undefined): selectedPeer is string { return Boolean(selectedPeer); }
 export { messageKey, mergeMessages, pruneHistoryMessages, reconcileHistoryMessages };

@@ -549,4 +549,14 @@ describe("ConversationHeader workflow controls", () => {
       expect(container.querySelector(".blocked-reason-popover")).toBeNull();
     });
   });
+
+  describe("Scroll lock button elimination", () => {
+    it("does not render a scroll lock or lock scroll button in the header toolbar", () => {
+      const { container } = render(<ConversationHeader agent={routerManagedAgent} />);
+      expect(screen.queryByRole("button", { name: /scroll lock/i })).toBeNull();
+      expect(screen.queryByRole("button", { name: /lock scroll/i })).toBeNull();
+      expect(container.querySelector(".scroll-lock-button")).toBeNull();
+    });
+  });
 });
+
