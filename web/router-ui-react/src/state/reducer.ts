@@ -196,7 +196,18 @@ export function reducer(state: AppState, action: AppAction): AppState {
       const removed = agents.some((agent) => agent.agent_id === action.agentId);
       const managedChildren = { ...state.managedChildren };
       if (removed) delete managedChildren[action.agentId];
-      return { ...state, managedProjectionVersion: action.version, managedAgents: agents.filter((agent) => agent.agent_id !== action.agentId), managedChildren };
+      const managedHistory = { ...(state.managedHistory ?? {}) };
+      delete managedHistory[action.agentId];
+      const messagesByPeer = { ...state.messagesByPeer };
+      delete messagesByPeer[action.agentId];
+      return {
+        ...state,
+        managedProjectionVersion: action.version,
+        managedAgents: agents.filter((agent) => agent.agent_id !== action.agentId),
+        managedChildren,
+        managedHistory,
+        messagesByPeer,
+      };
     }
     case "managed/children": {
       // Child frames replace the complete child projection. Their shared

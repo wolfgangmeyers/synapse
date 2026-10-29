@@ -159,7 +159,7 @@ describe("Conversation", () => {
 
   it("renders safe markdown and sends through the composer", () => {
     const onSend = vi.fn();
-    const { container } = render(<Conversation peer={{ agent_id: "helper" }} messages={[{ id: "1", from: "helper", to: "ui", body: "**Hello**" }]} onSend={onSend} />);
+    const { container } = render(<Conversation peer={{ agent_id: "helper" }} ownerId="ui" messages={[{ id: "1", from: "helper", to: "ui", body: "**Hello**" }]} onSend={onSend} />);
     expect(screen.getByText("Hello")).toBeTruthy();
     const composer = container.querySelector<HTMLTextAreaElement>("textarea");
     if (!composer) throw new Error("Composer was not rendered");

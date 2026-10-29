@@ -115,24 +115,23 @@ describe("validated post-E2E reliability repairs", () => {
     transport.close();
   });
 
-  it("keeps concurrent history deltas and serializes their IndexedDB writes", async () => {
+  it("keeps history repository no-op for conversation caching while preserving interface", async () => {
     const repository = new HistoryRepository();
     const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
     await Promise.all([
       repository.savePeer("worker", scope, [{ id: "one", message_incarnation_id: incarnation, body: "one", created_at: "2030-01-01T00:00:00.000Z" }]),
       repository.savePeer("worker", scope, [{ id: "two", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174001", body: "two", created_at: "2030-01-01T00:00:01.000Z" }]),
     ]);
-    await expect(repository.load(scope)).resolves.toMatchObject({ worker: expect.arrayContaining([expect.objectContaining({ id: "one" }), expect.objectContaining({ id: "two" })]) });
+    await expect(repository.load(scope)).resolves.toEqual({});
     expect(mergeMessages([{ id: "one", body: "old" }], [{ id: "one", body: "new" }, { id: "two" }])).toEqual([{ id: "one", body: "new" }, { id: "two" }]);
   });
 
-  it("replaces persisted optimistic rows when reconnect history is canonical", async () => {
+  it("does not persist optimistic rows or replace them in IndexedDB", async () => {
     const repository = new HistoryRepository();
     const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
     await repository.savePeer("worker", scope, [{ id: "local", from: "web", to: "worker", body: "hello", created_at: "2030-01-01T00:00:00.000Z", pending: true }]);
     await repository.replacePeer("worker", scope, [{ id: "canonical", sequence: 1, from: "web", to: "worker", body: "hello", created_at: "2030-01-01T00:00:00.000Z", recorded_at: "2030-01-01T00:00:00.000Z" }]);
-    await expect(repository.load(scope)).resolves.toMatchObject({ worker: [{ id: "canonical" }] });
-    await expect(repository.load(scope)).resolves.not.toMatchObject({ worker: [expect.objectContaining({ id: "local" })] });
+    await expect(repository.load(scope)).resolves.toEqual({});
   });
 
   it("does not acknowledge or steal deliveries as an administrative observer", async () => {

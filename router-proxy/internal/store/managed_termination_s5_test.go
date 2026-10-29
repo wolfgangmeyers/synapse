@@ -107,6 +107,19 @@ func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T)
 	require.NoError(t, err)
 	_, err = durable.RecordManagedCompleteHistory(ctx, "unrelated-agent", "managed_control", "info", "Unrelated history", "unrelated-history")
 	require.NoError(t, err)
+
+	// Populate conversation_timeline for terminated agent and an unrelated agent
+	content1 := "timeline message for terminated agent"
+	roleUser := "user"
+	_, err = durable.RecordConversationTimelineTx(ctx, "timeline-term-1", agent.AgentID, "message", &roleUser, &content1, nil, 1000)
+	require.NoError(t, err)
+
+	// Populate scratchpad_entries and agent_progress_history
+	_, err = durable.db.ExecContext(ctx, `INSERT INTO scratchpad_entries (id, agent_id, content, pinned, created_at, updated_at) VALUES ('sp-1', ?, 'note', 0, '2030-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`, agent.AgentID)
+	require.NoError(t, err)
+	_, err = durable.db.ExecContext(ctx, `INSERT INTO agent_progress_history (agent_id, percent, note, created_at) VALUES (?, 50, 'halfway', '2030-01-01T00:00:00Z')`, agent.AgentID)
+	require.NoError(t, err)
+
 	_, err = durable.db.ExecContext(ctx, `INSERT INTO conversation_messages (message_id,message_incarnation_id,delivery_message_id,sender,recipient,participant_a,participant_b,body,created_at,recorded_at)
 		VALUES ('terminated-conversation','terminated-incarnation','terminated-delivery',?,?,?,?,?,?,?),
 		       ('unrelated-conversation','unrelated-incarnation','unrelated-delivery','unrelated-a','unrelated-b','unrelated-a','unrelated-b','unrelated',?,?)`,
@@ -115,16 +128,25 @@ func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T)
 	require.NoError(t, durable.RetireManagedRecipientSourceForTermination(ctx, agent.AgentID, agent.Name))
 	require.NoError(t, durable.CompleteManagedTermination(ctx, action.ActionID))
 	var completeHistory, conversationHistory, historyBoundaries, historyIncarnations int
+	var timelineHistory, scratchpadEntries, progressHistory int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=?`, agent.AgentID).Scan(&completeHistory))
 	require.Equal(t, 0, completeHistory, "termination purges complete history owned by the terminated agent")
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_messages WHERE sender=? OR recipient=?`, agent.AgentID, agent.AgentID).Scan(&conversationHistory))
 	require.Equal(t, 0, conversationHistory, "termination purges conversation history owned by the terminated agent")
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_timeline WHERE agent_id=?`, agent.AgentID).Scan(&timelineHistory))
+	require.Equal(t, 0, timelineHistory, "termination purges conversation timeline entries owned by the terminated agent")
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM scratchpad_entries WHERE agent_id=?`, agent.AgentID).Scan(&scratchpadEntries))
+	require.Equal(t, 0, scratchpadEntries, "termination purges scratchpad entries owned by the terminated agent")
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_progress_history WHERE agent_id=?`, agent.AgentID).Scan(&progressHistory))
+	require.Equal(t, 0, progressHistory, "termination purges progress history owned by the terminated agent")
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_history_boundaries WHERE agent_id=?`, agent.AgentID).Scan(&historyBoundaries))
 	require.Equal(t, 0, historyBoundaries, "termination removes the prior history boundary")
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_history_incarnations WHERE agent_id=?`, agent.AgentID).Scan(&historyIncarnations))
 	require.Equal(t, 0, historyIncarnations, "termination removes prior history incarnations")
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id='unrelated-agent'`).Scan(&completeHistory))
 	require.Equal(t, 1, completeHistory, "termination must not purge another agent's activity history")
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_timeline WHERE agent_id='unrelated-agent'`).Scan(&timelineHistory))
+	require.Equal(t, 1, timelineHistory, "termination must not purge another agent's conversation timeline")
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_messages WHERE sender='unrelated-a' OR recipient='unrelated-a'`).Scan(&conversationHistory))
 	require.Equal(t, 1, conversationHistory, "termination must not purge another agent's conversation history")
 
@@ -150,6 +172,9 @@ func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T)
 	conversation, err := durable.ConversationHistory(ctx, replacement.AgentID, "peer")
 	require.NoError(t, err)
 	require.Empty(t, conversation, "a replacement agent must not inherit the prior conversation")
+	timelineEvents, _, err := durable.GetConversationTimeline(ctx, replacement.AgentID, 50, nil)
+	require.NoError(t, err)
+	require.Empty(t, timelineEvents, "a replacement agent must start with completely empty timeline history")
 
 	source, err := durable.RecipientSource(ctx, agent.Name)
 	require.NoError(t, err)

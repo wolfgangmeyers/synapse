@@ -81,36 +81,7 @@ function historyRecord(value: unknown): { peer: string; message: MessageRecord }
   return { peer: value.peer, message: value.message };
 }
 
-async function saveRecordsForPeer(
-  db: IDBDatabase,
-  scope: HistoryScope,
-  peer: string,
-  messages: readonly MessageRecord[],
-  now: number,
-): Promise<void> {
-  const routerUrl = normalizeRouterUrl(scope.routerUrl);
-  const owner = ownerScope(routerUrl, scope.agentId);
-  const peerKey = peerScope(routerUrl, scope.agentId, peer);
-  const existingKeys = await getAllKeysByIndex(db, HISTORY_STORE_NAME, PEER_SCOPE_INDEX, peerKey);
-  const transaction = db.transaction(HISTORY_STORE_NAME, "readwrite");
-  const store = transaction.objectStore(HISTORY_STORE_NAME);
-  for (const key of existingKeys) store.delete(key);
-  for (const message of messages) {
-    const identity = messageKey(message) || randomKey();
-    store.put({
-      key: `${peerKey}\u001f${identity}`,
-      ownerScope: owner,
-      peerScope: peerKey,
-      routerUrl,
-      agentId: scope.agentId,
-      peer,
-      message: messageForStorage(message),
-      createdAtMs: messageTime(message, now),
-      savedAtMs: now,
-    });
-  }
-  await transactionDone(transaction);
-}
+// saveRecordsForPeer removed as conversation_messages is no longer written.
 
 async function allThumbnailRecords(db: IDBDatabase): Promise<unknown[]> {
   const transaction = db.transaction(IMAGE_STORE_NAME, "readonly");
@@ -118,34 +89,18 @@ async function allThumbnailRecords(db: IDBDatabase): Promise<unknown[]> {
   return isUnknownArray(result) ? result : [];
 }
 
+export async function purgeConversationMessages(db: IDBDatabase): Promise<void> {
+  if (!db.objectStoreNames.contains(HISTORY_STORE_NAME)) return;
+  const transaction = db.transaction(HISTORY_STORE_NAME, "readwrite");
+  transaction.objectStore(HISTORY_STORE_NAME).clear();
+  await transactionDone(transaction);
+}
+
 export async function pruneHistoryDatabase(
-  db: IDBDatabase,
-  now = Date.now(),
+  _db: IDBDatabase,
+  _now = Date.now(),
 ): Promise<void> {
-  const transaction = db.transaction(HISTORY_STORE_NAME, "readonly");
-  const result: unknown = await requestResult(transaction.objectStore(HISTORY_STORE_NAME).getAll());
-  if (!Array.isArray(result)) return;
-  const byPeer = new Map<string, { record: Record<string, unknown>; peer: string; message: MessageRecord }[]>();
-  for (const value of result) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
-    if (!isRecord(value)) continue;
-    const record = value;
-    const parsed = historyRecord(value);
-    if (parsed === undefined) continue;
-    const owner = typeof record.ownerScope === "string" ? record.ownerScope : "";
-    const groupKey = `${owner}\u001f${parsed.peer}`;
-    const group = byPeer.get(groupKey) ?? [];
-    group.push({ record, peer: parsed.peer, message: parsed.message });
-    byPeer.set(groupKey, group);
-  }
-  for (const records of byPeer.values()) {
-    const first = records[0];
-    if (first === undefined) continue;
-    const routerUrl = typeof first.record.routerUrl === "string" ? first.record.routerUrl : "";
-    const agentId = typeof first.record.agentId === "string" ? first.record.agentId : "";
-    if (routerUrl === "" || agentId === "") continue;
-    await saveRecordsForPeer(db, { routerUrl, agentId }, first.peer, pruneHistoryMessages(records.map((item) => item.message), now), now);
-  }
+  // Deprecated: conversation caching is eliminated. We clear instead.
 }
 
 export async function pruneThumbnailDatabase(db: IDBDatabase, now = Date.now()): Promise<void> {
@@ -175,7 +130,7 @@ export function initializePersistence(
   const initialization = (async (): Promise<void> => {
     removeDeprecatedLocalStorage(storage);
     const db = await openHistoryDb(targetFactory);
-    await pruneHistoryDatabase(db, now);
+    await purgeConversationMessages(db);
     await pruneThumbnailDatabase(db, now);
   })();
   byStorage.set(storage, initialization);
@@ -197,79 +152,34 @@ export class HistoryRepository {
     this.storage = storage;
   }
 
-  public async load(scope: HistoryScope, now = Date.now()): Promise<HistoryByPeer> {
-    const routerUrl = normalizeRouterUrl(scope.routerUrl);
+  public async load(_scope: HistoryScope, now = Date.now()): Promise<HistoryByPeer> {
     const db = await openHistoryDb(this.factory);
-    let values = await getAllByIndex(db, HISTORY_STORE_NAME, OWNER_SCOPE_INDEX, ownerScope(routerUrl, scope.agentId));
-    if (values.length === 0 && routerUrl === DEFAULT_ROUTER_URL) {
-      const legacy8787 = await getAllByIndex(db, HISTORY_STORE_NAME, OWNER_SCOPE_INDEX, ownerScope("http://127.0.0.1:8787", scope.agentId));
-      if (legacy8787.length > 0) {
-        values = legacy8787;
-      }
-    }
-    const messages: HistoryByPeer = {};
-    for (const value of values) {
-      const parsed = historyRecord(value);
-      if (parsed === undefined) continue;
-      (messages[parsed.peer] ??= []).push(parsed.message);
-    }
+    await purgeConversationMessages(db);
     await pruneThumbnailDatabase(db, now);
-    for (const [peer, peerMessages] of Object.entries(messages)) {
-      const retained = pruneHistoryMessages(peerMessages, now);
-      messages[peer] = retained;
-      const needsRewrite = retained.length !== peerMessages.length || peerMessages.some(messageContainsDataUrl);
-      if (needsRewrite) {
-        await saveRecordsForPeer(db, { routerUrl, agentId: scope.agentId }, peer, retained, now);
-      }
-    }
-    return messages;
+    return {};
   }
 
-  private async enqueuePeer(
-    peer: string,
-    scope: HistoryScope,
-    messages: readonly MessageRecord[],
-    replace: boolean,
-    now: number,
-  ): Promise<void> {
-    const routerUrl = normalizeRouterUrl(scope.routerUrl);
-    const queueKey = `${peerScope(routerUrl, scope.agentId, peer)}`;
-    const previous = this.saveQueues.get(queueKey) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(async () => {
-      const db = await openHistoryDb(this.factory);
-      const existing = replace ? [] : await getAllByIndex(db, HISTORY_STORE_NAME, PEER_SCOPE_INDEX, queueKey);
-      const byKey = new Map<string, MessageRecord>();
-      for (const value of existing) {
-        const parsed = historyRecord(value);
-        if (parsed !== undefined) byKey.set(messageKey(parsed.message), parsed.message);
-      }
-      for (const message of messages) {
-        const key = messageKey(message);
-        byKey.set(key, { ...byKey.get(key), ...message });
-      }
-      await saveRecordsForPeer(db, { routerUrl, agentId: scope.agentId }, peer, pruneHistoryMessages([...byKey.values()], now), now);
-      await pruneThumbnailDatabase(db, now);
-    });
-    this.saveQueues.set(queueKey, next);
-    try { await next; } finally { if (this.saveQueues.get(queueKey) === next) this.saveQueues.delete(queueKey); }
+  public async purge(): Promise<void> {
+    const db = await openHistoryDb(this.factory);
+    await purgeConversationMessages(db);
   }
 
   public async savePeer(
-    peer: string,
-    scope: HistoryScope,
-    messages: readonly MessageRecord[],
-    now = Date.now(),
+    _peer: string,
+    _scope: HistoryScope,
+    _messages: readonly MessageRecord[],
+    _now = Date.now(),
   ): Promise<void> {
-    await this.enqueuePeer(peer, scope, messages, false, now);
+    // Conversation caching in IndexedDB is eliminated. No-op.
   }
 
   public async replacePeer(
-    peer: string,
-    scope: HistoryScope,
-    messages: readonly MessageRecord[],
-    now = Date.now(),
+    _peer: string,
+    _scope: HistoryScope,
+    _messages: readonly MessageRecord[],
+    _now = Date.now(),
   ): Promise<void> {
-    await this.enqueuePeer(peer, scope, messages, true, now);
+    // Conversation caching in IndexedDB is eliminated. No-op.
   }
 
   public async loadThumbnail(key: string, now = Date.now()): Promise<ThumbnailRecord | undefined> {
@@ -311,13 +221,13 @@ export async function loadMessages(
 }
 
 export async function savePeerMessages(
-  peer: string,
-  scope: HistoryScope,
-  messages: readonly MessageRecord[],
-  factory?: IndexedDbFactory,
-  now = Date.now(),
+  _peer: string,
+  _scope: HistoryScope,
+  _messages: readonly MessageRecord[],
+  _factory?: IndexedDbFactory,
+  _now = Date.now(),
 ): Promise<void> {
-  await new HistoryRepository(factory).savePeer(peer, scope, messages, now);
+  // Conversation caching in IndexedDB is eliminated. No-op.
 }
 
 export async function saveCachedImage(
