@@ -6,10 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 
-	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -38,8 +36,6 @@ func agentProgressRoute(path string) (agentID, action string, ok bool) {
 	switch parts[2] {
 	case "history":
 		return agentID, "history", true
-	case "chart.png":
-		return agentID, "chart.png", true
 	default:
 		return "", "", false
 	}
@@ -88,36 +84,6 @@ func (r *Router) handleAgentProgressHTTP(w http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	if action == "chart.png" {
-		entries, err := r.store.GetAgentProgressHistory(req.Context(), agentID)
-		if err != nil {
-			r.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get progress history"})
-			return
-		}
-		width := 800
-		height := 400
-		if wStr := req.URL.Query().Get("width"); wStr != "" {
-			if val, err := strconv.Atoi(wStr); err == nil && val > 0 {
-				width = val
-			}
-		}
-		if hStr := req.URL.Query().Get("height"); hStr != "" {
-			if val, err := strconv.Atoi(hStr); err == nil && val > 0 {
-				height = val
-			}
-		}
-		pngBytes, err := managed.RenderProgressChartPNG(entries, width, height)
-		if err != nil {
-			r.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to render chart"})
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Content-Length", strconv.Itoa(len(pngBytes)))
-		w.Header().Set("Cache-Control", "no-cache")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(pngBytes)
-		return
-	}
-
 	r.writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 }
+

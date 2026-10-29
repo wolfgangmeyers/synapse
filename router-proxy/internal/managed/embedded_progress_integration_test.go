@@ -3,7 +3,6 @@ package managed_test
 import (
 	"context"
 	"encoding/json"
-	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -89,32 +88,19 @@ func TestEmbeddedProgressIntegration(t *testing.T) {
 		require.Equal(t, "step 1", history[0].Note)
 	}
 
-	// 7. Make GET request to /v1/agents/{id}/progress/chart.png using httptest. Assert status 200, Content-Type image/png, and assert png.Decode succeeds.
-	{
-		req := httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentID+"/progress/chart.png", nil)
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusOK, rec.Code)
-		require.Equal(t, "image/png", rec.Header().Get("Content-Type"))
-
-		img, err := png.Decode(rec.Body)
-		require.NoError(t, err)
-		require.NotNil(t, img)
-	}
-
-	// 8. Call testStore.SetAgentProgress(ctx, agent.AgentID, 80, "step 2")
+	// 7. Call testStore.SetAgentProgress(ctx, agent.AgentID, 80, "step 2")
 	require.NoError(t, testStore.SetAgentProgress(ctx, agentID, 80, "step 2"))
 
-	// 9. Call testStore.ClearAgentProgress(ctx, agent.AgentID)
+	// 8. Call testStore.ClearAgentProgress(ctx, agent.AgentID)
 	require.NoError(t, testStore.ClearAgentProgress(ctx, agentID))
 
-	// 10. Call PublicAgent(agentRecord) and assert progress is nil.
+	// 9. Call PublicAgent(agentRecord) and assert progress is nil.
 	agentRecord, err = testStore.ManagedAgent(ctx, agentID)
 	require.NoError(t, err)
 	proj = managed.PublicAgent(agentRecord)
 	require.Nil(t, proj["progress"])
 
-	// 11. Make GET request to /v1/agents/{id}/progress/history. Assert status 200, length 2 (history preserved after clear).
+	// 10. Make GET request to /v1/agents/{id}/progress/history. Assert status 200, length 2 (history preserved after clear).
 	{
 		req := httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentID+"/progress/history", nil)
 		rec := httptest.NewRecorder()
@@ -134,17 +120,9 @@ func TestEmbeddedProgressIntegration(t *testing.T) {
 		require.Equal(t, "step 2", history[1].Note)
 	}
 
-	// 12. Make GET request for unknown agent ID to /v1/agents/unknown-agent/progress/history. Assert status 404.
+	// 11. Make GET request for unknown agent ID to /v1/agents/unknown-agent/progress/history. Assert status 404.
 	{
 		req := httptest.NewRequest(http.MethodGet, "/v1/agents/unknown-agent/progress/history", nil)
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusNotFound, rec.Code)
-	}
-
-	// 13. Make GET request for unknown agent ID to /v1/agents/unknown-agent/progress/chart.png. Assert status 404.
-	{
-		req := httptest.NewRequest(http.MethodGet, "/v1/agents/unknown-agent/progress/chart.png", nil)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusNotFound, rec.Code)

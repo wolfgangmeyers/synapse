@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import type { RouterHttpClient, ProgressHistoryEntry } from '../transport/http-client';
+import { activeRouterUrl } from '../persistence/settings-repository';
 
-export interface ProgressHistoryEntry {
-  percent: number;
-  note: string | null;
-  timestamp: string;
-}
+export type { ProgressHistoryEntry };
 
 export type TimeWindow = '1h' | '3h' | '6h' | '12h' | '24h' | '3d' | '7d' | 'all';
 
@@ -29,6 +27,10 @@ export const TIME_WINDOW_OPTIONS: { key: TimeWindow; label: string }[] = [
   { key: 'all', label: 'All' },
 ];
 
+/**
+ * Formats a time offset in milliseconds relative to the latest timestamp in the window
+ * into human-readable relative duration strings (e.g., "Latest", "-15m", "-2h", "-1d4h").
+ */
 export function formatRelativeOffset(offsetMs: number): string {
   if (offsetMs <= 0) {
     return 'Latest';
@@ -58,9 +60,10 @@ interface ProgressHistoryModalProps {
   agentId: string;
   isOpen?: boolean;
   onClose: () => void;
+  client?: RouterHttpClient;
 }
 
-export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agentId, isOpen = true, onClose }) => {
+export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agentId, isOpen = true, onClose, client }) => {
   const [history, setHistory] = useState<ProgressHistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,13 +76,16 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     setLoading(true);
     setError(null);
 
-    fetch(`/v1/agents/${encodeURIComponent(agentId)}/progress/history`)
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`Failed to load progress history: ${res.statusText}`);
-        }
-        return res.json() as Promise<ProgressHistoryEntry[]>;
-      })
+    const fetchHistory = client
+      ? client.progressHistory(agentId)
+      : fetch(`${activeRouterUrl()}/v1/agents/${encodeURIComponent(agentId)}/progress/history`).then(async (res) => {
+          if (!res.ok) {
+            throw new Error(`Failed to load progress history: ${res.statusText}`);
+          }
+          return res.json() as Promise<ProgressHistoryEntry[]>;
+        });
+
+    fetchHistory
       .then((data) => {
         if (isMounted) {
           setHistory(Array.isArray(data) ? data : []);
@@ -96,7 +102,7 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     return () => {
       isMounted = false;
     };
-  }, [agentId, isOpen]);
+  }, [agentId, isOpen, client]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -140,6 +146,9 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     if (timeWindow === 'all') {
       const earliest = Math.min(...times);
       windowDuration = maxTime - earliest;
+      // Zero-span safeguard: if all entries occur at the exact same timestamp (or only 1 entry),
+      // windowDuration would be 0, leading to division by zero in coordinate scaling.
+      // Default to a 1-hour span in this case.
       if (windowDuration <= 0) {
         windowDuration = 3600 * 1000;
       }
@@ -155,7 +164,10 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
       return t >= minTime && t <= maxTime;
     });
 
-    // Find the latest entry that occurs strictly before minTime (if any)
+    // Prior entry pre-window anchoring:
+    // Find the latest progress entry that occurred strictly before the current window's start (minTime).
+    // Anchoring to this point prevents the polyline from starting in empty space within the visible chart,
+    // visually showing the state that was active at the left boundary of the window.
     let prior: ProgressHistoryEntry | null = null;
     if (timeWindow !== 'all') {
       const earlier = history.filter((e) => new Date(e.timestamp).getTime() < minTime);
@@ -200,6 +212,12 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     return PADDING_LEFT + ratio * PLOT_WIDTH;
   };
 
+  /**
+   * Calculates the SVG X coordinate for a timestamp without clamping.
+   * For pre-window prior entries, this projects to an off-screen negative X coordinate (X < PADDING_LEFT).
+   * Combined with SVG <clipPath id="chart-plot-clip">, the polyline line segment cleanly enters
+   * from the left edge of the chart at the exact slope toward the first in-window entry.
+   */
   const getPolylineX = (timestamp: string) => {
     if (windowEnd <= windowStart) return PADDING_LEFT + PLOT_WIDTH;
     const t = new Date(timestamp).getTime();

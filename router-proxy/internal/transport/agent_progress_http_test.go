@@ -20,9 +20,9 @@ func TestAgentProgressRoute(t *testing.T) {
 		wantOK     bool
 	}{
 		{"/v1/agents/agent-1/progress/history", "agent-1", "history", true},
-		{"/v1/agents/agent-1/progress/chart.png", "agent-1", "chart.png", true},
+		{"/v1/agents/agent-1/progress/chart.png", "", "", false},
 		{"/v1/managed-agents/agent-2/progress/history", "agent-2", "history", true},
-		{"/v1/managed-agents/agent-2/progress/chart.png", "agent-2", "chart.png", true},
+		{"/v1/managed-agents/agent-2/progress/chart.png", "", "", false},
 		{"/v1/agents/agent%201/progress/history", "agent 1", "history", true},
 		{"/v1/agents/agent-1/progress/unknown", "", "", false},
 		{"/v1/agents/agent-1/progress", "", "", false},
@@ -111,22 +111,6 @@ func TestAgentProgressHTTP_Integration(t *testing.T) {
 		}
 		if len(history) != 1 || history[0].Percent != 42 || history[0].Note != "halfway done" {
 			t.Fatalf("unexpected history: %+v", history)
-		}
-	}
-
-	// 3. Chart endpoint
-	{
-		req := httptest.NewRequest(http.MethodGet, "/v1/managed-agents/agent-progress-test/progress/chart.png?width=400&height=200", nil)
-		w := httptest.NewRecorder()
-		router.handleHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d body: %s", w.Code, w.Body.String())
-		}
-		if ct := w.Header().Get("Content-Type"); ct != "image/png" {
-			t.Fatalf("expected Content-Type image/png, got %s", ct)
-		}
-		if w.Body.Len() == 0 {
-			t.Fatalf("expected non-empty body for png chart")
 		}
 	}
 }
