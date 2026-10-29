@@ -1,9 +1,57 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 export interface ProgressHistoryEntry {
   percent: number;
   note: string | null;
   timestamp: string;
+}
+
+export type TimeWindow = '1h' | '3h' | '6h' | '12h' | '24h' | '3d' | '7d' | 'all';
+
+export const TIME_WINDOW_DURATIONS: Record<Exclude<TimeWindow, 'all'>, number> = {
+  '1h': 60 * 60 * 1000,
+  '3h': 3 * 3600 * 1000,
+  '6h': 6 * 3600 * 1000,
+  '12h': 12 * 3600 * 1000,
+  '24h': 24 * 3600 * 1000,
+  '3d': 3 * 86400 * 1000,
+  '7d': 7 * 86400 * 1000,
+};
+
+export const TIME_WINDOW_OPTIONS: { key: TimeWindow; label: string }[] = [
+  { key: '1h', label: '1h' },
+  { key: '3h', label: '3h' },
+  { key: '6h', label: '6h' },
+  { key: '12h', label: '12h' },
+  { key: '24h', label: '24h' },
+  { key: '3d', label: '3d' },
+  { key: '7d', label: '7d' },
+  { key: 'all', label: 'All' },
+];
+
+export function formatRelativeOffset(offsetMs: number): string {
+  if (offsetMs <= 0) {
+    return 'Latest';
+  }
+  const totalMinutes = Math.round(offsetMs / 60000);
+  if (totalMinutes === 0) {
+    return 'Latest';
+  }
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const remMinutes = totalMinutes % (24 * 60);
+  const hours = Math.floor(remMinutes / 60);
+  const mins = remMinutes % 60;
+
+  if (days > 0) {
+    if (hours === 0 && mins === 0) return `-${days}d`;
+    if (hours > 0 && mins === 0) return `-${days}d${hours}h`;
+    return `-${days}d${hours}h`;
+  }
+  if (hours > 0) {
+    if (mins === 0) return `-${hours}h`;
+    return `-${hours}h${mins}m`;
+  }
+  return `-${mins}m`;
 }
 
 interface ProgressHistoryModalProps {
@@ -16,6 +64,8 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
   const [history, setHistory] = useState<ProgressHistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>('1h');
+  const [expandedIndices, setExpandedIndices] = useState<Record<number, boolean>>({});
 
   useEffect(() => {
     if (!isOpen) return;
@@ -46,7 +96,7 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     return () => {
       isMounted = false;
     };
-  }, [agentId]);
+  }, [agentId, isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -63,7 +113,85 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     };
   }, [isOpen, onClose]);
 
+  const toggleExpand = (idx: number) => {
+    setExpandedIndices((prev) => ({
+      ...prev,
+      [idx]: !prev[idx],
+    }));
+  };
+
+  // Reverse chronological list (newest first)
+  const sortedEntries = useMemo(() => {
+    return [...history].reverse();
+  }, [history]);
+
+  // Proportional timeline calculations
+  const { windowStart, windowEnd, windowEntries, xTicks } = useMemo(() => {
+    if (history.length === 0) {
+      return { windowStart: 0, windowEnd: 0, windowEntries: [], xTicks: [] };
+    }
+
+    const times = history.map((e) => new Date(e.timestamp).getTime());
+    const maxTime = Math.max(...times);
+
+    let minTime: number;
+    let windowDuration: number;
+
+    if (timeWindow === 'all') {
+      const earliest = Math.min(...times);
+      windowDuration = maxTime - earliest;
+      if (windowDuration <= 0) {
+        windowDuration = 3600 * 1000;
+      }
+      minTime = maxTime - windowDuration;
+    } else {
+      windowDuration = TIME_WINDOW_DURATIONS[timeWindow];
+      minTime = maxTime - windowDuration;
+    }
+
+    // Filter entries that fall inside the window
+    const filtered = history.filter((e) => {
+      const t = new Date(e.timestamp).getTime();
+      return t >= minTime && t <= maxTime;
+    });
+
+    // 5 X-axis relative tick markers across the window (0%, 25%, 50%, 75%, 100%)
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map((pct) => {
+      const offsetMs = windowDuration * (1 - pct);
+      const label = formatRelativeOffset(offsetMs);
+      const x = 44 + pct * 436; // 44 to 480
+      return { x, label, offsetMs };
+    });
+
+    return {
+      windowStart: minTime,
+      windowEnd: maxTime,
+      windowEntries: filtered,
+      xTicks: ticks,
+    };
+  }, [history, timeWindow]);
+
   if (!isOpen) return null;
+
+  const PADDING_LEFT = 44;
+  const PADDING_RIGHT = 20;
+  const PLOT_WIDTH = 500 - PADDING_LEFT - PADDING_RIGHT; // 436
+  const PLOT_TOP = 20;
+  const PLOT_BOTTOM = 180;
+  const PLOT_HEIGHT = PLOT_BOTTOM - PLOT_TOP; // 160
+
+  const getX = (timestamp: string) => {
+    if (windowEnd <= windowStart) return PADDING_LEFT + PLOT_WIDTH;
+    const t = new Date(timestamp).getTime();
+    const clampedT = Math.max(windowStart, Math.min(windowEnd, t));
+    const ratio = (clampedT - windowStart) / (windowEnd - windowStart);
+    return PADDING_LEFT + ratio * PLOT_WIDTH;
+  };
+
+  const getY = (percent: number) => {
+    const clampedPct = Math.max(0, Math.min(100, percent));
+    return PLOT_BOTTOM - (clampedPct / 100) * PLOT_HEIGHT;
+  };
 
   return (
     <div
@@ -78,7 +206,23 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
         onClick={(e) => e.stopPropagation()}
       >
         <div className="progress-history-header">
-          <h2 className="progress-history-title">Progress History</h2>
+          <div className="progress-history-title-row">
+            <h2 className="progress-history-title">Progress History</h2>
+            <div className="progress-window-selector" role="tablist" aria-label="Time window">
+              {TIME_WINDOW_OPTIONS.map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={timeWindow === opt.key}
+                  className={`progress-window-pill ${timeWindow === opt.key ? 'active' : ''}`}
+                  onClick={() => setTimeWindow(opt.key)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <button
             type="button"
             className="icon-btn-round"
@@ -100,40 +244,64 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
         {!loading && !error && history.length > 0 && (
           <div className="progress-history-body">
             <div className="progress-history-chart-container">
-              <svg className="progress-history-chart" viewBox="0 0 500 200" preserveAspectRatio="none">
-                <line x1="40" y1="20" x2="480" y2="20" stroke="#262626" strokeDasharray="3 3" />
-                <line x1="40" y1="100" x2="480" y2="100" stroke="#262626" strokeDasharray="3 3" />
-                <line x1="40" y1="180" x2="480" y2="180" stroke="#262626" strokeDasharray="3 3" />
-                
-                {history.length > 1 && (
+              <svg className="progress-history-chart" viewBox="0 0 500 215" preserveAspectRatio="none">
+                {/* Horizontal reference grid lines */}
+                <line x1={PADDING_LEFT} y1={getY(100)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(100)} stroke="rgba(255, 255, 255, 0.1)" strokeDasharray="3 3" />
+                <line x1={PADDING_LEFT} y1={getY(75)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(75)} stroke="rgba(255, 255, 255, 0.07)" strokeDasharray="3 3" />
+                <line x1={PADDING_LEFT} y1={getY(50)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(50)} stroke="rgba(255, 255, 255, 0.1)" strokeDasharray="3 3" />
+                <line x1={PADDING_LEFT} y1={getY(25)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(25)} stroke="rgba(255, 255, 255, 0.07)" strokeDasharray="3 3" />
+                <line x1={PADDING_LEFT} y1={getY(0)} x2={PADDING_LEFT + PLOT_WIDTH} y2={getY(0)} stroke="rgba(255, 255, 255, 0.1)" />
+
+                {/* Y-axis percentage labels */}
+                <text x={PADDING_LEFT - 6} y={getY(100) + 4} textAnchor="end" className="progress-chart-axis-label">100%</text>
+                <text x={PADDING_LEFT - 6} y={getY(50) + 4} textAnchor="end" className="progress-chart-axis-label">50%</text>
+                <text x={PADDING_LEFT - 6} y={getY(0) + 4} textAnchor="end" className="progress-chart-axis-label">0%</text>
+
+                {/* X-axis relative offset markers */}
+                {xTicks.map((tick, i) => (
+                  <g key={i}>
+                    <line x1={tick.x} y1={PLOT_BOTTOM} x2={tick.x} y2={PLOT_BOTTOM + 4} stroke="rgba(255, 255, 255, 0.2)" />
+                    <text
+                      x={tick.x}
+                      y={PLOT_BOTTOM + 16}
+                      textAnchor={i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}
+                      className="progress-chart-axis-label"
+                    >
+                      {tick.label}
+                    </text>
+                  </g>
+                ))}
+
+                {/* Polyline curve connecting proportional points */}
+                {windowEntries.length > 1 && (
                   <polyline
                     fill="none"
-                    stroke="#3b82f6"
+                    stroke="#38bdf8"
                     strokeWidth="2"
-                    points={history
-                      .map((d, i) => {
-                        const x = 40 + (i / (history.length - 1)) * 440;
-                        const y = 180 - (d.percent / 100) * 160;
-                        return `${x},${y}`;
-                      })
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    points={windowEntries
+                      .map((d) => `${getX(d.timestamp)},${getY(d.percent)}`)
                       .join(' ')}
                   />
                 )}
 
-                {history.map((d, i) => {
-                  const x = history.length === 1 ? 260 : 40 + (i / (history.length - 1)) * 440;
-                  const y = 180 - (d.percent / 100) * 160;
+                {/* Subtle point markers */}
+                {windowEntries.map((d, i) => {
+                  const cx = getX(d.timestamp);
+                  const cy = getY(d.percent);
                   return (
                     <circle
                       key={i}
-                      cx={x}
-                      cy={y}
-                      r="4"
-                      fill="#3b82f6"
-                      stroke="#ffffff"
+                      cx={cx}
+                      cy={cy}
+                      r="2.5"
+                      fill="#38bdf8"
+                      stroke="#0f172a"
                       strokeWidth="1.5"
+                      className="progress-history-point"
                     >
-                      <title>{`${d.percent}%: ${d.note ?? 'No note'} (${d.timestamp})`}</title>
+                      <title>{`${d.percent}%: ${d.note ?? 'No note'} (${new Date(d.timestamp).toLocaleTimeString()})`}</title>
                     </circle>
                   );
                 })}
@@ -141,24 +309,37 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
             </div>
 
             <div className="progress-history-list">
-              {history.map((item, idx) => (
-                <div key={idx} className="progress-history-entry">
-                  <span className="percent">{item.percent}%</span>
-                  <span className="note">{item.note || 'No note'}</span>
-                  <span className="time">{new Date(item.timestamp).toLocaleTimeString()}</span>
-                </div>
-              ))}
-            </div>
-
-            <div className="progress-history-footer">
-              <a
-                href={`/v1/agents/${encodeURIComponent(agentId)}/progress/chart.png`}
-                target="_blank"
-                rel="noreferrer"
-                className="progress-history-link"
-              >
-                Open Server PNG
-              </a>
+              {sortedEntries.map((item, idx) => {
+                const isExpanded = !!expandedIndices[idx];
+                return (
+                  <div
+                    key={idx}
+                    className={`progress-history-entry ${isExpanded ? 'expanded' : ''}`}
+                    onClick={() => toggleExpand(idx)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleExpand(idx);
+                      }
+                    }}
+                    title="Click to toggle full note"
+                  >
+                    <div className="progress-history-entry-row">
+                      <span className="percent">{item.percent}%</span>
+                      <span className={`note ${isExpanded ? 'note-expanded' : 'note-collapsed'}`}>
+                        {item.note || 'No note'}
+                      </span>
+                      <span className="time">{new Date(item.timestamp).toLocaleTimeString()}</span>
+                      <i
+                        className={`fa-solid fa-chevron-${isExpanded ? 'up' : 'down'} progress-entry-chevron`}
+                        aria-hidden="true"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -166,4 +347,3 @@ export const ProgressHistoryModal: React.FC<ProgressHistoryModalProps> = ({ agen
     </div>
   );
 };
-
