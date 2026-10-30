@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
-import { messageKey, messageTime, type HistoryMessage } from "../domain/history";
+import { DEFAULT_CONVERSATION_CHUNK_LIMIT, messageKey, messageTime, type HistoryMessage } from "../domain/history";
 import type { ManagedHistoryEntry, ManagedHistoryPresentation, ManagedHistoryOutcome } from "../protocol/types";
 import type { Agent } from "../state/agent-projection";
 import { currentUsername } from "../persistence/settings-repository";
@@ -484,7 +484,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     }
     let active = true;
     setInternalLoading(true);
-    fetchConversationTimeline(peerId, 50, undefined, routerUrl)
+    fetchConversationTimeline(peerId, DEFAULT_CONVERSATION_CHUNK_LIMIT, undefined, routerUrl)
       .then((resp) => {
         if (!active) return;
         setInternalEvents(resp.events);
@@ -520,7 +520,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     const oldestSeq = internalEvents[0]?.seq;
     if (!oldestSeq || oldestSeq <= 0) return;
     setInternalLoadingOlder(true);
-    fetchConversationTimeline(peerId, 50, oldestSeq, routerUrl)
+    fetchConversationTimeline(peerId, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq, routerUrl)
       .then((resp) => {
         setInternalEvents((prev) => [...resp.events, ...prev]);
         setInternalHasOlder(Boolean(resp.next_before_seq && resp.next_before_seq > 0));
@@ -560,8 +560,18 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       }
     }
 
+    const oldestEventSeq = (effectiveEvents && effectiveEvents.length > 0)
+      ? effectiveEvents[0]?.seq
+      : undefined;
+
     // Include live or pending messages (from WebSocket) not already captured
     for (const message of messages ?? []) {
+      if (oldestEventSeq !== undefined && oldestEventSeq > 1) {
+        const msgSeq = message.sequence ?? 0;
+        if (msgSeq > 0 && msgSeq < oldestEventSeq) {
+          continue;
+        }
+      }
       if (seenIds.has(message.id) || seenIds.has(messageKey(message))) {
         continue;
       }
@@ -573,6 +583,12 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
 
     // Include live activity entries (from WebSocket) not already captured
     for (const entry of activityEntries ?? []) {
+      if (oldestEventSeq !== undefined && oldestEventSeq > 1) {
+        const actSeq = activitySequence(entry);
+        if (actSeq !== Number.MAX_SAFE_INTEGER && actSeq < oldestEventSeq) {
+          continue;
+        }
+      }
       if (seenIds.has(entry.id) || seenIds.has(`hist:${entry.id}`) || seenIds.has(`hist:complete:${entry.id}`)) continue;
       if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) continue;
       const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
