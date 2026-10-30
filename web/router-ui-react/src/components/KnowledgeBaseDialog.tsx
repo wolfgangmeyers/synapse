@@ -246,8 +246,8 @@ export function KnowledgeBaseDialog({
       onClose={onClose}
       className="message-dialog kb-dialog"
     >
-      <div className="kb-dialog-body" style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-        <div className="kb-github-sync" style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+      <div className="kb-dialog-body">
+        <div className="kb-github-sync">
           <input
             type="text"
             className="kb-github-url-input"
@@ -312,17 +312,7 @@ export function KnowledgeBaseDialog({
 
         <div className="kb-browser">
           {currentFile !== "INDEX.md" ? (
-            <div
-              className="kb-nav-header"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-                marginBottom: "0.75rem",
-                paddingBottom: "0.5rem",
-                borderBottom: "1px solid var(--line, rgba(255, 255, 255, 0.1))",
-              }}
-            >
+            <div className="kb-nav-header">
               <button
                 type="button"
                 className="icon-btn-round kb-back-btn"
