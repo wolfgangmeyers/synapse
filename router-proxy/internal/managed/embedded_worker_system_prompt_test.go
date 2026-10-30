@@ -20,7 +20,7 @@ import (
 func TestEmbeddedWorkerSystemPrompt(t *testing.T) {
 	t.Run("injects agent ID and working directory", func(t *testing.T) {
 		agentID := "Worktrees"
-		cwd := "/home/wolfgang/code/mecha-developer/worktrees"
+		cwd := "/workspace/worktrees"
 		prompt := resolveEmbeddedWorkerSystemPrompt("worker", agentID, cwd)
 
 		// Base instructions must be present
@@ -39,7 +39,7 @@ func TestEmbeddedWorkerSystemPrompt(t *testing.T) {
 
 	t.Run("buildEmbeddedWorkerSystemPrompt matches resolveEmbeddedWorkerSystemPrompt", func(t *testing.T) {
 		agentID := "Worktrees"
-		cwd := "/home/wolfgang/code/mecha-developer/worktrees"
+		cwd := "/workspace/worktrees"
 		resolved := resolveEmbeddedWorkerSystemPrompt("worker", agentID, cwd)
 		built := buildEmbeddedWorkerSystemPrompt("worker", agentID, cwd)
 		require.Equal(t, resolved, built)

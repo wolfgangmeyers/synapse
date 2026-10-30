@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitsync"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -329,6 +330,22 @@ func (r *Router) handleGitSyncPull(w http.ResponseWriter, req *http.Request, tar
 			"count":  len(payload.Workflows),
 		})
 
+	case "kb":
+		// KB sync operates directly on directory structures (PullDirectory)
+		// between the remote repository and the local KB storage directory.
+		if err := syncer.PullDirectory(ctx, targetConfig.RepoURL, managed.ResolveKBRoot()); err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"target":  "kb",
+				"success": false,
+				"error":   fmt.Sprintf("Git pull failed: %v", err),
+			})
+			return
+		}
+		r.writeJSON(w, http.StatusOK, map[string]any{
+			"target":  "kb",
+			"success": true,
+		})
+
 	default:
 		r.writeError(w, &httpError{status: http.StatusBadRequest, code: "unsupported_target"})
 	}
@@ -419,6 +436,24 @@ func (r *Router) handleGitSyncPush(w http.ResponseWriter, req *http.Request, tar
 			"target":  "workflows",
 			"success": true,
 			"count":   len(payload.Workflows),
+		})
+
+	case "kb":
+		// KB sync operates directly on directory structures (PushDirectory)
+		// between the remote repository and the local KB storage directory.
+		commitMsg := "Update kb files from app"
+		if err := syncer.PushDirectory(ctx, targetConfig.RepoURL, managed.ResolveKBRoot(), commitMsg); err != nil {
+			r.writeJSON(w, http.StatusOK, map[string]any{
+				"target":  "kb",
+				"success": false,
+				"error":   fmt.Sprintf("Git push failed: %v", err),
+			})
+			return
+		}
+
+		r.writeJSON(w, http.StatusOK, map[string]any{
+			"target":  "kb",
+			"success": true,
 		})
 
 	default:

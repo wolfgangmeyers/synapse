@@ -17,13 +17,14 @@ import (
 	"github.com/sky-valley/pi/ai"
 )
 
-// resolveKBRoot returns the path to the knowledge base directory.
+// ResolveKBRoot returns the path to the knowledge base directory.
 // Priority:
 // 1. MECHA_KB_DIR env var if set and non-empty.
 // 2. ~/.mecha-developer/kb/ if it exists.
 // 3. ~/.mecha-wolfgang/kb/ if it exists.
-// 4. Default to ~/.mecha-developer/kb/ (will be created if needed on write).
-func resolveKBRoot() string {
+// 4. ~/.mecha/kb/ if it exists.
+// 5. Default to ~/.mecha-developer/kb/ (will be created if needed on write).
+func ResolveKBRoot() string {
 	if custom := strings.TrimSpace(os.Getenv("MECHA_KB_DIR")); custom != "" {
 		return filepath.Clean(custom)
 	}
@@ -41,7 +42,12 @@ func resolveKBRoot() string {
 		return primary
 	}
 
-	fallback := filepath.Join(home, ".mecha-wolfgang", "kb")
+	wolfgangKB := filepath.Join(home, ".mecha-wolfgang", "kb")
+	if info, err := os.Stat(wolfgangKB); err == nil && info.IsDir() {
+		return wolfgangKB
+	}
+
+	fallback := filepath.Join(home, ".mecha", "kb")
 	if info, err := os.Stat(fallback); err == nil && info.IsDir() {
 		return fallback
 	}
@@ -49,9 +55,9 @@ func resolveKBRoot() string {
 	return primary
 }
 
-// sanitizeKBPath ensures the path or topic slug is safe, prevents path traversal,
+// SanitizeKBPath ensures the path or topic slug is safe, prevents path traversal,
 // and returns the clean absolute path inside kbRoot.
-func sanitizeKBPath(kbRoot, input string) (string, error) {
+func SanitizeKBPath(kbRoot, input string) (string, error) {
 	cleanInput := strings.TrimSpace(input)
 	if cleanInput == "" {
 		return "", fmt.Errorf("path or topic cannot be empty")
@@ -76,16 +82,35 @@ func sanitizeKBPath(kbRoot, input string) (string, error) {
 	return target, nil
 }
 
+var nonAlphanumericSlugRe = regexp.MustCompile(`[^a-z0-9]+`)
+
 // toSlug converts a topic title to a slug (e.g. "JWT Authentication" -> "jwt-authentication").
 func toSlug(topic string) string {
 	slug := strings.ToLower(strings.TrimSpace(topic))
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	slug = re.ReplaceAllString(slug, "-")
+	slug = nonAlphanumericSlugRe.ReplaceAllString(slug, "-")
 	slug = strings.Trim(slug, "-")
 	if slug == "" {
 		slug = "topic"
 	}
 	return slug
+}
+
+// resolveExistingKBFile attempts to find a file by target path or topic slug inside kbRoot.
+func resolveExistingKBFile(kbRoot, target string) (string, error) {
+	filePath, err := SanitizeKBPath(kbRoot, target)
+	if err != nil {
+		return "", err
+	}
+	if _, statErr := os.Stat(filePath); statErr == nil {
+		return filePath, nil
+	}
+	// Try fallback to topic slug
+	slug := toSlug(target) + ".md"
+	altPath := filepath.Join(kbRoot, slug)
+	if _, altStatErr := os.Stat(altPath); altStatErr == nil {
+		return altPath, nil
+	}
+	return "", os.ErrNotExist
 }
 
 // schemas for KB tools
@@ -117,6 +142,16 @@ func embeddedKBWriteSchema() *ai.Schema {
 		ai.Prop("topic", ai.String("Topic title or slug to write (e.g. 'JWT Authentication').")),
 		ai.Prop("content", ai.String("Markdown content for the topic.")),
 		ai.Opt("domain", ai.String("Optional domain section for grouping in INDEX.md (e.g. 'Auth', 'Infrastructure').")),
+	)
+	schema.AdditionalAllowed = &closed
+	return schema
+}
+
+func embeddedKBDeleteSchema() *ai.Schema {
+	closed := false
+	schema := ai.Object(
+		ai.Opt("topic", ai.String("Topic title or slug to delete from knowledge base.")),
+		ai.Opt("path", ai.String("Relative or clean path to markdown file inside the KB directory to delete.")),
 	)
 	schema.AdditionalAllowed = &closed
 	return schema
@@ -225,7 +260,7 @@ func (m *Manager) embeddedKBSearchTool(owner embeddedOwner) agent.AgentTool {
 				limit = 10
 			}
 
-			kbRoot := resolveKBRoot()
+			kbRoot := ResolveKBRoot()
 			if _, err := os.Stat(kbRoot); os.IsNotExist(err) {
 				return agent.AgentToolResult{
 					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Knowledge base directory does not exist at %s (no documents found).", kbRoot)}},
@@ -510,27 +545,19 @@ func (m *Manager) embeddedKBReadTool(owner embeddedOwner) agent.AgentTool {
 				}, nil
 			}
 
-			kbRoot := resolveKBRoot()
-			filePath, err := sanitizeKBPath(kbRoot, targetParam)
+			kbRoot := ResolveKBRoot()
+			filePath, err := resolveExistingKBFile(kbRoot, targetParam)
 			if err != nil {
-				return agent.AgentToolResult{
-					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error: %v", err)}},
-					Details: map[string]any{"error": err.Error()},
-				}, nil
-			}
-
-			// If file does not exist directly, try finding by slug
-			if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
-				slug := toSlug(targetParam) + ".md"
-				altPath := filepath.Join(kbRoot, slug)
-				if _, altStatErr := os.Stat(altPath); altStatErr == nil {
-					filePath = altPath
-				} else {
+				if os.IsNotExist(err) {
 					return agent.AgentToolResult{
 						Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Knowledge base file not found: %s", targetParam)}},
 						Details: map[string]any{"error": "file not found", "path": targetParam},
 					}, nil
 				}
+				return agent.AgentToolResult{
+					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error: %v", err)}},
+					Details: map[string]any{"error": err.Error()},
+				}, nil
 			}
 
 			data, err := os.ReadFile(filePath)
@@ -550,6 +577,35 @@ func (m *Manager) embeddedKBReadTool(owner embeddedOwner) agent.AgentTool {
 	}
 }
 
+// syncKBPull performs best-effort opportunistic pulling from the configured Git remote repository
+// before mutating KB documents. If no Git repository is configured, or if the remote is temporarily
+// unreachable or authentication fails, the error is non-fatal so agent local workflows continue.
+func (m *Manager) syncKBPull(ctx context.Context) {
+	if m.store == nil || m.gitSyncer == nil {
+		return
+	}
+	target, err := m.store.GetGitSyncTarget(ctx, "kb")
+	if err != nil || target == nil || strings.TrimSpace(target.RepoURL) == "" {
+		return
+	}
+	kbRoot := ResolveKBRoot()
+	_ = m.gitSyncer.PullDirectory(ctx, target.RepoURL, kbRoot)
+}
+
+// syncKBPush performs best-effort opportunistic pushing to the configured Git remote repository
+// after mutating KB documents and updating INDEX.md. Errors are non-fatal for local availability.
+func (m *Manager) syncKBPush(ctx context.Context, commitMsg string) {
+	if m.store == nil || m.gitSyncer == nil {
+		return
+	}
+	target, err := m.store.GetGitSyncTarget(ctx, "kb")
+	if err != nil || target == nil || strings.TrimSpace(target.RepoURL) == "" {
+		return
+	}
+	kbRoot := ResolveKBRoot()
+	_ = m.gitSyncer.PushDirectory(ctx, target.RepoURL, kbRoot, commitMsg)
+}
+
 // embeddedKBWriteTool writes or updates a topic in the KB and updates INDEX.md.
 func (m *Manager) embeddedKBWriteTool(owner embeddedOwner) agent.AgentTool {
 	return agent.AgentTool{
@@ -561,6 +617,8 @@ func (m *Manager) embeddedKBWriteTool(owner embeddedOwner) agent.AgentTool {
 			if owner.binding.AgentID != "" && owner.identity != "" {
 				_ = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
 			}
+
+			m.syncKBPull(ctx)
 
 			rawTopic, _ := args["topic"].(string)
 			topic := strings.TrimSpace(rawTopic)
@@ -583,7 +641,7 @@ func (m *Manager) embeddedKBWriteTool(owner embeddedOwner) agent.AgentTool {
 			domain, _ := args["domain"].(string)
 			domain = strings.TrimSpace(domain)
 
-			kbRoot := resolveKBRoot()
+			kbRoot := ResolveKBRoot()
 			if err := os.MkdirAll(kbRoot, 0o755); err != nil {
 				return agent.AgentToolResult{
 					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error creating KB directory: %v", err)}},
@@ -593,7 +651,7 @@ func (m *Manager) embeddedKBWriteTool(owner embeddedOwner) agent.AgentTool {
 
 			slug := toSlug(topic)
 			filename := slug + ".md"
-			filePath, err := sanitizeKBPath(kbRoot, filename)
+			filePath, err := SanitizeKBPath(kbRoot, filename)
 			if err != nil {
 				return agent.AgentToolResult{
 					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error: %v", err)}},
@@ -618,6 +676,8 @@ func (m *Manager) embeddedKBWriteTool(owner embeddedOwner) agent.AgentTool {
 			// Update INDEX.md
 			indexPath := filepath.Join(kbRoot, "INDEX.md")
 			updateIndex(indexPath, topic, filename, domain)
+
+			m.syncKBPush(ctx, fmt.Sprintf("kb: update %s", topic))
 
 			return agent.AgentToolResult{
 				Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Successfully saved knowledge base topic %q to %s and updated INDEX.md", topic, filename)}},
@@ -687,7 +747,7 @@ func (m *Manager) embeddedKBListTool(owner embeddedOwner) agent.AgentTool {
 			domainFilter, _ := args["domain"].(string)
 			domainFilter = strings.TrimSpace(domainFilter)
 
-			kbRoot := resolveKBRoot()
+			kbRoot := ResolveKBRoot()
 			indexPath := filepath.Join(kbRoot, "INDEX.md")
 
 			if data, err := os.ReadFile(indexPath); err == nil {
@@ -752,3 +812,102 @@ func (m *Manager) embeddedKBListTool(owner embeddedOwner) agent.AgentTool {
 		},
 	}
 }
+
+// embeddedKBDeleteTool deletes a markdown document from the KB and updates INDEX.md.
+func (m *Manager) embeddedKBDeleteTool(owner embeddedOwner) agent.AgentTool {
+	return agent.AgentTool{
+		Name:        "kb_delete",
+		Label:       "Knowledge Base Delete",
+		Description: "Delete a markdown document from the knowledge base and remove its entry from INDEX.md.",
+		Parameters:  embeddedKBDeleteSchema(),
+		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			if owner.binding.AgentID != "" && owner.identity != "" {
+				_ = m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL)
+			}
+
+			m.syncKBPull(ctx)
+
+			rawTopic, _ := args["topic"].(string)
+			rawPath, _ := args["path"].(string)
+
+			target := strings.TrimSpace(rawPath)
+			if target == "" {
+				target = strings.TrimSpace(rawTopic)
+			}
+			if target == "" {
+				return agent.AgentToolResult{
+					Content: ai.ContentList{ai.TextContent{Text: "error: topic or path parameter must be specified"}},
+					Details: map[string]any{"error": "topic or path parameter must be specified"},
+				}, nil
+			}
+
+			kbRoot := ResolveKBRoot()
+			targetPath, err := resolveExistingKBFile(kbRoot, target)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return agent.AgentToolResult{
+						Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Knowledge base file not found: %s", target)}},
+						Details: map[string]any{"error": "file not found", "path": target},
+					}, nil
+				}
+				return agent.AgentToolResult{
+					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error: %v", err)}},
+					Details: map[string]any{"error": err.Error()},
+				}, nil
+			}
+
+			if err := os.Remove(targetPath); err != nil {
+				return agent.AgentToolResult{
+					Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Error deleting knowledge base file: %v", err)}},
+					Details: map[string]any{"error": err.Error()},
+				}, nil
+			}
+
+			filename := filepath.Base(targetPath)
+			deleteFromIndex(filepath.Join(kbRoot, "INDEX.md"), filename, rawTopic)
+
+			m.syncKBPush(ctx, fmt.Sprintf("kb: delete %s", target))
+
+			return agent.AgentToolResult{
+				Content: ai.ContentList{ai.TextContent{Text: fmt.Sprintf("Successfully deleted knowledge base document %q (%s) and updated INDEX.md", target, filename)}},
+				Details: map[string]any{
+					"target":   target,
+					"filename": filename,
+				},
+			}, nil
+		},
+	}
+}
+
+// deleteFromIndex reads INDEX.md, removes list item bullet lines containing (filename) or [%s] with topic,
+// and writes back the updated content. Section headings and surrounding notes are preserved.
+func deleteFromIndex(indexPath, filename, topic string) {
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var newLines []string
+
+	targetFileRef := fmt.Sprintf("(%s)", filename)
+	var targetTopicRef string
+	trimmedTopic := strings.TrimSpace(topic)
+	if trimmedTopic != "" {
+		targetTopicRef = fmt.Sprintf("[%s]", trimmedTopic)
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Only remove list items (- [Topic](file.md) or * [Topic](file.md)) referencing the file or topic
+		if strings.HasPrefix(trimmed, "- [") || strings.HasPrefix(trimmed, "* [") {
+			if strings.Contains(line, targetFileRef) || (targetTopicRef != "" && strings.Contains(line, targetTopicRef)) {
+				continue
+			}
+		}
+		newLines = append(newLines, line)
+	}
+
+	_ = os.WriteFile(indexPath, []byte(strings.Join(newLines, "\n")), 0o644)
+}
+

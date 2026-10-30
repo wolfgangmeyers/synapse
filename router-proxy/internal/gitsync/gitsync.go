@@ -65,6 +65,8 @@ func ValidateRepoURL(rawURL string) error {
 type Syncer interface {
 	Pull(ctx context.Context, repoURL, filename string) (content []byte, exists bool, err error)
 	Push(ctx context.Context, repoURL, filename string, content []byte, commitMessage string) error
+	PullDirectory(ctx context.Context, repoURL, targetDir string) error
+	PushDirectory(ctx context.Context, repoURL, sourceDir, commitMessage string) error
 }
 
 // Engine implements Syncer using system git.
@@ -278,6 +280,292 @@ func (e *Engine) Push(ctx context.Context, repoURL, filename string, content []b
 	}
 
 	// git commit
+	if _, err := runGit(ctx, cacheDir, "commit", "-m", commitMessage); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+
+	// git push origin main
+	if _, err := runGit(ctx, cacheDir, "push", "origin", "main"); err != nil {
+		return fmt.Errorf("git push: %w", err)
+	}
+
+	return nil
+}
+
+// PullDirectory fetches the latest changes from origin/main and copies all files from cacheDir to targetDir (skipping .git).
+func (e *Engine) PullDirectory(ctx context.Context, repoURL, targetDir string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return errors.New("repo URL is required")
+	}
+	if targetDir == "" {
+		return errors.New("target directory is required")
+	}
+
+	cacheDir := e.RepoDir(repoURL)
+	if err := e.ensureCloned(ctx, repoURL, cacheDir); err != nil {
+		return err
+	}
+
+	hasMain, err := hasRemoteBranch(ctx, cacheDir, "main")
+	if err != nil {
+		return fmt.Errorf("check remote main: %w", err)
+	}
+
+	if hasMain {
+		// Fetch, checkout, reset
+		if _, err := runGit(ctx, cacheDir, "fetch", "origin", "main"); err != nil {
+			return fmt.Errorf("fetch origin main: %w", err)
+		}
+		if _, err := runGit(ctx, cacheDir, "checkout", "main"); err != nil {
+			return fmt.Errorf("checkout main: %w", err)
+		}
+		if _, err := runGit(ctx, cacheDir, "reset", "--hard", "origin/main"); err != nil {
+			return fmt.Errorf("reset hard origin/main: %w", err)
+		}
+	}
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("create target dir %s: %w", targetDir, err)
+	}
+
+	// Build map of relative paths existing in cacheDir (excluding .git)
+	cacheFiles := make(map[string]bool)
+	err = filepath.Walk(cacheDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(cacheDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.IsDir() {
+			cacheFiles[rel] = true
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("scan cacheDir: %w", err)
+	}
+
+	// Remove files from targetDir that are not in cacheDir (excluding .git)
+	err = filepath.Walk(targetDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(targetDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.IsDir() && !cacheFiles[rel] {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove stale target file %s: %w", path, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("cleanup targetDir: %w", err)
+	}
+
+	// Copy all files from cacheDir to targetDir (skipping .git)
+	err = filepath.Walk(cacheDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(cacheDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		dstPath := filepath.Join(targetDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, 0755)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dstPath), err)
+		}
+		if err := os.WriteFile(dstPath, data, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("write %s: %w", dstPath, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("copy directory: %w", err)
+	}
+
+	return nil
+}
+
+// PushDirectory syncs contents of sourceDir into cacheDir (excluding .git), commits, and pushes to origin main.
+func (e *Engine) PushDirectory(ctx context.Context, repoURL, sourceDir, commitMessage string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return errors.New("repo URL is required")
+	}
+	if sourceDir == "" {
+		return errors.New("source directory is required")
+	}
+	if commitMessage == "" {
+		commitMessage = "Update files"
+	}
+
+	cacheDir := e.RepoDir(repoURL)
+	if err := e.ensureCloned(ctx, repoURL, cacheDir); err != nil {
+		return err
+	}
+
+	hasMain, err := hasRemoteBranch(ctx, cacheDir, "main")
+	if err != nil {
+		return fmt.Errorf("check remote main: %w", err)
+	}
+
+	if hasMain {
+		if _, err := runGit(ctx, cacheDir, "fetch", "origin", "main"); err != nil {
+			return fmt.Errorf("fetch origin main: %w", err)
+		}
+		if _, err := runGit(ctx, cacheDir, "checkout", "main"); err != nil {
+			return fmt.Errorf("checkout main: %w", err)
+		}
+		if _, err := runGit(ctx, cacheDir, "reset", "--hard", "origin/main"); err != nil {
+			return fmt.Errorf("reset hard origin/main: %w", err)
+		}
+	} else {
+		// Repository is empty or main does not exist yet.
+		// Checkout or create branch 'main'
+		_, _ = runGit(ctx, cacheDir, "checkout", "-b", "main")
+	}
+
+	// Build map of relative paths existing in sourceDir (excluding .git)
+	sourceFiles := make(map[string]bool)
+	if _, err := os.Stat(sourceDir); err == nil {
+		err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(sourceDir, path)
+			if err != nil {
+				return err
+			}
+			if rel == "." {
+				return nil
+			}
+			if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !info.IsDir() {
+				sourceFiles[rel] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("walk sourceDir: %w", err)
+		}
+	}
+
+	// Remove files from cacheDir that were removed from sourceDir (excluding .git)
+	err = filepath.Walk(cacheDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(cacheDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.IsDir() && !sourceFiles[rel] {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove stale file %s: %w", path, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("cleanup cacheDir: %w", err)
+	}
+
+	// Copy files from sourceDir to cacheDir
+	for rel := range sourceFiles {
+		srcPath := filepath.Join(sourceDir, rel)
+		dstPath := filepath.Join(cacheDir, rel)
+
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", srcPath, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dstPath), err)
+		}
+		if err := os.WriteFile(dstPath, data, 0644); err != nil {
+			return fmt.Errorf("write %s: %w", dstPath, err)
+		}
+	}
+
+	// git add -A .
+	if _, err := runGit(ctx, cacheDir, "add", "-A", "."); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+
+	// Check git status --porcelain
+	status, err := runGit(ctx, cacheDir, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("git status: %w", err)
+	}
+	if strings.TrimSpace(status) == "" {
+		// Nothing changed
+		return nil
+	}
+
+	// git commit -m <commitMessage>
 	if _, err := runGit(ctx, cacheDir, "commit", "-m", commitMessage); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}

@@ -9,7 +9,7 @@
 
 ## 1. Intent & User Outcome
 
-The conversation feed is Wolfgang's primary interface for observing and conversing with managed agents. It presents an unambiguous, visually differentiated timeline where direct conversations between Wolfgang and the agent appear as intuitive speech bubbles, inter-agent coordination messages appear as distinct expandable mailbox envelope cards, and agent execution events (tool invocations, thinking phases, subagent delegations, and context resets) appear as compact timeline activity notifications.
+The conversation feed is the user's primary interface for observing and conversing with managed agents. It presents an unambiguous, visually differentiated timeline where direct conversations between the user and the agent appear as intuitive speech bubbles, inter-agent coordination messages appear as distinct expandable mailbox envelope cards, and agent execution events (tool invocations, thinking phases, subagent delegations, and context resets) appear as compact timeline activity notifications.
 
 Users experience a smooth, flicker-free stream where new events append cleanly without jumping, collapsing, or flashing between temporary and finalized states.
 
@@ -43,7 +43,7 @@ Users experience a smooth, flicker-free stream where new events append cleanly w
   - Neither entry renders as an envelope card or tool activity box.
 
 #### Scenario: [SCN-FEED-002] Agent coordinates with peer worker via mailbox
-- **User Goal**: Clearly distinguish agent background coordination from agent responses directed to Wolfgang.
+- **User Goal**: Clearly distinguish agent background coordination from agent responses directed to the user.
 - **Given**:
   - The conversation view is open for supervisor agent `lead-agent`.
 - **When**:

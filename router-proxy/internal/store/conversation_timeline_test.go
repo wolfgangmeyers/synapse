@@ -220,3 +220,49 @@ func TestConversationTimeline_Migration(t *testing.T) {
 	}
 	require.True(t, foundMessageEvent, "should have found a message event with attachments")
 }
+
+func TestConversationTimeline_AssistantDeduplication(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	agentID := "agent-assistant-dedup"
+
+	// 1. Record assistant reply message via message enqueue hook
+	body := "Here is the result of the analysis."
+	msg := domain.Message{
+		ID:        "msg-asst-1",
+		From:      agentID,
+		To:        "user",
+		Body:      body,
+		CreatedAt: formatTimestamp(time.Now()),
+	}
+	err := s.recordTimelineMessageTx(ctx, msg, protocol.MessageSource{Kind: "agent"})
+	require.NoError(t, err)
+
+	// Timeline should have the assistant message for both recipient (user) and sender (agentID)
+	events, _, err := s.GetConversationTimeline(ctx, agentID, 50, nil)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, "message", events[0].Kind)
+	require.Equal(t, "assistant", *events[0].Role)
+	require.Equal(t, body, *events[0].Content)
+
+	// 2. Simulate history recording for the same assistant turn
+	histEntry := ManagedHistoryEntry{
+		ID:             "hist-asst-1",
+		At:             formatTimestamp(time.Now()),
+		MessageContent: &body,
+		Presentation: &ManagedHistoryPresentation{
+			Kind: "message",
+			From: agentID,
+			To:   "user",
+		},
+	}
+	err = s.recordTimelineHistoryTx(ctx, agentID, "assistant", "info", body, histEntry)
+	require.NoError(t, err)
+
+	// Timeline should still contain exactly 1 event (no duplicate assistant turn)
+	events, _, err = s.GetConversationTimeline(ctx, agentID, 50, nil)
+	require.NoError(t, err)
+	require.Len(t, events, 1, "assistant message should be deduplicated against history entry")
+}
+

@@ -88,11 +88,11 @@ export function DialogShell({
   }, [onCancel, onClose, onClosed, open, returnFocus]);
 
   return (
-    <dialog ref={dialogRef} className={className} aria-labelledby={headingId}>
+    <dialog ref={dialogRef} className={`dialog-shell ${className}`} aria-labelledby={headingId}>
       <div className="dialog-shell">
         <header>
           <div>
-            <h2 id={headingId}>{title}</h2>
+            <h2 id={headingId} className="dialog-title">{title}</h2>
             {description ? <p>{description}</p> : null}
           </div>
           <button type="button" className="icon-btn-round" aria-label={closeLabel} onClick={onClose}>

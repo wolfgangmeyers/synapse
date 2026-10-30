@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,11 +17,11 @@ import (
 )
 
 func TestKBTools_LiveSystemOneE2E(t *testing.T) {
-	// Verify live router endpoint is running before proceeding
-	checkClient := &http.Client{Timeout: 2 * time.Second}
-	checkResp, err := checkClient.Get("http://127.0.0.1:8765/v1/systemone")
+	// Verify live router endpoint and backend are actively responding before proceeding
+	checkClient := &http.Client{Timeout: 3 * time.Second}
+	checkResp, err := checkClient.Post("http://127.0.0.1:8765/v1/systemone/test", "application/json", strings.NewReader("{}"))
 	if err != nil || checkResp.StatusCode != http.StatusOK {
-		t.Skip("Live System 1 router endpoint at http://127.0.0.1:8765/v1/systemone is not available, skipping live E2E test")
+		t.Skip("Live System 1 backend at http://127.0.0.1:8765/v1/systemone/test is not available, skipping live E2E test")
 	}
 	checkResp.Body.Close()
 

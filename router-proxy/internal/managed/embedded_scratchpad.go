@@ -347,6 +347,7 @@ func (m *Manager) registerEmbeddedTools(owner embeddedOwner) []agent.AgentTool {
 		m.embeddedKBSearchTool(owner),
 		m.embeddedKBReadTool(owner),
 		m.embeddedKBWriteTool(owner),
+		m.embeddedKBDeleteTool(owner),
 		m.embeddedKBListTool(owner),
 	}
 }

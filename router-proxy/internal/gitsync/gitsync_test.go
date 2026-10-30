@@ -2,6 +2,7 @@ package gitsync_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,83 @@ func TestGitSyncEngine_PushAndPull(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, exists3)
 	require.Equal(t, content2, gotBytes3)
+}
+
+func TestGitSyncEngine_PushAndPullDirectory(t *testing.T) {
+	ctx := context.Background()
+	remoteURL := setupBareRemote(t)
+	cacheBase := t.TempDir()
+
+	engine, err := gitsync.New(gitsync.WithBaseDir(cacheBase))
+	require.NoError(t, err)
+
+	sourceDir := t.TempDir()
+	file1 := filepath.Join(sourceDir, "INDEX.md")
+	file2 := filepath.Join(sourceDir, "topic1.md")
+	subFile := filepath.Join(sourceDir, "sub", "topic2.md")
+
+	require.NoError(t, os.WriteFile(file1, []byte("# Index Content"), 0644))
+	require.NoError(t, os.WriteFile(file2, []byte("# Topic 1 Content"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Dir(subFile), 0755))
+	require.NoError(t, os.WriteFile(subFile, []byte("# Topic 2 Content"), 0644))
+
+	// Push directory to empty bare repo
+	err = engine.PushDirectory(ctx, remoteURL, sourceDir, "Initial kb sync")
+	require.NoError(t, err)
+
+	// Pull into a fresh target directory using clientEngine
+	clientCache := t.TempDir()
+	clientEngine, err := gitsync.New(gitsync.WithBaseDir(clientCache))
+	require.NoError(t, err)
+
+	targetDir := t.TempDir()
+	err = clientEngine.PullDirectory(ctx, remoteURL, targetDir)
+	require.NoError(t, err)
+
+	// Verify targetDir contents
+	t1, err := os.ReadFile(filepath.Join(targetDir, "INDEX.md"))
+	require.NoError(t, err)
+	require.Equal(t, "# Index Content", string(t1))
+
+	t2, err := os.ReadFile(filepath.Join(targetDir, "topic1.md"))
+	require.NoError(t, err)
+	require.Equal(t, "# Topic 1 Content", string(t2))
+
+	t3, err := os.ReadFile(filepath.Join(targetDir, "sub", "topic2.md"))
+	require.NoError(t, err)
+	require.Equal(t, "# Topic 2 Content", string(t3))
+
+	// Modify sourceDir: delete topic1.md, update topic2.md, add topic3.md
+	require.NoError(t, os.Remove(file2))
+	require.NoError(t, os.WriteFile(subFile, []byte("# Topic 2 Updated"), 0644))
+	file3 := filepath.Join(sourceDir, "topic3.md")
+	require.NoError(t, os.WriteFile(file3, []byte("# Topic 3 Content"), 0644))
+
+	// Push directory changes
+	err = engine.PushDirectory(ctx, remoteURL, sourceDir, "Update kb files")
+	require.NoError(t, err)
+
+	// Pull into targetDir again with clientEngine
+	err = clientEngine.PullDirectory(ctx, remoteURL, targetDir)
+	require.NoError(t, err)
+
+	// Verify topic1.md is now gone from targetDir
+	_, err = os.Stat(filepath.Join(targetDir, "topic1.md"))
+	require.True(t, os.IsNotExist(err))
+
+	// Verify topic2 updated
+	t3Updated, err := os.ReadFile(filepath.Join(targetDir, "sub", "topic2.md"))
+	require.NoError(t, err)
+	require.Equal(t, "# Topic 2 Updated", string(t3Updated))
+
+	// Verify topic3 present
+	t4, err := os.ReadFile(filepath.Join(targetDir, "topic3.md"))
+	require.NoError(t, err)
+	require.Equal(t, "# Topic 3 Content", string(t4))
+
+	// Push directory without changes: should return nil (no-op)
+	err = engine.PushDirectory(ctx, remoteURL, sourceDir, "No-op kb sync")
+	require.NoError(t, err)
 }
 
 func TestGitSyncEngine_PullEmptyRepo(t *testing.T) {

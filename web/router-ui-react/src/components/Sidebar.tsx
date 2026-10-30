@@ -43,13 +43,14 @@ export interface SidebarProps {
   onContextThresholds?: (() => void) | undefined;
   onMCPServers?: (() => void) | undefined;
   onToolDefaults?: (() => void) | undefined;
+  onKnowledgeBase?: (() => void) | undefined;
   onOpenProgressHistory?: ((agentId: string) => void) | undefined;
 }
 function browserStorage(): StorageAdapter | undefined {
   try { return globalThis.localStorage; } catch { return undefined; }
 }
 
-export function Sidebar({ scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onOpenProgressHistory }: SidebarProps): ReactElement {
+export function Sidebar({ scope, client, routerLabel, connection, connectionIdentity, connectionDetail, managedStatus, agents, selectedAgentId, filter, storage, arrivals, reminderCounts, expandedAgentIds, onRefresh, onRouterClick, onFilterChange, onSelectAgent, onGoal, onReminders, onToggleSubagents, onStopSubagent, onOpenArrival, onDismissArrival, onLaunchManaged, onRestartRouter, onProviderSettings, onSystemOneConfig, onContextThresholds, onMCPServers, onToolDefaults, onKnowledgeBase, onOpenProgressHistory }: SidebarProps): ReactElement {
   const [localFilter, setLocalFilter] = useState(filter ?? "");
   const persistence = useMemo(() => storage ?? browserStorage(), [storage]);
   const scopeKey = ownerScope(scope.routerUrl, scope.agentId);
@@ -75,7 +76,7 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
   const managedActionsId = useId();
   const managedActionsRef = useRef<HTMLDivElement>(null);
   const isConnected = connection === "connected";
-  const hasManagedActions = isConnected && Boolean(onLaunchManaged || onRestartRouter || onProviderSettings || onSystemOneConfig || onContextThresholds || onMCPServers || onToolDefaults);
+  const hasManagedActions = isConnected && Boolean(onLaunchManaged || onRestartRouter || onProviderSettings || onSystemOneConfig || onContextThresholds || onMCPServers || onToolDefaults || onKnowledgeBase);
   const activeFilter = filter ?? localFilter;
   const visible = useMemo(() => {
     const query = activeFilter.trim().toLowerCase();
@@ -151,6 +152,7 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
                     {onProviderSettings ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onProviderSettings, event)}>Provider settings</button> : null}
                     {onMCPServers ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onMCPServers, event)}>MCP Servers</button> : null}
                     {onToolDefaults ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onToolDefaults, event)}>Tool Defaults</button> : null}
+                    {onKnowledgeBase ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onKnowledgeBase, event)}>Knowledge Base</button> : null}
                     {onSystemOneConfig ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onSystemOneConfig, event)}>System 1 Config</button> : null}
                     {onContextThresholds ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onContextThresholds, event)}>Context Thresholds</button> : null}
                   </div>

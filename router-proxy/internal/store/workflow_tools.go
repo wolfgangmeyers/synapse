@@ -39,6 +39,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "kb_search", Name: "kb_search", Category: "memory", Description: "Search the persistent knowledge base"},
 	{ID: "kb_read", Name: "kb_read", Category: "memory", Description: "Read the content of a topic or markdown document"},
 	{ID: "kb_write", Name: "kb_write", Category: "memory", Description: "Write or update a markdown document in the knowledge base"},
+	{ID: "kb_delete", Name: "kb_delete", Category: "memory", Description: "Delete a markdown document from the knowledge base"},
 	{ID: "kb_list", Name: "kb_list", Category: "memory", Description: "List topics available in the knowledge base"},
 	{ID: "worker_spawn", Name: "worker_spawn", Category: "admin", Description: "Spawn a new independent managed worker"},
 	{ID: "worker_terminate", Name: "worker_terminate", Category: "admin", Description: "Terminate a running managed worker"},

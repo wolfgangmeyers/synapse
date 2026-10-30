@@ -237,9 +237,10 @@ function timelineEventToFeedItems(
   ownerId?: string,
   peerId?: string
 ): FeedItem[] {
-  const meta = event.metadata ?? {};
-  const fromMeta = typeof meta.from === "string" ? meta.from : undefined;
-  const toMeta = typeof meta.to === "string" ? meta.to : undefined;
+  const meta = (event.metadata && typeof event.metadata === "object") ? event.metadata as Record<string, unknown> : {};
+  // Dual normalization: resolve sender and recipient from from/sender and to/recipient properties
+  const fromMeta = typeof meta.from === "string" ? meta.from : (typeof meta.sender === "string" ? meta.sender : undefined);
+  const toMeta = typeof meta.to === "string" ? meta.to : (typeof meta.recipient === "string" ? meta.recipient : undefined);
 
   // 1. Subagent completion notifications / system messages / router messages:
   // If sender is system or router, or content has [Direct message from system] / [Subagent Completed],
@@ -321,7 +322,8 @@ function timelineEventToFeedItems(
     const isOutgoing = isFromHuman || (event.role === "user" && fromMeta === undefined);
     const from = fromMeta ?? (isOutgoing ? (ownerId ?? currentUser ?? "user") : (peerId ?? event.agent_id));
     const to = toMeta ?? (isOutgoing ? (peerId ?? event.agent_id) : (ownerId ?? currentUser ?? "user"));
-    const rawAttachments = meta.attachments ?? (event as any).attachments ?? meta.images;
+    // Dual normalization: support attachments from metadata (preferred) or direct event property
+    const rawAttachments = meta.attachments ?? (event as ConversationTimelineEvent & { attachments?: unknown }).attachments ?? meta.images;
     const message: HistoryMessage = {
       id: event.id,
       body: event.content ?? "",
@@ -348,7 +350,11 @@ function timelineEventToFeedItems(
   const metaLevel = typeof meta.level === "string" ? meta.level : undefined;
   const metaSender = typeof meta.sender === "string" ? meta.sender : fromMeta;
   const metaToolName = typeof meta.tool_name === "string" ? meta.tool_name : undefined;
-  const rawOutcome = (meta.presentation as any)?.outcome ?? meta.outcome;
+  // Dual normalization: check outcome from nested presentation object or top-level metadata
+  const presentationOutcome = meta.presentation && typeof meta.presentation === "object" && "outcome" in meta.presentation
+    ? (meta.presentation as { outcome?: unknown }).outcome
+    : undefined;
+  const rawOutcome = presentationOutcome ?? meta.outcome;
   const metaOutcome = rawOutcome === "success" || rawOutcome === "failed" || rawOutcome === "error" || rawOutcome === "active" || rawOutcome === "interrupted" || rawOutcome === "completed"
     ? rawOutcome
     : undefined;
@@ -383,6 +389,8 @@ function timelineEventToFeedItems(
   const userMail = isMailboxSendToUser(entry, currentUser, undefined);
   if (userMail !== undefined) {
     const rawItems: FeedItem[] = [];
+    // Thinking card splitting: Separate assistant thinking blocks from the accompanying message body
+    // into independent activity cards preceding the message bubble.
     const thinkingText = getThinkingContent(entry);
     if (thinkingText) {
       rawItems.push({
@@ -429,6 +437,8 @@ function timelineEventToFeedItems(
   }];
 }
 
+// Checks whether a history activity entry is already represented in the messages list.
+// Note: Formerly used fuzzy timestamp matching (±120s); now uses normalized content and identity comparison for exact deduplication.
 function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessage[]): boolean {
   if (isContextResetEntry(entry)) return false;
   if (messages.some((m) => m.id === entry.id)) return true;
