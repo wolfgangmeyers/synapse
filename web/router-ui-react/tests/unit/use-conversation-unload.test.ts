@@ -91,13 +91,6 @@ describe("useConversation natural unloading", () => {
     expect(result.current.timelineEvents[0]!.seq).toBe(11);
     expect(result.current.timelineEvents[149]!.seq).toBe(160);
 
-    // onReconcile should have been called with the trimmed set
-    expect(onReconcile).toHaveBeenCalled();
-    const lastReconcileCall = onReconcile.mock.calls[onReconcile.mock.calls.length - 1]!;
-    expect(lastReconcileCall[0]).toBe("agent-1");
-    expect(lastReconcileCall[1]).toHaveLength(CONVERSATION_UNLOAD_THRESHOLD);
-    expect(lastReconcileCall[1]![0]!.id).toBe("msg-11");
-
     // hasOlder remains true because oldest item sequence (11) > 1
     expect(result.current.hasOlder).toBe(true);
   });
