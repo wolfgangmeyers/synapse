@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, type ReactElement } from "react";
+import { useEffect, useState, useMemo, useRef, type ReactElement } from "react";
 import MarkdownIt from "markdown-it";
 import { DialogShell } from "./DialogShell";
 import type { RouterHttpClient } from "../transport/http-client";
@@ -79,14 +79,17 @@ export function KnowledgeBaseDialog({
   const [savedUrl, setSavedUrl] = useState("");
   const [currentFile, setCurrentFile] = useState("INDEX.md");
   const [content, setContent] = useState<string>("");
+  const [targetHeading, setTargetHeading] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [status, setStatus] = useState<{ message: string; error?: boolean }>({ message: "" });
+  const markdownBodyRef = useRef<HTMLDivElement>(null);
 
   // Load configured Git sync target on open
   useEffect(() => {
     if (!open) return;
     setCurrentFile("INDEX.md");
+    setTargetHeading(null);
     setStatus({ message: "" });
     if (client) {
       void client
@@ -257,6 +260,45 @@ export function KnowledgeBaseDialog({
     return md.render(content || "");
   }, [md, content]);
 
+  // Handle scrolling when content is rendered or currentFile changes:
+  // If targetHeading is set, scroll to that heading. Otherwise, reset scroll to top.
+  useEffect(() => {
+    const container = markdownBodyRef.current;
+    if (!container) return;
+
+    if (targetHeading) {
+      const decodedTargetId = decodeURIComponent(targetHeading).toLowerCase();
+      let el =
+        container.querySelector(`#${CSS.escape(targetHeading)}`) ??
+        container.querySelector(`#${CSS.escape(decodedTargetId)}`);
+
+      if (!el) {
+        const headings = container.querySelectorAll("h1, h2, h3, h4, h5, h6");
+        for (const h of headings) {
+          const id = h.getAttribute("id");
+          if (id && id.toLowerCase() === decodedTargetId) {
+            el = h;
+            break;
+          }
+          if (slugifyHeading(h.textContent ?? "") === decodedTargetId) {
+            el = h;
+            break;
+          }
+        }
+      }
+
+      if (el instanceof HTMLElement) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
+
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({ top: 0, behavior: "instant" });
+    }
+    container.scrollTop = 0;
+  }, [currentFile, renderedHtml, targetHeading]);
+
   /**
    * Event delegation on the markdown container.
    * Intercepts clicks on:
@@ -317,6 +359,7 @@ export function KnowledgeBaseDialog({
     e.preventDefault();
     const resolved = resolveRelativePath(currentFile, href);
     if (resolved) {
+      setTargetHeading(rawTargetId || null);
       setCurrentFile(resolved);
     }
   };
@@ -400,7 +443,10 @@ export function KnowledgeBaseDialog({
               <button
                 type="button"
                 className="icon-btn-round kb-back-btn"
-                onClick={() => setCurrentFile("INDEX.md")}
+                onClick={() => {
+                  setTargetHeading(null);
+                  setCurrentFile("INDEX.md");
+                }}
                 title="Back to Index"
                 aria-label="Back to Index"
               >
@@ -412,6 +458,7 @@ export function KnowledgeBaseDialog({
             </div>
           ) : null}
           <div
+            ref={markdownBodyRef}
             className="markdown-body"
             onClick={handleLinkClick}
             dangerouslySetInnerHTML={{ __html: renderedHtml }}

@@ -159,6 +159,86 @@ describe("KnowledgeBaseDialog", () => {
     });
   });
 
+  it("resets scrollTop to 0 when navigating to a new page or clicking Back to Index", async () => {
+    const { container } = render(
+      <KnowledgeBaseDialog
+        open={true}
+        client={mockClient as RouterHttpClient}
+        onClose={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Architecture Guide" })).toBeInTheDocument();
+    });
+
+    const markdownBody = container.querySelector(".kb-browser .markdown-body") as HTMLElement;
+    expect(markdownBody).not.toBeNull();
+
+    // Simulate user having scrolled down
+    markdownBody.scrollTop = 350;
+    expect(markdownBody.scrollTop).toBe(350);
+
+    // Navigate to Architecture Guide
+    fireEvent.click(screen.getByRole("link", { name: "Architecture Guide" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("This document describes system architecture.")).toBeInTheDocument();
+    });
+
+    // Verify scrollTop was reset to 0
+    expect(markdownBody.scrollTop).toBe(0);
+
+    // Simulate scrolling down again
+    markdownBody.scrollTop = 200;
+    expect(markdownBody.scrollTop).toBe(200);
+
+    // Click Back to Index
+    fireEvent.click(screen.getByRole("button", { name: "Back to Index" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Knowledge Base Index")).toBeInTheDocument();
+    });
+
+    // Verify scrollTop was reset to 0 again
+    expect(markdownBody.scrollTop).toBe(0);
+  });
+
+  it("scrolls to hashtag heading when navigating to a page with a hash", async () => {
+    const scrollIntoViewMock = vi.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrollIntoViewMock;
+
+    (mockClient.getKBFile as any).mockImplementation(async (path: string) => {
+      if (path === "INDEX.md") {
+        return "# Knowledge Base Index\n\n- [Guide with Section](guide.md#section-two)\n";
+      }
+      if (path === "guide.md") {
+        return "# Guide\n\nIntro text.\n\n## Section Two\n\nSection two text.";
+      }
+      return "";
+    });
+
+    render(
+      <KnowledgeBaseDialog
+        open={true}
+        client={mockClient as RouterHttpClient}
+        onClose={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Guide with Section" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("link", { name: "Guide with Section" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Section two text.")).toBeInTheDocument();
+    });
+
+    expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+  });
+
   it("scrolls to matching heading on #hashtag anchor link click without reloading or fetching file", async () => {
     const scrollIntoViewMock = vi.fn();
     window.HTMLElement.prototype.scrollIntoView = scrollIntoViewMock;
