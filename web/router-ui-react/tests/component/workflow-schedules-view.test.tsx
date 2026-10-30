@@ -96,7 +96,7 @@ describe("WorkflowSchedulesView Component", () => {
 
   it("opens add form with unselected workflow by default and cron picker", async () => {
     const client = createMockClient();
-    render(<WorkflowSchedulesView client={client} />);
+    render(<WorkflowSchedulesView client={client} recentFolders={["/recent/repo"]} />);
 
     const addBtns = await screen.findAllByText("+ Add Schedule");
     const targetAddBtn = addBtns[0];
@@ -112,5 +112,9 @@ describe("WorkflowSchedulesView Component", () => {
     // Cron picker presets and preview
     expect(screen.getByText("Common Presets")).toBeInTheDocument();
     expect(screen.getByText("Custom Cron")).toBeInTheDocument();
+
+    // Working directory picker is present with recent folders toggle
+    expect(screen.getByText("Working Directory (optional)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Recent folders" })).toBeInTheDocument();
   });
 });

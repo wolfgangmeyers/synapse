@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useRef, useId, useLayoutEffect, type CSSProperties, type ReactElement, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { DialogShell } from "./DialogShell";
+import { ManagedDirectoryPicker } from "./ManagedDirectoryPicker";
+import { loadManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "../persistence/managed-folder-history";
 import type { RouterHttpClient } from "../transport/http-client";
 import type { Workflow } from "../domain/workflow-states";
 import type { ManagedAgent } from "../protocol/types";
@@ -9,6 +11,8 @@ export interface WorkflowBackgroundRunModalProps {
   open: boolean;
   client: RouterHttpClient;
   initialWorkflowId?: string;
+  recentFolders?: readonly string[];
+  onListDirectories?: (path: string) => Promise<{ path: string; parent: string; directories: Array<{ name: string; path: string }> }>;
   onClose: () => void;
   onLaunched?: (agent: ManagedAgent) => void;
 }
@@ -17,6 +21,8 @@ export function WorkflowBackgroundRunModal({
   open,
   client,
   initialWorkflowId,
+  recentFolders: propRecentFolders,
+  onListDirectories,
   onClose,
   onLaunched,
 }: WorkflowBackgroundRunModalProps): ReactElement | null {
@@ -33,6 +39,11 @@ export function WorkflowBackgroundRunModal({
   const [loadingWorkflows, setLoadingWorkflows] = useState<boolean>(false);
   const [launching, setLaunching] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  const fallbackRecentFolders = useMemo(() => loadManagedRecentFolders(), []);
+  const activeRecentFolders = propRecentFolders ?? fallbackRecentFolders;
+
+  const handleListDirectories = onListDirectories ?? ((path: string) => client.managedDirectories(path));
 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -192,6 +203,7 @@ export function WorkflowBackgroundRunModal({
       const runOptions: { variables?: Record<string, string>; cwd?: string } = { variables };
       if (targetCwd.trim()) {
         runOptions.cwd = targetCwd.trim();
+        saveManagedRecentFolders(undefined, recordManagedRecentFolder(activeRecentFolders, targetCwd.trim()));
       }
       const res = await client.runWorkflow(selectedWorkflowId, runOptions);
       onLaunched?.(res);
@@ -237,7 +249,7 @@ export function WorkflowBackgroundRunModal({
               onClick={() => chooseWorkflow(w)}
             >
               <strong>{w.name}</strong>
-              <small>{w.id}{w.description ? ` · ${w.description}` : ""}</small>
+              {w.description ? <small>{w.description}</small> : null}
             </button>
           ))
         ) : (
@@ -256,7 +268,7 @@ export function WorkflowBackgroundRunModal({
       onClose={onClose}
       className="message-dialog workflow-bg-run-dialog"
     >
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "1.1rem" }}>
+      <form onSubmit={(e) => { void handleSubmit(e); }} style={{ display: "flex", flexDirection: "column", gap: "1.1rem" }}>
         {error ? (
           <div className="alert alert-danger" role="alert">
             {error}
@@ -293,17 +305,14 @@ export function WorkflowBackgroundRunModal({
         {selectedWorkflowId ? (
           <>
             <div className="form-group">
-              <label htmlFor="bg-workflow-cwd" style={{ display: "block", marginBottom: "6px", fontWeight: 600 }}>
-                Working Directory (optional)
-              </label>
-              <input
-                id="bg-workflow-cwd"
-                type="text"
-                className="form-control"
-                placeholder="e.g. /home/user/project or repo root"
+              <ManagedDirectoryPicker
+                label="Working Directory (optional)"
+                required={false}
                 value={targetCwd}
-                onChange={(e) => setTargetCwd(e.target.value)}
-                disabled={launching}
+                recentFolders={activeRecentFolders}
+                placeholder="e.g. /home/user/project or repo root"
+                onChange={setTargetCwd}
+                list={handleListDirectories}
               />
             </div>
 

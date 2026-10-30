@@ -145,10 +145,7 @@ export function WorkflowSelect({
               onClick={() => choose(w)}
             >
               <strong>{w.name}</strong>
-              <small>
-                {w.id}
-                {w.description ? ` · ${w.description}` : ""}
-              </small>
+              {w.description ? <small>{w.description}</small> : null}
             </button>
           ))
         ) : (
@@ -172,7 +169,7 @@ export function WorkflowSelect({
         onClick={() => setOpen((prev) => !prev)}
       >
         <span style={{ color: selectedWorkflow ? "var(--text, #f8fafc)" : "var(--muted, #94a3b8)" }}>
-          {selectedWorkflow ? `${selectedWorkflow.name} (${selectedWorkflow.id})` : placeholder}
+          {selectedWorkflow ? selectedWorkflow.name : placeholder}
         </span>
         <i className="fa-solid fa-chevron-down" aria-hidden="true" />
       </button>

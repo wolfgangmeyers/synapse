@@ -1,16 +1,20 @@
-import { useState, useEffect, type ReactElement, type FormEvent } from "react";
+import { useState, useEffect, useMemo, type ReactElement, type FormEvent } from "react";
 import type { RouterHttpClient } from "../transport/http-client";
 import type { WorkflowSchedule } from "../protocol/types";
 import type { Workflow } from "../domain/workflow-states";
 import { WorkflowSelect } from "./WorkflowSelect";
 import { ScheduleCronPicker, describeCron, intervalToCron } from "./ScheduleCronPicker";
+import { ManagedDirectoryPicker } from "./ManagedDirectoryPicker";
+import { loadManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "../persistence/managed-folder-history";
 
 export interface WorkflowSchedulesViewProps {
   client: RouterHttpClient;
-  onWorkflowRun?: (workflowId: string) => void;
+  recentFolders?: readonly string[] | undefined;
+  onListDirectories?: ((path: string) => Promise<{ path: string; parent: string; directories: Array<{ name: string; path: string }> }>) | undefined;
+  onWorkflowRun?: ((workflowId: string) => void) | undefined;
 }
 
-export function WorkflowSchedulesView({ client }: WorkflowSchedulesViewProps): ReactElement {
+export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders, onListDirectories, onWorkflowRun: _onWorkflowRun }: WorkflowSchedulesViewProps): ReactElement {
   const [viewMode, setViewMode] = useState<"list" | "form">("list");
   const [schedules, setSchedules] = useState<WorkflowSchedule[]>([]);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -28,6 +32,11 @@ export function WorkflowSchedulesView({ client }: WorkflowSchedulesViewProps): R
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const fallbackRecentFolders = useMemo(() => loadManagedRecentFolders(), []);
+  const activeRecentFolders = propRecentFolders ?? fallbackRecentFolders;
+
+  const handleListDirectories = onListDirectories ?? ((path: string) => client.managedDirectories(path));
 
   const loadData = async (): Promise<void> => {
     setLoading(true);
@@ -166,6 +175,10 @@ export function WorkflowSchedulesView({ client }: WorkflowSchedulesViewProps): R
         ...(targetCwd.trim() ? { target_cwd: targetCwd.trim() } : {}),
       };
 
+      if (targetCwd.trim()) {
+        saveManagedRecentFolders(undefined, recordManagedRecentFolder(activeRecentFolders, targetCwd.trim()));
+      }
+
       if (editingId) {
         await client.updateWorkflowSchedule(editingId, payload);
         setStatusMessage(`Updated schedule "${trimmedName}".`);
@@ -240,7 +253,7 @@ export function WorkflowSchedulesView({ client }: WorkflowSchedulesViewProps): R
             </div>
           ) : null}
 
-          <form onSubmit={handleSaveForm} className="mcp-form">
+          <form onSubmit={(e) => { void handleSaveForm(e); }} className="mcp-form">
             <div className="form-group" style={{ marginBottom: "1rem" }}>
               <label htmlFor="schedule-name" style={{ display: "block", marginBottom: "4px", fontWeight: 600 }}>
                 Schedule Name *
@@ -274,16 +287,14 @@ export function WorkflowSchedulesView({ client }: WorkflowSchedulesViewProps): R
             </div>
 
             <div className="form-group" style={{ marginBottom: "1rem" }}>
-              <label htmlFor="schedule-cwd" style={{ display: "block", marginBottom: "4px", fontWeight: 600 }}>
-                Working Directory (optional)
-              </label>
-              <input
-                id="schedule-cwd"
-                type="text"
-                className="form-control"
-                placeholder="/home/user/project"
+              <ManagedDirectoryPicker
+                label="Working Directory (optional)"
+                required={false}
                 value={targetCwd}
-                onChange={(e) => setTargetCwd(e.target.value)}
+                recentFolders={activeRecentFolders}
+                placeholder="e.g. /home/user/project or repo root"
+                onChange={setTargetCwd}
+                list={handleListDirectories}
               />
             </div>
 

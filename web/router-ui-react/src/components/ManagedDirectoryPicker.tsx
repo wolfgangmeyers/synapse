@@ -15,6 +15,9 @@ interface DirectoryListing {
 
 export interface ManagedDirectoryPickerProps {
   value: string;
+  label?: string;
+  required?: boolean;
+  placeholder?: string;
   recentFolders?: readonly string[];
   isCheckingGit?: boolean;
   onChange(value: string): void;
@@ -63,7 +66,16 @@ async function localFolderFromDrop(transfer: DataTransfer): Promise<string | und
 
 // The launch form keeps its freeform input stable. Folder navigation belongs to
 // the separate native dialog, and selection is committed only from that dialog.
-export function ManagedDirectoryPicker({ value, recentFolders = [], isCheckingGit = false, onChange, list }: ManagedDirectoryPickerProps): ReactElement {
+export function ManagedDirectoryPicker({
+  value,
+  label = "Working folder",
+  required = true,
+  placeholder = "~/code/project",
+  recentFolders = [],
+  isCheckingGit = false,
+  onChange,
+  list,
+}: ManagedDirectoryPickerProps): ReactElement {
   const inputID = useId();
   const searchID = useId();
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -173,15 +185,15 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], isCheckingGi
   };
   return <div className={`managed-directory-picker${dragging ? " dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={dropFolder}>
     <div className="managed-directory-field">
-      <label htmlFor={inputID}>Working folder</label>
+      <label htmlFor={inputID}>{label}</label>
       <div className="directory-picker-input-row">
         <div className="directory-picker-input-group" ref={menuRef}>
           <input
             id={inputID}
-            required
+            required={required}
             value={value}
             onChange={(event) => onChange(event.currentTarget.value)}
-            placeholder="~/code/project"
+            placeholder={placeholder}
             autoComplete="off"
             spellCheck={false}
           />
