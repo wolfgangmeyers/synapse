@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SubagentViewerDialog } from "../../src/components/SubagentViewerDialog";
 import type { ManagedChild } from "../../src/protocol/types";
@@ -641,5 +641,342 @@ describe("SubagentViewerDialog", () => {
     expect(previewElement).toBeInTheDocument();
     expect(screen.queryByText("npm test")).toBeNull();
   });
+
+  describe("proximity auto-scrolling", () => {
+    it("scrolls to bottom on initial load and when near bottom upon new entries", async () => {
+      vi.useFakeTimers();
+
+      let entries = [
+        {
+          id: "complete:1",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "First entry",
+          at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      const mockClient = {
+        managedHistory: vi.fn(async () => ({
+          view: "complete" as const,
+          entries: [...entries],
+          next_before: null,
+        })),
+      };
+
+      const subagents = [
+        {
+          id: "sub-1",
+          description: "Auto-scroll Subagent",
+          status: "running" as const,
+          started_at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      render(
+        <SubagentViewerDialog
+          open={true}
+          onClose={() => {}}
+          subagents={subagents as any}
+          client={mockClient as any}
+        />
+      );
+
+      // Open detail view
+      const card = screen.getByRole("button", { name: /Auto-scroll Subagent/ });
+      await act(async () => {
+        card.click();
+      });
+
+      const conversationView = screen.getByText("First entry").closest(".subagent-conversation-view") as HTMLDivElement;
+      expect(conversationView).toBeInTheDocument();
+
+      // Mock scroll metrics: scrollHeight = 1000, clientHeight = 400, scrollTop initially at bottom (600)
+      Object.defineProperty(conversationView, "clientHeight", { configurable: true, value: 400 });
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, writable: true, value: 1000 });
+      conversationView.scrollTop = 600;
+
+      // Add new entry while near bottom (distance from bottom = 0 <= 180)
+      entries = [
+        ...entries,
+        {
+          id: "complete:2",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Second entry",
+          at: "2026-03-30T05:00:05Z",
+        },
+      ];
+
+      // Simulate container growing
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, value: 1200 });
+
+      // Advance timer by 2000ms to poll history
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+
+      // The layout effect should update scrollTop to the bottom (scrollHeight = 1200)
+      expect(conversationView.scrollTop).toBe(1200);
+
+      vi.useRealTimers();
+    });
+
+    it("locks viewport position when scrolled up > 180px and resumes when returning near bottom", async () => {
+      vi.useFakeTimers();
+
+      let entries = [
+        {
+          id: "complete:1",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Turn 1",
+          at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      const mockClient = {
+        managedHistory: vi.fn(async () => ({
+          view: "complete" as const,
+          entries: [...entries],
+          next_before: null,
+        })),
+      };
+
+      const subagents = [
+        {
+          id: "sub-1",
+          description: "Scroll Locking Subagent",
+          status: "running" as const,
+          started_at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      render(
+        <SubagentViewerDialog
+          open={true}
+          onClose={() => {}}
+          subagents={subagents as any}
+          client={mockClient as any}
+        />
+      );
+
+      const card = screen.getByRole("button", { name: /Scroll Locking Subagent/ });
+      await act(async () => {
+        card.click();
+      });
+
+      const conversationView = screen.getByText("Turn 1").closest(".subagent-conversation-view") as HTMLDivElement;
+      Object.defineProperty(conversationView, "clientHeight", { configurable: true, value: 400 });
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, writable: true, value: 1000 });
+      conversationView.scrollTop = 600;
+
+      // User scrolls up to read older messages: scrollTop = 300
+      // distance from bottom = scrollHeight - (scrollTop + clientHeight) = 1000 - (300 + 400) = 300 > 180
+      conversationView.scrollTop = 300;
+      act(() => {
+        fireEvent.scroll(conversationView);
+      });
+
+      // New entry arrives while scrolled up
+      entries = [
+        ...entries,
+        {
+          id: "complete:2",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Turn 2",
+          at: "2026-03-30T05:00:05Z",
+        },
+      ];
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, value: 1200 });
+
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+
+      // Viewport position should NOT jump to bottom (stays locked at 300)
+      expect(conversationView.scrollTop).toBe(300);
+
+      // Now Wolfgang scrolls back down near bottom:
+      // scrollTop = 750, distance = 1200 - (750 + 400) = 50 <= 180
+      conversationView.scrollTop = 750;
+      act(() => {
+        fireEvent.scroll(conversationView);
+      });
+
+      // Another entry arrives
+      entries = [
+        ...entries,
+        {
+          id: "complete:3",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Turn 3",
+          at: "2026-03-30T05:00:10Z",
+        },
+      ];
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, value: 1400 });
+
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+
+      // Auto-scrolling should resume and scroll to bottom (1400)
+      expect(conversationView.scrollTop).toBe(1400);
+
+      vi.useRealTimers();
+    });
+
+    it("resets proximity and forces scroll to bottom on view switch even if re-entering the same subagent", async () => {
+      vi.useFakeTimers();
+
+      const entries = [
+        {
+          id: "complete:1",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Turn 1",
+          at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      const mockClient = {
+        managedHistory: vi.fn(async () => ({
+          view: "complete" as const,
+          entries: [...entries],
+          next_before: null,
+        })),
+      };
+
+      const subagents = [
+        {
+          id: "sub-1",
+          description: "Subagent Switch Test",
+          status: "running" as const,
+          started_at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      render(
+        <SubagentViewerDialog
+          open={true}
+          onClose={() => {}}
+          subagents={subagents as any}
+          client={mockClient as any}
+        />
+      );
+
+      // Open detail view
+      const card = screen.getByRole("button", { name: /Subagent Switch Test/ });
+      await act(async () => {
+        card.click();
+      });
+
+      const conversationView = screen.getByText("Turn 1").closest(".subagent-conversation-view") as HTMLDivElement;
+      Object.defineProperty(conversationView, "clientHeight", { configurable: true, value: 400 });
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, writable: true, value: 1000 });
+      conversationView.scrollTop = 1000;
+
+      // User scrolls up to read history (> 180px)
+      conversationView.scrollTop = 200;
+      act(() => {
+        fireEvent.scroll(conversationView);
+      });
+
+      // User clicks "Back to subagents" to return to list view
+      const backBtn = screen.getByRole("button", { name: /Back to subagents/i });
+      act(() => {
+        backBtn.click();
+      });
+
+      // User clicks on the same subagent card again
+      const reselectedCard = screen.getByRole("button", { name: /Subagent Switch Test/ });
+      await act(async () => {
+        reselectedCard.click();
+      });
+
+      const reselectedView = screen.getByText("Turn 1").closest(".subagent-conversation-view") as HTMLDivElement;
+      Object.defineProperty(reselectedView, "clientHeight", { configurable: true, value: 400 });
+      Object.defineProperty(reselectedView, "scrollHeight", { configurable: true, writable: true, value: 1000 });
+
+      // View switch must reset proximity and force scroll to bottom (1000)
+      expect(reselectedView.scrollTop).toBe(1000);
+
+      vi.useRealTimers();
+    });
+
+    it("auto-scrolls when latest entry content updates in-place while near bottom", async () => {
+      vi.useFakeTimers();
+
+      let entries = [
+        {
+          id: "complete:1",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Streaming initial chunk...",
+          at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      const mockClient = {
+        managedHistory: vi.fn(async () => ({
+          view: "complete" as const,
+          entries: [...entries],
+          next_before: null,
+        })),
+      };
+
+      const subagents = [
+        {
+          id: "sub-1",
+          description: "In-place Stream Subagent",
+          status: "running" as const,
+          started_at: "2026-03-30T05:00:00Z",
+        },
+      ];
+
+      render(
+        <SubagentViewerDialog
+          open={true}
+          onClose={() => {}}
+          subagents={subagents as any}
+          client={mockClient as any}
+        />
+      );
+
+      const card = screen.getByRole("button", { name: /In-place Stream Subagent/ });
+      await act(async () => {
+        card.click();
+      });
+
+      const conversationView = screen.getByText("Streaming initial chunk...").closest(".subagent-conversation-view") as HTMLDivElement;
+      Object.defineProperty(conversationView, "clientHeight", { configurable: true, value: 400 });
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, writable: true, value: 800 });
+      conversationView.scrollTop = 400; // at bottom: 800 - (400 + 400) = 0 <= 180
+
+      // In-place entry update (length remains 1, but content expands)
+      entries = [
+        {
+          id: "complete:1",
+          agent_id: "sub-1",
+          category: "assistant_text",
+          message: "Streaming initial chunk... and now a lot more content has streamed in!",
+          at: "2026-03-30T05:00:00Z",
+        },
+      ];
+      Object.defineProperty(conversationView, "scrollHeight", { configurable: true, value: 1100 });
+
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+
+      // Viewport must auto-scroll to the updated bottom (1100)
+      expect(conversationView.scrollTop).toBe(1100);
+
+      vi.useRealTimers();
+    });
+  });
 });
+
 

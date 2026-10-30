@@ -57,6 +57,15 @@ This specification defines the behavior for eliminating the manual scroll lock t
 - **When**: Wolfgang selects agent `agent-2` from the sidebar.
 - **Then**: The conversation feed resets, automatically scrolls to the bottom of `agent-2`'s conversation, and sets the proximity state to near bottom.
 
+#### Scenario: [SCN-SCROLL-006] Subagent viewer dialog proximity auto-scrolling
+- **Given**: Wolfgang is viewing the detailed activity timeline of a subagent inside the subagent viewer dialog.
+- **When**: The user's scroll position in the subagent conversation view is within the proximity threshold (`DEFAULT_AUTO_SCROLL_THRESHOLD = 180`) of the bottom.
+- **Then**: New streaming activity or polled history entries stick and follow the viewport to the bottom.
+- **When**: Wolfgang scrolls upward past 180px from the bottom to inspect prior subagent turns.
+- **Then**: Incoming subagent timeline updates preserve the user's scroll position without snapping or jumping to the bottom.
+- **When**: Wolfgang scrolls back down within 180px of the bottom.
+- **Then**: Proximity auto-scrolling automatically resumes on subsequent updates.
+
 ### Edge & Error Scenarios
 
 #### Scenario: [SCN-SCROLL-005] Empty or short conversation feeds
@@ -74,3 +83,4 @@ This specification defines the behavior for eliminating the manual scroll lock t
 | `SCN-SCROLL-002` | `tests/e2e/conversation-scroll-and-pagination.spec.ts` | Verify scroll position remains pinned when scrolled up > 180px |
 | `SCN-SCROLL-003` | `tests/e2e/conversation-scroll-and-pagination.spec.ts` | Verify scrolling back down resumes auto-scroll followership |
 | `SCN-SCROLL-004` | `tests/e2e/conversation-scroll-and-pagination.spec.ts` | Verify switching agents scrolls to bottom regardless of prior scroll state |
+| `SCN-SCROLL-006` | `web/router-ui-react/tests/component/subagent-viewer-dialog.test.tsx` | Verify subagent viewer dialog follows proximity auto-scrolling when near bottom and locks when scrolled up |
