@@ -13,6 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -367,27 +368,26 @@ func TestSubagentRunningFourthPullThrottledAndTerminalUnlimited(t *testing.T) {
 		return err == nil && rec.Status == "running"
 	}, 2*time.Second, 10*time.Millisecond)
 
-	// Pull 1: Allowed, returns mandatory warning
+	// Pull 1: Allowed, clean snapshot output (no shouting warning)
 	p1, err := getTool1.Execute(ctx, "pull-1", map[string]any{"agent_id": childID}, nil)
 	require.NoError(t, err)
 	text1 := p1.Content[0].(ai.TextContent).Text
-	assert.Contains(t, text1, SubagentSnapshotWarning)
 	assert.Contains(t, text1, "[Subagent Running Snapshot]")
 
 	// Pull 2: Allowed
 	_, err = getTool1.Execute(ctx, "pull-2", map[string]any{"agent_id": childID}, nil)
 	require.NoError(t, err)
 
-	// Pull 3 (via a newly constructed tools slice on same manager): Throttle must be shared per manager!
+	// Pull 3 (via a newly constructed tools slice on same manager): Budget tracked on parent lane
 	tools2 := mgr.EmbeddedSubagentPublicTools(parent)
 	getTool2 := lookupTool(t, tools2, "get_subagent_result")
 	_, err = getTool2.Execute(ctx, "pull-3", map[string]any{"agent_id": childID}, nil)
 	require.NoError(t, err)
 
-	// Pull 4: Rejected under rolling 60s limit
+	// Pull 4: Rejected under subagent read budget exhaustion
 	_, err = getTool2.Execute(ctx, "pull-4", map[string]any{"agent_id": childID}, nil)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrSubagentPollThrottled)
+	assert.Equal(t, SubagentReadExhaustionError, err.Error())
 
 	// Release gate so subagent settles
 	close(gate)
@@ -397,7 +397,7 @@ func TestSubagentRunningFourthPullThrottledAndTerminalUnlimited(t *testing.T) {
 		return err == nil && rec.Status == "completed"
 	}, 3*time.Second, 20*time.Millisecond)
 
-	// Once terminal, pulls are NEVER rejected (P3)
+	// Once terminal, pulls are NEVER rejected even with exhausted budget
 	for i := 1; i <= 6; i++ {
 		termRes, err := getTool1.Execute(ctx, fmt.Sprintf("term-pull-%d", i), map[string]any{
 			"agent_id": childID,
@@ -407,7 +407,6 @@ func TestSubagentRunningFourthPullThrottledAndTerminalUnlimited(t *testing.T) {
 		termText := termRes.Content[0].(ai.TextContent).Text
 		assert.Contains(t, termText, "[Subagent Result Report]")
 		assert.Contains(t, termText, "final report result")
-		assert.NotContains(t, termText, SubagentSnapshotWarning)
 	}
 }
 
@@ -747,7 +746,7 @@ func TestSubagentToolVerboseErrorOnCorruptChainAndClosedDB(t *testing.T) {
 
 	// Tamper with embedded_entries using modernc sqlite directly to simulate corrupt chain
 	// matching owner store test pattern: UPDATE embedded_entries SET body=X'01' WHERE agent_id=? AND seq=2
-	rawDB, err := sql.Open("sqlite", dbPath)
+	rawDB, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
 	require.NoError(t, err)
 	defer rawDB.Close()
 	_, err = rawDB.ExecContext(ctx, `UPDATE embedded_entries SET body=X'01' WHERE agent_id=? AND seq=2`, childID)
@@ -916,6 +915,11 @@ func TestListSubagentsTool_ExecutionAndFiltering(t *testing.T) {
 	assert.Equal(t, "child-a-3-done", compResp.Subagents[0].AgentID)
 	assert.Equal(t, "completed", compResp.Subagents[0].Status)
 
+	// Replenish parent lane so 4th call doesn't fail due to 3-credit budget
+	mgr.laneFor(parentA.AgentID).activeMu.Lock()
+	mgr.laneFor(parentA.AgentID).subagentReadPoolRemainingMs = SubagentReadPoolCapacity * SubagentReadReplenishmentIntervalMS
+	mgr.laneFor(parentA.AgentID).activeMu.Unlock()
+
 	// 4. Limit testing -> limit: 1 returns only 1 item while total_matching reflects actual
 	resLimit, err := listToolA.Execute(ctx, "call-list-4", map[string]any{"status": "all", "limit": 1}, nil)
 	require.NoError(t, err)
@@ -924,4 +928,130 @@ func TestListSubagentsTool_ExecutionAndFiltering(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 4, limitResp.Summary.TotalMatching)
 	require.Len(t, limitResp.Subagents, 1)
+}
+
+func TestSubagentReadBudgetScenarios(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "subagent_budget_scenarios.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	parent := subagentTestParent(t, db, "parent-budget-scenarios")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+
+	clock := deterministic.NewFixedClock(time.Unix(1000, 0))
+	mgr := makeSubagentTestManagerWithClock(t, db, reg, 4, clock)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+
+	tools := mgr.EmbeddedSubagentPublicTools(parent)
+	getTool := lookupTool(t, tools, "get_subagent_result")
+	listTool := lookupTool(t, tools, "list_subagents")
+
+	// SCN-006: Clean rejection of unsupported 'wait' argument
+	_, err = getTool.Execute(ctx, "wait-call", map[string]any{"agent_id": "any-id", "wait": true}, nil)
+	require.Error(t, err)
+	assert.Equal(t, "unsupported argument \"wait\": result retrieval is snapshot-only", err.Error())
+
+	// Tool description check: clean description
+	assert.Equal(t, "Retrieve execution results, status, metrics, or detailed transcripts for a background subagent.", getTool.Description)
+
+	// Create 1 running subagent, 1 queued subagent, and 1 completed subagent
+	runningChild := store.ManagedSubagentRecord{
+		AgentID:          "child-running-budget",
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "running work",
+		Status:           "running",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, runningChild))
+
+	queuedChild := store.ManagedSubagentRecord{
+		AgentID:          "child-queued-budget",
+		ParentAgentID:    parent.AgentID,
+		ParentSessionID:  parent.SessionID,
+		ParentEpoch:      parent.Epoch,
+		ParentGeneration: parent.Generation,
+		Description:      "queued work",
+		Status:           "queued",
+	}
+	require.NoError(t, db.CreateManagedSubagent(ctx, parent, queuedChild))
+
+	completedChild := createTerminalSubagentFixture(t, db, parent, "child-completed-budget", 1, "completed", store.ManagedSubagentResult{
+		ResultText: "completed deliverable",
+	})
+	_ = completedChild
+
+	// SCN-001 & SCN-002: Check budget starts at 3 credits
+	lane := mgr.laneFor(parent.AgentID)
+	rem, whole := lane.subagentReadPoolRemaining(clock.Now())
+	assert.Equal(t, float64(SubagentReadPoolCapacity), rem)
+	assert.Equal(t, SubagentReadPoolCapacity, whole)
+
+	// 1st call: list_subagents consumes 1 credit -> 2 remaining
+	resList, err := listTool.Execute(ctx, "l1", map[string]any{}, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, resList.Content)
+	rem, whole = lane.subagentReadPoolRemaining(clock.Now())
+	assert.Equal(t, 2.0, rem)
+	assert.Equal(t, 2, whole)
+
+	// 2nd call: get_subagent_result on running child consumes 1 credit -> 1 remaining
+	resGetRun, err := getTool.Execute(ctx, "g1", map[string]any{"agent_id": "child-running-budget"}, nil)
+	require.NoError(t, err)
+	textRun := resGetRun.Content[0].(ai.TextContent).Text
+	assert.Contains(t, textRun, "[Subagent Running Snapshot]")
+	rem, whole = lane.subagentReadPoolRemaining(clock.Now())
+	assert.Equal(t, 1.0, rem)
+	assert.Equal(t, 1, whole)
+
+	// 3rd call: get_subagent_result on queued child debits 1 credit -> 0 remaining
+	resGetQueued, err := getTool.Execute(ctx, "g-queued", map[string]any{"agent_id": "child-queued-budget"}, nil)
+	require.NoError(t, err)
+	textQueued := resGetQueued.Content[0].(ai.TextContent).Text
+	assert.Contains(t, textQueued, "[Subagent Running Snapshot]")
+	assert.Contains(t, textQueued, "Status: queued")
+	rem, whole = lane.subagentReadPoolRemaining(clock.Now())
+	assert.Equal(t, 0.0, rem)
+	assert.Equal(t, 0, whole)
+
+	// SCN-003: Exhaustion redirection error on running snapshot and list_subagents
+	_, err = listTool.Execute(ctx, "l3-exhausted", map[string]any{}, nil)
+	require.Error(t, err)
+	assert.Equal(t, SubagentReadExhaustionError, err.Error())
+
+	_, err = getTool.Execute(ctx, "g2-exhausted", map[string]any{"agent_id": "child-running-budget"}, nil)
+	require.Error(t, err)
+	assert.Equal(t, SubagentReadExhaustionError, err.Error())
+
+	// SCN-004: Terminal subagent result retrieval is unbudgeted (succeeds even when budget is 0)
+	resComp, err := getTool.Execute(ctx, "g-completed", map[string]any{"agent_id": "child-completed-budget"}, nil)
+	require.NoError(t, err)
+	textComp := resComp.Content[0].(ai.TextContent).Text
+	assert.Contains(t, textComp, "[Subagent Result Report]")
+	assert.Contains(t, textComp, "completed deliverable")
+
+	// Verify credits still 0
+	rem, whole = lane.subagentReadPoolRemaining(clock.Now())
+	assert.Equal(t, 0.0, rem)
+	assert.Equal(t, 0, whole)
+
+	// SCN-005: Replenish over time: advance clock 60 seconds
+	require.NoError(t, clock.Advance(60*time.Second))
+	rem, whole = lane.subagentReadPoolRemaining(clock.Now())
+	assert.InDelta(t, 1.0, rem, 0.001)
+	assert.Equal(t, 1, whole)
+
+	// list_subagents succeeds now
+	_, err = listTool.Execute(ctx, "l-refilled", map[string]any{}, nil)
+	require.NoError(t, err)
+
+	// Immediately calling running snapshot fails again (back to 0 credits)
+	_, err = getTool.Execute(ctx, "g-re-exhausted", map[string]any{"agent_id": "child-running-budget"}, nil)
+	require.Error(t, err)
+	assert.Equal(t, SubagentReadExhaustionError, err.Error())
 }

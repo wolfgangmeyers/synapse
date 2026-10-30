@@ -30,6 +30,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-LIFECYCLE-002` | Context Reset Window Config | `AgentManagement` | [`context-reset-window-spec.md`](./context-reset-window-spec.md) | `tests/e2e/context-reset-window.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-003` | Tmux Worker Registry & List | `AgentManagement` | [`tmux-worker-list-spec.md`](./tmux-worker-list-spec.md) | `tests/e2e/tmux-worker-list.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-004` | Router MCP & OAuth Tool Routing | `Settings` | [`router-mcp-oauth-tools-spec.md`](./router-mcp-oauth-tools-spec.md) | `tests/e2e/router-mcp-oauth.spec.ts` | `Active` |
+| `SPEC-LIFECYCLE-005` | Subagent Read Tools Budget & Redirection | `AgentManagement` | [`subagent-read-tools-budget.spec.md`](./subagent-read-tools-budget.spec.md) | `tests/e2e/subagent-read-tools-budget.spec.ts` | `Active` |
 | `SPEC-BACKGROUND-WORKFLOWS-001` | Background Workflows & Scheduled Execution | `Workflows` | [`SPEC-BACKGROUND-WORKFLOWS.md`](./SPEC-BACKGROUND-WORKFLOWS.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
 
 ---
