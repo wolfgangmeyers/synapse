@@ -26,6 +26,11 @@ This specification defines the behavior for eliminating the manual scroll lock t
 3. **Viewport Position Preservation**: If `distance > 180`, incoming events or messages MUST NOT adjust `scrollTop`. The user's reading position MUST be preserved.
 4. **Conversation Switch Reset**: Switching the active conversation/peer (`conversationKey` change) MUST reset `isNearBottomRef` to `true` and scroll to the bottom.
 5. **Double-rAF DOM Settlement**: Layout changes and auto-scrolling use synchronous layout alignment followed by a `requestAnimationFrame` callback to ensure settled DOM layout.
+6. **Conversation Chunking Constants**: `DEFAULT_CONVERSATION_CHUNK_LIMIT = 50`, `CONVERSATION_UNLOAD_THRESHOLD = 150` (3x chunk limit).
+7. **Inbound-Only Natural Trimming**: When live inbound messages or timeline events increase the active in-memory collection beyond `CONVERSATION_UNLOAD_THRESHOLD` (150), excess items at the top/front are sliced off (`.slice(-CONVERSATION_UNLOAD_THRESHOLD)`).
+8. **No Bottom Trimming on Scroll-Up**: Prepending older chunks via `loadOlder()` MUST NOT trim messages or timeline events from the bottom.
+9. **Older History Availability (`hasOlder`)**: `hasOlder` remains active (`true`) whenever the oldest in-memory item sequence > 1 or cursor (`nextBeforeSeq` / `nextBefore`) > 0.
+10. **No Zombie Resurrection**: Unloaded messages and activity entries must not be resurrected from secondary stores (`messagesByPeer`, `managedHistory`). Fallback entries with `sequence < oldestEventSeq` (or sequence <= 0 when oldestEventSeq > 1) are skipped.
 
 ---
 
@@ -66,6 +71,23 @@ This specification defines the behavior for eliminating the manual scroll lock t
 - **When**: Wolfgang scrolls back down within 180px of the bottom.
 - **Then**: Proximity auto-scrolling automatically resumes on subsequent updates.
 
+#### Scenario: [SCN-UNLOAD-001] Natural unloading when exceeding 150 messages during streaming updates
+- **Given**: Wolfgang is viewing an active conversation with agent `supervisor`.
+- **And**: The conversation currently holds 150 messages or timeline events in memory.
+- **When**: A new inbound message or timeline event arrives via WebSocket or streaming update.
+- **Then**: The newest message is appended to the bottom.
+- **And**: The oldest item is trimmed from the top of the collection, preserving the collection size at `CONVERSATION_UNLOAD_THRESHOLD` (150).
+- **And**: The active `hasOlder` indicator remains `true` because the oldest in-memory item sequence is > 1.
+- **And**: Secondary caches (such as Redux store `messagesByPeer`) are reconciled with the trimmed set to prevent zombie resurrection.
+
+#### Scenario: [SCN-UNLOAD-002] Re-fetching unloaded chunks via "Load older history" or scrollback
+- **Given**: Wolfgang is viewing a conversation where older items were trimmed due to natural unloading.
+- **And**: `hasOlder` is `true` because `oldestSeq > 1`.
+- **When**: Wolfgang clicks "Load older history" or scrolls to the top of the viewport.
+- **Then**: The system issues a fetch for the preceding chunk using `beforeSeq = oldestSeq`.
+- **And**: The fetched older chunk is prepended to the top of the conversation.
+- **And**: Existing items at the bottom are NOT trimmed, expanding the reading window without jumping or losing context.
+
 ### Edge & Error Scenarios
 
 #### Scenario: [SCN-SCROLL-005] Empty or short conversation feeds
@@ -84,3 +106,5 @@ This specification defines the behavior for eliminating the manual scroll lock t
 | `SCN-SCROLL-003` | `tests/e2e/conversation-scroll-and-pagination.spec.ts` | Verify scrolling back down resumes auto-scroll followership |
 | `SCN-SCROLL-004` | `tests/e2e/conversation-scroll-and-pagination.spec.ts` | Verify switching agents scrolls to bottom regardless of prior scroll state |
 | `SCN-SCROLL-006` | `web/router-ui-react/tests/component/subagent-viewer-dialog.test.tsx` | Verify subagent viewer dialog follows proximity auto-scrolling when near bottom and locks when scrolled up |
+| `SCN-UNLOAD-001` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Natural unloading when exceeding 150 messages during streaming updates |
+| `SCN-UNLOAD-002` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Re-fetching unloaded chunks via "Load older history" or scrollback |

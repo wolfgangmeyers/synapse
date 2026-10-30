@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { appendConversation, reconcileConversation } from "../state/conversation-projection";
-import type { HistoryMessage } from "../domain/history";
+import { CONVERSATION_UNLOAD_THRESHOLD, DEFAULT_CONVERSATION_CHUNK_LIMIT, type HistoryMessage } from "../domain/history";
 import type { RouterTransport } from "../transport/router-transport";
 import type { ConversationTimelineEvent } from "../transport/http-client";
 import type { RouterScope } from "../state/scopes";
@@ -42,10 +42,10 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     setLoading(true);
     const useFreshHistory = freshHistoryScope.current === scopeKey;
 
-    // First try the unified timeline endpoint GET /v1/conversation?agent_id=...&limit=50
+    // First try the unified timeline endpoint GET /v1/conversation?agent_id=...&limit=DEFAULT_CONVERSATION_CHUNK_LIMIT
     if (typeof transport.http?.fetchConversationTimeline === "function") {
       try {
-        const result = await transport.http.fetchConversationTimeline(peer, 50);
+        const result = await transport.http.fetchConversationTimeline(peer, DEFAULT_CONVERSATION_CHUNK_LIMIT);
         if (generation !== requestGeneration.current) return;
         setTimelineEvents(result.events);
         setNextBeforeSeq(result.next_before_seq);
@@ -91,7 +91,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     }
 
     try {
-      const result = await transport.conversation(scope.agentId, peer, { limit: 50 });
+      const result = await transport.conversation(scope.agentId, peer, { limit: DEFAULT_CONVERSATION_CHUNK_LIMIT });
       if (generation !== requestGeneration.current) return;
       setNextBefore(result.next_before ?? null);
       setMessages((current) => {
@@ -117,7 +117,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       if (oldestSeq !== null && oldestSeq !== undefined && oldestSeq > 0) {
         setLoadingOlder(true);
         try {
-          const result = await transport.http.fetchConversationTimeline(peer, 50, oldestSeq);
+          const result = await transport.http.fetchConversationTimeline(peer, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq);
           setTimelineEvents((prev) => [...result.events, ...prev]);
           setNextBeforeSeq(result.next_before_seq);
           setNextBefore(result.next_before_seq);
@@ -160,7 +160,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     if (nextBefore === null || nextBefore === undefined || nextBefore <= 0) return;
     setLoadingOlder(true);
     try {
-      const result = await transport.conversation(scope.agentId, peer, { before: nextBefore, limit: 50 });
+      const result = await transport.conversation(scope.agentId, peer, { before: nextBefore, limit: DEFAULT_CONVERSATION_CHUNK_LIMIT });
       setNextBefore(result.next_before ?? null);
       setMessages((current) => {
         const reconciled = reconcileConversation({ messages: current, highWaterSequence: 0, followMessages: true }, result.messages, result.high_water_sequence).messages;
@@ -217,15 +217,24 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
           },
           created_at: Date.now(),
         };
-        return [...current, liveEvt];
+        const next = [...current, liveEvt];
+        return next.length > CONVERSATION_UNLOAD_THRESHOLD ? next.slice(-CONVERSATION_UNLOAD_THRESHOLD) : next;
       });
       setMessages((current) => {
+        let next: HistoryMessage[];
         if (current.some((m) => m.id === message.id)) {
-          return current.map((m) => m.id === message.id ? { ...m, ...message } : m);
+          next = current.map((m) => m.id === message.id ? { ...m, ...message } : m);
+        } else {
+          const useFreshMessages = freshHistoryScope.current === scopeKey;
+          const appended = appendConversation({ messages: useFreshMessages ? [] : current, highWaterSequence: 0, followMessages: true }, message).messages;
+          next = useFreshMessages ? appendConversation({ messages: current, highWaterSequence: 0, followMessages: true }, message).messages : appended;
         }
-        const useFreshMessages = freshHistoryScope.current === scopeKey;
-        const next = appendConversation({ messages: useFreshMessages ? [] : current, highWaterSequence: 0, followMessages: true }, message).messages;
-        return useFreshMessages ? appendConversation({ messages: current, highWaterSequence: 0, followMessages: true }, message).messages : next;
+        if (next.length > CONVERSATION_UNLOAD_THRESHOLD) {
+          const trimmed = next.slice(-CONVERSATION_UNLOAD_THRESHOLD);
+          onReconcile?.(peer ?? "", trimmed, 0);
+          return trimmed;
+        }
+        return next;
       });
     });
     void refresh();
@@ -234,7 +243,10 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
 
   const send = useCallback(async (message: unknown): Promise<Record<string, unknown>> => transport.sendMessage(message), [transport]);
   const scopedError = messagesScopeKey === scopeKey ? error : undefined;
-  const hasOlder = (nextBeforeSeq !== null && nextBeforeSeq !== undefined && nextBeforeSeq > 0) || (nextBefore !== null && nextBefore !== undefined && nextBefore > 0);
+  const oldestEventSeq = timelineEvents.length > 0 && timelineEvents[0] ? timelineEvents[0].seq : undefined;
+  const hasOlder = (oldestEventSeq !== undefined && oldestEventSeq !== null && oldestEventSeq > 1)
+    || (nextBeforeSeq !== null && nextBeforeSeq !== undefined && nextBeforeSeq > 0)
+    || (nextBefore !== null && nextBefore !== undefined && nextBefore > 0);
   return {
     messages: messagesScopeKey === scopeKey ? messages : [],
     timelineEvents: messagesScopeKey === scopeKey ? timelineEvents : [],

@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -547,6 +549,126 @@ describe("MessageList", () => {
 
       // Verify the live message is preserved and rendered
       expect(screen.getByText("Brand new live message")).toBeInTheDocument();
+    });
+  });
+
+  describe("natural unloading and zombie prevention", () => {
+    it("zombie prevention: does not re-inject fallback messages or activity entries older than oldestEventSeq", () => {
+      // Simulate that events only contains items starting from sequence 51 (items 1..50 were unloaded)
+      const events: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
+        id: `evt-${i + 51}`,
+        agent_id: "agent-1",
+        seq: i + 51,
+        kind: "message",
+        role: "assistant",
+        content: `Active message ${i + 51}`,
+        created_at: 1700000000000 + (i + 51) * 1000,
+      }));
+
+      // Secondary stores (messages, activityEntries) have zombie items with sequence < 51
+      const staleMessages: HistoryMessage[] = [
+        {
+          id: "zombie-msg-1",
+          body: "Zombie message 1",
+          direction: "incoming",
+          from: "agent-1",
+          to: "user",
+          sequence: 1,
+        },
+        {
+          id: "zombie-msg-25",
+          body: "Zombie message 25",
+          direction: "incoming",
+          from: "agent-1",
+          to: "user",
+          sequence: 25,
+        },
+      ];
+
+      const staleActivityEntries: ManagedHistoryEntry[] = [
+        {
+          id: "complete:2",
+          agent_id: "agent-1",
+          at: "2026-10-27T10:00:00.000Z",
+          message: "Zombie tool execution",
+          presentation: {
+            kind: "tool",
+            tool_name: "bash",
+            outcome: "success",
+            summary: "Zombie tool summary",
+          },
+        },
+      ];
+
+      render(
+        <MessageList
+          peerId="agent-1"
+          ownerId="user"
+          events={events}
+          messages={staleMessages}
+          activityEntries={staleActivityEntries}
+        />
+      );
+
+      // Active messages should be present
+      expect(screen.getByText("Active message 51")).toBeInTheDocument();
+      expect(screen.getByText("Active message 100")).toBeInTheDocument();
+
+      // Zombie items with sequence < oldestEventSeq (51) should NOT be injected
+      expect(screen.queryByText("Zombie message 1")).not.toBeInTheDocument();
+      expect(screen.queryByText("Zombie message 25")).not.toBeInTheDocument();
+      expect(screen.queryByText("Zombie tool summary")).not.toBeInTheDocument();
+    });
+
+    it("calling loadOlder prepends older chunks and does NOT drop items from the bottom", () => {
+      // 150 items (51..200) currently loaded
+      const currentEvents: ConversationTimelineEvent[] = Array.from({ length: 150 }, (_, i) => ({
+        id: `evt-${i + 51}`,
+        agent_id: "agent-1",
+        seq: i + 51,
+        kind: "message",
+        role: "assistant",
+        content: `Message ${i + 51}`,
+        created_at: 1700000000000 + (i + 51) * 1000,
+      }));
+
+      const onLoadOlder = vi.fn();
+      const { rerender } = render(
+        <MessageList
+          peerId="agent-1"
+          events={currentEvents}
+          hasOlder={true}
+          onLoadOlder={onLoadOlder}
+        />
+      );
+
+      expect(screen.getByText("Message 51")).toBeInTheDocument();
+      expect(screen.getByText("Message 200")).toBeInTheDocument();
+
+      // Prepend older chunk 1..50
+      const olderEvents: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
+        id: `evt-${i + 1}`,
+        agent_id: "agent-1",
+        seq: i + 1,
+        kind: "message",
+        role: "assistant",
+        content: `Message ${i + 1}`,
+        created_at: 1700000000000 + (i + 1) * 1000,
+      }));
+
+      rerender(
+        <MessageList
+          peerId="agent-1"
+          events={[...olderEvents, ...currentEvents]}
+          hasOlder={false}
+          onLoadOlder={onLoadOlder}
+        />
+      );
+
+      // Now all 200 items are present: Message 1 prepended, Message 200 still present at bottom
+      expect(screen.getByText("Message 1")).toBeInTheDocument();
+      expect(screen.getByText("Message 51")).toBeInTheDocument();
+      expect(screen.getByText("Message 200")).toBeInTheDocument();
     });
   });
 });

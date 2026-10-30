@@ -2,6 +2,8 @@ import { secureUuid } from "../platform/secure-uuid";
 
 export const HISTORY_LIMIT = 5000;
 export const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const DEFAULT_CONVERSATION_CHUNK_LIMIT = 50;
+export const CONVERSATION_UNLOAD_THRESHOLD = 3 * DEFAULT_CONVERSATION_CHUNK_LIMIT; // 150
 
 export interface MessageAttachment { url?: string; id?: string; mime_type?: string; size_bytes?: number; name?: string; cacheKey?: string }
 export interface HistoryMessage {
