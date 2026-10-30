@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
@@ -22,23 +21,7 @@ import (
 // Returns the three public SDK subagent tools: "subagent", "get_subagent_result", and "steer_subagent".
 // Registered in internal/managed/embedded_session.go for embedded parent sessions.
 
-// subagentThrottle retrieves or creates the SubagentThrottle shared across all tool calls
-// for the given Manager instance using Manager.subagentThrottleInstance.
-func (m *Manager) subagentThrottle() *SubagentThrottle {
-	if m == nil {
-		return NewSubagentThrottle(nil)
-	}
-	m.subagentsMu.Lock()
-	defer m.subagentsMu.Unlock()
-	if m.subagentThrottleInstance == nil {
-		var clock deterministic.Clock
-		if m.clock != nil {
-			clock = m.clock
-		}
-		m.subagentThrottleInstance = NewSubagentThrottle(clock)
-	}
-	return m.subagentThrottleInstance
-}
+
 
 // EmbeddedSubagentPublicTools is the sole primary constructor returning the public SDK subagent tools:
 // "subagent", "get_subagent_result", "steer_subagent", "list_subagents", and "stop_subagent", bound to the parent's exact EmbeddedBinding fence.
@@ -235,14 +218,14 @@ func embeddedGetSubagentResultSchema() *ai.Schema {
 func (m *Manager) embeddedGetSubagentResultTool(parent store.EmbeddedBinding) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "get_subagent_result",
-		Description: SubagentSnapshotWarning,
+		Description: "Retrieve execution results, status, metrics, or detailed transcripts for a background subagent.",
 		Parameters:  embeddedGetSubagentResultSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := ctx.Err(); err != nil {
 				return agent.AgentToolResult{}, err
 			}
 			if _, ok := args["wait"]; ok {
-				return agent.AgentToolResult{}, fmt.Errorf("unsupported argument \"wait\": result retrieval is snapshot-only\n\n%s", SubagentSnapshotWarning)
+				return agent.AgentToolResult{}, fmt.Errorf("unsupported argument \"wait\": result retrieval is snapshot-only")
 			}
 
 			agentID, _ := args["agent_id"].(string)
@@ -259,11 +242,12 @@ func (m *Manager) embeddedGetSubagentResultTool(parent store.EmbeddedBinding) ag
 				return agent.AgentToolResult{}, err
 			}
 
-			// Shared throttle per manager enforces rolling anti-polling limit on active subagents.
-			throttle := m.subagentThrottle()
-			key := SubagentThrottleKeyForBinding(parent, agentID)
-			if err := throttle.Allow(key, record.Status); err != nil {
-				return agent.AgentToolResult{}, err
+			// Active and queued subagents consume read budget to deter polling loops; completed/terminal subagents are free to inspect deliverables.
+			if IsQueuedOrRunning(record.Status) {
+				lane := m.laneFor(parent.AgentID)
+				if err := lane.consumeSubagentReadCredit(m.now()); err != nil {
+					return agent.AgentToolResult{}, err
+				}
 			}
 
 			var transcript string
@@ -521,6 +505,12 @@ func (m *Manager) embeddedListSubagentsTool(parent store.EmbeddedBinding) agent.
 		Parameters:  embeddedListSubagentsSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if err := ctx.Err(); err != nil {
+				return agent.AgentToolResult{}, err
+			}
+
+			// Consumes from the read budget so repeated listings do not bypass anti-polling controls.
+			lane := m.laneFor(parent.AgentID)
+			if err := lane.consumeSubagentReadCredit(m.now()); err != nil {
 				return agent.AgentToolResult{}, err
 			}
 

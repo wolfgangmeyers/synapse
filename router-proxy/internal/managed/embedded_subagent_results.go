@@ -1,58 +1,17 @@
 package managed
 
 import (
-	"errors"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
 const (
-	// SubagentSnapshotWarning is the exact required mandatory warning returned
-	// when get_subagent_result is called on a running or queued subagent.
-	SubagentSnapshotWarning = "**MANDATORY**!!! This is a snapshot only. Do NOT repeatedly pull a running result!!! Rest and wait for completion; a completion notification will arrive automatically."
-
-	// SubagentThrottleWindow is the rolling window for anti-polling rate limits.
-	SubagentThrottleWindow = 60 * time.Second
-
-	// SubagentThrottleMaxPulls is the maximum number of pulls allowed for a
-	// running/queued subagent within a rolling window before rejecting.
-	SubagentThrottleMaxPulls = 3
-
-	// DefaultMaxThrottleKeys limits memory usage by bounding active throttle entries.
-	DefaultMaxThrottleKeys = 2048
-
 	// MaxSubagentPreviewRunes bounds the result preview in completion notifications.
 	MaxSubagentPreviewRunes = 500
 )
-
-// ErrSubagentPollThrottled indicates that an agent pulled get_subagent_result
-// more than 3 times in 60s for a running/queued child.
-var ErrSubagentPollThrottled = errors.New("subagent polling rate limit exceeded: stop polling get_subagent_result and wait for the completion notification")
-
-// SubagentThrottleKey identifies the child within its exact parent session, epoch,
-// and generation boundary to prevent cross-session or cross-epoch leakage.
-type SubagentThrottleKey struct {
-	ParentSessionID  string
-	ParentEpoch      int64
-	ParentGeneration string
-	ChildID          string
-}
-
-// SubagentThrottleKeyForBinding constructs a SubagentThrottleKey from a parent EmbeddedBinding and child ID.
-func SubagentThrottleKeyForBinding(parent store.EmbeddedBinding, childID string) SubagentThrottleKey {
-	return SubagentThrottleKey{
-		ParentSessionID:  parent.SessionID,
-		ParentEpoch:      parent.Epoch,
-		ParentGeneration: parent.Generation,
-		ChildID:          childID,
-	}
-}
 
 // IsTerminalSubagentStatus returns true if status is one of the settled terminal states.
 func IsTerminalSubagentStatus(status string) bool {
@@ -217,8 +176,6 @@ func FormatSubagentResultReportWithOptions(record store.ManagedSubagentRecord, o
 
 	var b strings.Builder
 	if IsQueuedOrRunning(record.Status) {
-		b.WriteString(SubagentSnapshotWarning)
-		b.WriteString("\n\n")
 		b.WriteString("[Subagent Running Snapshot]\n")
 	} else {
 		b.WriteString("[Subagent Result Report]\n")
@@ -253,154 +210,4 @@ func FormatSubagentResultReportWithOptions(record store.ManagedSubagentRecord, o
 	return b.String()
 }
 
-// SubagentThrottleOptions configures a SubagentThrottle instance.
-type SubagentThrottleOptions struct {
-	Clock    deterministic.Clock
-	Window   time.Duration
-	MaxPulls int
-	MaxKeys  int
-}
 
-// SubagentThrottle enforces the rolling anti-polling rate limit on running/queued subagents.
-type SubagentThrottle struct {
-	mu       sync.Mutex
-	clock    deterministic.Clock
-	window   time.Duration
-	maxPulls int
-	maxKeys  int
-	pulls    map[SubagentThrottleKey][]time.Time
-}
-
-type wallClock struct{}
-
-func (wallClock) Now() time.Time {
-	return time.Now().UTC()
-}
-
-// NewSubagentThrottle constructs a SubagentThrottle with standard defaults.
-func NewSubagentThrottle(clock deterministic.Clock) *SubagentThrottle {
-	return NewSubagentThrottleWithOptions(SubagentThrottleOptions{
-		Clock: clock,
-	})
-}
-
-// NewSubagentThrottleWithOptions constructs a SubagentThrottle with explicit options.
-func NewSubagentThrottleWithOptions(opts SubagentThrottleOptions) *SubagentThrottle {
-	clock := opts.Clock
-	if clock == nil {
-		clock = wallClock{}
-	}
-	window := opts.Window
-	if window <= 0 {
-		window = SubagentThrottleWindow
-	}
-	maxPulls := opts.MaxPulls
-	if maxPulls <= 0 {
-		maxPulls = SubagentThrottleMaxPulls
-	}
-	maxKeys := opts.MaxKeys
-	if maxKeys <= 0 {
-		maxKeys = DefaultMaxThrottleKeys
-	}
-	return &SubagentThrottle{
-		clock:    clock,
-		window:   window,
-		maxPulls: maxPulls,
-		maxKeys:  maxKeys,
-		pulls:    make(map[SubagentThrottleKey][]time.Time),
-	}
-}
-
-// Allow checks whether a get_subagent_result pull is permitted under rolling rate limits.
-// Only queued/running subagents are subject to the 3-pull rolling limit (4th pull rejects).
-// Terminal states are never throttled and prune any stored timestamps for the key.
-func (t *SubagentThrottle) Allow(key SubagentThrottleKey, status string) error {
-	if !IsQueuedOrRunning(status) {
-		t.mu.Lock()
-		delete(t.pulls, key)
-		t.mu.Unlock()
-		return nil
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	now := t.clock.Now()
-	cutoff := now.Add(-t.window)
-
-	timestamps := t.pulls[key]
-	var active []time.Time
-	for _, ts := range timestamps {
-		if ts.After(cutoff) {
-			active = append(active, ts)
-		}
-	}
-
-	if len(active) >= t.maxPulls {
-		t.pulls[key] = active
-		return ErrSubagentPollThrottled
-	}
-
-	active = append(active, now)
-	t.pulls[key] = active
-
-	if len(t.pulls) > t.maxKeys {
-		t.cleanupLocked(now, cutoff)
-	}
-
-	return nil
-}
-
-// cleanupLocked prunes expired timestamps and evicts oldest keys when over maxKeys.
-func (t *SubagentThrottle) cleanupLocked(now time.Time, cutoff time.Time) {
-	for k, ts := range t.pulls {
-		var valid []time.Time
-		for _, stamp := range ts {
-			if stamp.After(cutoff) {
-				valid = append(valid, stamp)
-			}
-		}
-		if len(valid) == 0 {
-			delete(t.pulls, k)
-		} else {
-			t.pulls[k] = valid
-		}
-	}
-
-	if len(t.pulls) > t.maxKeys {
-		type candidate struct {
-			key    SubagentThrottleKey
-			latest time.Time
-		}
-		var list []candidate
-		for k, ts := range t.pulls {
-			var latest time.Time
-			if len(ts) > 0 {
-				latest = ts[len(ts)-1]
-			}
-			list = append(list, candidate{key: k, latest: latest})
-		}
-		sort.Slice(list, func(i, j int) bool {
-			return list[i].latest.Before(list[j].latest)
-		})
-		toEvict := len(t.pulls) - t.maxKeys
-		for i := 0; i < toEvict && i < len(list); i++ {
-			delete(t.pulls, list[i].key)
-		}
-	}
-}
-
-// Prune removes expired timestamps for all keys and deletes empty keys.
-func (t *SubagentThrottle) Prune(now time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	cutoff := now.Add(-t.window)
-	t.cleanupLocked(now, cutoff)
-}
-
-// Len returns the current number of tracked keys in the throttle map.
-func (t *SubagentThrottle) Len() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return len(t.pulls)
-}

@@ -180,6 +180,8 @@ type managedAgentLane struct {
 	inlineAllowances         map[string]int
 	inlinePoolRemainingMs    int64
 	inlinePoolUpdatedAt      time.Time
+	subagentReadPoolRemainingMs int64
+	subagentReadPoolUpdatedAt   time.Time
 	contextUsage             *ContextUsage
 	baseTools                []agent.AgentTool
 	activeTools              []agent.AgentTool
@@ -495,7 +497,6 @@ type Manager struct {
 	subagentsActive                            map[string]*subagentTask
 	subagentsQueue                             []*subagentTask
 	subagentsRegistry                          map[string]*subagentTask
-	subagentThrottleInstance                   *SubagentThrottle
 	beforeSubagentWakeReservation              func(parent store.EmbeddedBinding)
 	activeEmbeddedSessions                     map[string]*coding.Session
 	activeSessionsMu                           sync.Mutex
