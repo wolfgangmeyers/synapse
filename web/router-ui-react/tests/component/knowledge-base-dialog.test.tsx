@@ -172,7 +172,7 @@ describe("KnowledgeBaseDialog", () => {
       expect(screen.getByRole("link", { name: "Architecture Guide" })).toBeInTheDocument();
     });
 
-    const markdownBody = container.querySelector(".kb-browser .markdown-body") as HTMLElement;
+    let markdownBody = container.querySelector(".kb-browser .markdown-body") as HTMLElement;
     expect(markdownBody).not.toBeNull();
 
     // Simulate user having scrolled down
@@ -186,7 +186,10 @@ describe("KnowledgeBaseDialog", () => {
       expect(screen.getByText("This document describes system architecture.")).toBeInTheDocument();
     });
 
-    // Verify scrollTop was reset to 0
+    // Re-query markdownBody because key={currentFile} creates a fresh un-scrolled DOM element
+    markdownBody = container.querySelector(".kb-browser .markdown-body") as HTMLElement;
+
+    // Verify scrollTop of the newly mounted container is 0
     expect(markdownBody.scrollTop).toBe(0);
 
     // Simulate scrolling down again
@@ -200,7 +203,10 @@ describe("KnowledgeBaseDialog", () => {
       expect(screen.getByText("Knowledge Base Index")).toBeInTheDocument();
     });
 
-    // Verify scrollTop was reset to 0 again
+    // Re-query markdownBody because key={currentFile} creates a fresh un-scrolled DOM element
+    markdownBody = container.querySelector(".kb-browser .markdown-body") as HTMLElement;
+
+    // Verify scrollTop is 0 again
     expect(markdownBody.scrollTop).toBe(0);
   });
 

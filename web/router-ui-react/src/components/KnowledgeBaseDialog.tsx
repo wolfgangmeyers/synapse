@@ -260,8 +260,8 @@ export function KnowledgeBaseDialog({
     return md.render(content || "");
   }, [md, content]);
 
-  // Handle scrolling when content is rendered or currentFile changes:
-  // If targetHeading is set, scroll to that heading. Otherwise, reset scroll to top.
+  // Reset or scroll to target heading when content is rendered or targetHeading changes.
+  // Note: key={currentFile} on the container automatically resets scrollTop to 0 on file changes.
   useEffect(() => {
     const container = markdownBodyRef.current;
     if (!container) return;
@@ -289,15 +289,9 @@ export function KnowledgeBaseDialog({
 
       if (el instanceof HTMLElement) {
         el.scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
       }
     }
-
-    if (typeof container.scrollTo === "function") {
-      container.scrollTo({ top: 0, behavior: "instant" });
-    }
-    container.scrollTop = 0;
-  }, [currentFile, renderedHtml, targetHeading]);
+  }, [renderedHtml, targetHeading]);
 
   /**
    * Event delegation on the markdown container.
@@ -458,6 +452,7 @@ export function KnowledgeBaseDialog({
             </div>
           ) : null}
           <div
+            key={currentFile}
             ref={markdownBodyRef}
             className="markdown-body"
             onClick={handleLinkClick}
