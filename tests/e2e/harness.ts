@@ -160,6 +160,7 @@ export async function startIsolatedRouter(options: {
     });
   });
 
+  const isManaged = options.managed ?? false;
   const args = [
     "--database",
     databasePath,
@@ -169,8 +170,46 @@ export async function startIsolatedRouter(options: {
     "127.0.0.1",
     "--port",
     String(port),
-    `--managed=${options.managed ?? false}`,
+    `--managed=${isManaged}`,
   ];
+
+  if (isManaged) {
+    const home = join(root, "managed-home");
+    const piAgentDir = join(home, ".pi", "agent");
+    const sessionRoot = join(home, "sessions");
+    const cwdRoot = join(root, "work");
+    await mkdir(piAgentDir, { recursive: true, mode: 0o700 });
+    await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
+    await mkdir(cwdRoot, { recursive: true, mode: 0o700 });
+
+    const fixtureDir = resolve(options.repoRoot, "web/router-ui-react/tests/functional/fixtures");
+    const piPath = join(root, "fake-managed-pi.mjs");
+    const authPath = resolve(fixtureDir, "fake-provider-auth.mjs");
+
+    const { readFile, copyFile } = await import("node:fs/promises");
+    let fakePiContent = await readFile(resolve(fixtureDir, "fake-managed-pi.mjs"), "utf8");
+    if (fakePiContent.startsWith("#!/usr/bin/env node")) {
+      fakePiContent = `#!${process.execPath}\n` + fakePiContent.slice("#!/usr/bin/env node\n".length);
+      await writeFile(piPath, fakePiContent);
+    } else {
+      await copyFile(resolve(fixtureDir, "fake-managed-pi.mjs"), piPath);
+    }
+    await chmod(piPath, 0o700);
+
+    args.push(
+      "--managed-pi", piPath,
+      "--managed-home", home,
+      "--managed-pi-agent-dir", piAgentDir,
+      "--managed-session-root", sessionRoot,
+      "--managed-manifest", join(options.repoRoot, "router", "contract", "managed-tools-v1.json"),
+      "--managed-mecha-rpc", join(options.repoRoot, "pi-extensions", "mecha-rpc", "index.ts"),
+      "--managed-pi-subagents", join(resolve(options.repoRoot, ".."), "pi-packages", "packages", "pi-subagents", "src", "index.ts"),
+      "--managed-auth-helper", authPath,
+      "--managed-runtime-root", options.repoRoot,
+      "--managed-cwd-roots", root,
+      "--managed-quiet-recipient", "functional-supervisor"
+    );
+  }
 
   const child = spawn(binaryPath, args, {
     cwd: options.repoRoot,
@@ -375,6 +414,7 @@ export async function serveFrontendDist(distDir: string): Promise<IsolatedFronte
 
 export async function setupE2EHarness(options?: {
   useProxy?: boolean;
+  managed?: boolean;
 }): Promise<E2ETestHarness> {
   const repoRoot = resolve(__dirname, "../..");
   const distDir = join(repoRoot, "web/router-ui-react/dist");
@@ -387,7 +427,7 @@ export async function setupE2EHarness(options?: {
 
   const [mockLLM, router, frontend] = await Promise.all([
     startMockLLMServer(),
-    startIsolatedRouter({ repoRoot, managed: false }),
+    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false }),
     serveFrontendDist(distDir),
   ]);
 

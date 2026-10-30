@@ -100,6 +100,7 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"blocked":                  agent.Blocked,
 		"blocked_reason":           nil,
 		"blocked_at":               nil,
+		"is_background":            agent.IsBackground,
 	}
 	if agent.Blocked {
 		result["blocked_reason"] = agent.BlockedReason

@@ -8,7 +8,7 @@ import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
 import type { Workflow, WorkflowState, WorkflowStatePosition, WorkflowStateResponse, WorkflowStatesResponse, WorkflowToolsResponse, WorkflowWithStates, CreateWorkflowRequest, UpdateWorkflowRequest, WorkflowExportBundle } from "../domain/workflow-states";
-import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider } from "../protocol/types";
+import type { ManagedAgent, ManagedAgentLaunchPayload, ManagedChildrenProjection, ManagedHistoryEntry, ManagedProvider, WorkflowSchedule } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
 export interface Capabilities extends Record<string, unknown> {}
@@ -611,6 +611,11 @@ export interface RouterHttpClient {
   exportWorkflow(id: string): Promise<WorkflowExportBundle>;
   importWorkflow(bundle: WorkflowExportBundle): Promise<Workflow>;
   updateWorkflowLayout(id: string, positions: WorkflowStatePosition[]): Promise<void>;
+  runWorkflow(workflowId: string, options?: { variables?: Record<string, string>; cwd?: string; model?: { provider: string; id: string } }): Promise<ManagedAgent>;
+  listWorkflowSchedules(workflowId?: string): Promise<WorkflowSchedule[]>;
+  createWorkflowSchedule(req: Partial<WorkflowSchedule>): Promise<WorkflowSchedule>;
+  updateWorkflowSchedule(id: string, req: Partial<WorkflowSchedule>): Promise<WorkflowSchedule>;
+  deleteWorkflowSchedule(id: string): Promise<void>;
   setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }): Promise<unknown>;
   setManagedAgentWorkflow(agentId: string, workflowId: string, variables?: Record<string, string>): Promise<unknown>;
   setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
@@ -755,6 +760,31 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     exportWorkflow: async (id) => request(`/v1/workflows/${encodeURIComponent(id)}/export`) as Promise<WorkflowExportBundle>,
     importWorkflow: async (bundle) => jsonRequest("/v1/workflows/import", "POST", bundle) as Promise<Workflow>,
     updateWorkflowLayout: async (id, positions) => { await jsonRequest(`/v1/workflows/${encodeURIComponent(id)}/layout`, "PUT", { positions }); },
+    runWorkflow: async (workflowId: string, options?: { variables?: Record<string, string>; cwd?: string; model?: { provider: string; id: string } }) => {
+      const body = await jsonRequest(`/v1/workflows/${encodeURIComponent(workflowId)}/run`, "POST", options ?? {});
+      return (recordValue(body)?.agent ?? body) as ManagedAgent;
+    },
+    listWorkflowSchedules: async (workflowId?: string) => {
+      const q = workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : "";
+      const body = await request(`/v1/workflow-schedules${q}`);
+      const rec = recordValue(body);
+      if (Array.isArray(rec?.schedules)) return rec.schedules as WorkflowSchedule[];
+      if (Array.isArray(body)) return body as WorkflowSchedule[];
+      return [];
+    },
+    createWorkflowSchedule: async (req: Partial<WorkflowSchedule>) => {
+      const body = await jsonRequest("/v1/workflow-schedules", "POST", req);
+      const rec = recordValue(body);
+      return (rec?.schedule ?? body) as WorkflowSchedule;
+    },
+    updateWorkflowSchedule: async (id: string, req: Partial<WorkflowSchedule>) => {
+      const body = await jsonRequest(`/v1/workflow-schedules/${encodeURIComponent(id)}`, "PATCH", req);
+      const rec = recordValue(body);
+      return (rec?.schedule ?? body) as WorkflowSchedule;
+    },
+    deleteWorkflowSchedule: async (id: string) => {
+      await request(`/v1/workflow-schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
     setManagedAgentWorkflowState: async (agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }) => {
       const payload: Record<string, unknown> = workflowStateId
         ? { action: "activate", workflow_state_id: workflowStateId }

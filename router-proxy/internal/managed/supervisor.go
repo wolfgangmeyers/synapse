@@ -49,6 +49,7 @@ type LaunchRequest struct {
 	Worktree           bool
 	WorktreeBranch     string
 	AllowInlineTools   bool
+	IsBackground       bool
 }
 type LaunchResult struct {
 	Agent    *store.ManagedAgentRecord
@@ -883,7 +884,7 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 		worktreeBasePath = cwd
 		worktreeBranch = request.WorktreeBranch
 	}
-	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: agentCwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now, Worktree: request.Worktree, WorktreeBasePath: worktreeBasePath, WorktreeBranch: worktreeBranch, AllowInlineTools: request.AllowInlineTools}
+	agent := store.ManagedAgentRecord{AgentID: request.Name, Name: request.Name, SlotHeld: true, Cwd: agentCwd, SelectedModel: store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}, Runtime: request.Runtime, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, PiSessionID: sessionID, RuntimeGeneration: runtimeGeneration, ManifestRevision: manifestRevision(m.manifest), ManifestHash: m.manifest.CanonicalSHA256, PendingInitialInstruction: request.InitialInstruction, CreatedAt: now, UpdatedAt: now, Worktree: request.Worktree, WorktreeBasePath: worktreeBasePath, WorktreeBranch: worktreeBranch, AllowInlineTools: request.AllowInlineTools, IsBackground: request.IsBackground}
 	if m.config.Enabled {
 		recipe, recipeErr := m.managedLaunchRecipe(agent)
 		if recipeErr != nil {
