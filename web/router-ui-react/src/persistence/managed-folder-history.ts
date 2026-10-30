@@ -1,5 +1,13 @@
 import type { StorageAdapter } from "./settings-repository";
 
+function storageOrUndefined(): StorageAdapter | undefined {
+  try {
+    return typeof globalThis.localStorage === "undefined" ? undefined : globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 export const MANAGED_RECENT_FOLDERS_KEY = "mecha.web.managedRecentFolders";
 export const MANAGED_RECENT_FOLDERS_LIMIT = 15;
 
@@ -21,7 +29,7 @@ export function normalizeManagedRecentFolders(values: readonly unknown[]): strin
   return folders;
 }
 
-export function loadManagedRecentFolders(storage: StorageAdapter | undefined): string[] {
+export function loadManagedRecentFolders(storage: StorageAdapter | undefined = storageOrUndefined()): string[] {
   if (storage === undefined) return [];
   try {
     const raw = storage.getItem(MANAGED_RECENT_FOLDERS_KEY);
@@ -36,7 +44,7 @@ export function recordManagedRecentFolder(folders: readonly string[], folder: st
   return normalizeManagedRecentFolders([folder, ...folders]);
 }
 
-export function saveManagedRecentFolders(storage: StorageAdapter | undefined, folders: readonly string[]): void {
+export function saveManagedRecentFolders(storage: StorageAdapter | undefined = storageOrUndefined(), folders: readonly string[]): void {
   if (storage === undefined) return;
   storage.setItem(MANAGED_RECENT_FOLDERS_KEY, JSON.stringify(normalizeManagedRecentFolders(folders)));
 }

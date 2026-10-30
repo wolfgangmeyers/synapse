@@ -885,13 +885,28 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     <ToolDefaultsDialog open={dialog === "tool-defaults"} client={session.transport.http} onClose={() => setDialog(undefined)} />
     <SystemOneConfigDialog open={dialog === "systemone-config"} client={session.transport.http} onClose={() => setDialog(undefined)} />
     <KnowledgeBaseDialog open={dialog === "knowledge-base"} client={session.transport.http} onClose={() => setDialog(undefined)} />
-    <WorkflowSchedulesModal open={dialog === "workflow-schedules"} client={session.transport.http} onClose={() => setDialog(undefined)} />
+    <WorkflowSchedulesModal
+      open={dialog === "workflow-schedules"}
+      client={session.transport.http}
+      recentFolders={distinctRecentFolders}
+      onListDirectories={(path) => session.transport.http.managedDirectories(path)}
+      onClose={() => setDialog(undefined)}
+    />
     <WorkflowBackgroundRunModal
       open={dialog === "run-background-workflow"}
       client={session.transport.http}
+      recentFolders={distinctRecentFolders}
+      onListDirectories={(path) => session.transport.http.managedDirectories(path)}
       onClose={() => setDialog(undefined)}
       onLaunched={(agent) => {
         setDialog(undefined);
+        if (agent.cwd) {
+          setManagedRecentFolders((current) => {
+            const next = recordManagedRecentFolder(current, agent.cwd);
+            saveManagedRecentFolders(storage, next);
+            return next;
+          });
+        }
         void reconciliation.refresh();
         void refreshManaged().catch(() => undefined);
         if (agent.agent_id) {

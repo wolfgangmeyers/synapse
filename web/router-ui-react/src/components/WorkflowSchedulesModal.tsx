@@ -6,10 +6,12 @@ import { WorkflowSchedulesView } from "./WorkflowSchedulesView";
 export interface WorkflowSchedulesModalProps {
   open: boolean;
   client: RouterHttpClient;
+  recentFolders?: readonly string[];
+  onListDirectories?: (path: string) => Promise<{ path: string; parent: string; directories: Array<{ name: string; path: string }> }>;
   onClose: () => void;
 }
 
-export function WorkflowSchedulesModal({ open, client, onClose }: WorkflowSchedulesModalProps): ReactElement {
+export function WorkflowSchedulesModal({ open, client, recentFolders, onListDirectories, onClose }: WorkflowSchedulesModalProps): ReactElement {
   return (
     <DialogShell
       open={open}
@@ -19,7 +21,7 @@ export function WorkflowSchedulesModal({ open, client, onClose }: WorkflowSchedu
       onClose={onClose}
       className="message-dialog workflow-schedules-dialog"
     >
-      <WorkflowSchedulesView client={client} />
+      <WorkflowSchedulesView client={client} recentFolders={recentFolders} onListDirectories={onListDirectories} />
     </DialogShell>
   );
 }
