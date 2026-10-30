@@ -59,7 +59,7 @@ function isBackgroundAgent(agent: Agent): boolean {
 
 function isCompletedAgent(agent: Agent): boolean {
   const lifecycle = agent.lifecycle_state ?? agent.managed_agent?.lifecycle_state;
-  const desired = (agent as { desired_state?: string }).desired_state ?? agent.managed_agent?.desired_state;
+  const desired = agent.desired_state ?? agent.managed_agent?.desired_state;
   const activity = agent.activity_state ?? agent.managed_agent?.activity_state;
   return lifecycle === "terminated" || lifecycle === "failed" || desired === "terminated" || activity === "stopped" || activity === "failed";
 }
@@ -148,6 +148,57 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
     setManagedActionsOpen(false);
   };
 
+  const serverMenuItems = useMemo(() => {
+    const items: Array<{ id: string; label: string; icon: string; action: () => void }> = [];
+    if (onLaunchManaged) {
+      items.push({ id: "launch-agent", label: "Launch Agent", icon: "fa-solid fa-robot", action: onLaunchManaged });
+    }
+    items.push({ id: "launch-workflow", label: "Launch Workflow", icon: "fa-solid fa-play", action: () => onLaunchBackgroundWorkflow?.() });
+    if (onRestartRouter) {
+      items.push({ id: "restart-router", label: "Restart router", icon: "fa-solid fa-arrows-rotate", action: onRestartRouter });
+    }
+    if (onProviderSettings) {
+      items.push({ id: "provider-settings", label: "Provider settings", icon: "fa-solid fa-key", action: onProviderSettings });
+    }
+    if (onMCPServers) {
+      items.push({ id: "mcp-servers", label: "MCP Servers", icon: "fa-solid fa-network-wired", action: onMCPServers });
+    }
+    if (onToolDefaults) {
+      items.push({ id: "tool-defaults", label: "Tool Defaults", icon: "fa-solid fa-sliders", action: onToolDefaults });
+    }
+    if (onKnowledgeBase) {
+      items.push({ id: "knowledge-base", label: "Knowledge Base", icon: "fa-solid fa-book", action: onKnowledgeBase });
+    }
+    if (onWorkflowSchedules) {
+      items.push({ id: "workflow-schedules", label: "Workflow Schedules", icon: "fa-solid fa-clock", action: onWorkflowSchedules });
+    }
+    items.push({
+      id: "workflows",
+      label: "Workflows",
+      icon: "fa-solid fa-diagram-project",
+      action: onWorkflows ?? (() => { window.location.hash = "#/workflows"; }),
+    });
+    if (onSystemOneConfig) {
+      items.push({ id: "system-one-config", label: "System 1 Config", icon: "fa-solid fa-brain", action: onSystemOneConfig });
+    }
+    if (onContextThresholds) {
+      items.push({ id: "context-thresholds", label: "Context Thresholds", icon: "fa-solid fa-gauge-high", action: onContextThresholds });
+    }
+    return items;
+  }, [
+    onLaunchManaged,
+    onLaunchBackgroundWorkflow,
+    onRestartRouter,
+    onProviderSettings,
+    onMCPServers,
+    onToolDefaults,
+    onKnowledgeBase,
+    onWorkflowSchedules,
+    onWorkflows,
+    onSystemOneConfig,
+    onContextThresholds,
+  ]);
+
   useEffect(() => {
     if (!managedActionsOpen) return;
     const closeOnOutsidePointer = (event: PointerEvent): void => { if (event.target instanceof Node && !managedActionsRef.current?.contains(event.target)) setManagedActionsOpen(false); };
@@ -189,19 +240,29 @@ export function Sidebar({ scope, client, routerLabel, connection, connectionIden
                     id={`${managedActionsId}-menu`}
                     className="managed-actions-menu"
                     role="menu"
-                    aria-label="Managed actions"
+                    aria-label="Server controls menu"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    {onLaunchManaged ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onLaunchManaged, event)}>Launch Agent</button> : null}
-                    <button type="button" role="menuitem" onClick={(event) => runManagedAction(onLaunchBackgroundWorkflow, event)}>Launch Workflow</button>
-                    {onRestartRouter ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onRestartRouter, event)}><i className="fa-solid fa-arrows-rotate" aria-hidden="true" style={{ marginRight: 8 }} />Restart router</button> : null}
-                    {onProviderSettings ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onProviderSettings, event)}>Provider settings</button> : null}
-                    {onMCPServers ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onMCPServers, event)}>MCP Servers</button> : null}
-                    {onToolDefaults ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onToolDefaults, event)}>Tool Defaults</button> : null}
-                    {onKnowledgeBase ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onKnowledgeBase, event)}>Knowledge Base</button> : null}
-                    <button type="button" role="menuitem" onClick={(event) => runManagedAction(onWorkflows ?? (() => { window.location.hash = "#/workflows"; }), event)}>Workflows</button>
-                    {onSystemOneConfig ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onSystemOneConfig, event)}>System 1 Config</button> : null}
-                    {onContextThresholds ? <button type="button" role="menuitem" onClick={(event) => runManagedAction(onContextThresholds, event)}>Context Thresholds</button> : null}
+                    <div className="managed-actions-header">
+                      <span className="managed-actions-title">Server Controls</span>
+                    </div>
+                    <div className="managed-actions-grid">
+                      {serverMenuItems.map((item) => (
+                        <div key={item.id} className="managed-action-tile">
+                          <button
+                            type="button"
+                            className="managed-action-tile-btn"
+                            role="menuitem"
+                            onClick={(event) => runManagedAction(item.action, event)}
+                            aria-label={item.label}
+                            title={item.label}
+                          >
+                            <i className={`${item.icon} managed-action-tile-icon`} aria-hidden="true" />
+                            <span className="managed-action-tile-label">{item.label}</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
               </div>

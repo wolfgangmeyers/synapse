@@ -3212,20 +3212,84 @@ dialog,
 .managed-actions-trigger:focus-visible, .managed-actions-menu button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .managed-actions-menu {
   position: absolute;
-  z-index: 1000 !important;
   top: calc(100% + 8px);
   right: 0;
-  display: grid;
-  width: max-content;
-  min-width: 220px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface-raised);
-  box-shadow: 0 18px 42px rgba(0,0,0,0.42);
+  z-index: 10001;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 12px;
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  animation: dropdown-fade-in 0.15s ease-out;
 }
-.managed-actions-menu button { width: 100%; min-height: 40px; padding: 0 12px; border-radius: 10px; background: transparent; color: var(--text); text-align: left; }
-.managed-actions-menu button:hover { background: rgba(157,168,255,0.16); }
+.managed-actions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.managed-actions-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted, #94a3b8);
+}
+.managed-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.managed-action-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  transition: all 0.15s ease;
+  overflow: hidden;
+}
+.managed-action-tile:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.managed-action-tile-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 38px;
+  padding: 8px 10px;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text, #f1f5f9) !important;
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.managed-action-tile-icon {
+  font-size: 0.95rem;
+  color: var(--text-secondary, #c2c8dc);
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+.managed-action-tile:hover .managed-action-tile-icon {
+  color: var(--primary, #9da8ff);
+}
+.managed-action-tile-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
 .danger-button { background: transparent; color: var(--danger); border: 1px solid rgba(255,180,171,.42); }
 .agent-source {

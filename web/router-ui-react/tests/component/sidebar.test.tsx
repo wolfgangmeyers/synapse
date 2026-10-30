@@ -11,7 +11,7 @@ describe("Sidebar", () => {
     const { container } = render(<Sidebar scope={{ routerUrl: "http://router.test", agentId: "web" }} routerLabel="local" connection="connected" agents={[]} />);
     const brand = container.querySelector(".brand");
     expect(brand).toContainElement(screen.getByRole("heading", { name: "Mecha-Developer" }));
-    expect(brand?.children).toHaveLength(2);
+    expect(brand?.children).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Refresh agents" })).not.toBeInTheDocument();
     expect(screen.queryByText("Your agent network")).not.toBeInTheDocument();
   });
@@ -47,29 +47,29 @@ describe("Sidebar", () => {
     expect(routerBtn.parentElement).toContainElement(menuButton);
     expect(menuButton).toHaveAttribute("aria-haspopup", "menu");
     expect(menuButton).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Launch managed agent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "Server controls menu" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Launch Agent")).not.toBeInTheDocument();
 
     await user.click(menuButton);
     expect(menuButton).toHaveAttribute("aria-expanded", "true");
-    const menu = screen.getByRole("menu", { name: "Managed actions" });
-    expect(menu).toHaveTextContent("Launch managed agent");
+    const menu = screen.getByRole("menu", { name: "Server controls menu" });
+    expect(menu).toHaveTextContent("Launch Agent");
     expect(menu).toHaveTextContent("Provider settings");
     expect(menu).not.toHaveTextContent("History");
 
     await user.keyboard("{Escape}");
     expect(menuButton).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "Server controls menu" })).not.toBeInTheDocument();
 
     await user.click(menuButton);
-    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    await user.click(screen.getByRole("menuitem", { name: "Launch Agent" }));
     expect(onLaunchManaged).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "Server controls menu" })).not.toBeInTheDocument();
 
     await user.click(menuButton);
     await user.click(screen.getByRole("menuitem", { name: "Provider settings" }));
     expect(onProviderSettings).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("menu", { name: "Managed actions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "Server controls menu" })).not.toBeInTheDocument();
   });
 
   it("moves an agent to the top of the visible list when selectedAgentId changes", () => {

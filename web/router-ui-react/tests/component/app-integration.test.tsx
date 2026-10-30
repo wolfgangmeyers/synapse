@@ -252,7 +252,7 @@ describe("App integration", () => {
     await user.click(screen.getByRole("button", { name: "Close provider settings" }));
 
     await user.click(menuButton);
-    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    await user.click(screen.getByRole("menuitem", { name: "Launch Agent" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     await user.click(screen.getByRole("button", { name: "Recent folders" }));
     const recentDialog = screen.getByRole("dialog", { name: "Choose working folder" });
@@ -300,7 +300,7 @@ describe("App integration", () => {
 
     render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory }} />);
     await user.click(await screen.findByRole("button", { name: "Managed actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    await user.click(screen.getByRole("menuitem", { name: "Launch Agent" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "  My Agent  " } });
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/project" } });

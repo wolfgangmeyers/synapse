@@ -45,6 +45,26 @@ Specifications governing persistent organizational knowledge storage, Markdown d
 
 ---
 
+## Settings & Configuration Specifications
+
+Specifications governing provider settings, router MCP configurations, and server management menus.
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-SETTINGS-002` | Server Management Dropdown Menu | `Settings` | [`SPEC-SERVER-MANAGEMENT-MENU.md`](./SPEC-SERVER-MANAGEMENT-MENU.md) | `tests/e2e/server-management-menu.spec.ts` | `Draft` |
+
+---
+
+## Agent Scratchpad Specifications
+
+Specifications governing persistent agent scratchpad memory, notes retention, pinning, and storage pruning.
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-SCRATCHPAD-001` | Scratchpad Entry Truncation Tool & Storage | `AgentManagement` | [`scratchpad-truncation.spec.md`](./scratchpad-truncation.spec.md) | `tests/e2e/scratchpad-truncation.spec.ts` | `Draft` |
+
+---
+
 ## Spec Authoring & Maintenance Workflow
 
 1. **Pre-Implementation Requirement**: No pull request or implementation commit modifying user behavior may land without an accompanying or pre-existing specification in `docs/specs/`.
