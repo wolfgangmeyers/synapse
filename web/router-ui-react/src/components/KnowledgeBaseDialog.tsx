@@ -10,6 +10,29 @@ export interface KnowledgeBaseDialogProps {
 }
 
 /**
+ * Slugifies heading text for anchor IDs matching GitHub/markdown standard.
+ */
+export function slugifyHeading(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-");
+}
+
+function extractPlainText(tokens: readonly { type: string; content?: string | undefined; children?: readonly unknown[] | undefined }[]): string {
+  let text = "";
+  for (const token of tokens) {
+    if (token.children && Array.isArray(token.children)) {
+      text += extractPlainText(token.children as readonly { type: string; content?: string | undefined; children?: readonly unknown[] | undefined }[]);
+    } else if (token.type === "text" || token.type === "code_inline") {
+      text += token.content ?? "";
+    }
+  }
+  return text;
+}
+
+/**
  * Resolves a target link href relative to the currently active markdown file within the KB.
  * Handles hash fragments, relative paths ("..", "."), and returns a clean relative path.
  * If the href is purely a hash fragment or empty, returns null.
@@ -194,6 +217,7 @@ export function KnowledgeBaseDialog({
   // Configure Markdown parser:
   // - html: false disables raw HTML to prevent XSS / script injection.
   // - validateLink permits standard safe web protocols and relative markdown paths without schemes.
+  // - heading_open rule injects id slugs for in-document anchor navigation (#hashtag links).
   const md = useMemo(() => {
     const parser = new MarkdownIt({ html: false, breaks: true, linkify: false });
     parser.validateLink = (url: string) => {
@@ -201,12 +225,31 @@ export function KnowledgeBaseDialog({
       if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("mailto:")) {
         return true;
       }
-      // Allow relative paths (e.g. topic.md, sub/topic.md) while disallowing dangerous schemes
+      // Allow relative paths (e.g. topic.md, sub/topic.md) and anchor links (#references) while disallowing dangerous schemes
       if (!trimmed.includes("://") && !trimmed.startsWith("//") && !trimmed.startsWith("javascript:")) {
         return true;
       }
       return false;
     };
+
+    const defaultHeadingOpen =
+      parser.renderer.rules.heading_open ||
+      function (tokens, idx, options) {
+        return parser.renderer.renderToken(tokens, idx, options);
+      };
+
+    parser.renderer.rules.heading_open = function (tokens, idx, options, env, self) {
+      const nextToken = tokens[idx + 1];
+      if (nextToken && nextToken.type === "inline") {
+        const rawText = nextToken.children ? extractPlainText(nextToken.children) : (nextToken.content ?? "");
+        const slug = slugifyHeading(rawText);
+        if (slug) {
+          tokens[idx]?.attrSet("id", slug);
+        }
+      }
+      return defaultHeadingOpen(tokens, idx, options, env, self);
+    };
+
     return parser;
   }, []);
 
@@ -216,24 +259,65 @@ export function KnowledgeBaseDialog({
 
   /**
    * Event delegation on the markdown container.
-   * Intercepts clicks on relative markdown links (e.g. href="topic.md") to keep
-   * browsing within the dialog SPA without triggering full page reloads.
+   * Intercepts clicks on:
+   * 1. In-document anchor links (#hashtag) -> scrolls to matching heading element.
+   * 2. Relative markdown links (e.g. href="topic.md") -> updates currentFile SPA navigation.
    */
   const handleLinkClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target instanceof HTMLElement ? e.target : null;
     const anchor = target?.closest("a");
-    if (anchor) {
-      const href = anchor.getAttribute("href");
-      if (href && !href.startsWith("http://") && !href.startsWith("https://") && !href.startsWith("mailto:")) {
-        if (href.startsWith("#")) {
-          return;
-        }
-        e.preventDefault();
-        const resolved = resolveRelativePath(currentFile, href);
-        if (resolved) {
-          setCurrentFile(resolved);
+    if (!anchor) return;
+
+    const href = anchor.getAttribute("href");
+    if (!href || href.startsWith("http://") || href.startsWith("https://") || href.startsWith("mailto:")) {
+      return;
+    }
+
+    // Relative link to current file or file with hash (e.g. "INDEX.md#references" or "file.md#target" or "#target")
+    const hashIndex = href.indexOf("#");
+    const rawPath = hashIndex !== -1 ? href.slice(0, hashIndex) : href;
+    const rawTargetId = hashIndex !== -1 ? href.slice(hashIndex + 1).trim() : "";
+
+    // If it's a hash pointing within the current file (e.g. "#target" or "currentFile#target")
+    if (href.startsWith("#") || (rawTargetId && (rawPath === "" || rawPath === currentFile || resolveRelativePath(currentFile, rawPath) === currentFile))) {
+      e.preventDefault();
+      if (!rawTargetId) return;
+
+      const container = e.currentTarget;
+      const decodedTargetId = decodeURIComponent(rawTargetId).toLowerCase();
+
+      // Attempt matching by exact ID, decoded lowercase ID, or heading text matching
+      let el =
+        container.querySelector(`#${CSS.escape(rawTargetId)}`) ??
+        container.querySelector(`#${CSS.escape(decodedTargetId)}`);
+
+      if (!el) {
+        // Fallback: search headings for matching id or slugified text
+        const headings = container.querySelectorAll("h1, h2, h3, h4, h5, h6");
+        for (const h of headings) {
+          const id = h.getAttribute("id");
+          if (id && id.toLowerCase() === decodedTargetId) {
+            el = h;
+            break;
+          }
+          if (slugifyHeading(h.textContent ?? "") === decodedTargetId) {
+            el = h;
+            break;
+          }
         }
       }
+
+      if (el instanceof HTMLElement) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      return;
+    }
+
+    // Relative links (potentially to another file with anchor fragment, e.g. "operations/worker.md#details")
+    e.preventDefault();
+    const resolved = resolveRelativePath(currentFile, href);
+    if (resolved) {
+      setCurrentFile(resolved);
     }
   };
 

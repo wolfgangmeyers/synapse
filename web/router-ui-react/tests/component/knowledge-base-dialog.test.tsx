@@ -20,7 +20,7 @@ describe("KnowledgeBaseDialog", () => {
       }),
       getKBFile: vi.fn().mockImplementation(async (path: string) => {
         if (path === "INDEX.md") {
-          return "# Knowledge Base Index\n\n## Guides\n- [Architecture Guide](architecture-guide.md)\n";
+          return "# Knowledge Base Index\n\nJump to [References Section](#references)\n\n## Guides\n- [Architecture Guide](architecture-guide.md)\n\n## References\n\nSome reference documentation here.\n";
         }
         if (path === "architecture-guide.md") {
           return "# Architecture Guide\n\nThis document describes system architecture.";
@@ -157,6 +157,42 @@ describe("KnowledgeBaseDialog", () => {
       expect(screen.getByText("Knowledge Base Index")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Back to Index" })).not.toBeInTheDocument();
     });
+  });
+
+  it("scrolls to matching heading on #hashtag anchor link click without reloading or fetching file", async () => {
+    const scrollIntoViewMock = vi.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrollIntoViewMock;
+
+    render(
+      <KnowledgeBaseDialog
+        open={true}
+        client={mockClient as RouterHttpClient}
+        onClose={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "References Section" })).toBeInTheDocument();
+    });
+
+    const getCalls = vi.mocked(mockClient.getKBFile)?.mock.calls.length ?? 0;
+
+    const hashLink = screen.getByRole("link", { name: "References Section" });
+    fireEvent.click(hashLink);
+
+    // Should not call getKBFile for anchor links
+    expect(vi.mocked(mockClient.getKBFile)?.mock.calls.length).toBe(getCalls);
+
+    // Should have invoked scrollIntoView on the target heading
+    expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+  });
+
+  it("slugifies headings correctly", async () => {
+    const { slugifyHeading } = await import("../../src/components/KnowledgeBaseDialog");
+    expect(slugifyHeading("References")).toBe("references");
+    expect(slugifyHeading("How to use this index")).toBe("how-to-use-this-index");
+    expect(slugifyHeading("1. Intent & User Outcome")).toBe("1-intent-user-outcome");
+    expect(slugifyHeading("Supervisor: Process & Rules")).toBe("supervisor-process-rules");
   });
 
   it("resolves relative paths and ignores anchor fragments", async () => {

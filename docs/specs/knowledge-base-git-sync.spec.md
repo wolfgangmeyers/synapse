@@ -23,8 +23,8 @@ The Knowledge Base (KB) serves as persistent, reusable organizational memory acr
 3. **Automated Pull-Before and Push-After Hooks**: When a remote repository is configured, modifying KB tools (`kb_write` and `kb_delete`) opportunistically pull remote changes prior to applying file/index modifications and push the committed modifications up to the remote repository.
 4. **Index Consistency on Deletion**: Calling `kb_delete` removes the target markdown file and removes its reference from `INDEX.md`, maintaining index integrity.
 5. **Path Traversal Protection**: Neither HTTP file serving endpoints (`/v1/kb/file`) nor agent tools (`kb_read`, `kb_write`, `kb_delete`) permit path traversal outside the KB root directory (`SanitizeKBPath`).
-6. **In-Dialog Markdown Browsing**: The Web UI dialog provides a lightweight markdown viewer that defaults to rendering `INDEX.md`, intercepts internal markdown links to navigate between topics within the dialog, and provides breadcrumb navigation ("Back to Index").
-7. **Design System Conformance**: The modal dialog adheres to the design system (dark glassmorphism, compact `.icon-btn-round` action buttons, and clear section separation).
+6. **In-Dialog Markdown Browsing**: The Web UI dialog provides a lightweight markdown viewer that defaults to rendering `INDEX.md`, intercepts internal markdown links to navigate between topics within the dialog, supports `#hashtag` anchor scrolling to matching headings, and provides breadcrumb navigation ("Back to Index").
+7. **Design System Conformance**: The modal dialog adheres to the design system (dark glassmorphism, compact `.icon-btn-round` action buttons, clean typography and spacing, and clear section separation).
 
 ---
 
@@ -54,6 +54,7 @@ The Knowledge Base (KB) serves as persistent, reusable organizational memory acr
 - **Then**:
   - The rendered Markdown displays the table of contents and links to topics.
   - When the user clicks a topic link (e.g. `architecture.md`), the dialog intercepts the click, fetches `GET /v1/kb/file?path=architecture.md`, and renders the topic content in-place.
+  - When the user clicks an in-document `#hashtag` anchor link (e.g. `[References](#references)`), the dialog prevents navigation or reload and smoothly scrolls the matching heading element into view.
   - A "Back to Index" button appears, allowing the user to return to the root index.
 
 #### Scenario: [SCN-KB-003] Agent deletes a Knowledge Base topic using `kb_delete`
