@@ -608,13 +608,13 @@ func TestEmbeddedSubagentBashStdoutOverflowTerminatesDescendants(t *testing.T) {
 
 	bashTool := tools[3]
 
-	// Command generates > 512 KiB to trigger overflow
+	// Command generates > embeddedSubagentBashLimit (64 KiB) to trigger overflow
 	result, err := bashTool.Execute(ctx, "b-overflow", map[string]any{
-		"command": "head -c 600000 /dev/zero | tr '\\0' 'x'",
+		"command": "head -c 100000 /dev/zero | tr '\\0' 'x'",
 	}, nil)
 	require.NoError(t, err, "stdout overflow must succeed cleanly without error or SIGKILL")
 	require.NotEmpty(t, result.Content)
 	text, ok := result.Content[0].(ai.TextContent)
 	require.True(t, ok)
-	require.Contains(t, text.Text, "Output truncated at 524288 bytes")
+	require.Contains(t, text.Text, fmt.Sprintf("Output truncated at %d bytes", embeddedSubagentBashLimit))
 }

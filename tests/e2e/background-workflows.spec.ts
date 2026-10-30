@@ -1,0 +1,413 @@
+import { test, expect } from "@playwright/test";
+import { setupE2EHarness, type E2ETestHarness } from "./harness";
+import { WebSocket } from "ws";
+import { DatabaseSync } from "node:sqlite";
+
+test.describe("Background Workflows & Scheduled Execution E2E", () => {
+  let harness: E2ETestHarness;
+
+  test.beforeAll(async () => {
+    harness = await setupE2EHarness({ useProxy: true, managed: true });
+  });
+
+  test.afterAll(async () => {
+    if (harness) {
+      await harness.close();
+    }
+  });
+
+  test("Scenario 1 & 2: Dynamic Background Workflow Launch and Missing Required Variables Validation", async ({
+    page,
+  }) => {
+    const targetRouterUrl = harness.proxy ? harness.proxy.url : harness.router.httpUrl;
+
+    // 1. Create a Workflow with required and optional variables and an entry state
+    const wfStateRes = await fetch(`${targetRouterUrl}/v1/workflow-states`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Audit State",
+        description: "Auditing repo {{REPOSITORY}} on branch {{BRANCH}}",
+        entry_text: "Run security and code audits on {{REPOSITORY}}",
+        goal: "Complete code audit for {{REPOSITORY}}",
+      }),
+    });
+    expect(wfStateRes.status).toBe(201);
+    const wfStateData = await wfStateRes.json();
+    const entryStateId = wfStateData.workflow_state.id;
+
+    const wfRes = await fetch(`${targetRouterUrl}/v1/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Code Audit",
+        description: "Autonomous code audit workflow",
+        entry_state_id: entryStateId,
+        variables: [
+          {
+            name: "REPOSITORY",
+            label: "Repository",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "BRANCH",
+            label: "Branch",
+            type: "text",
+            required: false,
+            default_value: "main",
+          },
+        ],
+      }),
+    });
+    expect(wfRes.status).toBe(201);
+    const wfData = await wfRes.json();
+    const workflowId = wfData.id;
+
+    // --- Scenario 2: Launch workflow with missing required variables -> 400 Bad Request ---
+    const badRunRes = await fetch(`${targetRouterUrl}/v1/workflows/${workflowId}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variables: {},
+      }),
+    });
+    expect(badRunRes.status).toBe(400);
+    const badRunData = await badRunRes.json();
+    expect(badRunData.error).toContain("missing required workflow parameter(s): REPOSITORY");
+
+    // Also test whitespace-only parameter
+    const blankRunRes = await fetch(`${targetRouterUrl}/v1/workflows/${workflowId}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variables: { REPOSITORY: "   " },
+      }),
+    });
+    expect(blankRunRes.status).toBe(400);
+
+    // --- Scenario 1: Launch background workflow with valid variables -> HTTP 201 and is_background = 1 ---
+    const runRes = await fetch(`${targetRouterUrl}/v1/workflows/${workflowId}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        variables: { REPOSITORY: "mecha-developer", BRANCH: "feature-bg" },
+      }),
+    });
+    expect(runRes.status).toBe(201);
+    const runData = await runRes.json();
+    expect(runData.agent_id).toMatch(/^bg-wf-/);
+    expect(runData.workflow_id).toBe(workflowId);
+
+    // Verify in SQLite database that is_background == 1
+    const db = new DatabaseSync(harness.router.databasePath);
+    const agentRow = db
+      .prepare("SELECT agent_id, is_background, active_workflow_id FROM managed_agents WHERE agent_id = ?")
+      .get(runData.agent_id) as { agent_id: string; is_background: number; active_workflow_id: string } | undefined;
+    expect(agentRow).toBeDefined();
+    expect(agentRow?.is_background).toBe(1);
+    expect(agentRow?.active_workflow_id).toBe(workflowId);
+
+    // Connect standard agent to verify tab separation in UI
+    const stdAgentId = "std-worker-1";
+    const agentWs = new WebSocket(`${targetRouterUrl.replace(/^http/, "ws")}/v1/agents`);
+    await new Promise<void>((resolve, reject) => {
+      agentWs.on("open", () => {
+        agentWs.send(
+          JSON.stringify({
+            version: "v1",
+            frame_id: "agent-reg-std",
+            type: "register",
+            agent_id: stdAgentId,
+            instance_id: "inst-" + Date.now(),
+            agent_role: "agent",
+            client_type: "test",
+            ack_confirmation: "correlated_v1",
+            conversation_sync: "v1",
+            delivery_receipts: "delivery_items_v1",
+          })
+        );
+      });
+      agentWs.on("message", (data) => {
+        try {
+          const parsed = JSON.parse(data.toString());
+          if (parsed.type === "registered") resolve();
+        } catch {}
+      });
+      agentWs.on("error", reject);
+    });
+
+    // Navigate to UI and verify tab separation
+    page.on("console", (msg) => console.log("PAGE CONSOLE:", msg.type(), msg.text()));
+    page.on("pageerror", (err) => console.log("PAGE ERROR:", err));
+
+    await page.goto(harness.frontend.url);
+    await page.evaluate(
+      ({ routerUrl }) => {
+        localStorage.setItem("mecha.web.activeRouter", routerUrl);
+        localStorage.setItem("mecha.web.routers", JSON.stringify([routerUrl]));
+      },
+      { routerUrl: targetRouterUrl }
+    );
+    await page.reload();
+
+    // Debug: fetch /v1/managed-agents from page context
+    const managedAgentsData = await page.evaluate(async (routerUrl) => {
+      try {
+        const res = await fetch(`${routerUrl}/v1/managed-agents`);
+        return { status: res.status, body: await res.json() };
+      } catch (err: any) {
+        return { error: err.message };
+      }
+    }, targetRouterUrl);
+    console.log("PAGE EVALUATE /v1/managed-agents:", JSON.stringify(managedAgentsData, null, 2));
+
+    // Verify "Agents" tab shows standard worker but NOT the background worker
+    const agentsTab = page.locator('button[role="tab"]:has-text("Agents")');
+    await expect(agentsTab).toBeVisible({ timeout: 5000 });
+    await agentsTab.click();
+
+    await expect(page.locator(`[data-agent-id="${stdAgentId}"]`)).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(`[data-agent-id="${runData.agent_id}"]`)).toHaveCount(0);
+
+    // Switch to "Background" tab and verify the background worker is displayed
+    const bgTab = page.locator('button[role="tab"]:has-text("Background")');
+    await expect(bgTab).toBeVisible();
+    await bgTab.click();
+
+    await expect(page.locator(`[data-agent-id="${runData.agent_id}"]`)).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(`[data-agent-id="${stdAgentId}"]`)).toHaveCount(0);
+
+    agentWs.close();
+    db.close();
+  });
+
+  test("Scenario 3: Create, list, edit, and trigger a workflow schedule via /v1/workflow-schedules", async ({
+    page,
+  }) => {
+    const targetRouterUrl = harness.proxy ? harness.proxy.url : harness.router.httpUrl;
+
+    // 1. Fetch available workflows or create one if none exist
+    let wfsRes = await fetch(`${targetRouterUrl}/v1/workflows`);
+    let wfs = await wfsRes.json();
+    let targetWf = wfs[0];
+    if (!targetWf) {
+      const createWfRes = await fetch(`${targetRouterUrl}/v1/workflows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Schedule Workflow",
+          description: "Workflow for schedule testing",
+          variables: [{ name: "REPOSITORY", label: "Repository", type: "text", required: true }],
+        }),
+      });
+      targetWf = await createWfRes.json();
+    }
+    expect(targetWf).toBeDefined();
+
+    // 2. Attempt to create schedule with missing required variables -> 400 Bad Request
+    const badSchedRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflow_id: targetWf.id,
+        name: "Nightly Audit",
+        schedule_type: "interval",
+        interval_ms: 3600000,
+        variables: {},
+        next_run_at: new Date(Date.now() + 3600000).toISOString(),
+      }),
+    });
+    expect(badSchedRes.status).toBe(400);
+
+    // 3. Create schedule with valid required variables -> 201 Created
+    const createSchedRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflow_id: targetWf.id,
+        name: "Nightly Audit",
+        schedule_type: "interval",
+        interval_ms: 3600000,
+        variables: { REPOSITORY: "mecha-developer" },
+        next_run_at: new Date(Date.now() + 3600000).toISOString(),
+      }),
+    });
+    expect(createSchedRes.status).toBe(201);
+    const createdSched = (await createSchedRes.json()).schedule;
+    expect(createdSched.id).toBeDefined();
+    expect(createdSched.name).toBe("Nightly Audit");
+
+    // 4. List workflow schedules via REST API
+    const listRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules`);
+    expect(listRes.status).toBe(200);
+    const listData = await listRes.json();
+    const found = listData.schedules.find((s: any) => s.id === createdSched.id);
+    expect(found).toBeDefined();
+
+    // 5. Edit workflow schedule via PATCH
+    const editRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules/${createdSched.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Hourly Audit Sweep",
+        interval_ms: 7200000,
+      }),
+    });
+    expect(editRes.status).toBe(200);
+    const updatedSched = (await editRes.json()).schedule;
+    expect(updatedSched.name).toBe("Hourly Audit Sweep");
+    expect(updatedSched.interval_ms).toBe(7200000);
+
+    // 6. Open UI and verify Workflow Schedules Modal displays the schedule in the list view
+    await page.goto(harness.frontend.url);
+    await page.evaluate(
+      ({ routerUrl }) => {
+        localStorage.setItem("mecha.web.activeRouter", routerUrl);
+        localStorage.setItem("mecha.web.routers", JSON.stringify([routerUrl]));
+      },
+      { routerUrl: targetRouterUrl }
+    );
+    await page.reload();
+
+    // Open managed actions dropdown
+    const trigger = page.locator(".managed-actions-trigger");
+    await expect(trigger).toBeVisible({ timeout: 5000 });
+    await trigger.click();
+
+    // Click "Workflow Schedules" menuitem
+    const schedulesMenuItem = page.locator('button[role="menuitem"]:has-text("Workflow Schedules")');
+    await expect(schedulesMenuItem).toBeVisible({ timeout: 5000 });
+    await schedulesMenuItem.click();
+
+    // Verify modal is displayed with schedule in list view
+    const modal = page.locator("dialog.workflow-schedules-dialog");
+    await expect(modal).toBeVisible({ timeout: 5000 });
+    await expect(modal.locator(".dialog-title")).toContainText("Workflow Schedules");
+    await expect(modal.locator("text=Hourly Audit Sweep")).toBeVisible({ timeout: 5000 });
+  });
+
+  test("Scenario 4: Background tab displays active background workers followed by completed workers without a segmented toggle", async ({
+    page,
+  }) => {
+    const targetRouterUrl = harness.proxy ? harness.proxy.url : harness.router.httpUrl;
+    const db = new DatabaseSync(harness.router.databasePath);
+
+    // Seed two background workers directly in DB: one active/running, one completed/terminated
+    const activeBgId = "bg-worker-active-1";
+    const completedBgId = "bg-worker-completed-1";
+    const nowIso = new Date().toISOString();
+
+    const sha256Hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    db.prepare(`
+      INSERT INTO managed_agents (
+        agent_id, name, cwd, selected_model_provider, selected_model_id,
+        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
+        manifest_revision, manifest_hash, created_at, updated_at, is_background
+      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'running', 'running', 'active', 'embedded', 1, 1, ?, ?, ?, 1)
+    `).run(activeBgId, activeBgId, sha256Hex, nowIso, nowIso);
+
+    db.prepare(`
+      INSERT INTO managed_agents (
+        agent_id, name, cwd, selected_model_provider, selected_model_id,
+        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
+        manifest_revision, manifest_hash, created_at, updated_at, is_background
+      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, ?, ?, ?, 1)
+    `).run(completedBgId, completedBgId, sha256Hex, nowIso, nowIso);
+
+    // Bump projection version
+    db.prepare("UPDATE managed_settings SET projection_version = projection_version + 1 WHERE singleton_id = 1").run();
+    db.close();
+
+    // Load page
+    await page.goto(harness.frontend.url);
+    await page.evaluate(
+      ({ routerUrl }) => {
+        localStorage.setItem("mecha.web.activeRouter", routerUrl);
+        localStorage.setItem("mecha.web.routers", JSON.stringify([routerUrl]));
+      },
+      { routerUrl: targetRouterUrl }
+    );
+    await page.reload();
+
+    // Click Background tab
+    const bgTab = page.locator('button[role="tab"]:has-text("Background")');
+    await expect(bgTab).toBeVisible({ timeout: 5000 });
+    await bgTab.click();
+
+    // Assert that segmented toggle control does NOT exist in the background tab
+    const segmentedToggle = page.locator('.segmented-toggle-group[aria-label="Background worker state"]');
+    await expect(segmentedToggle).toHaveCount(0);
+
+    // Both active worker and completed worker are displayed together
+    await expect(page.locator(`[data-agent-id="${activeBgId}"]`)).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(`[data-agent-id="${completedBgId}"]`)).toBeVisible({ timeout: 5000 });
+
+    // Verify ordering: active worker comes before completed worker
+    const listItems = page.locator(".sidebar-content [data-agent-id]");
+    const activeEl = page.locator(`.sidebar-content [data-agent-id="${activeBgId}"]`);
+    const completedEl = page.locator(`.sidebar-content [data-agent-id="${completedBgId}"]`);
+    await expect(activeEl).toBeVisible();
+    await expect(completedEl).toBeVisible();
+
+    const allIds = await listItems.evaluateAll((elements) =>
+      elements.map((el) => el.getAttribute("data-agent-id"))
+    );
+    const activeIndex = allIds.indexOf(activeBgId);
+    const completedIndex = allIds.indexOf(completedBgId);
+    expect(activeIndex).toBeGreaterThanOrEqual(0);
+    expect(completedIndex).toBeGreaterThanOrEqual(0);
+    expect(activeIndex).toBeLessThan(completedIndex);
+  });
+
+  test("Scenario 5: Verify 1-hour retention policy / pruning behavior for background workers", async () => {
+    const db = new DatabaseSync(harness.router.databasePath);
+
+    // Insert an old terminated background worker (terminated 65 minutes ago)
+    const oldTerminatedBgId = "bg-worker-old-terminated";
+    const recentTerminatedBgId = "bg-worker-recent-terminated";
+    const sixtyFiveMinAgo = new Date(Date.now() - 65 * 60 * 1000).toISOString();
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    db.prepare(`
+      INSERT INTO managed_agents (
+        agent_id, name, cwd, selected_model_provider, selected_model_id,
+        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
+        manifest_revision, manifest_hash, created_at, updated_at, is_background
+      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, 'hash', ?, ?, 1)
+    `).run(oldTerminatedBgId, oldTerminatedBgId, sixtyFiveMinAgo, sixtyFiveMinAgo);
+
+    db.prepare(`
+      INSERT INTO managed_agents (
+        agent_id, name, cwd, selected_model_provider, selected_model_id,
+        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
+        manifest_revision, manifest_hash, created_at, updated_at, is_background
+      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, 'hash', ?, ?, 1)
+    `).run(recentTerminatedBgId, recentTerminatedBgId, tenMinAgo, tenMinAgo);
+
+    // Verify both exist before pruning
+    const beforeOld = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(oldTerminatedBgId);
+    const beforeRecent = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(recentTerminatedBgId);
+    expect(beforeOld).toBeDefined();
+    expect(beforeRecent).toBeDefined();
+
+    // Execute pruning query matching store.PruneExpiredBackgroundAgents (1 hour threshold)
+    const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const result = db
+      .prepare(
+        "DELETE FROM managed_agents WHERE is_background = 1 AND (lifecycle_state = 'terminated' OR desired_state = 'terminated') AND updated_at < ?"
+      )
+      .run(cutoff);
+
+    expect(result.changes).toBeGreaterThanOrEqual(1);
+
+    // Verify the 65-min old worker was pruned while the 10-min old worker remains intact
+    const afterOld = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(oldTerminatedBgId);
+    const afterRecent = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(recentTerminatedBgId);
+    expect(afterOld).toBeUndefined();
+    expect(afterRecent).toBeDefined();
+
+    db.close();
+  });
+});

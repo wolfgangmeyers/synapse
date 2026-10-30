@@ -893,7 +893,30 @@ export interface ManagedAgent {
   blocked?: boolean;
   blocked_reason?: string | null;
   blocked_at?: string | null;
+  is_background?: boolean;
 }
+
+export interface WorkflowSchedule {
+  id: string;
+  workflow_id: string;
+  name: string;
+  enabled: boolean;
+  schedule_type: 'interval' | 'cron';
+  interval_ms?: number | null;
+  cron_expression?: string | null;
+  variables?: Record<string, string>;
+  target_cwd?: string;
+  model_provider?: string;
+  model_id?: string;
+  next_run_at: string;
+  last_run_at?: string | null;
+  last_run_status?: string | null;
+  last_run_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ManagedAgentProjection = ManagedAgent;
 
 export interface ManagedAgentLaunchPayload {
   name: string;

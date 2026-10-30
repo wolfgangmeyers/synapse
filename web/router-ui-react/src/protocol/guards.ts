@@ -176,6 +176,7 @@ export function isManagedAgent(value: unknown): value is ManagedAgent {
   if (Object.hasOwn(value, "record_kind") && (value as any).record_kind === "archived") return false;
   if (Object.hasOwn(value, "allow_inline_tools") && value.allow_inline_tools !== undefined && typeof value.allow_inline_tools !== "boolean") return false;
   if (Object.hasOwn(value, "worktree") && value.worktree !== undefined && typeof value.worktree !== "boolean") return false;
+  if (Object.hasOwn(value, "is_background") && value.is_background !== undefined && typeof value.is_background !== "boolean") return false;
   if (Object.hasOwn(value, "worktree_base_path") && value.worktree_base_path !== undefined && !isSafeString(value.worktree_base_path, 0, 4096)) return false;
   if (Object.hasOwn(value, "runtime") && value.runtime !== undefined && value.runtime !== "rpc" && value.runtime !== "embedded") return false;
   if (Object.hasOwn(value, "active_workflow_state_id") && value.active_workflow_state_id !== null && value.active_workflow_state_id !== undefined && !isSafeString(value.active_workflow_state_id, 0, 128)) return false;

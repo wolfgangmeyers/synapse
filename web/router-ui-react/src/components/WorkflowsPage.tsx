@@ -4,6 +4,8 @@ import type { Workflow, WorkflowExportBundle } from "../domain/workflow-states";
 import { DialogShell } from "./DialogShell";
 import { WorkflowCanvas } from "./WorkflowCanvas";
 import { ImportWorkflowModal } from "./ImportWorkflowModal";
+import { WorkflowSchedulesView } from "./WorkflowSchedulesView";
+import { WorkflowBackgroundRunModal } from "./WorkflowBackgroundRunModal";
 
 export interface WorkflowsPageProps {
   client: RouterHttpClient;
@@ -12,6 +14,7 @@ export interface WorkflowsPageProps {
 }
 
 export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageProps): ReactElement {
+  const [activeTab, setActiveTab] = useState<"workflows" | "schedules">("workflows");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -34,6 +37,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   const [deleting, setDeleting] = useState(false);
 
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [runModalWorkflowId, setRunModalWorkflowId] = useState<string | null>(null);
 
   // GitHub Sync state
   const [gitRepoUrl, setGitRepoUrl] = useState("");
@@ -292,25 +296,47 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
           </div>
         </div>
         <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setImportDialogOpen(true)}
-          >
-            <i className="fa-solid fa-file-import" aria-hidden="true" /> Import Workflow
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => {
-              setNewWorkflowName("");
-              setNewWorkflowDesc("");
-              setCreateError(undefined);
-              setCreateDialogOpen(true);
-            }}
-          >
-            <i className="fa-solid fa-plus" aria-hidden="true" /> New Workflow
-          </button>
+          {/* Top Navigation Tabs */}
+          <div className="brand-header-tabs" style={{ maxWidth: 300, display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              className={`brand-header-tab ${activeTab === "workflows" ? "active" : ""}`}
+              onClick={() => setActiveTab("workflows")}
+            >
+              <i className="fa-solid fa-diagram-project" aria-hidden="true" style={{ marginRight: 6 }} /> Workflows
+            </button>
+            <button
+              type="button"
+              className={`brand-header-tab ${activeTab === "schedules" ? "active" : ""}`}
+              onClick={() => setActiveTab("schedules")}
+            >
+              <i className="fa-solid fa-clock" aria-hidden="true" style={{ marginRight: 6 }} /> Schedules
+            </button>
+          </div>
+
+          {activeTab === "workflows" ? (
+            <>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setImportDialogOpen(true)}
+              >
+                <i className="fa-solid fa-file-import" aria-hidden="true" /> Import
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setNewWorkflowName("");
+                  setNewWorkflowDesc("");
+                  setCreateError(undefined);
+                  setCreateDialogOpen(true);
+                }}
+              >
+                <i className="fa-solid fa-plus" aria-hidden="true" /> New Workflow
+              </button>
+            </>
+          ) : null}
         </div>
       </header>
 
@@ -320,6 +346,11 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
         </div>
       ) : null}
 
+      {activeTab === "schedules" ? (
+        <div className="workflows-content">
+          <WorkflowSchedulesView client={client} />
+        </div>
+      ) : (
       <div className="workflows-content">
         <section className="workflows-github-sync" aria-label="GitHub Sync">
           <div className="workflows-github-sync-header">
@@ -524,6 +555,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
           </div>
         )}
       </div>
+      )}
 
       {createDialogOpen ? (
         <DialogShell
@@ -653,6 +685,25 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
         onClose={() => setImportDialogOpen(false)}
         onImport={handleImport}
       />
+      {runModalWorkflowId ? (
+        <WorkflowBackgroundRunModal
+          open={Boolean(runModalWorkflowId)}
+          client={client}
+          initialWorkflowId={runModalWorkflowId}
+          onClose={() => setRunModalWorkflowId(null)}
+          onLaunched={() => {
+            setRunModalWorkflowId(null);
+            // Return home so user lands on dashboard / background workers
+            if (onNavigateHome) {
+              onNavigateHome();
+            } else if (onBack) {
+              onBack();
+            } else {
+              window.location.hash = "";
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

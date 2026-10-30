@@ -218,6 +218,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case path == "/v1/workflow-states":
 		r.handleWorkflowStatesCollection(w, req)
 		return
+	case path == "/v1/workflow-schedules":
+		r.handleWorkflowSchedulesCollection(w, req)
+		return
 	case path == "/v1/workflow-tools":
 		r.handleWorkflowTools(w, req)
 		return
@@ -289,6 +292,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if id, _, ok := routeID(req.URL.EscapedPath(), "/v1/workflow-states/"); ok {
 		r.handleWorkflowStateItem(w, req, id)
+		return
+	}
+	if id, _, ok := routeID(req.URL.EscapedPath(), "/v1/workflow-schedules/"); ok {
+		r.handleWorkflowScheduleItem(w, req, id)
 		return
 	}
 	if id, action, ok := routeID(req.URL.EscapedPath(), "/v1/workflows/"); ok {

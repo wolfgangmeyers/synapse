@@ -169,6 +169,8 @@ type ManagedAgentRecord struct {
 	BlockedReason string
 	// BlockedAt is the timestamp when the agent was marked blocked.
 	BlockedAt string
+	// IsBackground indicates whether this agent is a background workflow worker.
+	IsBackground bool
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -1007,6 +1009,22 @@ func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAge
 			percentVal = *agent.ContextPercent
 		}
 		values = append(values, tokensVal, agent.ContextWindow, percentVal)
+	}
+	hasBackground, err := managedAgentColumnTx(ctx, s.db, "is_background")
+	if err != nil {
+		return err
+	}
+	if hasBackground {
+		columns += `,is_background`
+		values = append(values, boolInt(agent.IsBackground))
+	}
+	hasActiveWorkflow, err := managedAgentColumnTx(ctx, s.db, "active_workflow_id")
+	if err != nil {
+		return err
+	}
+	if hasActiveWorkflow {
+		columns += `,active_workflow_id,active_workflow_state_id`
+		values = append(values, nullIfEmpty(agent.ActiveWorkflowID), nullIfEmpty(agent.ActiveWorkflowStateID))
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_agents (`+columns+`) VALUES (`+placeholders+`)`, values...)
@@ -4631,6 +4649,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err := loadManagedBlockedTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
+	if err := loadManagedBackgroundTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
 	return agent, nil
 }
 
@@ -4689,6 +4710,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 			return nil, err
 		}
 		if err := loadManagedBlockedTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+		if err := loadManagedBackgroundTx(ctx, s.db, item); err != nil {
 			return nil, err
 		}
 		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
@@ -5187,6 +5211,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		if err := loadManagedBlockedTx(ctx, s.db, agent); err != nil {
 			return rollback(err)
 		}
+		if err := loadManagedBackgroundTx(ctx, s.db, agent); err != nil {
+			return rollback(err)
+		}
 		if agent.Runtime == "embedded" {
 			policy, err := s.embeddedProjectionGoalTx(ctx, agent.AgentID)
 			if err != nil {
@@ -5319,6 +5346,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return rollback(err)
 	}
 	if err := loadManagedBlockedTx(ctx, s.db, agent); err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedBackgroundTx(ctx, s.db, agent); err != nil {
 		return rollback(err)
 	}
 	var goalPolicy *ManagedGoalPolicy
