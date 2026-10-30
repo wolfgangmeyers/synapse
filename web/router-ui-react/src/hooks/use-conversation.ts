@@ -229,12 +229,7 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
           const appended = appendConversation({ messages: useFreshMessages ? [] : current, highWaterSequence: 0, followMessages: true }, message).messages;
           next = useFreshMessages ? appendConversation({ messages: current, highWaterSequence: 0, followMessages: true }, message).messages : appended;
         }
-        if (next.length > CONVERSATION_UNLOAD_THRESHOLD) {
-          const trimmed = next.slice(-CONVERSATION_UNLOAD_THRESHOLD);
-          onReconcile?.(peer ?? "", trimmed, 0);
-          return trimmed;
-        }
-        return next;
+        return next.length > CONVERSATION_UNLOAD_THRESHOLD ? next.slice(-CONVERSATION_UNLOAD_THRESHOLD) : next;
       });
     });
     void refresh();

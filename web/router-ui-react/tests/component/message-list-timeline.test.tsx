@@ -565,7 +565,7 @@ describe("MessageList", () => {
         created_at: 1700000000000 + (i + 51) * 1000,
       }));
 
-      // Secondary stores (messages, activityEntries) have zombie items with sequence < 51
+      // Secondary stores (messages, activityEntries) have zombie items with sequence < 51 and created_at < oldestEvent.created_at
       const staleMessages: HistoryMessage[] = [
         {
           id: "zombie-msg-1",
@@ -574,6 +574,7 @@ describe("MessageList", () => {
           from: "agent-1",
           to: "user",
           sequence: 1,
+          created_at: new Date(1700000000000 + 1 * 1000).toISOString(),
         },
         {
           id: "zombie-msg-25",
@@ -582,6 +583,7 @@ describe("MessageList", () => {
           from: "agent-1",
           to: "user",
           sequence: 25,
+          created_at: new Date(1700000000000 + 25 * 1000).toISOString(),
         },
       ];
 
@@ -589,7 +591,7 @@ describe("MessageList", () => {
         {
           id: "complete:2",
           agent_id: "agent-1",
-          at: "2026-10-27T10:00:00.000Z",
+          at: new Date(1700000000000 + 2 * 1000).toISOString(),
           message: "Zombie tool execution",
           presentation: {
             kind: "tool",

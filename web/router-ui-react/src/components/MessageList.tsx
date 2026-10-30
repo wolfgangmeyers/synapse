@@ -560,15 +560,15 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       }
     }
 
-    const oldestEventSeq = (effectiveEvents && effectiveEvents.length > 0)
-      ? effectiveEvents[0]?.seq
-      : undefined;
-
-    // Include live or pending messages (from WebSocket) not already captured
+    // Include live or pending messages (from WebSocket) not already captured.
+    // When effectiveEvents is present and active, fallback messages should only include
+    // pending / optimistic messages, or items that are newer than effectiveEvents[0].
     for (const message of messages ?? []) {
-      if (oldestEventSeq !== undefined && oldestEventSeq > 1) {
-        const msgSeq = message.sequence ?? 0;
-        if (msgSeq > 0 && msgSeq < oldestEventSeq) {
+      if (effectiveEvents && effectiveEvents.length > 0) {
+        const oldestEvent = effectiveEvents[0];
+        const isPending = Boolean(message.pending);
+        const isNewer = oldestEvent ? messageTime(message) >= oldestEvent.created_at : true;
+        if (!isPending && !isNewer) {
           continue;
         }
       }
@@ -583,9 +583,9 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
 
     // Include live activity entries (from WebSocket) not already captured
     for (const entry of activityEntries ?? []) {
-      if (oldestEventSeq !== undefined && oldestEventSeq > 1) {
-        const actSeq = activitySequence(entry);
-        if (actSeq !== Number.MAX_SAFE_INTEGER && actSeq < oldestEventSeq) {
+      if (effectiveEvents && effectiveEvents.length > 0) {
+        const oldestEvent = effectiveEvents[0];
+        if (oldestEvent && activityTime(entry) < oldestEvent.created_at) {
           continue;
         }
       }
