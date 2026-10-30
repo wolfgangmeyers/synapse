@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
+    "test:component": "vitest run",
     "test:unit": "vitest run tests/component/mcp-servers-dialog.test.tsx",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",

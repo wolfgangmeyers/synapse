@@ -15,8 +15,10 @@ import (
 )
 
 type mockGitSyncer struct {
-	pullFn func(ctx context.Context, repoURL, filename string) ([]byte, bool, error)
-	pushFn func(ctx context.Context, repoURL, filename string, content []byte, commitMessage string) error
+	pullFn          func(ctx context.Context, repoURL, filename string) ([]byte, bool, error)
+	pushFn          func(ctx context.Context, repoURL, filename string, content []byte, commitMessage string) error
+	pullDirectoryFn func(ctx context.Context, repoURL, targetDir string) error
+	pushDirectoryFn func(ctx context.Context, repoURL, sourceDir, commitMessage string) error
 }
 
 func (m *mockGitSyncer) Pull(ctx context.Context, repoURL, filename string) ([]byte, bool, error) {
@@ -29,6 +31,20 @@ func (m *mockGitSyncer) Pull(ctx context.Context, repoURL, filename string) ([]b
 func (m *mockGitSyncer) Push(ctx context.Context, repoURL, filename string, content []byte, commitMessage string) error {
 	if m.pushFn != nil {
 		return m.pushFn(ctx, repoURL, filename, content, commitMessage)
+	}
+	return nil
+}
+
+func (m *mockGitSyncer) PullDirectory(ctx context.Context, repoURL, targetDir string) error {
+	if m.pullDirectoryFn != nil {
+		return m.pullDirectoryFn(ctx, repoURL, targetDir)
+	}
+	return nil
+}
+
+func (m *mockGitSyncer) PushDirectory(ctx context.Context, repoURL, sourceDir, commitMessage string) error {
+	if m.pushDirectoryFn != nil {
+		return m.pushDirectoryFn(ctx, repoURL, sourceDir, commitMessage)
 	}
 	return nil
 }
@@ -517,5 +533,64 @@ func TestGitSyncHTTP_Workflows_PushAndPull(t *testing.T) {
 	pulledStates, err := s.ListWorkflowStatesByWorkflow(ctx, workflows[0].ID)
 	require.NoError(t, err)
 	require.Len(t, pulledStates, 2)
+}
+
+func TestGitSyncHTTP_KB_PushAndPull(t *testing.T) {
+	ctx := context.Background()
+	s, _ := store.OpenTestStore(t)
+	mock := &mockGitSyncer{}
+	r, err := transport.New(transport.Options{
+		Store:     s,
+		GitSyncer: mock,
+	})
+	require.NoError(t, err)
+
+	tempKB := t.TempDir()
+	t.Setenv("MECHA_KB_DIR", tempKB)
+
+	_, err = s.SetGitSyncTarget(ctx, "kb", "git@github.com:user/kb-repo.git")
+	require.NoError(t, err)
+
+	// Test Pull
+	var pulledRepo, pulledTarget string
+	mock.pullDirectoryFn = func(ctx context.Context, repoURL, targetDir string) error {
+		pulledRepo = repoURL
+		pulledTarget = targetDir
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/git-sync/kb/pull", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var pullResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &pullResp))
+	require.Equal(t, "kb", pullResp["target"])
+	require.Equal(t, true, pullResp["success"])
+	require.Equal(t, "git@github.com:user/kb-repo.git", pulledRepo)
+	require.Equal(t, tempKB, pulledTarget)
+
+	// Test Push
+	var pushedRepo, pushedSource, pushedMsg string
+	mock.pushDirectoryFn = func(ctx context.Context, repoURL, sourceDir, commitMessage string) error {
+		pushedRepo = repoURL
+		pushedSource = sourceDir
+		pushedMsg = commitMessage
+		return nil
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/git-sync/kb/push", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var pushResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &pushResp))
+	require.Equal(t, "kb", pushResp["target"])
+	require.Equal(t, true, pushResp["success"])
+	require.Equal(t, "git@github.com:user/kb-repo.git", pushedRepo)
+	require.Equal(t, tempKB, pushedSource)
+	require.Equal(t, "Update kb files from app", pushedMsg)
 }
 

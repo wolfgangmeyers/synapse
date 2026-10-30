@@ -9,7 +9,7 @@
 
 ## 1. Intent & User Outcome
 
-The conversation feed is Wolfgang's primary interface for observing and conversing with managed agents. It presents an unambiguous, visually differentiated timeline where direct conversations between Wolfgang and the agent appear as intuitive speech bubbles, inter-agent coordination messages appear as distinct expandable mailbox envelope cards, and agent execution events (tool invocations, thinking traces, subagent delegations, and context resets) appear as compact timeline activity notifications.
+The conversation feed is the user's primary interface for observing and conversing with managed agents. It presents an unambiguous, visually differentiated timeline where direct conversations between the user and the agent appear as intuitive speech bubbles, inter-agent coordination messages appear as distinct expandable mailbox envelope cards, and agent execution events (tool invocations, thinking traces, subagent delegations, and context resets) appear as compact timeline activity notifications.
 
 Crucially, **real-time updates must flow directly into the conversation view without requiring user action, window refocus, or page reload**. As an agent runs turns, executes tools, generates internal thinking, and outputs assistant text, the conversation UI must dynamically and immediately append and update these events in real-time over the active WebSocket transport.
 
@@ -34,7 +34,7 @@ Crucially, **real-time updates must flow directly into the conversation view wit
 - **User Goal**: Watch the conversation feed update live as the agent operates without touching the browser.
 - **Given**:
   - The conversation view is open and connected via WebSocket to the router for agent `worker-agent`.
-  - Wolfgang has sent a prompt or the agent has initiated background work.
+  - The user has sent a prompt or the agent has initiated background work.
 - **When**:
   - The agent begins thinking, executes a tool (e.g. `bash` or `read`), or produces an assistant reply.
   - The backend emits live WebSocket frames (`history_entry` via UI-live and/or `conversation_message` via router transport).
@@ -57,7 +57,7 @@ Crucially, **real-time updates must flow directly into the conversation view wit
   - Neither entry renders as an envelope card or tool activity box.
 
 #### Scenario: [SCN-FEED-003] Agent coordinates with peer worker via mailbox
-- **User Goal**: Clearly distinguish agent background coordination from agent responses directed to Wolfgang.
+- **User Goal**: Clearly distinguish agent background coordination from agent responses directed to the user.
 - **Given**:
   - The conversation view is open for supervisor agent `lead-agent`.
 - **When**:
@@ -109,7 +109,7 @@ Crucially, **real-time updates must flow directly into the conversation view wit
 #### Scenario: [SCN-FEED-008] Empty conversation with selected agent welcome card
 - **User Goal**: See a clean, inviting agent welcome state when selecting an agent that has no prior messages or activity, rather than a hung loading badge.
 - **Given**:
-  - Wolfgang selects an agent from the sidebar that has no prior conversation history or activity entries.
+  - The user selects an agent from the sidebar that has no prior conversation history or activity entries.
 - **When**:
   - The initial conversation fetch completes with 0 events.
 - **Then**:

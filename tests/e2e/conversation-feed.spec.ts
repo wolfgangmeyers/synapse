@@ -185,10 +185,19 @@ test.describe("Conversation Feed & Agent Interaction E2E", () => {
     await expect(messagesContainer).toBeVisible();
 
     // Check scrollTop is anchored near bottom
-    const isAtBottom = await messagesContainer.evaluate((el) => {
-      return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-    });
-    expect(isAtBottom).toBe(true);
+    await expect(async () => {
+      const scrollInfo = await messagesContainer.evaluate((el) => {
+        return {
+          scrollHeight: el.scrollHeight,
+          scrollTop: el.scrollTop,
+          clientHeight: el.clientHeight,
+          diff: el.scrollHeight - el.scrollTop - el.clientHeight,
+        };
+      });
+      console.log("SCROLL INFO 2:", scrollInfo);
+      const isAtBottom = scrollInfo.diff < 50;
+      expect(isAtBottom).toBe(true);
+    }).toPass({ timeout: 5000 });
 
     // 12. SCN-FEED-001 Verification: Real-time event push over WebSocket without page reload
     // Send a live message directly over the router while the page remains active

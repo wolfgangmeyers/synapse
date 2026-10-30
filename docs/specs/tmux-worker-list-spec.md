@@ -28,7 +28,7 @@ ORDER BY name
 
 This implementation causes critical operational blindness:
 1. **Tmux workers are completely invisible**: Workers executing in the `mecha` tmux session (e.g. pi/claude/codex/cursor instances launched in tmux windows, connected to `/v1/agents` over WebSocket, or registered in `recipient_sources` with `source_kind = 'tmux'`) are entirely omitted from the output.
-2. **Supervisors cannot manage mixed agent pools**: As Wolfgang's agent system operates with embedded workers by default while keeping tmux workers active for backup or specialized roles, any supervisor or coordinator invoking `mecha_worker(action="list")` fails to discover existing tmux worker windows or connected tmux agents.
+2. **Supervisors cannot manage mixed agent pools**: As the operator's agent system operates with embedded workers by default while keeping tmux workers active for backup or specialized roles, any supervisor or coordinator invoking `mecha_worker(action="list")` fails to discover existing tmux worker windows or connected tmux agents.
 3. **No discriminator between runtimes**: Callers receiving the worker list have no `kind` or `runtime` discriminator to determine whether a worker is an in-process embedded worker or a tmux-based worker.
 
 ---

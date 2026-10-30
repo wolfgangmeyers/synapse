@@ -666,6 +666,9 @@ func New(options Options) (*Router, error) {
 		if options.MCPManager != nil {
 			options.Managed.SetMCPManager(options.MCPManager)
 		}
+		if options.GitSyncer != nil {
+			options.Managed.SetGitSyncer(options.GitSyncer)
+		}
 	}
 	if options.ProviderAuth != nil {
 		options.ProviderAuth.SetPublisher(r.publishProviderAuth)

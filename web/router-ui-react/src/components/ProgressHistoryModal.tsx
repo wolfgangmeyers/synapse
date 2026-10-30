@@ -42,34 +42,7 @@ export function format24HourClock(date: Date, includeDate: boolean = false): str
   return `${hours}:${minutes}`;
 }
 
-/**
- * Formats a time offset in milliseconds relative to the latest timestamp in the window
- * into human-readable relative duration strings (e.g., "Latest", "-15m", "-2h", "-1d4h").
- */
-export function formatRelativeOffset(offsetMs: number): string {
-  if (offsetMs <= 0) {
-    return 'Latest';
-  }
-  const totalMinutes = Math.round(offsetMs / 60000);
-  if (totalMinutes === 0) {
-    return 'Latest';
-  }
-  const days = Math.floor(totalMinutes / (24 * 60));
-  const remMinutes = totalMinutes % (24 * 60);
-  const hours = Math.floor(remMinutes / 60);
-  const mins = remMinutes % 60;
 
-  if (days > 0) {
-    if (hours === 0 && mins === 0) return `-${days}d`;
-    if (hours > 0 && mins === 0) return `-${days}d${hours}h`;
-    return `-${days}d${hours}h`;
-  }
-  if (hours > 0) {
-    if (mins === 0) return `-${hours}h`;
-    return `-${hours}h${mins}m`;
-  }
-  return `-${mins}m`;
-}
 
 interface ProgressHistoryModalProps {
   agentId: string;

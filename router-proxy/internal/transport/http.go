@@ -255,6 +255,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodGet && (path == "/v1/tools/catalog" || path == "/v1/tools/catalog/"):
 		r.handleToolsCatalog(w, req)
 		return
+	case path == "/v1/kb/file":
+		r.handleKBFile(w, req)
+		return
 	case path == "/v1/systemone":
 		if req.Method == http.MethodGet {
 			r.handleSystemOneGET(w, req)

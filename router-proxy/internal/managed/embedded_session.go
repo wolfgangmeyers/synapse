@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitsync"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
@@ -41,6 +42,20 @@ func (m *EmbeddedManager) SetMCPManager(mgr *mcp.Manager) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mcpManager = mgr
+}
+
+// SetGitSyncer installs the git syncer used for git-synced tools (e.g. knowledge base).
+func (m *EmbeddedManager) SetGitSyncer(syncer gitsync.Syncer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gitSyncer = syncer
+}
+
+// GitSyncer returns the active git syncer, if configured.
+func (m *EmbeddedManager) GitSyncer() gitsync.Syncer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gitSyncer
 }
 
 // MCPManager returns the active MCP manager, if configured.
@@ -1373,6 +1388,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedKBSearchTool(owner))
 		tools = append(tools, m.embeddedKBReadTool(owner))
 		tools = append(tools, m.embeddedKBWriteTool(owner))
+		tools = append(tools, m.embeddedKBDeleteTool(owner))
 		tools = append(tools, m.embeddedKBListTool(owner))
 		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "mecha_workflow_transition"))
 		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))

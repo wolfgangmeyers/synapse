@@ -33,6 +33,16 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 
 ---
 
+## Knowledge Base Specifications
+
+Specifications governing persistent organizational knowledge storage, Markdown documentation browsing, and Git synchronization.
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-KB-001` | Knowledge Base Git Sync, kb_delete, & Markdown Browser | `KnowledgeBase` | [`knowledge-base-git-sync.spec.md`](./knowledge-base-git-sync.spec.md) | `tests/e2e/knowledge-base-git-sync.spec.ts` | `Active` |
+
+---
+
 ## Spec Authoring & Maintenance Workflow
 
 1. **Pre-Implementation Requirement**: No pull request or implementation commit modifying user behavior may land without an accompanying or pre-existing specification in `docs/specs/`.

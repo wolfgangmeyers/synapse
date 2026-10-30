@@ -30,6 +30,8 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
   const requestGeneration = useRef(0);
   const previousScope = useRef({ routerUrl: scope.routerUrl, agentId: scope.agentId, peer });
   const freshHistoryScope = useRef<string | undefined>(undefined);
+  // effectiveLoading: Computes loading state synchronously during peer/agent switches
+  // to prevent UI flicker/stale conversation flashes before the async refresh effect kicks in.
   const lastRenderedPeer = useRef(peer);
   const effectiveLoading = (lastRenderedPeer.current !== peer && peer !== undefined && peer !== "") || loading;
   lastRenderedPeer.current = peer;
@@ -49,9 +51,16 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         setNextBeforeSeq(result.next_before_seq);
         setNextBefore(result.next_before_seq);
 
+        // Dual normalization: support from/sender and to/recipient in timeline event metadata
+        // Role inversion: Map router timeline roles ('user'/'assistant') or sender identity to conversation direction
+        // (outgoing vs incoming) relative to the local agent/user scope.
         const projectedMessages: HistoryMessage[] = result.events.filter((e) => e.kind === "message").map((e) => {
-          const fromMeta = typeof e.metadata?.from === "string" ? e.metadata.from : undefined;
-          const toMeta = typeof e.metadata?.to === "string" ? e.metadata.to : undefined;
+          const fromMeta = typeof e.metadata?.from === "string"
+            ? e.metadata.from
+            : (typeof e.metadata?.sender === "string" ? e.metadata.sender : undefined);
+          const toMeta = typeof e.metadata?.to === "string"
+            ? e.metadata.to
+            : (typeof e.metadata?.recipient === "string" ? e.metadata.recipient : undefined);
           const isOutgoing = e.role === "user" || fromMeta === scope.agentId;
           return {
             id: e.id,
@@ -113,9 +122,14 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
           setNextBeforeSeq(result.next_before_seq);
           setNextBefore(result.next_before_seq);
 
+          // Dual normalization: support from/sender and to/recipient in timeline event metadata
           const olderMessages: HistoryMessage[] = result.events.filter((e) => e.kind === "message").map((e) => {
-            const fromMeta = typeof e.metadata?.from === "string" ? e.metadata.from : undefined;
-            const toMeta = typeof e.metadata?.to === "string" ? e.metadata.to : undefined;
+            const fromMeta = typeof e.metadata?.from === "string"
+              ? e.metadata.from
+              : (typeof e.metadata?.sender === "string" ? e.metadata.sender : undefined);
+            const toMeta = typeof e.metadata?.to === "string"
+              ? e.metadata.to
+              : (typeof e.metadata?.recipient === "string" ? e.metadata.recipient : undefined);
             const isOutgoing = e.role === "user" || fromMeta === scope.agentId;
             return {
               id: e.id,
@@ -181,21 +195,24 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       if (event.type === "status") { if (event.status === "connected" && event.identity.agentId === scope.agentId) void refresh(); return; }
       if (event.type !== "conversation" && event.type !== "delivery") return;
       const message = event.message;
-      const addressed = message.from === scope.agentId ? message.to : message.to === scope.agentId ? message.from : undefined;
-      if (addressed === undefined) return;
+      if (peer !== undefined && message.from !== peer && message.to !== peer) return;
+      // Dual normalization: support sender/recipient across from/sender and to/recipient properties
+      const msgFrom = message.from ?? (message as { sender?: string }).sender;
+      const msgTo = message.to ?? (message as { recipient?: string }).recipient;
+      const addressed = msgFrom === scope.agentId ? msgTo : msgTo === scope.agentId ? msgFrom : (msgFrom === peer ? msgTo : msgFrom);
       setTimelineEvents((current) => {
-        if (peer !== undefined && addressed !== peer) return current;
         const lastSeq = current.length > 0 ? (current[current.length - 1]?.seq ?? 0) : 0;
         const liveEvt: ConversationTimelineEvent = {
           id: `msg:${peer ?? ""}:${message.id}`,
           agent_id: peer ?? "",
           seq: message.sequence ?? (lastSeq + 1),
           kind: "message",
-          role: message.from === scope.agentId ? "user" : "assistant",
+          role: msgFrom === scope.agentId ? "user" : "assistant",
           ...(message.body !== undefined ? { content: message.body } : {}),
           metadata: {
-            ...(message.from !== undefined ? { from: message.from } : {}),
-            ...(message.to !== undefined ? { to: message.to } : {}),
+            ...(msgFrom !== undefined ? { from: msgFrom, sender: msgFrom } : {}),
+            ...(msgTo !== undefined ? { to: msgTo, recipient: msgTo } : {}),
+            ...(message.subject !== undefined ? { subject: message.subject } : {}),
             ...(Array.isArray(message.attachments) ? { attachments: message.attachments } : {}),
           },
           created_at: Date.now(),
@@ -203,7 +220,6 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
         return [...current, liveEvt];
       });
       setMessages((current) => {
-        if (peer !== undefined && addressed !== peer) return current;
         if (current.some((m) => m.id === message.id)) {
           return current.map((m) => m.id === message.id ? { ...m, ...message } : m);
         }

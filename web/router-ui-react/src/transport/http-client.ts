@@ -665,6 +665,7 @@ export interface RouterHttpClient {
   clearGitSyncTarget(target: string): Promise<void>;
   pullGitSync(target: string): Promise<GitSyncPullResponse>;
   pushGitSync(target: string): Promise<GitSyncPushResponse>;
+  getKBFile(path?: string): Promise<string>;
   progressHistory(agentId: string): Promise<ProgressHistoryEntry[]>;
   readonly baseUrl?: string;
   interruptManagedAgent(agentId: string): Promise<void>;
@@ -1056,6 +1057,14 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     pushGitSync: async (target: string): Promise<GitSyncPushResponse> => {
       const res = await jsonRequest(`/v1/git-sync/${encodeURIComponent(target)}/push`, "POST", {});
       return (recordValue(res) ?? {}) as GitSyncPushResponse;
+    },
+    getKBFile: async (path?: string): Promise<string> => {
+      const endpoint = path ? `/v1/kb/file?path=${encodeURIComponent(path)}` : "/v1/kb/file";
+      const res = await fetchImpl(resolveHttpEndpoint(base, endpoint), { method: "GET" });
+      if (!res.ok) {
+        throw new HttpRequestError(res.status, "kb_fetch_failed", "Failed to fetch KB file", await res.text());
+      }
+      return await res.text();
     },
     progressHistory: async (agentId: string): Promise<ProgressHistoryEntry[]> => {
       const res = await request(`/v1/agents/${encodeURIComponent(agentId)}/progress/history`, { method: "GET", credentials: "omit" });

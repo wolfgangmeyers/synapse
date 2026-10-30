@@ -186,8 +186,11 @@ func (s *Store) migrateToConversationTimelineTx(ctx context.Context) error {
 			kind := "history"
 			var role *string
 			presTo, _ := metaMap["to"].(string)
+			if presTo == "" {
+				presTo, _ = metaMap["recipient"].(string)
+			}
 			presKind, _ := metaMap["kind"].(string)
-			isAssistantTurn := category == "assistant" || (presKind == "message" && (strings.EqualFold(presTo, "user") || strings.EqualFold(presTo, "wolfgang") || presTo == ""))
+			isAssistantTurn := category == "assistant" || (presKind == "message" && (strings.EqualFold(presTo, "user") || presTo == ""))
 			if isAssistantTurn {
 				kind = "message"
 				roleAssistant := "assistant"
@@ -395,13 +398,16 @@ func (s *Store) recordTimelineHistoryTx(ctx context.Context, agentID, category, 
 	// (e.g. category "managed_message", "reminder" or presentation.kind "message"/"reminder" when From is user/external).
 	isUserMsg := category == "managed_message" || (entry.Presentation != nil && entry.Presentation.Kind == "message")
 	fromUser := false
+	fromIdentity := ""
 	if entry.SenderIdentity != nil && *entry.SenderIdentity != "" {
-		sId := strings.ToLower(strings.TrimSpace(*entry.SenderIdentity))
-		if sId == "user" || sId != strings.ToLower(strings.TrimSpace(agentID)) {
-			fromUser = true
+		fromIdentity = *entry.SenderIdentity
+	} else if entry.Presentation != nil {
+		if entry.Presentation.From != "" {
+			fromIdentity = entry.Presentation.From
 		}
-	} else if entry.Presentation != nil && entry.Presentation.From != "" {
-		sId := strings.ToLower(strings.TrimSpace(entry.Presentation.From))
+	}
+	if fromIdentity != "" {
+		sId := strings.ToLower(strings.TrimSpace(fromIdentity))
 		if sId == "user" || sId != strings.ToLower(strings.TrimSpace(agentID)) {
 			fromUser = true
 		}
@@ -453,9 +459,18 @@ func (s *Store) recordTimelineHistoryTx(ctx context.Context, agentID, category, 
 	presKind := ""
 	if entry.Presentation != nil {
 		presTo = entry.Presentation.To
+		if presTo == "" {
+			presTo, _ = metaMap["recipient"].(string)
+		}
 		presKind = entry.Presentation.Kind
+	} else {
+		if rec, ok := metaMap["recipient"].(string); ok && rec != "" {
+			presTo = rec
+		} else if toVal, ok := metaMap["to"].(string); ok && toVal != "" {
+			presTo = toVal
+		}
 	}
-	isAssistantTurn := category == "assistant" || (presKind == "message" && (strings.EqualFold(presTo, "user") || strings.EqualFold(presTo, "wolfgang") || presTo == ""))
+	isAssistantTurn := category == "assistant" || (presKind == "message" && (strings.EqualFold(presTo, "user") || presTo == ""))
 	if isAssistantTurn {
 		kind = "message"
 		roleAssistant := "assistant"

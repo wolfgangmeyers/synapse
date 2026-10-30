@@ -7,9 +7,8 @@ on:
       - "package.json"
       - "package-lock.json"
       - "pi-extensions/mecha-messaging/**"
-      - "harness/mailbox-client.js"
+      - "pi-extensions/mecha-messaging/mailbox-client.js"
       - "discord-gateway-bridge/main.mjs"
-      - ".claude/skills/supervisor/tools/claude_sidecar.mjs"
       - "tests/**"
   pull_request:
     paths:
@@ -17,9 +16,8 @@ on:
       - "package.json"
       - "package-lock.json"
       - "pi-extensions/mecha-messaging/**"
-      - "harness/mailbox-client.js"
+      - "pi-extensions/mecha-messaging/mailbox-client.js"
       - "discord-gateway-bridge/main.mjs"
-      - ".claude/skills/supervisor/tools/claude_sidecar.mjs"
       - "tests/**"
 
 jobs:

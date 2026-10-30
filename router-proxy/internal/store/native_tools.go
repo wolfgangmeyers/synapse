@@ -57,6 +57,7 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "kb_search", Category: "Knowledge Base & Search", Description: "Search the persistent knowledge base", DefaultEnabled: true},
 	{ToolName: "kb_read", Category: "Knowledge Base & Search", Description: "Read the content of a topic or markdown document", DefaultEnabled: true},
 	{ToolName: "kb_write", Category: "Knowledge Base & Search", Description: "Write or update a markdown document in the knowledge base", DefaultEnabled: true},
+	{ToolName: "kb_delete", Category: "Knowledge Base & Search", Description: "Delete a markdown document from the knowledge base", DefaultEnabled: true},
 	{ToolName: "kb_list", Category: "Knowledge Base & Search", Description: "List topics available in the knowledge base", DefaultEnabled: true},
 	{ToolName: "google_search", Category: "Knowledge Base & Search", Description: "Search the web using Google Search", DefaultEnabled: true},
 

@@ -265,7 +265,7 @@ func (r *Router) conversationRecipients(agentIDs ...string) []*session {
 		// UI agent IDs are display labels only. Retain the old conversation
 		// filtering semantics without putting browsers in the durable map.
 		for candidate := range r.uiSessions {
-			if candidate.conversationSync == "v1" && contains(agentIDs, candidate.agentID) {
+			if candidate.conversationSync == "v1" {
 				addSession(candidate)
 			}
 		}

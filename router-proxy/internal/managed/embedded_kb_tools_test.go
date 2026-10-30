@@ -283,3 +283,162 @@ func TestKBTools_SystemOneSearch_FallbackOnError(t *testing.T) {
 	require.Contains(t, emptyText, "using keyword matching fallback; system 1 error:")
 }
 
+func TestKBDeleteTool(t *testing.T) {
+	tempKB := t.TempDir()
+	t.Setenv("MECHA_KB_DIR", tempKB)
+
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	mgr := &Manager{
+		store: db,
+	}
+
+	owner := embeddedOwner{
+		binding: store.EmbeddedBinding{
+			AgentID:    "test-worker",
+			SessionID:  "test-session",
+			Epoch:      1,
+			Generation: "1",
+		},
+		identity: "test-identity",
+	}
+
+	writeTool := mgr.embeddedKBWriteTool(owner)
+	deleteTool := mgr.embeddedKBDeleteTool(owner)
+	readTool := mgr.embeddedKBReadTool(owner)
+
+	ctx := context.Background()
+
+	// 1. Create a topic
+	topicContent := `## Summary
+Delete me topic summary.
+
+## Content
+This topic will be deleted.`
+
+	resWrite, err := writeTool.Execute(ctx, "call-w1", map[string]any{
+		"topic":   "To Be Deleted",
+		"content": topicContent,
+		"domain":  "Testing",
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, resWrite.Content, 1)
+
+	fileTarget := filepath.Join(tempKB, "to-be-deleted.md")
+	_, err = os.Stat(fileTarget)
+	require.NoError(t, err)
+
+	indexPath := filepath.Join(tempKB, "INDEX.md")
+	indexBytes, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	require.Contains(t, string(indexBytes), "to-be-deleted.md")
+	require.Contains(t, string(indexBytes), "To Be Deleted")
+
+	// 2. Delete the topic by topic name
+	resDelete, err := deleteTool.Execute(ctx, "call-d1", map[string]any{
+		"topic": "To Be Deleted",
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, resDelete.Content, 1)
+	deleteText := resDelete.Content[0].(ai.TextContent).Text
+	require.Contains(t, deleteText, "Successfully deleted knowledge base document")
+	require.Contains(t, deleteText, "to-be-deleted.md")
+
+	// Verify file is gone
+	_, err = os.Stat(fileTarget)
+	require.True(t, os.IsNotExist(err))
+
+	// Verify INDEX.md no longer has the entry
+	indexBytes, err = os.ReadFile(indexPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(indexBytes), "to-be-deleted.md")
+	require.NotContains(t, string(indexBytes), "[To Be Deleted]")
+
+	// Verify read tool returns not found
+	resRead, err := readTool.Execute(ctx, "call-r1", map[string]any{
+		"topic": "to-be-deleted",
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, resRead.Content[0].(ai.TextContent).Text, "Knowledge base file not found")
+
+	// 3. Test deleting again returns not found
+	resDelete2, err := deleteTool.Execute(ctx, "call-d2", map[string]any{
+		"topic": "To Be Deleted",
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, resDelete2.Content[0].(ai.TextContent).Text, "Knowledge base file not found")
+
+	// 4. Test deleting non-existent file directly by path returns error
+	resDeleteNonExistent, err := deleteTool.Execute(ctx, "call-d-missing", map[string]any{
+		"path": "non-existent-file.md",
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, resDeleteNonExistent.Content[0].(ai.TextContent).Text, "Knowledge base file not found")
+
+	// 5. Test path traversal rejection
+	resDeleteTraversal, err := deleteTool.Execute(ctx, "call-d-trav", map[string]any{
+		"path": "../../etc/passwd",
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, resDeleteTraversal.Content[0].(ai.TextContent).Text, "traversal denied")
+
+	// 6. Test missing parameter error
+	resDeleteEmpty, err := deleteTool.Execute(ctx, "call-d-empty", map[string]any{}, nil)
+	require.NoError(t, err)
+	require.Contains(t, resDeleteEmpty.Content[0].(ai.TextContent).Text, "topic or path parameter must be specified")
+
+	// 7. Deletion via path argument and verify INDEX.md cleans bullet list link while preserving surrounding text/headings
+	sampleDocPath := filepath.Join(tempKB, "sample-doc.md")
+	err = os.WriteFile(sampleDocPath, []byte("# Sample Doc\n\nSample content"), 0o644)
+	require.NoError(t, err)
+
+	keepDocPath := filepath.Join(tempKB, "keep-me.md")
+	err = os.WriteFile(keepDocPath, []byte("# Keep Me\n\nKeep content"), 0o644)
+	require.NoError(t, err)
+
+	customIndex := `# Knowledge Base Index
+
+## Notes
+
+Important notes regarding documentation structure.
+
+## Testing Domain
+
+- [Sample Doc](sample-doc.md)
+- [Keep Me](keep-me.md)
+
+Footer notes and guidelines.`
+	err = os.WriteFile(indexPath, []byte(customIndex), 0o644)
+	require.NoError(t, err)
+
+	resDeletePath, err := deleteTool.Execute(ctx, "call-d-path", map[string]any{
+		"path": "sample-doc.md",
+	}, nil)
+	require.NoError(t, err)
+	require.Contains(t, resDeletePath.Content[0].(ai.TextContent).Text, "Successfully deleted knowledge base document")
+	require.Contains(t, resDeletePath.Content[0].(ai.TextContent).Text, "sample-doc.md")
+
+	// Verify sample-doc.md was deleted
+	_, err = os.Stat(sampleDocPath)
+	require.True(t, os.IsNotExist(err))
+
+	// Verify keep-me.md still exists
+	_, err = os.Stat(keepDocPath)
+	require.NoError(t, err)
+
+	// Verify INDEX.md: sample-doc is removed, but headings and surrounding text are preserved
+	updatedIndexBytes, err := os.ReadFile(indexPath)
+	require.NoError(t, err)
+	updatedIndex := string(updatedIndexBytes)
+
+	require.NotContains(t, updatedIndex, "[Sample Doc](sample-doc.md)")
+	require.Contains(t, updatedIndex, "- [Keep Me](keep-me.md)")
+	require.Contains(t, updatedIndex, "## Notes")
+	require.Contains(t, updatedIndex, "Important notes regarding documentation structure.")
+	require.Contains(t, updatedIndex, "## Testing Domain")
+	require.Contains(t, updatedIndex, "Footer notes and guidelines.")
+}
+
+
