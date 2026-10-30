@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useId, type Reac
 import type { ManagedChild, ManagedHistoryEntry } from "../protocol/types";
 import type { SubagentSummary } from "../state/agent-projection";
 import { compareManagedHistoryEntries } from "../state/reducer";
+import { DEFAULT_AUTO_SCROLL_THRESHOLD, shouldFollowToBottom } from "../state/conversation-projection";
 import type { ManagedHistoryResponse, RouterHttpClient } from "../transport/http-client";
 import { MarkdownBody } from "../domain/markdown";
 import { CompleteTimelineEntry, getThinkingContent, isContextResetEntry, ThinkingTraceCard } from "./CompleteTimelineEntry";
@@ -183,6 +184,9 @@ export function SubagentViewerDialog({
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const conversationContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Track sticky proximity state within 180px threshold, and detect subagent selection changes
+  const isNearBottomRef = useRef(true);
+  const prevSubagentIdRef = useRef<string | null>(null);
   const titleId = useId();
 
   // Periodic interval to update running duration for active subagents
@@ -201,25 +205,70 @@ export function SubagentViewerDialog({
       setHistoryEntries([]);
       setHistoryError(null);
       setLoading(false);
+      isNearBottomRef.current = true;
+      prevSubagentIdRef.current = null;
     }
   }, [open]);
 
-  // Auto-scroll to bottom of conversation view when selected subagent changes or new messages stream in
+  const sortedHistoryEntries = useMemo(
+    () => [...historyEntries].sort(compareManagedHistoryEntries),
+    [historyEntries],
+  );
+
+  const latestEntry = sortedHistoryEntries.at(-1);
+  const latestEntryKey = latestEntry
+    ? `${latestEntry.id}:${latestEntry.message?.length ?? 0}:${latestEntry.message_content?.length ?? 0}`
+    : "";
+
+  // Sticky auto-scroll model: auto-scroll to bottom on subagent switch or when near bottom, but lock position when reading older backlog
   useLayoutEffect(() => {
-    if (!selectedSubagentId) return;
-    const scrollToBottom = () => {
+    if (!selectedSubagentId) {
+      prevSubagentIdRef.current = null;
+      isNearBottomRef.current = true;
+      return;
+    }
+
+    const isSubagentSwitch = prevSubagentIdRef.current !== selectedSubagentId;
+    prevSubagentIdRef.current = selectedSubagentId;
+
+    const element = conversationContainerRef.current;
+    if (!element) return;
+
+    if (isSubagentSwitch) {
+      isNearBottomRef.current = true;
+      element.scrollTop = element.scrollHeight;
+      const frame = requestAnimationFrame(() => {
+        if (conversationContainerRef.current) {
+          conversationContainerRef.current.scrollTop = conversationContainerRef.current.scrollHeight;
+        }
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+
+    if (!isNearBottomRef.current) {
+      return;
+    }
+
+    element.scrollTop = element.scrollHeight;
+    const frame = requestAnimationFrame(() => {
+      if (!isNearBottomRef.current) return;
       if (conversationContainerRef.current) {
         conversationContainerRef.current.scrollTop = conversationContainerRef.current.scrollHeight;
       }
-      if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === "function") {
-        messagesEndRef.current.scrollIntoView({ behavior: "auto" });
-      }
-    };
-
-    scrollToBottom();
-    const frame = requestAnimationFrame(scrollToBottom);
+    });
     return () => cancelAnimationFrame(frame);
-  }, [selectedSubagentId, historyEntries.length]);
+  }, [selectedSubagentId, sortedHistoryEntries.length, latestEntryKey]);
+
+  // Update sticky proximity state based on whether the user is within DEFAULT_AUTO_SCROLL_THRESHOLD (180px) of the bottom
+  const onScroll = (): void => {
+    const element = conversationContainerRef.current;
+    if (!element) return;
+    const { scrollTop, scrollHeight, clientHeight } = element;
+    isNearBottomRef.current = shouldFollowToBottom(
+      { scrollTop, scrollHeight, clientHeight },
+      DEFAULT_AUTO_SCROLL_THRESHOLD
+    );
+  };
 
   const selectedSubagent = selectedSubagentId
     ? subagents.find((s) => s.id === selectedSubagentId) ?? null
@@ -369,11 +418,6 @@ export function SubagentViewerDialog({
     nowMs,
   );
 
-  const sortedHistoryEntries = useMemo(
-    () => [...historyEntries].sort(compareManagedHistoryEntries),
-    [historyEntries],
-  );
-
   const renderedHistoryItems = useMemo(() => {
     let lastThinking: string | undefined;
     const result: Array<{ entry: ManagedHistoryEntry; suppressThinking: boolean }> = [];
@@ -439,6 +483,7 @@ export function SubagentViewerDialog({
               ref={conversationContainerRef}
               className="subagent-conversation-view"
               style={{ overflowY: "auto" }}
+              onScroll={onScroll}
             >
               {loading && sortedHistoryEntries.length === 0 ? (
                 <div className="subagent-loading-state">
