@@ -5563,10 +5563,128 @@ dialog.kb-dialog[open] {
   flex: 1 1 0%;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 28px 36px;
   background: var(--canvas, rgba(15, 23, 42, 0.6));
   border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
-  border-radius: 12px;
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 32px rgba(0, 0, 0, 0.25);
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: var(--text, #f2f4ff);
+  scroll-behavior: smooth;
+}
+
+.kb-browser .markdown-body h1,
+.kb-browser .markdown-body h2,
+.kb-browser .markdown-body h3,
+.kb-browser .markdown-body h4,
+.kb-browser .markdown-body h5,
+.kb-browser .markdown-body h6 {
+  color: #ffffff;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  scroll-margin-top: 16px;
+}
+
+.kb-browser .markdown-body h1 {
+  font-size: 1.65rem;
+  line-height: 1.3;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+}
+
+.kb-browser .markdown-body h1:first-child {
+  margin-top: 0;
+}
+
+.kb-browser .markdown-body h2 {
+  font-size: 1.32rem;
+  line-height: 1.35;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.kb-browser .markdown-body h3 {
+  font-size: 1.12rem;
+  line-height: 1.4;
+  margin-top: 1.6rem;
+  margin-bottom: 0.65rem;
+}
+
+.kb-browser .markdown-body h4 {
+  font-size: 1rem;
+  line-height: 1.45;
+  margin-top: 1.3rem;
+  margin-bottom: 0.5rem;
+}
+
+.kb-browser .markdown-body p {
+  margin: 0 0 1.1rem;
+}
+
+.kb-browser .markdown-body ul,
+.kb-browser .markdown-body ol {
+  margin: 0 0 1.1rem;
+  padding-left: 1.6rem;
+}
+
+.kb-browser .markdown-body li {
+  margin: 0.35rem 0;
+}
+
+.kb-browser .markdown-body hr {
+  height: 1px;
+  border: none;
+  background: var(--line, rgba(255, 255, 255, 0.12));
+  margin: 2rem 0;
+}
+
+.kb-browser .markdown-body a {
+  color: var(--secondary, #78e0cd);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: color 0.15s ease;
+}
+
+.kb-browser .markdown-body a:hover {
+  color: #a5f3e7;
+}
+
+.kb-browser .markdown-body blockquote {
+  margin: 1.2rem 0;
+  padding: 0.6rem 1.2rem;
+  border-left: 3px solid var(--secondary, #78e0cd);
+  background: rgba(120, 224, 205, 0.05);
+  border-radius: 0 8px 8px 0;
+  color: var(--text-secondary, #c2c8dc);
+}
+
+.kb-browser .markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.2rem 0;
+  font-size: 0.9rem;
+}
+
+.kb-browser .markdown-body th,
+.kb-browser .markdown-body td {
+  padding: 8px 12px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
+  text-align: left;
+}
+
+.kb-browser .markdown-body th {
+  background: rgba(255, 255, 255, 0.04);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.kb-browser .markdown-body tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.015);
 }
 
 .subagent-viewer-dialog {
