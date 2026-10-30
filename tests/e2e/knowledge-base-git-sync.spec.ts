@@ -55,6 +55,11 @@ test.describe("Knowledge Base Git Sync & Markdown Browser E2E", () => {
     );
     await page.reload();
 
+    // 0. Verify that before opening, the dialog is not visible
+    const closedDialog = page.locator('dialog.kb-dialog');
+    await expect(closedDialog).not.toBeVisible();
+    await page.screenshot({ path: "test-results/kb-dialog-closed.png" });
+
     // 1. Open the managed actions dropdown menu from the sidebar
     const trigger = page.locator(".managed-actions-trigger");
     await expect(trigger).toBeVisible({ timeout: 10000 });
@@ -114,5 +119,23 @@ test.describe("Knowledge Base Git Sync & Markdown Browser E2E", () => {
     await backBtn.click();
     await expect(markdownBody).toContainText("Knowledge Base Index");
     await expect(backBtn).not.toBeVisible();
+
+    // Verify dialog sizing: calc(100vw - 48px) and calc(100dvh - 48px)
+    const box = await dialog.boundingBox();
+    const viewport = page.viewportSize();
+    expect(box).not.toBeNull();
+    if (box && viewport) {
+      expect(box.width).toBeCloseTo(viewport.width - 48, -1);
+      expect(box.height).toBeCloseTo(viewport.height - 48, -1);
+    }
+
+    // Take screenshot of open dialog
+    await page.screenshot({ path: "test-results/kb-dialog-open.png" });
+
+    // 9. Test closing the dialog
+    const closeBtn = dialog.locator('header .icon-btn-round[aria-label="Close dialog"]');
+    await expect(closeBtn).toBeVisible();
+    await closeBtn.click();
+    await expect(closedDialog).not.toBeVisible();
   });
 });
