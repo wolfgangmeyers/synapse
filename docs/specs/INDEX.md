@@ -26,6 +26,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-OPENAI-CATALOG-001` | OpenAI GPT-6.1 Terra Catalog | `AgentManagement` | [`openai-model-catalog.spec.md`](./openai-model-catalog.spec.md) | `tests/e2e/openai-model-catalog.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-001` | Claude Code Managed Workers | `AgentManagement` | [`claude-code-workers-spec.md`](./claude-code-workers-spec.md) | `tests/e2e/claude-code-workers.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-002` | Context Reset Window Config | `AgentManagement` | [`context-reset-window-spec.md`](./context-reset-window-spec.md) | `tests/e2e/context-reset-window.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-003` | Tmux Worker Registry & List | `AgentManagement` | [`tmux-worker-list-spec.md`](./tmux-worker-list-spec.md) | `tests/e2e/tmux-worker-list.spec.ts` | `Active` |
