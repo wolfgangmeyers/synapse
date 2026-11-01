@@ -20,6 +20,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/codexdevice"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
@@ -45,6 +46,7 @@ type config struct {
 	managedUIDist         string
 	codexCredentialPath   string
 	embeddedWorkerDefault bool
+	testClock             bool
 	managed               managed.Config
 	embeddedRoot          embeddedRootConfig
 }
@@ -92,6 +94,7 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.managedUIDist, "managed-ui-dist", "", "built React UI directory served by the router")
 	flags.StringVar(&result.codexCredentialPath, "codex-credential-path", "", "explicit private local Codex credential file (managed mode only)")
 	flags.BoolVar(&result.embeddedWorkerDefault, "embedded-worker-default", false, "default bare managed HTTP launches to embedded workers (requires private Codex credential)")
+	flags.BoolVar(&result.testClock, "test-clock", false, "enable deterministic fixed test clock with /v1/test/clock/advance endpoint")
 	var managedEnabled bool
 	flags.BoolVar(&managedEnabled, "managed", true, "enable router-managed Pi launches (set false to preserve legacy-only routing)")
 	flags.BoolVar(&result.embeddedRoot.Enabled, "embedded-root-bootstrap", false, "reserve the explicitly configured embedded root before readiness")
@@ -120,6 +123,9 @@ func parseConfig(args []string) (config, error) {
 	flags.BoolVar(&allowManagedLaunchRecipeMismatch, "managed-allow-launch-recipe-mismatch", false, "allow recovery when the current launch recipe SHA differs from the stored recipe")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
+	}
+	if os.Getenv("MECHA_TEST_CLOCK") == "true" || os.Getenv("MECHA_TEST_CLOCK") == "1" {
+		result.testClock = true
 	}
 	if flags.NArg() != 0 {
 		return config{}, errors.New("unexpected positional argument")
@@ -273,9 +279,14 @@ func main() {
 	if err := startupEntered(stageStoreManifest); err != nil {
 		log.Fatal(err)
 	}
+	var testClock *deterministic.FixedClock
+	if options.testClock {
+		testClock = deterministic.NewFixedClock(time.Now())
+	}
 	var durable *store.Store
 	attachmentsStore, err := attachments.New(attachments.Options{
 		Directory: options.database + ".attachments",
+		Clock:     testClock,
 		Referenced: func(id string) bool {
 			if durable == nil {
 				return false
@@ -287,7 +298,11 @@ func main() {
 	if err != nil {
 		log.Fatal(startupResult(stageStoreManifest, err))
 	}
-	durable, err = store.Open(ctx, options.database, store.Options{MaxBatchBodyChars: options.maxBatch})
+	storeOpts := store.Options{MaxBatchBodyChars: options.maxBatch}
+	if testClock != nil {
+		storeOpts.Clock = testClock
+	}
+	durable, err = store.Open(ctx, options.database, storeOpts)
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		log.Fatal(startupResult(stageStoreManifest, err))
@@ -348,6 +363,9 @@ func main() {
 		codexOptions.RPCFactory = managedRPCFactory()
 		codexOptions.CatalogSource = managed.StoreCatalogSource{Store: durable}
 		codexOptions.RootControlHandlers = rootHandlers
+		if testClock != nil {
+			codexOptions.Clock = testClock
+		}
 		if codexOptions.GoalContinuationDelay <= 0 {
 			codexOptions.GoalContinuationDelay = 10 * time.Second
 		}
@@ -406,7 +424,7 @@ func main() {
 	if err := startupEntered(stageListen); err != nil {
 		log.Fatal(err)
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, DefaultEmbeddedRoot: embeddedWorkerDefaultEnabled(options), StartupManaged: func(startupCtx context.Context, manager *managed.Manager) error {
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Clock: testClock, EnableTestClock: options.testClock, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, DefaultEmbeddedRoot: embeddedWorkerDefaultEnabled(options), StartupManaged: func(startupCtx context.Context, manager *managed.Manager) error {
 		if !options.embeddedRoot.Enabled {
 			return launchConfiguredEmbeddedRoot(startupCtx, options, manager)
 		}
