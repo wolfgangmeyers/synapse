@@ -148,3 +148,29 @@ func TestEmbeddedRestartFakeDoerFence(t *testing.T) {
 		t.Fatalf("redirect followed: status %d hits %d", resp.StatusCode, hits.Load())
 	}
 }
+
+// The seam resolves the real startup registry, never an injected Terra model.
+func TestEmbeddedRestartTerraProductionRegistry(t *testing.T) {
+	t.Setenv("EMBEDDED_RESTART_FAKE_ENABLE", "1")
+	t.Setenv("EMBEDDED_RESTART_FAKE_ENDPOINT", "http://127.0.0.1:9191")
+	if err := managed.LoadCodexModelsStore(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	opts := managed.ManagerOptions{}
+	if err := configureEmbeddedRestartFake(config{host: "127.0.0.1", managed: managed.Config{Enabled: true}}, &opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"gpt-6-sol", "gpt-6.1-terra"} {
+		original := ai.GetModel("openai-codex", id)
+		resolved := opts.EmbeddedModelResolver(store.ManagedAgentRecord{SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: id}})
+		if original == nil || resolved == nil || original == resolved || !reflect.DeepEqual(*original, *resolved) {
+			t.Fatalf("%s must resolve an unchanged copy of the production registry model", id)
+		}
+		if id == "gpt-6.1-terra" && (resolved.Api != ai.APIOpenAICodexResponses || resolved.BaseURL != "https://chatgpt.com/backend-api" || resolved.ContextWindow != 1050000 || resolved.MaxTokens != 128000 || !reflect.DeepEqual(resolved.Input, []string{"text", "image"}) || !reflect.DeepEqual(resolved.Cost, ai.ModelCost{Input: 1, CacheRead: 0.05, Output: 5}) || len(resolved.Headers) != 0 || !ai.IsModelType(resolved, ai.ModelTypeChat)) {
+			t.Fatalf("Terra metadata mismatch: %#v", resolved)
+		}
+	}
+	if opts.EmbeddedModelResolver(store.ManagedAgentRecord{SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-6.1-terra"}}) != nil {
+		t.Fatal("API-key provider must not resolve through Codex seam")
+	}
+}

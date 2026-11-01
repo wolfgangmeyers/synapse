@@ -140,8 +140,12 @@ export async function startIsolatedRouter(options: {
   repoRoot: string;
   managed?: boolean;
   testClock?: boolean;
+  embedded?: { endpoint: string; signedOut?: boolean };
 }): Promise<IsolatedRouter> {
+  if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
+  let ownedChild: ChildProcess | undefined;
+  try {
   await chmod(root, 0o700);
 
   const databasePath = join(root, "router.sqlite");
@@ -153,7 +157,7 @@ export async function startIsolatedRouter(options: {
 
   // Compile router binary into the temporary directory for isolation
   await new Promise<void>((res, rej) => {
-    const cp = spawn("go", ["build", "-o", binaryPath, "./cmd/mailbox-router"], {
+    const cp = spawn("go", ["build", ...(options.embedded ? ["-tags=embedded_restart_test_only"] : []), "-o", binaryPath, "./cmd/mailbox-router"], {
       cwd: routerProxyDir,
       stdio: "pipe",
     });
@@ -218,11 +222,37 @@ export async function startIsolatedRouter(options: {
     );
   }
 
+  if (options.embedded) {
+    const privateDir = join(root, "private");
+    await mkdir(privateDir, { mode: 0o700 });
+    if (!options.embedded.signedOut) {
+      const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "terra-test-account" } })).toString("base64url");
+      await writeFile(join(privateDir, "codex.json"), JSON.stringify({ access_token: `fake.${claims}.terra-test-secret`, refresh_token: "terra-refresh-secret", account_id: "terra-test-account", expires_at: "2099-01-01T00:00:00Z" }), { mode: 0o600 });
+    }
+    // Real helper and owned credential projection, never the generic fake auth helper.
+    const helperIndex = args.indexOf("--managed-auth-helper");
+    args[helperIndex + 1] = join(options.repoRoot, "auth-helper/index.mjs");
+    args.push("--codex-credential-path", join(privateDir, "codex.json"));
+    await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify({ google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });
+    await writeFile(join(root, "work/note.txt"), "terra harmless tool evidence", { mode: 0o600 });
+  }
+  // Keep build/toolchain settings above; allow only disposable runtime config here.
+  let runtimeEnvironment = process.env;
+  if (options.embedded) {
+    for (const directory of ["config", "cache", "tmp"]) await mkdir(join(root, directory), { mode: 0o700 });
+    runtimeEnvironment = {
+      PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
+      XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), TMPDIR: join(root, "tmp"),
+      EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint,
+    };
+  }
   const child = spawn(binaryPath, args, {
     cwd: options.repoRoot,
+    env: runtimeEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
+  ownedChild = child;
   let settled = false;
   let stdout = "";
   let stderr = "";
@@ -296,6 +326,15 @@ export async function startIsolatedRouter(options: {
       await rm(root, { recursive: true, force: true }).catch(() => {});
     },
   };
+  } catch (error) {
+    if (ownedChild && ownedChild.exitCode === null && ownedChild.signalCode === null) {
+      const closed = new Promise<void>(resolve => ownedChild!.once("close", () => resolve()));
+      ownedChild.kill("SIGKILL");
+      await closed;
+    }
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function startRouterProxy(options: {
@@ -428,6 +467,7 @@ export async function serveFrontendDist(distDir: string): Promise<IsolatedFronte
     url: `http://127.0.0.1:${port}`,
     server: srv,
     close: async () => {
+      srv.closeAllConnections();
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     },
   };
