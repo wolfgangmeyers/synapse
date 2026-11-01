@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -559,6 +560,7 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 	if r.managed != nil {
 		r.managed.SweepAgentMonitors(ctx)
 	}
+	r.sweepWorkflowSchedules(ctx)
 	r.sweepAttachmentsBestEffort()
 	// Node publishes activity expiry before its heartbeat/sweep record.
 	r.sweepLiveState()
@@ -623,6 +625,56 @@ func (r *Router) publishLifecycleUpdates(ctx context.Context, updates []store.Li
 		}
 		r.mu.Unlock()
 		_ = r.broadcastLifecycle(update.ParentAgentID, update.RouterVersion)
+	}
+}
+
+func (r *Router) sweepWorkflowSchedules(ctx context.Context) {
+	if r.store == nil {
+		return
+	}
+	now := r.now()
+	due, err := r.store.GetDueWorkflowSchedules(ctx, now)
+	if err != nil {
+		r.emitEvent(RouterErrorEvent("workflow_schedule_sweep_failed", ""))
+		return
+	}
+	for _, schedule := range due {
+		var lastStatus string
+		var lastErr string
+
+		if r.managed == nil {
+			lastStatus = "failed"
+			lastErr = "managed runtime is unavailable"
+		} else {
+			var modelOverride *managed.Model
+			if strings.TrimSpace(schedule.ModelProvider) != "" && strings.TrimSpace(schedule.ModelID) != "" {
+				modelOverride = &managed.Model{
+					Provider: strings.TrimSpace(schedule.ModelProvider),
+					ID:       strings.TrimSpace(schedule.ModelID),
+				}
+			}
+			_, launchErr := r.managed.LaunchBackgroundWorkflow(ctx, schedule.WorkflowID, schedule.Variables, schedule.TargetCwd, modelOverride)
+			if launchErr != nil {
+				lastStatus = "failed"
+				lastErr = launchErr.Error()
+			} else {
+				lastStatus = "success"
+				lastErr = ""
+			}
+		}
+
+		nextRun, calcErr := store.NextRunAt(schedule.Schedule, now)
+		var nextRunAt string
+		if calcErr != nil {
+			if lastErr == "" {
+				lastErr = calcErr.Error()
+			}
+			nextRunAt = timestamp(now.Add(time.Hour))
+		} else {
+			nextRunAt = timestamp(nextRun)
+		}
+
+		_ = r.store.AdvanceWorkflowSchedule(ctx, schedule.ID, nextRunAt, lastStatus, lastErr)
 	}
 }
 

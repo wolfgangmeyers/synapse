@@ -255,6 +255,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		r.handleRouterRestart(w, req)
 		return
+	case path == "/v1/test/clock/advance":
+		r.handleTestClockAdvance(w, req)
+		return
 	case req.Method == http.MethodGet && (path == "/v1/tools/catalog" || path == "/v1/tools/catalog/"):
 		r.handleToolsCatalog(w, req)
 		return
@@ -1507,6 +1510,48 @@ func (r *Router) handleMessageItem(w http.ResponseWriter, req *http.Request, id,
 	default:
 		r.writeError(w, &httpError{404, "not_found", 0})
 	}
+}
+
+func (r *Router) handleTestClockAdvance(w http.ResponseWriter, req *http.Request) {
+	if r.testClock == nil {
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+		return
+	}
+	if req.Method != http.MethodPost {
+		r.writeError(w, &httpError{status: http.StatusMethodNotAllowed, code: "method_not_allowed"})
+		return
+	}
+	payload, err := r.readJSON(req)
+	if err != nil {
+		r.writeError(w, err)
+		return
+	}
+	rawDelta, exists := payload["delta_ms"]
+	if !exists {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{"error": "delta_ms is required", "code": "invalid_request"})
+		return
+	}
+	var deltaMS int64
+	if err := json.Unmarshal(rawDelta, &deltaMS); err != nil || deltaMS <= 0 {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{"error": "delta_ms must be a positive integer greater than 0", "code": "invalid_request"})
+		return
+	}
+
+	delta := time.Duration(deltaMS) * time.Millisecond
+	if err := r.testClock.Advance(delta); err != nil {
+		r.writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "code": "invalid_request"})
+		return
+	}
+
+	if err := r.runSweep(req.Context()); err != nil {
+		r.emitEvent(RouterErrorEvent("sweep_failed", ""))
+	}
+
+	newTime := r.testClock.Now().UTC()
+	r.writeJSON(w, http.StatusOK, map[string]any{
+		"now":         newTime.Format(time.RFC3339),
+		"advanced_ms": deltaMS,
+	})
 }
 
 func (r *Router) handleRouterRestart(w http.ResponseWriter, req *http.Request) {

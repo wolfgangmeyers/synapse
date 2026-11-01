@@ -264,11 +264,13 @@ type Options struct {
 	GitSyncer           gitsync.Syncer
 	ExitFunc            func(int)
 	RestartDelay        time.Duration
+	EnableTestClock     bool
 }
 
 type Router struct {
 	store          *store.Store
 	clock          deterministic.Clock
+	testClock      *deterministic.FixedClock
 	ids            deterministic.IDSource
 	host           string
 	port           int
@@ -538,7 +540,15 @@ func New(options Options) (*Router, error) {
 		return nil, errors.New("WebSocket path must begin with /")
 	}
 	clock := options.Clock
-	if clock == nil {
+	var testClock *deterministic.FixedClock
+	if options.EnableTestClock {
+		if fc, ok := clock.(*deterministic.FixedClock); ok {
+			testClock = fc
+		} else {
+			testClock = deterministic.NewFixedClock(wallClock())
+			clock = testClock
+		}
+	} else if clock == nil {
 		clock = clockFunc(wallClock)
 	}
 	ids := options.IDSource
@@ -643,7 +653,7 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok", exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
+	r := &Router{store: options.Store, clock: clock, testClock: testClock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, uiDeliveryOwners: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, rateReservations: map[*rateReservation]struct{}{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, defaultEmbeddedRoot: options.DefaultEmbeddedRoot, managedBridge: managedBridge, providerAuth: options.ProviderAuth, staticUI: static, runtimeIdentity: options.RuntimeIdentity, routerLogReader: options.RouterLogReader, testOnlyHTTPHandler: options.TestOnlyHTTPHandler, readinessStatus: "ok", exitFunc: options.ExitFunc, restartDelay: options.RestartDelay}
 	r.startupWork = r.runStartup
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
@@ -1136,6 +1146,7 @@ func (s *session) lifecycleEnabledNow() bool {
 
 func (r *Router) nextID() (string, error) { return r.ids.Next() }
 func (r *Router) now() time.Time          { return r.clock.Now().UTC() }
+func (r *Router) TestClock() *deterministic.FixedClock { return r.testClock }
 func timestamp(value time.Time) string    { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 func (r *Router) readiness() string {

@@ -26,6 +26,7 @@ export interface IsolatedRouter {
   websocketUrl: string;
   process: ChildProcess;
   close: () => Promise<void>;
+  advanceClock: (deltaMs: number) => Promise<{ now: string; advanced_ms: number }>;
 }
 
 export interface IsolatedProxy {
@@ -49,6 +50,7 @@ export interface E2ETestHarness {
   mockLLM: MockLLMServer;
   frontend: IsolatedFrontend;
   close: () => Promise<void>;
+  advanceClock: (deltaMs: number) => Promise<{ now: string; advanced_ms: number }>;
 }
 
 export async function allocatePort(): Promise<number> {
@@ -137,6 +139,7 @@ export async function startMockLLMServer(): Promise<MockLLMServer> {
 export async function startIsolatedRouter(options: {
   repoRoot: string;
   managed?: boolean;
+  testClock?: boolean;
 }): Promise<IsolatedRouter> {
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
   await chmod(root, 0o700);
@@ -172,6 +175,10 @@ export async function startIsolatedRouter(options: {
     String(port),
     `--managed=${isManaged}`,
   ];
+
+  if (options.testClock !== false) {
+    args.push("--test-clock");
+  }
 
   if (isManaged) {
     const home = join(root, "managed-home");
@@ -258,6 +265,19 @@ export async function startIsolatedRouter(options: {
   const httpUrl = `http://127.0.0.1:${port}`;
   const websocketUrl = `ws://127.0.0.1:${port}/v1/agents`;
 
+  const advanceClock = async (deltaMs: number): Promise<{ now: string; advanced_ms: number }> => {
+    const res = await fetch(`${httpUrl}/v1/test/clock/advance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delta_ms: deltaMs }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to advance clock (${res.status}): ${text}`);
+    }
+    return res.json();
+  };
+
   return {
     root,
     databasePath,
@@ -266,6 +286,7 @@ export async function startIsolatedRouter(options: {
     httpUrl,
     websocketUrl,
     process: child,
+    advanceClock,
     close: async () => {
       if (child.exitCode === null) {
         child.kill("SIGTERM");
@@ -415,6 +436,7 @@ export async function serveFrontendDist(distDir: string): Promise<IsolatedFronte
 export async function setupE2EHarness(options?: {
   useProxy?: boolean;
   managed?: boolean;
+  testClock?: boolean;
 }): Promise<E2ETestHarness> {
   const repoRoot = resolve(__dirname, "../..");
   const distDir = join(repoRoot, "web/router-ui-react/dist");
@@ -427,7 +449,7 @@ export async function setupE2EHarness(options?: {
 
   const [mockLLM, router, frontend] = await Promise.all([
     startMockLLMServer(),
-    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false }),
+    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock }),
     serveFrontendDist(distDir),
   ]);
 
@@ -442,6 +464,7 @@ export async function setupE2EHarness(options?: {
     proxy,
     mockLLM,
     frontend,
+    advanceClock: (deltaMs: number) => router.advanceClock(deltaMs),
     close: async () => {
       await Promise.allSettled([
         proxy ? proxy.close() : Promise.resolve(),
