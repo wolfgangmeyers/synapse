@@ -96,14 +96,12 @@ func (r *Router) handleWorkflowScheduleItem(w http.ResponseWriter, req *http.Req
 			WorkflowID:     existing.WorkflowID,
 			Name:           existing.Name,
 			Enabled:        &existing.Enabled,
-			ScheduleType:   existing.ScheduleType,
-			IntervalMS:     existing.IntervalMS,
-			CronExpression: existing.CronExpression,
-			Variables:      existing.Variables,
-			TargetCwd:      existing.TargetCwd,
-			ModelProvider:  existing.ModelProvider,
-			ModelID:        existing.ModelID,
-			NextRunAt:      existing.NextRunAt,
+			Schedule:      existing.Schedule,
+			Variables:     existing.Variables,
+			TargetCwd:     existing.TargetCwd,
+			ModelProvider: existing.ModelProvider,
+			ModelID:       existing.ModelID,
+			NextRunAt:     existing.NextRunAt,
 		}
 
 		if name, err := rawString(payload, "name", false); err == nil && name != "" {
@@ -118,17 +116,11 @@ func (r *Router) handleWorkflowScheduleItem(w http.ResponseWriter, req *http.Req
 				updateReq.Enabled = &b
 			}
 		}
-		if schedType, err := rawString(payload, "schedule_type", false); err == nil && schedType != "" {
-			updateReq.ScheduleType = schedType
-		}
-		if intervalRaw, exists := payload["interval_ms"]; exists {
-			var ims int64
-			if err := json.Unmarshal(intervalRaw, &ims); err == nil {
-				updateReq.IntervalMS = &ims
+		if schedRaw, exists := payload["schedule"]; exists && len(schedRaw) > 0 && string(schedRaw) != "null" {
+			var sched store.StructuredSchedule
+			if err := json.Unmarshal(schedRaw, &sched); err == nil {
+				updateReq.Schedule = sched
 			}
-		}
-		if cronExpr, err := rawString(payload, "cron_expression", false); err == nil && cronExpr != "" {
-			updateReq.CronExpression = &cronExpr
 		}
 		if varsRaw, exists := payload["variables"]; exists && len(varsRaw) > 0 && string(varsRaw) != "null" {
 			var vars map[string]string

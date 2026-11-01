@@ -32,6 +32,9 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-LIFECYCLE-004` | Router MCP & OAuth Tool Routing | `Settings` | [`router-mcp-oauth-tools-spec.md`](./router-mcp-oauth-tools-spec.md) | `tests/e2e/router-mcp-oauth.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-005` | Subagent Read Tools Budget & Redirection | `AgentManagement` | [`subagent-read-tools-budget.spec.md`](./subagent-read-tools-budget.spec.md) | `tests/e2e/subagent-read-tools-budget.spec.ts` | `Active` |
 | `SPEC-BACKGROUND-WORKFLOWS-001` | Background Workflows & Scheduled Execution | `Workflows` | [`SPEC-BACKGROUND-WORKFLOWS.md`](./SPEC-BACKGROUND-WORKFLOWS.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
+| `SPEC-WORKFLOWS-002` | Implicit Workflow Goals & Workflow-Level Snooze | `Workflows` | [`workflow-implicit-goals.spec.md`](./workflow-implicit-goals.spec.md) | `tests/e2e/workflow-implicit-goals.spec.ts` | `Active` |
+| `SPEC-WORKFLOWS-003` | Structured Workflow Schedules & Test Clock | `Workflows` | [`SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md`](./SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
+| `SPEC-LIFECYCLE-007` | Deterministic Embedded Own Reminder Delays & Idempotency | `AgentManagement` | [`embedded-own-reminder-delay.spec.md`](./embedded-own-reminder-delay.spec.md) | `router-proxy/internal/store/embedded_own_reminder_test.go` | `Active` |
 
 ---
 
@@ -45,12 +48,23 @@ Specifications governing persistent organizational knowledge storage, Markdown d
 
 ---
 
+## Search & Tooling Specifications
+
+Specifications governing agent search capabilities, tool integrations, and external research grounding.
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-SEARCH-001` | Codex Search (`codex_search`) | `Tooling` | [`codex-search.md`](./codex-search.md) | `tests/e2e/codex-search.spec.ts` | `Active` |
+
+---
+
 ## Settings & Configuration Specifications
 
 Specifications governing provider settings, router MCP configurations, and server management menus.
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-ROUTER-CONFIG-001` | Router JSON Config File & Custom KB Directory | `Settings` | [`router-config-file-and-kb.spec.md`](./router-config-file-and-kb.spec.md) | `tests/e2e/router-config-file-and-kb.spec.ts` | `Draft` |
 | `SPEC-SETTINGS-002` | Server Management Dropdown Menu | `Settings` | [`SPEC-SERVER-MANAGEMENT-MENU.md`](./SPEC-SERVER-MANAGEMENT-MENU.md) | `tests/e2e/server-management-menu.spec.ts` | `Draft` |
 
 ---
