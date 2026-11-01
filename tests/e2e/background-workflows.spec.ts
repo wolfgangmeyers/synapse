@@ -212,31 +212,37 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
       body: JSON.stringify({
         workflow_id: targetWf.id,
         name: "Nightly Audit",
-        schedule_type: "interval",
-        interval_ms: 3600000,
+        schedule: {
+          days_mode: "every_day",
+          time_mode: "repeating_interval",
+          interval: { value: 1, unit: "hours" },
+        },
         variables: {},
-        next_run_at: new Date(Date.now() + 3600000).toISOString(),
       }),
     });
     expect(badSchedRes.status).toBe(400);
 
-    // 3. Create schedule with valid required variables -> 201 Created
+    // 3. Create schedule with valid required variables and structured schedule -> 201 Created
     const createSchedRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         workflow_id: targetWf.id,
         name: "Nightly Audit",
-        schedule_type: "interval",
-        interval_ms: 3600000,
+        schedule: {
+          days_mode: "every_day",
+          time_mode: "repeating_interval",
+          interval: { value: 1, unit: "hours" },
+        },
         variables: { REPOSITORY: "mecha-developer" },
-        next_run_at: new Date(Date.now() + 3600000).toISOString(),
       }),
     });
     expect(createSchedRes.status).toBe(201);
     const createdSched = (await createSchedRes.json()).schedule;
     expect(createdSched.id).toBeDefined();
     expect(createdSched.name).toBe("Nightly Audit");
+    expect(createdSched.schedule.time_mode).toBe("repeating_interval");
+    expect(createdSched.schedule.interval.value).toBe(1);
 
     // 4. List workflow schedules via REST API
     const listRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules`);
@@ -245,21 +251,36 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
     const found = listData.schedules.find((s: any) => s.id === createdSched.id);
     expect(found).toBeDefined();
 
-    // 5. Edit workflow schedule via PATCH
+    // 5. Edit workflow schedule via PATCH with structured schedule updates
     const editRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules/${createdSched.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: "Hourly Audit Sweep",
-        interval_ms: 7200000,
+        schedule: {
+          days_mode: "every_day",
+          time_mode: "repeating_interval",
+          interval: { value: 2, unit: "hours" },
+        },
       }),
     });
     expect(editRes.status).toBe(200);
     const updatedSched = (await editRes.json()).schedule;
     expect(updatedSched.name).toBe("Hourly Audit Sweep");
-    expect(updatedSched.interval_ms).toBe(7200000);
+    expect(updatedSched.schedule.interval.value).toBe(2);
 
-    // 6. Open UI and verify Workflow Schedules Modal displays the schedule in the list view
+    // 6. Test clock advancement trigger: advance the clock to trigger schedule execution
+    const advanceResult = await harness.advanceClock(2 * 60 * 60 * 1000 + 1000);
+    expect(advanceResult.advanced_ms).toBeGreaterThan(0);
+
+    // Verify the schedule was executed and advanced
+    const postAdvanceRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules/${createdSched.id}`);
+    expect(postAdvanceRes.status).toBe(200);
+    const postAdvanceSched = (await postAdvanceRes.json()).schedule;
+    expect(postAdvanceSched.last_run_at).not.toBeNull();
+    expect(postAdvanceSched.last_run_status).toBe("success");
+
+    // 7. Open UI and verify Workflow Schedules Modal displays the schedule in the list view
     await page.goto(harness.frontend.url);
     await page.evaluate(
       ({ routerUrl }) => {
