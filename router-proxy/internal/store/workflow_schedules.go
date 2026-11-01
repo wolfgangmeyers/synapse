@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -15,40 +17,52 @@ const (
 	maxWorkflowScheduleNameBytes = 256
 )
 
+// IntervalSpec defines a repeating interval.
+type IntervalSpec struct {
+	Value int    `json:"value"`
+	Unit  string `json:"unit"` // "minutes", "hours", "days"
+}
+
+// StructuredSchedule defines the schedule cadence and timing.
+type StructuredSchedule struct {
+	DaysMode string        `json:"days_mode"`           // "every_day" | "specific_days"
+	Days     []int         `json:"days,omitempty"`      // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+	TimeMode string        `json:"time_mode"`           // "specific_times" | "repeating_interval"
+	Times    []string      `json:"times,omitempty"`     // 24-hr "HH:MM" chronologically sorted
+	Interval *IntervalSpec `json:"interval,omitempty"`  // interval configuration
+	Timezone string        `json:"timezone,omitempty"`  // IANA timezone identifier, default "UTC"
+}
+
 // WorkflowScheduleRecord represents a persistent workflow schedule.
 type WorkflowScheduleRecord struct {
-	ID             string            `json:"id"`
-	WorkflowID     string            `json:"workflow_id"`
-	Name           string            `json:"name"`
-	Enabled        bool              `json:"enabled"`
-	ScheduleType   string            `json:"schedule_type"` // "interval" or "cron"
-	IntervalMS     *int64            `json:"interval_ms,omitempty"`
-	CronExpression *string           `json:"cron_expression,omitempty"`
-	Variables      map[string]string `json:"variables"`
-	TargetCwd      string            `json:"target_cwd"`
-	ModelProvider  string            `json:"model_provider"`
-	ModelID        string            `json:"model_id"`
-	NextRunAt      string            `json:"next_run_at"`
-	LastRunAt      *string           `json:"last_run_at,omitempty"`
-	LastRunStatus  *string           `json:"last_run_status,omitempty"`
-	LastRunError   *string           `json:"last_run_error,omitempty"`
-	CreatedAt      string            `json:"created_at"`
-	UpdatedAt      string            `json:"updated_at"`
+	ID            string             `json:"id"`
+	WorkflowID    string             `json:"workflow_id"`
+	Name          string             `json:"name"`
+	Enabled       bool               `json:"enabled"`
+	Schedule      StructuredSchedule `json:"schedule"`
+	Variables     map[string]string  `json:"variables"`
+	TargetCwd     string             `json:"target_cwd"`
+	ModelProvider string             `json:"model_provider"`
+	ModelID       string             `json:"model_id"`
+	NextRunAt     string             `json:"next_run_at"`
+	LastRunAt     *string            `json:"last_run_at,omitempty"`
+	LastRunStatus *string            `json:"last_run_status,omitempty"`
+	LastRunError  *string            `json:"last_run_error,omitempty"`
+	CreatedAt     string             `json:"created_at"`
+	UpdatedAt     string             `json:"updated_at"`
 }
 
 // WorkflowScheduleRequest holds creation or update parameters for a schedule.
 type WorkflowScheduleRequest struct {
-	WorkflowID     string            `json:"workflow_id"`
-	Name           string            `json:"name"`
-	Enabled        *bool             `json:"enabled,omitempty"`
-	ScheduleType   string            `json:"schedule_type"` // "interval" or "cron"
-	IntervalMS     *int64            `json:"interval_ms,omitempty"`
-	CronExpression *string           `json:"cron_expression,omitempty"`
-	Variables      map[string]string `json:"variables,omitempty"`
-	TargetCwd      string            `json:"target_cwd"`
-	ModelProvider  string            `json:"model_provider"`
-	ModelID        string            `json:"model_id"`
-	NextRunAt      string            `json:"next_run_at"`
+	WorkflowID    string             `json:"workflow_id"`
+	Name          string             `json:"name"`
+	Enabled       *bool              `json:"enabled,omitempty"`
+	Schedule      StructuredSchedule `json:"schedule"`
+	Variables     map[string]string  `json:"variables,omitempty"`
+	TargetCwd     string             `json:"target_cwd"`
+	ModelProvider string             `json:"model_provider"`
+	ModelID       string             `json:"model_id"`
+	NextRunAt     string             `json:"next_run_at,omitempty"`
 }
 
 // ValidateWorkflowVariables verifies that all required variables defined in workflowVars
@@ -73,6 +87,191 @@ func ValidateWorkflowVariables(workflowVars []WorkflowVariableDefinition, inputV
 	return nil
 }
 
+// ValidateStructuredSchedule checks all constraints on a StructuredSchedule.
+func ValidateStructuredSchedule(spec StructuredSchedule) error {
+	// 1. Timezone
+	tz := strings.TrimSpace(spec.Timezone)
+	if tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			return &WorkflowValidationError{Field: "schedule.timezone", Message: fmt.Sprintf("invalid timezone %q: %v", tz, err)}
+		}
+	}
+
+	// 2. DaysMode
+	switch spec.DaysMode {
+	case "every_day":
+		// days array is optional / ignored
+	case "specific_days":
+		if len(spec.Days) == 0 {
+			return &WorkflowValidationError{Field: "schedule.days", Message: "days array must not be empty when days_mode is specific_days"}
+		}
+		seen := make(map[int]bool)
+		for _, d := range spec.Days {
+			if d < 0 || d > 6 {
+				return &WorkflowValidationError{Field: "schedule.days", Message: fmt.Sprintf("invalid day %d: must be 0 (Sunday) through 6 (Saturday)", d)}
+			}
+			if seen[d] {
+				return &WorkflowValidationError{Field: "schedule.days", Message: fmt.Sprintf("duplicate day %d in days array", d)}
+			}
+			seen[d] = true
+		}
+	default:
+		return &WorkflowValidationError{Field: "schedule.days_mode", Message: "days_mode must be 'every_day' or 'specific_days'"}
+	}
+
+	// 3. TimeMode
+	switch spec.TimeMode {
+	case "specific_times":
+		if len(spec.Times) == 0 {
+			return &WorkflowValidationError{Field: "schedule.times", Message: "times array must not be empty when time_mode is specific_times"}
+		}
+		seenTimes := make(map[string]bool)
+		for _, tStr := range spec.Times {
+			tTrimmed := strings.TrimSpace(tStr)
+			if err := validateTimeString(tTrimmed); err != nil {
+				return &WorkflowValidationError{Field: "schedule.times", Message: err.Error()}
+			}
+			if seenTimes[tTrimmed] {
+				return &WorkflowValidationError{Field: "schedule.times", Message: fmt.Sprintf("duplicate time %q in times array", tTrimmed)}
+			}
+			seenTimes[tTrimmed] = true
+		}
+	case "repeating_interval":
+		if spec.Interval == nil {
+			return &WorkflowValidationError{Field: "schedule.interval", Message: "interval must not be nil when time_mode is repeating_interval"}
+		}
+		if spec.Interval.Value <= 0 {
+			return &WorkflowValidationError{Field: "schedule.interval.value", Message: "interval value must be a positive integer"}
+		}
+		switch spec.Interval.Unit {
+		case "minutes", "hours", "days":
+			// valid
+		default:
+			return &WorkflowValidationError{Field: "schedule.interval.unit", Message: "interval unit must be 'minutes', 'hours', or 'days'"}
+		}
+	default:
+		return &WorkflowValidationError{Field: "schedule.time_mode", Message: "time_mode must be 'specific_times' or 'repeating_interval'"}
+	}
+
+	return nil
+}
+
+func validateTimeString(t string) error {
+	parts := strings.Split(t, ":")
+	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 2 {
+		return fmt.Errorf("invalid time format %q, must be HH:MM (24-hour)", t)
+	}
+	hh, err := strconv.Atoi(parts[0])
+	if err != nil || hh < 0 || hh > 23 {
+		return fmt.Errorf("invalid hour %q in time %q (must be 00-23)", parts[0], t)
+	}
+	mm, err := strconv.Atoi(parts[1])
+	if err != nil || mm < 0 || mm > 59 {
+		return fmt.Errorf("invalid minute %q in time %q (must be 00-59)", parts[1], t)
+	}
+	return nil
+}
+
+func parseTimeOfDay(t string) (hour int, minute int) {
+	parts := strings.Split(t, ":")
+	h, _ := strconv.Atoi(parts[0])
+	m, _ := strconv.Atoi(parts[1])
+	return h, m
+}
+
+func dayMatches(day int, daysMode string, days []int) bool {
+	if daysMode == "every_day" {
+		return true
+	}
+	for _, d := range days {
+		if d == day {
+			return true
+		}
+	}
+	return false
+}
+
+// NextRunAt computes the next scheduled run timestamp after `now`.
+func NextRunAt(spec StructuredSchedule, now time.Time) (time.Time, error) {
+	if err := ValidateStructuredSchedule(spec); err != nil {
+		return time.Time{}, err
+	}
+
+	loc := time.UTC
+	if strings.TrimSpace(spec.Timezone) != "" {
+		loadedLoc, err := time.LoadLocation(strings.TrimSpace(spec.Timezone))
+		if err != nil {
+			return time.Time{}, err
+		}
+		loc = loadedLoc
+	}
+
+	nowInLoc := now.In(loc)
+
+	if spec.TimeMode == "specific_times" {
+		// Clean and sort times
+		var times []string
+		for _, t := range spec.Times {
+			times = append(times, strings.TrimSpace(t))
+		}
+		sort.Strings(times)
+
+		// Search up to 366 days in the future
+		for dayOffset := 0; dayOffset <= 366; dayOffset++ {
+			candidateDate := nowInLoc.AddDate(0, 0, dayOffset)
+			weekday := int(candidateDate.Weekday()) // 0 = Sunday, 1 = Monday, ...
+			if !dayMatches(weekday, spec.DaysMode, spec.Days) {
+				continue
+			}
+
+			year, month, day := candidateDate.Date()
+			for _, tStr := range times {
+				h, m := parseTimeOfDay(tStr)
+				candTime := time.Date(year, month, day, h, m, 0, 0, loc)
+				if candTime.After(nowInLoc) {
+					return candTime.UTC(), nil
+				}
+			}
+		}
+		return time.Time{}, fmt.Errorf("no matching schedule run found within 1 year")
+	}
+
+	// spec.TimeMode == "repeating_interval"
+	var d time.Duration
+	switch spec.Interval.Unit {
+	case "minutes":
+		d = time.Duration(spec.Interval.Value) * time.Minute
+	case "hours":
+		d = time.Duration(spec.Interval.Value) * time.Hour
+	case "days":
+		d = time.Duration(spec.Interval.Value) * 24 * time.Hour
+	}
+
+	if spec.DaysMode == "every_day" {
+		// Simple forward advancement by interval
+		return now.Add(d).UTC(), nil
+	}
+
+	// Specific days with repeating interval:
+	// Start from now + interval. If the landing day is an eligible day, that is the next run.
+	// If the landing day is not eligible, jump forward to the start of the next eligible day (midnight loc).
+	cand := nowInLoc.Add(d)
+	for dayOffset := 0; dayOffset <= 366; dayOffset++ {
+		checkDay := cand.AddDate(0, 0, dayOffset)
+		weekday := int(checkDay.Weekday())
+		if dayMatches(weekday, spec.DaysMode, spec.Days) {
+			if dayOffset == 0 {
+				return cand.UTC(), nil
+			}
+			// Snap to beginning of that eligible day
+			year, month, day := checkDay.Date()
+			return time.Date(year, month, day, 0, 0, 0, 0, loc).UTC(), nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("no matching schedule run found within 1 year")
+}
+
 func validateWorkflowScheduleRequest(req WorkflowScheduleRequest) error {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
@@ -90,24 +289,29 @@ func validateWorkflowScheduleRequest(req WorkflowScheduleRequest) error {
 		return &WorkflowValidationError{Field: "workflow_id", Message: "workflow_id must not be empty"}
 	}
 
-	switch req.ScheduleType {
-	case "interval":
-		if req.IntervalMS == nil || *req.IntervalMS <= 0 {
-			return &WorkflowValidationError{Field: "interval_ms", Message: "interval_ms must be positive for interval schedule"}
-		}
-	case "cron":
-		if req.CronExpression == nil || strings.TrimSpace(*req.CronExpression) == "" {
-			return &WorkflowValidationError{Field: "cron_expression", Message: "cron_expression must not be empty for cron schedule"}
-		}
-	default:
-		return &WorkflowValidationError{Field: "schedule_type", Message: "schedule_type must be 'interval' or 'cron'"}
-	}
-
-	if strings.TrimSpace(req.NextRunAt) == "" {
-		return &WorkflowValidationError{Field: "next_run_at", Message: "next_run_at must not be empty"}
+	if err := ValidateStructuredSchedule(req.Schedule); err != nil {
+		return err
 	}
 
 	return nil
+}
+
+func marshalSchedule(spec StructuredSchedule) (string, error) {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "{}", err
+	}
+	return string(b), nil
+}
+
+func unmarshalSchedule(raw string) StructuredSchedule {
+	var res StructuredSchedule
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return res
+	}
+	_ = json.Unmarshal([]byte(trimmed), &res)
+	return res
 }
 
 func marshalScheduleVariables(vars map[string]string) (string, error) {
@@ -135,14 +339,13 @@ func scanWorkflowSchedule(row interface {
 	Scan(dest ...interface{}) error
 }) (*WorkflowScheduleRecord, error) {
 	var (
-		rec            WorkflowScheduleRecord
-		enabledInt     int
-		intervalMS     sql.NullInt64
-		cronExpr       sql.NullString
-		varsJSON       string
-		lastRunAt      sql.NullString
-		lastRunStatus  sql.NullString
-		lastRunError   sql.NullString
+		rec           WorkflowScheduleRecord
+		enabledInt    int
+		schedJSON     string
+		varsJSON      string
+		lastRunAt     sql.NullString
+		lastRunStatus sql.NullString
+		lastRunError  sql.NullString
 	)
 
 	err := row.Scan(
@@ -150,9 +353,7 @@ func scanWorkflowSchedule(row interface {
 		&rec.WorkflowID,
 		&rec.Name,
 		&enabledInt,
-		&rec.ScheduleType,
-		&intervalMS,
-		&cronExpr,
+		&schedJSON,
 		&varsJSON,
 		&rec.TargetCwd,
 		&rec.ModelProvider,
@@ -169,12 +370,7 @@ func scanWorkflowSchedule(row interface {
 	}
 
 	rec.Enabled = enabledInt != 0
-	if intervalMS.Valid {
-		rec.IntervalMS = &intervalMS.Int64
-	}
-	if cronExpr.Valid {
-		rec.CronExpression = &cronExpr.String
-	}
+	rec.Schedule = unmarshalSchedule(schedJSON)
 	if lastRunAt.Valid {
 		rec.LastRunAt = &lastRunAt.String
 	}
@@ -190,7 +386,7 @@ func scanWorkflowSchedule(row interface {
 }
 
 const workflowScheduleSelect = `
-	SELECT id, workflow_id, name, enabled, schedule_type, interval_ms, cron_expression,
+	SELECT id, workflow_id, name, enabled, schedule_json,
 	       variables_json, target_cwd, model_provider, model_id, next_run_at,
 	       last_run_at, last_run_status, last_run_error, created_at, updated_at
 	FROM workflow_schedules
@@ -221,10 +417,25 @@ func (s *Store) CreateWorkflowSchedule(ctx context.Context, req WorkflowSchedule
 			return err
 		}
 
-		now := formatTimestamp(s.clock.Now())
+		nowTime := s.clock.Now()
+		now := formatTimestamp(nowTime)
 		enabled := 1
 		if req.Enabled != nil && !*req.Enabled {
 			enabled = 0
+		}
+
+		nextRunAt := strings.TrimSpace(req.NextRunAt)
+		if nextRunAt == "" {
+			computed, err := NextRunAt(req.Schedule, nowTime)
+			if err != nil {
+				return &WorkflowValidationError{Field: "schedule", Message: fmt.Sprintf("failed to compute next_run_at: %v", err)}
+			}
+			nextRunAt = formatTimestamp(computed)
+		}
+
+		schedJSON, err := marshalSchedule(req.Schedule)
+		if err != nil {
+			return err
 		}
 
 		varsJSON, err := marshalScheduleVariables(req.Variables)
@@ -234,23 +445,21 @@ func (s *Store) CreateWorkflowSchedule(ctx context.Context, req WorkflowSchedule
 
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO workflow_schedules (
-				id, workflow_id, name, enabled, schedule_type, interval_ms, cron_expression,
+				id, workflow_id, name, enabled, schedule_json,
 				variables_json, target_cwd, model_provider, model_id, next_run_at,
 				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			id,
 			strings.TrimSpace(req.WorkflowID),
 			strings.TrimSpace(req.Name),
 			enabled,
-			req.ScheduleType,
-			req.IntervalMS,
-			req.CronExpression,
+			schedJSON,
 			varsJSON,
 			req.TargetCwd,
 			req.ModelProvider,
 			req.ModelID,
-			req.NextRunAt,
+			nextRunAt,
 			now,
 			now,
 		)
@@ -259,20 +468,18 @@ func (s *Store) CreateWorkflowSchedule(ctx context.Context, req WorkflowSchedule
 		}
 
 		rec = &WorkflowScheduleRecord{
-			ID:             id,
-			WorkflowID:     strings.TrimSpace(req.WorkflowID),
-			Name:           strings.TrimSpace(req.Name),
-			Enabled:        enabled == 1,
-			ScheduleType:   req.ScheduleType,
-			IntervalMS:     req.IntervalMS,
-			CronExpression: req.CronExpression,
-			Variables:      req.Variables,
-			TargetCwd:      req.TargetCwd,
-			ModelProvider:  req.ModelProvider,
-			ModelID:        req.ModelID,
-			NextRunAt:      req.NextRunAt,
-			CreatedAt:      now,
-			UpdatedAt:      now,
+			ID:            id,
+			WorkflowID:    strings.TrimSpace(req.WorkflowID),
+			Name:          strings.TrimSpace(req.Name),
+			Enabled:       enabled == 1,
+			Schedule:      req.Schedule,
+			Variables:     req.Variables,
+			TargetCwd:     req.TargetCwd,
+			ModelProvider: req.ModelProvider,
+			ModelID:       req.ModelID,
+			NextRunAt:     nextRunAt,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}
 		if rec.Variables == nil {
 			rec.Variables = make(map[string]string)
@@ -354,12 +561,27 @@ func (s *Store) UpdateWorkflowSchedule(ctx context.Context, id string, req Workf
 			return err
 		}
 
-		now := formatTimestamp(s.clock.Now())
+		nowTime := s.clock.Now()
+		now := formatTimestamp(nowTime)
 		enabled := 1
 		if req.Enabled != nil && !*req.Enabled {
 			enabled = 0
 		} else if req.Enabled == nil && !existing.Enabled {
 			enabled = 0
+		}
+
+		nextRunAt := strings.TrimSpace(req.NextRunAt)
+		if nextRunAt == "" {
+			computed, err := NextRunAt(req.Schedule, nowTime)
+			if err != nil {
+				return &WorkflowValidationError{Field: "schedule", Message: fmt.Sprintf("failed to compute next_run_at: %v", err)}
+			}
+			nextRunAt = formatTimestamp(computed)
+		}
+
+		schedJSON, err := marshalSchedule(req.Schedule)
+		if err != nil {
+			return err
 		}
 
 		varsJSON, err := marshalScheduleVariables(req.Variables)
@@ -372,9 +594,7 @@ func (s *Store) UpdateWorkflowSchedule(ctx context.Context, id string, req Workf
 				workflow_id = ?,
 				name = ?,
 				enabled = ?,
-				schedule_type = ?,
-				interval_ms = ?,
-				cron_expression = ?,
+				schedule_json = ?,
 				variables_json = ?,
 				target_cwd = ?,
 				model_provider = ?,
@@ -386,14 +606,12 @@ func (s *Store) UpdateWorkflowSchedule(ctx context.Context, id string, req Workf
 			strings.TrimSpace(req.WorkflowID),
 			strings.TrimSpace(req.Name),
 			enabled,
-			req.ScheduleType,
-			req.IntervalMS,
-			req.CronExpression,
+			schedJSON,
 			varsJSON,
 			req.TargetCwd,
 			req.ModelProvider,
 			req.ModelID,
-			req.NextRunAt,
+			nextRunAt,
 			now,
 			id,
 		)
