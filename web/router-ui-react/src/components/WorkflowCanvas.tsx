@@ -362,7 +362,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
           name: sourceState.name,
           description: sourceState.description,
           entry_text: sourceState.entry_text,
-          goal: sourceState.goal,
           reminders: sourceState.reminders,
           allowed_tools: sourceState.allowed_tools,
           allow_exit: sourceState.allow_exit,
@@ -404,7 +403,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
         name: sourceState.name,
         description: sourceState.description,
         entry_text: sourceState.entry_text,
-        goal: sourceState.goal,
         reminders: sourceState.reminders,
         allowed_tools: sourceState.allowed_tools,
         allow_exit: sourceState.allow_exit,
@@ -433,7 +431,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
         name: sourceState.name,
         description: sourceState.description,
         entry_text: sourceState.entry_text,
-        goal: sourceState.goal,
         reminders: sourceState.reminders,
         allowed_tools: sourceState.allowed_tools,
         allow_exit: sourceState.allow_exit,
@@ -504,7 +501,6 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
       name: updatedState.name,
       description: updatedState.description,
       entry_text: updatedState.entry_text,
-      goal: updatedState.goal,
       reminders: updatedState.reminders,
       monitors: updatedState.monitors,
       allowed_tools: updatedState.allowed_tools,
@@ -588,23 +584,25 @@ export function WorkflowCanvas({ workflowId, client, onBack }: WorkflowCanvasPro
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={async () => {
+            onClick={() => {
               if (!workflow) return;
-              try {
-                const bundle = await client.exportWorkflow(workflow.id);
-                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(bundle, null, 2));
-                const downloadAnchor = document.createElement("a");
-                const sanitizedName = workflow.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || "workflow";
-                downloadAnchor.setAttribute("href", dataStr);
-                downloadAnchor.setAttribute("download", `${sanitizedName}-workflow.json`);
-                document.body.appendChild(downloadAnchor);
-                downloadAnchor.click();
-                downloadAnchor.remove();
-                setStatusMessage("Workflow exported");
-                setTimeout(() => setStatusMessage(null), 2000);
-              } catch (err: unknown) {
-                setError(err instanceof Error ? err.message : "Failed to export workflow");
-              }
+              void (async () => {
+                try {
+                  const bundle = await client.exportWorkflow(workflow.id);
+                  const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(bundle, null, 2));
+                  const downloadAnchor = document.createElement("a");
+                  const sanitizedName = workflow.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || "workflow";
+                  downloadAnchor.setAttribute("href", dataStr);
+                  downloadAnchor.setAttribute("download", `${sanitizedName}-workflow.json`);
+                  document.body.appendChild(downloadAnchor);
+                  downloadAnchor.click();
+                  downloadAnchor.remove();
+                  setStatusMessage("Workflow exported");
+                  setTimeout(() => setStatusMessage(null), 2000);
+                } catch (err: unknown) {
+                  setError(err instanceof Error ? err.message : "Failed to export workflow");
+                }
+              })();
             }}
             title="Export workflow to JSON"
           >

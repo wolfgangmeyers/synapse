@@ -159,7 +159,6 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 				Key:          "state_init",
 				Name:         "Init State",
 				Description:  "Initialize work",
-				Goal:         "Initialize env ${ENV}",
 				IsEntryState: true,
 				AllowExit:    false,
 				AllowedTools: []string{"read", "bash"},
@@ -171,7 +170,6 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 				Key:          "state_finish",
 				Name:         "Finish State",
 				Description:  "Complete work",
-				Goal:         "Done",
 				IsEntryState: false,
 				AllowExit:    true,
 				AllowedTools: []string{"read"},
@@ -221,11 +219,12 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 	require.Equal(t, importedWfID, rec.ActiveWorkflowID)
 	require.NotEmpty(t, rec.ActiveWorkflowStateID)
 
-	// Verify goal synchronized with variable substitution (${ENV} -> production)
+	// Verify implicit workflow goal activated and locked
 	pol, err := db.ManagedGoalPolicyFor(ctx, owner.binding.AgentID)
 	require.NoError(t, err)
 	require.True(t, pol.Config.Enabled)
-	require.Equal(t, "Initialize env production", pol.Config.Goal)
+	require.Equal(t, "Complete active workflow: Test Bundle Workflow", pol.Config.Goal)
+	require.True(t, pol.Config.Settings.GoalLockEnabled)
 
 	// 6. workflow_assign: deactivate
 	resAssignDeact, err := assignTool.Execute(ctx, "c8", map[string]any{
@@ -319,14 +318,12 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 		"workflow_id": importedWfID,
 		"state_id":    newStateID,
 		"name":        "Intermediate State Updated",
-		"goal":        "Process items thoroughly",
 	}, nil)
 	require.NoError(t, err)
 	var stateUpdateResp map[string]any
 	require.NoError(t, json.Unmarshal([]byte(resStateUpdate.Content[0].(ai.TextContent).Text), &stateUpdateResp))
 	require.Equal(t, "ok", stateUpdateResp["status"])
 	require.Equal(t, "Intermediate State Updated", stateUpdateResp["state"].(map[string]any)["name"])
-	require.Equal(t, "Process items thoroughly", stateUpdateResp["state"].(map[string]any)["goal"])
 
 	// Delete state via workflow_state_delete
 	resStateDelete, err := stateDeleteTool.Execute(ctx, "c15", map[string]any{"state_id": newStateID}, nil)

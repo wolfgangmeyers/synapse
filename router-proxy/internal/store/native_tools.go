@@ -60,6 +60,7 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "kb_delete", Category: "Knowledge Base & Search", Description: "Delete a markdown document from the knowledge base", DefaultEnabled: true},
 	{ToolName: "kb_list", Category: "Knowledge Base & Search", Description: "List topics available in the knowledge base", DefaultEnabled: true},
 	{ToolName: "google_search", Category: "Knowledge Base & Search", Description: "Search the web using Google Search", DefaultEnabled: true},
+	{ToolName: "codex_search", Category: "Knowledge Base & Search", Description: "Search the web using OpenAI Codex web search", DefaultEnabled: true},
 
 	// Worker Administration (disabled by default)
 	{ToolName: "worker_spawn", Category: "Worker Administration", Description: "Spawn a new managed worker", DefaultEnabled: false, IsAdmin: true},

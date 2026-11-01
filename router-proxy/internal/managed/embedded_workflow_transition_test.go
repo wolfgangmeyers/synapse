@@ -108,7 +108,6 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 		Name:        "Implement",
 		Description: "Writing code",
 		EntryText:   "Follow TDD and write unit tests.",
-		Goal:        "Implement the planned feature",
 		AllowExit:   ptr(false),
 		Transitions: []store.WorkflowTransitionConfig{
 			{TargetStateID: doneState.ID, Description: "Transition here once tests pass"},
@@ -144,8 +143,16 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no active workflow state")
 
-	// 2. Set active workflow state to Plan
+	// 2. Set active workflow state to Plan and set implicit workflow goal
 	require.NoError(t, db.SetManagedAgentActiveWorkflowState(ctx, agentID, &planState.ID))
+	goalSettings := store.DefaultManagedGoalSettings()
+	goalSettings.GoalLockEnabled = true
+	_, err = db.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
+		Enabled:  true,
+		Goal:     "Complete active workflow: TestWF",
+		Settings: goalSettings,
+	})
+	require.NoError(t, err)
 
 	// 3. Try to exit from Plan -> Blocked because allow_exit == false
 	_, err = tool.Execute(ctx, "call-1", map[string]any{
@@ -181,11 +188,11 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NotNil(t, currState)
 	require.Equal(t, implementState.ID, currState.ID)
 
-	// Verify goal was synchronized to target state's goal and locked
+	// Verify goal was preserved across transition and remained locked
 	goalPolicy, err := db.ManagedGoalPolicyFor(ctx, agentID)
 	require.NoError(t, err)
 	require.True(t, goalPolicy.Config.Enabled)
-	require.Equal(t, "Implement the planned feature", goalPolicy.Config.Goal)
+	require.Equal(t, "Complete active workflow: TestWF", goalPolicy.Config.Goal)
 	require.True(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
 	// 6. Transition from Implement to Done using aliasTool and TargetStateID
@@ -202,12 +209,12 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, doneState.ID, currState.ID)
 
-	// Done state has empty goal -> agent goal should be deactivated and unlocked
+	// State transition preserves implicit workflow goal
 	goalPolicy, err = db.ManagedGoalPolicyFor(ctx, agentID)
 	require.NoError(t, err)
-	require.False(t, goalPolicy.Config.Enabled)
-	require.Empty(t, goalPolicy.Config.Goal)
-	require.False(t, goalPolicy.Config.Settings.GoalLockEnabled)
+	require.True(t, goalPolicy.Config.Enabled)
+	require.Equal(t, "Complete active workflow: TestWF", goalPolicy.Config.Goal)
+	require.True(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
 	// 7. Done state has allow_exit == true -> Successful exit
 	resExit, err := tool.Execute(ctx, "call-5", map[string]any{
@@ -241,7 +248,6 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	stateWithVars, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{
 		Name:        "Deploy",
 		Description: "Deploying ${COMPONENT}",
-		Goal:        "Deploy {{COMPONENT}} to prod",
 		AllowExit:   ptr(true),
 		WorkflowID:  &wfWithVars.ID,
 	})
@@ -259,8 +265,14 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	_ = doneWithTrans
 
-	// Activate Done state with variables
+	// Activate Done state with variables and implicit workflow goal
 	require.NoError(t, db.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, &wfWithVars.ID, &doneState.ID, map[string]string{"COMPONENT": "auth-service"}))
+	_, err = db.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
+		Enabled:  true,
+		Goal:     "Complete active workflow: " + wfWithVars.Name,
+		Settings: goalSettings,
+	})
+	require.NoError(t, err)
 
 	// Transition to Deploy
 	resVar, err := tool.Execute(ctx, "call-6", map[string]any{
@@ -271,10 +283,10 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	resVarText := resVar.Content[0].(ai.TextContent).Text
 	require.Contains(t, resVarText, "Deploying auth-service")
 
-	// Verify goal was substituted
+	// Verify goal remained intact
 	goalPolicy, err = db.ManagedGoalPolicyFor(ctx, agentID)
 	require.NoError(t, err)
-	require.Equal(t, "Deploy auth-service to prod", goalPolicy.Config.Goal)
+	require.Equal(t, "Complete active workflow: "+wfWithVars.Name, goalPolicy.Config.Goal)
 
 	// 8. Test subagent invocation rejection
 	subagentID := "subagent-transitions-1"

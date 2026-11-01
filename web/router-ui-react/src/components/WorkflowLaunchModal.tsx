@@ -138,11 +138,6 @@ export function WorkflowLaunchModal({
     return renderTemplate(entryState.entry_text, variables, templateMap);
   }, [entryState?.entry_text, variables, templateMap]);
 
-  const previewGoal = useMemo(() => {
-    if (!entryState?.goal) return "";
-    return renderTemplate(entryState.goal, variables, templateMap);
-  }, [entryState?.goal, variables, templateMap]);
-
 
   if (!open) {
     return null;
@@ -289,32 +284,9 @@ export function WorkflowLaunchModal({
               </div>
             ) : null}
 
-            {previewGoal ? (
-              <div>
-                <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-secondary, #aaa)" }}>
-                  Goal:
-                </span>
-                <pre
-                  style={{
-                    margin: "4px 0 0 0",
-                    padding: "8px",
-                    background: "var(--surface-raised, #1a202c)",
-                    borderRadius: "6px",
-                    fontSize: "0.8rem",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    maxHeight: "100px",
-                    overflowY: "auto",
-                  }}
-                >
-                  {previewGoal}
-                </pre>
-              </div>
-            ) : null}
-
-            {!previewEntryText && !previewGoal ? (
+            {!previewEntryText ? (
               <span style={{ fontSize: "0.8rem", color: "var(--muted, #888)", fontStyle: "italic" }}>
-                Entry state has no instructions or goal text.
+                Entry state has no instructions text.
               </span>
             ) : null}
           </div>

@@ -38,7 +38,6 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
   const [formName, setFormName] = useState("");
   const [formDescription, setFormDescription] = useState("");
   const [formEntryText, setFormEntryText] = useState("");
-  const [formGoal, setFormGoal] = useState("");
   const [formReminders, setFormReminders] = useState<WorkflowReminderConfig[]>([]);
   const [formAllToolsAllowed, setFormAllToolsAllowed] = useState(true);
   const [formAllowedTools, setFormAllowedTools] = useState<string[]>([]);
@@ -77,7 +76,6 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormName("");
     setFormDescription("");
     setFormEntryText("");
-    setFormGoal("");
     setFormReminders([]);
     setFormAllToolsAllowed(true);
     setFormAllowedTools([]);
@@ -92,7 +90,6 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
     setFormName(state.name);
     setFormDescription(state.description);
     setFormEntryText(state.entry_text);
-    setFormGoal(state.goal ?? "");
     setFormReminders(state.reminders ? state.reminders.map((r) => ({ ...r })) : []);
     const hasRestrictions = Boolean(state.allowed_tools && state.allowed_tools.length > 0);
     setFormAllToolsAllowed(!hasRestrictions);
@@ -253,7 +250,6 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
       name: formName.trim(),
       description: formDescription.trim(),
       entry_text: formEntryText,
-      goal: formGoal.trim(),
       allowed_tools: formAllToolsAllowed ? [] : formAllowedTools,
       transitions: validTransitions,
       allow_exit: formAllowExit,
@@ -389,16 +385,6 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
                       <span>All tools allowed</span>
                     </span>
                   )}
-                  {st.goal ? (
-                    <span
-                      className="workflow-tool-badge"
-                      title={st.goal}
-                      data-testid={`state-goal-badge-${st.id}`}
-                    >
-                      <i className="fa-solid fa-flag" aria-hidden="true" />
-                      <span>Goal configured</span>
-                    </span>
-                  ) : null}
                   {st.allow_exit === false ? (
                     <span
                       className="workflow-tool-badge restricted"
@@ -558,21 +544,6 @@ export function WorkflowStatesPage({ client, onNavigateHome, onBack }: WorkflowS
             />
             <small className="form-text text-muted">
               This text will automatically post to the agent when entering this state.
-            </small>
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="state-goal">Workflow State Goal (optional)</label>
-            <textarea
-              id="state-goal"
-              className="form-control"
-              rows={3}
-              placeholder="What goal should be locked to the agent while in this state?"
-              value={formGoal}
-              onChange={(e) => setFormGoal(e.target.value)}
-            />
-            <small className="form-text text-muted">
-              When set, this goal is locked onto agents entering this state and cannot be overwritten by workers.
             </small>
           </div>
 

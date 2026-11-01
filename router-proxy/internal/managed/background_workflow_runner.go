@@ -160,17 +160,27 @@ func (m *Manager) LaunchBackgroundWorkflow(
 		return nil, fmt.Errorf("failed to set active workflow state on launched agent: %w", err)
 	}
 
-	// Synchronize goal if configured on entry state
-	if entryState.Goal != "" {
-		goalText := m.store.SubstituteAndExpandText(ctx, entryState.Goal, inputVars)
-		goalSettings := store.DefaultManagedGoalSettings()
-		goalSettings.GoalLockEnabled = true
-		_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
-			Enabled:  true,
-			Goal:     goalText,
-			Settings: goalSettings,
-		})
+	// Activate implicit workflow completion goal
+	wfName := "active"
+	snoozeDurationMS := int64(600000)
+	if wf, err := m.store.GetWorkflow(ctx, workflowID); err == nil && wf != nil {
+		wfName = wf.Name
+		if wf.SnoozeDurationMS > 0 {
+			snoozeDurationMS = int64(wf.SnoozeDurationMS)
+		}
 	}
+	goalText := "Complete active workflow: " + wfName
+	goalSettings := store.DefaultManagedGoalSettings()
+	if policy, err := m.store.ManagedGoalPolicyFor(ctx, agentID); err == nil && policy != nil {
+		goalSettings = policy.Config.Settings
+	}
+	goalSettings.GoalLockEnabled = true
+	goalSettings.SnoozeDurationMS = snoozeDurationMS
+	_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
+		Enabled:  true,
+		Goal:     goalText,
+		Settings: goalSettings,
+	})
 
 	_ = m.store.SpawnWorkflowStateReminders(ctx, agentID, entryState, inputVars)
 	_ = m.SpawnWorkflowStateMonitors(ctx, agentID, entryState, inputVars)

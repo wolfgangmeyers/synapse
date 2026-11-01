@@ -27,6 +27,8 @@ func TestEmbeddedScratchpadSchema(t *testing.T) {
 	require.True(t, schema.Check(map[string]any{"action": "pin", "id": "entry-1"}))
 	require.True(t, schema.Check(map[string]any{"action": "unpin", "id": "entry-1"}))
 	require.True(t, schema.Check(map[string]any{"action": "delete", "id": "entry-1"}))
+	require.True(t, schema.Check(map[string]any{"action": "truncate", "before_id": "entry-1"}))
+	require.True(t, schema.Check(map[string]any{"action": "truncate", "keep_last": 10}))
 
 	// Invalid action
 	require.False(t, schema.Check(map[string]any{"action": "unknown"}))
@@ -424,3 +426,158 @@ func TestEmbeddedScratchpadBatchOperations(t *testing.T) {
 	require.Equal(t, 2, total)
 	require.Len(t, entries, 2)
 }
+
+func TestEmbeddedScratchpadTruncate(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test_truncate.db")
+	db, err := store.Open(ctx, dbPath, store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+
+	agentID := "worker-scratchpad-trunc"
+	binding := store.EmbeddedBinding{AgentID: agentID, SessionID: "session-1", Epoch: 1, Generation: "gen-1"}
+	owner := embeddedOwner{binding: binding, identity: "fixture:" + agentID}
+
+	mgr := &Manager{store: db}
+	tool := mgr.embeddedScratchpadTool(owner)
+
+	// Helper to append notes
+	appendNote := func(content string, pinned bool) string {
+		time.Sleep(5 * time.Millisecond)
+		res, err := tool.Execute(ctx, "append-call", map[string]any{
+			"action":  "append",
+			"content": content,
+			"pinned":  pinned,
+		}, nil)
+		require.NoError(t, err)
+		txt := res.Content[0].(ai.TextContent).Text
+		parts := strings.Split(txt, " ")
+		require.True(t, len(parts) >= 4)
+		return parts[3]
+	}
+
+	// 1. Validation errors
+	// Both before_id and keep_last
+	_, err = tool.Execute(ctx, "trunc-err-1", map[string]any{
+		"action":    "truncate",
+		"before_id": "some-id",
+		"keep_last": 5,
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad truncate requires either before_id or keep_last, not both", err.Error())
+
+	// Neither before_id nor keep_last
+	_, err = tool.Execute(ctx, "trunc-err-2", map[string]any{
+		"action": "truncate",
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad truncate requires either before_id or keep_last > 0", err.Error())
+
+	// keep_last <= 0
+	_, err = tool.Execute(ctx, "trunc-err-3", map[string]any{
+		"action":    "truncate",
+		"keep_last": 0,
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad truncate requires either before_id or keep_last > 0", err.Error())
+
+	_, err = tool.Execute(ctx, "trunc-err-4", map[string]any{
+		"action":    "truncate",
+		"keep_last": -3,
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "scratchpad truncate keep_last must be greater than 0", err.Error())
+
+	// Non-existent before_id
+	_, err = tool.Execute(ctx, "trunc-err-5", map[string]any{
+		"action":    "truncate",
+		"before_id": "non-existent-id",
+	}, nil)
+	require.Error(t, err)
+	require.Equal(t, "entry not found: non-existent-id", err.Error())
+
+	// 2. Truncate with keep_last and preserve pinned entries
+	// Create:
+	// Pinned 1
+	// Unpinned 1
+	// Unpinned 2
+	// Pinned 2
+	// Unpinned 3
+	// Unpinned 4
+	// Unpinned 5
+	p1 := appendNote("Pinned 1", true)
+	u1 := appendNote("Unpinned 1", false)
+	u2 := appendNote("Unpinned 2", false)
+	p2 := appendNote("Pinned 2", true)
+	u3 := appendNote("Unpinned 3", false)
+	u4 := appendNote("Unpinned 4", false)
+	u5 := appendNote("Unpinned 5", false)
+
+	// Keep last 2 unpinned: u1, u2, u3 should be deleted (3 entries). u4 and u5 kept. p1 and p2 preserved.
+	res, err := tool.Execute(ctx, "trunc-keep-last", map[string]any{
+		"action":    "truncate",
+		"keep_last": 2,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Truncated 3 scratchpad entries.", res.Content[0].(ai.TextContent).Text)
+
+	// Verify entries in db
+	entries, total, err := db.FetchScratchpadRecent(ctx, agentID, 20)
+	require.NoError(t, err)
+	require.Equal(t, 4, total) // p1, p2, u4, u5
+	foundIDs := make(map[string]bool)
+	for _, e := range entries {
+		foundIDs[e.ID] = true
+	}
+	require.True(t, foundIDs[p1], "p1 must be preserved")
+	require.True(t, foundIDs[p2], "p2 must be preserved")
+	require.True(t, foundIDs[u4], "u4 must be preserved")
+	require.True(t, foundIDs[u5], "u5 must be preserved")
+	require.False(t, foundIDs[u1], "u1 must be truncated")
+	require.False(t, foundIDs[u2], "u2 must be truncated")
+	require.False(t, foundIDs[u3], "u3 must be truncated")
+
+	// 3. Truncate with before_id
+	// Add more entries:
+	// Unpinned 6
+	// Unpinned 7
+	// Unpinned 8
+	u6 := appendNote("Unpinned 6", false)
+	u7 := appendNote("Unpinned 7", false)
+	u8 := appendNote("Unpinned 8", false)
+
+	// Current unpinned: u4, u5, u6, u7, u8
+	// Truncate before u6: should delete u4, u5 (2 entries). u6 itself is NOT deleted.
+	res, err = tool.Execute(ctx, "trunc-before-id", map[string]any{
+		"action":    "truncate",
+		"before_id": u6,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Truncated 2 scratchpad entries.", res.Content[0].(ai.TextContent).Text)
+
+	entries, total, err = db.FetchScratchpadRecent(ctx, agentID, 20)
+	require.NoError(t, err)
+	require.Equal(t, 5, total) // p1, p2, u6, u7, u8
+	foundIDs = make(map[string]bool)
+	for _, e := range entries {
+		foundIDs[e.ID] = true
+	}
+	require.True(t, foundIDs[p1], "p1 must remain")
+	require.True(t, foundIDs[p2], "p2 must remain")
+	require.True(t, foundIDs[u6], "u6 must remain")
+	require.True(t, foundIDs[u7], "u7 must remain")
+	require.True(t, foundIDs[u8], "u8 must remain")
+	require.False(t, foundIDs[u4], "u4 was deleted")
+	require.False(t, foundIDs[u5], "u5 was deleted")
+
+	// Single entry truncation singular test: "Truncated 1 scratchpad entry."
+	// Remaining unpinned: u6, u7, u8
+	// Truncate before u7: u6 is before u7, so only u6 is deleted (1 entry).
+	res, err = tool.Execute(ctx, "trunc-single", map[string]any{
+		"action":    "truncate",
+		"before_id": u7,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Truncated 1 scratchpad entry.", res.Content[0].(ai.TextContent).Text)
+}
+

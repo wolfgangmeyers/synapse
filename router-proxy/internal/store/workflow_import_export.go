@@ -21,7 +21,6 @@ type WorkflowStateExport struct {
 	Name         string                     `json:"name"`
 	Description  string                     `json:"description"`
 	EntryText    string                     `json:"entry_text"`
-	Goal         string                     `json:"goal"`
 	IsEntryState bool                       `json:"is_entry_state"`
 	AllowExit    bool                       `json:"allow_exit"`
 	AllowedTools []string                   `json:"allowed_tools"`
@@ -34,9 +33,10 @@ type WorkflowStateExport struct {
 
 // WorkflowInfoExport models workflow metadata.
 type WorkflowInfoExport struct {
-	Name        string                       `json:"name"`
-	Description string                       `json:"description"`
-	Variables   []WorkflowVariableDefinition `json:"variables"`
+	Name             string                       `json:"name"`
+	Description      string                       `json:"description"`
+	SnoozeDurationMS int                          `json:"snooze_duration_ms"`
+	Variables        []WorkflowVariableDefinition `json:"variables"`
 }
 
 // WorkflowExportBundle represents a fully portable workflow graph bundle.
@@ -157,10 +157,14 @@ func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExpor
 
 			workflowName := strings.TrimSpace(bundle.Workflow.Name)
 			workflowDesc := strings.TrimSpace(bundle.Workflow.Description)
+			snoozeDurationMS := bundle.Workflow.SnoozeDurationMS
+			if snoozeDurationMS <= 0 {
+				snoozeDurationMS = 600000
+			}
 
 			// Insert workflow first (with NULL entry_state_id to satisfy FK constraint)
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?)`,
-				newWfID, workflowName, workflowDesc, variablesJSON, now, now)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+				newWfID, workflowName, workflowDesc, snoozeDurationMS, variablesJSON, now, now)
 			if err != nil {
 				return fmt.Errorf("insert workflow %s: %w", workflowName, err)
 			}
@@ -213,8 +217,8 @@ func (s *Store) ReplaceAllWorkflows(ctx context.Context, bundles []WorkflowExpor
 					allowExitInt = 0
 				}
 
-				_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					newStateID, newWfID, st.Name, st.Description, st.EntryText, st.Goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
+				_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					newStateID, newWfID, st.Name, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
 				if err != nil {
 					return fmt.Errorf("insert workflow state %s: %w", st.Name, err)
 				}
@@ -298,7 +302,6 @@ func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*Workflo
 			Name:         st.Name,
 			Description:  st.Description,
 			EntryText:    st.EntryText,
-			Goal:         st.Goal,
 			IsEntryState: isEntry,
 			AllowExit:    st.AllowExit,
 			AllowedTools: allowedTools,
@@ -315,13 +318,19 @@ func (s *Store) ExportWorkflow(ctx context.Context, workflowID string) (*Workflo
 		vars = []WorkflowVariableDefinition{}
 	}
 
+	snoozeDurationMS := wf.SnoozeDurationMS
+	if snoozeDurationMS <= 0 {
+		snoozeDurationMS = 600000
+	}
+
 	bundle := &WorkflowExportBundle{
 		SchemaVersion: 1,
 		ExportedAt:    formatTimestamp(s.clock.Now()),
 		Workflow: WorkflowInfoExport{
-			Name:        wf.Name,
-			Description: wf.Description,
-			Variables:   vars,
+			Name:             wf.Name,
+			Description:      wf.Description,
+			SnoozeDurationMS: snoozeDurationMS,
+			Variables:        vars,
 		},
 		EntryStateKey: entryKey,
 		States:        exportedStates,
@@ -468,13 +477,6 @@ func (s *Store) ValidateExportBundle(bundle WorkflowExportBundle) error {
 		}
 		if !utf8.ValidString(st.EntryText) || strings.ContainsRune(st.EntryText, 0) {
 			return &WorkflowValidationError{Field: fmt.Sprintf("states[%d].entry_text", i), Message: "entry text contains invalid characters"}
-		}
-
-		if len([]byte(st.Goal)) > maxWorkflowStateGoalBytes {
-			return &WorkflowValidationError{Field: fmt.Sprintf("states[%d].goal", i), Message: "goal exceeds maximum byte length"}
-		}
-		if !utf8.ValidString(st.Goal) || strings.ContainsRune(st.Goal, 0) {
-			return &WorkflowValidationError{Field: fmt.Sprintf("states[%d].goal", i), Message: "goal contains invalid characters"}
 		}
 
 		// Validate reminders
@@ -635,9 +637,14 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 			return err
 		}
 
+		snoozeDurationMS := bundle.Workflow.SnoozeDurationMS
+		if snoozeDurationMS <= 0 {
+			snoozeDurationMS = 600000
+		}
+
 		// Insert workflow first (with NULL entry_state_id to satisfy FK constraint)
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?)`,
-			newWfID, candidateName, strings.TrimSpace(bundle.Workflow.Description), variablesJSON, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+			newWfID, candidateName, strings.TrimSpace(bundle.Workflow.Description), snoozeDurationMS, variablesJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowNameConflictError{Name: candidateName}
@@ -696,8 +703,8 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				allowExitInt = 0
 			}
 
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				newStateID, newWfID, st.Name, st.Description, st.EntryText, st.Goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newStateID, newWfID, st.Name, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, st.UIPosX, st.UIPosY, now, now)
 			if err != nil {
 				return err
 			}
@@ -708,7 +715,6 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 				Name:         st.Name,
 				Description:  st.Description,
 				EntryText:    st.EntryText,
-				Goal:         st.Goal,
 				Reminders:    st.Reminders,
 				Monitors:     monitorsCopy,
 				AllowedTools: sanitizedTools,
@@ -730,14 +736,15 @@ func (s *Store) ImportWorkflow(ctx context.Context, bundle WorkflowExportBundle)
 		}
 
 		createdWorkflow = &Workflow{
-			ID:           newWfID,
-			Name:         candidateName,
-			Description:  strings.TrimSpace(bundle.Workflow.Description),
-			EntryStateID: newEntryStateID,
-			Variables:    varsList,
-			CreatedAt:    now,
-			UpdatedAt:    now,
-			StateCount:   len(bundle.States),
+			ID:               newWfID,
+			Name:             candidateName,
+			Description:      strings.TrimSpace(bundle.Workflow.Description),
+			EntryStateID:     newEntryStateID,
+			SnoozeDurationMS: snoozeDurationMS,
+			Variables:        varsList,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+			StateCount:       len(bundle.States),
 		}
 
 		return nil

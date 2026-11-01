@@ -1,0 +1,35 @@
+{
+  "database": "data/mailbox.db",
+  "host": "127.0.0.1",
+  "port": 8765,
+  "log": "data/events.jsonl",
+  "max_batch_chars": 4096,
+  "policy_timeout": "2m",
+  "managed": true,
+  "managed_ui_dist": "web/router-ui-react/dist",
+  "codex_credential_path": "~/.mecha-developer/codex-credentials.json",
+  "embedded_worker_default": false,
+  "kb": {
+    "dir": "docs/kb"
+  },
+  "managed_runtime": {
+    "pi_executable": "/usr/local/bin/pi",
+    "managed_home": "~/.mecha-developer/runtime",
+    "allowed_working_directory_roots": [
+      "/home/wolfgang",
+      "/tmp/mecha-worktrees"
+    ],
+    "canonical_quiet_recipient_id": "supervisor"
+  },
+  "embedded_root": {
+    "enabled": false,
+    "request_id": "00000000-0000-0000-0000-000000000000",
+    "name": "root-supervisor",
+    "cwd": "/home/wolfgang/code/mecha-developer",
+    "model": {
+      "provider": "google-vertex",
+      "id": "gemini-3.8-flash"
+    },
+    "initial_instruction": "Coordinate system subagents and execute dev-loop workflows."
+  }
+}

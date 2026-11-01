@@ -347,11 +347,17 @@ func TestToolsCatalog(t *testing.T) {
 	require.NotEmpty(t, result.Tools)
 	require.NotEmpty(t, result.Categories)
 
-	var foundBash, foundAdmin, foundAllowance bool
+	var foundBash, foundAdmin, foundAllowance, foundCodexSearch bool
 	for _, tool := range result.Tools {
 		if tool.ToolName == "bash" {
 			foundBash = true
 			require.Equal(t, "System & Shell", tool.Category)
+			require.False(t, tool.IsAdmin)
+			require.True(t, tool.DefaultEnabled)
+		}
+		if tool.ToolName == "codex_search" {
+			foundCodexSearch = true
+			require.Equal(t, "Knowledge Base & Search", tool.Category)
 			require.False(t, tool.IsAdmin)
 			require.True(t, tool.DefaultEnabled)
 		}
@@ -368,6 +374,7 @@ func TestToolsCatalog(t *testing.T) {
 		}
 	}
 	require.True(t, foundBash)
+	require.True(t, foundCodexSearch, "expected codex_search to be in tools catalog")
 	require.True(t, foundAdmin)
 	require.True(t, foundAllowance)
 }

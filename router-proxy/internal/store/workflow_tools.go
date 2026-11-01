@@ -15,6 +15,7 @@ var CanonicalWorkflowTools = []WorkflowToolDefinition{
 	{ID: "write", Name: "write", Category: "system", Description: "Write or overwrite files"},
 	{ID: "bash", Name: "bash", Category: "system", Description: "Execute shell commands"},
 	{ID: "google_search", Name: "google_search", Category: "system", Description: "Search the web using Google Search via Grounding"},
+	{ID: "codex_search", Name: "codex_search", Category: "system", Description: "Search the web using OpenAI Codex web search"},
 	{ID: "mecha_mailbox_send", Name: "mecha_mailbox_send", Category: "lifecycle", Description: "Send async mailbox messages"},
 	{ID: "goal", Name: "goal", Category: "lifecycle", Description: "Inspect or control goals"},
 	{ID: "goal_snooze", Name: "goal_snooze", Category: "lifecycle", Description: "Snooze goal evaluations"},

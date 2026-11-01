@@ -24,12 +24,14 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newWorkflowName, setNewWorkflowName] = useState("");
   const [newWorkflowDesc, setNewWorkflowDesc] = useState("");
+  const [newWorkflowSnoozeMinutes, setNewWorkflowSnoozeMinutes] = useState<number>(10);
   const [createError, setCreateError] = useState<string | undefined>(undefined);
   const [creating, setCreating] = useState(false);
 
   const [renameWorkflow, setRenameWorkflow] = useState<Workflow | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameDesc, setRenameDesc] = useState("");
+  const [renameSnoozeMinutes, setRenameSnoozeMinutes] = useState<number>(10);
   const [renameError, setRenameError] = useState<string | undefined>(undefined);
   const [renaming, setRenaming] = useState(false);
 
@@ -175,13 +177,16 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     setCreating(true);
     setCreateError(undefined);
     try {
+      const snoozeDurationMS = (newWorkflowSnoozeMinutes > 0 ? newWorkflowSnoozeMinutes : 10) * 60_000;
       const created = await client.createWorkflow({
         name: newWorkflowName.trim(),
         description: newWorkflowDesc.trim(),
+        snooze_duration_ms: snoozeDurationMS,
       });
       setCreateDialogOpen(false);
       setNewWorkflowName("");
       setNewWorkflowDesc("");
+      setNewWorkflowSnoozeMinutes(10);
       await fetchWorkflows();
       setSelectedWorkflowId(created.id);
     } catch (err: unknown) {
@@ -201,9 +206,11 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
     setRenaming(true);
     setRenameError(undefined);
     try {
+      const snoozeDurationMS = (renameSnoozeMinutes > 0 ? renameSnoozeMinutes : 10) * 60_000;
       await client.updateWorkflow(renameWorkflow.id, {
         name: renameName.trim(),
         description: renameDesc.trim(),
+        snooze_duration_ms: snoozeDurationMS,
       });
       setRenameWorkflow(null);
       await fetchWorkflows();
@@ -506,6 +513,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                         setRenameWorkflow(wf);
                         setRenameName(wf.name);
                         setRenameDesc(wf.description ?? "");
+                        setRenameSnoozeMinutes(wf.snooze_duration_ms ? Math.round(wf.snooze_duration_ms / 60_000) : 10);
                         setRenameError(undefined);
                       }}
                     >
@@ -584,7 +592,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                 required
               />
             </div>
-            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
               <label htmlFor="workflow-desc-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
                 Description (optional)
               </label>
@@ -596,6 +604,26 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                 value={newWorkflowDesc}
                 onChange={(e) => setNewWorkflowDesc(e.target.value)}
               />
+            </div>
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label htmlFor="workflow-snooze-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Goal Snooze Duration (minutes)
+              </label>
+              <input
+                id="workflow-snooze-input"
+                type="number"
+                min={1}
+                className="form-control"
+                placeholder="10"
+                value={newWorkflowSnoozeMinutes}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  setNewWorkflowSnoozeMinutes(isNaN(val) ? 10 : Math.max(1, val));
+                }}
+              />
+              <span style={{ fontSize: "0.8rem", color: "var(--muted, #888)", display: "block", marginTop: "0.25rem" }}>
+                Default duration for goal_snooze while executing this workflow (default: 10 minutes).
+              </span>
             </div>
             <div className="dialog-actions workflow-dialog-actions">
               <button type="button" className="btn btn-secondary" onClick={() => setCreateDialogOpen(false)}>
@@ -635,7 +663,7 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                 required
               />
             </div>
-            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
               <label htmlFor="rename-desc-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
                 Description
               </label>
@@ -646,6 +674,22 @@ export function WorkflowsPage({ client, onNavigateHome, onBack }: WorkflowsPageP
                 value={renameDesc}
                 onChange={(e) => setRenameDesc(e.target.value)}
               />
+            </div>
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label htmlFor="rename-snooze-input" style={{ display: "block", marginBottom: "0.4rem", fontWeight: 500 }}>
+                Goal Snooze Duration (minutes)
+              </label>
+              <input
+                id="rename-snooze-input"
+                type="number"
+                min={1}
+                className="form-control"
+                value={renameSnoozeMinutes}
+                onChange={(e) => setRenameSnoozeMinutes(Math.max(1, parseInt(e.target.value, 10) || 1))}
+              />
+              <span style={{ fontSize: "0.8rem", color: "var(--muted, #888)", display: "block", marginTop: "0.25rem" }}>
+                Default duration for goal_snooze while executing this workflow (default: 10 minutes).
+              </span>
             </div>
             <div className="dialog-actions workflow-dialog-actions">
               <button type="button" className="btn btn-secondary" onClick={() => setRenameWorkflow(null)}>

@@ -125,7 +125,6 @@ func TestEmbeddedWorkflowTransitionPreservesCustomGoalSettings(t *testing.T) {
 
 	state2, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{
 		Name:       "State2",
-		Goal:       "Do step 2",
 		AllowExit:  ptr(true),
 		WorkflowID: &wf.ID,
 	})
@@ -133,7 +132,6 @@ func TestEmbeddedWorkflowTransitionPreservesCustomGoalSettings(t *testing.T) {
 
 	state1, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{
 		Name:       "State1",
-		Goal:       "Do step 1",
 		AllowExit:  ptr(true),
 		WorkflowID: &wf.ID,
 		Transitions: []store.WorkflowTransitionConfig{
@@ -148,9 +146,10 @@ func TestEmbeddedWorkflowTransitionPreservesCustomGoalSettings(t *testing.T) {
 	// Configure custom goal settings on agent policy: SnoozeDurationMS: 600000
 	customSettings := store.DefaultManagedGoalSettings()
 	customSettings.SnoozeDurationMS = 600000
+	customSettings.GoalLockEnabled = true
 	_, err = db.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
 		Enabled:  true,
-		Goal:     state1.Goal,
+		Goal:     "Complete active workflow: " + wf.Name,
 		Settings: customSettings,
 	})
 	require.NoError(t, err)
@@ -168,12 +167,12 @@ func TestEmbeddedWorkflowTransitionPreservesCustomGoalSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res.Content)
 
-	// Verify policy after transition: Goal is updated to State 2's goal, GoalLockEnabled is true,
+	// Verify policy after transition: Goal is preserved, GoalLockEnabled is true,
 	// and custom SnoozeDurationMS (600000) is preserved rather than reset to DefaultManagedGoalSettings() (300000).
 	policyAfter, err := db.ManagedGoalPolicyFor(ctx, agentID)
 	require.NoError(t, err)
 	require.True(t, policyAfter.Config.Enabled)
-	require.Equal(t, "Do step 2", policyAfter.Config.Goal)
+	require.Equal(t, "Complete active workflow: "+wf.Name, policyAfter.Config.Goal)
 	require.True(t, policyAfter.Config.Settings.GoalLockEnabled)
 	require.Equal(t, int64(600000), policyAfter.Config.Settings.SnoozeDurationMS, "custom SnoozeDurationMS must be preserved across workflow state transitions")
 }

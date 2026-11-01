@@ -8,8 +8,8 @@ description: Authoritative guide to router-managed workflows, state machine DAGs
 ## Purpose & Architecture
 
 Managed workflows are router-owned state-machine DAGs backed by SQLite tables:
-- `workflows`: workflow definitions, entry state pointer, variable definitions JSON.
-- `workflow_states`: individual states, descriptions, entry text instructions, goals, tool restrictions, reminders, monitors, exit allowance, UI coordinates.
+- `workflows`: workflow definitions, entry state pointer, snooze duration, variable definitions JSON.
+- `workflow_states`: individual states, descriptions, entry text instructions, tool restrictions, reminders, monitors, exit allowance, UI coordinates.
 - `workflow_state_transitions`: directed edges between states with target IDs and descriptions.
 
 These are not plain-text markdown templates. They are structural state machines enforced at the router runtime level.
@@ -17,13 +17,14 @@ These are not plain-text markdown templates. They are structural state machines 
 ```
 +-----------------------------------------------------------+
 |                        workflows                          |
-|  id, name, description, entry_state_id, variables_json   |
+|  id, name, description, entry_state_id, snooze_duration,  |
+|  variables_json                                           |
 +-----------------------------------------------------------+
                              | 1:N
                              v
 +-----------------------------------------------------------+
 |                     workflow_states                       |
-|  id, workflow_id, name, entry_text, goal, allow_exit,     |
+|  id, workflow_id, name, entry_text, allow_exit,           |
 |  allowed_tools, reminders, monitors, ui_pos_x, ui_pos_y   |
 +-----------------------------------------------------------+
                              | 1:N
@@ -58,7 +59,7 @@ On entering or transitioning to a state:
    - Instructions from `entry_text` (variable-interpolated)
    - Available forward transitions with descriptions
    - Exit allowance indicator
-2. **Goal enforcement**: If `goal` is defined on the state, router sets agent goal config with variable substitution applied and sets `GoalLockEnabled: true`. When `goal` is empty, existing goal config is disabled and unlocked.
+2. **Implicit workflow completion goal**: When an agent enters an active workflow, the router automatically activates an implicit goal: `"Complete active workflow: <workflow_name>"` with `GoalLockEnabled: true` and workflow-configured snooze duration (default 10 minutes). Per-state goals are removed; internal state transitions keep the implicit goal active and locked. Manual goal set/off calls are rejected while any workflow is active. When the workflow exits or deactivates, the goal is cleared.
 3. **Tool filtering**: If `allowed_tools` is defined and non-empty, the agent's exposed toolset is restricted to that list.
    - System escape tools always bypass restrictions:
      - `mecha_workflow_transition` (or alias `workflow_transition`)
@@ -116,6 +117,7 @@ Returns:
       "name": "dev-loop",
       "description": "Default dev loop: spec -> plan -> review -> implement (TDD) -> coverage -> review",
       "entry_state_id": "st_01j7...",
+      "snooze_duration_ms": 600000,
       "state_count": 4,
       "variable_count": 1,
       "created_at": "2026-03-01T00:00:00Z",
@@ -136,7 +138,7 @@ Returns:
 ```json
 {
   "status": "ok",
-  "workflow": { "id": "...", "name": "...", "description": "...", "entry_state_id": "...", "variables": [...] },
+  "workflow": { "id": "...", "name": "...", "description": "...", "snooze_duration_ms": 600000, "entry_state_id": "...", "variables": [...] },
   "states": [ ... ],
   "bundle": { ... }
 }
@@ -151,6 +153,7 @@ Parameters:
 - `workflow_id` (string, optional): Target workflow ID or name when updating via fields.
 - `name` (string, optional): Workflow name (required when creating via fields without bundle).
 - `description` (string, optional): Workflow description.
+- `snooze_duration_ms` (integer, optional): Workflow-level goal snooze duration in milliseconds (defaults to 600,000 ms / 10 minutes).
 - `entry_state_id` (string, optional): Entry state ID.
 
 When `bundle` is provided, the entire workflow graph (states, transitions, variables) is validated and imported atomically.
@@ -185,7 +188,7 @@ Parameters:
 When activated:
 - Active workflow and state are assigned to the agent.
 - State reminders and monitors are spawned.
-- Goal and goal lock are applied.
+- Implicit workflow completion goal and goal lock are applied.
 - Active toolset is filtered.
 - Initial guidance prompt is admitted to the agent turn.
 
@@ -214,7 +217,6 @@ Returns:
       "workflow_id": "01838059-86d4-48af-a0b2-0cb006582728",
       "name": "initial",
       "description": "Initial setup state",
-      "goal": "Complete setup",
       "allow_exit": true,
       "allowed_tools": ["bash", "read"],
       "reminder_count": 0,
@@ -249,7 +251,6 @@ Returns:
     "name": "initial",
     "description": "Initial setup state",
     "entry_text": "You are setting things up",
-    "goal": "Complete setup",
     "reminders": [],
     "monitors": [],
     "allowed_tools": ["bash", "read"],
@@ -273,7 +274,6 @@ Parameters:
 - `name` (string, optional): State name (required when creating a new state).
 - `description` (string, optional): State description.
 - `entry_text` (string, optional): Instructions injected into agent turn on state entry.
-- `goal` (string, optional): State goal (enforced and locked when agent is in state).
 - `allow_exit` (boolean, optional): Whether exiting the workflow is allowed from this state.
 - `allowed_tools` (array of strings, optional): Tool whitelist for this state.
 - `reminders` (array of objects, optional): State-scoped reminder configs.
@@ -321,6 +321,7 @@ Portable JSON bundle format used for export, import, git-sync, and programmatic 
   "workflow": {
     "name": "string (1-256 chars, unique)",
     "description": "string (max 4096 chars)",
+    "snooze_duration_ms": 600000,
     "variables": [
       {
         "name": "string (1-64 chars: alphanumeric, _, -)",
@@ -339,7 +340,6 @@ Portable JSON bundle format used for export, import, git-sync, and programmatic 
       "name": "string (1-256 chars)",
       "description": "string (max 4096 chars)",
       "entry_text": "string (max 65536 chars, instructions injected on state entry)",
-      "goal": "string (max 4000 chars, locked agent goal while in state)",
       "is_entry_state": false,
       "allow_exit": false,
       "allowed_tools": ["string"],
@@ -385,7 +385,7 @@ Portable JSON bundle format used for export, import, git-sync, and programmatic 
 
 ### Text Interpolation Rules
 
-Variable substitutions occur across `entry_text`, `goal`, state descriptions, transition descriptions, and reminder bodies.
+Variable substitutions occur across `entry_text`, state descriptions, transition descriptions, and reminder bodies.
 
 Supported syntax:
 - `${var_name}`
@@ -406,6 +406,7 @@ Complete, valid `mecha-workflows` v1 JSON bundle for the canonical development l
   "workflow": {
     "name": "dev-loop",
     "description": "Canonical development loop: Specification -> Planning -> Implementation (TDD) -> Review & Validation.",
+    "snooze_duration_ms": 600000,
     "variables": [
       {
         "name": "task_description",
@@ -432,7 +433,6 @@ Complete, valid `mecha-workflows` v1 JSON bundle for the canonical development l
       "name": "Specification",
       "description": "Define observable behavior, architecture, and analyze alternative approaches.",
       "entry_text": "Write SPEC.md in the worktree based on the task description:\n${task_description}\n\nRequirements:\n1. Specify observable inputs, outputs, state changes, and error conditions.\n2. Include high-level component design.\n3. Analyze several alternative approaches and justify the selected one.\n4. Send SPEC.md to supervisor via mailbox for review. Do not advance until approved.",
-      "goal": "Draft SPEC.md for ${task_description}, analyze alternatives, and obtain supervisor approval.",
       "is_entry_state": true,
       "allow_exit": false,
       "allowed_tools": [
@@ -461,7 +461,6 @@ Complete, valid `mecha-workflows` v1 JSON bundle for the canonical development l
       "name": "Planning",
       "description": "Draft implementation plan mapped to SPEC.md and run robot-review passes.",
       "entry_text": "Draft PLAN.md covering all behaviors from SPEC.md.\n\nRequirements:\n1. Map every requirement to design items, file paths, and test strategies.\n2. Run robot-review on PLAN.md using a single reviewer covering all focus areas (unless complexity requires multiple).\n3. Validate reviewer output with pr-validate using a different persona.\n4. Address valid feedback within the 3-round robot-review cap.\n5. Send signed-off plan ledger to supervisor before implementing.",
-      "goal": "Create PLAN.md matching SPEC.md, complete robot-review and pr-validate passes, and secure plan sign-off.",
       "is_entry_state": false,
       "allow_exit": false,
       "allowed_tools": [
@@ -497,7 +496,6 @@ Complete, valid `mecha-workflows` v1 JSON bundle for the canonical development l
       "name": "Implementation",
       "description": "Test-driven development, service execution, and behavior verification.",
       "entry_text": "Implement the planned changes following strict TDD:\n\n1. Write failing tests covering all behaviors in SPEC.md before writing production code.\n2. Implement code until tests pass.\n3. For multi-service or user-visible changes, run live services and verify end-to-end.\n4. Verify tests pass against ${base_branch}.\n5. Transition to review once implementation and direct proofs are complete.",
-      "goal": "Write failing tests first, implement verified code satisfying SPEC.md, and confirm all tests pass.",
       "is_entry_state": false,
       "allow_exit": false,
       "allowed_tools": [
@@ -530,7 +528,6 @@ Complete, valid `mecha-workflows` v1 JSON bundle for the canonical development l
       "name": "Review & Validation",
       "description": "Test coverage validation, implementation robot-review, and final readiness gates.",
       "entry_text": "Perform final validation and review on the working candidate:\n\n1. Run test-coverage skill on changed code; resolve blocking gaps.\n2. Run robot-review on the diff against ${base_branch} using one reviewer per focus area.\n3. Validate findings using pr-validate with independent personas.\n4. Fix valid findings within the 3-round cap across plan and implementation.\n5. For UI changes, verify live browser evidence.\n6. Mail supervisor the final review ledger and sign-off report before exiting.",
-      "goal": "Pass test coverage analysis, complete robot-review and pr-validate checks, verify browser evidence, and report completion.",
       "is_entry_state": false,
       "allow_exit": true,
       "allowed_tools": [
@@ -596,6 +593,6 @@ The router validates bundle integrity on import/save:
 - **Worker**:
   - Operates inside the boundaries set by the active state.
   - Follows injected instructions from `entry_text`.
-  - Executes work matching the locked `goal`.
+  - Executes work towards completing the workflow under the implicit workflow goal.
   - Initiates state progression explicitly via `mecha_workflow_transition` when phase exit conditions are met.
   - Exits the workflow cleanly once final sign-off is confirmed in an exit-allowed state.

@@ -92,8 +92,19 @@ func (m *Manager) embeddedGoalTool(owner embeddedOwner, admitted func(string) *s
 			return agent.AgentToolResult{}, errors.New("goal call was not freshly admitted")
 		}
 		activeWorkflowState, sErr := m.store.GetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID)
-		if sErr == nil && activeWorkflowState != nil && activeWorkflowState.Goal != "" {
-			return agent.AgentToolResult{}, fmt.Errorf("goal is locked by active workflow state %q", activeWorkflowState.Name)
+		curAgent, aErr := m.store.ManagedAgent(ctx, owner.binding.AgentID)
+		if (sErr == nil && activeWorkflowState != nil) || (aErr == nil && curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "")) {
+			wfName := "active"
+			if curAgent != nil && curAgent.ActiveWorkflowID != "" {
+				if wf, err := m.store.GetWorkflow(ctx, curAgent.ActiveWorkflowID); err == nil && wf != nil {
+					wfName = wf.Name
+				}
+			} else if activeWorkflowState != nil && activeWorkflowState.WorkflowID != nil {
+				if wf, err := m.store.GetWorkflow(ctx, *activeWorkflowState.WorkflowID); err == nil && wf != nil {
+					wfName = wf.Name
+				}
+			}
+			return agent.AgentToolResult{}, fmt.Errorf("manual goal control is disabled while workflow %q is active; the active goal is to complete the workflow", wfName)
 		}
 		if err := m.store.CheckEmbeddedGoalInvocation(ctx, invocation); err != nil {
 			return agent.AgentToolResult{}, err

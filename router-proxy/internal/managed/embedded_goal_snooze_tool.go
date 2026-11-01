@@ -118,6 +118,11 @@ func (m *Manager) goalSnoozeLimitMS(ctx context.Context, agentID string) int64 {
 		if err == nil && policy != nil && policy.Config.Settings.SnoozeDurationMS > 0 {
 			limitMs = policy.Config.Settings.SnoozeDurationMS
 		}
+		if curAgent, err := m.store.ManagedAgent(ctx, agentID); err == nil && curAgent != nil && curAgent.ActiveWorkflowID != "" {
+			if wf, err := m.store.GetWorkflow(ctx, curAgent.ActiveWorkflowID); err == nil && wf != nil && wf.SnoozeDurationMS > 0 {
+				limitMs = int64(wf.SnoozeDurationMS)
+			}
+		}
 	}
 	if limitMs > store.EmbeddedGoalSnoozeMaxDurationMS {
 		limitMs = store.EmbeddedGoalSnoozeMaxDurationMS

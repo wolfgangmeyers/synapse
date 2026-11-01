@@ -32,8 +32,19 @@ func (m *Manager) executeManagedGoalControl(ctx context.Context, binding *manage
 		return RootControlHandlerResult{}, errors.New("managed goal action is invalid")
 	}
 	activeWorkflowState, err := m.store.GetManagedAgentActiveWorkflowState(ctx, invocation.Fence.AgentID)
-	if err == nil && activeWorkflowState != nil && activeWorkflowState.Goal != "" {
-		return RootControlHandlerResult{}, fmt.Errorf("goal is locked by active workflow state %q", activeWorkflowState.Name)
+	curAgent, aErr := m.store.ManagedAgent(ctx, invocation.Fence.AgentID)
+	if (err == nil && activeWorkflowState != nil) || (aErr == nil && curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "")) {
+		wfName := "active"
+		if curAgent != nil && curAgent.ActiveWorkflowID != "" {
+			if wf, wErr := m.store.GetWorkflow(ctx, curAgent.ActiveWorkflowID); wErr == nil && wf != nil {
+				wfName = wf.Name
+			}
+		} else if activeWorkflowState != nil && activeWorkflowState.WorkflowID != nil {
+			if wf, wErr := m.store.GetWorkflow(ctx, *activeWorkflowState.WorkflowID); wErr == nil && wf != nil {
+				wfName = wf.Name
+			}
+		}
+		return RootControlHandlerResult{}, fmt.Errorf("manual goal control is disabled while workflow %q is active; the active goal is to complete the workflow", wfName)
 	}
 	current, err := m.store.ManagedGoalPolicyFor(ctx, invocation.Fence.AgentID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
