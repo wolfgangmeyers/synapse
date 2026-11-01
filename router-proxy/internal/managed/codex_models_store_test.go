@@ -13,7 +13,7 @@ import (
 func TestLoadCodexModelsStoreAddsSupportedMissingModels(t *testing.T) {
 	dir := t.TempDir()
 	model := *ai.GetModel("openai-codex", "gpt-6-sol")
-	model.ID, model.Name = "gpt-6.1-sol", "GPT-6.1 Sol"
+	model.ID, model.Name = "store-fixture-model", "Store Fixture Model"
 	invalid := model
 	invalid.ID, invalid.BaseURL = "wrong-endpoint", "https://example.org"
 	existing := model

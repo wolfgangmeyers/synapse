@@ -83,13 +83,9 @@ func (h CodexBrowserAuth) snapshot(ctx context.Context, commit func([]store.Mana
 		}
 		if usable {
 			for _, model := range ai.GetModels("openai-codex") {
-				if model.Api == ai.APIOpenAICodexResponses {
+				if validateEmbeddedCodexModel(model) == nil && ai.IsModelType(model, ai.ModelTypeChat) && model.ContextWindow > 0 && model.MaxTokens > 0 {
 					catalog = append(catalog, store.ManagedProviderModel{Provider: model.Provider, ID: model.ID, Name: model.Name, Available: true})
 				}
-			}
-			// ponytail: fill the one missing Codex catalog ID until the pinned SDK catches up.
-			if ai.GetModel("openai-codex", "gpt-6.1-sol") == nil {
-				catalog = append(catalog, store.ManagedProviderModel{Provider: "openai-codex", ID: "gpt-6.1-sol", Name: "GPT-6.1 Sol", Available: true})
 			}
 		}
 		if commit != nil {
