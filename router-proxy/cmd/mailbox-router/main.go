@@ -283,10 +283,14 @@ func main() {
 	if options.testClock {
 		testClock = deterministic.NewFixedClock(time.Now())
 	}
+	var attachmentsClock attachments.Clock
+	if testClock != nil {
+		attachmentsClock = testClock
+	}
 	var durable *store.Store
 	attachmentsStore, err := attachments.New(attachments.Options{
 		Directory: options.database + ".attachments",
-		Clock:     testClock,
+		Clock:     attachmentsClock,
 		Referenced: func(id string) bool {
 			if durable == nil {
 				return false
@@ -424,7 +428,7 @@ func main() {
 	if err := startupEntered(stageListen); err != nil {
 		log.Fatal(err)
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Clock: testClock, EnableTestClock: options.testClock, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, DefaultEmbeddedRoot: embeddedWorkerDefaultEnabled(options), StartupManaged: func(startupCtx context.Context, manager *managed.Manager) error {
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Clock: storeOpts.Clock, EnableTestClock: options.testClock, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: options.auditSupervisorTarget != "" && options.auditTmuxSession != "", AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, DefaultEmbeddedRoot: embeddedWorkerDefaultEnabled(options), StartupManaged: func(startupCtx context.Context, manager *managed.Manager) error {
 		if !options.embeddedRoot.Enabled {
 			return launchConfiguredEmbeddedRoot(startupCtx, options, manager)
 		}
