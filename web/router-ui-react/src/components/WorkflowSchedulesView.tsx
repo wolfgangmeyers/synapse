@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, type ReactElement, type FormEvent } from "react";
 import type { RouterHttpClient } from "../transport/http-client";
-import type { WorkflowSchedule } from "../protocol/types";
+import type { WorkflowSchedule, StructuredSchedule } from "../protocol/types";
 import type { Workflow } from "../domain/workflow-states";
 import { WorkflowSelect } from "./WorkflowSelect";
-import { ScheduleCronPicker, describeCron, intervalToCron } from "./ScheduleCronPicker";
+import { StructuredSchedulePicker, describeStructuredSchedule } from "./StructuredSchedulePicker";
 import { ManagedDirectoryPicker } from "./ManagedDirectoryPicker";
 import { loadManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "../persistence/managed-folder-history";
 
@@ -13,6 +13,12 @@ export interface WorkflowSchedulesViewProps {
   onListDirectories?: ((path: string) => Promise<{ path: string; parent: string; directories: Array<{ name: string; path: string }> }>) | undefined;
   onWorkflowRun?: ((workflowId: string) => void) | undefined;
 }
+
+const DEFAULT_SCHEDULE: StructuredSchedule = {
+  days_mode: "every_day",
+  time_mode: "specific_times",
+  times: ["09:00"],
+};
 
 export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders, onListDirectories, onWorkflowRun: _onWorkflowRun }: WorkflowSchedulesViewProps): ReactElement {
   const [viewMode, setViewMode] = useState<"list" | "form">("list");
@@ -26,7 +32,7 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [workflowId, setWorkflowId] = useState("");
-  const [cronExpression, setCronExpression] = useState("0 * * * *");
+  const [scheduleSpec, setScheduleSpec] = useState<StructuredSchedule>(DEFAULT_SCHEDULE);
   const [variables, setVariables] = useState<Record<string, string>>({});
   const [targetCwd, setTargetCwd] = useState("");
   const [saving, setSaving] = useState(false);
@@ -63,7 +69,7 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
     setEditingId(null);
     setName("");
     setWorkflowId("");
-    setCronExpression("0 * * * *");
+    setScheduleSpec(DEFAULT_SCHEDULE);
     setVariables({});
     setTargetCwd("");
     setFormError(null);
@@ -80,14 +86,7 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
     setEditingId(schedule.id);
     setName(schedule.name);
     setWorkflowId(schedule.workflow_id);
-    // Seamlessly feed either cron_expression or legacy interval_ms into ScheduleCronPicker
-    if (schedule.cron_expression && schedule.cron_expression.trim()) {
-      setCronExpression(schedule.cron_expression.trim());
-    } else if (schedule.interval_ms) {
-      setCronExpression(intervalToCron(schedule.interval_ms));
-    } else {
-      setCronExpression("0 * * * *");
-    }
+    setScheduleSpec(schedule.schedule ?? DEFAULT_SCHEDULE);
     setVariables(schedule.variables ?? {});
     setTargetCwd(schedule.target_cwd ?? "");
     setFormError(null);
@@ -145,8 +144,18 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
       return;
     }
 
-    if (!cronExpression.trim()) {
-      setFormError("Cron expression is required.");
+    if (scheduleSpec.days_mode === "specific_days" && (!scheduleSpec.days || scheduleSpec.days.length === 0)) {
+      setFormError("At least one day must be selected.");
+      return;
+    }
+
+    if (scheduleSpec.time_mode === "specific_times" && (!scheduleSpec.times || scheduleSpec.times.length === 0)) {
+      setFormError("At least one time must be specified.");
+      return;
+    }
+
+    if (scheduleSpec.time_mode === "repeating_interval" && (!scheduleSpec.interval || scheduleSpec.interval.value < 1)) {
+      setFormError("Interval value must be at least 1.");
       return;
     }
 
@@ -165,12 +174,17 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
 
     setSaving(true);
     try {
+      // Automatically record user's timezone if not specified
+      const userTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      const fullSchedule: StructuredSchedule = {
+        ...scheduleSpec,
+        timezone: scheduleSpec.timezone || userTz,
+      };
+
       const payload: Partial<WorkflowSchedule> = {
         name: trimmedName,
         workflow_id: workflowId,
-        schedule_type: "cron",
-        cron_expression: cronExpression.trim(),
-        interval_ms: null,
+        schedule: fullSchedule,
         variables,
         ...(targetCwd.trim() ? { target_cwd: targetCwd.trim() } : {}),
       };
@@ -283,7 +297,7 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
 
             <div className="form-group" style={{ marginBottom: "1rem" }}>
               <label style={{ display: "block", marginBottom: "4px", fontWeight: 600 }}>Schedule *</label>
-              <ScheduleCronPicker value={cronExpression} onChange={setCronExpression} />
+              <StructuredSchedulePicker value={scheduleSpec} onChange={setScheduleSpec} />
             </div>
 
             <div className="form-group" style={{ marginBottom: "1rem" }}>
@@ -463,14 +477,8 @@ export function WorkflowSchedulesView({ client, recentFolders: propRecentFolders
                         </span>
                         <span>•</span>
                         <span>
-                          Schedule: <strong style={{ color: "#c084fc" }}>{describeCron(schedule.cron_expression ?? (schedule.interval_ms ? intervalToCron(schedule.interval_ms) : ""))}</strong>
+                          Schedule: <strong style={{ color: "#c084fc" }}>{describeStructuredSchedule(schedule.schedule)}</strong>
                         </span>
-                        {schedule.cron_expression ? (
-                          <>
-                            <span>•</span>
-                            <code style={{ fontSize: "0.78rem", color: "#a5b4fc" }}>{schedule.cron_expression}</code>
-                          </>
-                        ) : null}
                       </div>
 
                       <div className="mcp-server-meta">
