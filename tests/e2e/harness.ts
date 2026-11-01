@@ -141,6 +141,7 @@ export async function startIsolatedRouter(options: {
   managed?: boolean;
   testClock?: boolean;
   embedded?: { endpoint: string; signedOut?: boolean };
+  codexCredentialPath?: string;
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
@@ -195,7 +196,9 @@ export async function startIsolatedRouter(options: {
 
     const fixtureDir = resolve(options.repoRoot, "web/router-ui-react/tests/functional/fixtures");
     const piPath = join(root, "fake-managed-pi.mjs");
-    const authPath = resolve(fixtureDir, "fake-provider-auth.mjs");
+    const authPath = options.codexCredentialPath
+      ? resolve(options.repoRoot, "auth-helper/index.mjs")
+      : resolve(fixtureDir, "fake-provider-auth.mjs");
 
     const { readFile, copyFile } = await import("node:fs/promises");
     let fakePiContent = await readFile(resolve(fixtureDir, "fake-managed-pi.mjs"), "utf8");
@@ -236,14 +239,16 @@ export async function startIsolatedRouter(options: {
     await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify({ google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });
     await writeFile(join(root, "work/note.txt"), "terra harmless tool evidence", { mode: 0o600 });
   }
+  if (options.codexCredentialPath) args.push("--codex-credential-path", options.codexCredentialPath);
+
   // Keep build/toolchain settings above; allow only disposable runtime config here.
   let runtimeEnvironment = process.env;
-  if (options.embedded) {
+  if (options.embedded || options.codexCredentialPath) {
     for (const directory of ["config", "cache", "tmp"]) await mkdir(join(root, directory), { mode: 0o700 });
     runtimeEnvironment = {
       PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
       XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), TMPDIR: join(root, "tmp"),
-      EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint,
+      ...(options.embedded ? { EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint } : {}),
     };
   }
   const child = spawn(binaryPath, args, {
@@ -477,6 +482,7 @@ export async function setupE2EHarness(options?: {
   useProxy?: boolean;
   managed?: boolean;
   testClock?: boolean;
+  codexCredentialPath?: string;
 }): Promise<E2ETestHarness> {
   const repoRoot = resolve(__dirname, "../..");
   const distDir = join(repoRoot, "web/router-ui-react/dist");
@@ -489,7 +495,7 @@ export async function setupE2EHarness(options?: {
 
   const [mockLLM, router, frontend] = await Promise.all([
     startMockLLMServer(),
-    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock }),
+    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock, codexCredentialPath: options?.codexCredentialPath }),
     serveFrontendDist(distDir),
   ]);
 

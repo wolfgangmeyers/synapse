@@ -5,6 +5,18 @@ Personal dev-tooling skills for AI coding agents — supervisor, worker, watchdo
 Companion repos:
 - `wolfgangmeyers/mecha-review` — self-contained PR review and review-adjacent skills (review-pr, robot-review, pr-summary, pr-validate, pr-context, explain)
 
+## First-time setup
+
+Install Git, Node.js 22.19 or newer (including npm), Go compatible with `router-proxy/go.mod`, and make. Then run:
+
+```bash
+tools/initialize.sh
+```
+
+The initializer installs missing upstream Pi, clones the maintained `pi-packages` fork beside this checkout when absent, installs locked dependencies, and builds the Web UI and router. It prints the exact commands to start both services. Open `http://localhost:8787` and sign in through Providers before launching workers.
+
+It is safe to rerun: existing credentials, database, configuration, Pi extensions, and fork source edits are preserved. Existing Pi is reused and the fork is never automatically pulled or reset. Runtime directories are prepared privately without changing home-directory permissions. Package-manager errors identify the failing step; if global npm installation needs write access, configure a user-owned npm prefix and rerun. The script does not use sudo or install OS packages, and it does not start services or sign into providers.
+
 ## Structure
 
 Skills live under `.claude/skills/<name>/SKILL.md` with optional `tools/` and supporting files. Each skill is a self-contained instruction set any agent (Claude Code, Codex, Cursor) can invoke by reading the file.

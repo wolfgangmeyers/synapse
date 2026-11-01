@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEmbeddedCodexLocalCredentialRejectsUnsafeLockAndParent(t *testing.T) {
+func TestEmbeddedCodexLocalCredentialRejectsUnsafeLockAndAcceptsOrdinaryParent(t *testing.T) {
 	root := testfixture.PrivateDir(t)
 	private := filepath.Join(root, "private")
 	require.NoError(t, os.Mkdir(private, 0700))
@@ -45,7 +45,7 @@ func TestEmbeddedCodexLocalCredentialRejectsUnsafeLockAndParent(t *testing.T) {
 	require.NoError(t, os.Chmod(public, 0755))
 	assertMode(t, public, 0755)
 	_, err := store.OpenLocalCodexCredentialStore(filepath.Join(public, "credential"))
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestEmbeddedCodexLocalCredentialCancelledOrFailedUpdatePreservesRecord(t *testing.T) {
