@@ -308,6 +308,159 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
     await expect(modal.locator("text=Hourly Audit Sweep")).toBeVisible({ timeout: 5000 });
   });
 
+  test("SCN-001 & SCN-002: Specific Days and Specific Times schedule fires and UI creation workflow via Workflows window", async ({
+    page,
+  }) => {
+    const targetRouterUrl = harness.proxy ? harness.proxy.url : harness.router.httpUrl;
+
+    // 1. Create a dedicated workflow for UI testing and schedule firing
+    const wfStateRes = await fetch(`${targetRouterUrl}/v1/workflow-states`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Morning Health Entry",
+        description: "Entry state for daily health sweeps",
+        entry_text: "Execute health check for {{REPO}}",
+        goal: "Health check complete",
+      }),
+    });
+    expect(wfStateRes.status).toBe(201);
+    const entryState = (await wfStateRes.json()).workflow_state;
+
+    const wfRes = await fetch(`${targetRouterUrl}/v1/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Daily Health Sweep",
+        description: "Scheduled health sweep workflow",
+        entry_state_id: entryState.id,
+        variables: [{ name: "REPO", label: "Repository Name", type: "text", required: true }],
+      }),
+    });
+    expect(wfRes.status).toBe(201);
+    const wf = await wfRes.json();
+
+    // 2. Open Workflows window -> Schedules tab -> click "+ Add Schedule"
+    await page.goto(harness.frontend.url);
+    await page.evaluate(
+      ({ routerUrl }) => {
+        localStorage.setItem("mecha.web.activeRouter", routerUrl);
+        localStorage.setItem("mecha.web.routers", JSON.stringify([routerUrl]));
+      },
+      { routerUrl: targetRouterUrl }
+    );
+    await page.reload();
+
+    // Open managed actions dropdown and click "Workflows"
+    const trigger = page.locator(".managed-actions-trigger");
+    await expect(trigger).toBeVisible({ timeout: 5000 });
+    await trigger.click();
+
+    const workflowsMenuItem = page.locator('button[role="menuitem"]:has-text("Workflows")');
+    await expect(workflowsMenuItem).toBeVisible({ timeout: 5000 });
+    await workflowsMenuItem.click();
+
+    // Verify Workflows page is loaded
+    await expect(page.locator(".workflows-page")).toBeVisible({ timeout: 5000 });
+
+    // Click "Schedules" tab in brand-header-tabs
+    const schedulesTab = page.locator('.brand-header-tab:has-text("Schedules")');
+    await expect(schedulesTab).toBeVisible({ timeout: 5000 });
+    await schedulesTab.click();
+
+    // Verify WorkflowSchedulesView is rendered and click "+ Add Schedule"
+    const addScheduleBtn = page.locator('button:has-text("+ Add Schedule")');
+    await expect(addScheduleBtn).toBeVisible({ timeout: 5000 });
+    await addScheduleBtn.click();
+
+    // Verify Add Schedule form is displayed
+    await expect(page.locator("text=Add Schedule")).toBeVisible({ timeout: 5000 });
+
+    // Fill in Schedule Name
+    await page.fill("#schedule-name", "Weekday Morning Health Sweep");
+
+    // Select Target Workflow
+    const workflowSelectBtn = page.locator(".model-picker button.model-current");
+    await expect(workflowSelectBtn).toBeVisible({ timeout: 5000 });
+    await workflowSelectBtn.click();
+
+    const targetOption = page.locator(`.model-options button:has-text("${wf.name}")`);
+    await expect(targetOption).toBeVisible({ timeout: 5000 });
+    await targetOption.click();
+
+    // Interact with StructuredSchedulePicker:
+    // Select "Specific days"
+    const specificDaysBtn = page.locator('button.segmented-toggle-btn:has-text("Specific days")');
+    await expect(specificDaysBtn).toBeVisible({ timeout: 5000 });
+    await specificDaysBtn.click();
+
+    // Click "Weekdays" preset
+    const weekdaysPresetBtn = page.locator('.specific-days-controls button:has-text("Weekdays")');
+    await expect(weekdaysPresetBtn).toBeVisible({ timeout: 5000 });
+    await weekdaysPresetBtn.click();
+
+    // Select "At specific times"
+    const specificTimesBtn = page.locator('button.segmented-toggle-btn:has-text("At specific times")');
+    await expect(specificTimesBtn).toBeVisible({ timeout: 5000 });
+    await specificTimesBtn.click();
+
+    // Set time input to "08:30"
+    const timeInput = page.locator('.specific-times-container input[type="time"]');
+    await expect(timeInput).toBeVisible({ timeout: 5000 });
+    await timeInput.fill("08:30");
+
+    // Verify live summary chip reflects the plain-English summary
+    const summaryChip = page.locator(".schedule-summary-chip");
+    await expect(summaryChip).toContainText("Runs Monday through Friday at 08:30 AM");
+
+    // Fill in required variable REPO
+    const repoVarInput = page.locator("#var-REPO");
+    await expect(repoVarInput).toBeVisible({ timeout: 5000 });
+    await repoVarInput.fill("reflexivity/mecha-developer");
+
+    // Submit form: click "Create Schedule"
+    const submitBtn = page.locator('button[type="submit"]:has-text("Create Schedule")');
+    await expect(submitBtn).toBeVisible({ timeout: 5000 });
+    await submitBtn.click();
+
+    // Verify it transitions back to list view and displays the created schedule with plain-English summary
+    await expect(page.locator("strong.mcp-server-name:has-text('Weekday Morning Health Sweep')")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator("text=Runs Monday through Friday at 08:30 AM")).toBeVisible({ timeout: 5000 });
+
+    // Fetch the created schedule via API to get ID and next_run_at
+    const schedListRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules`);
+    expect(schedListRes.status).toBe(200);
+    const schedListData = await schedListRes.json();
+    const createdSched = schedListData.schedules.find(
+      (s: any) => s.name === "Weekday Morning Health Sweep"
+    );
+    expect(createdSched).toBeDefined();
+    expect(createdSched.next_run_at).toBeDefined();
+
+    // 3. Advance clock to next_run_at time and verify schedule fires and spawns background worker
+    const nextRunTime = new Date(createdSched.next_run_at).getTime();
+    // Advance clock past next_run_at (up to 7 days + 1 minute if needed to hit the next designated clock time)
+    const advanceRes = await harness.advanceClock(7 * 24 * 60 * 60 * 1000);
+    expect(advanceRes.advanced_ms).toBeGreaterThan(0);
+
+    // Verify schedule executed
+    const verifySchedRes = await fetch(`${targetRouterUrl}/v1/workflow-schedules/${createdSched.id}`);
+    expect(verifySchedRes.status).toBe(200);
+    const verifySched = (await verifySchedRes.json()).schedule;
+    expect(verifySched.last_run_at).not.toBeNull();
+    expect(verifySched.last_run_status).toBe("success");
+
+    // Verify background worker was spawned
+    const agentsRes = await fetch(`${targetRouterUrl}/v1/managed-agents`);
+    expect(agentsRes.status).toBe(200);
+    const agentsData = await agentsRes.json();
+    const spawnedBgAgent = agentsData.agents.find(
+      (a: any) => a.is_background === true && a.active_workflow_id === wf.id
+    );
+    expect(spawnedBgAgent).toBeDefined();
+    expect(spawnedBgAgent.agent_id).toMatch(/^bg-wf-/);
+  });
+
   test("Scenario 4: Background tab displays active background workers followed by completed workers without a segmented toggle", async ({
     page,
   }) => {

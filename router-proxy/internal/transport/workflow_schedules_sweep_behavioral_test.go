@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -205,4 +206,101 @@ func TestWorkflowSchedulesSweepBehavioral(t *testing.T) {
 	require.Contains(t, *failedRun.LastRunError, "EXTRA_REQUIRED")
 	// Next run should have advanced another hour to 13:05
 	require.Equal(t, "2026-11-02T13:05:00.000Z", failedRun.NextRunAt)
+
+	// 9. Non-UTC timezone schedule evaluation during sweep (e.g. "America/New_York")
+	// At current test time (2026-11-02 12:05:00 UTC), EST is UTC-5, so local time is 07:05:00.
+	// A schedule set for 09:00 America/New_York corresponds to 14:00:00 UTC.
+	nySchedule, err := durable.CreateWorkflowSchedule(ctx, store.WorkflowScheduleRequest{
+		WorkflowID:    wf.ID,
+		Name:          "NY Morning Task",
+		TargetCwd:     root,
+		ModelProvider: "google",
+		ModelID:       "gemini-2.5-flash",
+		Variables:     map[string]string{"PROJECT": "Empire", "EXTRA_REQUIRED": "yes"},
+		Schedule: store.StructuredSchedule{
+			DaysMode: "every_day",
+			TimeMode: "specific_times",
+			Times:    []string{"09:00"},
+			Timezone: "America/New_York",
+		},
+	})
+	require.NoError(t, err)
+	// 09:00 EST on Nov 2, 2026 is 14:00 UTC
+	require.Equal(t, "2026-11-02T14:00:00.000Z", nySchedule.NextRunAt)
+	require.Nil(t, nySchedule.LastRunAt)
+
+	// Advance clock by 110 minutes (from 12:05 to 13:55 UTC) -> NY schedule not yet due (14:00)
+	advance110Min, _ := json.Marshal(map[string]any{"delta_ms": 110 * 60 * 1000})
+	res, err = client.Post(server.URL+"/v1/test/clock/advance", "application/json", bytes.NewReader(advance110Min))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	unfiredNY, err := durable.GetWorkflowSchedule(ctx, nySchedule.ID)
+	require.NoError(t, err)
+	require.Nil(t, unfiredNY.LastRunAt)
+	require.Equal(t, "2026-11-02T14:00:00.000Z", unfiredNY.NextRunAt)
+
+	// Advance clock by 10 minutes (from 13:55 to 14:05 UTC) -> crosses 14:00 UTC (09:00 EST)
+	advance10Min, _ := json.Marshal(map[string]any{"delta_ms": 10 * 60 * 1000})
+	res, err = client.Post(server.URL+"/v1/test/clock/advance", "application/json", bytes.NewReader(advance10Min))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	firedNY, err := durable.GetWorkflowSchedule(ctx, nySchedule.ID)
+	require.NoError(t, err)
+	require.NotNil(t, firedNY.LastRunAt)
+	require.Equal(t, "success", *firedNY.LastRunStatus)
+	// Next run for 09:00 America/New_York advances to the following day at 09:00 EST = 2026-11-03 14:00:00 UTC
+	require.Equal(t, "2026-11-03T14:00:00.000Z", firedNY.NextRunAt)
+
+	// 10. Fallback when NextRunAt fails on a corrupted schedule record during sweep
+	// Create a valid schedule, then directly corrupt its schedule_json in SQLite so NextRunAt fails
+	corruptSched, err := durable.CreateWorkflowSchedule(ctx, store.WorkflowScheduleRequest{
+		WorkflowID:    wf.ID,
+		Name:          "Corrupt Schedule Task",
+		TargetCwd:     root,
+		ModelProvider: "google",
+		ModelID:       "gemini-2.5-flash",
+		Variables:     map[string]string{"PROJECT": "Corrupt", "EXTRA_REQUIRED": "present"},
+		Schedule: store.StructuredSchedule{
+			DaysMode: "every_day",
+			TimeMode: "repeating_interval",
+			Interval: &store.IntervalSpec{Value: 1, Unit: "hours"},
+			Timezone: "UTC",
+		},
+	})
+	require.NoError(t, err)
+
+	// Corrupt schedule_json with an invalid timezone and invalid mode so NextRunAt fails
+	rawDB, err := sql.Open("sqlite", filepath.Join(root, "router.db"))
+	require.NoError(t, err)
+	defer rawDB.Close()
+	corruptScheduleJSON := `{"days_mode":"invalid_days","time_mode":"invalid_time","timezone":"NonExistent/Zone_Nowhere"}`
+	// Also set next_run_at to past so it is immediately due on sweep
+	duePast := "2026-11-02T10:00:00.000Z"
+	_, err = rawDB.ExecContext(ctx, `
+		UPDATE workflow_schedules
+		SET schedule_json = ?, next_run_at = ?
+		WHERE id = ?
+	`, corruptScheduleJSON, duePast, corruptSched.ID)
+	require.NoError(t, err)
+
+	// Advance clock by 1 minute to trigger sweep
+	advance1Min, _ := json.Marshal(map[string]any{"delta_ms": 60 * 1000})
+	res, err = client.Post(server.URL+"/v1/test/clock/advance", "application/json", bytes.NewReader(advance1Min))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	res.Body.Close()
+
+	// Verify fallback: NextRunAt calculation failure resulted in fallback advancement (now + 1 hour)
+	sweptCorrupt, err := durable.GetWorkflowSchedule(ctx, corruptSched.ID)
+	require.NoError(t, err)
+	require.NotNil(t, sweptCorrupt.LastRunAt)
+	// Even though background launch succeeded, NextRunAt failed, which logs the error in last_run_error
+	require.NotNil(t, sweptCorrupt.LastRunError)
+	require.NotEmpty(t, *sweptCorrupt.LastRunError)
+	// Current time is 14:06:00 UTC (14:05 + 1 min), fallback next_run_at is now + 1h = 15:06:00 UTC
+	require.Equal(t, "2026-11-02T15:06:00.000Z", sweptCorrupt.NextRunAt)
 }
