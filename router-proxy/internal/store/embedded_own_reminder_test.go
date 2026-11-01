@@ -345,3 +345,155 @@ func TestEmbeddedOwnReminderCapAndSessionCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, embeddedRedCount(t, s, "embedded_own_reminder_calls"))
 }
+
+func TestEmbeddedOwnReminderWithDelaysAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	fixedNow := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	clock := deterministic.NewFixedClock(fixedNow)
+	path := filepath.Join(t.TempDir(), "router.db")
+	s, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if !s.closed {
+			require.NoError(t, s.Close())
+		}
+	})
+
+	b := redBind(t, s, "delay-agent", "delay-session", 1, "delay-generation", "worker")
+	nowStr := formatTimestamp(clock.Now())
+	_, err = s.db.Exec(`INSERT INTO recipient_sources(recipient_name,source_kind,owner_identity,state,created_at,updated_at) VALUES(?,'managed',?,'active',?,?)`, b.AgentID, b.AgentID, nowStr, nowStr)
+	require.NoError(t, err)
+
+	// 1. Determinism of ParseEmbeddedOwnReminderArguments across multiple calls with delay
+	rawDelayMinutes := []byte(`{"action":"create","body":"check in 10m","delay_minutes":10}`)
+	parsed1, err := ParseEmbeddedOwnReminderArguments(rawDelayMinutes)
+	require.NoError(t, err)
+	parsed2, err := ParseEmbeddedOwnReminderArguments(rawDelayMinutes)
+	require.NoError(t, err)
+	require.Equal(t, parsed1, parsed2)
+	require.Equal(t, "create", parsed1.Action)
+	require.Equal(t, "check in 10m", parsed1.Body)
+	require.True(t, parsed1.HasDelay)
+	require.Equal(t, int64(10*60*1000), parsed1.DelayMS)
+	require.False(t, parsed1.HasDueAt)
+
+	rawDelaySeconds := []byte(`{"action":"create","body":"check in 45s","delay_seconds":45}`)
+	parsedSec1, err := ParseEmbeddedOwnReminderArguments(rawDelaySeconds)
+	require.NoError(t, err)
+	parsedSec2, err := ParseEmbeddedOwnReminderArguments(rawDelaySeconds)
+	require.NoError(t, err)
+	require.Equal(t, parsedSec1, parsedSec2)
+	require.Equal(t, "create", parsedSec1.Action)
+	require.Equal(t, "check in 45s", parsedSec1.Body)
+	require.True(t, parsedSec1.HasDelay)
+	require.Equal(t, int64(45*1000), parsedSec1.DelayMS)
+	require.False(t, parsedSec1.HasDueAt)
+
+	// 2. Creating a reminder with delay_minutes with BeforeToolExecute effect intent recording and EmbeddedOwnReminderAdmittedCall
+	callIDMinutes := "call-reminder-delay-min"
+	intentMinutes := []byte(fmt.Sprintf(`{"id":%q,"name":"mecha_reminder","arguments":{"action":"create","body":"check in 10m","delay_minutes":10}}`, callIDMinutes))
+	require.NoError(t, s.RecordEmbeddedEffectIntent(ctx, b, callIDMinutes, intentMinutes))
+
+	// Verify effect intent comparison succeeds without "conflicting call binding or arguments"
+	createRes, replay, err := s.EmbeddedOwnReminderAdmittedCall(ctx, b, callIDMinutes, rawDelayMinutes, true)
+	require.NoError(t, err)
+	require.False(t, replay)
+	require.NotEmpty(t, createRes.ReminderID)
+
+	// Verify the reminder record in the database has the expected next_due_at (+10m from fixedNow)
+	expectedDueMinutes := formatTimestamp(clock.Now().Add(10 * time.Minute))
+	rem, err := s.ReminderFor(ctx, createRes.ReminderID)
+	require.NoError(t, err)
+	require.NotNil(t, rem)
+	require.Equal(t, "check in 10m", rem.Body)
+	require.Equal(t, expectedDueMinutes, rem.NextDueAt)
+
+	// 3. Verify idempotency replay with delay_minutes succeeds and returns the exact same reminder result without conflict
+	replayRes, replay, err := s.EmbeddedOwnReminderCall(ctx, b, callIDMinutes, rawDelayMinutes)
+	require.NoError(t, err)
+	require.True(t, replay)
+	require.Equal(t, createRes, replayRes)
+
+	// Also verify via EmbeddedOwnReminderAdmittedCall replay
+	admittedReplayRes, replay, err := s.EmbeddedOwnReminderAdmittedCall(ctx, b, callIDMinutes, rawDelayMinutes, true)
+	require.NoError(t, err)
+	require.True(t, replay)
+	require.Equal(t, createRes, admittedReplayRes)
+
+	// Verify conflicting arguments still fail on replay
+	_, _, err = s.EmbeddedOwnReminderCall(ctx, b, callIDMinutes, []byte(`{"action":"create","body":"different","delay_minutes":10}`))
+	require.ErrorContains(t, err, "conflicting")
+
+	// 4. Creating a reminder with delay_seconds
+	callIDSeconds := "call-reminder-delay-sec"
+	intentSeconds := []byte(fmt.Sprintf(`{"id":%q,"name":"mecha_reminder","arguments":{"action":"create","body":"check in 45s","delay_seconds":45}}`, callIDSeconds))
+	require.NoError(t, s.RecordEmbeddedEffectIntent(ctx, b, callIDSeconds, intentSeconds))
+
+	createSecRes, replay, err := s.EmbeddedOwnReminderAdmittedCall(ctx, b, callIDSeconds, rawDelaySeconds, true)
+	require.NoError(t, err)
+	require.False(t, replay)
+	require.NotEmpty(t, createSecRes.ReminderID)
+
+	expectedDueSeconds := formatTimestamp(clock.Now().Add(45 * time.Second))
+	remSec, err := s.ReminderFor(ctx, createSecRes.ReminderID)
+	require.NoError(t, err)
+	require.NotNil(t, remSec)
+	require.Equal(t, "check in 45s", remSec.Body)
+	require.Equal(t, expectedDueSeconds, remSec.NextDueAt)
+
+	// Verify idempotency replay with delay_seconds
+	replaySecRes, replay, err := s.EmbeddedOwnReminderCall(ctx, b, callIDSeconds, rawDelaySeconds)
+	require.NoError(t, err)
+	require.True(t, replay)
+	require.Equal(t, createSecRes, replaySecRes)
+
+	// 5. Updating a reminder with delay_minutes or delay_seconds
+	// Advance clock slightly (1 minute) to check new due time calculation relative to current clock
+	require.NoError(t, clock.Advance(time.Minute))
+
+	// Update the first reminder with delay_seconds
+	updateCall1 := "call-reminder-update-sec"
+	updateArgs1 := []byte(fmt.Sprintf(`{"action":"update","id":%q,"body":"updated in 30s","delay_seconds":30}`, createRes.ReminderID))
+	updateIntent1 := []byte(fmt.Sprintf(`{"id":%q,"name":"mecha_reminder","arguments":{"action":"update","id":%q,"body":"updated in 30s","delay_seconds":30}}`, updateCall1, createRes.ReminderID))
+	require.NoError(t, s.RecordEmbeddedEffectIntent(ctx, b, updateCall1, updateIntent1))
+
+	updateRes1, replay, err := s.EmbeddedOwnReminderAdmittedCall(ctx, b, updateCall1, updateArgs1, true)
+	require.NoError(t, err)
+	require.False(t, replay)
+	require.True(t, updateRes1.Updated)
+
+	expectedUpdatedDue1 := formatTimestamp(clock.Now().Add(30 * time.Second))
+	remUpdated1, err := s.ReminderFor(ctx, createRes.ReminderID)
+	require.NoError(t, err)
+	require.Equal(t, "updated in 30s", remUpdated1.Body)
+	require.Equal(t, expectedUpdatedDue1, remUpdated1.NextDueAt)
+
+	// Update idempotency check
+	replayUpdate1, replay, err := s.EmbeddedOwnReminderCall(ctx, b, updateCall1, updateArgs1)
+	require.NoError(t, err)
+	require.True(t, replay)
+	require.Equal(t, updateRes1, replayUpdate1)
+
+	// Update the second reminder with delay_minutes
+	updateCall2 := "call-reminder-update-min"
+	updateArgs2 := []byte(fmt.Sprintf(`{"action":"update","id":%q,"body":"updated in 15m","delay_minutes":15}`, createSecRes.ReminderID))
+	updateIntent2 := []byte(fmt.Sprintf(`{"id":%q,"name":"mecha_reminder","arguments":{"action":"update","id":%q,"body":"updated in 15m","delay_minutes":15}}`, updateCall2, createSecRes.ReminderID))
+	require.NoError(t, s.RecordEmbeddedEffectIntent(ctx, b, updateCall2, updateIntent2))
+
+	updateRes2, replay, err := s.EmbeddedOwnReminderAdmittedCall(ctx, b, updateCall2, updateArgs2, true)
+	require.NoError(t, err)
+	require.False(t, replay)
+	require.True(t, updateRes2.Updated)
+
+	expectedUpdatedDue2 := formatTimestamp(clock.Now().Add(15 * time.Minute))
+	remUpdated2, err := s.ReminderFor(ctx, createSecRes.ReminderID)
+	require.NoError(t, err)
+	require.Equal(t, "updated in 15m", remUpdated2.Body)
+	require.Equal(t, expectedUpdatedDue2, remUpdated2.NextDueAt)
+
+	// Update idempotency check for delay_minutes
+	replayUpdate2, replay, err := s.EmbeddedOwnReminderCall(ctx, b, updateCall2, updateArgs2)
+	require.NoError(t, err)
+	require.True(t, replay)
+	require.Equal(t, updateRes2, replayUpdate2)
+}

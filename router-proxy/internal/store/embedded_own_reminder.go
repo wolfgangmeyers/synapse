@@ -239,17 +239,16 @@ func ParseEmbeddedOwnReminderArguments(raw []byte) (EmbeddedOwnReminderArguments
 		}
 	}
 	if !a.HasDelay {
-		if v, ok := fields["delay_seconds"]; ok {
-			if s, ok := rawToInt64(v); ok && s > 0 {
-				delayDuration = time.Duration(s) * time.Second
-				a.DelayMS = delayDuration.Milliseconds()
-				a.HasDelay = true
+		for _, k := range []string{"delay_seconds", "delaySeconds"} {
+			if v, ok := fields[k]; ok {
+				if s, ok := rawToInt64(v); ok && s > 0 {
+					delayDuration = time.Duration(s) * time.Second
+					a.DelayMS = delayDuration.Milliseconds()
+					a.HasDelay = true
+					break
+				}
 			}
 		}
-	}
-	if !a.HasDueAt && a.HasDelay {
-		a.DueAt = time.Now().UTC().Add(delayDuration).Format("2006-01-02T15:04:05.000Z")
-		a.HasDueAt = true
 	}
 
 	if a.HasBody && (a.Body == "" || len([]byte(a.Body)) > 4096 || !utf8.ValidString(a.Body)) {
@@ -262,11 +261,11 @@ func ParseEmbeddedOwnReminderArguments(raw []byte) (EmbeddedOwnReminderArguments
 	}
 	switch a.Action {
 	case "create":
-		if !a.HasBody || !a.HasDueAt {
+		if !a.HasBody || (!a.HasDueAt && !a.HasDelay) {
 			return fail("create requires body and due_at")
 		}
 	case "update":
-		if !reminderIDPattern.MatchString(a.ID) || !(a.HasBody || a.HasDueAt || a.HasInterval) {
+		if !reminderIDPattern.MatchString(a.ID) || !(a.HasBody || a.HasDueAt || a.HasDelay || a.HasInterval) {
 			return fail("update requires valid id and at least one property")
 		}
 	case "cancel", "delete":
@@ -433,9 +432,20 @@ func (s *Store) embeddedOwnReminderCall(ctx context.Context, b EmbeddedBinding, 
 		}
 		switch args.Action {
 		case "create":
-			due, err := validDue(args.DueAt)
-			if err != nil {
-				return err
+			var due time.Time
+			if args.HasDueAt {
+				var err error
+				due, err = validDue(args.DueAt)
+				if err != nil {
+					return err
+				}
+			} else if args.HasDelay {
+				due = now.Add(time.Duration(args.DelayMS) * time.Millisecond)
+				if !due.After(now) || due.After(now.Add(7*24*time.Hour)) {
+					return &EmbeddedOwnReminderError{Reason: "due_at must be within the next 7 days"}
+				}
+			} else {
+				return &EmbeddedOwnReminderError{Reason: "create requires body and due_at"}
 			}
 			if args.HasInterval && due.UnixMilli() > maxUTCMillis-args.IntervalMS {
 				return &EmbeddedOwnReminderError{Reason: "interval_ms overflows UTC"}
@@ -485,6 +495,12 @@ func (s *Store) embeddedOwnReminderCall(ctx context.Context, b EmbeddedBinding, 
 				parsed, err := validDue(args.DueAt)
 				if err != nil {
 					return err
+				}
+				due = formatTimestamp(parsed)
+			} else if args.HasDelay {
+				parsed := now.Add(time.Duration(args.DelayMS) * time.Millisecond)
+				if !parsed.After(now) || parsed.After(now.Add(7*24*time.Hour)) {
+					return &EmbeddedOwnReminderError{Reason: "due_at must be within the next 7 days"}
 				}
 				due = formatTimestamp(parsed)
 			}
