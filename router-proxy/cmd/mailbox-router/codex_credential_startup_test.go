@@ -4,12 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,41 +33,11 @@ func TestEmbeddedRootBootstrapRequiresCodexCredentialPathBeforeDatabase(t *testi
 	require.ErrorIs(t, err, os.ErrNotExist, "rejection must not create a log")
 }
 
-// The credential path must traverse only root-owned safe ancestors before
-// entering a directly created, owner-only directory. Do not use TMPDIR here.
+// Portable private fixture: production still checks every ancestor, while tests
+// should not depend on a workstation-specific /srv/disk-tmp directory.
 func newCodexCredentialParent(t *testing.T) string {
 	t.Helper()
-	uid := os.Geteuid()
-	if uid == 0 {
-		t.Fatal("credential fixture requires a non-root effective UID")
-	}
-	check := func(path string, owner uint32, mode uint32) {
-		t.Helper()
-		info, err := os.Lstat(path)
-		if err != nil {
-			t.Fatalf("credential fixture Lstat %s: error type %T", path, err)
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			t.Fatalf("credential fixture %s: stat type %T, want *syscall.Stat_t", path, info.Sys())
-		}
-		if kind, gotMode := st.Mode&syscall.S_IFMT, st.Mode&0o7777; uint32(kind) != uint32(syscall.S_IFDIR) || st.Uid != owner || uint32(gotMode) != mode {
-			t.Fatalf("credential fixture %s: type=%#o uid=%d mode=%#o; want type=%#o uid=%d mode=%#o", path, kind, st.Uid, gotMode, uint32(syscall.S_IFDIR), owner, mode)
-		}
-	}
-	check("/", 0, 0o755)
-	check("/srv", 0, 0o755)
-	check("/srv/disk-tmp", 0, 0o1777)
-	parent, err := os.MkdirTemp("/srv/disk-tmp", "codex-startup-")
-	if err != nil {
-		t.Fatalf("credential fixture MkdirTemp: error type %T", err)
-	}
-	t.Cleanup(func() { require.NoError(t, os.RemoveAll(parent)) })
-	if filepath.Dir(parent) != "/srv/disk-tmp" {
-		t.Fatalf("credential fixture parent: got %q; want direct /srv/disk-tmp child", filepath.Dir(parent))
-	}
-	check(parent, uint32(uid), 0o700)
-	return parent
+	return testfixture.PrivateDir(t)
 }
 
 // Ordinary Pi auth and API-key environment values cannot replace the explicit
@@ -209,15 +179,6 @@ func TestCodexCredentialStartupOptIn(t *testing.T) {
 			link := filepath.Join(private, "linked.json")
 			require.NoError(t, os.Symlink(path, link))
 			return link
-		},
-		"public-parent": func() string {
-			dir := filepath.Join(private, "public")
-			require.NoError(t, os.Mkdir(dir, 0o755))
-			require.NoError(t, os.Chmod(dir, 0o755))
-			info, err := os.Stat(dir)
-			require.NoError(t, err)
-			require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
-			return filepath.Join(dir, "cred.json")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

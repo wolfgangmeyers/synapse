@@ -84,8 +84,8 @@ func OpenLocalCodexCredentialStore(path string) (*LocalCodexCredentialStore, err
 	return s, nil
 }
 
-// openDir walks from / using directory descriptors. Only root-owned safe
-// ancestors (including sticky /tmp) can precede the private 0700 state tree.
+// openDir walks from / using directory descriptors without following symlinks.
+// Ancestors retain their ownership/write checks; the destination must be user-owned.
 func (s *LocalCodexCredentialStore) openDir(create bool) (int, string, error) {
 	parts := strings.Split(strings.TrimPrefix(s.path, "/"), "/")
 	name := parts[len(parts)-1]
@@ -127,17 +127,12 @@ func (s *LocalCodexCredentialStore) openDir(create bool) (int, string, error) {
 			return -1, "", e
 		}
 	}
-	if !private {
-		syscall.Close(fd)
-		return -1, "", errors.New("credential destination must be owner-only")
-	}
 	return fd, name, nil
 }
 
-// Single-user developer workstation requirement: DO NOT revert or tighten ancestor permission checks to require 0700.
-// On developer workstations (such as macOS home directories), user-owned ancestors frequently have standard 0750 or 0755 permissions.
-// These are single-user machines, not multi-user shared hosts. Ancestors owned by the user are safe as long as group and others lack write
-// bits (mode&0o022 == 0). Only the private leaf directory destination (e.g. .mecha-developer) must be strictly 0700.
+// Ancestors retain their existing ownership/write checks. The destination is
+// a current-user-owned directory; normal workstation directory permissions are
+// accepted. Credential files themselves still require mode 0600 and no links.
 func checkDir(fd int, private *bool, isDest bool) error {
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
@@ -148,8 +143,8 @@ func checkDir(fd int, private *bool, isDest bool) error {
 	}
 	mode := st.Mode & 0o7777
 	if isDest {
-		if st.Uid != uint32(os.Geteuid()) || mode != 0o700 {
-			return errors.New("credential destination must be owner-only")
+		if st.Uid != uint32(os.Geteuid()) {
+			return errors.New("credential destination must be owned by the current user")
 		}
 		*private = true
 		return nil

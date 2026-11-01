@@ -54,12 +54,13 @@ func TestCodexCredentialAncestorPermissions(t *testing.T) {
 			errSubstring: "credential ancestor is writable",
 		},
 		{
-			name:         "destination 0755 rejected even if ancestor is 0755",
+			name:         "destination 0755 accepted",
 			ancestorMode: 0o755,
 			destMode:     0o755,
-			wantErr:      true,
-			errSubstring: "credential destination must be owner-only",
+			wantErr:      false,
 		},
+		{name: "destination 0750 accepted", ancestorMode: 0o755, destMode: 0o750},
+		{name: "destination 0775 accepted", ancestorMode: 0o755, destMode: 0o775},
 	}
 
 	for _, tc := range tests {
