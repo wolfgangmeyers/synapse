@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -277,6 +276,7 @@ func TestWorkflowStatesHTTPAllowedTools(t *testing.T) {
 	res.Body.Close()
 }
 
+// TestWorkflowStatesHTTPGoal verifies legacy goal in payload is safely accepted/ignored without error.
 func TestWorkflowStatesHTTPGoal(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
@@ -290,7 +290,7 @@ func TestWorkflowStatesHTTPGoal(t *testing.T) {
 
 	client := server.Client()
 
-	// 1. POST /v1/workflow-states with {"goal": "Test goal..."} returns the goal
+	// 1. POST /v1/workflow-states with legacy "goal" succeeds
 	createPayload := map[string]any{
 		"name":        "goal-state",
 		"description": "State with a goal",
@@ -308,9 +308,8 @@ func TestWorkflowStatesHTTPGoal(t *testing.T) {
 	createdState, ok := createRes["workflow_state"].(map[string]any)
 	require.True(t, ok)
 	stateID := createdState["id"].(string)
-	require.Equal(t, "Test goal: complete all tasks.", createdState["goal"])
 
-	// 2. GET /v1/workflow-states/{id} returns goal
+	// 2. GET /v1/workflow-states/{id} succeeds
 	res, err = client.Get(server.URL + "/v1/workflow-states/" + stateID)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.StatusCode)
@@ -319,11 +318,11 @@ func TestWorkflowStatesHTTPGoal(t *testing.T) {
 	res.Body.Close()
 	fetchedState, ok := getRes["workflow_state"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "Test goal: complete all tasks.", fetchedState["goal"])
+	require.Equal(t, "goal-state", fetchedState["name"])
 
-	// 3. PUT /v1/workflow-states/{id} updates goal
+	// 3. PUT /v1/workflow-states/{id} with legacy goal succeeds
 	updatePayload := map[string]any{
-		"name": "goal-state",
+		"name": "goal-state-updated",
 		"goal": "Updated goal: all tasks verified.",
 	}
 	updateBody, _ := json.Marshal(updatePayload)
@@ -338,47 +337,7 @@ func TestWorkflowStatesHTTPGoal(t *testing.T) {
 	res.Body.Close()
 	updatedState, ok := updateRes["workflow_state"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "Updated goal: all tasks verified.", updatedState["goal"])
-
-	// Verify GET returns the updated goal
-	res, err = client.Get(server.URL + "/v1/workflow-states/" + stateID)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, res.StatusCode)
-	var getUpdatedRes map[string]any
-	require.NoError(t, json.NewDecoder(res.Body).Decode(&getUpdatedRes))
-	res.Body.Close()
-	require.Equal(t, "Updated goal: all tasks verified.", getUpdatedRes["workflow_state"].(map[string]any)["goal"])
-
-	// 4. Test validation error (goal > 4000 bytes) returns HTTP 400
-	longGoal := strings.Repeat("x", 4001)
-	badPayload := map[string]any{
-		"name": "too-long-goal",
-		"goal": longGoal,
-	}
-	badBody, _ := json.Marshal(badPayload)
-	res, err = client.Post(server.URL+"/v1/workflow-states", "application/json", bytes.NewReader(badBody))
-	require.NoError(t, err)
-	require.Equal(t, http.StatusBadRequest, res.StatusCode)
-	var badRes map[string]any
-	require.NoError(t, json.NewDecoder(res.Body).Decode(&badRes))
-	res.Body.Close()
-	errObj, ok := badRes["error"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "invalid_workflow_state", errObj["code"])
-
-	// Test PUT validation error (goal > 4000 bytes) returns HTTP 400
-	badPutPayload := map[string]any{
-		"name": "goal-state",
-		"goal": longGoal,
-	}
-	badPutBody, _ := json.Marshal(badPutPayload)
-	badPutReq, err := http.NewRequest(http.MethodPut, server.URL+"/v1/workflow-states/"+stateID, bytes.NewReader(badPutBody))
-	require.NoError(t, err)
-	badPutReq.Header.Set("Content-Type", "application/json")
-	res, err = client.Do(badPutReq)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusBadRequest, res.StatusCode)
-	res.Body.Close()
+	require.Equal(t, "goal-state-updated", updatedState["name"])
 }
 
 func TestWorkflowToolsHTTP(t *testing.T) {
@@ -406,7 +365,7 @@ func TestWorkflowToolsHTTP(t *testing.T) {
 
 	require.NotEmpty(t, payload.Tools)
 
-	var foundGoogleSearch bool
+	var foundGoogleSearch, foundCodexSearch bool
 	for _, tool := range payload.Tools {
 		if tool.ID == "google_search" {
 			foundGoogleSearch = true
@@ -414,6 +373,13 @@ func TestWorkflowToolsHTTP(t *testing.T) {
 			require.Equal(t, "system", tool.Category)
 			require.Equal(t, "Search the web using Google Search via Grounding", tool.Description)
 		}
+		if tool.ID == "codex_search" {
+			foundCodexSearch = true
+			require.Equal(t, "codex_search", tool.Name)
+			require.Equal(t, "system", tool.Category)
+			require.Equal(t, "Search the web using OpenAI Codex web search", tool.Description)
+		}
 	}
 	require.True(t, foundGoogleSearch, "expected google_search to be in workflow tools list")
+	require.True(t, foundCodexSearch, "expected codex_search to be in workflow tools list")
 }

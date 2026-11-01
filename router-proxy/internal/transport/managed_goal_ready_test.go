@@ -182,11 +182,10 @@ func TestManagedGoalUpdateAndDisableWhenAgentHasActiveWorkflowState(t *testing.T
 	ctx := context.Background()
 	client := server.Client()
 
-	// Create a workflow state with a locked goal
+	// Create a workflow state
 	state, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
 		Name:        "LockedWorkflowState",
-		Description: "State with mandatory goal",
-		Goal:        "State mandated goal",
+		Description: "State in workflow",
 	})
 	require.NoError(t, err)
 
@@ -194,30 +193,26 @@ func TestManagedGoalUpdateAndDisableWhenAgentHasActiveWorkflowState(t *testing.T
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,session_epoch,active_workflow_state_id,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,'/tmp','google','gemini-3.8-flash','running','running','idle','embedded',1,?,1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, agentID, agentID, state.ID)
 	require.NoError(t, err)
 
-	// Initial goal set to state's goal
+	// Initial goal set to implicit workflow goal
 	_, err = durable.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
 		Enabled:  true,
-		Goal:     state.Goal,
+		Goal:     "Complete active workflow: active",
 		Settings: store.DefaultManagedGoalSettings(),
 	})
 	require.NoError(t, err)
 
-	// Operator disables goal via HTTP PUT - must succeed with 200 OK!
+	// Operator attempts to disable goal via HTTP PUT - must be rejected with 409 Conflict while active workflow is attached!
 	code, offResp := callGoalEndpoint(t, client, server.URL, http.MethodPut, agentID, map[string]any{
 		"action": "off",
 	})
-	require.Equal(t, http.StatusOK, code, offResp)
-	offGoalState := offResp["goal_state"].(map[string]any)
-	require.Equal(t, false, offGoalState["enabled"])
-	require.Equal(t, "", offGoalState["goal"])
+	require.Equal(t, http.StatusConflict, code, offResp)
+	require.Contains(t, offResp["error"].(map[string]any)["message"], "manual goal control is disabled while workflow")
 
-	// Operator updates goal via HTTP PUT - must succeed with 200 OK!
+	// Operator attempts to update goal via HTTP PUT - must be rejected with 409 Conflict while active workflow is attached!
 	code, setResp := callGoalEndpoint(t, client, server.URL, http.MethodPut, agentID, map[string]any{
 		"action": "set",
 		"goal":   "Operator updated goal",
 	})
-	require.Equal(t, http.StatusOK, code, setResp)
-	setGoalState := setResp["goal_state"].(map[string]any)
-	require.Equal(t, true, setGoalState["enabled"])
-	require.Equal(t, "Operator updated goal", setGoalState["goal"])
+	require.Equal(t, http.StatusConflict, code, setResp)
+	require.Contains(t, setResp["error"].(map[string]any)["message"], "manual goal control is disabled while workflow")
 }

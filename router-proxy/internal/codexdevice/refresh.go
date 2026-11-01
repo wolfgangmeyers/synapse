@@ -19,7 +19,13 @@ import (
 // Refresh exchanges a stored refresh token with the fixed production issuer.
 // It returns a complete replacement credential or an error; it never writes to the store.
 func Refresh(ctx context.Context, client *http.Client, old store.CodexCredential) (store.CodexCredential, error) {
-	return refresh(ctx, client, issuer, old)
+	return RefreshWithBaseURL(ctx, client, issuer, old)
+}
+
+// RefreshWithBaseURL exchanges a stored refresh token against a custom issuer base URL.
+// It returns a complete replacement credential or an error; it never writes to the store.
+func RefreshWithBaseURL(ctx context.Context, client *http.Client, base string, old store.CodexCredential) (store.CodexCredential, error) {
+	return refresh(ctx, client, base, old)
 }
 
 // refresh's base override is private and used only with local fake issuer tests.

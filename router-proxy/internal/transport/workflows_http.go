@@ -109,20 +109,25 @@ func (r *Router) handleWorkflowItem(w http.ResponseWriter, req *http.Request, id
 			}
 
 			// If name is omitted or empty in PUT payload, keep existing workflow's name and description if omitted
+			existingWf, err := r.store.GetWorkflow(req.Context(), id)
+			if err != nil {
+				r.writeError(w, storeError(err))
+				return
+			}
+			if existingWf == nil {
+				r.writeError(w, &httpError{status: 404, code: "workflow_not_found"})
+				return
+			}
 			if reqData.Name == "" {
-				existingWf, err := r.store.GetWorkflow(req.Context(), id)
-				if err != nil {
-					r.writeError(w, storeError(err))
-					return
-				}
-				if existingWf == nil {
-					r.writeError(w, &httpError{status: 404, code: "workflow_not_found"})
-					return
-				}
 				reqData.Name = existingWf.Name
 				if reqData.Description == "" {
 					reqData.Description = existingWf.Description
 				}
+			}
+
+			// If snooze_duration_ms is omitted in PUT payload, preserve existing workflow's snooze_duration_ms
+			if _, exists := payload["snooze_duration_ms"]; !exists {
+				reqData.SnoozeDurationMS = existingWf.SnoozeDurationMS
 			}
 
 			// If entry_state_id is explicitly passed in payload (even if empty string or null),
@@ -156,6 +161,55 @@ func (r *Router) handleWorkflowItem(w http.ResponseWriter, req *http.Request, id
 		default:
 			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
 		}
+
+	case "run":
+		if req.Method != http.MethodPost {
+			r.writeError(w, &httpError{status: 405, code: "method_not_allowed"})
+			return
+		}
+		if r.managed == nil {
+			r.writeError(w, &httpError{status: 503, code: "managed_unavailable"})
+			return
+		}
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return
+		}
+		var vars map[string]string
+		if raw, exists := payload["variables"]; exists && len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &vars); err != nil {
+				r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+				return
+			}
+		}
+		var targetCwd string
+		if raw, exists := payload["cwd"]; exists && len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &targetCwd); err != nil {
+				r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+				return
+			}
+		}
+		agent, err := r.managed.LaunchBackgroundWorkflow(req.Context(), id, vars, targetCwd, nil)
+		if err != nil {
+			if valErr, ok := err.(*store.WorkflowValidationError); ok {
+				r.writeJSON(w, http.StatusBadRequest, map[string]any{"error": valErr.Error(), "code": valErr.Code()})
+				return
+			}
+			if notFound, ok := err.(*store.WorkflowNotFoundError); ok {
+				r.writeError(w, &httpError{status: 404, code: notFound.Code()})
+				return
+			}
+			r.writeError(w, storeError(err))
+			return
+		}
+		r.writeJSON(w, http.StatusCreated, map[string]any{
+			"agent_id":    agent.AgentID,
+			"name":        agent.Name,
+			"status":      agent.LifecycleState,
+			"workflow_id": id,
+			"agent":       agent,
+		})
 
 	case "duplicate":
 		if req.Method != http.MethodPost {
@@ -249,11 +303,19 @@ func parseWorkflowRequest(payload map[string]json.RawMessage) (store.WorkflowReq
 		variables = &vars
 	}
 
+	var snoozeDurationMS int
+	if raw, exists := payload["snooze_duration_ms"]; exists && len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &snoozeDurationMS); err != nil {
+			return store.WorkflowRequest{}, &httpError{status: 400, code: "invalid_request"}
+		}
+	}
+
 	return store.WorkflowRequest{
-		Name:         name,
-		Description:  desc,
-		EntryStateID: entryStateID,
-		Variables:    variables,
+		Name:             name,
+		Description:      desc,
+		EntryStateID:     entryStateID,
+		SnoozeDurationMS: snoozeDurationMS,
+		Variables:        variables,
 	}, nil
 }
 

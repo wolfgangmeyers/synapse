@@ -19,7 +19,20 @@ type ScratchpadEntry struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-var ErrPinnedLimitReached = errors.New("pinned entry limit reached (maximum 20 pinned entries); please unpin an obsolete entry before pinning a new one")
+var (
+	ErrPinnedLimitReached       = errors.New("pinned entry limit reached (maximum 20 pinned entries); please unpin an obsolete entry before pinning a new one")
+	ErrInvalidParameter         = errors.New("invalid parameter")
+	ErrScratchpadEntryNotFound  = errors.New("scratchpad entry not found")
+)
+
+// ScratchpadTruncateOptions specifies pruning criteria for TruncateScratchpadEntries.
+// Exactly one of BeforeID or KeepLast must be provided.
+type ScratchpadTruncateOptions struct {
+	// BeforeID prunes unpinned entries created strictly prior to the entry identified by this ID.
+	BeforeID string `json:"before_id,omitempty"`
+	// KeepLast retains the newest N unpinned entries and prunes older unpinned entries. Must be > 0.
+	KeepLast int    `json:"keep_last,omitempty"`
+}
 
 func (s *Store) CountPinnedScratchpadEntries(ctx context.Context, agentID string) (int, error) {
 	if strings.TrimSpace(agentID) == "" {
@@ -531,3 +544,91 @@ func dedupeScratchpadIDs(items []string) []string {
 	}
 	return result
 }
+
+// TruncateScratchpadEntries prunes older unpinned scratchpad entries for an agent
+// based on either BeforeID or KeepLast.
+//
+// Pinned entries (pinned = 1) are strictly preserved under all circumstances and are never deleted.
+// If BeforeID is provided, only unpinned entries created strictly prior to the threshold entry
+// are pruned, leaving pinned entries and the cutoff entry itself intact.
+// If KeepLast is provided, the newest N unpinned entries are retained and all older unpinned
+// entries are pruned atomically.
+func (s *Store) TruncateScratchpadEntries(ctx context.Context, agentID string, opts ScratchpadTruncateOptions) (int, error) {
+	if strings.TrimSpace(agentID) == "" {
+		return 0, fmt.Errorf("%w: agent_id must not be empty", ErrInvalidParameter)
+	}
+
+	if opts.BeforeID != "" && opts.KeepLast != 0 {
+		return 0, fmt.Errorf("%w: cannot specify both before_id and keep_last", ErrInvalidParameter)
+	}
+	if opts.BeforeID == "" && opts.KeepLast <= 0 {
+		if opts.KeepLast < 0 {
+			return 0, fmt.Errorf("%w: keep_last must be greater than 0", ErrInvalidParameter)
+		}
+		return 0, fmt.Errorf("%w: must specify either before_id or keep_last greater than 0", ErrInvalidParameter)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var rowsAffected int64
+	if opts.BeforeID != "" {
+		var createdAt string
+		err := tx.QueryRowContext(ctx,
+			`SELECT created_at FROM scratchpad_entries WHERE agent_id = ? AND id = ?`,
+			agentID, opts.BeforeID,
+		).Scan(&createdAt)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, fmt.Errorf("scratchpad entry %q not found for agent %q: %w", opts.BeforeID, agentID, sql.ErrNoRows)
+			}
+			return 0, err
+		}
+
+		// Only unpinned entries created strictly prior to the threshold entry are pruned,
+		// leaving pinned entries and the cutoff entry intact.
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM scratchpad_entries
+			 WHERE agent_id = ? AND pinned = 0 AND created_at < ?`,
+			agentID, createdAt,
+		)
+		if err != nil {
+			return 0, err
+		}
+		rowsAffected, err = res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+	} else if opts.KeepLast > 0 {
+		// The subquery selects the newest N unpinned entries; unpinned entries outside that set
+		// are deleted atomically, while all pinned entries are preserved.
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM scratchpad_entries
+			 WHERE agent_id = ? AND pinned = 0
+			   AND id NOT IN (
+			       SELECT id FROM scratchpad_entries
+			       WHERE agent_id = ? AND pinned = 0
+			       ORDER BY created_at DESC, id DESC
+			       LIMIT ?
+			   )`,
+			agentID, agentID, opts.KeepLast,
+		)
+		if err != nil {
+			return 0, err
+		}
+		rowsAffected, err = res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	return int(rowsAffected), nil
+}
+

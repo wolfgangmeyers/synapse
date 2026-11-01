@@ -243,12 +243,11 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
     unmount();
   });
 
-  it("includes goal in updateWorkflowState payload when saving state config via modal", async () => {
+  it("updates state config without per-state goal when saving via modal", async () => {
     const user = userEvent.setup();
     const updateWorkflowStateMock = vi.fn().mockResolvedValue({
       workflow_state: {
         ...mockStates[0],
-        goal: "Finish phase 1 and verify tests",
       },
     });
 
@@ -256,10 +255,7 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
       getWorkflow: vi.fn().mockResolvedValue({
         workflow: mockWorkflows[0],
         states: [
-          {
-            ...mockStates[0],
-            goal: "Initial goal",
-          },
+          mockStates[0],
           mockStates[1],
         ],
       }),
@@ -278,10 +274,9 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
     // Open config modal for st-1
     await user.click(screen.getByTestId("config-btn-st-1"));
 
-    // Verify modal is open and goal preview or configure button is present
+    // Verify modal is open
     await waitFor(() => {
       expect(screen.getByText("Configure State: Planning")).toBeDefined();
-      expect(screen.getByText("Initial goal")).toBeDefined();
     });
 
     // Save changes via the modal's submit button
@@ -298,7 +293,6 @@ describe("WorkflowsPage & WorkflowCanvas Integration", () => {
         name: "Planning",
         description: "Write specification",
         entry_text: "Plan carefully.",
-        goal: "Initial goal",
         allow_exit: false,
       })
     );

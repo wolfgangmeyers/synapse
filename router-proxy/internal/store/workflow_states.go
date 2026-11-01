@@ -85,7 +85,6 @@ type WorkflowState struct {
 	Name         string                     `json:"name"`
 	Description  string                     `json:"description"`
 	EntryText    string                     `json:"entry_text"`
-	Goal         string                     `json:"goal"`
 	Reminders    []WorkflowReminderConfig   `json:"reminders"`
 	Monitors     []WorkflowMonitorConfig    `json:"monitors"`
 	AllowedTools []string                   `json:"allowed_tools"`
@@ -103,7 +102,6 @@ type WorkflowStateRequest struct {
 	Name         string                     `json:"name"`
 	Description  string                     `json:"description"`
 	EntryText    string                     `json:"entry_text"`
-	Goal         string                     `json:"goal"`
 	Reminders    []WorkflowReminderConfig   `json:"reminders"`
 	Monitors     []WorkflowMonitorConfig    `json:"monitors"`
 	AllowedTools []string                   `json:"allowed_tools"`
@@ -229,12 +227,6 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 		return &WorkflowStateValidationError{Field: "entry_text", Message: "entry text contains invalid characters"}
 	}
 
-	if len([]byte(req.Goal)) > maxWorkflowStateGoalBytes {
-		return &WorkflowStateValidationError{Field: "goal", Message: "goal exceeds maximum byte length"}
-	}
-	if !utf8.ValidString(req.Goal) || strings.ContainsRune(req.Goal, 0) {
-		return &WorkflowStateValidationError{Field: "goal", Message: "goal contains invalid characters"}
-	}
 
 	if req.ID != nil {
 		id := strings.TrimSpace(*req.ID)
@@ -334,7 +326,7 @@ func unmarshalWorkflowMonitors(raw string) []WorkflowMonitorConfig {
 }
 
 func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states ORDER BY name ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +341,7 @@ func (s *Store) ListWorkflowStates(ctx context.Context) ([]WorkflowState, error)
 		var allowedToolsJSON sql.NullString
 		var transitionsJSON sql.NullString
 		var allowExitInt int
-		if err := rows.Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if workflowID.Valid {
@@ -391,8 +383,8 @@ func (s *Store) GetWorkflowState(ctx context.Context, id string) (*WorkflowState
 	var allowedToolsJSON sql.NullString
 	var transitionsJSON sql.NullString
 	var allowExitInt int
-	err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-		Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+		Scan(&state.ID, &workflowID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -432,7 +424,6 @@ func (s *Store) ListWorkflowStateSummariesByWorkflow(ctx context.Context, workfl
 			WorkflowID:   st.WorkflowID,
 			Name:         st.Name,
 			Description:  st.Description,
-			Goal:         st.Goal,
 			AllowExit:    st.AllowExit,
 			Transitions:  trans,
 			AllowedTools: allowedTools,
@@ -593,7 +584,6 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 		now := formatTimestamp(s.clock.Now())
 		desc := strings.TrimSpace(req.Description)
 		entryText := req.EntryText
-		goal := req.Goal
 
 		remindersJSON, err := marshalWorkflowReminders(req.Reminders)
 		if err != nil {
@@ -647,8 +637,8 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			uiPosY = *req.UIPosY
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, workflowIDVal, name, desc, entryText, goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, workflowIDVal, name, desc, entryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -675,7 +665,6 @@ func (s *Store) CreateWorkflowState(ctx context.Context, req WorkflowStateReques
 			Name:         name,
 			Description:  desc,
 			EntryText:    entryText,
-			Goal:         goal,
 			Reminders:    remindersCopy,
 			Monitors:     monitorsCopy,
 			AllowedTools: sanitizedTools,
@@ -706,8 +695,8 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 		var existingAllowedTools sql.NullString
 		var existingTransitions sql.NullString
 		var existingAllowExitInt int
-		err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
-			Scan(&existing.ID, &existingWorkflowID, &existing.Name, &existing.Description, &existing.EntryText, &existing.Goal, &existingReminders, &existingMonitors, &existingAllowedTools, &existingTransitions, &existingAllowExitInt, &existing.UIPosX, &existing.UIPosY, &existing.CreatedAt, &existing.UpdatedAt)
+		err := s.db.QueryRowContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE id = ?`, id).
+			Scan(&existing.ID, &existingWorkflowID, &existing.Name, &existing.Description, &existing.EntryText, &existingReminders, &existingMonitors, &existingAllowedTools, &existingTransitions, &existingAllowExitInt, &existing.UIPosX, &existing.UIPosY, &existing.CreatedAt, &existing.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowStateNotFoundError{ID: id}
 		}
@@ -746,7 +735,6 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 		now := formatTimestamp(s.clock.Now())
 		desc := strings.TrimSpace(req.Description)
 		entryText := req.EntryText
-		goal := req.Goal
 
 		remindersJSON, err := marshalWorkflowReminders(req.Reminders)
 		if err != nil {
@@ -820,8 +808,8 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			return err
 		}
 
-		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET workflow_id = ?, name = ?, description = ?, entry_text = ?, goal = ?, reminders_json = ?, monitors_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, ui_pos_x = ?, ui_pos_y = ?, updated_at = ? WHERE id = ?`,
-			workflowIDVal, name, desc, entryText, goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, id)
+		_, err = s.db.ExecContext(ctx, `UPDATE workflow_states SET workflow_id = ?, name = ?, description = ?, entry_text = ?, reminders_json = ?, monitors_json = ?, allowed_tools_json = ?, transitions_json = ?, allow_exit = ?, ui_pos_x = ?, ui_pos_y = ?, updated_at = ? WHERE id = ?`,
+			workflowIDVal, name, desc, entryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, id)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowStateNameConflictError{Name: name}
@@ -848,7 +836,6 @@ func (s *Store) UpdateWorkflowState(ctx context.Context, id string, req Workflow
 			Name:         name,
 			Description:  desc,
 			EntryText:    entryText,
-			Goal:         goal,
 			Reminders:    remindersCopy,
 			Monitors:     monitorsCopy,
 			AllowedTools: sanitizedTools,

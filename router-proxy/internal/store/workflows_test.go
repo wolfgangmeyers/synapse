@@ -18,14 +18,16 @@ func TestWorkflowCRUD(t *testing.T) {
 
 	// 2. Create first workflow
 	req1 := WorkflowRequest{
-		Name:        "code-review-flow",
-		Description: "A workflow for code reviews",
+		Name:             "code-review-flow",
+		Description:      "A workflow for code reviews",
+		SnoozeDurationMS: 300000,
 	}
 	wf1, err := s.CreateWorkflow(ctx, req1)
 	require.NoError(t, err)
 	require.NotEmpty(t, wf1.ID)
 	require.Equal(t, req1.Name, wf1.Name)
 	require.Equal(t, req1.Description, wf1.Description)
+	require.Equal(t, 300000, wf1.SnoozeDurationMS)
 	require.Nil(t, wf1.EntryStateID)
 	require.Equal(t, 0, wf1.StateCount)
 	require.NotEmpty(t, wf1.CreatedAt)
@@ -37,7 +39,7 @@ func TestWorkflowCRUD(t *testing.T) {
 	var nameConflict *WorkflowNameConflictError
 	require.ErrorAs(t, err, &nameConflict)
 
-	// 4. Create second workflow
+	// 4. Create second workflow (with 0 snooze duration to test default 600000)
 	req2 := WorkflowRequest{
 		Name:        "bug-fix-flow",
 		Description: "A workflow for bug fixes",
@@ -45,6 +47,7 @@ func TestWorkflowCRUD(t *testing.T) {
 	wf2, err := s.CreateWorkflow(ctx, req2)
 	require.NoError(t, err)
 	require.NotEqual(t, wf1.ID, wf2.ID)
+	require.Equal(t, 600000, wf2.SnoozeDurationMS)
 
 	// 5. List workflows (ordered by name: bug-fix-flow, code-review-flow)
 	wfs, err = s.ListWorkflows(ctx)
@@ -59,6 +62,7 @@ func TestWorkflowCRUD(t *testing.T) {
 	require.NotNil(t, fetched)
 	require.Equal(t, wf1.ID, fetched.ID)
 	require.Equal(t, wf1.Name, fetched.Name)
+	require.Equal(t, 300000, fetched.SnoozeDurationMS)
 	require.Equal(t, 0, fetched.StateCount)
 
 	// Get non-existent
@@ -68,13 +72,15 @@ func TestWorkflowCRUD(t *testing.T) {
 
 	// 7. Update workflow
 	updateReq := WorkflowRequest{
-		Name:        "code-review-flow-v2",
-		Description: "Updated code review workflow",
+		Name:             "code-review-flow-v2",
+		Description:      "Updated code review workflow",
+		SnoozeDurationMS: 120000,
 	}
 	updated, err := s.UpdateWorkflow(ctx, wf1.ID, updateReq)
 	require.NoError(t, err)
 	require.Equal(t, updateReq.Name, updated.Name)
 	require.Equal(t, updateReq.Description, updated.Description)
+	require.Equal(t, 120000, updated.SnoozeDurationMS)
 
 	// Conflict update
 	conflictReq := WorkflowRequest{
@@ -245,7 +251,6 @@ func TestWorkflowDuplicate(t *testing.T) {
 		Name:         "stage-one",
 		Description:  "First stage",
 		EntryText:    "Entering stage one",
-		Goal:         "Draft spec and tests",
 		AllowedTools: []string{"read", "edit"},
 		UIPosX:       &x1,
 		UIPosY:       &y1,
@@ -329,10 +334,6 @@ func TestWorkflowDuplicate(t *testing.T) {
 	// Verify states in duplicated workflow retain their original names (scoped uniqueness)
 	require.Equal(t, "stage-one", clonedState1.Name)
 	require.Equal(t, "stage-two", clonedState2.Name)
-
-	// Verify copied goal on duplicated workflow states
-	require.Equal(t, "Draft spec and tests", clonedState1.Goal)
-	require.Equal(t, "", clonedState2.Goal)
 
 	// Duplicate non-existent workflow
 

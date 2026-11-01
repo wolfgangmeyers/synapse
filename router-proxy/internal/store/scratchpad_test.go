@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -520,3 +521,304 @@ func TestScratchpadBatchCRUD(t *testing.T) {
 	_, err = db.DeleteScratchpadEntries(ctx, agentID, []string{})
 	require.Error(t, err)
 }
+
+func TestTruncateScratchpadEntries(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("TruncateByBeforeID_UnpinnedTarget", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentID := "agent-truncate-1"
+
+		// Create 6 unpinned entries (e1..e6) and 2 pinned entries (p1, p2) with time.Sleep
+		e1, err := db.AppendScratchpadEntry(ctx, agentID, "e1", false)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		e2, err := db.AppendScratchpadEntry(ctx, agentID, "e2", false)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		p1, err := db.AppendScratchpadEntry(ctx, agentID, "p1", true)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		e3, err := db.AppendScratchpadEntry(ctx, agentID, "e3", false)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		e4, err := db.AppendScratchpadEntry(ctx, agentID, "e4", false)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		p2, err := db.AppendScratchpadEntry(ctx, agentID, "p2", true)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		e5, err := db.AppendScratchpadEntry(ctx, agentID, "e5", false)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		e6, err := db.AppendScratchpadEntry(ctx, agentID, "e6", false)
+		require.NoError(t, err)
+
+		// Pick e4 as BeforeID
+		deletedCount, err := db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{
+			BeforeID: e4.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 3, deletedCount) // e1, e2, e3 deleted
+
+		// Check remaining entries
+		entries, total, err := db.PaginateScratchpad(ctx, agentID, 100, 0)
+		require.NoError(t, err)
+		require.Equal(t, 5, total)
+		require.Len(t, entries, 5)
+
+		remainingIDs := make(map[string]bool)
+		for _, entry := range entries {
+			remainingIDs[entry.ID] = true
+			if entry.ID == p1.ID || entry.ID == p2.ID {
+				require.True(t, entry.Pinned)
+			}
+		}
+
+		require.False(t, remainingIDs[e1.ID])
+		require.False(t, remainingIDs[e2.ID])
+		require.False(t, remainingIDs[e3.ID])
+
+		require.True(t, remainingIDs[p1.ID])
+		require.True(t, remainingIDs[e4.ID])
+		require.True(t, remainingIDs[p2.ID])
+		require.True(t, remainingIDs[e5.ID])
+		require.True(t, remainingIDs[e6.ID])
+	})
+
+	t.Run("TruncateByBeforeID_PinnedTarget", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentID := "agent-truncate-pinned-target"
+
+		e1, err := db.AppendScratchpadEntry(ctx, agentID, "e1", false)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		p1, err := db.AppendScratchpadEntry(ctx, agentID, "p1", true)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		e2, err := db.AppendScratchpadEntry(ctx, agentID, "e2", false)
+		require.NoError(t, err)
+
+		// Pick p1 as BeforeID
+		deletedCount, err := db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{
+			BeforeID: p1.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, deletedCount) // e1 deleted
+
+		entries, total, err := db.PaginateScratchpad(ctx, agentID, 100, 0)
+		require.NoError(t, err)
+		require.Equal(t, 2, total)
+		require.Len(t, entries, 2)
+
+		remainingIDs := make(map[string]bool)
+		for _, entry := range entries {
+			remainingIDs[entry.ID] = true
+		}
+
+		require.False(t, remainingIDs[e1.ID])
+		require.True(t, remainingIDs[p1.ID])
+		require.True(t, remainingIDs[e2.ID])
+	})
+
+	t.Run("TruncateByKeepLast", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentID := "agent-truncate-keep-last"
+
+		unpinned := make([]*ScratchpadEntry, 10)
+		for i := 0; i < 10; i++ {
+			entry, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("unpinned-%d", i), false)
+			require.NoError(t, err)
+			unpinned[i] = entry
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		pinned := make([]*ScratchpadEntry, 3)
+		for i := 0; i < 3; i++ {
+			entry, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("pinned-%d", i), true)
+			require.NoError(t, err)
+			pinned[i] = entry
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		deletedCount, err := db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{
+			KeepLast: 3,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 7, deletedCount)
+
+		entries, total, err := db.PaginateScratchpad(ctx, agentID, 100, 0)
+		require.NoError(t, err)
+		require.Equal(t, 6, total) // 3 pinned + 3 unpinned
+		require.Len(t, entries, 6)
+
+		remainingIDs := make(map[string]bool)
+		for _, entry := range entries {
+			remainingIDs[entry.ID] = true
+		}
+
+		// First 7 unpinned deleted
+		for i := 0; i < 7; i++ {
+			require.False(t, remainingIDs[unpinned[i].ID])
+		}
+		// Last 3 unpinned kept
+		for i := 7; i < 10; i++ {
+			require.True(t, remainingIDs[unpinned[i].ID])
+		}
+		// All 3 pinned kept
+		for i := 0; i < 3; i++ {
+			require.True(t, remainingIDs[pinned[i].ID])
+		}
+	})
+
+	t.Run("TruncateByKeepLast_FewerThanLimit", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentID := "agent-truncate-fewer"
+
+		for i := 0; i < 3; i++ {
+			_, err := db.AppendScratchpadEntry(ctx, agentID, fmt.Sprintf("unpinned-%d", i), false)
+			require.NoError(t, err)
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		deletedCount, err := db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{
+			KeepLast: 5,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 0, deletedCount)
+
+		_, total, err := db.PaginateScratchpad(ctx, agentID, 100, 0)
+		require.NoError(t, err)
+		require.Equal(t, 3, total)
+	})
+
+	t.Run("MutualExclusivityValidation", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentID := "agent-validation"
+
+		// Both BeforeID and KeepLast
+		_, err = db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{
+			BeforeID: "some-id",
+			KeepLast: 3,
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrInvalidParameter)
+		require.Contains(t, err.Error(), "cannot specify both before_id and keep_last")
+
+		// Neither BeforeID nor KeepLast
+		_, err = db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrInvalidParameter)
+		require.Contains(t, err.Error(), "must specify either before_id or keep_last greater than 0")
+
+		// KeepLast < 0
+		_, err = db.TruncateScratchpadEntries(ctx, agentID, ScratchpadTruncateOptions{
+			KeepLast: -1,
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrInvalidParameter)
+		require.Contains(t, err.Error(), "keep_last must be greater than 0")
+
+		// Empty agentID
+		_, err = db.TruncateScratchpadEntries(ctx, "", ScratchpadTruncateOptions{
+			KeepLast: 5,
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrInvalidParameter)
+	})
+
+	t.Run("NonExistentOrCrossAgentBeforeID", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentA := "agent-A"
+		agentB := "agent-B"
+
+		// Non-existent BeforeID
+		_, err = db.TruncateScratchpadEntries(ctx, agentA, ScratchpadTruncateOptions{
+			BeforeID: "non-existent",
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, sql.ErrNoRows)
+
+		// Create entry for agentB
+		entryB, err := db.AppendScratchpadEntry(ctx, agentB, "agentB note", false)
+		require.NoError(t, err)
+
+		// Pass agentB's entry ID for agentA
+		_, err = db.TruncateScratchpadEntries(ctx, agentA, ScratchpadTruncateOptions{
+			BeforeID: entryB.ID,
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, sql.ErrNoRows)
+	})
+
+	t.Run("CrossAgentIsolation", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		db, err := Open(ctx, dbPath, Options{})
+		require.NoError(t, err)
+		defer db.Close()
+
+		agentA := "agent-isolation-A"
+		agentB := "agent-isolation-B"
+
+		// Create entries for agentA and agentB
+		for i := 0; i < 5; i++ {
+			_, err := db.AppendScratchpadEntry(ctx, agentA, fmt.Sprintf("A-%d", i), false)
+			require.NoError(t, err)
+			_, err = db.AppendScratchpadEntry(ctx, agentB, fmt.Sprintf("B-%d", i), false)
+			require.NoError(t, err)
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		// Truncate agentA keeping last 2
+		deletedCount, err := db.TruncateScratchpadEntries(ctx, agentA, ScratchpadTruncateOptions{
+			KeepLast: 2,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 3, deletedCount)
+
+		// Verify agentA entries
+		_, totalA, err := db.PaginateScratchpad(ctx, agentA, 100, 0)
+		require.NoError(t, err)
+		require.Equal(t, 2, totalA)
+
+		// Verify agentB entries are completely untouched
+		entriesB, totalB, err := db.PaginateScratchpad(ctx, agentB, 100, 0)
+		require.NoError(t, err)
+		require.Equal(t, 5, totalB)
+		require.Len(t, entriesB, 5)
+	})
+}
+

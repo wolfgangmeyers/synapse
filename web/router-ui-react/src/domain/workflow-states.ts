@@ -38,7 +38,6 @@ export interface WorkflowState {
   name: string;
   description: string;
   entry_text: string;
-  goal?: string | undefined;
   reminders?: WorkflowReminderConfig[];
   monitors?: WorkflowMonitorConfig[];
   allowed_tools?: string[];
@@ -72,6 +71,7 @@ export interface Workflow {
   name: string;
   description: string;
   entry_state_id: string | null;
+  snooze_duration_ms?: number;
   variables?: WorkflowVariableDefinition[];
   created_at: string;
   updated_at: string;
@@ -81,6 +81,7 @@ export interface Workflow {
 export interface CreateWorkflowRequest {
   name: string;
   description?: string;
+  snooze_duration_ms?: number;
   variables?: WorkflowVariableDefinition[];
 }
 
@@ -88,6 +89,7 @@ export interface UpdateWorkflowRequest {
   name?: string;
   description?: string;
   entry_state_id?: string | null;
+  snooze_duration_ms?: number;
   variables?: WorkflowVariableDefinition[];
 }
 
@@ -106,7 +108,7 @@ export interface WorkflowStateExport {
   name: string;
   description: string;
   entry_text: string;
-  goal: string;
+  goal?: string;
   is_entry_state: boolean;
   allow_exit: boolean;
   allowed_tools: string[];
@@ -120,6 +122,7 @@ export interface WorkflowStateExport {
 export interface WorkflowInfoExport {
   name: string;
   description: string;
+  snooze_duration_ms?: number;
   variables: WorkflowVariableDefinition[];
 }
 
@@ -136,7 +139,6 @@ export interface WorkflowStateInput {
   name: string;
   description?: string;
   entry_text?: string;
-  goal?: string | undefined;
   reminders?: WorkflowReminderConfig[];
   monitors?: WorkflowMonitorConfig[];
   allowed_tools?: string[];

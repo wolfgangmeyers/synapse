@@ -15,21 +15,23 @@ const (
 )
 
 type Workflow struct {
-	ID           string                       `json:"id"`
-	Name         string                       `json:"name"`
-	Description  string                       `json:"description"`
-	EntryStateID *string                      `json:"entry_state_id,omitempty"`
-	Variables    []WorkflowVariableDefinition `json:"variables"`
-	CreatedAt    string                       `json:"created_at"`
-	UpdatedAt    string                       `json:"updated_at"`
-	StateCount   int                          `json:"state_count"`
+	ID               string                       `json:"id"`
+	Name             string                       `json:"name"`
+	Description      string                       `json:"description"`
+	EntryStateID     *string                      `json:"entry_state_id,omitempty"`
+	SnoozeDurationMS int                          `json:"snooze_duration_ms"`
+	Variables        []WorkflowVariableDefinition `json:"variables"`
+	CreatedAt        string                       `json:"created_at"`
+	UpdatedAt        string                       `json:"updated_at"`
+	StateCount       int                          `json:"state_count"`
 }
 
 type WorkflowRequest struct {
-	Name         string                        `json:"name"`
-	Description  string                        `json:"description"`
-	EntryStateID *string                       `json:"entry_state_id,omitempty"`
-	Variables    *[]WorkflowVariableDefinition `json:"variables,omitempty"`
+	Name             string                        `json:"name"`
+	Description      string                        `json:"description"`
+	EntryStateID     *string                       `json:"entry_state_id,omitempty"`
+	SnoozeDurationMS int                           `json:"snooze_duration_ms"`
+	Variables        *[]WorkflowVariableDefinition `json:"variables,omitempty"`
 }
 
 type WorkflowStatePosition struct {
@@ -126,6 +128,11 @@ func (s *Store) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*Workf
 		now := formatTimestamp(s.clock.Now())
 		desc := strings.TrimSpace(req.Description)
 
+		snoozeDurationMS := req.SnoozeDurationMS
+		if snoozeDurationMS <= 0 {
+			snoozeDurationMS = 600000
+		}
+
 		var variablesJSON string
 		var varsList []WorkflowVariableDefinition
 		if req.Variables != nil {
@@ -156,8 +163,8 @@ func (s *Store) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*Workf
 			entryStateIDVal = &trimmed
 		}
 
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, variables_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			id, name, desc, entryStateIDVal, variablesJSON, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, name, desc, entryStateIDVal, snoozeDurationMS, variablesJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowNameConflictError{Name: name}
@@ -166,14 +173,15 @@ func (s *Store) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*Workf
 		}
 
 		wf = &Workflow{
-			ID:           id,
-			Name:         name,
-			Description:  desc,
-			EntryStateID: entryStateIDVal,
-			Variables:    varsList,
-			CreatedAt:    now,
-			UpdatedAt:    now,
-			StateCount:   0,
+			ID:               id,
+			Name:             name,
+			Description:      desc,
+			EntryStateID:     entryStateIDVal,
+			SnoozeDurationMS: snoozeDurationMS,
+			Variables:        varsList,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+			StateCount:       0,
 		}
 		return nil
 	})
@@ -186,12 +194,12 @@ func (s *Store) GetWorkflow(ctx context.Context, id string) (*Workflow, error) {
 	var entryStateID sql.NullString
 	var variablesJSON sql.NullString
 	query := `
-		SELECT w.id, w.name, w.description, w.entry_state_id, w.variables_json, w.created_at, w.updated_at,
+		SELECT w.id, w.name, w.description, w.entry_state_id, w.snooze_duration_ms, w.variables_json, w.created_at, w.updated_at,
 		       (SELECT COUNT(*) FROM workflow_states ws WHERE ws.workflow_id = w.id) AS state_count
 		FROM workflows w
 		WHERE w.id = ?`
 	err := s.db.QueryRowContext(ctx, query, id).
-		Scan(&wf.ID, &wf.Name, &wf.Description, &entryStateID, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount)
+		Scan(&wf.ID, &wf.Name, &wf.Description, &entryStateID, &wf.SnoozeDurationMS, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -207,7 +215,7 @@ func (s *Store) GetWorkflow(ctx context.Context, id string) (*Workflow, error) {
 
 func (s *Store) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 	query := `
-		SELECT w.id, w.name, w.description, w.entry_state_id, w.variables_json, w.created_at, w.updated_at,
+		SELECT w.id, w.name, w.description, w.entry_state_id, w.snooze_duration_ms, w.variables_json, w.created_at, w.updated_at,
 		       (SELECT COUNT(*) FROM workflow_states ws WHERE ws.workflow_id = w.id) AS state_count
 		FROM workflows w
 		ORDER BY w.name ASC, w.id ASC`
@@ -222,7 +230,7 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 		var wf Workflow
 		var entryStateID sql.NullString
 		var variablesJSON sql.NullString
-		if err := rows.Scan(&wf.ID, &wf.Name, &wf.Description, &entryStateID, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount); err != nil {
+		if err := rows.Scan(&wf.ID, &wf.Name, &wf.Description, &entryStateID, &wf.SnoozeDurationMS, &variablesJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.StateCount); err != nil {
 			return nil, err
 		}
 		if entryStateID.Valid {
@@ -250,8 +258,8 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 		var existing Workflow
 		var existingEntryStateID sql.NullString
 		var existingVariablesJSON sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_state_id, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
-			Scan(&existing.ID, &existing.Name, &existing.Description, &existingEntryStateID, &existingVariablesJSON, &existing.CreatedAt, &existing.UpdatedAt)
+		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
+			Scan(&existing.ID, &existing.Name, &existing.Description, &existingEntryStateID, &existing.SnoozeDurationMS, &existingVariablesJSON, &existing.CreatedAt, &existing.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowNotFoundError{ID: id}
 		}
@@ -271,6 +279,11 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 
 		now := formatTimestamp(s.clock.Now())
 		desc := strings.TrimSpace(req.Description)
+
+		snoozeDurationMS := req.SnoozeDurationMS
+		if snoozeDurationMS <= 0 {
+			snoozeDurationMS = 600000
+		}
 
 		var variablesJSON string
 		var finalVars []WorkflowVariableDefinition
@@ -309,8 +322,8 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 			entryStateIDVal = &existingEntryStateID.String
 		}
 
-		_, err = s.db.ExecContext(ctx, `UPDATE workflows SET name = ?, description = ?, entry_state_id = ?, variables_json = ?, updated_at = ? WHERE id = ?`,
-			name, desc, entryStateIDVal, variablesJSON, now, id)
+		_, err = s.db.ExecContext(ctx, `UPDATE workflows SET name = ?, description = ?, entry_state_id = ?, snooze_duration_ms = ?, variables_json = ?, updated_at = ? WHERE id = ?`,
+			name, desc, entryStateIDVal, snoozeDurationMS, variablesJSON, now, id)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowNameConflictError{Name: name}
@@ -322,14 +335,15 @@ func (s *Store) UpdateWorkflow(ctx context.Context, id string, req WorkflowReque
 		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_states WHERE workflow_id = ?`, id).Scan(&stateCount)
 
 		wf = &Workflow{
-			ID:           id,
-			Name:         name,
-			Description:  desc,
-			EntryStateID: entryStateIDVal,
-			Variables:    finalVars,
-			CreatedAt:    existing.CreatedAt,
-			UpdatedAt:    now,
-			StateCount:   stateCount,
+			ID:               id,
+			Name:             name,
+			Description:      desc,
+			EntryStateID:     entryStateIDVal,
+			SnoozeDurationMS: snoozeDurationMS,
+			Variables:        finalVars,
+			CreatedAt:        existing.CreatedAt,
+			UpdatedAt:        now,
+			StateCount:       stateCount,
 		}
 		return nil
 	})
@@ -361,7 +375,7 @@ func (s *Store) DeleteWorkflow(ctx context.Context, id string) (bool, error) {
 }
 
 func (s *Store) ListWorkflowStatesByWorkflow(ctx context.Context, workflowID string) ([]WorkflowState, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE workflow_id = ? ORDER BY name ASC, id ASC`, workflowID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at FROM workflow_states WHERE workflow_id = ? ORDER BY name ASC, id ASC`, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +390,7 @@ func (s *Store) ListWorkflowStatesByWorkflow(ctx context.Context, workflowID str
 		var allowedToolsJSON sql.NullString
 		var transitionsJSON sql.NullString
 		var allowExitInt int
-		if err := rows.Scan(&state.ID, &wfID, &state.Name, &state.Description, &state.EntryText, &state.Goal, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.ID, &wfID, &state.Name, &state.Description, &state.EntryText, &remindersJSON, &monitorsJSON, &allowedToolsJSON, &transitionsJSON, &allowExitInt, &state.UIPosX, &state.UIPosY, &state.CreatedAt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if wfID.Valid {
@@ -452,8 +466,8 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 		var original Workflow
 		var originalEntryStateID sql.NullString
 		var originalVariablesJSON sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_state_id, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
-			Scan(&original.ID, &original.Name, &original.Description, &originalEntryStateID, &originalVariablesJSON, &original.CreatedAt, &original.UpdatedAt)
+		err := s.db.QueryRowContext(ctx, `SELECT id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at FROM workflows WHERE id = ?`, id).
+			Scan(&original.ID, &original.Name, &original.Description, &originalEntryStateID, &original.SnoozeDurationMS, &originalVariablesJSON, &original.CreatedAt, &original.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return &WorkflowNotFoundError{ID: id}
 		}
@@ -508,9 +522,14 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			varsJSON = "[]"
 		}
 
+		snoozeDurationMS := original.SnoozeDurationMS
+		if snoozeDurationMS <= 0 {
+			snoozeDurationMS = 600000
+		}
+
 		// 7. Insert new workflow first with NULL entry_state_id so workflow_states foreign key (workflow_id REFERENCES workflows(id)) is satisfied!
-		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?)`,
-			newWfID, trimmedName, original.Description, varsJSON, now, now)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO workflows (id, name, description, entry_state_id, snooze_duration_ms, variables_json, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+			newWfID, trimmedName, original.Description, snoozeDurationMS, varsJSON, now, now)
 		if err != nil {
 			if isConstraintError(err) {
 				return &WorkflowNameConflictError{Name: trimmedName}
@@ -563,8 +582,8 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 			uiPosX := st.UIPosX + 20
 			uiPosY := st.UIPosY + 20
 
-			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, goal, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				newStateID, newWfID, candidateName, st.Description, st.EntryText, st.Goal, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_states (id, workflow_id, name, description, entry_text, reminders_json, monitors_json, allowed_tools_json, transitions_json, allow_exit, ui_pos_x, ui_pos_y, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newStateID, newWfID, candidateName, st.Description, st.EntryText, remindersJSON, monitorsJSON, allowedToolsJSON, transitionsJSON, allowExitInt, uiPosX, uiPosY, now, now)
 			if err != nil {
 				return err
 			}
@@ -579,14 +598,15 @@ func (s *Store) DuplicateWorkflow(ctx context.Context, id string, newName string
 		}
 
 		duplicated = &Workflow{
-			ID:           newWfID,
-			Name:         trimmedName,
-			Description:  original.Description,
-			EntryStateID: newEntryStateID,
-			Variables:    unmarshalWorkflowVariables(varsJSON),
-			CreatedAt:    now,
-			UpdatedAt:    now,
-			StateCount:   len(states),
+			ID:               newWfID,
+			Name:             trimmedName,
+			Description:      original.Description,
+			EntryStateID:     newEntryStateID,
+			SnoozeDurationMS: snoozeDurationMS,
+			Variables:        unmarshalWorkflowVariables(varsJSON),
+			CreatedAt:        now,
+			UpdatedAt:        now,
+			StateCount:       len(states),
 		}
 		return nil
 	})

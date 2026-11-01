@@ -150,6 +150,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodGet && managedScratchpadPath(req.URL.Path) != "":
 		r.handleManagedScratchpadGET(w, req, managedScratchpadPath(req.URL.Path))
 		return true
+	case req.Method == http.MethodPost && managedScratchpadTruncatePath(req.URL.Path) != "":
+		r.handleManagedScratchpadTruncatePOST(w, req, managedScratchpadTruncatePath(req.URL.Path))
+		return true
 	case req.Method == http.MethodPost && managedInterruptPath(req.URL.Path) != "":
 		r.handleManagedAgentInterrupt(w, req)
 		return true
@@ -1436,6 +1439,74 @@ func (r *Router) handleManagedScratchpadGET(w http.ResponseWriter, req *http.Req
 		"total_count": totalCount,
 	}, nil)
 }
+
+type managedScratchpadTruncatePayload struct {
+	BeforeID string `json:"before_id"`
+	KeepLast *int   `json:"keep_last"`
+}
+
+func (r *Router) handleManagedScratchpadTruncatePOST(w http.ResponseWriter, req *http.Request, agentID string) {
+	agent, err := r.store.ManagedAgent(req.Context(), agentID)
+	if err != nil || agent == nil {
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(req.Body, 16*1024))
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "Could not read request body"})
+		return
+	}
+
+	var payload managedScratchpadTruncatePayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "Request body is invalid JSON"})
+		return
+	}
+
+	beforeID := strings.TrimSpace(payload.BeforeID)
+	hasKeepLast := payload.KeepLast != nil
+
+	// Validate mutual exclusivity and constraints
+	if (beforeID != "" && hasKeepLast) || (beforeID == "" && !hasKeepLast) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "must specify either before_id or keep_last, but not both"})
+		return
+	}
+
+	keepLast := 0
+	if hasKeepLast {
+		keepLast = *payload.KeepLast
+		if keepLast <= 0 {
+			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", "keep_last must be greater than 0"})
+			return
+		}
+	}
+
+	deletedCount, err := r.store.TruncateScratchpadEntries(req.Context(), agentID, store.ScratchpadTruncateOptions{
+		BeforeID: beforeID,
+		KeepLast: keepLast,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrScratchpadEntryNotFound) {
+			r.writeManagedError(w, req, &managedHTTPError{404, "ENTRY_NOT_FOUND", "Scratchpad entry was not found"})
+			return
+		}
+		if errors.Is(err, store.ErrInvalidParameter) {
+			r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST", err.Error()})
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not truncate scratchpad entries"})
+		return
+	}
+
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
+		"ok":               true,
+		"agent_id":         agentID,
+		"deleted_count":    deletedCount,
+		"pinned_preserved": true,
+	}, nil)
+}
+
 func managedWorkflowStatePath(path string) string {
 	const prefix = "/v1/managed-agents/"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/workflow-state") {
@@ -1478,6 +1549,19 @@ func managedScratchpadPath(path string) string {
 		return ""
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/scratchpad")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func managedScratchpadTruncatePath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	const suffix = "/scratchpad/truncate"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
 	if id == "" || strings.Contains(id, "/") {
 		return ""
 	}
@@ -1722,25 +1806,29 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 			return
 		}
 
-		// Synchronize goal with workflow state, applying variable substitution and template expansion
-		if wfState.Goal != "" {
-			goalText := r.store.SubstituteAndExpandText(req.Context(), wfState.Goal, variables)
-			goalSettings := store.DefaultManagedGoalSettings()
-			goalSettings.GoalLockEnabled = true
-			_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
-				Enabled:  true,
-				Goal:     goalText,
-				Settings: goalSettings,
-			})
-		} else {
-			goalSettings := store.DefaultManagedGoalSettings()
-			goalSettings.GoalLockEnabled = false
-			_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
-				Enabled:  false,
-				Goal:     "",
-				Settings: goalSettings,
-			})
+		// Activate implicit workflow completion goal
+		wfName := "active"
+		snoozeDurationMS := int64(600000)
+		if workflowID != nil && *workflowID != "" {
+			if wf, err := r.store.GetWorkflow(req.Context(), *workflowID); err == nil && wf != nil {
+				wfName = wf.Name
+				if wf.SnoozeDurationMS > 0 {
+					snoozeDurationMS = int64(wf.SnoozeDurationMS)
+				}
+			}
 		}
+		goalText := "Complete active workflow: " + wfName
+		goalSettings := store.DefaultManagedGoalSettings()
+		if policy, err := r.store.ManagedGoalPolicyFor(req.Context(), agentID); err == nil && policy != nil {
+			goalSettings = policy.Config.Settings
+		}
+		goalSettings.GoalLockEnabled = true
+		goalSettings.SnoozeDurationMS = snoozeDurationMS
+		_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
+			Enabled:  true,
+			Goal:     goalText,
+			Settings: goalSettings,
+		})
 
 		_ = r.store.SpawnWorkflowStateReminders(req.Context(), agentID, wfState, variables)
 		if r.managed != nil {
@@ -2001,6 +2089,23 @@ func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, 
 			return
 		}
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agent"})
+		return
+	}
+
+	if agent.ActiveWorkflowID != "" || agent.ActiveWorkflowStateID != "" {
+		wfName := "active"
+		if agent.ActiveWorkflowID != "" {
+			if wf, err := r.store.GetWorkflow(req.Context(), agent.ActiveWorkflowID); err == nil && wf != nil {
+				wfName = wf.Name
+			}
+		} else if agent.ActiveWorkflowStateID != "" {
+			if st, err := r.store.GetWorkflowState(req.Context(), agent.ActiveWorkflowStateID); err == nil && st != nil && st.WorkflowID != nil {
+				if wf, err := r.store.GetWorkflow(req.Context(), *st.WorkflowID); err == nil && wf != nil {
+					wfName = wf.Name
+				}
+			}
+		}
+		r.writeManagedError(w, req, &managedHTTPError{409, "WORKFLOW_ACTIVE", fmt.Sprintf("manual goal control is disabled while workflow %q is active; the active goal is to complete the workflow", wfName)})
 		return
 	}
 

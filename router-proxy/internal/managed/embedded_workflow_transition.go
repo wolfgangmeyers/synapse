@@ -173,31 +173,8 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				}
 				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
 
-				// Synchronize goal with target state, substituting variables and expanding prompt templates
-				if targetState.Goal != "" {
-					goalText := m.store.SubstituteAndExpandText(ctx, targetState.Goal, workflowVars)
-					goalSettings := store.DefaultManagedGoalSettings()
-					if policy, err := m.store.ManagedGoalPolicyFor(ctx, owner.binding.AgentID); err == nil && policy != nil {
-						goalSettings = policy.Config.Settings
-					}
-					goalSettings.GoalLockEnabled = true
-					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
-						Enabled:  true,
-						Goal:     goalText,
-						Settings: goalSettings,
-					})
-				} else {
-					goalSettings := store.DefaultManagedGoalSettings()
-					if policy, err := m.store.ManagedGoalPolicyFor(ctx, owner.binding.AgentID); err == nil && policy != nil {
-						goalSettings = policy.Config.Settings
-					}
-					goalSettings.GoalLockEnabled = false
-					_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
-						Enabled:  false,
-						Goal:     "",
-						Settings: goalSettings,
-					})
-				}
+				// On state transition: do NOT wipe, rewrite, or deactivate the goal.
+				// The implicit workflow goal remains active and locked.
 
 				// Spawn new reminders
 				_ = m.store.SpawnWorkflowStateReminders(ctx, owner.binding.AgentID, targetState, workflowVars)

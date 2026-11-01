@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,7 +15,7 @@ import (
 func embeddedScratchpadSchema() *ai.Schema {
 	closed := false
 	schema := ai.Object(
-		ai.Prop("action", ai.EnumOf("append", "fetch", "paginate", "search", "pin", "unpin", "delete")),
+		ai.Prop("action", ai.EnumOf("append", "fetch", "paginate", "search", "pin", "unpin", "delete", "truncate")),
 		ai.Opt("content", ai.String("Content of the scratchpad entry (for append, maximum 4000 characters).")),
 		ai.Opt("pinned", ai.Boolean("Whether the entry is pinned (for append / pin).")),
 		ai.Opt("id", ai.String("Single entry ID (for pin / unpin / delete).")),
@@ -22,6 +23,8 @@ func embeddedScratchpadSchema() *ai.Schema {
 		ai.Opt("query", ai.String("Search query string (for search).")),
 		ai.Opt("limit", ai.Integer("Maximum entries to return (optional, default 5, max 20).")),
 		ai.Opt("offset", ai.Integer("Pagination offset (optional, default 0).")),
+		ai.Opt("before_id", ai.String("Truncate unpinned entries created strictly before this entry's timestamp (for truncate). Mutually exclusive with keep_last.")),
+		ai.Opt("keep_last", ai.Integer("Number of most recent unpinned entries to keep (for truncate, must be > 0). Mutually exclusive with before_id.")),
 	)
 	schema.AdditionalAllowed = &closed
 	return schema
@@ -73,7 +76,7 @@ func extractScratchpadEntryIDs(args map[string]any, action string) ([]string, er
 func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "scratchpad",
-		Description: "Persistent scratchpad memory for notes, milestones, and context across session resets. Supports append, fetch (recent + pinned), paginate, search, pin, unpin, and delete.",
+		Description: "Persistent scratchpad memory for notes, milestones, and context across session resets. Supports append, fetch (recent + pinned), paginate, search, pin, unpin, delete, and truncate.",
 		Parameters:  embeddedScratchpadSchema(),
 		Execute: func(ctx context.Context, id string, args map[string]any, _ agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 			if m == nil || m.store == nil {
@@ -330,6 +333,69 @@ func (m *Manager) embeddedScratchpadTool(owner embeddedOwner) agent.AgentTool {
 				return agent.AgentToolResult{
 					Content: ai.ContentList{
 						ai.TextContent{Text: fmt.Sprintf("Deleted %d scratchpad entries: %s", len(deletedIDs), strings.Join(deletedIDs, ", "))},
+					},
+				}, nil
+
+			case "truncate":
+				// Extract BeforeID argument if provided
+				var beforeID string
+				if bVal, ok := args["before_id"].(string); ok {
+					beforeID = strings.TrimSpace(bVal)
+				}
+
+				// Extract KeepLast argument if provided, supporting int, float64, and int64 numeric types from JSON decoding
+				keepLastProvided := false
+				var keepLast int
+				if kVal, ok := args["keep_last"]; ok && kVal != nil {
+					keepLastProvided = true
+					switch v := kVal.(type) {
+					case int:
+						keepLast = v
+					case float64:
+						keepLast = int(v)
+					case int64:
+						keepLast = int(v)
+					default:
+						return agent.AgentToolResult{}, errors.New("invalid parameter: keep_last must be an integer")
+					}
+				}
+
+				// Validate mutual exclusivity and value constraints before attempting truncation
+				if beforeID != "" && keepLastProvided {
+					return agent.AgentToolResult{}, errors.New("scratchpad truncate requires either before_id or keep_last, not both")
+				}
+				if beforeID == "" && !keepLastProvided {
+					return agent.AgentToolResult{}, errors.New("scratchpad truncate requires either before_id or keep_last > 0")
+				}
+				if keepLastProvided {
+					if keepLast < 0 {
+						return agent.AgentToolResult{}, errors.New("scratchpad truncate keep_last must be greater than 0")
+					}
+					if keepLast == 0 {
+						return agent.AgentToolResult{}, errors.New("scratchpad truncate requires either before_id or keep_last > 0")
+					}
+				}
+
+				// Execute truncation atomically in the durable store
+				deletedCount, err := m.store.TruncateScratchpadEntries(ctx, agentID, store.ScratchpadTruncateOptions{
+					BeforeID: beforeID,
+					KeepLast: keepLast,
+				})
+				// Handle specific error cases (e.g. entry not found when before_id does not exist for agent)
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrScratchpadEntryNotFound) {
+						return agent.AgentToolResult{}, fmt.Errorf("entry not found: %s", beforeID)
+					}
+					return agent.AgentToolResult{}, err
+				}
+
+				entryWord := "entries"
+				if deletedCount == 1 {
+					entryWord = "entry"
+				}
+				return agent.AgentToolResult{
+					Content: ai.ContentList{
+						ai.TextContent{Text: fmt.Sprintf("Truncated %d scratchpad %s.", deletedCount, entryWord)},
 					},
 				}, nil
 

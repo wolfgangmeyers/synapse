@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -42,7 +43,6 @@ func TestWorkflowImportExport(t *testing.T) {
 		Name:         "Build",
 		Description:  "Compiles the binaries",
 		EntryText:    "Compiling version ${TAG}",
-		Goal:         "Produce build artifact",
 		AllowedTools: []string{"bash", "read"},
 		UIPosX:       &x1,
 		UIPosY:       &y1,
@@ -76,7 +76,6 @@ func TestWorkflowImportExport(t *testing.T) {
 		Name:         "Deploy",
 		Description:  "Deploy to cluster",
 		EntryText:    "Deploying to ${ENV}",
-		Goal:         "Deploy containers",
 		AllowedTools: []string{"bash"},
 		AllowExit:    &exitFalse,
 		UIPosX:       &x2,
@@ -89,7 +88,6 @@ func TestWorkflowImportExport(t *testing.T) {
 		Name:         stateBuild.Name,
 		Description:  stateBuild.Description,
 		EntryText:    stateBuild.EntryText,
-		Goal:         stateBuild.Goal,
 		AllowedTools: stateBuild.AllowedTools,
 		Reminders:    stateBuild.Reminders,
 		Monitors:     stateBuild.Monitors,
@@ -265,14 +263,16 @@ func TestWorkflowImportExport(t *testing.T) {
 		require.NotEmpty(t, payload.ExportedAt)
 		// We have original wf and imported wf
 		require.Len(t, payload.Workflows, 2)
+		require.Equal(t, 600000, payload.Workflows[0].Workflow.SnoozeDurationMS)
 
 		// Test ReplaceAllWorkflows with 1 new workflow bundle
 		newBundle := WorkflowExportBundle{
 			SchemaVersion: 1,
 			ExportedAt:    payload.ExportedAt,
 			Workflow: WorkflowInfoExport{
-				Name:        "Replaced Pipeline",
-				Description: "Brand new replacement pipeline",
+				Name:             "Replaced Pipeline",
+				Description:      "Brand new replacement pipeline",
+				SnoozeDurationMS: 180000,
 				Variables: []WorkflowVariableDefinition{
 					{
 						Name:         "STAGE",
@@ -289,7 +289,6 @@ func TestWorkflowImportExport(t *testing.T) {
 					Name:         "Init State",
 					Description:  "Initialize things",
 					EntryText:    "Initializing...",
-					Goal:         "Boot up",
 					IsEntryState: true,
 					AllowExit:    true,
 					AllowedTools: []string{"bash"},
@@ -305,7 +304,6 @@ func TestWorkflowImportExport(t *testing.T) {
 					Name:         "Final State",
 					Description:  "Final step",
 					EntryText:    "Done.",
-					Goal:         "Finish execution",
 					IsEntryState: false,
 					AllowExit:    true,
 					AllowedTools: []string{"read"},
@@ -322,6 +320,7 @@ func TestWorkflowImportExport(t *testing.T) {
 		require.Len(t, allWfs, 1)
 		require.Equal(t, "Replaced Pipeline", allWfs[0].Name)
 		require.Equal(t, "Brand new replacement pipeline", allWfs[0].Description)
+		require.Equal(t, 180000, allWfs[0].SnoozeDurationMS)
 		require.Equal(t, 2, allWfs[0].StateCount)
 		require.NotNil(t, allWfs[0].EntryStateID)
 
@@ -359,3 +358,47 @@ func TestWorkflowImportExport(t *testing.T) {
 	})
 }
 
+
+func TestWorkflowImportLegacyGoalIgnored(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	// JSON bundle containing legacy "goal" in state and omitting "snooze_duration_ms" in workflow
+	legacyBundleJSON := `{
+		"schema_version": 1,
+		"exported_at": "2026-03-30T10:00:00Z",
+		"workflow": {
+			"name": "Legacy Workflow",
+			"description": "Legacy workflow bundle test",
+			"variables": []
+		},
+		"entry_state_key": "legacy-state-1",
+		"states": [
+			{
+				"key": "legacy-state-1",
+				"name": "State One",
+				"description": "First state with legacy goal",
+				"entry_text": "Starting legacy work",
+				"goal": "Legacy goal that should be ignored",
+				"is_entry_state": true,
+				"allow_exit": true,
+				"allowed_tools": ["bash"],
+				"transitions": []
+			}
+		]
+	}`
+
+	var bundle WorkflowExportBundle
+	err := json.Unmarshal([]byte(legacyBundleJSON), &bundle)
+	require.NoError(t, err)
+
+	err = s.ValidateExportBundle(bundle)
+	require.NoError(t, err)
+
+	wf, states, err := s.ImportWorkflow(ctx, bundle)
+	require.NoError(t, err)
+	require.NotNil(t, wf)
+	require.Equal(t, 600000, wf.SnoozeDurationMS)
+	require.Len(t, states, 1)
+	require.Equal(t, "State One", states[0].Name)
+}

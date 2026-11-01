@@ -472,25 +472,29 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 					return agent.AgentToolResult{}, fmt.Errorf("failed to set active workflow: %w", err)
 				}
 
-				// Synchronize goal with workflow state, applying variable substitution
-				if wfState.Goal != "" {
-					goalText := m.store.SubstituteAndExpandText(ctx, wfState.Goal, variables)
-					goalSettings := store.DefaultManagedGoalSettings()
-					goalSettings.GoalLockEnabled = true
-					_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
-						Enabled:  true,
-						Goal:     goalText,
-						Settings: goalSettings,
-					})
-				} else {
-					goalSettings := store.DefaultManagedGoalSettings()
-					goalSettings.GoalLockEnabled = false
-					_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
-						Enabled:  false,
-						Goal:     "",
-						Settings: goalSettings,
-					})
+				// Activate implicit workflow completion goal
+				wfName := "active"
+				snoozeDurationMS := int64(600000)
+				if workflowID != nil && *workflowID != "" {
+					if targetWf, err := m.store.GetWorkflow(ctx, *workflowID); err == nil && targetWf != nil {
+						wfName = targetWf.Name
+						if targetWf.SnoozeDurationMS > 0 {
+							snoozeDurationMS = int64(targetWf.SnoozeDurationMS)
+						}
+					}
 				}
+				goalText := "Complete active workflow: " + wfName
+				goalSettings := store.DefaultManagedGoalSettings()
+				if policy, err := m.store.ManagedGoalPolicyFor(ctx, agentID); err == nil && policy != nil {
+					goalSettings = policy.Config.Settings
+				}
+				goalSettings.GoalLockEnabled = true
+				goalSettings.SnoozeDurationMS = snoozeDurationMS
+				_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
+					Enabled:  true,
+					Goal:     goalText,
+					Settings: goalSettings,
+				})
 
 				_ = m.store.SpawnWorkflowStateReminders(ctx, agentID, wfState, variables)
 				_ = m.SpawnWorkflowStateMonitors(ctx, agentID, wfState, variables)
@@ -754,7 +758,6 @@ func embeddedWorkflowStateSaveSchema() *ai.Schema {
 		ai.Opt("name", ai.String("State name.")),
 		ai.Opt("description", ai.String("State description.")),
 		ai.Opt("entry_text", ai.String("Entry instructions text.")),
-		ai.Opt("goal", ai.String("Goal for this state.")),
 		ai.Opt("reminders", ai.ArrayOf(&ai.Schema{Type: "object", Description: "State reminder config object."}, "State reminder configs.")),
 		ai.Opt("monitors", ai.ArrayOf(&ai.Schema{Type: "object", Description: "State monitor config object."}, "State monitor configs.")),
 		ai.Opt("allowed_tools", ai.ArrayOf(ai.String(), "Allowed tool names list.")),
@@ -821,7 +824,6 @@ func (m *Manager) embeddedWorkflowStateSaveTool(owner embeddedOwner) agent.Agent
 				req.Name = existingState.Name
 				req.Description = existingState.Description
 				req.EntryText = existingState.EntryText
-				req.Goal = existingState.Goal
 				req.Reminders = existingState.Reminders
 				req.Monitors = existingState.Monitors
 				req.AllowedTools = existingState.AllowedTools
@@ -842,9 +844,6 @@ func (m *Manager) embeddedWorkflowStateSaveTool(owner embeddedOwner) agent.Agent
 			}
 			if entry, ok := args["entry_text"].(string); ok {
 				req.EntryText = entry
-			}
-			if goal, ok := args["goal"].(string); ok {
-				req.Goal = goal
 			}
 			if allowExit, ok := args["allow_exit"].(bool); ok {
 				req.AllowExit = &allowExit

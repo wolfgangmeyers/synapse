@@ -1,11 +1,9 @@
 import { useState, useEffect, type ReactElement, type FormEvent } from "react";
 import type { WorkflowState, WorkflowReminderConfig, WorkflowMonitorConfig, KnownToolDefinition } from "../domain/workflow-states";
 import { KNOWN_WORKFLOW_TOOLS } from "../domain/workflow-states";
-import { DEFAULT_GOAL_STATE, type GoalState, type goalControlPayload } from "../domain/goals";
 import { MONITOR_PRESETS, getMonitorPresetById } from "../domain/monitor-presets";
 import { secureUuid } from "../platform/secure-uuid";
 import { DialogShell } from "./DialogShell";
-import { GoalEditorDialog } from "./GoalEditorDialog";
 
 export interface StateConfigModalProps {
   state: WorkflowState;
@@ -62,9 +60,6 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
   const [monitorMaxAlerts, setMonitorMaxAlerts] = useState(0);
   const [monitorShowAdvanced, setMonitorShowAdvanced] = useState(false);
   const [monitorFormError, setMonitorFormError] = useState<string | null>(null);
-
-  const [goal, setGoal] = useState<string>(state.goal ?? "");
-  const [showGoalEditor, setShowGoalEditor] = useState(false);
 
   // Sub-reminder dialog or inline editing
   const [editingReminderIdx, setEditingReminderIdx] = useState<number | null>(null);
@@ -268,7 +263,6 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
         name: name.trim(),
         description: description.trim(),
         entry_text: entryText,
-        goal: goal.trim(),
         allowed_tools: restrictTools ? Array.from(selectedTools) : [],
         reminders,
         monitors,
@@ -471,52 +465,6 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
               </div>
             </div>
           ) : null}
-        </div>
-
-        {/* Workflow State Goal section */}
-        <div className="form-section" style={{ marginBottom: "1.25rem", borderTop: "1px solid var(--border-color, #333)", paddingTop: "0.75rem" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-            <div style={{ fontWeight: 600 }}>Workflow State Goal</div>
-            {!goal ? (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => setShowGoalEditor(true)}
-              >
-                <i className="fa-solid fa-flag" aria-hidden="true" /> Configure Goal
-              </button>
-            ) : null}
-          </div>
-
-          {!goal ? (
-            <p className="text-muted" style={{ fontSize: "0.85em", margin: "0" }}>
-              No persistent goal configured. Workers in this state will operate without a locked workflow goal.
-            </p>
-          ) : (
-            <div className="state-goal-preview-box" style={{ padding: "8px 12px", background: "rgba(255,255,255,0.04)", border: "1px solid var(--border-color, #444)", borderRadius: "4px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px" }}>
-                <div style={{ flex: 1, whiteSpace: "pre-wrap", fontSize: "0.85em", lineHeight: 1.4 }}>
-                  {goal}
-                </div>
-                <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setShowGoalEditor(true)}
-                  >
-                    <i className="fa-solid fa-pen" aria-hidden="true" /> Edit Goal
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-danger btn-sm"
-                    onClick={() => setGoal("")}
-                  >
-                    <i className="fa-solid fa-trash" aria-hidden="true" /> Clear Goal
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Reminders section */}
@@ -946,28 +894,6 @@ export function StateConfigModal({ state, isEntry, tools: propTools, onClose, on
           </button>
         </div>
       </form>
-
-      {/* Goal Editor Dialog */}
-      {showGoalEditor ? (
-        <GoalEditorDialog
-          open={showGoalEditor}
-          peer={`State: ${name || state.name}`}
-          goalState={{
-            ...DEFAULT_GOAL_STATE,
-            enabled: Boolean(goal),
-            goal: goal || "",
-          }}
-          onClose={() => setShowGoalEditor(false)}
-          onSave={(payload) => {
-            if (payload.action === "set" && payload.goal) {
-              setGoal(payload.goal);
-            } else {
-              setGoal("");
-            }
-            setShowGoalEditor(false);
-          }}
-        />
-      ) : null}
     </DialogShell>
   );
 }

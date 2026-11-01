@@ -138,11 +138,10 @@ func TestWorkflowHTTP(t *testing.T) {
 	stateID := stateCreated["workflow_state"].(map[string]any)["id"].(string)
 	require.NotEmpty(t, stateID)
 	require.Equal(t, wfID, stateCreated["workflow_state"].(map[string]any)["workflow_id"])
-	require.Equal(t, "Workflow goal 1", stateCreated["workflow_state"].(map[string]any)["goal"])
 	require.Equal(t, 100.5, stateCreated["workflow_state"].(map[string]any)["ui_pos_x"])
 	require.Equal(t, 200.5, stateCreated["workflow_state"].(map[string]any)["ui_pos_y"])
 
-	// Verify GET /v1/workflows/{id} includes state with goal
+	// Verify GET /v1/workflows/{id} includes state
 	res, err = client.Get(server.URL + "/v1/workflows/" + wfID)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.StatusCode)
@@ -151,7 +150,6 @@ func TestWorkflowHTTP(t *testing.T) {
 	res.Body.Close()
 	statesWithGoal := getResWithStates["states"].([]any)
 	require.Len(t, statesWithGoal, 1)
-	require.Equal(t, "Workflow goal 1", statesWithGoal[0].(map[string]any)["goal"])
 
 	// 8. PUT /v1/workflows/{id} update entry_state_id and name
 	updatePayload := map[string]any{

@@ -1429,6 +1429,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if m.hasGoogleSearchAuth(ctx) {
 			tools = append(tools, m.embeddedGoogleSearchTool(owner))
 		}
+		if m.hasCodexSearchAuth(ctx) {
+			tools = append(tools, m.embeddedCodexSearchTool(owner))
+		}
 		tools = append(tools, m.EmbeddedSubagentPublicTools(binding)...)
 		tools = append(tools, m.embeddedProgressTool(owner))
 		tools = append(tools, m.embeddedBlockedTool(owner))
@@ -2401,6 +2404,13 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			}
 			rawDetails = fmt.Sprintf("Goal evaluation failed: %v", evalErr)
 			evalErr = nil
+		}
+		// If the agent is in an active workflow, do not allow turn evaluators to prematurely complete the implicit workflow goal.
+		if outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted {
+			if curAgent, err := m.store.ManagedAgent(m.runCtx, binding.AgentID); err == nil && curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "") {
+				outcome = store.EmbeddedGoalEvaluationNotDone
+				reason = "Active workflow is still in progress; implicit workflow goal cannot be completed until workflow exits"
+			}
 		}
 		changed := false
 		if m.runCtx.Err() == nil {

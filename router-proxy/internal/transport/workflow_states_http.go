@@ -103,7 +103,6 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 	}
 	desc, _ := rawString(payload, "description", false)
 	entryText, _ := rawString(payload, "entry_text", false)
-	goal, _ := rawString(payload, "goal", false)
 
 	var reminders []store.WorkflowReminderConfig
 	if raw, exists := payload["reminders"]; exists && len(raw) > 0 && string(raw) != "null" {
@@ -174,7 +173,6 @@ func parseWorkflowStateRequest(payload map[string]json.RawMessage) (store.Workfl
 		Name:         name,
 		Description:  desc,
 		EntryText:    entryText,
-		Goal:         goal,
 		Reminders:    reminders,
 		Monitors:     monitors,
 		AllowedTools: allowedTools,

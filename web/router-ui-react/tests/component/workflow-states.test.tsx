@@ -61,43 +61,29 @@ describe("WorkflowStatesPage", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
     unmount();
   });
-  it("renders goal badge when state has a goal configured", async () => {
-    const statesWithGoal = [
+  it("renders state card without per-state goal badge", async () => {
+    const states = [
       {
-        id: "state-with-goal",
-        name: "Goal-Oriented State",
-        description: "State with persistent goal",
+        id: "state-1",
+        name: "Standard State",
+        description: "State without per-state goal",
         entry_text: "Entry instructions",
-        goal: "Finish all test coverage",
-        created_at: "2025-01-01T00:00:00Z",
-        updated_at: "2025-01-01T00:00:00Z",
-      },
-      {
-        id: "state-without-goal",
-        name: "No-Goal State",
-        description: "State without goal",
-        entry_text: "Entry instructions",
-        goal: "",
         created_at: "2025-01-01T00:00:00Z",
         updated_at: "2025-01-01T00:00:00Z",
       },
     ];
 
     const mockClient = {
-      workflowStates: vi.fn().mockResolvedValue({ workflow_states: statesWithGoal }),
+      workflowStates: vi.fn().mockResolvedValue({ workflow_states: states }),
     } as unknown as RouterHttpClient;
 
     const { unmount } = render(<WorkflowStatesPage client={mockClient} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Goal-Oriented State")).toBeDefined();
+      expect(screen.getByText("Standard State")).toBeDefined();
     });
 
-    const goalBadge = screen.getByTestId("state-goal-badge-state-with-goal");
-    expect(goalBadge).toBeDefined();
-    expect(goalBadge.textContent).toContain("Goal configured");
-    expect(goalBadge.getAttribute("title")).toBe("Finish all test coverage");
-    expect(screen.queryByTestId("state-goal-badge-state-without-goal")).toBeNull();
+    expect(screen.queryByTestId("state-goal-badge-state-1")).toBeNull();
 
     unmount();
   });

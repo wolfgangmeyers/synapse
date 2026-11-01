@@ -34,16 +34,11 @@ describe("WorkflowStateNode", () => {
     updated_at: "2026-10-01T00:00:00Z",
   };
 
-  it("renders goal badge when state.goal is a non-empty string", () => {
-    const stateWithGoal: WorkflowState = {
-      ...baseState,
-      goal: "Complete the specification and verify requirements",
-    };
-
+  it("renders entry badge when isEntry is true", () => {
     const nodeData: WorkflowStateNodeData = {
-      state: stateWithGoal,
+      state: baseState,
       workflow: baseWorkflow,
-      isEntry: false,
+      isEntry: true,
       onOpenConfig: vi.fn(),
       onDeleteState: vi.fn(),
     };
@@ -65,61 +60,24 @@ describe("WorkflowStateNode", () => {
       />
     );
 
-    const goalBadge = container.querySelector(".badge-goal");
-    expect(goalBadge).not.toBeNull();
-    expect(goalBadge?.getAttribute("title")).toBe("Complete the specification and verify requirements");
-    expect(goalBadge?.textContent).toContain("Goal");
-    expect(goalBadge?.querySelector("i.fa-flag")).not.toBeNull();
+    const entryBadge = container.querySelector(".badge-entry");
+    expect(entryBadge).not.toBeNull();
+    expect(entryBadge?.textContent).toContain("ENTRY");
   });
 
-  it("does not render goal badge when state.goal is undefined or empty string", () => {
-    const stateWithoutGoal: WorkflowState = {
-      ...baseState,
-      goal: "",
-    };
-
+  it("does not render goal badge as per-state goals are removed", () => {
     const nodeData: WorkflowStateNodeData = {
-      state: stateWithoutGoal,
+      state: baseState,
       workflow: baseWorkflow,
       isEntry: false,
       onOpenConfig: vi.fn(),
       onDeleteState: vi.fn(),
     };
 
-    const { container, rerender } = render(
+    const { container } = render(
       <WorkflowStateNode
         id="node-1"
         data={nodeData as unknown as Record<string, unknown>}
-        selected={false}
-        type="workflowState"
-        zIndex={0}
-        isConnectable={true}
-        positionAbsoluteX={0}
-        positionAbsoluteY={0}
-        dragging={false}
-        draggable={false}
-        selectable={true}
-        deletable={true}
-      />
-    );
-
-    expect(container.querySelector(".badge-goal")).toBeNull();
-
-    // Also test with goal undefined
-    const stateUndefinedGoal: WorkflowState = {
-      ...baseState,
-      goal: undefined,
-    };
-
-    const nodeDataUndefined: WorkflowStateNodeData = {
-      ...nodeData,
-      state: stateUndefinedGoal,
-    };
-
-    rerender(
-      <WorkflowStateNode
-        id="node-1"
-        data={nodeDataUndefined as unknown as Record<string, unknown>}
         selected={false}
         type="workflowState"
         zIndex={0}

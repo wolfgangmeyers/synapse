@@ -833,29 +833,25 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	require.Equal(t, "ok", resSet.Status)
 
 	// 2. Create workflow states:
-	// - StateWithGoal: has goal "State locked goal"
-	// - StateWithoutGoal: has empty goal ""
-	stateWithGoal, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+	wf, err := durable.CreateWorkflow(ctx, store.WorkflowRequest{
+		Name: "TestFlow",
+	})
+	require.NoError(t, err)
+
+	stateInWf, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
+		WorkflowID:  &wf.ID,
 		Name:        "LockedPhase",
 		Description: "Phase with locked goal",
-		Goal:        "State locked goal",
 	})
 	require.NoError(t, err)
 
-	stateWithoutGoal, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{
-		Name:        "FreePhase",
-		Description: "Phase without goal",
-		Goal:        "",
-	})
-	require.NoError(t, err)
-
-	// 3. Set active workflow state to StateWithGoal and verify synchronization + lock
-	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, &stateWithGoal.ID))
+	// 3. Set active workflow state to stateInWf and activate implicit workflow goal
+	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, &stateInWf.ID))
 	goalSettings := store.DefaultManagedGoalSettings()
 	goalSettings.GoalLockEnabled = true
 	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
 		Enabled:  true,
-		Goal:     stateWithGoal.Goal,
+		Goal:     "Complete active workflow: " + wf.Name,
 		Settings: goalSettings,
 	})
 	require.NoError(t, err)
@@ -863,10 +859,10 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
 	require.NoError(t, err)
 	require.True(t, policy.Config.Enabled)
-	require.Equal(t, "State locked goal", policy.Config.Goal)
+	require.Equal(t, "Complete active workflow: "+wf.Name, policy.Config.Goal)
 	require.True(t, policy.Config.Settings.GoalLockEnabled)
 
-	// 4. Worker goal(action="set") rejected with lock error when state has goal
+	// 4. Worker goal(action="set") rejected with lock error when workflow is active
 	_, err = manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
 		RequestID:   "123e4567-e89b-42d3-a456-426614174081",
 		OperationID: "goal.control",
@@ -874,9 +870,9 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 		Fence:       fence,
 	})
 	require.Error(t, err)
-	require.Equal(t, fmt.Sprintf("goal is locked by active workflow state %q", stateWithGoal.Name), err.Error())
+	require.Contains(t, err.Error(), "manual goal control is disabled while workflow")
 
-	// 5. Worker goal(action="off") rejected with lock error when state has goal
+	// 5. Worker goal(action="off") rejected with lock error when workflow is active
 	_, err = manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
 		RequestID:   "123e4567-e89b-42d3-a456-426614174082",
 		OperationID: "goal.control",
@@ -884,9 +880,9 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 		Fence:       fence,
 	})
 	require.Error(t, err)
-	require.Equal(t, fmt.Sprintf("goal is locked by active workflow state %q", stateWithGoal.Name), err.Error())
+	require.Contains(t, err.Error(), "manual goal control is disabled while workflow")
 
-	// 6. Worker goal(action="status") permitted when state has goal
+	// 6. Worker goal(action="status") permitted when workflow is active
 	resStatus, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
 		RequestID:   "123e4567-e89b-42d3-a456-426614174083",
 		OperationID: "goal.control",
@@ -897,8 +893,8 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	require.Equal(t, "ok", resStatus.Status)
 	require.Equal(t, "Goal is active.", resStatus.Content)
 
-	// 7. Transition to state with empty goal clears agent goal and unlocks it
-	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, &stateWithoutGoal.ID))
+	// 7. Clear workflow state completely (exit)
+	require.NoError(t, durable.SetManagedAgentActiveWorkflowWithVariables(ctx, fence.AgentID, nil, nil, nil))
 	goalSettingsUnlocked := store.DefaultManagedGoalSettings()
 	goalSettingsUnlocked.GoalLockEnabled = false
 	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
@@ -914,32 +910,7 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	require.Empty(t, policy.Config.Goal)
 	require.False(t, policy.Config.Settings.GoalLockEnabled)
 
-	// 8. Worker goal(action="set") permitted when state has empty goal
-	resSetEmptyState, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
-		RequestID:   "123e4567-e89b-42d3-a456-426614174084",
-		OperationID: "goal.control",
-		Arguments:   map[string]any{"action": "set", "goal": "worker goal in free state"},
-		Fence:       fence,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "ok", resSetEmptyState.Status)
-
-	// 9. Clear workflow state completely (exit)
-	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, nil))
-	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
-		Enabled:  false,
-		Goal:     "",
-		Settings: goalSettingsUnlocked,
-	})
-	require.NoError(t, err)
-
-	policy, err = durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
-	require.NoError(t, err)
-	require.False(t, policy.Config.Enabled)
-	require.Empty(t, policy.Config.Goal)
-	require.False(t, policy.Config.Settings.GoalLockEnabled)
-
-	// 10. Worker goal(action="set") permitted when no workflow state
+	// 8. Worker goal(action="set") permitted when no workflow state
 	resSetNoState, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
 		RequestID:   "123e4567-e89b-42d3-a456-426614174085",
 		OperationID: "goal.control",
