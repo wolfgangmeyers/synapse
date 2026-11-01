@@ -896,14 +896,26 @@ export interface ManagedAgent {
   is_background?: boolean;
 }
 
+export interface IntervalSpec {
+  value: number;
+  unit: "minutes" | "hours" | "days";
+}
+
+export interface StructuredSchedule {
+  days_mode: "every_day" | "specific_days";
+  days?: number[];
+  time_mode: "specific_times" | "repeating_interval";
+  times?: string[];
+  interval?: IntervalSpec;
+  timezone?: string;
+}
+
 export interface WorkflowSchedule {
   id: string;
   workflow_id: string;
   name: string;
   enabled: boolean;
-  schedule_type: 'interval' | 'cron';
-  interval_ms?: number | null;
-  cron_expression?: string | null;
+  schedule: StructuredSchedule;
   variables?: Record<string, string>;
   target_cwd?: string;
   model_provider?: string;

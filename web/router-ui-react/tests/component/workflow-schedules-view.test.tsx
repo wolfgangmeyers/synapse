@@ -1,8 +1,14 @@
+// @vitest-environment jsdom
+
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { WorkflowSchedulesView } from "../../src/components/WorkflowSchedulesView";
-import { describeCron, intervalToCron } from "../../src/components/ScheduleCronPicker";
+import {
+  describeStructuredSchedule,
+  describeDays,
+  formatTime12h,
+} from "../../src/components/StructuredSchedulePicker";
 import type { RouterHttpClient } from "../../src/transport/http-client";
 import type { WorkflowSchedule } from "../../src/protocol/types";
 import type { Workflow } from "../../src/domain/workflow-states";
@@ -13,22 +19,58 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("ScheduleCronPicker utilities", () => {
-  it("describes cron expressions accurately in human-readable terms", () => {
-    expect(describeCron("*/5 * * * *")).toBe("Runs every 5 minutes");
-    expect(describeCron("0 * * * *")).toBe("Runs at minute 0 of every hour");
-    expect(describeCron("0 0 * * *")).toBe("Runs every day at 00:00");
-    expect(describeCron("0 9 * * 1-5")).toBe("Runs Monday through Friday at 09:00");
-    expect(describeCron("0 0 * * 1")).toBe("Runs every Monday at 00:00");
-    expect(describeCron("0 0 1 * *")).toBe("Runs on the 1st of every month at 00:00");
-    expect(describeCron("15 3 * * *")).toBe("Runs every day at 03:15");
+describe("StructuredSchedule description utilities", () => {
+  it("formats 24-hour clock strings into 12-hour strings with AM/PM", () => {
+    expect(formatTime12h("00:00")).toBe("12:00 AM");
+    expect(formatTime12h("09:15")).toBe("09:15 AM");
+    expect(formatTime12h("12:00")).toBe("12:00 PM");
+    expect(formatTime12h("17:45")).toBe("05:45 PM");
+    expect(formatTime12h("23:59")).toBe("11:59 PM");
   });
 
-  it("converts intervals in ms to reasonable cron expressions", () => {
-    expect(intervalToCron(60000)).toBe("* * * * *");
-    expect(intervalToCron(300000)).toBe("*/5 * * * *");
-    expect(intervalToCron(3600000)).toBe("0 * * * *");
-    expect(intervalToCron(86400000)).toBe("0 0 * * *");
+  it("describes day sets accurately", () => {
+    expect(describeDays([0, 1, 2, 3, 4, 5, 6])).toBe("every day");
+    expect(describeDays([1, 2, 3, 4, 5])).toBe("Monday through Friday");
+    expect(describeDays([6, 0])).toBe("on weekends");
+    expect(describeDays([1])).toBe("every Monday");
+    expect(describeDays([1, 3])).toBe("on Monday and Wednesday");
+    expect(describeDays([1, 3, 5])).toBe("on Monday, Wednesday, and Friday");
+  });
+
+  it("describes structured schedules in natural English", () => {
+    expect(
+      describeStructuredSchedule({
+        days_mode: "every_day",
+        time_mode: "specific_times",
+        times: ["09:00"],
+      })
+    ).toBe("Runs every day at 09:00 AM");
+
+    expect(
+      describeStructuredSchedule({
+        days_mode: "specific_days",
+        days: [1, 2, 3, 4, 5],
+        time_mode: "specific_times",
+        times: ["09:15", "17:45"],
+      })
+    ).toBe("Runs Monday through Friday at 09:15 AM and 05:45 PM");
+
+    expect(
+      describeStructuredSchedule({
+        days_mode: "specific_days",
+        days: [1, 2, 3, 4, 5],
+        time_mode: "repeating_interval",
+        interval: { value: 2, unit: "hours" },
+      })
+    ).toBe("Runs every 2 hours, Monday through Friday");
+
+    expect(
+      describeStructuredSchedule({
+        days_mode: "every_day",
+        time_mode: "repeating_interval",
+        interval: { value: 15, unit: "minutes" },
+      })
+    ).toBe("Runs every 15 minutes continuously");
   });
 });
 
@@ -39,9 +81,11 @@ describe("WorkflowSchedulesView Component", () => {
       workflow_id: "wf-1",
       name: "Nightly Security Audit",
       enabled: true,
-      schedule_type: "cron",
-      cron_expression: "0 0 * * *",
-      interval_ms: null,
+      schedule: {
+        days_mode: "every_day",
+        time_mode: "specific_times",
+        times: ["00:00"],
+      },
       variables: { REPO: "mecha" },
       next_run_at: "2026-11-01T00:00:00Z",
       created_at: "2026-10-30T00:00:00Z",
@@ -52,9 +96,12 @@ describe("WorkflowSchedulesView Component", () => {
       workflow_id: "wf-1",
       name: "Hourly Health Ping",
       enabled: false,
-      schedule_type: "cron",
-      cron_expression: "0 * * * *",
-      interval_ms: null,
+      schedule: {
+        days_mode: "specific_days",
+        days: [1, 2, 3, 4, 5],
+        time_mode: "repeating_interval",
+        interval: { value: 1, unit: "hours" },
+      },
       variables: { REPO: "mecha" },
       next_run_at: "2026-11-01T01:00:00Z",
       created_at: "2026-10-30T00:00:00Z",
@@ -82,19 +129,19 @@ describe("WorkflowSchedulesView Component", () => {
       deleteWorkflowSchedule: vi.fn(),
     }) as unknown as RouterHttpClient;
 
-  it("renders the configured schedules with human-readable descriptions", async () => {
+  it("renders the configured schedules with natural English descriptions", async () => {
     const client = createMockClient();
     render(<WorkflowSchedulesView client={client} />);
 
     expect(await screen.findByText("Nightly Security Audit")).toBeInTheDocument();
     expect(screen.getByText("Hourly Health Ping")).toBeInTheDocument();
 
-    // Human-readable cron descriptions rendered
-    expect(screen.getByText("Runs every day at 00:00")).toBeInTheDocument();
-    expect(screen.getByText("Runs at minute 0 of every hour")).toBeInTheDocument();
+    // Natural English structured schedule descriptions rendered
+    expect(screen.getByText("Runs every day at 12:00 AM")).toBeInTheDocument();
+    expect(screen.getByText("Runs every 1 hour, Monday through Friday")).toBeInTheDocument();
   });
 
-  it("opens add form with unselected workflow by default and cron picker", async () => {
+  it("opens add form with unselected workflow and structured schedule picker", async () => {
     const client = createMockClient();
     render(<WorkflowSchedulesView client={client} recentFolders={["/recent/repo"]} />);
 
@@ -109,9 +156,11 @@ describe("WorkflowSchedulesView Component", () => {
     // Target workflow select placeholder is visible
     expect(screen.getByText("Select a workflow...")).toBeInTheDocument();
 
-    // Cron picker presets and preview
-    expect(screen.getByText("Common Presets")).toBeInTheDocument();
-    expect(screen.getByText("Custom Cron")).toBeInTheDocument();
+    // Structured schedule picker toggles are present
+    expect(screen.getByText("Every day")).toBeInTheDocument();
+    expect(screen.getByText("Specific days")).toBeInTheDocument();
+    expect(screen.getByText("At specific times")).toBeInTheDocument();
+    expect(screen.getByText("Repeating interval")).toBeInTheDocument();
 
     // Working directory picker is present with recent folders toggle
     expect(screen.getByText("Working Directory (optional)")).toBeInTheDocument();
