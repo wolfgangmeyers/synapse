@@ -147,12 +147,12 @@ func TestEmbeddedRequiredMailboxRegistry(t *testing.T) {
 
 func TestEmbeddedRequiredWorkerActionsRegistry(t *testing.T) {
 	for _, role := range []string{"root", "worker"} {
-		for _, action := range []string{"list", "launch", "send", "cleanup"} {
+		for _, action := range []string{"list", "send", "cleanup"} {
 			t.Run(role+"/"+action, func(t *testing.T) {
 				ctx := context.Background()
 				m, db, provider, caller, root := requiredToolsFixture(t, role)
 				target := "independent-target"
-				if action != "launch" {
+				{
 					_, err := m.Launch(ctx, LaunchRequest{Name: target, Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "settle independently"})
 					require.NoError(t, err)
 					require.Eventually(t, func() bool {
@@ -164,10 +164,6 @@ func TestEmbeddedRequiredWorkerActionsRegistry(t *testing.T) {
 				if action != "list" {
 					args["name"] = target
 				}
-				if action == "launch" {
-					args["cwd"], args["instruction"] = root, "independent initial task"
-					args["model"] = map[string]any{"provider": "openai-codex", "id": "gpt-5.6-terra"}
-				}
 				if action == "send" {
 					args["body"] = "independent worker mail"
 				}
@@ -176,17 +172,6 @@ func TestEmbeddedRequiredWorkerActionsRegistry(t *testing.T) {
 				switch action {
 				case "list":
 					require.Contains(t, string(payload["workers"]), target)
-				case "launch":
-					require.JSONEq(t, `"accepted"`, string(payload["status"]))
-					row, err := db.ManagedAgent(ctx, target)
-					require.NoError(t, err)
-					callerRow, err := db.ManagedAgent(ctx, caller)
-					require.NoError(t, err)
-					require.NotEqual(t, callerRow.PiSessionID, row.PiSessionID)
-					require.NotEqual(t, callerRow.RuntimeGeneration, row.RuntimeGeneration)
-					savedRole, err := db.SavedEmbeddedSessionRole(ctx, store.EmbeddedBinding{AgentID: row.AgentID, SessionID: row.PiSessionID, Epoch: row.SessionEpoch, Generation: row.RuntimeGeneration})
-					require.NoError(t, err)
-					require.Equal(t, "worker", savedRole)
 				case "send":
 					var id string
 					require.NoError(t, json.Unmarshal(payload["message_id"], &id))

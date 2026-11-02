@@ -634,7 +634,6 @@
             "maxLength": 64,
             "enum": [
               "list",
-              "launch",
               "cleanup",
               "send"
             ]
@@ -662,8 +661,8 @@
       },
       "operation_id": "ops.worker",
       "name": "mecha_worker",
-      "definition_id": "def_95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
-      "definition_sha256": "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da"
+      "definition_id": "def_11da86c3834df8a3c478df658dd554fe1af668aec8ba2c35b092c5649db2247d",
+      "definition_sha256": "11da86c3834df8a3c478df658dd554fe1af668aec8ba2c35b092c5649db2247d"
     },
     {
       "capability_id": "web_search",

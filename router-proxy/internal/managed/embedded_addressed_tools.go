@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
 )
-
-type embeddedToolInvocationContextKey struct{}
 
 // The router supplies its ordinary after-acceptance routing/publication path.
 // This callback cannot accept mail: the fenced Store transaction already did.
@@ -75,11 +72,9 @@ func embeddedMailboxSchema() *ai.Schema {
 }
 
 func embeddedWorkerSchema() *ai.Schema {
-	model := embeddedClosedObject(ai.Prop("provider", embeddedBoundedString(128)), ai.Prop("id", embeddedBoundedString(128)))
-	s := embeddedClosedObject(ai.Prop("action", ai.EnumOf("list", "launch", "send", "cleanup")), ai.Opt("name", embeddedBoundedString(128)), ai.Opt("cwd", embeddedBoundedString(4096)), ai.Opt("instruction", embeddedBoundedString(MaxInitialInstructionBytes)), ai.Opt("model", model), ai.Opt("body", embeddedBoundedString(protocol.DefaultMaxBodyBytes)), ai.Opt("subject", embeddedBoundedString(256)))
+	s := embeddedClosedObject(ai.Prop("action", ai.EnumOf("list", "send", "cleanup")), ai.Opt("name", embeddedBoundedString(128)), ai.Opt("body", embeddedBoundedString(protocol.DefaultMaxBodyBytes)), ai.Opt("subject", embeddedBoundedString(256)))
 	s.OneOf = []*ai.Schema{
 		embeddedClosedObject(ai.Prop("action", ai.EnumOf("list"))),
-		embeddedClosedObject(ai.Prop("action", ai.EnumOf("launch")), ai.Prop("name", embeddedBoundedString(128)), ai.Prop("cwd", embeddedBoundedString(4096)), ai.Prop("instruction", embeddedBoundedString(MaxInitialInstructionBytes)), ai.Opt("model", model)),
 		embeddedClosedObject(ai.Prop("action", ai.EnumOf("send")), ai.Prop("name", embeddedBoundedString(128)), ai.Prop("body", embeddedBoundedString(protocol.DefaultMaxBodyBytes)), ai.Opt("subject", embeddedBoundedString(256))),
 		embeddedClosedObject(ai.Prop("action", ai.EnumOf("cleanup")), ai.Prop("name", embeddedBoundedString(128))),
 	}
@@ -107,14 +102,6 @@ func embeddedAddressedArguments(name string, args map[string]any) error {
 		if action == "cleanup" {
 			return nil
 		}
-		if action == "launch" {
-			cwd, _ := args["cwd"].(string)
-			instruction, _ := args["instruction"].(string)
-			if cwd == "" || !utf8.ValidString(cwd) || len(cwd) > 4096 || !utf8.ValidString(instruction) || len(instruction) > MaxInitialInstructionBytes {
-				return errors.New("invalid worker launch arguments")
-			}
-			return nil // Canonical Manager admission owns cwd/model validation.
-		}
 	}
 	recipient, _ := args["recipient"].(string)
 	if name == "mecha_worker" {
@@ -135,12 +122,12 @@ func embeddedAddressedArguments(name string, args map[string]any) error {
 	return protocol.ValidateEnvelope(envelope, protocol.DefaultMaxBodyBytes)
 }
 
-func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitted func(string) *store.EmbeddedToolInvocation, completed func(string, *store.EmbeddedToolInvocation), freshLaunch func(string) bool) agent.AgentTool {
+func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitted func(string) *store.EmbeddedToolInvocation, completed func(string, *store.EmbeddedToolInvocation)) agent.AgentTool {
 	schema := embeddedMailboxSchema()
 	description := "Queue an independently addressed mailbox message. Returns acceptance, not delivery or an automatic reply."
 	if name == "mecha_worker" {
 		schema = embeddedWorkerSchema()
-		description = "List, launch, send mail to or clean up independent embedded workers by their saved identity. Launch and cleanup return accepted operations, not readiness or completion."
+		description = "List, send mail to or clean up independent embedded workers by their saved identity. Cleanup returns an accepted operation, not completion."
 	}
 	return agent.AgentTool{Name: name, Description: description, Parameters: schema, Execute: func(ctx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 		current, ok := ctx.Value(embeddedOwnerContextKey{}).(embeddedOwner)
@@ -157,10 +144,8 @@ func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitt
 		if err := m.store.StartEmbeddedToolInvocation(ctx, invocation, ai.ToolCall{ID: id, Name: name, Arguments: args}); err != nil {
 			return agent.AgentToolResult{}, err
 		}
-		if name != "mecha_worker" || args["action"] != "launch" {
-			if m.embeddedAfterIntent != nil {
-				m.embeddedAfterIntent(ctx)
-			}
+		if m.embeddedAfterIntent != nil {
+			m.embeddedAfterIntent(ctx)
 		}
 		if err := m.authorizeEmbeddedWorkerLaunch(ctx, owner); err != nil {
 			return agent.AgentToolResult{}, err
@@ -179,14 +164,6 @@ func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitt
 			switch args["action"] {
 			case "list":
 				_, err = m.store.ListEmbeddedToolWorkers(ctx, invocation)
-			case "launch":
-				if args["name"] == owner.binding.AgentID {
-					return agent.AgentToolResult{}, errors.New("worker launch cannot reuse its calling serial lane")
-				}
-				// Keep the existing canonical launch and uncertainty reconciliation.
-				// Only this SDK execution can add the atomic producer guard.
-				launchCtx := context.WithValue(ctx, embeddedToolInvocationContextKey{}, invocation)
-				_, err = m.embeddedWorkerLaunchTool(owner, freshLaunch).Execute(launchCtx, id, args, update)
 			case "cleanup":
 				worker, _ := args["name"].(string)
 				if worker == owner.binding.AgentID {

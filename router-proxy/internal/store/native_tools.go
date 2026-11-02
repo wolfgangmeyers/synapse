@@ -29,7 +29,7 @@ var NativeToolCatalog = []NativeToolDef{
 
 	// Messaging & Routing
 	{ToolName: "mecha_mailbox_send", Category: "Messaging & Routing", Description: "Queue an independently addressed mailbox message", DefaultEnabled: true},
-	{ToolName: "mecha_worker", Category: "Messaging & Routing", Description: "Launch or send mail to independent embedded workers", DefaultEnabled: true},
+	{ToolName: "mecha_worker", Category: "Messaging & Routing", Description: "List, send mail to or clean up independent workers", DefaultEnabled: true},
 	{ToolName: "mecha_worker_terminate", Category: "Messaging & Routing", Description: "Terminate self and optionally remove assigned worktree", DefaultEnabled: true},
 	{ToolName: "mecha_reminder", Category: "Messaging & Routing", Description: "Create, list, update or delete reminders", DefaultEnabled: true},
 	{ToolName: "mecha_send_image", Category: "Messaging & Routing", Description: "Send an image to the user or another recipient", DefaultEnabled: true},

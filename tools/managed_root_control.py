@@ -59,7 +59,7 @@ ROOT_OPERATION_CONTRACT: dict[str, dict[str, frozenset[str] | None | bool]] = {
     "notifications.settled": {"fields": frozenset({"action"}), "actions": frozenset({"enable", "disable", "status"}), "available": True},
     "ops.state": {"fields": frozenset({"action", "task", "state", "alias", "type", "project", "description", "purpose", "window", "branch", "pr", "linear", "field", "value"}), "actions": frozenset({"query", "create", "update"}), "available": True},
     "ops.verification_handoff": {"fields": frozenset({"action", "task", "reminderId", "successor", "remoteVerified"}), "actions": frozenset({"record"}), "available": True},
-    "ops.worker": {"fields": frozenset({"action", "alias", "worker", "message", "subject"}), "actions": frozenset({"list", "launch", "cleanup", "send"}), "available": True},
+    "ops.worker": {"fields": frozenset({"action", "alias", "worker", "message", "subject"}), "actions": frozenset({"list", "cleanup", "send"}), "available": True},
     "web.search": {"fields": frozenset({"query", "freshness", "maxResults"}), "actions": None, "available": True},
 }
 
@@ -535,7 +535,7 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
             values += ["--remote-verified", text(arguments["remoteVerified"], "remoteVerified")]
         return invoke_script("state_verification_handoff.py", values)
     if operation == "ops.worker":
-        if action in {"launch", "cleanup"}:
+        if action == "cleanup":
             return invoke_script("worker_lifecycle.py", [action, "--alias", identifier(arguments.get("alias"), "alias")])
         if action == "list":
             return invoke_script("worker_list.py", [])

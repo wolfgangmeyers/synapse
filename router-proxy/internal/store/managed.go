@@ -758,7 +758,7 @@ func (s *Store) ReserveManagedEmbeddedWorkerFromOwner(ctx context.Context, agent
 	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "worker", &parent)
 }
 
-func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string, parent *EmbeddedBinding, current ...*EmbeddedToolInvocation) error {
+func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string, parent *EmbeddedBinding) error {
 	if maxAgents < 1 {
 		return errors.New("managed process limit must be positive")
 	}
@@ -793,14 +793,6 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 		operation.State = "pending"
 	}
 	transaction := func() error {
-		if len(current) != 0 {
-			if len(current) != 1 {
-				return errors.New("invalid current worker launch admission")
-			}
-			if err := s.admitEmbeddedToolTx(ctx, current[0]); err != nil {
-				return err
-			}
-		}
 		if parent != nil {
 			if err := s.embeddedFence(ctx, *parent); err != nil {
 				return err
@@ -933,11 +925,6 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 			}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
-		return err
-	}
-	if len(current) == 1 && current[0] != nil {
-		committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, transaction)
-		current[0].recordDomainDisposition(committed, conclusive, err)
 		return err
 	}
 	return s.runImmediate(ctx, transaction)

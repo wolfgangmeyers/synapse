@@ -20,12 +20,13 @@ func TestEmbeddedAddressedActionSchemas(t *testing.T) {
 		{"action": "list"},
 		{"action": "send", "name": "worker", "body": "mail"},
 		{"action": "cleanup", "name": "worker"},
-		{"action": "launch", "name": "worker", "cwd": "/project", "instruction": "task"},
 	} {
 		require.True(t, embeddedWorkerSchema().Check(valid), "%v", valid)
 		require.NoError(t, embeddedAddressedArguments("mecha_worker", valid))
 	}
 	for _, invalid := range []map[string]any{
+		{"action": "launch", "name": "worker", "cwd": "/project", "instruction": "task"},
+
 		{"action": "list", "instruction": "not permitted"},
 		{"action": "send", "name": "worker"},
 		{"action": "cleanup", "name": "worker", "cwd": "/project"},
@@ -54,7 +55,7 @@ func TestEmbeddedAddressedToolsRejectContextOwnerBeforeAdmission(t *testing.T) {
 	tool := m.embeddedAddressedTool(owner, "mecha_mailbox_send", func(string) *store.EmbeddedToolInvocation {
 		t.Fatal("unclaimed context reached fresh admission lookup")
 		return nil
-	}, nil, nil)
+	}, nil)
 	for _, ctx := range []context.Context{context.Background(), context.WithValue(context.Background(), embeddedOwnerContextKey{}, embeddedOwner{binding: owner.binding, identity: "different"})} {
 		_, err := tool.Execute(ctx, "call", map[string]any{"recipient": "recipient", "body": "mail"}, nil)
 		require.ErrorContains(t, err, "current runner context owner")

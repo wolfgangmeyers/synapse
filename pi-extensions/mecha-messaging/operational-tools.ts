@@ -470,7 +470,7 @@ const CURSOR_TOOL_METADATA: Record<string, CursorToolMetadata> = Object.freeze({
   mecha_worker: {
     promptSnippet: "List managed workers or send a worker a mailbox message",
     promptGuidelines: [
-      "Use mecha_worker with action list, launch, cleanup, or send for managed worker operations.",
+      "Use mecha_worker with action list, cleanup, or send for managed worker operations.",
       "Call pi__mecha_worker through the Cursor pi bridge.",
     ],
   },
@@ -854,19 +854,17 @@ export function createOperationalToolDefinitions({
 
     descriptor("mecha_worker", "Managed worker", [
       variant("list"),
-      variant("launch", { alias: workerAlias }, ["alias"]),
       variant("cleanup", { alias: workerAlias }, ["alias"]),
       variant("send", { worker: task, message: shortText, subject }, ["worker", "message"]),
     ], async (input) => {
       const definitions = {
         list: { properties: {}, required: [] },
-        launch: { properties: { alias: true }, required: ["alias"] },
         cleanup: { properties: { alias: true }, required: ["alias"] },
         send: { properties: { worker: true, message: true, subject: true }, required: ["worker", "message"] },
       };
       validateAction(input, definitions);
       if (input.action === "list") return success(await runScript(SCRIPT_PATHS.workerList));
-      if (input.action === "launch" || input.action === "cleanup") {
+      if (input.action === "cleanup") {
         return success(await runScript(SCRIPT_PATHS.workerLifecycle, [input.action, "--alias", workerId(input.alias, "alias")]));
       }
       const sender = resolveCurrentAgentId() || environment.MECHA_AGENT_ID;
