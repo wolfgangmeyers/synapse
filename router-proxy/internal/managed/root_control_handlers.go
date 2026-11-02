@@ -85,7 +85,6 @@ var rootControlOperationIdentity = map[string]struct{ capability, name string }{
 	"notifications.settled":    {"mecha_settled_notifications", "mecha_settled_notifications"},
 	"ops.state":                {"mecha_state", "mecha_state"},
 	"ops.verification_handoff": {"mecha_verification_handoff", "mecha_verification_handoff"},
-	"ops.worker":               {"mecha_worker", "mecha_worker"},
 	"web.search":               {"web_search", ""},
 }
 

@@ -180,10 +180,6 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 							if recipient, ok := call.Arguments["recipient"].(string); ok && (recipient == a.Sender || recipient == targetRecipient) {
 								isMailSend = true
 							}
-						} else if call.Name == "mecha_worker" && call.Arguments["action"] == "send" {
-							if name, ok := call.Arguments["name"].(string); ok && (name == a.Sender || name == targetRecipient) {
-								isMailSend = true
-							}
 						}
 						if isMailSend {
 							var effectState string
@@ -224,7 +220,7 @@ func (s *Store) AppendEmbeddedFinalAndReplyWithHistory(ctx context.Context, b Em
 		}
 		// Assistant final text is only recorded in history as ordinary assistant output.
 		// It is NEVER an outbound message or auto-reply to targetRecipient.
-		// Sending messages to other agents strictly requires mecha_mailbox_send or mecha_worker(action="send").
+		// Sending messages to other agents strictly requires mecha_mailbox_send.
 		replyBody := replyBodyText
 		hash := sha256.Sum256([]byte(attemptID + "\x00" + entry.Digest))
 		replyID := "embedded-reply-" + hex.EncodeToString(hash[:])

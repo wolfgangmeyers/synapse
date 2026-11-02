@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,11 +146,8 @@ func (s *Store) embeddedToolFenceTx(ctx context.Context, w *EmbeddedToolInvocati
 // Called only from the SDK BeforeToolExecute callback, after the original
 // assistant append. The current process and source are supplied by the runner.
 func (s *Store) RecordEmbeddedToolInvocation(ctx context.Context, b EmbeddedBinding, process, userSeq int64, userDigest, attempt string, call ai.ToolCall) (*EmbeddedToolInvocation, error) {
-	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_worker" && call.Name != "mecha_send_image" && call.Name != "mecha_agent_urgency") {
+	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_send_image" && call.Name != "mecha_agent_urgency") {
 		return nil, errors.New("invalid managed tool call")
-	}
-	if call.Name == "mecha_worker" && call.Arguments["action"] == "launch" {
-		return nil, errors.New("mecha_worker action launch is not supported")
 	}
 	intent, err := json.Marshal(call)
 	if err != nil || embeddedBody(intent) != nil {
@@ -325,20 +320,6 @@ func (s *Store) AppendEmbeddedToolInvocationResult(ctx context.Context, w *Embed
 	return entry, err
 }
 
-func (s *Store) embeddedToolWorkerTargetTx(ctx context.Context, w *EmbeddedToolInvocation, name string) error {
-	if w.call.Name != "mecha_worker" || w.call.Arguments["name"] != name || (w.call.Arguments["action"] == "cleanup" && name == w.origin.binding.AgentID) {
-		return errors.New("worker action requires another saved independent worker")
-	}
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM managed_agents a JOIN embedded_sessions e ON e.agent_id=a.agent_id AND e.session_id=a.pi_session_id AND e.epoch=a.session_epoch AND e.generation=a.runtime_generation AND e.current=1 WHERE a.agent_id=? AND a.runtime='embedded' AND e.role='worker'`, name).Scan(&count); err != nil {
-		return err
-	}
-	if count != 1 {
-		return errors.New("target is not a current independent embedded worker")
-	}
-	return nil
-}
-
 // Uses ordinary bounded mail receipts/queue admission, with an additional
 // producer guard inside that very transaction. No second mail ledger.
 func (s *Store) EnqueueEmbeddedToolMail(ctx context.Context, w *EmbeddedToolInvocation) (EnqueueResult, error) {
@@ -351,9 +332,6 @@ func (s *Store) EnqueueEmbeddedToolMail(ctx context.Context, w *EmbeddedToolInvo
 		return EnqueueResult{}, errors.New("mail admission already consumed")
 	}
 	recipient, _ := w.call.Arguments["recipient"].(string)
-	if w.call.Name == "mecha_worker" {
-		recipient, _ = w.call.Arguments["name"].(string)
-	}
 	if strings.EqualFold(recipient, "system") {
 		return EnqueueResult{}, errors.New("failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
 	}
@@ -424,15 +402,6 @@ func (s *Store) embeddedToolMailGuardTx(ctx context.Context, w *EmbeddedToolInvo
 	}
 	args := w.call.Arguments
 	recipient := args["recipient"]
-	if w.call.Name == "mecha_worker" {
-		if args["action"] != "send" {
-			return errors.New("worker mail requires send action")
-		}
-		recipient = args["name"]
-		if err := s.embeddedToolWorkerTargetTx(ctx, w, envelope.To); err != nil {
-			return err
-		}
-	}
 	if envelope.From != w.origin.binding.AgentID || recipient != envelope.To || args["body"] != envelope.Body || envelope.ID == "" {
 		return errors.New("mail envelope differs from current addressed SDK call")
 	}
@@ -444,125 +413,4 @@ func (s *Store) embeddedToolMailGuardTx(ctx context.Context, w *EmbeddedToolInvo
 		return errors.New("unexpected mail subject")
 	}
 	return nil
-}
-
-func (s *Store) ListEmbeddedToolWorkers(ctx context.Context, w *EmbeddedToolInvocation) ([]*ManagedAgentRecord, error) {
-	if w == nil || w.call.ID == "" {
-		return nil, errors.New("missing embedded tool admission invocation")
-	}
-	var workers []*ManagedAgentRecord
-	err := s.runImmediate(ctx, func() error {
-		if err := s.admitEmbeddedToolTx(ctx, w); err != nil {
-			return err
-		}
-		if w.call.Name != "mecha_worker" || w.call.Arguments["action"] != "list" || len(w.call.Arguments) != 1 {
-			return errors.New("invalid worker list call")
-		}
-		rows, err := s.db.QueryContext(ctx, managedAgentSelect+` WHERE runtime='embedded' AND EXISTS (SELECT 1 FROM embedded_sessions e WHERE e.agent_id=managed_agents.agent_id AND e.session_id=managed_agents.pi_session_id AND e.epoch=managed_agents.session_epoch AND e.generation=managed_agents.runtime_generation AND e.current=1 AND e.role='worker') ORDER BY name`)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			row, err := scanManagedAgent(rows, nil)
-			if err != nil {
-				_ = rows.Close()
-				return err
-			}
-			workers = append(workers, row)
-		}
-		err = rows.Err()
-		closeErr := rows.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		for _, row := range workers {
-			if err := loadManagedRuntimeTx(ctx, s.db, row); err != nil {
-				return err
-			}
-		}
-
-		seen := make(map[string]bool, len(workers))
-		items := make([]map[string]any, 0, len(workers))
-		for _, row := range workers {
-			seen[row.AgentID] = true
-			items = append(items, map[string]any{
-				"worker_id":       row.AgentID,
-				"kind":            "embedded",
-				"lifecycle_state": row.LifecycleState,
-				"desired_state":   row.DesiredState,
-			})
-		}
-
-		now := formatTimestamp(s.clock.Now())
-		const tmuxQuery = `
-SELECT r.recipient_name,
-       CASE WHEN l.lease_id IS NOT NULL AND l.expires_at > ? THEN 'running' ELSE 'idle' END as lifecycle_state
-FROM recipient_sources r
-LEFT JOIN agent_leases l ON l.agent_id = r.recipient_name AND l.expires_at > ?
-WHERE r.source_kind = 'tmux'
-  AND r.state IN ('active', 'reserved')
-  AND r.recipient_name NOT IN ('system', 'reminders', 'router', 'user', 'managed-runtime-readiness', 'reflex-router-proxy-launcher', 'supervisor', 'web_ui')
-ORDER BY r.recipient_name`
-
-		rows, queryErr := s.db.QueryContext(ctx, tmuxQuery, now, now)
-		if queryErr == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var name, lifecycleState string
-				if scanErr := rows.Scan(&name, &lifecycleState); scanErr == nil {
-					if !seen[name] {
-						seen[name] = true
-						items = append(items, map[string]any{
-							"worker_id":       name,
-							"kind":            "tmux",
-							"lifecycle_state": lifecycleState,
-							"desired_state":   "running",
-						})
-					}
-				}
-			}
-		}
-
-		sort.Slice(items, func(i, j int) bool {
-			return fmt.Sprint(items[i]["worker_id"]) < fmt.Sprint(items[j]["worker_id"])
-		})
-
-		w.domainContent, err = json.Marshal(map[string]any{"workers": items})
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return workers, nil
-}
-
-func (s *Store) ReserveEmbeddedToolCleanup(ctx context.Context, reservation ManagedLifecycleReservation, w *EmbeddedToolInvocation) (ManagedLifecycleAdmission, error) {
-	if w == nil {
-		return ManagedLifecycleAdmission{}, errors.New("missing cleanup producer")
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.domainSettled {
-		return ManagedLifecycleAdmission{}, errors.New("cleanup admission already consumed")
-	}
-	admission, err := s.reserveManagedLifecycle(ctx, reservation, w)
-	if w.domainCommitted && w.domainConclusive && !admission.Replayed {
-		var encodeErr error
-		w.domainContent, encodeErr = json.Marshal(map[string]any{"status": "accepted", "worker_id": reservation.AgentID, "operation_id": reservation.RequestID, "replayed": false})
-		err = errors.Join(err, encodeErr)
-	}
-	return admission, err
-}
-
-func (s *Store) embeddedToolCleanupGuardTx(ctx context.Context, w *EmbeddedToolInvocation, reservation ManagedLifecycleReservation) error {
-	if err := s.admitEmbeddedToolTx(ctx, w); err != nil {
-		return err
-	}
-	if reservation.Kind != "terminate" || w.call.Arguments["action"] != "cleanup" {
-		return errors.New("worker cleanup requires termination admission")
-	}
-	return s.embeddedToolWorkerTargetTx(ctx, w, reservation.AgentID)
 }

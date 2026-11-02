@@ -143,7 +143,6 @@ func rootControlSafeArguments(operationID string, arguments any) (string, bool) 
 		"notifications.settled":    {"action": {}},
 		"ops.state":                {"action": {}, "state": {}, "field": {}},
 		"ops.verification_handoff": {"action": {}, "remoteVerified": {}},
-		"ops.worker":               {"action": {}},
 		"web.search":               {"freshness": {}, "maxResults": {}},
 	}
 	keys, ok := allowed[operationID]

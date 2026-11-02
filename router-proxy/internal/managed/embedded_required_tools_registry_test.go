@@ -2,9 +2,7 @@ package managed
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -142,56 +140,5 @@ func TestEmbeddedRequiredMailboxRegistry(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, replies, "automatic reply outbox was eliminated; outbound messages require explicit mecha_mailbox_send")
 		})
-	}
-}
-
-func TestEmbeddedRequiredWorkerActionsRegistry(t *testing.T) {
-	for _, role := range []string{"root", "worker"} {
-		for _, action := range []string{"list", "send", "cleanup"} {
-			t.Run(role+"/"+action, func(t *testing.T) {
-				ctx := context.Background()
-				m, db, provider, caller, root := requiredToolsFixture(t, role)
-				target := "independent-target"
-				{
-					_, err := m.Launch(ctx, LaunchRequest{Name: target, Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "settle independently"})
-					require.NoError(t, err)
-					require.Eventually(t, func() bool {
-						row, e := db.ManagedAgent(ctx, target)
-						return e == nil && row.LifecycleState == "running"
-					}, 4*time.Second, 10*time.Millisecond)
-				}
-				args := map[string]any{"action": action}
-				if action != "list" {
-					args["name"] = target
-				}
-				if action == "send" {
-					args["body"] = "independent worker mail"
-				}
-				result := requiredToolsCall(t, m, db, provider, caller, "mecha_worker", role+"-"+action, args)
-				payload := requiredToolsPayload(t, result)
-				switch action {
-				case "list":
-					require.Contains(t, string(payload["workers"]), target)
-				case "send":
-					var id string
-					require.NoError(t, json.Unmarshal(payload["message_id"], &id))
-					mail, err := db.MessageFor(ctx, id)
-					require.NoError(t, err)
-					require.Equal(t, caller, mail.From)
-					require.Equal(t, target, mail.To)
-					require.Equal(t, "independent worker mail", mail.Body)
-					require.Eventually(t, func() bool {
-						mail, err := db.MessageFor(ctx, id)
-						return err == nil && mail.State == domain.MessageAcknowledged
-					}, 4*time.Second, 10*time.Millisecond, "worker send must route through the target's own mailbox lane")
-				case "cleanup":
-					require.JSONEq(t, `"accepted"`, string(payload["status"]))
-					require.Eventually(t, func() bool {
-						_, err := db.ManagedAgent(ctx, target)
-						return errors.Is(err, sql.ErrNoRows)
-					}, 4*time.Second, 10*time.Millisecond)
-				}
-			})
-		}
 	}
 }

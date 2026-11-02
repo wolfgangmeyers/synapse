@@ -472,13 +472,6 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 					}
 					pres.From = p.binding.AgentID
 				}
-			} else if toolName == "mecha_worker" {
-				if args, ok := toolInput.(map[string]any); ok && args["action"] == "send" {
-					if recipient, ok := args["name"].(string); ok {
-						pres.To = recipient
-					}
-					pres.From = p.binding.AgentID
-				}
 			}
 			completionKey := fmt.Sprintf("tool:%s:%s", p.binding.AgentID, toolCallID)
 			entry, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_tool", level, messageText, completionKey, pres, toolInput, contentPtr)
@@ -520,7 +513,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			return err
 		}
 	}
-	if result, ok := message.(ai.ToolResultMessage); ok && (result.ToolName == "mecha_mailbox_send" || result.ToolName == "mecha_worker" || result.ToolName == "mecha_send_image" || result.ToolName == "mecha_agent_urgency") && p.toolInvocation != nil && p.toolInvocation(result.ToolCallID) == nil {
+	if result, ok := message.(ai.ToolResultMessage); ok && (result.ToolName == "mecha_mailbox_send" || result.ToolName == "mecha_send_image" || result.ToolName == "mecha_agent_urgency") && p.toolInvocation != nil && p.toolInvocation(result.ToolCallID) == nil {
 		// A denial before intent is an ordinary checked SDK error. An intent
 		// without this Execute's completion stays UNKNOWN, never an SDK receipt.
 		_, err := p.db.RecoverEmbeddedEffect(ctx, p.binding, result.ToolCallID)
@@ -667,7 +660,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 				return observeErr
 			}
 		}
-		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" && result.ToolName != "mecha_send_image" && result.ToolName != "mecha_agent_urgency" {
+		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_mailbox_send" && result.ToolName != "mecha_send_image" && result.ToolName != "mecha_agent_urgency" {
 			if result.ToolName != "read" && result.ToolName != "write" && result.ToolName != "edit" && result.ToolName != "mecha_reminder" && result.ToolName != "mecha_context" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "workflow_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
 				body, err := json.Marshal(result)
 				if err == nil {
@@ -1508,9 +1501,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedSessionTools(owner)...)
 		tools = append(tools, m.embeddedWorkflowManagementTools(owner)...)
 	}
-	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {
-		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted))
-	}
 	if m.embeddedExternalTool != nil {
 		tool := *m.embeddedExternalTool
 		if tool.Name == "" || tool.Parameters == nil || tool.Execute == nil {
@@ -1859,7 +1849,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 				return nil
 			}
-			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
+			if call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: "addressed managed tools require a saved root or worker"}
 				}
@@ -1924,7 +1914,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					return err
 				}
 			}
-			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
+			if call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
 				freshWorkerMu.Lock()
 				delete(freshToolIntents, call.ToolCall.ID)
 				delete(toolExecutions, call.ToolCall.ID)
@@ -1945,7 +1935,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			var goalAdmission *store.EmbeddedGoalInvocation
 			var toolAdmission *store.EmbeddedToolInvocation
-			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
+			if call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
 				toolAdmission, err = m.store.RecordEmbeddedToolInvocation(callCtx, binding, goalProcess, p.turnSeq, p.turnDigest, p.mailAttempt, call.ToolCall)
 			} else if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
 				goalAdmission, err = m.store.RecordEmbeddedGoalInvocation(callCtx, binding, goalProcess, p.turnSeq, p.turnDigest, p.mailAttempt, call.ToolCall.ID, intent)

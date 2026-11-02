@@ -56,6 +56,7 @@ func (s *Store) GetToolDefaults(ctx context.Context) ([]ToolDefinition, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tool_name, category, enabled, mcp_server_id
 		FROM managed_tool_defaults
+        WHERE tool_name != 'mecha_worker' OR mcp_server_id IS NOT NULL
 		ORDER BY category ASC, tool_name ASC
 	`)
 	if err != nil {
@@ -89,6 +90,9 @@ func (s *Store) GetToolDefaults(ctx context.Context) ([]ToolDefinition, error) {
 // SetToolDefault updates the enabled status of a specific default tool.
 func (s *Store) SetToolDefault(ctx context.Context, toolName string, enabled bool) error {
 	toolName = strings.TrimSpace(toolName)
+	if toolName == "mecha_worker" {
+		return errors.New("unknown tool: mecha_worker")
+	}
 	if toolName == "" {
 		return errors.New("tool_name must not be empty")
 	}
@@ -202,6 +206,7 @@ func (s *Store) GetAgentTools(ctx context.Context, agentID string) ([]ToolDefini
 			d.mcp_server_id
 		FROM managed_tool_defaults d
 		LEFT JOIN managed_agent_tools a ON d.tool_name = a.tool_name AND a.agent_id = ?
+        WHERE d.tool_name != 'mecha_worker' OR d.mcp_server_id IS NOT NULL
 		ORDER BY d.category ASC, d.tool_name ASC
 	`, agentID)
 	if err != nil {
@@ -239,6 +244,9 @@ func (s *Store) SetAgentTool(ctx context.Context, agentID string, toolName strin
 		return errors.New("agent_id must not be empty")
 	}
 	toolName = strings.TrimSpace(toolName)
+	if toolName == "mecha_worker" {
+		return errors.New("unknown tool: mecha_worker")
+	}
 	if toolName == "" {
 		return errors.New("tool_name must not be empty")
 	}

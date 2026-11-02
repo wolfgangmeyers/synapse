@@ -106,15 +106,12 @@ test("persists Python and native worker mail through proxy", async ({ page }) =>
     const persisted = await page.evaluate(async ({ url, id }) => (await fetch(`${url}/v1/messages/${id}`, { credentials: "omit" })).json(), { url, id });
     expect(JSON.stringify(persisted)).toContain("durable mail");
     await expect.poll(() => JSON.stringify(frames)).toContain(id);
-    const worker = createOperationalToolDefinitions({ environment: { ...environment, MECHA_ROUTER_URL: url }, resolveCurrentAgentId: () => "native-sender" }).find(tool => tool.name === "mecha_worker")!;
-    const result = await worker.execute("native-send", { action: "send", worker: "native-recipient", message: "native worker body", subject: "native subject" });
-    expect(JSON.stringify(result)).toContain("accepted:");
-    const rows = await (await fetch(`${url}/v1/conversation?agent_id=native-recipient&limit=200`)).json();
-    expect(JSON.stringify(rows)).toContain("native worker body");
+    expect(createOperationalToolDefinitions().some(tool => tool.name === "mecha_worker")).toBe(false);
+    // Native mailbox persistence is exercised through the embedded SDK in worker-tool-actions.
     // Read the actual SQLite store with Python's stdlib; no internal JS mocks.
     const db = await python(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute('select count(*) from messages').fetchone()[0])", router.databasePath]);
     expect(db.code, db.stderr).toBe(0);
-    expect(Number(db.stdout)).toBeGreaterThanOrEqual(2);
+    expect(Number(db.stdout)).toBeGreaterThanOrEqual(1);
   } finally { socket.terminate(); }
 });
 
@@ -170,26 +167,27 @@ test("reports retired operations unavailable before subprocess", async () => {
     ["ops.state", { action: "query", task: "task" }], ["ops.priority", { action: "status", priorityId: "priority", status: "active" }],
     ["ops.verification_handoff", { action: "record", task: "task", reminderId: "reminder", successor: "worker" }],
     ["ops.pr_status", { action: "status", pullRequest: 1 }], ["ops.git_status", { action: "status", task: "task" }],
-    ...["list", "cleanup"].map(action => ["ops.worker", { action }] as [string, Record<string, unknown>]), ["mail.parent", { message: "hello" }],
+    ...["launch", "list", "send", "cleanup"].map(action => ["ops.worker", { action }] as [string, Record<string, unknown>]), ["mail.parent", { message: "hello" }],
   ];
   for (const [index, [operation, args]] of retired.entries()) {
     const result = await host(home, invocation(`unavailable-${index}`, operation, args));
-    expect(result.status).toBe("error"); expect(result.error_code).toBe("ROOT_OPERATION_UNAVAILABLE");
+    expect(result.status).toBe("error"); expect(result.error_code, `${operation}: ${JSON.stringify(result)}`).toBe("ROOT_OPERATION_UNAVAILABLE");
     expect(result.error_message).not.toMatch(/No such file|can't open/);
   }
   let calls = 0;
   const tools = createOperationalToolDefinitions({ runFile: async () => { calls++; throw new Error("must not spawn"); } });
-  for (const [name, args] of [["mecha_state", { action: "query", task: "task" }], ["mecha_worker", { action: "list" }]] as const) {
+  for (const [name, args] of [["mecha_state", { action: "query", task: "task" }]] as const) {
     expect(JSON.stringify(await tools.find(tool => tool.name === name)!.execute("call", args))).toContain("ROOT_OPERATION_UNAVAILABLE");
   }
+  expect(tools.some(tool => tool.name === "mecha_worker")).toBe(false);
   expect(calls).toBe(0);
 });
 
 test("forwards correlation and replays without resending", async () => {
   // Actual host dispatch -> proxy -> router -> SQLite, including recovery and conflicts.
-  for (const operation of ["mail.send", "ops.worker"]) {
+  for (const operation of ["mail.send"]) {
     const body = `real-host-${operation}`;
-    const args = operation === "mail.send" ? { recipient: "host-recipient", body } : { action: "send", worker: "host-recipient", message: body };
+    const args = { recipient: "host-recipient", body };
     const request = invocation(`real-${operation}`, operation, args);
     const home = join(root, `real-${operation}`);
     const first = await host(home, request);
@@ -221,8 +219,8 @@ test("forwards correlation and replays without resending", async () => {
     req.on("end", () => { received.push({ header: req.headers["x-mecha-managed-control-request-id"], body }); res.end(JSON.stringify({ message: { id: "accepted-id", state: "queued" } })); });
   });
   try {
-    for (const operation of ["mail.send", "ops.worker"]) {
-      const args = operation === "mail.send" ? { recipient: "worker", body: "correlated" } : { action: "send", worker: "worker", message: "correlated" };
+    for (const operation of ["mail.send"]) {
+      const args = { recipient: "worker", body: "correlated" };
       const request = invocation(`correlation-${operation}`, operation, args);
       const home = join(root, `replay-${operation}`);
       const first = await host(home, request, fake.url);
@@ -233,7 +231,7 @@ test("forwards correlation and replays without resending", async () => {
       expect(received.at(-1)?.header).toBe(request.request_id);
       expect(JSON.parse(received.at(-1)!.body).from).toBe("native-sender");
     }
-    expect(received).toHaveLength(2);
+    expect(received).toHaveLength(1);
   } finally { await fake.close(); }
 });
 

@@ -2,7 +2,6 @@ package managed
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 
@@ -71,42 +70,12 @@ func embeddedMailboxSchema() *ai.Schema {
 	return embeddedClosedObject(ai.Prop("recipient", embeddedBoundedString(128)), ai.Prop("body", embeddedBoundedString(protocol.DefaultMaxBodyBytes)), ai.Opt("subject", embeddedBoundedString(256)))
 }
 
-func embeddedWorkerSchema() *ai.Schema {
-	s := embeddedClosedObject(ai.Prop("action", ai.EnumOf("list", "send", "cleanup")), ai.Opt("name", embeddedBoundedString(128)), ai.Opt("body", embeddedBoundedString(protocol.DefaultMaxBodyBytes)), ai.Opt("subject", embeddedBoundedString(256)))
-	s.OneOf = []*ai.Schema{
-		embeddedClosedObject(ai.Prop("action", ai.EnumOf("list"))),
-		embeddedClosedObject(ai.Prop("action", ai.EnumOf("send")), ai.Prop("name", embeddedBoundedString(128)), ai.Prop("body", embeddedBoundedString(protocol.DefaultMaxBodyBytes)), ai.Opt("subject", embeddedBoundedString(256))),
-		embeddedClosedObject(ai.Prop("action", ai.EnumOf("cleanup")), ai.Prop("name", embeddedBoundedString(128))),
-	}
-	return s
-}
-
 // Validate the original uncoerced SDK values before recording any intent.
 func embeddedAddressedArguments(name string, args map[string]any) error {
-	if name == "mecha_mailbox_send" {
-		if !embeddedMailboxSchema().Check(args) {
-			return errors.New("invalid addressed mailbox arguments")
-		}
-	} else {
-		if name != "mecha_worker" || !embeddedWorkerSchema().Check(args) {
-			return errors.New("invalid worker action arguments")
-		}
-		action, _ := args["action"].(string)
-		if action == "list" {
-			return nil
-		}
-		worker, _ := args["name"].(string)
-		if !managedNameRE.MatchString(worker) || len(worker) > 128 {
-			return errors.New("invalid worker identity")
-		}
-		if action == "cleanup" {
-			return nil
-		}
+	if name != "mecha_mailbox_send" || !embeddedMailboxSchema().Check(args) {
+		return errors.New("invalid addressed mailbox arguments")
 	}
 	recipient, _ := args["recipient"].(string)
-	if name == "mecha_worker" {
-		recipient, _ = args["name"].(string)
-	}
 	if strings.EqualFold(recipient, "system") {
 		return errors.New("failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
 	}
@@ -125,10 +94,6 @@ func embeddedAddressedArguments(name string, args map[string]any) error {
 func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitted func(string) *store.EmbeddedToolInvocation, completed func(string, *store.EmbeddedToolInvocation)) agent.AgentTool {
 	schema := embeddedMailboxSchema()
 	description := "Queue an independently addressed mailbox message. Returns acceptance, not delivery or an automatic reply."
-	if name == "mecha_worker" {
-		schema = embeddedWorkerSchema()
-		description = "List, send mail to or clean up independent embedded workers by their saved identity. Cleanup returns an accepted operation, not completion."
-	}
 	return agent.AgentTool{Name: name, Description: description, Parameters: schema, Execute: func(ctx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
 		current, ok := ctx.Value(embeddedOwnerContextKey{}).(embeddedOwner)
 		if !ok || current != owner {
@@ -151,30 +116,13 @@ func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitt
 			return agent.AgentToolResult{}, err
 		}
 		var err error
-		if name == "mecha_mailbox_send" || args["action"] == "send" {
-			var accepted store.EnqueueResult
-			if m.embeddedBeforeToolDomain != nil {
-				m.embeddedBeforeToolDomain()
-			}
-			accepted, err = m.store.EnqueueEmbeddedToolMail(ctx, invocation)
-			if m.claimEmbeddedToolHandoff(invocation) {
-				err = errors.Join(err, m.publishEmbeddedToolMail(ctx, accepted))
-			}
-		} else {
-			switch args["action"] {
-			case "list":
-				_, err = m.store.ListEmbeddedToolWorkers(ctx, invocation)
-			case "cleanup":
-				worker, _ := args["name"].(string)
-				if worker == owner.binding.AgentID {
-					return agent.AgentToolResult{}, errors.New("worker cleanup cannot target its calling serial lane")
-				}
-				body, encodeErr := json.Marshal(args)
-				if encodeErr != nil {
-					return agent.AgentToolResult{}, encodeErr
-				}
-				_, err = m.terminateWithEmbeddedProducer(ctx, TerminateRequest{AgentID: worker, Method: "DELETE", CanonicalPath: "/v1/managed-agents/" + worker, RequestID: embeddedWorkerRequestID(owner.binding, id), CanonicalBodyHash: hashString(string(body))}, invocation)
-			}
+		var accepted store.EnqueueResult
+		if m.embeddedBeforeToolDomain != nil {
+			m.embeddedBeforeToolDomain()
+		}
+		accepted, err = m.store.EnqueueEmbeddedToolMail(ctx, invocation)
+		if m.claimEmbeddedToolHandoff(invocation) {
+			err = errors.Join(err, m.publishEmbeddedToolMail(ctx, accepted))
 		}
 		if err != nil {
 			store.RecordEmbeddedToolHandoffError(invocation, err)

@@ -59,7 +59,7 @@ func handlerIndexByOperation(t *testing.T, handlers []RootControlHandler, operat
 func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 	manifest := loadCurrentRootManifest(t)
 	require.Equal(t, 2, manifest.Revision)
-	require.Len(t, manifest.Tools, 17)
+	require.Len(t, manifest.Tools, 16)
 
 	operations := make(map[string]ManifestTool, len(manifest.Tools))
 	for _, tool := range manifest.Tools {
@@ -68,6 +68,7 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 		operations[tool.OperationID] = tool
 	}
 	require.Len(t, operations, len(manifest.Tools))
+	require.NotContains(t, operations, "ops.worker", "retired worker tool must not return to the manifest")
 
 	search, found := operations["web.search"]
 	require.True(t, found, "current manifest must include revision-two web.search")
@@ -109,7 +110,7 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 			require.Equal(t, "reconciled", reconciled.Content)
 		}
 	}
-	require.Equal(t, int32(32), calls.Load(), "each available owner must delegate execute and reconcile exactly once")
+	require.Equal(t, int32(30), calls.Load(), "each available owner must delegate execute and reconcile exactly once")
 }
 
 func TestRootControlHandlerRegistryRejectsEveryClosureMutation(t *testing.T) {
