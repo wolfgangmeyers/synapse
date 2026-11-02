@@ -14,12 +14,17 @@ import (
 // DOMAIN result, checked result append. No successful receipt is SQL seeded.
 func goalSDKCommand(t *testing.T, s *Store, b EmbeddedBinding, id string, command EmbeddedGoalCommand) *ManagedGoalPolicy {
 	t.Helper()
+	return goalSDKCommandWithAppend(t, s, b, id, command, receiptSDKAppend)
+}
+
+func goalSDKCommandWithAppend(t *testing.T, s *Store, b EmbeddedBinding, id string, command EmbeddedGoalCommand, appendMessage func(*testing.T, *Store, EmbeddedBinding, ai.Message) EmbeddedEntry) *ManagedGoalPolicy {
+	t.Helper()
 	args := map[string]any{"action": command.Action}
 	if command.Action == "set" {
 		args["goal"] = command.Goal
 	}
 	call := providers.FauxToolCall("goal", args, id)
-	receiptSDKAppend(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
+	appendMessage(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
 	intent, err := json.Marshal(call)
 	require.NoError(t, err)
 	require.NoError(t, s.RecordEmbeddedEffectIntent(context.Background(), b, id, intent))
@@ -29,7 +34,7 @@ func goalSDKCommand(t *testing.T, s *Store, b EmbeddedBinding, id string, comman
 	payload, err := json.Marshal(policy)
 	require.NoError(t, err)
 	require.NoError(t, s.CheckEmbeddedGoalResult(context.Background(), b, id, payload))
-	receiptSDKAppend(t, s, b, ai.ToolResultMessage{ToolCallID: id, ToolName: "goal", Content: ai.ContentList{ai.TextContent{Text: string(payload)}}, Timestamp: 1})
+	appendMessage(t, s, b, ai.ToolResultMessage{ToolCallID: id, ToolName: "goal", Content: ai.ContentList{ai.TextContent{Text: string(payload)}}, Timestamp: 1})
 	return policy
 }
 

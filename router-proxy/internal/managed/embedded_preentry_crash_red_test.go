@@ -155,7 +155,7 @@ func testEmbeddedPreEntrySIGKILL(t *testing.T, explicit bool) {
 	defer reg.Unregister()
 	var calls, wakeCalls atomic.Int32
 	var expectedGeneration atomic.Int64
-	neutralBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Continue working from your saved context."}}})
+	neutralBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context."}}})
 	require.NoError(t, err)
 	neutralAnswer := func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 		var scoped int
@@ -320,7 +320,7 @@ func testEmbeddedPreEntrySIGKILL(t *testing.T, explicit bool) {
 // Each extra user is a distinct checked neutral wake, never an original replay.
 func assertExplicitPreEntryUsers(t *testing.T, raw *sql.DB, original []byte, originalSeq, finalSeq int64, finalDigest string, wantNeutrals int) {
 	t.Helper()
-	neutral, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Continue working from your saved context."}}})
+	neutral, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context."}}})
 	require.NoError(t, err)
 	rows, err := raw.Query(`SELECT seq,body FROM embedded_entries WHERE kind='user' ORDER BY seq`)
 	require.NoError(t, err)
@@ -350,14 +350,14 @@ func assertExplicitPreEntryUsers(t *testing.T, raw *sql.DB, original []byte, ori
 func assertPreEntryNeutralWake(t *testing.T, raw *sql.DB, generation, predecessorSeq int64, predecessorDigest string, oldOwner int64) {
 	t.Helper()
 	var scoped int
-	require.NoError(t, raw.QueryRow(`SELECT count(*) FROM embedded_restart_wake_slots w JOIN embedded_sessions s ON s.agent_id=w.agent_id AND s.session_id=w.session_id AND s.epoch=w.epoch AND s.generation=w.runtime_generation JOIN embedded_entries u ON u.agent_id=w.agent_id AND u.session_id=w.session_id AND u.epoch=w.epoch AND u.generation=w.runtime_generation AND u.seq=? JOIN embedded_nonmail_provider_entries p ON p.agent_id=u.agent_id AND p.session_id=u.session_id AND p.epoch=u.epoch AND p.generation=u.generation AND p.user_seq=u.seq AND p.user_digest=u.digest JOIN embedded_restart_wake_checked_origins o ON o.agent_id=w.agent_id AND o.slot=w.slot AND o.session_id=w.session_id AND o.epoch=w.epoch AND o.runtime_generation=w.runtime_generation AND o.wake_id=w.wake_id AND o.process_generation=w.process_generation AND o.claim_owner_token=w.claim_owner_token JOIN embedded_entries f ON f.agent_id=o.agent_id AND f.session_id=o.session_id AND f.epoch=o.epoch AND f.generation=o.runtime_generation AND f.seq=o.seq WHERE w.agent_id='preentry-root' AND s.current=1 AND w.slot='current' AND w.claim_owner_token=s.owner_token AND w.claim_owner_token>=? AND w.process_generation=? AND w.kind='root-idle' AND w.state='checked-complete' AND w.notice_id IS NULL AND w.digest=? AND w.wake_id='settled:preentry-root:' || (? - 1) || ':' || ? AND u.kind='user' AND json_extract(u.body,'$.content[0].text')='Continue working from your saved context.' AND f.seq=u.seq+1 AND f.kind='assistant' AND json_extract(f.body,'$.stopReason')='stop'`, predecessorSeq+1, oldOwner, generation, predecessorDigest, predecessorSeq, generation).Scan(&scoped))
+	require.NoError(t, raw.QueryRow(`SELECT count(*) FROM embedded_restart_wake_slots w JOIN embedded_sessions s ON s.agent_id=w.agent_id AND s.session_id=w.session_id AND s.epoch=w.epoch AND s.generation=w.runtime_generation JOIN embedded_entries u ON u.agent_id=w.agent_id AND u.session_id=w.session_id AND u.epoch=w.epoch AND u.generation=w.runtime_generation AND u.seq=? JOIN embedded_nonmail_provider_entries p ON p.agent_id=u.agent_id AND p.session_id=u.session_id AND p.epoch=u.epoch AND p.generation=u.generation AND p.user_seq=u.seq AND p.user_digest=u.digest JOIN embedded_restart_wake_checked_origins o ON o.agent_id=w.agent_id AND o.slot=w.slot AND o.session_id=w.session_id AND o.epoch=w.epoch AND o.runtime_generation=w.runtime_generation AND o.wake_id=w.wake_id AND o.process_generation=w.process_generation AND o.claim_owner_token=w.claim_owner_token JOIN embedded_entries f ON f.agent_id=o.agent_id AND f.session_id=o.session_id AND f.epoch=o.epoch AND f.generation=o.runtime_generation AND f.seq=o.seq WHERE w.agent_id='preentry-root' AND s.current=1 AND w.slot='current' AND w.claim_owner_token=s.owner_token AND w.claim_owner_token>=? AND w.process_generation=? AND w.kind='root-idle' AND w.state='checked-complete' AND w.notice_id IS NULL AND w.digest=? AND w.wake_id='settled:preentry-root:' || (? - 1) || ':' || ? AND u.kind='user' AND json_extract(u.body,'$.content[0].text')='The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context.' AND f.seq=u.seq+1 AND f.kind='assistant' AND json_extract(f.body,'$.stopReason')='stop'`, predecessorSeq+1, oldOwner, generation, predecessorDigest, predecessorSeq, generation).Scan(&scoped))
 	require.Equal(t, 1, scoped, "neutral requires its exact fenced wake, provider entry and checked-origin stop final")
 }
 
 // Attribution prints metadata and in-memory equality only; SDK message bodies stay private.
 func logPreEntryAttribution(t *testing.T, raw *sql.DB, original []byte, originalSeq int64, originalDigest string, finalSeq int64, finalDigest string) {
 	t.Helper()
-	neutral, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "Continue working from your saved context."}}})
+	neutral, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context."}}})
 	require.NoError(t, err)
 	t.Logf("checked original user seq=%d digest=%s; immutable checked final seq=%d digest=%s", originalSeq, originalDigest, finalSeq, finalDigest)
 	rows, err := raw.Query(`SELECT seq,digest,kind,body FROM embedded_entries ORDER BY seq`)

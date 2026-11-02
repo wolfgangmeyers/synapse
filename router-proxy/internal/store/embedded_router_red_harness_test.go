@@ -52,7 +52,7 @@ func TestEmbeddedRouterHarnessSQLiteAndFault(t *testing.T) {
 		if _, err := s.db.Exec(`UPDATE embedded_sessions SET current=0 WHERE agent_id='a'`); err != nil {
 			return err
 		}
-		_, err := s.db.Exec(`INSERT INTO embedded_entries VALUES ('a','s',1,'g',1,'genesis','user',X'01','digest')`)
+		_, err := s.db.Exec(`INSERT INTO embedded_entries(agent_id,session_id,epoch,generation,seq,parent_digest,kind,body,digest) VALUES ('a','s',1,'g',1,'genesis','user',X'01','digest')`)
 		return err
 	})
 	require.ErrorContains(t, err, "injected embedded red fault")

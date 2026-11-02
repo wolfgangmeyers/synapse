@@ -41,9 +41,15 @@ func TestEmbeddedGoalContinuationDueFromSavedTurn(t *testing.T) {
 				} else {
 					// A foreign preference row cannot be authority for this evaluation.
 					_, err := s.db.Exec(`INSERT INTO embedded_goal_snooze_calls(call_id,agent_id,session_id,epoch,generation,role,user_seq,user_digest,goal_revision,args_json,result_json,policy_version) VALUES(?,?,?,?,?,'root',?,?,?,'{"duration_ms":1000}','{}',1)`, "foreign", b.AgentID, b.SessionID, b.Epoch, b.Generation, turn.UserSeq, turn.UserDigest, turn.GoalRevision)
-					require.NoError(t, err)
-					_, err = s.db.Exec(`INSERT INTO embedded_goal_snooze_preferences(agent_id,session_id,epoch,generation,role,user_seq,user_digest,goal_revision,policy_version,call_id,due_at) VALUES(?,?,?,?,? ,?,?,?,1,'foreign',?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, "root", turn.UserSeq, turn.UserDigest, turn.GoalRevision, "2030-01-02T03:04:06.000Z")
-					require.NoError(t, err)
+					if tc.mismatch == "turn" {
+						require.ErrorContains(t, err, "retention-expired")
+					} else {
+						require.NoError(t, err)
+					}
+					if tc.mismatch != "turn" {
+						_, err = s.db.Exec(`INSERT INTO embedded_goal_snooze_preferences(agent_id,session_id,epoch,generation,role,user_seq,user_digest,goal_revision,policy_version,call_id,due_at) VALUES(?,?,?,?,? ,?,?,?,1,'foreign',?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, "root", turn.UserSeq, turn.UserDigest, turn.GoalRevision, "2030-01-02T03:04:06.000Z")
+						require.NoError(t, err)
+					}
 				}
 			}
 			receiptForEvaluation(t, s, b, &k)
@@ -63,13 +69,13 @@ func TestEmbeddedGoalContinuationDueFromSavedTurn(t *testing.T) {
 			c, err := s.EmbeddedGoalContinuationFor(ctx, b, k)
 			require.NoError(t, err)
 			if tc.mismatch == "" && tc.preference {
-				require.Equal(t, formatTimestamp(clock.Now().Add(time.Second)), c.DueAt.String)
+				require.Equal(t, formatTimestamp(clock.Now().Add(750*time.Millisecond)), c.DueAt.String)
 				require.True(t, c.DueAt.Valid)
 				c, started, err := s.StartEmbeddedGoalContinuation(ctx, b, k)
 				require.NoError(t, err)
 				require.False(t, started)
 				require.Equal(t, "reserved", c.State)
-				require.NoError(t, clock.Advance(999*time.Millisecond))
+				require.NoError(t, clock.Advance(749*time.Millisecond))
 				_, started, err = s.StartEmbeddedGoalContinuation(ctx, b, k)
 				require.NoError(t, err)
 				require.False(t, started)
@@ -152,4 +158,68 @@ func TestEmbeddedGoalContinuationDueReopenAndInvalidation(t *testing.T) {
 			require.True(t, started)
 		})
 	}
+}
+
+func TestEmbeddedGoalContinuation_HonorsPolicySnoozedUntil(t *testing.T) {
+	s, b, k := evaluationFixture(t)
+	defer s.Close()
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Now().UTC().Truncate(time.Millisecond))
+	s.clock = clock
+
+	// Set snoozed_until on managed_agent_policies 10 minutes into the future
+	futureTime := clock.Now().Add(10 * time.Minute)
+	futureStr := formatTimestamp(futureTime)
+	err := s.SetManagedGoalSnoozeUntil(ctx, b.AgentID, futureStr)
+	require.NoError(t, err)
+
+	receiptForEvaluation(t, s, b, &k)
+	_, _, err = s.ClaimEmbeddedGoalEvaluation(ctx, b, k)
+	require.NoError(t, err)
+
+	// Complete evaluation as NOT_DONE without any turn-specific snooze preference
+	_, changed, err := s.CompleteEmbeddedGoalEvaluation(ctx, b, k, EmbeddedGoalEvaluationNotDone, "")
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	c, err := s.EmbeddedGoalContinuationFor(ctx, b, k)
+	require.NoError(t, err)
+	require.True(t, c.DueAt.Valid)
+	require.Equal(t, futureStr, c.DueAt.String)
+
+	// Start continuation should not start before snoozed_until
+	_, started, err := s.StartEmbeddedGoalContinuation(ctx, b, k)
+	require.NoError(t, err)
+	require.False(t, started)
+
+	// Advance clock past snooze
+	require.NoError(t, clock.Advance(10*time.Minute))
+	c, started, err = s.StartEmbeddedGoalContinuation(ctx, b, k)
+	require.NoError(t, err)
+	require.True(t, started)
+	require.Equal(t, "unknown", c.Disposition)
+}
+
+func TestEmbeddedGoalEvaluation_ClearsSnoozedUntilOnCompletion(t *testing.T) {
+	s, b, k := evaluationFixture(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	futureStr := formatTimestamp(s.clock.Now().Add(10 * time.Minute))
+	err := s.SetManagedGoalSnoozeUntil(ctx, b.AgentID, futureStr)
+	require.NoError(t, err)
+
+	receiptForEvaluation(t, s, b, &k)
+	_, _, err = s.ClaimEmbeddedGoalEvaluation(ctx, b, k)
+	require.NoError(t, err)
+
+	// Complete evaluation as DONE/COMPLETED
+	_, changed, err := s.CompleteEmbeddedGoalEvaluation(ctx, b, k, EmbeddedGoalEvaluationDone, "all finished")
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var snoozedUntil sql.NullString
+	err = s.db.QueryRowContext(ctx, `SELECT snoozed_until FROM managed_agent_policies WHERE agent_id=?`, b.AgentID).Scan(&snoozedUntil)
+	require.NoError(t, err)
+	require.False(t, snoozedUntil.Valid)
 }

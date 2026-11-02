@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -52,6 +53,20 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 		return RootControlHandlerResult{}, err
 	}
 	if action != "status" {
+		current, lookupErr := m.store.ManagedAgent(ctx, agentID)
+		if lookupErr != nil {
+			return RootControlHandlerResult{}, lookupErr
+		}
+		if current != nil && (current.ActiveWorkflowID != "" || current.ActiveWorkflowStateID != "") {
+			name := "Workflow"
+			if current.ActiveWorkflowID != "" {
+				if workflow, err := m.store.GetWorkflow(ctx, current.ActiveWorkflowID); err == nil && workflow != nil && workflow.Name != "" {
+					name = workflow.Name
+				}
+			}
+			return RootControlHandlerResult{}, fmt.Errorf("manual goal control is disabled while workflow %q is active; the active goal is to complete the workflow", name)
+		}
+
 		config := store.ManagedGoalConfig{Settings: store.DefaultManagedGoalSettings()}
 		var revision int64
 		if policy != nil {

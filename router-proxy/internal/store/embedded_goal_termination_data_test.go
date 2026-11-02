@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sky-valley/pi/ai"
@@ -17,10 +18,16 @@ var goalTerminationTables = []string{"embedded_goal_applied_receipts", "embedded
 // row is produced through its ordinary Store/checked SDK creation path.
 func goalTerminationHistory(t *testing.T, s *Store, id, outcome string, snooze, started bool) EmbeddedBinding {
 	t.Helper()
+	return goalTerminationHistoryWithAppend(t, s, id, outcome, snooze, started, receiptSDKAppend, false)
+}
+
+func goalTerminationHistoryWithAppend(t *testing.T, s *Store, id, outcome string, snooze, started bool, appendMessage func(*testing.T, *Store, EmbeddedBinding, ai.Message) EmbeddedEntry, legacy bool) EmbeddedBinding {
+	t.Helper()
 	ctx := context.Background()
 	b := lifecycleEmbeddedFixture(t, s, id)
-	user := receiptProviderUser(t, s, b, "finish work")
-	policy := goalSDKCommand(t, s, b, id+"-set", EmbeddedGoalCommand{Action: "set", Goal: "finish", Settings: DefaultManagedGoalSettings()})
+	user := appendMessage(t, s, b, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "finish work"}}})
+	require.NoError(t, s.EnterEmbeddedNonMailProviderTurn(ctx, b, user.Sequence, user.Digest))
+	policy := goalSDKCommandWithAppend(t, s, b, id+"-set", EmbeddedGoalCommand{Action: "set", Goal: "finish", Settings: DefaultManagedGoalSettings()}, appendMessage)
 	if started {
 		// The checked original result exists, but the legacy fixture leaves its
 		// effect UNKNOWN. A started continuation requires actual observation.
@@ -36,11 +43,19 @@ func goalTerminationHistory(t *testing.T, s *Store, id, outcome string, snooze, 
 	}
 	key := EmbeddedGoalEvaluationKey{UserSeq: user.Sequence, UserDigest: user.Digest, GoalRevision: policy.DesiredRevision}
 	if snooze {
-		_, replay, err := s.SaveEmbeddedGoalSnoozePreference(ctx, b, EmbeddedGoalSnoozeTurn{UserSeq: key.UserSeq, UserDigest: key.UserDigest, GoalRevision: key.GoalRevision}, id+"-snooze", []byte(`{"duration_ms":1}`))
-		require.NoError(t, err)
-		require.False(t, replay)
+		if legacy {
+			legacySnoozePreference(t, s, b, EmbeddedGoalSnoozeTurn{UserSeq: key.UserSeq, UserDigest: key.UserDigest, GoalRevision: key.GoalRevision}, id+"-snooze", 1)
+		} else {
+			_, replay, err := s.SaveEmbeddedGoalSnoozePreference(ctx, b, EmbeddedGoalSnoozeTurn{UserSeq: key.UserSeq, UserDigest: key.UserDigest, GoalRevision: key.GoalRevision}, id+"-snooze", []byte(`{"duration_ms":1}`))
+			require.NoError(t, err)
+			require.False(t, replay)
+		}
 	}
 	if outcome == "snooze-only" {
+		return b
+	}
+	if legacy {
+		legacyGoalEvaluationHistory(t, s, b, user, policy, id)
 		return b
 	}
 	_, replay, err := s.CommitEmbeddedGoalAppliedReceipt(ctx, b, EmbeddedGoalAppliedReceiptRequest{TurnKey: id + "-turn", TurnEntrySeq: key.UserSeq, TurnEntryDigest: key.UserDigest, GoalRevision: key.GoalRevision})
@@ -49,10 +64,7 @@ func goalTerminationHistory(t *testing.T, s *Store, id, outcome string, snooze, 
 	if outcome == "receipt-only" {
 		return b
 	}
-	body, err := json.Marshal(ai.AssistantMessage{StopReason: ai.StopStop})
-	require.NoError(t, err)
-	final, err := s.AppendEmbeddedEntry(ctx, b, "assistant", body)
-	require.NoError(t, err)
+	final := appendMessage(t, s, b, ai.AssistantMessage{StopReason: ai.StopStop})
 	key.FinalSeq, key.FinalDigest = final.Sequence, final.Digest
 	_, claimed, err := s.ClaimEmbeddedGoalEvaluation(ctx, b, key)
 	require.NoError(t, err)
@@ -187,15 +199,22 @@ func TestEmbeddedGoalHistoryMigration083PreservesRowsRollbackRetry(t *testing.T)
 	path := filepath.Join(t.TempDir(), "migration.db")
 	s, err := Open(ctx, path, Options{Migrations: migrations[:idx]})
 	require.NoError(t, err)
-	b := goalTerminationHistory(t, s, "migration-goal", EmbeddedGoalEvaluationNotDone, true, false)
-	// Snapshot every value, including immutable history and transition state.
+	b := goalTerminationHistoryWithAppend(t, s, "migration-goal", EmbeddedGoalEvaluationNotDone, true, false, legacySDKAppend, true)
+	// Snapshot every original column, including immutable history and transition
+	// state. Later retention migrations add columns with their own coverage.
+	originalColumns := map[string]string{}
 	snapshot := func(s *Store) []string {
 		var result []string
 		for _, table := range goalTerminationTables {
-			rows, err := s.db.Query("SELECT * FROM "+table+" WHERE agent_id=?", b.AgentID)
+			columnsSQL := originalColumns[table]
+			if columnsSQL == "" {
+				columnsSQL = "*"
+			}
+			rows, err := s.db.Query("SELECT "+columnsSQL+" FROM "+table+" WHERE agent_id=?", b.AgentID)
 			require.NoError(t, err)
 			columns, err := rows.Columns()
 			require.NoError(t, err)
+			originalColumns[table] = strings.Join(columns, ",")
 			for rows.Next() {
 				values := make([]any, len(columns))
 				pointers := make([]any, len(columns))

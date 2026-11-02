@@ -119,6 +119,9 @@ func (s *Store) embeddedEvaluationRow(ctx context.Context, b EmbeddedBinding, k 
 }
 
 func (s *Store) EmbeddedEvaluationRow(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey) (EmbeddedGoalEvaluation, error) {
+	if err := s.embeddedEvidenceReadGate(ctx, b, k, ""); err != nil {
+		return EmbeddedGoalEvaluation{}, err
+	}
 	return s.embeddedEvaluationRow(ctx, b, k)
 }
 
@@ -131,6 +134,9 @@ func (s *Store) ClaimEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBindi
 	var e EmbeddedGoalEvaluation
 	claimed := false
 	err := s.runImmediate(ctx, func() error {
+		if err := s.embeddedEvidenceReplayTx(ctx, b, k, ""); err != nil {
+			return err
+		}
 		prior, err := s.embeddedEvaluationRow(ctx, b, k)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -168,7 +174,11 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 	}
 	var e EmbeddedGoalEvaluation
 	changed := false
+	var admissionDenied error
 	err := s.runImmediate(ctx, func() error {
+		if err := s.embeddedEvidenceReplayTx(ctx, b, k, ""); err != nil {
+			return err
+		}
 		prior, err := s.embeddedEvaluationRow(ctx, b, k)
 		if err != nil {
 			return err
@@ -182,6 +192,11 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 		if prior.State != EmbeddedGoalEvaluationUnknown {
 			if prior.State == EmbeddedGoalEvaluationNotDone {
 				if err := s.reserveEmbeddedGoalContinuation(ctx, prior); err != nil {
+					if errors.Is(err, ErrEmbeddedEvidenceExpired) {
+						admissionDenied = err
+						e = prior
+						return nil
+					}
 					return err
 				}
 			}
@@ -193,6 +208,15 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 		}
 		if prior.OwnerToken != b.OwnerToken {
 			return errors.New("stale embedded evaluation claim owner")
+		}
+		if outcome == EmbeddedGoalEvaluationCompleted || outcome == EmbeddedGoalEvaluationDone {
+			var active sql.NullString
+			if err := s.db.QueryRowContext(ctx, `SELECT active_workflow_id FROM managed_agents WHERE agent_id=?`, b.AgentID).Scan(&active); err != nil {
+				return err
+			}
+			if active.Valid && active.String != "" {
+				return errors.New("active workflow cannot be evaluator-completed")
+			}
 		}
 		dbState := outcome
 		if outcome == EmbeddedGoalEvaluationCompleted {
@@ -210,8 +234,11 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 			return errors.New("stale embedded evaluation claim")
 		}
 		if outcome == EmbeddedGoalEvaluationCompleted || outcome == EmbeddedGoalEvaluationDone {
+			if err := s.retireEmbeddedGoalSnoozeEvidenceTx(ctx, b.AgentID); err != nil {
+				return err
+			}
 			now := formatTimestamp(s.clock.Now())
-			_, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET goal_enabled=0,evaluator_state='done',last_outcome='COMPLETED',updated_at=?,evaluator_reason=? WHERE agent_id=? AND applied_revision=? AND projection_state='applied'`, now, reason, b.AgentID, k.GoalRevision)
+			_, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET goal_enabled=0,evaluator_state='done',last_outcome='COMPLETED',snoozed_until=NULL,updated_at=?,evaluator_reason=? WHERE agent_id=? AND applied_revision=? AND projection_state='applied'`, now, reason, b.AgentID, k.GoalRevision)
 			if err != nil {
 				return err
 			}
@@ -228,6 +255,11 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 		}
 		if outcome == EmbeddedGoalEvaluationNotDone {
 			if err := s.reserveEmbeddedGoalContinuation(ctx, e); err != nil {
+				if errors.Is(err, ErrEmbeddedEvidenceExpired) {
+					admissionDenied = err
+					changed = true
+					return nil
+				}
 				return err
 			}
 		}
@@ -237,7 +269,7 @@ func (s *Store) CompleteEmbeddedGoalEvaluation(ctx context.Context, b EmbeddedBi
 	if err != nil {
 		return EmbeddedGoalEvaluation{}, false, err
 	}
-	return e, changed, nil
+	return e, changed, admissionDenied
 }
 
 type EmbeddedGoalEvaluationSummary struct {

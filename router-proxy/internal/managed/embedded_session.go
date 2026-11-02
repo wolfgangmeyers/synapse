@@ -154,6 +154,7 @@ func (m *EmbeddedManager) embeddedMCPTool(serverID, toolName, desc, schema strin
 type embeddedPersistence struct {
 	db                       *store.Store
 	binding                  store.EmbeddedBinding
+	executionToken           int64
 	seq                      int64
 	digest                   string
 	turnSeq                  int64
@@ -256,7 +257,43 @@ func (p *embeddedPersistence) traceChecked(message agent.AgentMessage) {
 	}
 }
 
+func (p *embeddedPersistence) clearExecution() error {
+	if p.executionToken == 0 {
+		return nil
+	}
+	if err := p.db.ClearEmbeddedExecution(context.Background(), p.binding, p.executionToken); err != nil {
+		log.Printf("[embedded:%s] clear SDK execution: %v", p.binding.AgentID, err)
+		return err
+	}
+	p.executionToken = 0
+	return nil
+}
+
+// Repeated provider/tool admission validates the already bound user without
+// refreshing its revision when a goal tool changes policy during the turn.
+func (p *embeddedPersistence) bindExecutionUser(ctx context.Context) error {
+	if p.executionToken == 0 {
+		return nil
+	} // Supporting persistence fixtures own no runtime execution.
+	// Revalidate cached users at every provider/tool admission. The store's
+	// exact-user path checks owner/token without rebinding the frozen revision.
+	if p.turnSeq <= 0 || p.turnDigest == "" {
+		return errors.New("SDK execution has no checked user")
+	}
+	if err := p.db.SetEmbeddedSDKExecutionUser(ctx, p.binding, p.executionToken, p.turnSeq, p.turnDigest); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) (retErr error) {
+	// Every user writer (ordinary, mail, steer and recovery notice) converges
+	// here. Bind only after checked persistence, before SDK provider/tool entry.
+	defer func() {
+		if retErr == nil && message.MessageRole() == ai.RoleUser && p.executionToken > 0 {
+			retErr = p.bindExecutionUser(ctx)
+		}
+	}()
 	defer func() {
 		if retErr != nil {
 			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", p.binding.AgentID, p.source, p.msgID, retErr)
@@ -356,7 +393,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 		}
 	}
 	if result, ok := message.(ai.ToolResultMessage); ok {
-		if result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "context_reset" && result.ToolName != "reset" {
+		if result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "workflow_snooze" && result.ToolName != "context_reset" && result.ToolName != "reset" {
 			p.toolExecuted = true
 		}
 		toolName := result.ToolName
@@ -551,6 +588,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			return nil
 		}
 	}
+	var checkedWakeFinal *store.EmbeddedEntry
 	if p.wake != nil {
 		final := false
 		switch assistant := message.(type) {
@@ -565,12 +603,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 			key := fmt.Sprintf("root:%s:%s:%d:%s:%d", p.binding.AgentID, p.binding.SessionID, p.binding.Epoch, p.binding.Generation, p.seq+1)
 			entry, err := p.db.AppendEmbeddedRestartWakeFinalAt(ctx, p.binding, p.wake.processGeneration, p.wake.id, p.seq, p.digest, key, body)
-			if err == nil {
-				p.seq, p.digest = entry.Sequence, entry.Digest
-				p.wakeFinal = &entry
-				p.traceChecked(message)
+			if err != nil {
+				return err
 			}
-			return err
+			p.wakeFinal = &entry
+			checkedWakeFinal = &entry
 		}
 	}
 	if p.mailAttempt != "" {
@@ -601,7 +638,11 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 	}
 	key := fmt.Sprintf("root:%s:%s:%d:%s:%d", p.binding.AgentID, p.binding.SessionID, p.binding.Epoch, p.binding.Generation, p.seq+1)
 	var entry store.EmbeddedEntry
-	if result, ok := message.(ai.ToolResultMessage); ok && p.toolInvocation != nil && p.toolInvocation(result.ToolCallID) != nil {
+	if checkedWakeFinal != nil {
+		// The fenced wake append already saved this final. Reuse its checked
+		// entry for normal history projection, never append the SDK reply twice.
+		entry = *checkedWakeFinal
+	} else if result, ok := message.(ai.ToolResultMessage); ok && p.toolInvocation != nil && p.toolInvocation(result.ToolCallID) != nil {
 		entry, err = p.db.AppendEmbeddedToolInvocationResult(ctx, p.toolInvocation(result.ToolCallID), p.seq, p.digest, key, result, body)
 	} else if result, ok := message.(ai.ToolResultMessage); ok && p.goalInvocation != nil && p.goalInvocation(result.ToolCallID) != nil {
 		entry, err = p.db.AppendEmbeddedGoalInvocationResult(ctx, p.goalInvocation(result.ToolCallID), p.seq, p.digest, key, result, body)
@@ -627,7 +668,7 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 		if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName != "mecha_worker" && result.ToolName != "mecha_mailbox_send" && result.ToolName != "mecha_send_image" {
-			if result.ToolName != "read" && result.ToolName != "write" && result.ToolName != "edit" && result.ToolName != "mecha_reminder" && result.ToolName != "mecha_context" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
+			if result.ToolName != "read" && result.ToolName != "write" && result.ToolName != "edit" && result.ToolName != "mecha_reminder" && result.ToolName != "mecha_context" && result.ToolName != "bash" && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "workflow_snooze" && result.ToolName != "mecha_tool_timeout" && result.ToolName != "extend_tool_timeout" && result.ToolName != InlineToolAllowanceToolName {
 				body, err := json.Marshal(result)
 				if err == nil {
 					_ = p.db.ObserveEmbeddedEffect(ctx, p.binding, result.ToolCallID, body)
@@ -1013,6 +1054,32 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, errors.New("embedded runner requires claimed owner")
 	}
 	binding := owner.binding
+	executionToken, executionErr := m.store.EnterEmbeddedSDKExecution(ctx, binding, continuation)
+	if executionErr != nil {
+		return 0, executionErr
+	}
+	var p *embeddedPersistence
+	settleExecution := func() error {
+		if p != nil {
+			return p.clearExecution()
+		}
+		if executionToken == 0 {
+			return nil
+		}
+		err := m.store.ClearEmbeddedExecution(context.Background(), binding, executionToken)
+		if err != nil {
+			log.Printf("[embedded:%s] clear SDK execution: %v", binding.AgentID, err)
+			return err
+		}
+		executionToken = 0
+		return nil
+	}
+	defer func() {
+		if err := settleExecution(); err != nil && turnErr == nil {
+			turnErr = err
+		}
+	}()
+
 	_ = m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
 	source := "prompt"
 	msgID := ""
@@ -1035,12 +1102,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if mail == nil {
 		log.Printf("[embedded:%s] Turn started (source: %s, message: %s)", binding.AgentID, source, msgID)
 	}
-	var p *embeddedPersistence
 	var session *coding.Session
 	var model *ai.Model
 	_ = m.store.SetEmbeddedActivityState(ctx, binding, "active")
 	m.publishProjection()
 	defer func() {
+		// SDK Run has joined its callbacks. Settle before wake offers.
+		settleErr := settleExecution()
+		if settleErr != nil && turnErr == nil {
+			turnErr = settleErr
+		}
 		if session != nil {
 			isStaleEpoch := false
 			if m.store != nil {
@@ -1068,11 +1139,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		if p != nil && p.toolExecuted {
 			m.laneFor(binding.AgentID).consecutiveContinuations = 0
-		} else if continuation == nil && (explicitPrompt != "" || mail != nil) {
-			lane := m.laneFor(binding.AgentID)
-			lane.consecutiveContinuations = 0
-			lane.consecutiveEmptyTurns = 0
-			lane.goalAttempt = 0
 		}
 		if errors.Is(turnErr, context.Canceled) || (turnErr != nil && strings.Contains(turnErr.Error(), "context canceled")) {
 			_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), binding.AgentID)
@@ -1080,7 +1146,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
 		}
 		m.publishProjection()
-		if (mail == nil || turnErr == nil) && !m.isWorkerSelfTerminationPending(binding.AgentID) {
+		if settleErr == nil && (mail == nil || turnErr == nil) && !m.isWorkerSelfTerminationPending(binding.AgentID) {
 			m.OfferDirect(binding.AgentID)
 		}
 		m.checkWorkerSelfTerminationAfterTurn(context.Background(), binding.AgentID)
@@ -1139,7 +1205,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, err
 		}
 	}
-	p = &embeddedPersistence{db: m.store, binding: binding, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, flushReplies: func(agentID string) { m.flushEmbeddedReplies(ctx, agentID) }, toolInputs: make(map[string]any), toolCompanionTexts: make(map[string]string)}
+	p = &embeddedPersistence{db: m.store, binding: binding, executionToken: executionToken, digest: "genesis", source: source, msgID: msgID, afterUserAppend: m.embeddedAfterUserAppend, publishComplete: m.publishCompleteHistory, flushReplies: func(agentID string) { m.flushEmbeddedReplies(ctx, agentID) }, toolInputs: make(map[string]any), toolCompanionTexts: make(map[string]string)}
 	if wake != nil {
 		if err := p.checkClaimedWake(ctx, *wake); err != nil {
 			return 0, err
@@ -1199,7 +1265,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			delete(goalExecutions, result.ToolCallID)
 		}
 		freshWorkerMu.Unlock()
-		if execution.expected == nil && result.ToolName != "goal" && result.ToolName != "goal_snooze" {
+		if execution.expected == nil && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "workflow_snooze" {
 			return nil
 		}
 		if !commit {
@@ -1344,6 +1410,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedSendImageTool(owner, toolAdmitted, toolCompleted))
 		tools = append(tools, m.embeddedGoalTool(owner, goalAdmitted, goalCompleted))
 		tools = append(tools, m.embeddedGoalSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
+			return store.EmbeddedGoalSnoozeTurn{UserSeq: p.turnSeq, UserDigest: p.turnDigest}
+		}, goalAdmitted, goalCompleted))
+		tools = append(tools, m.embeddedWorkflowSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
 			return store.EmbeddedGoalSnoozeTurn{UserSeq: p.turnSeq, UserDigest: p.turnDigest}
 		}, goalAdmitted, goalCompleted))
 		tools = append(tools, m.embeddedCompactionTool(owner))
@@ -1503,6 +1572,11 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return fail(err)
 		}
 		auxiliary, _ := requestCtx.Value(embeddedAuxiliaryRequestKey{}).(bool)
+		if !auxiliary && p.turnSeq > 0 {
+			if err := p.bindExecutionUser(requestCtx); err != nil {
+				return fail(err)
+			}
+		}
 		if !auxiliary && (requestModel == nil || requestModel.ContextWindow <= embeddedContextHeadroom || embeddedProjectedTokens(transcript.Messages) > requestModel.ContextWindow-embeddedContextHeadroom) {
 			return fail(errors.New("provider request cannot fit fixed headroom"))
 		}
@@ -1655,6 +1729,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			return nil
 		}, BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
+			if err := p.bindExecutionUser(callCtx); err != nil {
+				return err
+			}
 			toolName := call.ToolCall.Name
 			if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, toolName); err != nil {
 				return &agent.PolicyDenial{Reason: err.Error()}
@@ -1670,7 +1747,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					}
 					p.toolCompanionTexts[toolCallID] = companionText
 				}
-				if p != nil && toolName != "goal" && toolName != "goal_snooze" && toolName != "context_reset" && toolName != "reset" {
+				if p != nil && toolName != "goal" && toolName != "goal_snooze" && toolName != "workflow_snooze" && toolName != "context_reset" && toolName != "reset" {
 					p.toolExecuted = true
 					if p.toolInputs == nil {
 						p.toolInputs = make(map[string]any)
@@ -1732,6 +1809,15 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 					return &agent.PolicyDenial{Reason: err.Error()}
 				}
 			}
+			if call.ToolCall.Name == "workflow_snooze" {
+				if role != "root" && role != "worker" {
+					return &agent.PolicyDenial{Reason: "workflow snooze requires embedded root or worker"}
+				}
+				if _, _, err := embeddedWorkflowSnoozeArguments(call.ToolCall.Arguments, 600000); err != nil {
+					return &agent.PolicyDenial{Reason: err.Error()}
+				}
+			}
+
 			if call.ToolCall.Name == "goal_snooze" {
 				if role != "root" && role != "worker" {
 					return &agent.PolicyDenial{Reason: "goal snooze requires embedded root or worker"}
@@ -1805,7 +1891,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if call.ToolCall.Name == "goal" && call.ToolCall.Arguments["action"] == "status" {
 				return nil // Read-only status has no unresolved effect intent.
 			}
-			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" {
+			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
 				freshWorkerMu.Lock()
 				delete(freshGoalIntents, call.ToolCall.ID)
 				delete(goalExecutions, call.ToolCall.ID)
@@ -1864,7 +1950,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			var toolAdmission *store.EmbeddedToolInvocation
 			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" {
 				toolAdmission, err = m.store.RecordEmbeddedToolInvocation(callCtx, binding, goalProcess, p.turnSeq, p.turnDigest, p.mailAttempt, call.ToolCall)
-			} else if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" {
+			} else if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
 				goalAdmission, err = m.store.RecordEmbeddedGoalInvocation(callCtx, binding, goalProcess, p.turnSeq, p.turnDigest, p.mailAttempt, call.ToolCall.ID, intent)
 			} else {
 				err = m.store.RecordEmbeddedEffectIntent(callCtx, binding, call.ToolCall.ID, intent)
@@ -1887,7 +1973,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				freshReminderIntents[call.ToolCall.ID] = true
 				freshWorkerMu.Unlock()
 			}
-			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" {
+			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
 				freshWorkerMu.Lock()
 				freshGoalIntents[call.ToolCall.ID] = goalAdmission
 				freshWorkerMu.Unlock()
@@ -1985,6 +2071,22 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		return err
 	}
+	if wake != nil && len(wakePrompts) == 0 {
+		// Continue an exact claimed interrupted wake, not an inferred fresh turn.
+		snapshot, err := m.store.ReopenEmbedded(ctx, binding)
+		if err != nil {
+			return 0, err
+		}
+		for i := len(snapshot.Entries) - 1; i >= 0; i-- {
+			if snapshot.Entries[i].Kind == "user" {
+				p.turnSeq, p.turnDigest = snapshot.Entries[i].Sequence, snapshot.Entries[i].Digest
+				break
+			}
+		}
+		if err := p.bindExecutionUser(ctx); err != nil {
+			return 0, err
+		}
+	}
 	if wake != nil {
 		// ClaimEmbeddedRestartWake already starts an interrupted 076 notice.
 		// Do not enter the ordinary recovery path, which starts it again.
@@ -1996,6 +2098,10 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if recoveryNotice != nil && recoveryNotice.State != "started" {
 		p.notice = recoveryNotice
 		if recoveryNotice.State == "appended" {
+			p.turnSeq, p.turnDigest = p.seq, p.digest
+			if err := p.bindExecutionUser(ctx); err != nil {
+				return 0, err
+			}
 			p.noticeStart = true
 			if err := handleTurnErr(session.Continue(ctx)); err != nil {
 				return 0, err
@@ -2029,8 +2135,19 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		return p.seq, nil
 	}
+	// The caller holds lane.serial. Reset incoming work before execution so
+	// its own empty final remains the first counted turn, not erased on return.
+	if continuation == nil && (explicitPrompt != "" || mail != nil) {
+		lane := m.laneFor(binding.AgentID)
+		lane.consecutiveContinuations = 0
+		lane.consecutiveEmptyTurns = 0
+		lane.goalAttempt = 0
+	}
 	if continuation != nil {
 		promptText := m.formatGoalContinuationPrompt(ctx, binding, continuation)
+		if promptText == "" {
+			return 0, handleTurnErr(errors.New("goal continuation prompt unavailable"))
+		}
 		if explicitPrompt != "" {
 			promptText = explicitPrompt
 		}
@@ -2040,6 +2157,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
 				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				if err := settleExecution(); err != nil {
+					return 0, err
+				}
 				m.checkContextResetAfterTurn(ctx, binding, model, session)
 				return p.seq, nil
 			}
@@ -2048,6 +2168,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
+		}
+		if err := settleExecution(); err != nil {
+			return 0, err
 		}
 		m.checkContextResetAfterTurn(ctx, binding, model, session)
 		return p.seq, nil
@@ -2077,6 +2200,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
 				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				if err := settleExecution(); err != nil {
+					return 0, err
+				}
 				m.checkContextResetAfterTurn(ctx, binding, model, session)
 				return p.seq, nil
 			}
@@ -2085,6 +2211,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
+		}
+		if err := settleExecution(); err != nil {
+			return 0, err
 		}
 		m.checkContextResetAfterTurn(ctx, binding, model, session)
 		return p.seq, nil
@@ -2099,6 +2228,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
 				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
 				if explicitPrompt != ContextResetWakePrompt {
+					if err := settleExecution(); err != nil {
+						return 0, err
+					}
 					m.checkContextResetAfterTurn(ctx, binding, model, session)
 				}
 				return p.seq, nil
@@ -2110,6 +2242,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, handleTurnErr(err)
 		}
 		if explicitPrompt != ContextResetWakePrompt {
+			if err := settleExecution(); err != nil {
+				return 0, err
+			}
 			m.checkContextResetAfterTurn(ctx, binding, model, session)
 		}
 		return p.seq, nil
@@ -2123,6 +2258,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
 				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				if err := settleExecution(); err != nil {
+					return 0, err
+				}
 				m.checkContextResetAfterTurn(ctx, binding, model, session)
 				return p.seq, nil
 			}
@@ -2132,8 +2270,14 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
+		if err := settleExecution(); err != nil {
+			return 0, err
+		}
 		m.checkContextResetAfterTurn(ctx, binding, model, session)
 		return p.seq, nil
+	}
+	if err := settleExecution(); err != nil {
+		return 0, err
 	}
 	m.checkContextResetAfterTurn(ctx, binding, model, session)
 	return p.seq, nil
@@ -2145,7 +2289,12 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	if m.isWorkerSelfTerminationPending(binding.AgentID) {
 		return nil
 	}
-	if curAgent, err := m.store.ManagedAgent(ctx, binding.AgentID); err == nil && curAgent != nil && curAgent.Blocked {
+	curAgent, err := m.store.ManagedAgent(ctx, binding.AgentID)
+	if err != nil {
+		return err
+	}
+	hasActiveWorkflow := curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "")
+	if curAgent != nil && curAgent.Blocked {
 		log.Printf("[embedded:%s] Suppressing goal evaluation because agent is blocked: %s", binding.AgentID, curAgent.BlockedReason)
 		return nil
 	}
@@ -2226,17 +2375,17 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 		switch m := msg.(type) {
 		case ai.ToolResultMessage:
-			if m.ToolName != "goal" && m.ToolName != "goal_snooze" {
+			if m.ToolName != "goal" && m.ToolName != "goal_snooze" && m.ToolName != "workflow_snooze" {
 				toolCalls++
 			}
-			if m.ToolName == "goal_snooze" {
+			if !m.IsError && (m.ToolName == "goal_snooze" || m.ToolName == "workflow_snooze") {
 				calledGoalSnooze = true
 			}
 		case *ai.ToolResultMessage:
-			if m != nil && m.ToolName != "goal" && m.ToolName != "goal_snooze" {
+			if m != nil && m.ToolName != "goal" && m.ToolName != "goal_snooze" && m.ToolName != "workflow_snooze" {
 				toolCalls++
 			}
-			if m != nil && m.ToolName == "goal_snooze" {
+			if m != nil && !m.IsError && (m.ToolName == "goal_snooze" || m.ToolName == "workflow_snooze") {
 				calledGoalSnooze = true
 			}
 		case ai.AssistantMessage:
@@ -2246,14 +2395,14 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 					if c.Name == "goal_snooze" {
 						calledGoalSnooze = true
 					}
-					if c.Name != "goal" && c.Name != "goal_snooze" {
+					if c.Name != "goal" && c.Name != "goal_snooze" && c.Name != "workflow_snooze" {
 						toolCalls++
 					}
 				case *ai.ToolCall:
 					if c != nil && c.Name == "goal_snooze" {
 						calledGoalSnooze = true
 					}
-					if c != nil && c.Name != "goal" && c.Name != "goal_snooze" {
+					if c != nil && c.Name != "goal" && c.Name != "goal_snooze" && c.Name != "workflow_snooze" {
 						toolCalls++
 					}
 				case ai.TextContent:
@@ -2283,17 +2432,11 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				for _, part := range m.Content {
 					switch c := part.(type) {
 					case ai.ToolCall:
-						if c.Name == "goal_snooze" {
-							calledGoalSnooze = true
-						}
-						if c.Name != "goal" && c.Name != "goal_snooze" {
+						if c.Name != "goal" && c.Name != "goal_snooze" && c.Name != "workflow_snooze" {
 							toolCalls++
 						}
 					case *ai.ToolCall:
-						if c != nil && c.Name == "goal_snooze" {
-							calledGoalSnooze = true
-						}
-						if c != nil && c.Name != "goal" && c.Name != "goal_snooze" {
+						if c != nil && c.Name != "goal" && c.Name != "goal_snooze" && c.Name != "workflow_snooze" {
 							toolCalls++
 						}
 					case ai.TextContent:
@@ -2322,7 +2465,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 	}
 	lane := m.laneFor(binding.AgentID)
-	if toolCalls == 0 && !hasText && !calledGoalSnooze {
+	if !hasActiveWorkflow && toolCalls == 0 && !hasText && !calledGoalSnooze {
 		lane.consecutiveEmptyTurns++
 		if lane.consecutiveEmptyTurns < 3 {
 			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns)
@@ -2346,14 +2489,23 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			m.startManagedTask(func() {
 				lane := m.laneFor(binding.AgentID)
 				lane.serial.Lock()
+				token, enterErr := m.store.EnterEmbeddedGoalEvaluationExecution(m.runCtx, binding, key)
+				if enterErr != nil {
+					lane.serial.Unlock()
+					return
+				}
 				outcome := store.EmbeddedGoalEvaluationNotDone
 				reason := "Empty response without action"
 				_, changed, evalErr := m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
 				if evalErr == nil {
 					m.recordGoalEvaluationActivity(binding, key, outcome, reason, reason)
 				}
+				clearErr := m.store.ClearEmbeddedExecution(context.Background(), binding, token)
+				if clearErr != nil {
+					log.Printf("[embedded:%s] clear evaluator execution: %v", binding.AgentID, clearErr)
+				}
 				lane.serial.Unlock()
-				if evalErr != nil || !changed {
+				if evalErr != nil || clearErr != nil || !changed {
 					m.publishProjection()
 					return
 				}
@@ -2382,10 +2534,34 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		// Evaluation cannot overlap a newer ordinary SDK turn on this agent.
 		lane := m.laneFor(binding.AgentID)
 		lane.serial.Lock()
+		token, enterErr := m.store.EnterEmbeddedGoalEvaluationExecution(m.runCtx, binding, key)
+		if enterErr != nil {
+			lane.serial.Unlock()
+			m.publishProjection()
+			return
+		}
 		evaluator := m.embeddedGoalEvaluator
 		var outcome, reason, rawDetails string
 		var evalErr error
-		if evaluator != nil {
+		curAgent, curAgentErr := m.store.ManagedAgent(m.runCtx, binding.AgentID)
+		if curAgentErr != nil {
+			log.Printf("[embedded:%s] read managed agent after goal evaluation claim (user_seq=%d, goal_revision=%d, final_seq=%d): %v; leaving UNKNOWN without replay", binding.AgentID, key.UserSeq, key.GoalRevision, key.FinalSeq, curAgentErr)
+			if clearErr := m.store.ClearEmbeddedExecution(context.Background(), binding, token); clearErr != nil {
+				log.Printf("[embedded:%s] clear evaluator execution: %v", binding.AgentID, clearErr)
+			}
+			lane.serial.Unlock()
+			m.publishProjection()
+			return
+		}
+		hasActiveWorkflow := curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "")
+
+		if hasActiveWorkflow {
+			outcome = store.EmbeddedGoalEvaluationNotDone
+			reason = m.workflowContinuationGuidance(m.runCtx, curAgent)
+			// The exact guidance is external content, not the bounded store reason.
+			rawDetails = reason
+			reason = "Active workflow requires progress or workflow_snooze."
+		} else if evaluator != nil {
 			outcome, reason, evalErr = evaluator(m.runCtx, key)
 			rawDetails = reason
 		} else {
@@ -2405,13 +2581,6 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			rawDetails = fmt.Sprintf("Goal evaluation failed: %v", evalErr)
 			evalErr = nil
 		}
-		// If the agent is in an active workflow, do not allow turn evaluators to prematurely complete the implicit workflow goal.
-		if outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted {
-			if curAgent, err := m.store.ManagedAgent(m.runCtx, binding.AgentID); err == nil && curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "") {
-				outcome = store.EmbeddedGoalEvaluationNotDone
-				reason = "Active workflow is still in progress; implicit workflow goal cannot be completed until workflow exits"
-			}
-		}
 		changed := false
 		if m.runCtx.Err() == nil {
 			_, changed, evalErr = m.store.CompleteEmbeddedGoalEvaluation(m.runCtx, binding, key, outcome, reason)
@@ -2428,8 +2597,12 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				lane.goalAttempt = 20
 			}
 		}
+		clearErr := m.store.ClearEmbeddedExecution(context.Background(), binding, token)
+		if clearErr != nil {
+			log.Printf("[embedded:%s] clear evaluator execution: %v", binding.AgentID, clearErr)
+		}
 		lane.serial.Unlock()
-		if evalErr != nil || !changed || outcome != store.EmbeddedGoalEvaluationNotDone {
+		if evalErr != nil || clearErr != nil || !changed || outcome != store.EmbeddedGoalEvaluationNotDone {
 			m.publishProjection()
 			return
 		}

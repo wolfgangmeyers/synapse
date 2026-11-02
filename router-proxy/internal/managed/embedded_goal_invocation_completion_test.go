@@ -148,8 +148,11 @@ func TestEmbeddedGoalInvocationSDKCompletionObserved(t *testing.T) {
 }
 
 func TestEmbeddedGoalInvocationCompletionBoundaries(t *testing.T) {
-	for _, name := range []string{"goal", "goal_snooze"} {
+	for _, name := range []string{"goal", "goal_snooze", "workflow_snooze"} {
 		for _, fault := range []string{"success-restart", "before-domain", "after-domain", "before-result", "after-result", "stale-owner-append", "stale-process-append", "stale-owner-observe", "stale-process-observe", "wrong-content", "wrong-name", "wrong-id", "error-result", "wrong-entry-observe"} {
+			if name == "workflow_snooze" && fault != "after-domain" {
+				continue
+			}
 			t.Run(name+"/"+fault, func(t *testing.T) {
 				ctx := context.Background()
 				db, b, path := completionFixture(t)
@@ -161,7 +164,7 @@ func TestEmbeddedGoalInvocationCompletionBoundaries(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, db.EnterEmbeddedNonMailProviderTurn(ctx, b, user.Sequence, user.Digest))
 				args := map[string]any{"action": "set", "goal": "current goal"}
-				if name == "goal_snooze" {
+				if name == "goal_snooze" || name == "workflow_snooze" {
 					saved, err := db.ManagedAgent(ctx, b.AgentID)
 					require.NoError(t, err)
 					fence := store.ManagedRuntimeFence{AgentID: saved.AgentID, PiSessionID: saved.PiSessionID, SessionEpoch: saved.SessionEpoch,
@@ -171,6 +174,13 @@ func TestEmbeddedGoalInvocationCompletionBoundaries(t *testing.T) {
 					require.NoError(t, err)
 					require.EqualValues(t, 1, policy.DesiredRevision)
 					args = map[string]any{"duration_ms": 1000}
+				}
+				if name == "workflow_snooze" {
+					wf, err := db.CreateWorkflow(ctx, store.WorkflowRequest{Name: "Completion"})
+					require.NoError(t, err)
+					state, err := db.CreateWorkflowState(ctx, store.WorkflowStateRequest{Name: "Work", WorkflowID: &wf.ID})
+					require.NoError(t, err)
+					require.NoError(t, db.SetManagedAgentActiveWorkflowWithVariables(ctx, b.AgentID, &wf.ID, &state.ID, nil))
 				}
 				intent, err := json.Marshal(map[string]any{"id": "current-call", "name": name, "arguments": args})
 				require.NoError(t, err)
@@ -201,8 +211,13 @@ func TestEmbeddedGoalInvocationCompletionBoundaries(t *testing.T) {
 					expected = &result
 				}
 				tool := m.embeddedGoalTool(embeddedOwner{binding: b, identity: "wake-fixture"}, admitted, completed)
-				if name == "goal_snooze" {
+				if name == "goal_snooze" || name == "workflow_snooze" {
 					tool = m.embeddedGoalSnoozeTool(embeddedOwner{binding: b, identity: "wake-fixture"}, func() store.EmbeddedGoalSnoozeTurn {
+						return store.EmbeddedGoalSnoozeTurn{UserSeq: user.Sequence, UserDigest: user.Digest}
+					}, admitted, completed)
+				}
+				if name == "workflow_snooze" {
+					tool = m.embeddedWorkflowSnoozeTool(embeddedOwner{binding: b, identity: "wake-fixture"}, func() store.EmbeddedGoalSnoozeTurn {
 						return store.EmbeddedGoalSnoozeTurn{UserSeq: user.Sequence, UserDigest: user.Digest}
 					}, admitted, completed)
 				}
@@ -215,8 +230,35 @@ func TestEmbeddedGoalInvocationCompletionBoundaries(t *testing.T) {
 					completionAssertDomain(t, b, path, name, "current-call", fault == "after-domain")
 					require.Nil(t, expected)
 					completionAssertUnknown(t, db, b, path, user.Sequence)
+					if name == "workflow_snooze" && fault == "after-domain" {
+						raw, err := sql.Open("sqlite", path)
+						require.NoError(t, err)
+						defer raw.Close()
+						var due, policyDue string
+						require.NoError(t, raw.QueryRow(`SELECT due_at FROM embedded_goal_snooze_preferences WHERE agent_id=?`, b.AgentID).Scan(&due))
+						require.Equal(t, "2030-01-02T03:04:06.000Z", due)
+						require.NoError(t, raw.QueryRow(`SELECT snoozed_until FROM managed_agent_policies WHERE agent_id=?`, b.AgentID).Scan(&policyDue))
+						require.Equal(t, due, policyDue)
+						effect, err := db.RecoverEmbeddedEffect(ctx, b, "current-call")
+						require.NoError(t, err)
+						require.Equal(t, "unknown", effect.State)
+						// A fresh Execute with no newly admitted witness cannot replay.
+						_, err = tool.Execute(ctx, "current-call", args, nil)
+						require.Error(t, err)
+						require.Nil(t, expected)
+						require.NoError(t, raw.QueryRow(`SELECT snoozed_until FROM managed_agent_policies WHERE agent_id=?`, b.AgentID).Scan(&policyDue))
+						require.Equal(t, due, policyDue)
+						completionAssertUnknown(t, db, b, path, user.Sequence)
+					}
 					_, err = db.RecordEmbeddedGoalInvocation(ctx, b, g, user.Sequence, user.Digest, "", "current-call", intent)
 					require.Error(t, err, "saved domain or intent must not mint completion")
+					if name == "workflow_snooze" {
+						recoveredGeneration, err := db.MintEmbeddedProcessGeneration(ctx, "recovered-workflow-completion")
+						require.NoError(t, err)
+						_, err = db.RecordEmbeddedGoalInvocation(ctx, b, recoveredGeneration, user.Sequence, user.Digest, "", "current-call", intent)
+						require.Error(t, err, "new process generation cannot replay uncertain committed snooze")
+						completionAssertUnknown(t, db, b, path, user.Sequence)
+					}
 					return
 				}
 				require.NoError(t, err)
@@ -320,7 +362,7 @@ func completionAssertDomain(t *testing.T, b store.EmbeddedBinding, path, name, i
 	require.NoError(t, err)
 	defer raw.Close()
 	table, complete := "embedded_goal_calls", " AND state='complete'"
-	if name == "goal_snooze" {
+	if name == "goal_snooze" || name == "workflow_snooze" {
 		table, complete = "embedded_goal_snooze_calls", ""
 	}
 	var rows int

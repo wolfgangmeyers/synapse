@@ -444,3 +444,83 @@ func TestManagedAgentWorkflowStateTransitionsIntegration(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, res.StatusCode)
 	res.Body.Close()
 }
+
+// Supporting criterion F handler proof, not public Playwright coverage. The
+// disposable SQLite trigger exercises a real lifecycle transaction failure.
+func TestManagedAgentWorkflowDeactivateAtomicHTTP(t *testing.T) {
+	for _, failCleanup := range []bool{false, true} {
+		name := "success"
+		if failCleanup {
+			name = "cleanup_failure_rolls_back"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "router.db")
+			durable, err := store.Open(ctx, dbPath, store.Options{})
+			require.NoError(t, err)
+			t.Cleanup(func() { durable.Close() })
+			manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+			require.NoError(t, err)
+			manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
+			require.NoError(t, err)
+			router, err := transport.New(transport.Options{Store: durable, Managed: manager})
+			require.NoError(t, err)
+			rawDB, err := sql.Open("sqlite", dbPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { rawDB.Close() })
+			agentID := "agent-" + uuid.NewString()
+			_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,created_at,updated_at) VALUES(?,?,'/tmp','openai-codex','gpt-5','running','running','idle','embedded','session-1',1,'gen-1',1,'hash','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, agentID, "atomic-workflow-agent")
+			require.NoError(t, err)
+			ws, err := durable.CreateWorkflowState(ctx, store.WorkflowStateRequest{Name: "atomic-review"})
+			require.NoError(t, err)
+			wf, err := durable.CreateWorkflow(ctx, store.WorkflowRequest{Name: "atomic-workflow", EntryStateID: &ws.ID})
+			require.NoError(t, err)
+			require.NoError(t, durable.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, &wf.ID, &ws.ID, map[string]string{"task": "review"}))
+			settings := store.DefaultManagedGoalSettings()
+			settings.GoalLockEnabled = true
+			settings.SnoozeDurationMS = 300000
+			_, err = durable.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{Enabled: true, Goal: "Complete active workflow: atomic-workflow", Settings: settings})
+			require.NoError(t, err)
+			require.NoError(t, durable.SetManagedGoalSnoozeUntil(ctx, agentID, "2099-01-01T00:00:00Z"))
+			before, err := durable.ManagedGoalPolicyFor(ctx, agentID)
+			require.NoError(t, err)
+			if failCleanup {
+				_, err = rawDB.ExecContext(ctx, `CREATE TRIGGER fail_workflow_cleanup BEFORE UPDATE ON managed_agent_policies WHEN OLD.goal_enabled=1 AND NEW.goal_enabled=0 BEGIN SELECT RAISE(ABORT, 'cleanup denied'); END`)
+				require.NoError(t, err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "/v1/managed-agents/"+agentID+"/workflow-state", bytes.NewBufferString(`{"action":"deactivate"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Request-ID", uuid.NewString())
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(res.Body.Bytes(), &body))
+			after, err := durable.ManagedGoalPolicyFor(ctx, agentID)
+			require.NoError(t, err)
+			var workflowID, stateID, variables sql.NullString
+			require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT active_workflow_id,active_workflow_state_id,workflow_variables_json FROM managed_agents WHERE agent_id=?`, agentID).Scan(&workflowID, &stateID, &variables))
+			if failCleanup {
+				require.Equal(t, http.StatusInternalServerError, res.Code, res.Body.String())
+				require.NotContains(t, body, "active_workflow_state_id", "must not report successful deactivation")
+				require.Equal(t, wf.ID, workflowID.String)
+				require.Equal(t, ws.ID, stateID.String)
+				require.JSONEq(t, `{"task":"review"}`, variables.String)
+				require.Equal(t, before.Config, after.Config)
+				require.Equal(t, before.SnoozedUntil, after.SnoozedUntil)
+				return
+			}
+			require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+			require.Equal(t, "", body["active_workflow_id"])
+			require.Equal(t, "", body["active_workflow_state_id"])
+			require.Nil(t, body["workflow_variables"])
+			require.False(t, workflowID.Valid)
+			require.False(t, stateID.Valid)
+			require.False(t, variables.Valid)
+			require.False(t, after.Config.Enabled)
+			require.Empty(t, after.Config.Goal)
+			require.Empty(t, after.SnoozedUntil)
+			settings.GoalLockEnabled = false
+			require.Equal(t, settings, after.Config.Settings, "deactivation must not reset unrelated goal settings via a second goal update")
+		})
+	}
+}

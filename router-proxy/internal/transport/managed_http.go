@@ -1929,14 +1929,6 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		if r.managed != nil {
 			_ = r.managed.SyncEmbeddedWorkflowTools(req.Context(), agentID)
 		}
-		// Deactivate goal on workflow state deactivation
-		goalSettings := store.DefaultManagedGoalSettings()
-		goalSettings.GoalLockEnabled = false
-		_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
-			Enabled:  false,
-			Goal:     "",
-			Settings: goalSettings,
-		})
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{

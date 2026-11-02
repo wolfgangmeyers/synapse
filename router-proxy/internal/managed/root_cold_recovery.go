@@ -246,7 +246,11 @@ func (m *Manager) MaybeResumeEmbeddedGoal(agentID string) {
 		return
 	}
 	now := formatManagedTime(m.clock.Now())
-	if pref, err := m.store.CurrentEmbeddedGoalSnoozePreference(m.runCtx, agentID); err == nil && pref != nil {
+	pref, err := m.store.CurrentEmbeddedGoalSnoozePreference(m.runCtx, agentID)
+	if err != nil {
+		return // Missing authority is not permission to dispatch fresh work.
+	}
+	if pref != nil {
 		if pref.SnoozeUntil != "" && pref.SnoozeUntil > now {
 			return
 		}

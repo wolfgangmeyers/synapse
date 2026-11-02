@@ -97,6 +97,17 @@ func (s *Store) embeddedFence(ctx context.Context, b EmbeddedBinding) error {
 	if err := s.embeddedOwnerFence(ctx, b); err != nil {
 		return err
 	}
+	// Runtime identities carry a positive durable token. Token-zero router control
+	// and session discovery remain supported; no lease/expiry authority is used.
+	if b.OwnerToken > 0 {
+		var token int64
+		if err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token); err != nil {
+			return err
+		}
+		if token != b.OwnerToken {
+			return errors.New("stale embedded owner token")
+		}
+	}
 	if err := s.embeddedManagedFence(ctx, b); err != nil {
 		return err
 	}
@@ -234,20 +245,23 @@ type EmbeddedOwnerLeaseHeld struct{ RetryAfter time.Duration }
 func (e *EmbeddedOwnerLeaseHeld) Error() string { return "embedded owner lease held" }
 
 // AcquireEmbeddedOwner installs or confirms an owner claim on an already
-// bound session. In Stage 2 (lease elimination), it is a harmless identity
-// confirmation that validates the active session, increments the token, and
-// ensures the session remains active without locking out subsequent callers.
+// bound session. Same-owner confirmation preserves its token; changing owner
+// advances the durable execution fence. This does not restore lease exclusion.
 func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner string, ttl time.Duration) (int64, error) {
 	if owner == "" || len(owner) > 256 {
 		return 0, errors.New("invalid embedded owner lease")
 	}
 	var token int64
 	err := s.runImmediate(ctx, func() error {
-		if err := s.embeddedFence(ctx, b); err != nil {
+		// Acquisition is a control operation: validate session/runtime, not the
+		// prior runtime token. It is the operation that mints the successor fence.
+		control := b
+		control.OwnerToken = 0
+		if err := s.embeddedFence(ctx, control); err != nil {
 			return err
 		}
 		expires := formatTimestamp(s.clock.Now().Add(100 * 365 * 24 * time.Hour))
-		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=CASE WHEN owner_token<=0 THEN 1 ELSE owner_token END,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation)
+		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=CASE WHEN owner_token<=0 THEN 1 WHEN owner_id IS NOT ? THEN owner_token+1 ELSE owner_token END,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, owner, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation)
 		if err != nil {
 			return err
 		}
@@ -804,6 +818,13 @@ func embeddedBody(body []byte) error {
 // appendEmbeddedTx runs only inside runImmediate. The caller checks its binding
 // and expected head in the same transaction as the insert.
 func (s *Store) appendEmbeddedTx(ctx context.Context, b EmbeddedBinding, kind string, body []byte, expectedSeq int64, expectedDigest string) (EmbeddedEntry, error) {
+	return s.appendEmbeddedAdmittedTx(ctx, b, kind, body, expectedSeq, expectedDigest, s.clock.Now().UnixMilli())
+}
+
+func (s *Store) appendEmbeddedAdmittedTx(ctx context.Context, b EmbeddedBinding, kind string, body []byte, expectedSeq int64, expectedDigest string, admittedAt int64) (EmbeddedEntry, error) {
+	if admittedAt <= 0 {
+		return EmbeddedEntry{}, errors.New("invalid retention admission time")
+	}
 	if kind == "" || len(kind) > 64 {
 		return EmbeddedEntry{}, errors.New("invalid embedded entry kind")
 	}
@@ -824,7 +845,7 @@ func (s *Store) appendEmbeddedTx(ctx context.Context, b EmbeddedBinding, kind st
 	}
 	e := EmbeddedEntry{Sequence: seq + 1, ParentDigest: digest, Kind: kind, Body: bytes.Clone(body)}
 	e.Digest = embeddedEntryDigest(b, e)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_entries(agent_id,session_id,epoch,generation,seq,parent_digest,kind,body,digest) VALUES(?,?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, e.Sequence, e.ParentDigest, e.Kind, e.Body, e.Digest)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_entries(agent_id,session_id,epoch,generation,seq,parent_digest,kind,body,digest,retention_admitted_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, e.Sequence, e.ParentDigest, e.Kind, e.Body, e.Digest, admittedAt)
 	return e, err
 }
 func (s *Store) embeddedHead(ctx context.Context, b EmbeddedBinding) (int64, string, error) {
@@ -1118,6 +1139,13 @@ func (s *Store) embeddedGoalInvocationFenceTx(ctx context.Context, w *EmbeddedGo
 	if err := s.embeddedFence(ctx, w.binding); err != nil {
 		return err
 	}
+	var revision int64
+	if err := s.db.QueryRowContext(ctx, `SELECT desired_revision FROM managed_agent_policies WHERE agent_id=?`, w.binding.AgentID).Scan(&revision); err != nil {
+		return err
+	}
+	if err := s.embeddedEvidenceReplayTx(ctx, w.binding, EmbeddedGoalEvaluationKey{UserSeq: w.userSeq, UserDigest: w.userDigest, GoalRevision: revision}, w.id); err != nil {
+		return err
+	}
 	var process int64
 	if err := s.db.QueryRowContext(ctx, `SELECT generation FROM embedded_process_generation_counter WHERE singleton=1`).Scan(&process); err != nil {
 		return err
@@ -1163,7 +1191,7 @@ func (s *Store) RecordEmbeddedGoalInvocation(ctx context.Context, b EmbeddedBind
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
 	}
-	if id == "" || len(id) > 256 || embeddedBody(intent) != nil || json.Unmarshal(intent, &call) != nil || call.ID != id || (call.Name != "goal" && call.Name != "goal_snooze") {
+	if id == "" || len(id) > 256 || embeddedBody(intent) != nil || json.Unmarshal(intent, &call) != nil || call.ID != id || (call.Name != "goal" && call.Name != "goal_snooze" && call.Name != "workflow_snooze") {
 		return nil, errors.New("invalid goal invocation intent")
 	}
 	if call.Name == "goal" && call.Arguments["action"] != "set" && call.Arguments["action"] != "off" {
@@ -1240,6 +1268,17 @@ func (s *Store) checkEmbeddedGoalInvocationDomainTx(ctx context.Context, w *Embe
 	}
 	if err != nil {
 		return err
+	}
+	if w.name == "workflow_snooze" {
+		var p EmbeddedGoalSnoozePreference
+		if err = json.Unmarshal([]byte(payload), &p); err != nil {
+			return err
+		}
+		expected, err := p.WorkflowResultJSON()
+		if err != nil {
+			return err
+		}
+		payload = string(expected)
 	}
 	if !bytes.Equal([]byte(text.Text), []byte(payload)) {
 		return errors.New("goal invocation result differs from successful domain transaction")
