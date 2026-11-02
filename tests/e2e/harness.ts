@@ -27,7 +27,7 @@ export interface IsolatedRouter {
   websocketUrl: string;
   process: ChildProcess;
   close: () => Promise<void>;
-  restart: () => Promise<void>;
+  restart: (prepareDatabase?: (databasePath: string) => Promise<void>) => Promise<void>;
   advanceClock: (deltaMs: number) => Promise<{ now: string; advanced_ms: number }>;
 }
 
@@ -349,9 +349,11 @@ export async function startIsolatedRouter(options: {
     httpUrl,
     websocketUrl,
     get process() { return ownedChild!; },
-    restart: async () => {
+    restart: async (prepareDatabase) => {
       if (closing) throw new Error("Cannot restart a closed isolated router");
       await stop();
+      // Upgrade fixtures may replace SQLite only after its owning process exits.
+      if (prepareDatabase) await prepareDatabase(databasePath);
       try { await launch(); } catch (error) { await stop(); throw error; }
     },
     advanceClock,

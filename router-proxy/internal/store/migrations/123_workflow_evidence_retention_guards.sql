@@ -1,4 +1,6 @@
 -- Pending acceptance has a finite immutable lifetime, independent of call churn.
+-- Older databases can be missing predecessor guards. Replace them whether or
+-- not they survived earlier upgrades; every new guard is installed atomically.
 -- One database-wide legacy horizon, copied once onto existing session metadata.
 -- New sessions have no legacy grace. No history/ledger or refreshed deadline.
 ALTER TABLE embedded_sessions ADD COLUMN legacy_evidence_expires_at_ms INTEGER NOT NULL DEFAULT 0 CHECK(legacy_evidence_expires_at_ms>=0);
@@ -13,7 +15,7 @@ ALTER TABLE embedded_goal_continuations ADD COLUMN retention_expires_at_ms INTEG
 -- Migration-time legacy drain is frozen once; original saved D is not changed.
 -- The legacy guard rejects even state-preserving UPDATEs. Suspend only that
 -- guard for this backfill, then restore its exact definition in this transaction.
-DROP TRIGGER embedded_goal_continuation_transition;
+DROP TRIGGER IF EXISTS embedded_goal_continuation_transition;
 UPDATE embedded_goal_continuations SET retention_expires_at_ms=COALESCE((
  SELECT MAX(e.retention_admitted_at_ms+2592000000,COALESCE(CAST(ROUND((julianday(embedded_goal_continuations.due_at)-2440587.5)*86400000) AS INTEGER),e.retention_admitted_at_ms+2592000000))+2592000000
  FROM embedded_entries e WHERE e.agent_id=embedded_goal_continuations.agent_id AND e.session_id=embedded_goal_continuations.session_id AND e.epoch=embedded_goal_continuations.epoch AND e.generation=embedded_goal_continuations.generation AND e.seq=embedded_goal_continuations.user_seq AND e.digest=embedded_goal_continuations.user_digest AND e.kind='user'
@@ -58,7 +60,7 @@ FROM embedded_goal_continuations c JOIN embedded_goal_evaluations v USING(agent_
 JOIN embedded_retention_turns t USING(agent_id,session_id,epoch,generation,user_seq,user_digest)
 LEFT JOIN embedded_goal_snooze_preferences p USING(agent_id,session_id,epoch,generation,user_seq,user_digest,goal_revision)
 WHERE c.state='reserved' AND v.state='NOT_DONE' AND c.retention_expires_at_ms>t.evidence_expired_through_ms+2592000000;
-DROP TRIGGER embedded_goal_receipt_immutable_delete;
+DROP TRIGGER IF EXISTS embedded_goal_receipt_immutable_delete;
 CREATE TRIGGER embedded_goal_receipt_immutable_delete BEFORE DELETE ON embedded_goal_applied_receipts
 WHEN EXISTS(SELECT 1 FROM managed_agents WHERE agent_id=OLD.agent_id) AND
 ((NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.turn_entry_seq AND t.user_digest=OLD.turn_entry_digest AND t.retention_admitted_at_ms<=t.evidence_expired_through_ms) AND NOT (EXISTS(SELECT 1 FROM embedded_retention_legacy_drained_sessions s WHERE s.agent_id=OLD.agent_id AND s.session_id=OLD.session_id AND s.epoch=OLD.epoch AND s.generation=OLD.generation) AND NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.turn_entry_seq AND t.user_digest=OLD.turn_entry_digest))) OR EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=OLD.agent_id AND x.session_id=OLD.session_id AND x.epoch=OLD.epoch AND x.generation=OLD.generation AND x.user_seq=OLD.turn_entry_seq AND x.user_digest=OLD.turn_entry_digest AND x.goal_revision=OLD.goal_revision))
@@ -66,7 +68,7 @@ BEGIN SELECT RAISE(ABORT,'retention evidence is immutable while protected'); END
 CREATE TRIGGER embedded_goal_applied_receipts_retention_insert BEFORE INSERT ON embedded_goal_applied_receipts
 WHEN NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=NEW.agent_id AND t.session_id=NEW.session_id AND t.epoch=NEW.epoch AND t.generation=NEW.generation AND t.user_seq=NEW.turn_entry_seq AND t.user_digest=NEW.turn_entry_digest AND t.retention_admitted_at_ms>t.evidence_expired_through_ms)
 BEGIN SELECT RAISE(ABORT,'retention-expired embedded evidence'); END;
-DROP TRIGGER embedded_goal_evaluation_immutable_delete;
+DROP TRIGGER IF EXISTS embedded_goal_evaluation_immutable_delete;
 CREATE TRIGGER embedded_goal_evaluation_immutable_delete BEFORE DELETE ON embedded_goal_evaluations
 WHEN EXISTS(SELECT 1 FROM managed_agents WHERE agent_id=OLD.agent_id) AND
 ((NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest AND t.retention_admitted_at_ms<=t.evidence_expired_through_ms) AND NOT (EXISTS(SELECT 1 FROM embedded_retention_legacy_drained_sessions s WHERE s.agent_id=OLD.agent_id AND s.session_id=OLD.session_id AND s.epoch=OLD.epoch AND s.generation=OLD.generation) AND NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest))) OR EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=OLD.agent_id AND x.session_id=OLD.session_id AND x.epoch=OLD.epoch AND x.generation=OLD.generation AND x.user_seq=OLD.user_seq AND x.user_digest=OLD.user_digest AND x.goal_revision=OLD.goal_revision AND x.final_seq=OLD.final_seq AND x.final_digest=OLD.final_digest))
@@ -77,7 +79,7 @@ BEGIN SELECT RAISE(ABORT,'retention-expired embedded evidence'); END;
 CREATE TRIGGER embedded_goal_evaluations_retention_update BEFORE UPDATE ON embedded_goal_evaluations
 WHEN NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=NEW.agent_id AND t.session_id=NEW.session_id AND t.epoch=NEW.epoch AND t.generation=NEW.generation AND t.user_seq=NEW.user_seq AND t.user_digest=NEW.user_digest AND t.retention_admitted_at_ms>t.evidence_expired_through_ms) AND NOT EXISTS(SELECT 1 FROM embedded_execution_closures x WHERE x.agent_id=NEW.agent_id AND x.session_id=NEW.session_id AND x.epoch=NEW.epoch AND x.generation=NEW.generation AND x.user_seq=NEW.user_seq AND x.user_digest=NEW.user_digest AND x.goal_revision=NEW.goal_revision AND x.final_seq=NEW.final_seq AND x.final_digest=NEW.final_digest)
 BEGIN SELECT RAISE(ABORT,'retention-expired embedded evidence'); END;
-DROP TRIGGER embedded_goal_continuation_no_delete;
+DROP TRIGGER IF EXISTS embedded_goal_continuation_no_delete;
 CREATE TRIGGER embedded_goal_continuation_no_delete BEFORE DELETE ON embedded_goal_continuations
 WHEN EXISTS(SELECT 1 FROM managed_agents WHERE agent_id=OLD.agent_id) AND
 ((NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest AND t.retention_admitted_at_ms<=t.evidence_expired_through_ms) AND NOT (EXISTS(SELECT 1 FROM embedded_retention_legacy_drained_sessions s WHERE s.agent_id=OLD.agent_id AND s.session_id=OLD.session_id AND s.epoch=OLD.epoch AND s.generation=OLD.generation) AND NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest))) OR EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=OLD.agent_id AND x.session_id=OLD.session_id AND x.epoch=OLD.epoch AND x.generation=OLD.generation AND x.user_seq=OLD.user_seq AND x.user_digest=OLD.user_digest AND x.goal_revision=OLD.goal_revision))
@@ -85,7 +87,7 @@ BEGIN SELECT RAISE(ABORT,'retention evidence is immutable while protected'); END
 CREATE TRIGGER embedded_goal_continuations_retention_insert BEFORE INSERT ON embedded_goal_continuations
 WHEN NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=NEW.agent_id AND t.session_id=NEW.session_id AND t.epoch=NEW.epoch AND t.generation=NEW.generation AND t.user_seq=NEW.user_seq AND t.user_digest=NEW.user_digest AND t.retention_admitted_at_ms>t.evidence_expired_through_ms)
 BEGIN SELECT RAISE(ABORT,'retention-expired embedded evidence'); END;
-DROP TRIGGER embedded_goal_snooze_call_no_delete;
+DROP TRIGGER IF EXISTS embedded_goal_snooze_call_no_delete;
 CREATE TRIGGER embedded_goal_snooze_call_no_delete BEFORE DELETE ON embedded_goal_snooze_calls
 WHEN EXISTS(SELECT 1 FROM managed_agents WHERE agent_id=OLD.agent_id) AND
 ((NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest AND t.retention_admitted_at_ms<=t.evidence_expired_through_ms) AND NOT (EXISTS(SELECT 1 FROM embedded_retention_legacy_drained_sessions s WHERE s.agent_id=OLD.agent_id AND s.session_id=OLD.session_id AND s.epoch=OLD.epoch AND s.generation=OLD.generation) AND NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest))) OR EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=OLD.agent_id AND x.session_id=OLD.session_id AND x.epoch=OLD.epoch AND x.generation=OLD.generation AND x.user_seq=OLD.user_seq AND x.user_digest=OLD.user_digest AND x.goal_revision=OLD.goal_revision AND x.call_id=OLD.call_id))
@@ -93,7 +95,7 @@ BEGIN SELECT RAISE(ABORT,'retention evidence is immutable while protected'); END
 CREATE TRIGGER embedded_goal_snooze_calls_retention_insert BEFORE INSERT ON embedded_goal_snooze_calls
 WHEN NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=NEW.agent_id AND t.session_id=NEW.session_id AND t.epoch=NEW.epoch AND t.generation=NEW.generation AND t.user_seq=NEW.user_seq AND t.user_digest=NEW.user_digest AND t.retention_admitted_at_ms>t.evidence_expired_through_ms)
 BEGIN SELECT RAISE(ABORT,'retention-expired embedded evidence'); END;
-DROP TRIGGER embedded_goal_snooze_preference_no_delete;
+DROP TRIGGER IF EXISTS embedded_goal_snooze_preference_no_delete;
 CREATE TRIGGER embedded_goal_snooze_preference_no_delete BEFORE DELETE ON embedded_goal_snooze_preferences
 WHEN EXISTS(SELECT 1 FROM managed_agents WHERE agent_id=OLD.agent_id) AND
 ((NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest AND t.retention_admitted_at_ms<=t.evidence_expired_through_ms) AND NOT (EXISTS(SELECT 1 FROM embedded_retention_legacy_drained_sessions s WHERE s.agent_id=OLD.agent_id AND s.session_id=OLD.session_id AND s.epoch=OLD.epoch AND s.generation=OLD.generation) AND NOT EXISTS(SELECT 1 FROM embedded_retention_turns t WHERE t.agent_id=OLD.agent_id AND t.session_id=OLD.session_id AND t.epoch=OLD.epoch AND t.generation=OLD.generation AND t.user_seq=OLD.user_seq AND t.user_digest=OLD.user_digest))) OR EXISTS(SELECT 1 FROM embedded_retention_closures x WHERE x.agent_id=OLD.agent_id AND x.session_id=OLD.session_id AND x.epoch=OLD.epoch AND x.generation=OLD.generation AND x.user_seq=OLD.user_seq AND x.user_digest=OLD.user_digest AND x.goal_revision=OLD.goal_revision))
