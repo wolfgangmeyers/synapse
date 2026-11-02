@@ -287,7 +287,6 @@ export function isKnownMockOrigin(origin) {
   if (
     origin === "https://oauth2.googleapis.com" ||
     origin === "https://www.googleapis.com" ||
-    origin === "https://daily-cloudcode-pa.googleapis.com" ||
     origin === "https://aiplatform.googleapis.com" ||
     origin.endsWith("-aiplatform.googleapis.com")
   ) {
@@ -510,92 +509,6 @@ function configureMockAgent(undiciPkg) {
         statusCode: 200,
         data: { email },
       };
-    })
-    .persist();
-
-  // 3. Cloud Code Assist: loadCodeAssist (SYNC reply)
-  const cloudClient = agent.get("https://daily-cloudcode-pa.googleapis.com");
-  cloudClient
-    .intercept({ path: "/v1internal:loadCodeAssist", method: "POST" })
-    .reply((_opts) => {
-      if (process.env.MECHA_TEST_MOCK_FAIL_CODEASSIST === "true") {
-        return {
-          statusCode: 500,
-          data: { error: { message: "Internal server error" } },
-        };
-      }
-
-      const projectId =
-        process.env.MECHA_TEST_MOCK_PROJECT_ID || "synthetic-antigravity-project";
-      return {
-        statusCode: 200,
-        data: {
-          cloudaicompanionProject: { id: projectId },
-        },
-      };
-    })
-    .persist();
-
-  // 4. Cloud Code Assist: listCloudAICompanionProjects (SYNC reply)
-  cloudClient
-    .intercept({ path: "/v1internal:listCloudAICompanionProjects", method: "POST" })
-    .reply((_opts) => {
-      const projectId =
-        process.env.MECHA_TEST_MOCK_PROJECT_ID || "synthetic-antigravity-project";
-      return {
-        statusCode: 200,
-        data: {
-          projects: [{ id: projectId }],
-        },
-      };
-    })
-    .persist();
-
-  // 5. Cloud Code Assist: fetchAvailableModels (SYNC reply)
-  cloudClient
-    .intercept({ path: "/v1internal:fetchAvailableModels", method: "POST" })
-    .reply((_opts) => {
-      return {
-        statusCode: 200,
-        data: {
-          models: {
-            "gemini-3.8-flash": { displayName: "Gemini 3.8 Flash (Low)" },
-          },
-        },
-      };
-    })
-    .persist();
-
-  // 6. Cloud Code Assist: streamGenerateContent (exact bounded streaming endpoint)
-  const streamChunk =
-    process.env.MECHA_TEST_MOCK_STREAM_CHUNK || "synthetic streaming response from antigravity";
-  const sseData =
-    `data: ` +
-    JSON.stringify({
-      response: {
-        candidates: [
-          {
-            content: { parts: [{ text: streamChunk }] },
-            finishReason: "STOP",
-          },
-        ],
-      },
-    }) +
-    `\n\n`;
-
-  cloudClient
-    .intercept({
-      path: (p) =>
-        p === "/v1internal:streamGenerateContent?alt=sse" ||
-        p === "/v1internal:streamGenerateContent" ||
-        p === "/v1internal:streamGenerateCode",
-      method: "POST",
-    })
-    .reply(200, sseData, {
-      headers: {
-        "content-type": "text/event-stream; charset=utf-8",
-        "cache-control": "no-cache",
-      },
     })
     .persist();
 

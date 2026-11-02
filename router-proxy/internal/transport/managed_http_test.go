@@ -208,7 +208,6 @@ func (r *providerAuthHTTPRun) Respond(ctx context.Context, promptID, value strin
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
 		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
-		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: false, Status: "signed_out"},
 	}, Models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}}}
 	close(r.events)
 	r.finish()

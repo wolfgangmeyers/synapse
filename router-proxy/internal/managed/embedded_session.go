@@ -1545,7 +1545,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			// Production resolution has no generic-provider fallback.
 			return ai.StreamSimple(requestCtx, injectedStreamModel, ai.Context{Messages: transcript.Messages}, opts)
 		}
-		if requestModel.Provider == "antigravity" || requestModel.Provider == "google" {
+		if requestModel.Provider == "google" {
 			return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
 		}
 		if requestModel.Provider == "google-vertex" {

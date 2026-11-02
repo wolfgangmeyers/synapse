@@ -67,6 +67,9 @@ func ValidateSelectedModel(model Model) error {
 
 func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (Model, error) {
 	available := func(candidate Model) bool {
+		if candidate.Provider == "antigravity" {
+			return false
+		}
 		for _, model := range catalog.Models {
 			if model.Provider == candidate.Provider && model.ID == candidate.ID && model.Available {
 				return true
@@ -165,18 +168,12 @@ func CatalogFromModels(models ...Model) ModelSource {
 	return ModelSourceFunc(func(context.Context) (Catalog, error) { return Catalog{Models: append([]Model(nil), models...)}, nil })
 }
 
-// ResolveModel returns the ai.Model configuration matching the saved model
-// selection. It handles Antigravity/Google provider aliasing while strictly
-// preserving the configured Provider, provides fallback metadata for Antigravity
-// models not in the catalog, and returns an error without cross-provider fallback.
+// ResolveModel resolves supported selections without cross-provider fallback.
 func ResolveModel(saved store.ManagedModel) (*ai.Model, error) {
-	if saved.Provider == "" || saved.ID == "" {
+	if !validProviderAuthProvider(saved.Provider) || saved.ID == "" {
 		return nil, &modelUnavailableError{Provider: saved.Provider, ID: saved.ID}
 	}
 	model := ai.GetModel(saved.Provider, saved.ID)
-	if model == nil && (saved.Provider == "antigravity" || saved.Provider == "google") {
-		model = ai.GetModel("google", saved.ID)
-	}
 	if model == nil && (saved.Provider == "google" || saved.Provider == "google-vertex") && strings.HasPrefix(saved.ID, "gemini-") {
 		api := "google-generative-ai"
 		if saved.Provider == "google-vertex" {
@@ -188,19 +185,6 @@ func ResolveModel(saved store.ManagedModel) (*ai.Model, error) {
 			Api:           api,
 			ContextWindow: 1048576,
 			MaxTokens:     65536,
-		}
-	}
-	if model == nil && saved.Provider == "antigravity" {
-		maxTokens := 8192
-		if strings.HasPrefix(saved.ID, "gemini-4-") || saved.ID == "gemini-4-argon" {
-			maxTokens = 65536
-		}
-		model = &ai.Model{
-			ID:            saved.ID,
-			Provider:      "antigravity",
-			Api:           "google-generative-ai",
-			ContextWindow: 1048576,
-			MaxTokens:     maxTokens,
 		}
 	}
 	if model == nil {

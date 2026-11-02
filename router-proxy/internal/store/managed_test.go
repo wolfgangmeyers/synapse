@@ -756,16 +756,15 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
 
-	// Verify initial baseline snapshot contains all 5 default signed-out providers
+	// Verify initial baseline snapshot contains all 4 supported signed-out providers
 	initialSnapshot, err := durable.ManagedProviderSnapshot(ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), initialSnapshot.AuthRevision)
-	require.Len(t, initialSnapshot.Providers, 5)
+	require.Len(t, initialSnapshot.Providers, 4)
 	for _, expected := range []struct {
 		provider string
 		label    string
 	}{
-		{"antigravity", "Google Antigravity"},
 		{"cursor", "Cursor"},
 		{"google", "Google"},
 		{"google-vertex", "Google Vertex AI"},
@@ -789,14 +788,12 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: true, Status: "authenticated"},
 		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
-		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: true, Status: "authenticated", AccountLabel: "user@gmail.com"},
 	}
 	models := []ManagedProviderModel{
 		{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true},
 		{Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true},
 		{Provider: "cursor", ID: "claude-fable-5-1@1m", Name: "Claude Fable 5.1 @ 1m", Available: true},
 		{Provider: "cursor", ID: "claude-opus-4-7@1m:fast", Name: "Claude Opus 4.7 (fast) @ 1m", Available: true},
-		{Provider: "antigravity", ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Available: true},
 	}
 	revision, err := durable.CommitManagedProviderSnapshot(ctx, providers, models)
 	require.NoError(t, err)
@@ -804,13 +801,13 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	snapshot, err := durable.ManagedProviderSnapshot(ctx)
 	require.NoError(t, err)
 	require.Equal(t, revision, snapshot.AuthRevision)
-	require.Len(t, snapshot.Providers, 5)
+	require.Len(t, snapshot.Providers, 4)
 	require.ElementsMatch(t, models, snapshot.Models)
 
 	// Invalid input fails before the transaction, retaining the old catalog and
 	// revision rather than creating auth history or a partial provider state.
-	_, err = durable.CommitManagedProviderSnapshot(ctx, providers[:4], nil)
-	require.ErrorContains(t, err, "exactly five providers")
+	_, err = durable.CommitManagedProviderSnapshot(ctx, providers[:3], nil)
+	require.ErrorContains(t, err, "exactly four providers")
 	after, err := durable.ManagedProviderSnapshot(ctx)
 	require.NoError(t, err)
 	require.Equal(t, snapshot, after)
@@ -832,7 +829,7 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	// Duplicate provider rejected
 	dupProvider := make([]ManagedProviderStatus, len(providers))
 	copy(dupProvider, providers)
-	dupProvider[4] = dupProvider[0]
+	dupProvider[3] = dupProvider[0]
 	_, err = durable.CommitManagedProviderSnapshot(ctx, dupProvider, nil)
 	require.ErrorContains(t, err, "provider status is invalid")
 

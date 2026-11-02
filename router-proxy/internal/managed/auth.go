@@ -97,7 +97,7 @@ func NewProviderAuthCoordinator(durable *store.Store, manager *Manager, helper P
 }
 
 func validProviderAuthProvider(provider string) bool {
-	return provider == "openai-codex" || provider == "google" || provider == "cursor" || provider == "google-vertex" || provider == "antigravity"
+	return provider == "openai-codex" || provider == "google" || provider == "cursor" || provider == "google-vertex"
 }
 
 func (a *ProviderAuthCoordinator) SetPublisher(publish func(ProviderAuthEvent)) {

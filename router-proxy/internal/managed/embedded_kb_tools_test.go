@@ -441,4 +441,68 @@ Footer notes and guidelines.`
 	require.Contains(t, updatedIndex, "Footer notes and guidelines.")
 }
 
+func TestResolveKBRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		dirs  []string
+		files []string
+		env   string
+		want  string
+	}{
+		{name: "default", want: ".mecha-developer/kb"},
+		{name: "blank env", env: " \t ", want: ".mecha-developer/kb"},
+		{name: "canonical", dirs: []string{".mecha-developer/kb"}, want: ".mecha-developer/kb"},
+		{name: "canonical precedes fallback", dirs: []string{".mecha-developer/kb", ".mecha/kb", ".unknown-kb-source/kb"}, want: ".mecha-developer/kb"},
+		{name: "supported fallback", dirs: []string{".mecha/kb"}, want: ".mecha/kb"},
+		{name: "unsupported only", dirs: []string{".unknown-kb-source/kb"}, want: ".mecha-developer/kb"},
+		{name: "fallback precedes unsupported", dirs: []string{".unknown-kb-source/kb", ".mecha/kb"}, want: ".mecha/kb"},
+		{name: "canonical file", dirs: []string{".mecha/kb"}, files: []string{".mecha-developer/kb"}, want: ".mecha/kb"},
+		{name: "fallback file", files: []string{".mecha/kb"}, want: ".mecha-developer/kb"},
+		{name: "env precedence and cleaning", dirs: []string{".mecha-developer/kb", ".mecha/kb"}, env: "  custom/../chosen  ", want: "chosen"},
+		{name: "explicit unsupported path allowed", env: ".unknown-kb-source/kb", want: ".unknown-kb-source/kb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("MECHA_KB_DIR", tc.env)
+			for _, dir := range tc.dirs {
+				require.NoError(t, os.MkdirAll(filepath.Join(home, dir), 0o700))
+			}
+			for _, file := range tc.files {
+				path := filepath.Join(home, file)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, os.WriteFile(path, []byte("not a directory"), 0o600))
+			}
+			want := tc.want
+			if strings.TrimSpace(tc.env) == "" {
+				want = filepath.Join(home, want)
+			}
+			require.Equal(t, want, ResolveKBRoot())
+		})
+	}
+}
 
+func TestKBTools_UnsupportedRootIgnored(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("MECHA_KB_DIR", "")
+	unsupported := filepath.Join(home, ".unknown-kb-source", "kb")
+	require.NoError(t, os.MkdirAll(unsupported, 0o700))
+	path := filepath.Join(unsupported, "unsupported-topic.md")
+	content := []byte("# Unsupported topic\n\nPreserve this document.\n")
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+
+	mgr := &Manager{}
+	result, err := mgr.embeddedKBReadTool(embeddedOwner{}).Execute(context.Background(), "read-unsupported", map[string]any{"topic": "unsupported-topic"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Knowledge base file not found: unsupported-topic", result.Content[0].(ai.TextContent).Text)
+	require.Equal(t, filepath.Join(home, ".mecha-developer", "kb"), ResolveKBRoot())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, content, data)
+	entries, err := os.ReadDir(unsupported)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	_, err = os.Stat(filepath.Join(home, ".mecha-developer"))
+	require.True(t, os.IsNotExist(err), "resolution and read must not create or migrate the canonical KB")
+}

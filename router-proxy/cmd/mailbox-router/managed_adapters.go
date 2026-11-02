@@ -159,9 +159,6 @@ func (h fixedAuthHelper) environment() []string {
 	if cloudSDK := os.Getenv("CLOUDSDK_CONFIG"); cloudSDK != "" {
 		environment = append(environment, "CLOUDSDK_CONFIG="+cloudSDK)
 	}
-	if h.config.AntigravityExtension != "" {
-		environment = append(environment, "MECHA_ANTIGRAVITY_EXTENSION="+h.config.AntigravityExtension)
-	}
 	return environment
 }
 
@@ -292,7 +289,7 @@ type helperWirePrompt struct {
 
 // safeProviderPromptURL admits only the authorized OAuth endpoints needed to
 // complete sign-in (auth.openai.com for openai-codex, and
-// accounts.google.com/o/oauth2/v2/auth for antigravity). Every other helper-owned
+// no other OAuth hosts). Every other helper-owned
 // string remains untrusted display data, so an injected child cannot turn the
 // router UI into an open redirect.
 func safeProviderPromptURL(provider, raw string) string {
@@ -306,14 +303,6 @@ func safeProviderPromptURL(provider, raw string) string {
 	switch provider {
 	case "openai-codex":
 		if !strings.EqualFold(parsed.Hostname(), "auth.openai.com") {
-			return ""
-		}
-		return parsed.String()
-	case "antigravity":
-		if !strings.EqualFold(parsed.Hostname(), "accounts.google.com") {
-			return ""
-		}
-		if parsed.Path != "/o/oauth2/v2/auth" {
 			return ""
 		}
 		return parsed.String()

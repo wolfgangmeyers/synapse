@@ -177,7 +177,6 @@ describe("ProviderAuthDialog", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -201,10 +200,11 @@ describe("ProviderAuthDialog", () => {
     const optionValues = Array.from(optionElements).map((opt) => opt.value);
     expect(optionValues).toContain("api_key");
     expect(optionValues).toContain("vertex_adc");
-    expect(optionValues).toContain("antigravity");
+    expect(optionValues).not.toContain("antigravity");
+    expect(optionValues).toHaveLength(2);
   });
 
-  it("initializes auth method to first authenticated provider in priority order: google -> google-vertex -> antigravity, hiding dropdown when connected", async () => {
+  it("initializes auth method to first authenticated provider in priority order: google -> google-vertex, hiding dropdown when connected", async () => {
     const client = clientFixture();
 
     // Case 1: google authenticated, others also authenticated -> priority 1 is api_key, dropdown hidden
@@ -214,7 +214,6 @@ describe("ProviderAuthDialog", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: true, status: "authenticated", account_label: "proj-1", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: true, status: "authenticated", account_label: "user@test.com", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -231,7 +230,6 @@ describe("ProviderAuthDialog", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: true, status: "authenticated", account_label: "proj-1", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: true, status: "authenticated", account_label: "user@test.com", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -240,22 +238,6 @@ describe("ProviderAuthDialog", () => {
     expect(render2.queryByLabelText(/google authentication method/i)).not.toBeInTheDocument();
     render2.unmount();
 
-    // Case 3: google and vertex signed_out, antigravity authenticated -> priority 3 is antigravity, dropdown hidden
-    client.providerAuthMock.mockResolvedValue({
-      auth_revision: 5,
-      providers: [
-        { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
-        { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: true, status: "authenticated", account_label: "user@test.com", updated_at: timestamp },
-        { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
-      ],
-    });
-    const render3 = render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    expect(await render3.findByText(/user@test\.com/i)).toBeInTheDocument();
-    expect(render3.queryByLabelText(/google authentication method/i)).not.toBeInTheDocument();
-    render3.unmount();
-
     // Case 4: all disconnected -> dropdown visible, defaults to api_key
     client.providerAuthMock.mockResolvedValue({
       auth_revision: 5,
@@ -263,7 +245,6 @@ describe("ProviderAuthDialog", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -281,7 +262,6 @@ describe("ProviderAuthDialog", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", account_label: "gcp-production-project", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", account_label: "user@domain.com", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -299,11 +279,6 @@ describe("ProviderAuthDialog", () => {
     expect(methodSelect).toHaveValue("vertex_adc");
     expect(screen.getByText(/gcloud auth application-default login/i)).toBeInTheDocument();
 
-    // Switch to Antigravity: MUST NOT call client.startProviderAuth or mutate credentials
-    await user.selectOptions(methodSelect, "antigravity");
-    expect(client.startProviderAuth).not.toHaveBeenCalled();
-    expect(methodSelect).toHaveValue("antigravity");
-    expect(screen.queryByText(/gcloud auth application-default login/i)).not.toBeInTheDocument();
   });
 
   it("independent logout only signs out the selected Google provider without affecting others", async () => {
@@ -315,7 +290,6 @@ describe("ProviderAuthDialog", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: true, status: "authenticated", account_label: "my-gcp-project", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: true, status: "authenticated", account_label: "wolfgang@google.com", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ],
     });
@@ -381,43 +355,6 @@ describe("ProviderAuthDialog", () => {
     await user.type(regionInput, "us-east4");
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(client.respondProviderAuth).toHaveBeenCalledWith("op-v1", "p-reg", "us-east4");
-  });
-
-  it("handles Antigravity OAuth prompt with safe authorization link, manual callback paste, and cancel", async () => {
-    const user = userEvent.setup();
-    const client = clientFixture();
-    const onPromptHandled = vi.fn();
-    const prompt: ProviderAuthPromptFrame = {
-      type: "provider_auth_prompt",
-      protocol: "mecha.web/v1",
-      projection_version: 1,
-      operation_id: "op-ag-1",
-      provider: "antigravity",
-      prompt: {
-        id: "ag-paste",
-        kind: "text",
-        message: "Paste callback URL or authorization code",
-        url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=ag-client",
-      },
-    };
-
-    const { rerender } = render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={onPromptHandled} />);
-    const link = screen.getByRole("link", { name: /open.*sign-in page/i });
-    expect(link).toHaveAttribute("href", "https://accounts.google.com/o/oauth2/v2/auth?client_id=ag-client");
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link).toHaveAttribute("rel", "noopener noreferrer");
-
-    const pasteInput = screen.getByLabelText("Paste callback URL or authorization code");
-    expect(pasteInput).toHaveAttribute("type", "text");
-    await user.type(pasteInput, "http://localhost:51121/oauth-callback?code=test-code");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(client.respondProviderAuth).toHaveBeenCalledWith("op-ag-1", "ag-paste", "http://localhost:51121/oauth-callback?code=test-code");
-    expect(onPromptHandled).toHaveBeenCalledOnce();
-
-    // Cancel path
-    rerender(<ProviderAuthDialog open client={client} prompt={{ ...prompt, operation_id: "op-ag-cancel" }} onClose={() => undefined} onPromptHandled={onPromptHandled} />);
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(client.cancelProviderAuth).toHaveBeenCalledWith("op-ag-cancel"));
   });
 
   it("handles prompt submission failure gracefully and reports error status", async () => {
@@ -527,34 +464,6 @@ describe("ProviderAuthDialog", () => {
     expect(screen.queryByText("ChatGPT")).not.toBeInTheDocument();
     expect(screen.queryByText("Cursor")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
-  });
-
-  it("shows clean waiting state without confusing input for automated browser sign-in", async () => {
-    const client = clientFixture();
-    const prompt: ProviderAuthPromptFrame = {
-      type: "provider_auth_prompt",
-      protocol: "mecha.web/v1",
-      projection_version: 1,
-      operation_id: "op-auto-1",
-      provider: "antigravity",
-      prompt: {
-        id: "ag-auto",
-        kind: "text",
-        message: "Enter the requested sign-in value.",
-        url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=ag-client",
-      },
-    };
-
-    render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={() => undefined} />);
-    expect(await screen.findByRole("link", { name: /open.*sign-in page/i })).toBeInTheDocument();
-    // Should show waiting state
-    expect(screen.getByText("Waiting for sign-in to complete…")).toBeInTheDocument();
-    // Should NOT show confusing input or generic message asking for sign-in value
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.queryByText("Enter the requested sign-in value.")).not.toBeInTheDocument();
-    // Should NOT have Continue button, only Cancel button
-    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
   });
 
   it("opens custom dropdowns and allows selecting methods and models", async () => {

@@ -90,7 +90,7 @@ describe("ManagedAgentDialog", () => {
   it.each([
     ["google", "gemini-2.5-flash", "Gemini 2.5 Flash"],
     ["google-vertex", "gemini-2.5-flash", "Gemini 2.5 Flash \\(Vertex\\)"],
-    ["antigravity", "gemini-3.8-flash", "Gemini 3.8 Flash \\(Antigravity\\)"],
+    ["google-vertex", "gemini-3.8-flash", "Gemini 3.8 Flash \\(Antigravity\\)"],
   ])("launches %s model with rpc runtime instead of embedded", async (provider, id, namePattern) => {
     const user = userEvent.setup();
     const onLaunch = vi.fn(async () => undefined);
@@ -154,8 +154,8 @@ describe("ManagedAgentDialog", () => {
 
     resolveModels({
       auth_revision: 1,
-      default_model: { provider: "antigravity", id: "gemini-3.8-flash" },
-      models: [{ provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini", available: true }],
+      default_model: { provider: "google-vertex", id: "gemini-3.8-flash" },
+      models: [{ provider: "google-vertex", id: "gemini-3.8-flash", name: "Gemini", available: true }],
     });
     await waitFor(() => expect(launchBtn).not.toBeDisabled());
     await user.click(launchBtn);

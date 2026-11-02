@@ -1060,7 +1060,7 @@ export interface HistoryEntryFrame {
   view: "quiet" | "complete";
   entry: ManagedHistoryEntry;
 }
-export type ManagedProvider = "openai-codex" | "google" | "cursor" | "google-vertex" | "antigravity";
+export type ManagedProvider = "openai-codex" | "google" | "cursor" | "google-vertex";
 
 export interface ProviderAuthPrompt {
   id: string;
