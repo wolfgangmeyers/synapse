@@ -64,6 +64,16 @@ ROOT_OPERATION_CONTRACT: dict[str, dict[str, frozenset[str] | None | bool]] = {
 }
 
 
+UNAVAILABLE_OPERATIONS = frozenset({
+    "ops.state", "ops.priority", "ops.verification_handoff",
+    "ops.pr_status", "ops.git_status", "mail.parent",
+})
+
+
+def operation_unavailable(operation: str, arguments: dict[str, Any]) -> bool:
+    return operation in UNAVAILABLE_OPERATIONS or (operation == "ops.worker" and arguments.get("action") != "send")
+
+
 def validate_operation_dispatch(operation: str, arguments: dict[str, Any]) -> None:
     contract = ROOT_OPERATION_CONTRACT.get(operation)
     if contract is None:
@@ -80,8 +90,6 @@ def validate_operation_dispatch(operation: str, arguments: dict[str, Any]) -> No
             raise ValueError(f"{operation} action is invalid")
     elif arguments.get("action") not in actions:
         raise ValueError(f"{operation} action is invalid")
-    if contract["available"] is not True:
-        raise ValueError(f"{operation} is unavailable")
 
 
 def canonical(value: Any) -> str:
@@ -480,6 +488,8 @@ def managed_reminder(arguments: dict[str, Any], fence: dict[str, Any]) -> dict[s
 
 def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str, settings: dict[str, Any], request_id: str, fence: dict[str, Any]) -> dict[str, Any]:
     validate_operation_dispatch(operation, arguments)
+    if operation_unavailable(operation, arguments):
+        return result("error", f"{operation} is unavailable in this checkout.", {"operation": operation}, "ROOT_OPERATION_UNAVAILABLE")
     action = arguments.get("action")
     if operation == "ops.state":
         if action == "query":
@@ -529,7 +539,7 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
             return invoke_script("worker_lifecycle.py", [action, "--alias", identifier(arguments.get("alias"), "alias")])
         if action == "list":
             return invoke_script("worker_list.py", [])
-        values = ["--to", identifier(arguments.get("worker"), "worker"), "--body", text(arguments.get("message"), "message"), "--from", agent_id]
+        values = ["--to", identifier(arguments.get("worker"), "worker"), "--body", text(arguments.get("message"), "message"), "--from", agent_id, "--managed-control-request-id", identifier(request_id, "request_id")]
         if arguments.get("subject") is not None:
             values += ["--subject", text(arguments["subject"], "subject")]
         return invoke_script("mailbox_send.py", values)

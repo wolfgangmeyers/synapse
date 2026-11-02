@@ -8,13 +8,13 @@ import { createRouterReminderReader, lockedReminderResult } from "./reminder-loc
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 export function resolveSupervisorTools(extensionDirectory = HERE) {
-  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  const adjacentTools = join(extensionDirectory, "tools");
   try {
     if (statSync(adjacentTools).isDirectory()) return adjacentTools;
   } catch {
     // A missing or inaccessible bundled path is safe to ignore; use the checkout layout below.
   }
-  return join(extensionDirectory, "..", "..", ".claude", "skills", "supervisor", "tools");
+  return join(extensionDirectory, "..", "..", "tools");
 }
 
 const SUPERVISOR_TOOLS = resolveSupervisorTools();
@@ -54,6 +54,7 @@ const CREDENTIAL_KEY_CONTEXT = new Set(["access", "api", "auth", "client", "encr
 
 class OperationalInputError extends TypeError {}
 class OperationalActionError extends Error {}
+class OperationalUnavailableError extends OperationalActionError {}
 
 type JsonObject = Record<string, unknown>;
 type CursorToolMetadata = { promptSnippet?: string; promptGuidelines?: string[] };
@@ -405,7 +406,7 @@ function failure(error: unknown): { content: [{ type: "text"; text: string }]; d
   const expected = error instanceof OperationalInputError || error instanceof OperationalActionError;
   return {
     content: [{ type: "text", text: boundedOutput(expected ? error.message : "Operational action failed.") }],
-    details: {},
+    details: error instanceof OperationalUnavailableError ? { error_code: "ROOT_OPERATION_UNAVAILABLE" } : {},
     isError: true,
   };
 }
@@ -552,6 +553,7 @@ export function createOperationalToolDefinitions({
   const python = environment.PYTHON || "python3";
   const runScript = async (scriptPath: string, args: string[] = []): Promise<string> => {
     if (!Object.values(SCRIPT_PATHS).includes(scriptPath)) throw new OperationalActionError("operational script is not allowlisted");
+    if (scriptPath !== SCRIPT_PATHS.workerSend) throw new OperationalUnavailableError("Legacy supervisor operation is unavailable in this checkout.");
     const result = await runFile(python, [scriptPath, ...args], { env: environment });
     return processOutput(result?.stdout, result?.stderr);
   };
@@ -867,7 +869,9 @@ export function createOperationalToolDefinitions({
       if (input.action === "launch" || input.action === "cleanup") {
         return success(await runScript(SCRIPT_PATHS.workerLifecycle, [input.action, "--alias", workerId(input.alias, "alias")]));
       }
-      const args = ["--to", id(input.worker, "worker"), "--body", text(input.message, "message")];
+      const sender = resolveCurrentAgentId() || environment.MECHA_AGENT_ID;
+      if (!sender) throw new OperationalActionError("Mailbox sender identity is unavailable.");
+      const args = ["--to", id(input.worker, "worker"), "--body", text(input.message, "message"), "--from", id(sender, "sender")];
       if (input.subject !== undefined) args.push("--subject", text(input.subject, "subject", 200));
       return success(await runScript(SCRIPT_PATHS.workerSend, args));
     }),
