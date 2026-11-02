@@ -135,6 +135,16 @@ func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding
 	}
 }
 
+// Retire runtime scheduling only after the store has durably invalidated old work.
+func (m *Manager) retireEmbeddedGoalTimer(agentID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if timer := m.embeddedGoalTimers[agentID]; timer != nil {
+		timer.cancel()
+		delete(m.embeddedGoalTimers, agentID)
+	}
+}
+
 func (m *Manager) startEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey) {
 	m.startEmbeddedGoalContinuationWithPrompt(binding, key, "")
 }
@@ -206,13 +216,10 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 		lane.goalAttempt = 20
 	}
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
-	prompt := overridePrompt
-	if prompt == "" {
-		prompt = m.formatGoalContinuationPrompt(ctx, owner.binding, &key)
-	}
+
 	// Start committed UNKNOWN before any SDK provider request. An error or
 	// process loss cannot authorize replay; the saved transcript is evidence.
-	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key)
+	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, overridePrompt, nil, &key)
 }
 
 func (m *Manager) hasActiveSubagents(agentID string) bool {
@@ -274,6 +281,12 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 
+	// Empty turns own their keyed re-nudges. A fresh idle prompt can overtake
+	// the queued verdict and must not bypass the third-empty circuit breaker.
+	if lane.consecutiveEmptyTurns > 0 {
+		return
+	}
+
 	maxContinuations := m.maxConsecutiveGoalContinuations
 	if maxContinuations <= 0 {
 		maxContinuations = defaultMaxConsecutiveGoalContinuations
@@ -318,12 +331,20 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 		return
 	}
 
-	if hasPending, err := m.store.HasPendingWakeOrStartedContinuation(m.runCtx, owner.binding); err == nil && hasPending {
+	hasPending, err := m.store.HasPendingWakeOrStartedContinuation(m.runCtx, owner.binding)
+	if err != nil {
+		return
+	}
+	if hasPending {
 		log.Printf("kickoffIdleGoalContinuation: agent %s has pending wake or started continuation", agentID)
 		return
 	}
 
-	if key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding); err == nil && found {
+	key, found, err := m.store.LatestReservedEmbeddedGoalContinuation(m.runCtx, owner.binding)
+	if err != nil {
+		return
+	}
+	if found {
 		m.startManagedTask(func() {
 			m.startEmbeddedGoalContinuation(owner.binding, key)
 		})
@@ -332,6 +353,9 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding, nil)
+	if prompt == "" {
+		return
+	}
 	lane.consecutiveContinuations++
 	lane.goalAttempt++
 	if lane.goalAttempt > 20 {
@@ -346,7 +370,36 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 const goalContinuationDefaultPrompt = "Continue working on the current goal."
 const goalContinuationNoSubagentsNoticePrompt = "Continue working on the current goal. Notice: There are NO active subagents running. To launch a subagent, you must invoke the subagent tool directly via the API. Otherwise, execute tools (bash, read, edit) directly to make progress on the goal."
 
+func (m *Manager) workflowContinuationGuidance(ctx context.Context, agent *store.ManagedAgentRecord) string {
+	wfName := "Workflow"
+	if agent.ActiveWorkflowID != "" {
+		if wf, err := m.store.GetWorkflow(ctx, agent.ActiveWorkflowID); err == nil && wf != nil && wf.Name != "" {
+			wfName = wf.Name
+		}
+	}
+	stateName := "active"
+	if agent.ActiveWorkflowStateID != "" {
+		if st, err := m.store.GetWorkflowState(ctx, agent.ActiveWorkflowStateID); err == nil && st != nil && st.Name != "" {
+			stateName = st.Name
+		}
+	}
+	return fmt.Sprintf("The workflow %s is currently active in state %s. You must either make progress towards completing the workflow or call workflow_snooze.", wfName, stateName)
+}
+
+// An empty prompt means the workflow authority could not be read. Callers must
+// suppress dispatch, not substitute ordinary goal guidance or replay a start.
 func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding store.EmbeddedBinding, key *store.EmbeddedGoalEvaluationKey) string {
+	if m.store != nil {
+		curAgent, err := m.store.ManagedAgent(ctx, binding.AgentID)
+		if err != nil {
+			log.Printf("[embedded:%s] read managed agent for goal continuation prompt: %v; suppressing dispatch without replay", binding.AgentID, err)
+			return ""
+		}
+		if curAgent != nil && (curAgent.ActiveWorkflowID != "" || curAgent.ActiveWorkflowStateID != "") {
+			return m.workflowContinuationGuidance(ctx, curAgent)
+		}
+	}
+
 	goal := ""
 	if m.store != nil {
 		if policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID); err == nil && policy != nil && policy.Config.Goal != "" {

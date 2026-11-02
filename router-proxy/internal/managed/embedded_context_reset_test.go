@@ -414,6 +414,7 @@ func TestExplicitContextResetToolInvocation(t *testing.T) {
 				return providers.FauxAssistantMessage(ai.ContentList{
 					providers.FauxToolCall("context_reset", map[string]any{
 						"reason": "clean_context_checkpoint",
+						"window": DefaultPreservedContextWindow,
 					}, "call-reset-1"),
 				}, ai.StopToolUse)
 			}

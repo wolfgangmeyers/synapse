@@ -4956,7 +4956,7 @@ func loadManagedActiveWorkflowStateIDTx(ctx context.Context, db *sql.DB, agent *
 	return nil
 }
 
-func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID string, workflowStateID *string) error {
+func (s *Store) setManagedAgentActiveWorkflowStateTx(ctx context.Context, agentID string, workflowStateID *string) error {
 	hasCol, err := managedAgentColumnTx(ctx, s.db, "active_workflow_state_id")
 	if err != nil {
 		return err
@@ -5021,7 +5021,7 @@ func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID 
 	return nil
 }
 
-func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, agentID string, workflowID *string, workflowStateID *string, vars map[string]string) error {
+func (s *Store) setManagedAgentActiveWorkflowWithVariablesTx(ctx context.Context, agentID string, workflowID *string, workflowStateID *string, vars map[string]string) error {
 	hasStateCol, err := managedAgentColumnTx(ctx, s.db, "active_workflow_state_id")
 	if err != nil {
 		return err
@@ -6129,3 +6129,45 @@ func (s *Store) TimeoutStuckLaunches(ctx context.Context, timeout time.Duration)
 }
 
 var _ = fmt.Sprintf
+
+// SetManagedAgentActiveWorkflowState commits binding and old snooze retirement
+// together. Started continuations retain their unknown-outcome replay fences.
+func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID string, stateID *string) error {
+	if stateID != nil && *stateID == "" {
+		stateID = nil
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := s.setManagedAgentActiveWorkflowStateTx(ctx, agentID, stateID); err != nil {
+			return err
+		}
+		return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
+	})
+}
+
+func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, agentID string, workflowID, stateID *string, vars map[string]string) error {
+	if stateID != nil && *stateID == "" {
+		stateID = nil
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := s.setManagedAgentActiveWorkflowWithVariablesTx(ctx, agentID, workflowID, stateID, vars); err != nil {
+			return err
+		}
+		return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
+	})
+}
+
+func (s *Store) retireEmbeddedGoalSnoozeEvidenceTx(ctx context.Context, agentID string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_snooze_preferences SET active=0 WHERE agent_id=? AND active=1`, agentID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_continuations SET state='invalidated',disposition='invalidated' WHERE agent_id=? AND state='reserved'`, agentID)
+	return err
+}
+
+func (s *Store) retireWorkflowSnoozeTx(ctx context.Context, agentID string, deactivate bool) error {
+	if err := s.retireEmbeddedGoalSnoozeEvidenceTx(ctx, agentID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET snoozed_until=NULL,next_wakeup_at=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,goal_enabled=CASE WHEN ? THEN 0 ELSE goal_enabled END,goal_text=CASE WHEN ? THEN '' ELSE goal_text END,settings_json=CASE WHEN ? THEN json_set(settings_json,'$.goal_lock_enabled',json('false')) ELSE settings_json END,updated_at=? WHERE agent_id=?`, deactivate, deactivate, deactivate, formatTimestamp(s.clock.Now()), agentID)
+	return err
+}

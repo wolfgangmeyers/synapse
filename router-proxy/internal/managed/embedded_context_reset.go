@@ -184,6 +184,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 	}
 
 	var sessionMessages []agent.AgentMessage
+	var sessionEntries []store.EmbeddedEntry
 	for _, entry := range snap.Entries {
 		msg, err := ai.UnmarshalMessage(entry.Body)
 		if err != nil {
@@ -191,6 +192,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		}
 		if msg.MessageRole() != ai.RoleSystem {
 			sessionMessages = append(sessionMessages, msg)
+			sessionEntries = append(sessionEntries, entry)
 		}
 	}
 
@@ -204,8 +206,10 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 
 	// Port the last targetWindow messages (skipping an orphaned leading tool result).
 	var portedMessages []agent.AgentMessage
+	var portedEntries []store.EmbeddedEntry
 	if len(sessionMessages) <= targetWindow {
 		portedMessages = sessionMessages
+		portedEntries = sessionEntries
 	} else {
 		startIdx := len(sessionMessages) - targetWindow
 		// Ensure we don't start on an orphaned tool result
@@ -214,6 +218,7 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		}
 		if startIdx < len(sessionMessages) {
 			portedMessages = sessionMessages[startIdx:]
+			portedEntries = sessionEntries[startIdx:]
 		}
 	}
 
@@ -312,18 +317,10 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		}
 	}
 
-	// Append ported recent messages
-	for _, msg := range portedMessages {
-		body, err := json.Marshal(msg)
-		if err != nil {
-			continue
-		}
-		roleKind := string(msg.MessageRole())
-		if roleKind == "" {
-			roleKind = "user"
-		}
-		if _, err := m.store.AppendEmbeddedEntry(ctx, nextBinding, roleKind, body); err != nil {
-			return fmt.Errorf("append ported message: %w", err)
+	// Import validated saved rows, not SDK JSON timestamps or remarshaled bodies.
+	for _, entry := range portedEntries {
+		if _, err := m.store.AppendImportedEmbeddedEntry(ctx, nextBinding, binding, entry.Sequence, entry.Digest); err != nil {
+			return fmt.Errorf("import ported message: %w", err)
 		}
 	}
 

@@ -24,7 +24,7 @@ import (
 // compaction implementation is injected into this production composition.
 // SDK sessions and owned dispatch retain a validated pinned Codex identity.
 // Only token/window metadata and the external provider adapter are synthetic.
-func productionPolicyManager(t *testing.T, db *store.Store, root string, reg *providers.FauxProviderRegistration) *Manager {
+func productionPolicyManager(t *testing.T, db *store.Store, root string, reg *providers.FauxProviderRegistration, continuationLimit ...int) *Manager {
 	t.Helper()
 	// Snapshot/restore the external API adapter, without replacing selection or
 	// weakening the admission owner's Codex guard. Resolve request-scoped auth
@@ -51,10 +51,15 @@ func productionPolicyManager(t *testing.T, db *store.Store, root string, reg *pr
 	t.Cleanup(func() { ai.RegisterApiProvider(previous) })
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
+	maxContinuations := 0 // Preserve the production default for other callers.
+	if len(continuationLimit) > 0 {
+		maxContinuations = continuationLimit[0]
+	}
 	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest,
-		Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-		GoalContinuationDelay: 20 * time.Millisecond,
+		Config:                          Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+		CatalogSource:                   CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		GoalContinuationDelay:           20 * time.Millisecond,
+		MaxConsecutiveGoalContinuations: maxContinuations,
 		EmbeddedModelResolver: func(saved store.ManagedAgentRecord) *ai.Model {
 			pinned := ai.GetModel(saved.SelectedModel.Provider, saved.SelectedModel.ID)
 			require.NotNil(t, pinned)
@@ -129,7 +134,7 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 				steps[i] = respond
 			}
 			reg.SetResponses(steps)
-			m := productionPolicyManager(t, db, root, reg)
+			m := productionPolicyManager(t, db, root, reg, 1)
 			defer m.Close(ctx)
 			launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "production-goal", Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "set the fixture goal", RequestID: "b5555555-5555-4555-8555-555555555581"})
 			require.NoError(t, err)
@@ -167,18 +172,27 @@ func TestEmbeddedProductionGoalEvaluationBounded(t *testing.T) {
 					}, 3*time.Second, 10*time.Millisecond)
 				}
 			}
+			if verdict == "NOT_DONE" || verdict == "invalid" {
+				// A checked final precedes its asynchronous evaluation. Close cancels
+				// that work; it is not a settlement barrier. Cap dispatch at one
+				// continuation, but require both distinct finals to be evaluated.
+				require.Eventually(t, func() bool {
+					var n int
+					return read.QueryRow(`SELECT count(*) FROM embedded_goal_evaluations e JOIN embedded_entries u ON u.agent_id=e.agent_id AND u.session_id=e.session_id AND u.epoch=e.epoch AND u.generation=e.generation AND u.seq=e.user_seq AND u.digest=e.user_digest JOIN embedded_entries f ON f.agent_id=e.agent_id AND f.session_id=e.session_id AND f.epoch=e.epoch AND f.generation=e.generation AND f.seq=e.final_seq AND f.digest=e.final_digest WHERE e.agent_id=? AND e.state='NOT_DONE' AND u.kind='user' AND f.kind='assistant' AND json_extract(f.body,'$.stopReason')='stop'`, launched.Agent.AgentID).Scan(&n) == nil && n == 2
+				}, 3*time.Second, 10*time.Millisecond, "both checked user/final identities must settle before shutdown")
+			}
 			if verdict == "invalid" {
 				m.mu.Lock()
 				owner := m.embeddedOwners[launched.Agent.AgentID]
 				m.mu.Unlock()
 				var key store.EmbeddedGoalEvaluationKey
-				require.NoError(t, read.QueryRow(`SELECT user_seq,user_digest,goal_revision,final_seq,final_digest FROM embedded_goal_evaluations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&key.UserSeq, &key.UserDigest, &key.GoalRevision, &key.FinalSeq, &key.FinalDigest))
+				require.NoError(t, read.QueryRow(`SELECT user_seq,user_digest,goal_revision,final_seq,final_digest FROM embedded_goal_evaluations WHERE agent_id=? ORDER BY user_seq LIMIT 1`, launched.Agent.AgentID).Scan(&key.UserSeq, &key.UserDigest, &key.GoalRevision, &key.FinalSeq, &key.FinalDigest))
 				evaluation, claimed, e := db.ClaimEmbeddedGoalEvaluation(ctx, owner.binding, key)
 				require.NoError(t, e)
 				require.False(t, claimed)
 				require.Equal(t, store.EmbeddedGoalEvaluationNotDone, evaluation.State)
 			}
-			require.NoError(t, m.Close(ctx)) // joins evaluator/continuation; exact counts after settlement
+			require.NoError(t, m.Close(ctx)) // cancels and joins only after the required durable settlement
 			require.EqualValues(t, map[bool]int{true: 3, false: 2}[verdict == "OFF"], ordinary.Load())
 			if verdict == "OFF" {
 				require.Zero(t, evaluations.Load())

@@ -48,6 +48,9 @@ func (s *Store) CommitEmbeddedGoalAppliedReceipt(ctx context.Context, b Embedded
 	}
 	replay := false
 	err := s.runImmediate(ctx, func() error {
+		if err := s.embeddedEvidenceReplayTx(ctx, b, EmbeddedGoalEvaluationKey{UserSeq: request.TurnEntrySeq, UserDigest: request.TurnEntryDigest, GoalRevision: request.GoalRevision}, ""); err != nil {
+			return err
+		}
 		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
 		}

@@ -100,74 +100,8 @@ func unknownContinuationFixture(t *testing.T, tool, head string) (*Store, Embedd
 	return s, b, k, clock, unknownID
 }
 
-// Both exact original and current checked neutral heads must reject unresolved
-// generic UNKNOWN, including exact completed goal/snooze DOMAIN receipts.
-func TestEmbeddedGoalContinuationUnknownFailClosed(t *testing.T) {
-	t.Skip("simplified continuation guards in Step 2 allow continuation without unproven effect lineage checks")
-	for _, head := range []string{"original", "neutral"} {
-		for _, tool := range []string{"goal", "goal_snooze", "bash"} {
-			t.Run(head+"/"+tool, func(t *testing.T) {
-				ctx := context.Background()
-				s, b, k, clock, id := unknownContinuationFixture(t, tool, head)
-				original, err := s.embeddedEvaluationRow(ctx, b, k)
-				require.NoError(t, err)
-				reservation, err := s.EmbeddedGoalContinuationFor(ctx, b, k)
-				require.NoError(t, err)
-				require.True(t, reservation.DueAt.Valid)
-				require.Equal(t, "reserved", reservation.State)
-				require.Equal(t, "pending", reservation.Disposition)
-				require.Empty(t, reservation.StartedAt)
-				require.NoError(t, clock.Advance(time.Second-time.Millisecond))
-				_, started, err := s.StartEmbeddedGoalContinuation(ctx, b, k)
-				require.NoError(t, err)
-				require.False(t, started)
-				require.NoError(t, clock.Advance(time.Millisecond))
-				unknown, err := s.RecoverEmbeddedEffect(ctx, b, id)
-				require.NoError(t, err)
-				require.Equal(t, "unknown", unknown.State)
-				require.False(t, unknown.ShouldReplay)
-				require.Equal(t, 1, embeddedRedCount(t, s, "embedded_effects"))
-				before, err := s.ReopenEmbedded(ctx, b)
-				require.NoError(t, err)
-				policyBefore, err := s.ManagedGoalPolicyFor(ctx, b.AgentID)
-				require.NoError(t, err)
-				versionBefore, err := s.GetProjectionVersion(ctx)
-				require.NoError(t, err)
-				var domainsBefore string
-				domainQuery := `SELECT json_object('goal',(SELECT json_group_array(json_object('id',call_id,'state',state,'result',result_json)) FROM embedded_goal_calls),'snooze',(SELECT json_group_array(json_object('id',call_id,'result',result_json)) FROM embedded_goal_snooze_calls))`
-				require.NoError(t, s.db.QueryRow(domainQuery).Scan(&domainsBefore))
-				for retry := 0; retry < 2; retry++ {
-					_, started, err = s.StartEmbeddedGoalContinuation(ctx, b, k)
-					require.False(t, started)
-					require.ErrorContains(t, err, "continuation unproven effect lineage")
-					after, readErr := s.ReopenEmbedded(ctx, b)
-					require.NoError(t, readErr)
-					require.Equal(t, before, after)
-					stillUnknown, readErr := s.RecoverEmbeddedEffect(ctx, b, id)
-					require.NoError(t, readErr)
-					require.Equal(t, unknown, stillUnknown, "denial preserves every effect field and nonreplay")
-					evaluation, readErr := s.embeddedEvaluationRow(ctx, b, k)
-					require.NoError(t, readErr)
-					require.Equal(t, original, evaluation)
-					require.Equal(t, 1, embeddedRedCount(t, s, "embedded_goal_evaluations"))
-					continued, readErr := s.EmbeddedGoalContinuationFor(ctx, b, k)
-					require.NoError(t, readErr)
-					require.Equal(t, reservation, continued, "denial cannot consume original-key due CAS")
-					policyAfter, readErr := s.ManagedGoalPolicyFor(ctx, b.AgentID)
-					require.NoError(t, readErr)
-					require.Equal(t, policyBefore, policyAfter)
-					versionAfter, readErr := s.GetProjectionVersion(ctx)
-					require.NoError(t, readErr)
-					require.Equal(t, versionBefore, versionAfter)
-					var domainsAfter string
-					require.NoError(t, s.db.QueryRow(domainQuery).Scan(&domainsAfter))
-					require.Equal(t, domainsBefore, domainsAfter)
-				}
-			})
-		}
-	}
-}
-
+// Historical blanket UNKNOWN continuation denial is retired. See
+// embedded_continuation_surviving_guards_test.go for unchanged/no-replay safety.
 func TestEmbeddedGoalContinuationEffectFreeHeadControls(t *testing.T) {
 	for _, head := range []string{"original", "neutral"} {
 		for _, control := range []string{"due", "off", "revision", "stale-owner"} {

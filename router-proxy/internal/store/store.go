@@ -266,6 +266,15 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := chmodStateFiles(databasePath); err != nil {
 		return closeOnError(err)
 	}
+	var retentionSchema int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE id='123_workflow_evidence_retention_guards'`).Scan(&retentionSchema); err != nil {
+		return closeOnError(err)
+	}
+	if retentionSchema == 1 {
+		if err := store.runImmediate(ctx, func() error { return store.pruneEmbeddedEvidenceTx(ctx) }); err != nil {
+			return closeOnError(err)
+		}
+	}
 	return store, nil
 }
 
@@ -1099,7 +1108,40 @@ func (s *Store) runImmediateWithCommitOutcome(ctx context.Context, operation fun
 		return false, true, cause
 	}
 	if err := operation(); err != nil {
-		return rollback(err)
+		committed, conclusive, cause := rollback(err)
+		// A denial must not roll back the surviving clock fence. All domain
+		// effects rolled back above; persist only cutoff/call-freeze metadata.
+		if conclusive && !committed && strings.Contains(cause.Error(), "retention-expired") {
+			var present int
+			if checkErr := s.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE id='123_workflow_evidence_retention_guards'`).Scan(&present); checkErr != nil {
+				return committed, conclusive, errors.Join(cause, checkErr)
+			}
+			if present == 1 {
+				if _, e := s.db.ExecContext(ctx, "BEGIN IMMEDIATE"); e != nil {
+					return committed, conclusive, errors.Join(cause, e)
+				}
+				e := s.refreshEmbeddedExecutionCallsTx(ctx)
+				if e == nil {
+					cutoff := s.clock.Now().UnixMilli() - embeddedEvidenceAgeMS
+					if cutoff < 0 {
+						cutoff = 0
+					}
+					_, e = s.db.ExecContext(ctx, `UPDATE embedded_sessions SET evidence_expired_through_ms=MAX(evidence_expired_through_ms,?)`, cutoff)
+				}
+				if e == nil {
+					_, e = s.db.ExecContext(ctx, "COMMIT")
+				}
+				if e != nil {
+					// A failed COMMIT can leave SQLite's transaction active too.
+					// Cleanup concerns metadata only, not the rolled-back domain.
+					if _, rollbackErr := s.db.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+						e = errors.Join(e, fmt.Errorf("metadata rollback failed: %w", rollbackErr))
+					}
+					return committed, conclusive, errors.Join(cause, e)
+				}
+			}
+		}
+		return committed, conclusive, cause
 	}
 	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {
 		return rollback(err)
@@ -1176,6 +1218,9 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 	var result SweepResult
 	if err := s.runImmediate(ctx, func() error {
 		now := s.clock.Now()
+		if err := s.pruneEmbeddedEvidenceIfPresentTx(ctx); err != nil {
+			return err
+		}
 		nowText := formatTimestamp(now)
 		var err error
 		result.StaleAgents, err = s.pruneStaleAgents(ctx, nowText)

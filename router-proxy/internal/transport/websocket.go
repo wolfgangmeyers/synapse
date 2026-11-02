@@ -1275,6 +1275,18 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 	if s.role != "user_interaction" {
 		return s.sendError("goal_control_not_allowed", frameString(frame, "frame_id"))
 	}
+	// Managed workers need not have a legacy WS session. Reject manual workflow
+	// mutation for the exact current managed session before legacy resolution;
+	// this does not create an embedded dispatch path or borrow a legacy lease.
+	action := frameString(frame, "action")
+	if action == "set" || action == "off" {
+		agent, err := r.store.ManagedAgent(context.Background(), frameString(frame, "target_agent_id"))
+		if err == nil && agent != nil && agent.PiSessionID != "" &&
+			agent.PiSessionID == frameString(frame, "target_instance_id") &&
+			(agent.ActiveWorkflowID != "" || agent.ActiveWorkflowStateID != "") {
+			return s.sendError("WORKFLOW_ACTIVE", frameString(frame, "frame_id"))
+		}
+	}
 	target, targetError := r.findControlTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
 	if targetError != "" {
 		return s.sendError(targetError, frameString(frame, "frame_id"))

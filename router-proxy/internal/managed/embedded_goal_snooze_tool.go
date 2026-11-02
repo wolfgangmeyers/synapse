@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
@@ -14,7 +15,7 @@ import (
 
 func embeddedGoalSnoozeSchema() *ai.Schema {
 	closed := false
-	s := ai.Object(ai.Prop("duration_ms", ai.Integer()))
+	s := ai.Object(ai.Opt("duration_ms", ai.Integer()))
 	s.AdditionalAllowed = &closed
 	return s
 }
@@ -30,6 +31,13 @@ func embeddedGoalSnoozeArguments(args map[string]any, limitMsOpt ...int64) ([]by
 	}
 	if limitMs > store.EmbeddedGoalSnoozeMaxDurationMS {
 		limitMs = store.EmbeddedGoalSnoozeMaxDurationMS
+	}
+
+	// Reject lossy numeric conversion before applying the existing configured cap.
+	for _, key := range []string{"duration_ms", "duration"} {
+		if v, ok := args[key].(float64); ok && (math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < -9223372036854775808.0 || v >= 9223372036854775808.0) {
+			return nil, &store.EmbeddedGoalSnoozeDenial{Reason: "duration must be a finite representable integer"}
+		}
 	}
 
 	clampOrKeep := func(d int64) int64 {
@@ -181,9 +189,6 @@ func (m *Manager) embeddedGoalSnoozeTool(owner embeddedOwner, turn func() store.
 		}
 		if replay {
 			return agent.AgentToolResult{}, errors.New("goal snooze outcome already recorded: SDK result unknown")
-		}
-		if policy.DueAt != "" {
-			_ = m.store.SetManagedGoalSnoozeUntil(ctx, owner.binding.AgentID, policy.DueAt)
 		}
 		if m.embeddedAfterGoalCommit != nil {
 			m.embeddedAfterGoalCommit(ctx)

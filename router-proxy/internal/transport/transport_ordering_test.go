@@ -329,7 +329,9 @@ func newTransportOrderingFixture(t *testing.T) (*store.Store, *Router) {
 	durable, err := store.Open(context.Background(), dbPath, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
-	router, err := New(Options{Store: durable, Clock: clock})
+	// CloneTemplateDB skips migrations, so capability discovery cannot infer
+	// goal control from MigrationIDs. These control tests require it explicitly.
+	router, err := New(Options{Store: durable, Clock: clock, GoalControlAvailable: true})
 	require.NoError(t, err)
 	return durable, router
 }

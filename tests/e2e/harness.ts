@@ -21,6 +21,7 @@ export interface IsolatedRouter {
   root: string;
   databasePath: string;
   logPath: string;
+  readinessStderr: () => string;
   port: number;
   httpUrl: string;
   websocketUrl: string;
@@ -263,7 +264,9 @@ export async function startIsolatedRouter(options: {
     const escalation = setTimeout(() => child.kill("SIGKILL"), 2000);
     try { await closed; } finally { clearTimeout(escalation); }
   };
+  let readinessStderr = "";
   const launch = async () => {
+    readinessStderr = "";
     const child = spawn(binaryPath, args, {
       cwd: options.repoRoot,
       env: runtimeEnvironment,
@@ -279,8 +282,10 @@ export async function startIsolatedRouter(options: {
       const timeout = setTimeout(() => {
         if (!settled) {
           settled = true;
-          child.kill("SIGKILL");
-          rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`));
+          // A Go stack dump makes a blocked startup actionable; close still
+          // joins the actual executable before deleting its disposable root.
+          child.kill("SIGQUIT");
+          child.once("close", () => rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`)));
         }
       }, 15_000);
 
@@ -299,6 +304,11 @@ export async function startIsolatedRouter(options: {
       child.stdout.on("data", checkReady);
       child.stderr.on("data", (chunk) => {
         stderr += chunk.toString();
+        // Closed vocabulary only: never expose arbitrary helper stderr, auth,
+        // stack locals or credentials through readiness artifacts.
+        if (stderr.includes("managed provider status is unavailable")) {
+          readinessStderr = "managed provider status is unavailable";
+        }
       });
 
       child.once("close", (code) => {
@@ -334,6 +344,7 @@ export async function startIsolatedRouter(options: {
     root,
     databasePath,
     logPath,
+    readinessStderr: () => readinessStderr,
     port,
     httpUrl,
     websocketUrl,

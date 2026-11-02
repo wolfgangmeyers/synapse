@@ -57,6 +57,13 @@ func (s *Store) UpdateEmbeddedBrowserGoal(ctx context.Context, b EmbeddedBinding
 	}
 	var policy *ManagedGoalPolicy
 	err = s.embeddedBrowserControl(ctx, b, operation, func() error {
+		var workflow sql.NullString
+		if err := s.db.QueryRowContext(ctx, `SELECT active_workflow_id FROM managed_agents WHERE agent_id=?`, b.AgentID).Scan(&workflow); err != nil {
+			return err
+		}
+		if workflow.Valid && workflow.String != "" {
+			return errors.New("goal is locked while a workflow is active")
+		}
 		if len(expectedRevision) > 0 {
 			var current int64
 			err := s.db.QueryRowContext(ctx, `SELECT desired_revision FROM managed_agent_policies WHERE agent_id=?`, b.AgentID).Scan(&current)
