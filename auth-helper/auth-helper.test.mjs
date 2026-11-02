@@ -7,10 +7,8 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { parseRequest, parseResponse, projectCatalog, promptEvent, terminalResult } from "./protocol.mjs";
 
-import os from "node:os";
 
 const DEFAULT_PRELOAD = join(import.meta.dirname, "test-preload-mock-fetch.mjs");
-const CANONICAL_ANTIGRAVITY_PATH = join(os.homedir(), ".pi/agent/npm/node_modules/pi-antigravity/src/index.ts");
 
 async function runHelper(input, env = {}) {
   const child = spawn(process.execPath, [join(import.meta.dirname, "index.mjs")], {
@@ -22,7 +20,6 @@ async function runHelper(input, env = {}) {
       MECHA_HOST_HOME: env.MECHA_HOST_HOME || env.HOME,
       GOOGLE_APPLICATION_CREDENTIALS: env.GOOGLE_APPLICATION_CREDENTIALS,
       CLOUDSDK_CONFIG: env.CLOUDSDK_CONFIG,
-      MECHA_ANTIGRAVITY_EXTENSION: "MECHA_ANTIGRAVITY_EXTENSION" in env ? env.MECHA_ANTIGRAVITY_EXTENSION : CANONICAL_ANTIGRAVITY_PATH,
       NODE_OPTIONS: env.NODE_OPTIONS ?? `--import ${DEFAULT_PRELOAD}`,
       ...env.extraEnv,
     },
@@ -47,7 +44,6 @@ async function runHelperInteractive(initialLine, onPrompt, env = {}) {
       MECHA_HOST_HOME: env.MECHA_HOST_HOME || env.HOME,
       GOOGLE_APPLICATION_CREDENTIALS: env.GOOGLE_APPLICATION_CREDENTIALS,
       CLOUDSDK_CONFIG: env.CLOUDSDK_CONFIG,
-      MECHA_ANTIGRAVITY_EXTENSION: "MECHA_ANTIGRAVITY_EXTENSION" in env ? env.MECHA_ANTIGRAVITY_EXTENSION : CANONICAL_ANTIGRAVITY_PATH,
       NODE_OPTIONS: env.NODE_OPTIONS ?? `--import ${DEFAULT_PRELOAD}`,
       ...env.extraEnv,
     },
@@ -164,7 +160,6 @@ test("provider auth protocol binds each prompt and terminal snapshot to one mapp
       { provider: "google", label: "Google", authenticated: true, status: "authenticated" },
       { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out" },
       { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out" },
-      { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out" },
     ],
     models: [{ provider: "google", id: "gemini-test", name: "Gemini test", available: true }],
   });
@@ -198,7 +193,6 @@ test("one bounded JSONL request succeeds without leaking environment or credenti
       { provider: "google", label: "Google", authenticated: false, status: "signed_out" },
       { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out" },
       { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out" },
-      { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out" },
     ],
     models: [],
   });
@@ -524,277 +518,6 @@ test("Vertex AI ADC login accepts valid single host label regions including cust
 });
 
 
-test("Antigravity login executes OAuth PKCE, captures redirect, and stores account tokens", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  await writeFile(authPath, "{}", { mode: 0o600 });
-
-  let capturedPrompt = null;
-  // Test redirect path via loopback callback server
-  const result = await runHelperInteractive(
-    JSON.stringify({ operation: "login", operation_id: "op-ag-oauth", provider: "antigravity" }),
-    async (event) => {
-      capturedPrompt = event.prompt;
-      // Extract state from prompt URL
-      assert.ok(capturedPrompt.url);
-      const parsedUrl = new URL(capturedPrompt.url);
-      assert.equal(parsedUrl.hostname, "accounts.google.com");
-      assert.equal(parsedUrl.pathname, "/o/oauth2/v2/auth");
-      assert.ok(parsedUrl.searchParams.get("code_challenge"));
-      const state = parsedUrl.searchParams.get("state");
-      assert.ok(state);
-
-      // Hit local callback server on port 51121
-      const cbRes = await fetch(`http://localhost:51121/oauth-callback?state=${state}&code=synthetic-auth-code`);
-      assert.equal(cbRes.status, 200);
-
-      // The loopback callback wins, prompt does not need to return anything
-      return undefined;
-    },
-    { HOME: home, authPath }
-  );
-
-  assert.equal(result.exitCode, 0);
-  const terminal = result.events.find((e) => e.type === "terminal");
-  assert.ok(terminal);
-  assert.equal(terminal.status, "succeeded");
-  assert.equal(terminal.provider, "antigravity");
-  const agStatus = terminal.providers.find((p) => p.provider === "antigravity");
-  assert.ok(agStatus);
-  assert.equal(agStatus.authenticated, true);
-  assert.equal(agStatus.status, "authenticated");
-  assert.ok(terminal.models.some((m) => m.provider === "antigravity"));
-
-  const stored = JSON.parse(await readFile(authPath, "utf8"));
-  assert.ok(stored.antigravity);
-  assert.equal(stored.antigravity.type, "oauth");
-  assert.equal(stored.antigravity.email, "synthetic-user@example.com");
-  assert.equal(stored.antigravity.projectId, "synthetic-antigravity-project");
-  assert.equal(JSON.stringify(result.events).includes("synthetic-antigravity-access-token"), false);
-  assert.equal(JSON.stringify(result.events).includes("synthetic-antigravity-refresh-token"), false);
-});
-
-test("Antigravity login manual paste supports headless sessions", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  await writeFile(authPath, "{}", { mode: 0o600 });
-
-  const result = await runHelperInteractive(
-    JSON.stringify({ operation: "login", operation_id: "op-ag-paste", provider: "antigravity" }),
-    async (event) => {
-      const parsedUrl = new URL(event.prompt.url);
-      const state = parsedUrl.searchParams.get("state");
-      return `http://localhost:51121/oauth-callback?state=${state}&code=synthetic-auth-code`;
-    },
-    { HOME: home, authPath }
-  );
-
-  assert.equal(result.exitCode, 0);
-  const terminal = result.events.find((e) => e.type === "terminal");
-  assert.equal(terminal?.status, "succeeded");
-});
-
-test("Antigravity login rejects state mismatch on manual paste", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  await writeFile(authPath, "{}", { mode: 0o600 });
-
-  let tries = 0;
-  const result = await runHelperInteractive(
-    JSON.stringify({ operation: "login", operation_id: "op-ag-mismatch", provider: "antigravity" }),
-    async (event) => {
-      tries++;
-      if (tries === 1) {
-        // Send mismatched state
-        return `http://localhost:51121/oauth-callback?state=wrong-state&code=synthetic-code`;
-      }
-      // Recover with matching state on retry prompt
-      const parsedUrl = new URL(event.prompt.url);
-      const state = parsedUrl.searchParams.get("state");
-      return `http://localhost:51121/oauth-callback?state=${state}&code=synthetic-code`;
-    },
-    { HOME: home, authPath }
-  );
-
-  assert.equal(result.exitCode, 0);
-  assert.equal(tries, 2);
-});
-
-test("Antigravity login cancel/retry cleanup releases callback server", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  await writeFile(authPath, "{}", { mode: 0o600 });
-
-  // Start a login and abort it by closing child stdin or sending invalid input
-  const child = spawn(process.execPath, [join(import.meta.dirname, "index.mjs")], {
-    env: {
-      PATH: process.env.PATH,
-      HOME: home,
-      MECHA_PI_AUTH_PATH: authPath,
-      MECHA_ANTIGRAVITY_EXTENSION: CANONICAL_ANTIGRAVITY_PATH,
-      NODE_OPTIONS: `--import ${DEFAULT_PRELOAD}`,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  child.stdin.write(JSON.stringify({ operation: "login", operation_id: "op-ag-cancel", provider: "antigravity" }) + "\n");
-  // Wait a moment for server to listen on port 51121
-  await new Promise((r) => setTimeout(r, 200));
-  // Destroy child
-  child.kill("SIGKILL");
-  await new Promise((r) => child.once("close", r));
-
-  // Verify that port 51121 is free and a second login can start without EADDRINUSE
-  const result = await runHelperInteractive(
-    JSON.stringify({ operation: "login", operation_id: "op-ag-retry", provider: "antigravity" }),
-    async (event) => {
-      const parsedUrl = new URL(event.prompt.url);
-      const state = parsedUrl.searchParams.get("state");
-      return `http://localhost:51121/oauth-callback?state=${state}&code=synthetic-auth-code`;
-    },
-    { HOME: home, authPath }
-  );
-
-  assert.equal(result.exitCode, 0);
-  const terminal = result.events.find((e) => e.type === "terminal");
-  assert.equal(terminal?.status, "succeeded");
-});
-
-test("Multiple Google authentication methods coexist independently without cross-logout deletion", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  const hostHome = await mkdtemp(join(tmpdir(), "mecha-host-home-"));
-  const gcloudDir = join(hostHome, ".config", "gcloud");
-  await mkdir(gcloudDir, { recursive: true });
-  const hostAdc = join(gcloudDir, "application_default_credentials.json");
-  await writeFile(hostAdc, "{}");
-
-  // Seed auth.json with all 3 Google methods configured
-  await writeFile(authPath, JSON.stringify({
-    google: { type: "api_key", key: "google-api-key" },
-    "google-vertex": {
-      type: "api_key",
-      env: {
-        GOOGLE_CLOUD_PROJECT: "proj-1",
-        GOOGLE_CLOUD_LOCATION: "us-central1",
-        GOOGLE_APPLICATION_CREDENTIALS: hostAdc,
-      },
-    },
-    antigravity: {
-      type: "oauth",
-      access: "ag-access",
-      refresh: "ag-refresh",
-      expires: Date.now() + 3600_000,
-      email: "user@example.com",
-      projectId: "proj-ag",
-    },
-  }), { mode: 0o600 });
-
-  // 1. Snapshot shows all 3 authenticated
-  let result = await runHelper('{"operation":"models"}\n', { HOME: home, authPath, MECHA_HOST_HOME: hostHome });
-  assert.equal(result.exitCode, 0);
-  let snapshot = JSON.parse(result.stdout);
-  assert.equal(snapshot.providers.find((p) => p.provider === "google").authenticated, true);
-  assert.equal(snapshot.providers.find((p) => p.provider === "google-vertex").authenticated, true);
-  assert.equal(snapshot.providers.find((p) => p.provider === "antigravity").authenticated, true);
-
-  // 2. Logout of google: vertex and antigravity must remain authenticated
-  const logoutGoogle = await runHelper(
-    JSON.stringify({ operation: "logout", operation_id: "op-logout-google", provider: "google" }) + "\n",
-    { HOME: home, authPath, MECHA_HOST_HOME: hostHome }
-  );
-  assert.equal(logoutGoogle.exitCode, 0);
-  let stored = JSON.parse(await readFile(authPath, "utf8"));
-  assert.equal(stored.google, undefined);
-  assert.ok(stored["google-vertex"]);
-  assert.ok(stored.antigravity);
-
-  // 3. Logout of google-vertex: antigravity must remain authenticated
-  const logoutVertex = await runHelper(
-    JSON.stringify({ operation: "logout", operation_id: "op-logout-vertex", provider: "google-vertex" }) + "\n",
-    { HOME: home, authPath, MECHA_HOST_HOME: hostHome }
-  );
-  assert.equal(logoutVertex.exitCode, 0);
-  stored = JSON.parse(await readFile(authPath, "utf8"));
-  assert.equal(stored["google-vertex"], undefined);
-  assert.ok(stored.antigravity);
-
-  // 4. Logout of antigravity
-  const logoutAg = await runHelper(
-    JSON.stringify({ operation: "logout", operation_id: "op-logout-ag", provider: "antigravity" }) + "\n",
-    { HOME: home, authPath, MECHA_HOST_HOME: hostHome }
-  );
-  assert.equal(logoutAg.exitCode, 0);
-  stored = JSON.parse(await readFile(authPath, "utf8"));
-  assert.equal(stored.antigravity, undefined);
-});
-
-test("Missing Antigravity extension path disables provider registration without triggering external package install", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  await writeFile(authPath, "{}", { mode: 0o600 });
-
-  // Point extension to absent path
-  const absentPath = "/tmp/nonexistent-ag-extension-path/index.ts";
-
-  // Snapshot must succeed and return all 5 providers with antigravity signed_out
-  const result = await runHelper('{"operation":"models"}\n', {
-    HOME: home,
-    authPath,
-    MECHA_ANTIGRAVITY_EXTENSION: absentPath,
-  });
-  assert.equal(result.exitCode, 0);
-  const snapshot = JSON.parse(result.stdout);
-  assert.equal(snapshot.providers.length, 5);
-  const ag = snapshot.providers.find((p) => p.provider === "antigravity");
-  assert.ok(ag);
-  assert.equal(ag.authenticated, false);
-  assert.equal(ag.status, "signed_out");
-
-  // Attempting login to antigravity fails with actionable error
-  const loginResult = await runHelperInteractive(
-    JSON.stringify({ operation: "login", operation_id: "op-missing-ag", provider: "antigravity" }),
-    async () => "",
-    { HOME: home, authPath, MECHA_ANTIGRAVITY_EXTENSION: absentPath }
-  );
-  assert.equal(loginResult.exitCode, 1);
-  const terminal = loginResult.events.find((e) => e.type === "terminal");
-  assert.ok(terminal);
-  assert.equal(terminal.status, "failed");
-  assert.match(terminal.error, /Antigravity extension/i);
-});
-
-test("Catalog metadata snapshot should not force OAuth refresh", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-
-  // Seed expired token in auth.json
-  await writeFile(authPath, JSON.stringify({
-    antigravity: {
-      type: "oauth",
-      access: "expired-access-token",
-      refresh: "expired-refresh-token",
-      expires: Date.now() - 3600_000, // Expired 1 hour ago
-      email: "user@example.com",
-      projectId: "proj-1",
-    },
-  }), { mode: 0o600 });
-
-  // With MECHA_TEST_MOCK_FAIL_REFRESH=true, if a refresh were triggered, it would fail
-  const result = await runHelper('{"operation":"models"}\n', {
-    HOME: home,
-    authPath,
-    extraEnv: { MECHA_TEST_MOCK_FAIL_REFRESH: "true" },
-  });
-
-  assert.equal(result.exitCode, 0);
-  const snapshot = JSON.parse(result.stdout);
-  const ag = snapshot.providers.find((p) => p.provider === "antigravity");
-  assert.ok(ag);
-  assert.equal(ag.authenticated, true);
-  assert.ok(snapshot.models.some((m) => m.provider === "antigravity"));
-});
-
 test("Preload loopback predicate strictly allows loopback and denies evil lookalikes", async () => {
   const { isLoopbackHost, isAllowedLoopbackUrl } = await import("./test-preload-mock-fetch.mjs");
 
@@ -1080,78 +803,6 @@ test("Vertex AI ADC login fails with actionable error when ADC file is missing o
   assert.match(terminal.error, /gcloud auth application-default login/i);
 });
 
-test("Unset or empty MECHA_ANTIGRAVITY_EXTENSION disables Antigravity with actionable login error", async () => {
-  for (const emptyVal of ["", "   "]) {
-    const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-    const authPath = join(home, "auth.json");
-    await writeFile(authPath, "{}", { mode: 0o600 });
-
-    // 1. Snapshot returns 5 providers with Antigravity signed_out
-    const result = await runHelper('{"operation":"models"}\n', {
-      HOME: home,
-      authPath,
-      MECHA_ANTIGRAVITY_EXTENSION: emptyVal,
-    });
-    assert.equal(result.exitCode, 0);
-    const snapshot = JSON.parse(result.stdout);
-    assert.equal(snapshot.providers.length, 5);
-    const ag = snapshot.providers.find((p) => p.provider === "antigravity");
-    assert.ok(ag);
-    assert.equal(ag.authenticated, false);
-    assert.equal(ag.status, "signed_out");
-
-    // 2. Login fails with explicit disabled / not configured error
-    const loginResult = await runHelperInteractive(
-      JSON.stringify({ operation: "login", operation_id: "op-ag-empty", provider: "antigravity" }),
-      async () => "",
-      { HOME: home, authPath, MECHA_ANTIGRAVITY_EXTENSION: emptyVal }
-    );
-    assert.equal(loginResult.exitCode, 1);
-    const terminal = loginResult.events.find((e) => e.type === "terminal");
-    assert.ok(terminal);
-    assert.equal(terminal.status, "failed");
-    assert.match(terminal.error, /disabled or not configured/i);
-  }
-});
-
-test("Antigravity extension entry present but missing models or auth sibling modules disables registration", async () => {
-  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
-  const authPath = join(home, "auth.json");
-  await writeFile(authPath, "{}", { mode: 0o600 });
-
-  // Create isolated entry file without models/ or auth/ directories
-  const isolatedDir = await mkdtemp(join(tmpdir(), "mecha-isolated-ag-"));
-  const entryFile = join(isolatedDir, "index.ts");
-  await writeFile(entryFile, "export default function() {}");
-
-  // 1. Snapshot returns 5 providers with Antigravity signed_out
-  const result = await runHelper('{"operation":"models"}\n', {
-    HOME: home,
-    authPath,
-    MECHA_ANTIGRAVITY_EXTENSION: entryFile,
-  });
-  assert.equal(result.exitCode, 0);
-  const snapshot = JSON.parse(result.stdout);
-  assert.equal(snapshot.providers.length, 5);
-  const ag = snapshot.providers.find((p) => p.provider === "antigravity");
-  assert.ok(ag);
-  assert.equal(ag.authenticated, false);
-  assert.equal(ag.status, "signed_out");
-
-  // 2. Login fails with actionable error naming the target entry path
-  const loginResult = await runHelperInteractive(
-    JSON.stringify({ operation: "login", operation_id: "op-ag-no-siblings", provider: "antigravity" }),
-    async () => "",
-    { HOME: home, authPath, MECHA_ANTIGRAVITY_EXTENSION: entryFile }
-  );
-  assert.equal(loginResult.exitCode, 1);
-  const terminal = loginResult.events.find((e) => e.type === "terminal");
-  assert.ok(terminal);
-  assert.equal(terminal.status, "failed");
-  assert.match(terminal.error, /Antigravity extension not found or invalid/i);
-  assert.match(terminal.error, new RegExp(entryFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-});
-
 test("Preload guards ESM named imports of node:http and node:https via syncBuiltinESMExports", async () => {
   const child = spawn(process.execPath, [
     "--import", DEFAULT_PRELOAD,
@@ -1199,3 +850,21 @@ test("Preload guards ESM named imports of node:http and node:https via syncBuilt
 
 
 
+
+test("Antigravity removal rejects login and logout without credential mutation", async () => {
+  const home = await mkdtemp(join(tmpdir(), "auth-removal-"));
+  const authPath = join(home, "auth.json");
+  const credentials = JSON.stringify({ antigravity: { type: "oauth", access: "inert", refresh: "inert" } });
+  await writeFile(authPath, credentials, { mode: 0o600 });
+  for (const operation of ["login", "logout"]) {
+    const result = await runHelper(JSON.stringify({ operation, operation_id: "removed-" + operation, provider: "antigravity" }) + "\n", { HOME: home, authPath });
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(await readFile(authPath, "utf8"), credentials);
+  }
+  const result = await runHelper(JSON.stringify({ operation: "models" }) + "\n", { HOME: home, authPath });
+  assert.equal(result.exitCode, 0, result.stderr);
+  const snapshot = JSON.parse(result.stdout.trim());
+  assert.deepEqual(snapshot.providers.map(p => p.provider).sort(), ["cursor", "google", "google-vertex", "openai-codex"]);
+  assert.equal(snapshot.models.some(m => m.provider === "antigravity"), false);
+  assert.equal(await readFile(authPath, "utf8"), credentials);
+});

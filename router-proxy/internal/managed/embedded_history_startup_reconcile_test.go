@@ -98,7 +98,7 @@ func TestStartupReconciliationDanglingEmbeddedToolCall(t *testing.T) {
 	defer rawDB.Close()
 
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id, name, slot_held, cwd, selected_model_provider, selected_model_id, desired_state, lifecycle_state, activity_state, pi_session_id, session_epoch, runtime_generation, manifest_revision, manifest_hash, created_at, started_at, updated_at, runtime)
-		VALUES ('workflows', 'workflows', 1, '/tmp', 'antigravity', 'gemini-3.8-flash', 'running', 'running', 'active', 'sess-reconcile', 1, 'gen-reconcile', 1, 'hash', '2026-10-09T00:00:00Z', '2026-10-09T00:00:00Z', '2026-10-09T00:00:00Z', 'embedded')`)
+		VALUES ('workflows', 'workflows', 1, '/tmp', 'google-vertex', 'gemini-3.8-flash', 'running', 'running', 'active', 'sess-reconcile', 1, 'gen-reconcile', 1, 'hash', '2026-10-09T00:00:00Z', '2026-10-09T00:00:00Z', '2026-10-09T00:00:00Z', 'embedded')`)
 	require.NoError(t, err)
 
 	require.NoError(t, db.BindEmbeddedSession(ctx, binding, "worker"))

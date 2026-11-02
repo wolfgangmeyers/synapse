@@ -1,6 +1,6 @@
 ---
 name: mailbox
-description: Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats, mandatory pre-read blocks, and tools. Load whenever you act as supervisor or handle worker mail; companion to the supervisor skill.
+description: Mailbox V2 async mailbox — Mailbox V2 router delivery formats, mandatory pre-read blocks, and tools. Load whenever you act as supervisor or handle worker mail; companion to the supervisor skill.
 ---
 
 # Mailbox Skill

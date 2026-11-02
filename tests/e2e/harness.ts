@@ -26,6 +26,7 @@ export interface IsolatedRouter {
   websocketUrl: string;
   process: ChildProcess;
   close: () => Promise<void>;
+  restart: () => Promise<void>;
   advanceClock: (deltaMs: number) => Promise<{ now: string; advanced_ms: number }>;
 }
 
@@ -140,7 +141,7 @@ export async function startIsolatedRouter(options: {
   repoRoot: string;
   managed?: boolean;
   testClock?: boolean;
-  embedded?: { endpoint: string; signedOut?: boolean };
+  embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string };
   codexCredentialPath?: string;
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
@@ -249,53 +250,68 @@ export async function startIsolatedRouter(options: {
       PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
       XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), TMPDIR: join(root, "tmp"),
       ...(options.embedded ? { EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint } : {}),
+      ...(options.embedded?.kbDir ? { MECHA_KB_DIR: options.embedded.kbDir(join(root, "managed-home")) } : {}),
     };
   }
-  const child = spawn(binaryPath, args, {
-    cwd: options.repoRoot,
-    env: runtimeEnvironment,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // Stop the executable itself, not a launcher, and join its close event before
+  // reopening SQLite or removing the fixture. Escalation is bounded and joined.
+  const stop = async () => {
+    const child = ownedChild;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+    child.kill("SIGTERM");
+    const escalation = setTimeout(() => child.kill("SIGKILL"), 2000);
+    try { await closed; } finally { clearTimeout(escalation); }
+  };
+  const launch = async () => {
+    const child = spawn(binaryPath, args, {
+      cwd: options.repoRoot,
+      env: runtimeEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-  ownedChild = child;
-  let settled = false;
-  let stdout = "";
-  let stderr = "";
+    ownedChild = child;
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
 
-  await new Promise<void>((res, rej) => {
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`));
-      }
-    }, 15_000);
+    await new Promise<void>((res, rej) => {
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          child.kill("SIGKILL");
+          rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`));
+        }
+      }, 15_000);
 
-    const checkReady = (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout += text;
-      if (text.includes("MECHA_V2_ROUTER_READY")) {
+      const checkReady = (chunk: Buffer) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (text.includes("MECHA_V2_ROUTER_READY")) {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            res();
+          }
+        }
+      };
+
+      child.stdout.on("data", checkReady);
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      child.once("close", (code) => {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          res();
+          rej(new Error(`Isolated router exited prematurely (code ${code}).\nStderr: ${stderr}`));
         }
-      }
-    };
-
-    child.stdout.on("data", checkReady);
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      });
     });
 
-    child.once("close", (code) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        rej(new Error(`Isolated router exited prematurely (code ${code}).\nStderr: ${stderr}`));
-      }
-    });
-  });
+  };
+  await launch();
 
   const httpUrl = `http://127.0.0.1:${port}`;
   const websocketUrl = `ws://127.0.0.1:${port}/v1/agents`;
@@ -313,6 +329,7 @@ export async function startIsolatedRouter(options: {
     return res.json();
   };
 
+  let closing: Promise<void> | undefined;
   return {
     root,
     databasePath,
@@ -320,15 +337,19 @@ export async function startIsolatedRouter(options: {
     port,
     httpUrl,
     websocketUrl,
-    process: child,
+    get process() { return ownedChild!; },
+    restart: async () => {
+      if (closing) throw new Error("Cannot restart a closed isolated router");
+      await stop();
+      try { await launch(); } catch (error) { await stop(); throw error; }
+    },
     advanceClock,
-    close: async () => {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await new Promise((r) => setTimeout(r, 200));
-        if (child.exitCode === null) child.kill("SIGKILL");
-      }
-      await rm(root, { recursive: true, force: true }).catch(() => {});
+    close: () => {
+      closing ??= (async () => {
+        await stop();
+        await rm(root, { recursive: true, force: true });
+      })();
+      return closing;
     },
   };
   } catch (error) {

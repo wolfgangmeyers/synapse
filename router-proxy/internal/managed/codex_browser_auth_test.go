@@ -51,7 +51,6 @@ func cachedOrdinarySnapshot(run *fakeProviderAuthRun) fakeProviderAuthSnapshotHe
 		{Provider: "google", Label: "Google", Authenticated: true, Status: "authenticated"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
 		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
-		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: false, Status: "signed_out"},
 	}, models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "stale-helper-model", Name: "Stale", Available: true}, {Provider: "google", ID: "google-fixture", Name: "Google fixture", Available: true}}}
 }
 

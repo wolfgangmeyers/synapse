@@ -17,18 +17,16 @@ export interface ProviderAuthDialogProps {
   onPromptHandled: () => void;
 }
 
-export type GoogleAuthMethod = "api_key" | "vertex_adc" | "antigravity";
+export type GoogleAuthMethod = "api_key" | "vertex_adc";
 
 const googleMethodToProvider: Record<GoogleAuthMethod, ManagedProvider> = {
   api_key: "google",
   vertex_adc: "google-vertex",
-  antigravity: "antigravity",
 };
 
 const googleMethodLabels: Record<GoogleAuthMethod, string> = {
   api_key: "API key",
   vertex_adc: "Vertex AI ADC",
-  antigravity: "Google Antigravity",
 };
 
 const providerLabels: Record<ManagedProvider, string> = {
@@ -36,11 +34,10 @@ const providerLabels: Record<ManagedProvider, string> = {
   google: "Google",
   cursor: "Cursor",
   "google-vertex": "Google Vertex AI",
-  antigravity: "Google Antigravity",
 };
 
 function isGoogleAuthMethod(value: string): value is GoogleAuthMethod {
-  return value === "api_key" || value === "vertex_adc" || value === "antigravity";
+  return value === "api_key" || value === "vertex_adc";
 }
 
 function computeInitialGoogleMethod(providers?: ProviderStatus[]): GoogleAuthMethod {
@@ -49,8 +46,6 @@ function computeInitialGoogleMethod(providers?: ProviderStatus[]): GoogleAuthMet
   if (google?.authenticated) return "api_key";
   const vertex = providers.find((p) => p.provider === "google-vertex");
   if (vertex?.authenticated) return "vertex_adc";
-  const ag = providers.find((p) => p.provider === "antigravity");
-  if (ag?.authenticated) return "antigravity";
   return "api_key";
 }
 
@@ -283,7 +278,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         const isSecret = prompt.provider === "google" || prompt.prompt.kind === "secret";
         const promptLabel = prompt.provider === "google"
           ? "Google API key"
-          : (prompt.provider === "google-vertex" || prompt.provider === "antigravity" || prompt.prompt.kind === "text")
+          : (prompt.provider === "google-vertex" || prompt.prompt.kind === "text")
             ? (prompt.prompt.message || "Response")
             : isSecret
               ? "API key"
@@ -404,18 +399,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                           >
                             <strong>Vertex AI ADC</strong>
                           </button>
-                          <button
-                            type="button"
-                            className="model-option"
-                            role="option"
-                            aria-selected={selectedGoogleMethod === "antigravity"}
-                            onClick={() => {
-                              setUserSelectedGoogleMethod("antigravity");
-                              setGoogleMenuOpen(false);
-                            }}
-                          >
-                            <strong>Google Antigravity</strong>
-                          </button>
+
                         </div>
                       </div>
                     )}
@@ -433,7 +417,6 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                     >
                       <option value="api_key">API key</option>
                       <option value="vertex_adc">Vertex AI ADC</option>
-                      <option value="antigravity">Google Antigravity</option>
                     </select>
                   </div>
                 )}

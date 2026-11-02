@@ -14,7 +14,7 @@ import (
 // The shared Pi catalog remains broad. Embedded authority comes only from the
 // pinned Codex SDK model and this router's private credential, even for defaults.
 func (m *Manager) admitEmbeddedModel(ctx context.Context, candidate Model) (Model, error) {
-	if candidate.Provider == "antigravity" || candidate.Provider == "google" || candidate.Provider == "google-vertex" {
+	if candidate.Provider == "google" || candidate.Provider == "google-vertex" {
 		return candidate, nil
 	}
 	sdk := ai.GetModel(candidate.Provider, candidate.ID)

@@ -30,11 +30,6 @@ or near-miss names. Infer the likely intended repo, skill, tool, or command from
 context when the meaning is clear; ask or verify before acting when ambiguity
 could affect files, external communication, or destructive operations.
 
-## Related repos
-
-- `mecha-review` — owns self-contained code-review and review-adjacent skills (`review-pr`, `robot-review`, `pr-context`, `pr-summary`, `pr-validate`, `explain`). Not duplicated here.
-- `mecha-developer` — original monorepo; non-review skills were migrated from there into this repo.
-
 ## Skills
 
 | Skill | Description |
@@ -45,7 +40,7 @@ could affect files, external communication, or destructive operations.
 | `generate-persona` | Generate a behavioral persona from any data source (chat logs, PR reviews, text files, git history), guided by intended use case. Replaces `generate-reviewer-persona` and `generate-supervisor-persona`. |
 | `generate-supervisor-persona` | **Deprecated** — thin wrapper that redirects to `generate-persona` with `--use supervision --source chat-logs`. |
 | `kb` | Manage the persistent markdown knowledge base at `~/.mecha-developer/kb/`. For persistent, reusable knowledge worth keeping across sessions. |
-| `mailbox` | Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats and mandatory pre-read state-update rules. **Load with supervisor** so runtime-delivered mail is handled correctly. |
+| `mailbox` | Mailbox V2 async mailbox — Mailbox V2 router delivery formats and mandatory pre-read state-update rules. **Load with supervisor** so runtime-delivered mail is handled correctly. |
 | `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the registered checkout-source Mailbox V2 Pi extension without relocating, copying, symlinking, or restoring an installed artifact. |
 | `pr-watch` | Watch assigned GitHub pull requests and run the required review workflow from the dedicated PR-review agent. |
 | `remote-cloud-desktop` | Provision a generic Ubuntu KDE Plasma X11 desktop over xrdp with access restricted to a private overlay network. |

@@ -20,6 +20,12 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 
 ---
 
+## Provider Removal Specifications
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-PROVIDERS-ANTIGRAVITY-REMOVAL-001` | Remove Antigravity; preserve Gemini API-key, Vertex and Codex | `Settings` | [`antigravity-removal.spec.md`](./antigravity-removal.spec.md) | `tests/e2e/antigravity-removal.spec.ts` (planned) | `Draft` |
+
 ## Agent Lifecycle & Execution Specifications
 
 Specifications covering agent process supervisors, tmux bridges, embedded runtimes, context threshold handling, and background task orchestration.

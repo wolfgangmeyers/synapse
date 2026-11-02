@@ -227,7 +227,6 @@ describe("App integration", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ] });
       if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 0, default_model: null, models: [{ provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true }] });
@@ -285,7 +284,6 @@ describe("App integration", () => {
         { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "google-vertex", label: "Google Vertex AI", authenticated: false, status: "signed_out", updated_at: timestamp },
-        { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: timestamp },
         { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
       ] });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
