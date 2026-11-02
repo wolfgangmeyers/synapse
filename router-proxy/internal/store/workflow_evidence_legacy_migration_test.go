@@ -10,6 +10,30 @@ import (
 )
 
 func TestWorkflowRetentionLegacyContinuationsMigration123(t *testing.T) {
+	testWorkflowRetentionLegacyContinuationsMigration123(t, nil)
+}
+
+func TestWorkflowRetentionMissingGuardsMigration123(t *testing.T) {
+	triggers := []string{
+		"embedded_goal_continuation_transition",
+		"embedded_goal_receipt_immutable_delete",
+		"embedded_goal_evaluation_immutable_delete",
+		"embedded_goal_continuation_no_delete",
+		"embedded_goal_snooze_call_no_delete",
+		"embedded_goal_snooze_preference_no_delete",
+	}
+	for _, trigger := range triggers {
+		t.Run(trigger, func(t *testing.T) {
+			testWorkflowRetentionLegacyContinuationsMigration123(t, []string{trigger})
+		})
+	}
+	t.Run("all predecessors missing", func(t *testing.T) {
+		testWorkflowRetentionLegacyContinuationsMigration123(t, triggers)
+	})
+}
+
+func testWorkflowRetentionLegacyContinuationsMigration123(t *testing.T, missing []string) {
+	t.Helper()
 	ctx := context.Background()
 	path := t.TempDir() + "/legacy.db"
 	migrations := DefaultMigrations()
@@ -56,6 +80,12 @@ func TestWorkflowRetentionLegacyContinuationsMigration123(t *testing.T) {
 		require.NoError(t, legacy.db.QueryRow(`SELECT body,digest FROM embedded_entries WHERE agent_id=? AND seq=?`, b.AgentID, k.UserSeq).Scan(&snap.body, &snap.digest))
 		saved = append(saved, snap)
 	}
+	// Reproduce an upgraded database whose old guards were removed. The
+	// replacement migration must install its guards, not require the old ones.
+	for _, trigger := range missing {
+		_, err = legacy.db.Exec(`DROP TRIGGER ` + trigger)
+		require.NoError(t, err)
+	}
 	require.NoError(t, legacy.Close())
 	before := time.Now().Add(-time.Second).UnixMilli()
 	upgraded, err := Open(ctx, path, Options{})
@@ -83,12 +113,18 @@ func TestWorkflowRetentionLegacyContinuationsMigration123(t *testing.T) {
 			require.Error(t, err)
 			_, err = s.db.Exec(`UPDATE embedded_goal_continuations SET state=state WHERE agent_id=?`, want.agent)
 			require.ErrorContains(t, err, "continuation transition invalid")
+			_, err = s.db.Exec(`DELETE FROM embedded_goal_continuations WHERE agent_id=?`, want.agent)
+			require.ErrorContains(t, err, "retention evidence is immutable while protected")
 		}
 		var n int
 		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&n))
 		require.Zero(t, n)
 		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('embedded_execution_continuation_start','embedded_execution_continuation_started')`).Scan(&n))
 		require.Equal(t, 2, n)
+		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('embedded_goal_continuation_transition','embedded_goal_receipt_immutable_delete','embedded_goal_evaluation_immutable_delete','embedded_goal_continuation_no_delete','embedded_goal_snooze_call_no_delete','embedded_goal_snooze_preference_no_delete')`).Scan(&n))
+		require.Equal(t, 6, n, "every replacement guard must be installed")
+		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE id='123_workflow_evidence_retention_guards'`).Scan(&n))
+		require.Equal(t, 1, n)
 	}
 	check(upgraded, true)
 	require.NoError(t, upgraded.Close())

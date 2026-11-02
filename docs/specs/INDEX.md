@@ -33,6 +33,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-ROUTER-INIT-001` | Fresh-machine Router Initialization | `Settings` | [`router-initialization.spec.md`](./router-initialization.spec.md) | `tests/e2e/router-initialization.spec.ts` | `Active` |
+| `SPEC-ROUTER-MIGRATION-001` | Router Retention Migration Recovery | `Settings` | [`router-retention-migration.spec.md`](./router-retention-migration.spec.md) | `tests/e2e/router-retention-migration.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-CODEX-CATALOG-001` | Codex Catalog and Embedded Launch Parity | `AgentManagement` | [`codex-model-catalog.spec.md`](./codex-model-catalog.spec.md) | `tests/e2e/codex-model-catalog.spec.ts` | `Active` |
 | `SPEC-OPENAI-CATALOG-001` | OpenAI GPT-6.1 Terra Catalog | `AgentManagement` | [`openai-model-catalog.spec.md`](./openai-model-catalog.spec.md) | `tests/e2e/openai-model-catalog.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-001` | Claude Code Managed Workers | `AgentManagement` | [`claude-code-workers-spec.md`](./claude-code-workers-spec.md) | `tests/e2e/claude-code-workers.spec.ts` | `Active` |
