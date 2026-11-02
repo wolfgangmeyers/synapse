@@ -454,6 +454,7 @@ type Manager struct {
 	codexHTTPTransport         http.RoundTripper
 	embeddedStatusObserver     func(embeddedTransportTrace)
 	embeddedGoalEvaluator      func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error)
+	embeddedUrgencyCoordinator func(func() (store.AgentUrgencyResult, bool, error)) (store.AgentUrgencyResult, error)
 	embeddedExternalTool       *agent.AgentTool
 	embeddedAfterIntent        func(context.Context)
 	embeddedAfterCheckedIntent func(context.Context)

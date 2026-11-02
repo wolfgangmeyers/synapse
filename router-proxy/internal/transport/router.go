@@ -318,6 +318,8 @@ type Router struct {
 	sweepMu   sync.Mutex
 	closeDone chan struct{}
 	closeErr  error
+	// urgencyMu serializes urgency commits and both socket publications.
+	urgencyMu sync.Mutex
 	// conversationLocks serializes each conversation's durable write and live
 	// broadcast together. This is the synchronous Node handler boundary; a
 	// separate lock per participant pair keeps unrelated conversations moving.
@@ -669,6 +671,7 @@ func New(options Options) (*Router, error) {
 		options.Managed.SetDirectReplyPublisher(r.persistManagedDirectReply)
 		options.Managed.SetEmbeddedReplyPublisher(r.persistEmbeddedReply)
 		options.Managed.SetEmbeddedMailPublisher(r.afterEnqueue)
+		options.Managed.SetEmbeddedUrgencyCoordinator(r.coordinateAgentUrgency)
 		options.Managed.SetRemindersChangedPublisher(func(ctx context.Context) {
 			r.sweepReminders(ctx)
 			r.broadcast(map[string]any{"type": "reminders_changed"})

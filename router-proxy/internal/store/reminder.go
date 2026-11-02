@@ -338,7 +338,7 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 		return err
 	}
 	if !lastConnected.Valid {
-		_, err = s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = ?", reminder.Target)
+		_, err = s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = ? AND NOT EXISTS (SELECT 1 FROM managed_agents WHERE managed_agents.agent_id=agents.agent_id)", reminder.Target)
 		return err
 	}
 	intervalMS := *reminder.IntervalMS
@@ -355,7 +355,7 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 		}
 		current, _ := protocol.ParseTimestamp(now)
 		if current.Sub(connectedAt) >= time.Hour {
-			_, err = s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = ?", reminder.Target)
+			_, err = s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = ? AND NOT EXISTS (SELECT 1 FROM managed_agents WHERE managed_agents.agent_id=agents.agent_id)", reminder.Target)
 			return err
 		}
 		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled'", next, reminder.ID)

@@ -161,6 +161,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleRouterLog(w, req, agentID)
 		return
 	}
+	if agentID, matched := agentUrgencyPath(req.URL.EscapedPath()); matched {
+		r.handleAgentUrgencyPUT(w, req, agentID)
+		return
+	}
 	if r.handleManagedHTTP(w, req) {
 		return
 	}

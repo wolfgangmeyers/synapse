@@ -10,6 +10,7 @@ type WorkflowToolDefinition struct {
 
 // CanonicalWorkflowTools defines the single source of truth for workflow tools catalog.
 var CanonicalWorkflowTools = []WorkflowToolDefinition{
+	{ID: "mecha_agent_urgency", Name: "mecha_agent_urgency", Category: "lifecycle", Description: "Set explicit attention metadata, not priority or blocked state"},
 	{ID: "read", Name: "read", Category: "system", Description: "Read file contents"},
 	{ID: "edit", Name: "edit", Category: "system", Description: "Make targeted edits to files"},
 	{ID: "write", Name: "write", Category: "system", Description: "Write or overwrite files"},

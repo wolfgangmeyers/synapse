@@ -28,6 +28,7 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "list_subagents", Category: "Subagent Lifecycle", Description: "List background subagents launched by this agent", DefaultEnabled: true},
 
 	// Messaging & Routing
+	{ToolName: "mecha_agent_urgency", Category: "Messaging & Routing", Description: "Set explicit attention metadata, not priority or blocked state", DefaultEnabled: true},
 	{ToolName: "mecha_mailbox_send", Category: "Messaging & Routing", Description: "Queue an independently addressed mailbox message", DefaultEnabled: true},
 	{ToolName: "mecha_worker", Category: "Messaging & Routing", Description: "List, send mail to or clean up independent workers", DefaultEnabled: true},
 	{ToolName: "mecha_worker_terminate", Category: "Messaging & Routing", Description: "Terminate self and optionally remove assigned worktree", DefaultEnabled: true},

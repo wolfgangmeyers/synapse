@@ -107,6 +107,8 @@ export interface RouterTransport {
   connect(): void;
   close(): void;
   refreshAgents(): Promise<void>;
+  /** Invalidate the connected snapshot, queueing one follow-up behind an active read. */
+  invalidateAgents(): void;
   refreshReminders(): Promise<void>;
   conversation(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }>;
   fetchConversationTimeline?(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
@@ -253,6 +255,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       if (pending !== undefined) { removeControl(pending.controlId); emit({ type: "control-error", frame, pending }); }
       return;
     }
+    if (frame.type === "agent_urgency_changed") { emit({ type: "frame", frame, identity }); scheduleAgentRefresh("agent_projection_frame"); return; }
     if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); return; }
     if (frame.type === "agent_activity" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
     if (frame.type === "agent_model_catalog") return;
@@ -322,6 +325,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     connect: socket.connect,
     close() { clearInterval(refreshTimer); clearRefreshScheduling(); goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
+    invalidateAgents: () => scheduleAgentRefresh("agent_projection_frame"),
     refreshReminders,
     conversation: (owner, peer, options) => http.conversations(owner, peer, options),
     fetchConversationTimeline: (agentId, limit, beforeSeq) => http.fetchConversationTimeline(agentId, limit, beforeSeq),

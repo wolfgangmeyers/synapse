@@ -55,6 +55,7 @@ export interface Reminder {
 }
 
 export interface Agent {
+  urgent?: boolean;
   agent_id: AgentId;
   instance_id: InstanceId;
   agent_role: AgentRole;
@@ -762,7 +763,14 @@ export type ClientFrame =
   | SubagentLifecycleEventFrame
   | SubagentStateResyncFrame;
 
+export interface AgentUrgencyChangedFrame {
+  type: "agent_urgency_changed";
+  agent_id: AgentId;
+  urgent: boolean;
+}
+
 export type ServerFrame =
+  | AgentUrgencyChangedFrame
   | RegisteredFrame
   | LeaseRejectedFrame
   | ErrorFrame
@@ -861,6 +869,7 @@ export interface AgentProgress {
 }
 
 export interface ManagedAgent {
+  urgent?: boolean;
   agent_id: AgentId;
   source: "router-managed";
   runtime?: "rpc" | "embedded";
@@ -1086,4 +1095,4 @@ export interface ProviderAuthStateFrame {
   status: "pending" | "succeeded" | "failed" | "expired" | "cancelled";
   error?: string;
 }
-export type UILiveFrame = ManagedAgentsSnapshotFrame | ManagedAgentDeltaFrame | ManagedAgentRemovedFrame | ManagedChildrenSnapshotFrame | HistoryEntryFrame | ProviderAuthPromptFrame | ProviderAuthStateFrame;
+export type UILiveFrame = AgentUrgencyChangedFrame | ManagedAgentsSnapshotFrame | ManagedAgentDeltaFrame | ManagedAgentRemovedFrame | ManagedChildrenSnapshotFrame | HistoryEntryFrame | ProviderAuthPromptFrame | ProviderAuthStateFrame;

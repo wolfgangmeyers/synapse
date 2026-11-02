@@ -1405,7 +1405,7 @@ func (s *Store) completeLinkedReminder(ctx context.Context, messageID string) er
 func (s *Store) pruneStaleAgents(ctx context.Context, now string) (int, error) {
 	threshold := formatTimestamp(parseTimestamp(now).Add(-time.Hour))
 	rows, err := s.db.QueryContext(ctx, `SELECT agent_id FROM agents
-		WHERE (
+		WHERE NOT EXISTS (SELECT 1 FROM managed_agents WHERE managed_agents.agent_id=agents.agent_id) AND (
 			(last_connected_at IS NULL AND first_seen_at <= ? AND NOT EXISTS (
 				SELECT 1 FROM reminders
 				WHERE reminders.target = agents.agent_id

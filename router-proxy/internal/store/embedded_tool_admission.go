@@ -148,7 +148,7 @@ func (s *Store) embeddedToolFenceTx(ctx context.Context, w *EmbeddedToolInvocati
 // Called only from the SDK BeforeToolExecute callback, after the original
 // assistant append. The current process and source are supplied by the runner.
 func (s *Store) RecordEmbeddedToolInvocation(ctx context.Context, b EmbeddedBinding, process, userSeq int64, userDigest, attempt string, call ai.ToolCall) (*EmbeddedToolInvocation, error) {
-	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_worker" && call.Name != "mecha_send_image") {
+	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_worker" && call.Name != "mecha_send_image" && call.Name != "mecha_agent_urgency") {
 		return nil, errors.New("invalid managed tool call")
 	}
 	if call.Name == "mecha_worker" && call.Arguments["action"] == "launch" {
@@ -265,7 +265,13 @@ func (s *Store) AppendEmbeddedToolInvocationResult(ctx context.Context, w *Embed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.completed || w.consumed {
+	// An absent/retired urgency target is a conclusive domain rejection, not
+	// uncertain execution. Only the original live witness can check this error;
+	// storage, stale-fence and post-COMMIT failures remain UNKNOWN.
+	rejectedUrgency := w.call.Name == "mecha_agent_urgency" && w.executing && w.admitted &&
+		w.domainSettled && w.domainConclusive && !w.domainCommitted && w.handoffErr == nil &&
+		errors.Is(w.domainErr, ErrAgentNotFound)
+	if (!w.completed && !rejectedUrgency) || w.consumed {
 		disposition := errors.New("managed tool outcome UNKNOWN: no producer completion")
 		if w.domainCommitted && w.domainConclusive {
 			disposition = errors.New("managed tool admission committed: no checked SDK producer completion")
@@ -277,11 +283,15 @@ func (s *Store) AppendEmbeddedToolInvocationResult(ctx context.Context, w *Embed
 	}
 	w.consumed = true
 	encoded, err := json.Marshal(result)
-	if err != nil || !bytes.Equal(encoded, body) || result.Timestamp <= 0 || result.ToolCallID != w.call.ID || result.ToolName != w.call.Name || result.IsError || len(result.Content) != 1 || seq < w.producerSeq {
+	if err != nil || !bytes.Equal(encoded, body) || result.Timestamp <= 0 || result.ToolCallID != w.call.ID || result.ToolName != w.call.Name || result.IsError != rejectedUrgency || len(result.Content) != 1 || seq < w.producerSeq {
 		return EmbeddedEntry{}, errors.New("managed tool checked SDK result mismatch")
 	}
 	text, ok := result.Content[0].(ai.TextContent)
-	if !ok || !bytes.Equal([]byte(text.Text), w.domainContent) {
+	expected := w.domainContent
+	if rejectedUrgency {
+		expected = []byte(w.domainErr.Error())
+	}
+	if !ok || !bytes.Equal([]byte(text.Text), expected) {
 		return EmbeddedEntry{}, errors.New("managed tool checked content mismatch")
 	}
 	var entry EmbeddedEntry

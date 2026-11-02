@@ -1,5 +1,6 @@
 import type { ProtocolError } from "./errors";
 import type {
+  AgentUrgencyChangedFrame,
   AckFrame,
   ActivityFrame,
   AgentActivityFrame,
@@ -169,7 +170,12 @@ export function isContextUsage(value: unknown): value is ContextUsage {
     && (percent === null || (typeof percent === "number" && Number.isFinite(percent) && percent >= 0 && percent <= 100));
 }
 
+export function isAgentUrgencyChangedFrame(value: unknown): value is AgentUrgencyChangedFrame {
+  return isRecord(value) && value.type === "agent_urgency_changed" && isAgentId(value.agent_id) && typeof value.urgent === "boolean";
+}
+
 export function isManagedAgent(value: unknown): value is ManagedAgent {
+  if (isRecord(value) && Object.hasOwn(value, "urgent") && typeof value.urgent !== "boolean") return false;
   const required = ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"];
   if (!isRecord(value) || !required.every((key) => Object.hasOwn(value, key))) return false;
   if (privateRuntimeFields.some((field) => Object.hasOwn(value, field))) return false;
@@ -341,6 +347,7 @@ export function isManagedCompleteHistoryEntry(value: unknown): value is ManagedH
 }
 
 export function isUILiveFrame(value: unknown): value is UILiveFrame {
+  if (isAgentUrgencyChangedFrame(value)) return true;
   if (!isRecord(value) || value.protocol !== "mecha.web/v1") return false;
   if (value.type === "managed_children_snapshot") return isExactRecord(value, ["type", "protocol", "lifecycle_version", "generated_at", "children"]) && isSafeInteger(value.lifecycle_version, 0) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.children) && value.children.every(isManagedChildrenProjection);
   if (!isSafeInteger(value.projection_version, 0)) return false;
@@ -623,7 +630,7 @@ function isLifecycleDisposition(value: unknown): value is SubagentLifecycleAckno
 export function isSubagentLifecycleAcknowledgedFrame(value: unknown): value is SubagentLifecycleAcknowledgedFrame { return isFrame(value, "subagent_lifecycle_acknowledged", ["version", "frame_id", "type", "request_id", "event_id", "client_sequence", "producer_epoch", "agent_id", "instance_id", "parent_session_id", "lease_id", "disposition", "router_version", "applied_version"]) && isFrameId(value.request_id) && isFrameId(value.event_id) && isSafeInteger(value.client_sequence, 1) && isPatternString(value.producer_epoch, lifecycleEpochPattern, 36, 36) && isAgentId(value.agent_id) && isFrameId(value.instance_id) && isFrameId(value.parent_session_id) && isFrameId(value.lease_id) && isLifecycleDisposition(value.disposition) && isSafeInteger(value.router_version, 0) && (value.applied_version === undefined || isSafeInteger(value.applied_version, 0)); }
 
 const clientFrameGuards: Array<(value: unknown) => value is ClientFrame> = [isRegisterFrame, isLeaseRenewFrame, isActivityFrame, isModelCatalogFrame, isInlineToolStateFrame, isInlineToolControlFrame, isInlineToolControlResultFrame, isModelControlFrame, isModelControlResultFrame, isGoalControlFrame, isGoalControlResultFrame, isReminderLockControlFrame, isReminderLockControlResultFrame, isGoalStateFrame, isMessageArrivalClientFrame, isInjectionRequestedFrame, isAckFrame, isNackFrame, isPingFrame, isSubagentSyncEnableFrame, isSubagentLifecycleSnapshotFrame, isSubagentLifecycleEventFrame, isSubagentStateResyncFrame];
-const serverFrameGuards: Array<(value: unknown) => value is ServerFrame> = [isRegisteredFrame, isLeaseRejectedFrame, isErrorFrame, isPongFrame, isMessageFrame, isConversationMessageFrame, isRemindersChangedFrame, isInlineToolStateFrame, isInlineToolControlForwardFrame, isInlineToolControlResultFrame, isModelControlForwardFrame, isModelControlResultFrame, isGoalControlForwardFrame, isGoalControlResultFrame, isReminderLockControlForwardFrame, isReminderLockControlResultFrame, isAgentGoalStateFrame, isDeliveryAcknowledgedFrame, isAgentActivityFrame, isAgentModelCatalogFrame, isMessageArrivalServerFrame, isSubagentStateSnapshotFrame, isSubagentStateUpdateFrame, isSubagentStateReplayFrame, isSubagentLifecycleAcknowledgedFrame];
+const serverFrameGuards: Array<(value: unknown) => value is ServerFrame> = [isAgentUrgencyChangedFrame, isRegisteredFrame, isLeaseRejectedFrame, isErrorFrame, isPongFrame, isMessageFrame, isConversationMessageFrame, isRemindersChangedFrame, isInlineToolStateFrame, isInlineToolControlForwardFrame, isInlineToolControlResultFrame, isModelControlForwardFrame, isModelControlResultFrame, isGoalControlForwardFrame, isGoalControlResultFrame, isReminderLockControlForwardFrame, isReminderLockControlResultFrame, isAgentGoalStateFrame, isDeliveryAcknowledgedFrame, isAgentActivityFrame, isAgentModelCatalogFrame, isMessageArrivalServerFrame, isSubagentStateSnapshotFrame, isSubagentStateUpdateFrame, isSubagentStateReplayFrame, isSubagentLifecycleAcknowledgedFrame];
 
 export function isClientFrame(value: unknown): value is ClientFrame { return clientFrameGuards.some((guard) => guard(value)); }
 export function isServerFrame(value: unknown): value is ServerFrame { return serverFrameGuards.some((guard) => guard(value)); }
