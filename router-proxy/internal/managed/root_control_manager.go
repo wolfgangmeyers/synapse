@@ -226,6 +226,21 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 	if err != nil || !sameBindingFence(row.Fence, fence) {
 		return
 	}
+	// Durable results no longer need a live tool definition or handler.
+	switch row.State {
+	case "completed", "failed":
+		m.appendRootControlResult(ctx, binding, *row)
+		return
+	case "append_pending", "awaiting_append":
+		m.reconcileRootControlAppend(ctx, binding, *row)
+		return
+	}
+	// Retirement is recovery-only, never admission or execution. Keep durable
+	// delivery above this branch and the full current binding fence before it.
+	if row.OperationID == "ops.worker" && row.CapabilityID == "mecha_worker" && row.ToolName == "mecha_worker" {
+		m.recoverRetiredWorkerControl(ctx, binding, row)
+		return
+	}
 	tool, found := m.rootManifestTool(RootControlEvent{CapabilityID: row.CapabilityID, ToolName: row.ToolName, DefinitionID: row.DefinitionID, DefinitionSHA256: m.definitionSHA256ForStoredControl(row), OperationID: row.OperationID})
 	handler, available := m.rootControlHandlers.Handler(tool)
 	if !found || !available {
@@ -258,14 +273,58 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 		}
 		result, err := m.executeRootControlHandler(ctx, binding, handler, invocation, true)
 		m.finishRootControlHandler(ctx, binding, handler, claim, result, err, claim.Request.State == "side_effect_committed")
-	case "completed", "failed":
-		// A handler-invalid result is stored as failed before its durable result
-		// append is claimed. It is still a recoverable result-delivery row; do not
-		// require the handler to execute again.
-		m.appendRootControlResult(ctx, binding, *row)
-	case "append_pending", "awaiting_append":
-		m.reconcileRootControlAppend(ctx, binding, *row)
 	}
+}
+
+// recoverRetiredWorkerControl settles only the removed worker operation. A
+// received request has no effect to recover. An uncertain request may consult
+// the host ledger, but must never reach Execute (including fallback executors).
+func (m *Manager) recoverRetiredWorkerControl(ctx context.Context, binding *managedBinding, row *store.ManagedControlRequest) {
+	owner, err := m.ids.Next()
+	if err != nil {
+		return
+	}
+	var claim *store.ManagedControlHandlerClaim
+	switch row.State {
+	case "received":
+		claim, err = m.store.ClaimManagedControlHandler(ctx, row.RequestID, owner, row.Fence)
+	case "executing", "side_effect_committed":
+		claim, err = m.store.RecoverManagedControlHandler(ctx, row.RequestID, owner, row.Fence)
+	default:
+		return
+	}
+	if err != nil {
+		return
+	}
+	result := RootControlHandlerResult{Status: "error", Content: "The retired worker operation is unavailable.", Details: map[string]any{}, ErrorCode: "ROOT_OPERATION_UNAVAILABLE", ErrorMessage: "the retired worker operation has no recoverable host result"}
+	if row.State != "received" && m.rootControlHandlers != nil {
+		// Operational handlers share the host executor. Borrow only its explicit
+		// reconcile boundary; never register a retired handler in the live catalog.
+		for _, candidate := range m.rootControlHandlers.byOperation {
+			handler, ok := candidate.(operationRootControlHandler)
+			if !ok || handler.executor == nil {
+				continue
+			}
+			switch f := handler.executor.(type) {
+			case RootControlOperationExecutorFunc:
+				if f.ReconcileFunc == nil {
+					continue // This helper otherwise falls back to Execute.
+				}
+			case *RootControlOperationExecutorFunc:
+				if f == nil || f.ReconcileFunc == nil {
+					continue // A nil pointer cannot reconcile; otherwise avoid Execute fallback.
+				}
+			}
+			handler.identity = RootControlHandlerIdentity{CapabilityID: row.CapabilityID, ToolName: row.ToolName, DefinitionID: row.DefinitionID, OperationID: row.OperationID}
+			invocation := RootControlInvocation{RequestID: row.RequestID, ResultID: row.ResultID, ToolCallID: row.ToolCallID, OperationID: row.OperationID, Arguments: map[string]any{}, Fence: row.Fence}
+			saved, reconcileErr := invokeRootControlHandler(ctx, handler, invocation, true)
+			if reconcileErr == nil && saved.Status == "ok" {
+				result = saved
+			}
+			break
+		}
+	}
+	m.finishRootControlHandler(ctx, binding, nil, claim, result, nil, row.State == "side_effect_committed")
 }
 
 // invokeRootControlHandler contains only the dynamic handler call. A handler

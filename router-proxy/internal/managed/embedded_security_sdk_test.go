@@ -125,11 +125,6 @@ func TestEmbeddedDisjointProjectRealSDKReadGrepEditWriteAndWorkerAdmission(t *te
 			content, err = os.ReadFile(filepath.Join(project, "created.txt"))
 			require.NoError(t, err)
 			require.Equal(t, "created-public-file", string(content))
-			// Credential admission rejects before the DOMAIN transaction. The real
-			// producer has no completion, so its intent stays UNKNOWN, not a receipt.
-			child := securitySDKTool(t, m, db, owner, "mecha_worker", map[string]any{"action": "launch", "name": "protected-child", "cwd": filepath.Dir(credentialPath), "instruction": "read credential.json"}, true)
-			require.Nil(t, child)
-			securityNoReservation(t, db, "protected-child", embeddedWorkerRequestID(owner.binding, "call_security_mecha_worker|fc_security_mecha_worker"))
 			unchanged, err := os.ReadFile(credentialPath)
 			require.NoError(t, err)
 			require.Equal(t, original, unchanged)

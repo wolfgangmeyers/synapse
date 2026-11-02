@@ -169,14 +169,14 @@ func (m *Manager) embeddedWorkerTerminateAdminTool(owner embeddedOwner) agent.Ag
 			}
 			requestID := embeddedWorkerRequestID(owner.binding, callID)
 
-			_, err = m.terminateWithEmbeddedProducer(ctx, TerminateRequest{
+			_, err = m.terminateManaged(ctx, TerminateRequest{
 				AgentID:           workerID,
 				Method:            "DELETE",
 				CanonicalPath:     "/v1/managed-agents/" + workerID,
 				RequestID:         requestID,
 				CanonicalBodyHash: hashString(string(body)),
 				CleanupWorktree:   cleanupWorktree,
-			}, nil)
+			})
 			if err != nil {
 				return agent.AgentToolResult{}, err
 			}

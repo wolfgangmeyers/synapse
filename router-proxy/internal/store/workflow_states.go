@@ -190,7 +190,7 @@ func sanitizeWorkflowAllowedTools(tools []string) ([]string, error) {
 	result := make([]string, 0, len(tools))
 	for _, raw := range tools {
 		t := strings.TrimSpace(raw)
-		if !ValidWorkflowTools[t] {
+		if t != "mecha_worker" && !ValidWorkflowTools[t] {
 			return nil, &WorkflowStateValidationError{Field: "allowed_tools", Message: fmt.Sprintf("invalid tool %q", t)}
 		}
 		if !seen[t] {
@@ -226,7 +226,6 @@ func validateWorkflowStateRequest(req WorkflowStateRequest) error {
 	if !utf8.ValidString(req.EntryText) || strings.ContainsRune(req.EntryText, 0) {
 		return &WorkflowStateValidationError{Field: "entry_text", Message: "entry text contains invalid characters"}
 	}
-
 
 	if req.ID != nil {
 		id := strings.TrimSpace(*req.ID)

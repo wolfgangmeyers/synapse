@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
@@ -16,26 +15,8 @@ import (
 )
 
 func TestEmbeddedAddressedActionSchemas(t *testing.T) {
-	for _, valid := range []map[string]any{
-		{"action": "list"},
-		{"action": "send", "name": "worker", "body": "mail"},
-		{"action": "cleanup", "name": "worker"},
-	} {
-		require.True(t, embeddedWorkerSchema().Check(valid), "%v", valid)
-		require.NoError(t, embeddedAddressedArguments("mecha_worker", valid))
-	}
-	for _, invalid := range []map[string]any{
-		{"action": "launch", "name": "worker", "cwd": "/project", "instruction": "task"},
-
-		{"action": "list", "instruction": "not permitted"},
-		{"action": "send", "name": "worker"},
-		{"action": "cleanup", "name": "worker", "cwd": "/project"},
-		{"action": "launch", "name": "worker", "cwd": "/project"},
-		{"action": "send", "name": "worker", "body": 42},
-		{"action": "launch", "name": "worker", "cwd": "/project", "instruction": "task", "role": "root"},
-	} {
-		require.False(t, embeddedWorkerSchema().Check(invalid), "%v", invalid)
-		require.Error(t, embeddedAddressedArguments("mecha_worker", invalid))
+	for _, action := range []string{"launch", "list", "send", "cleanup"} {
+		require.Error(t, embeddedAddressedArguments("mecha_worker", map[string]any{"action": action}))
 	}
 	require.Error(t, embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "agent@example.com", "body": "mail"}))
 	require.Error(t, embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "recipient", "body": "mail", "from": "spoofed-sender"}))
@@ -43,10 +24,7 @@ func TestEmbeddedAddressedActionSchemas(t *testing.T) {
 	require.EqualError(t, err, "failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
 	err = embeddedAddressedArguments("mecha_mailbox_send", map[string]any{"recipient": "System", "body": "mail"})
 	require.EqualError(t, err, "failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
-	err = embeddedAddressedArguments("mecha_worker", map[string]any{"action": "send", "name": "system", "body": "mail"})
-	require.EqualError(t, err, "failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
-	err = embeddedAddressedArguments("mecha_worker", map[string]any{"action": "send", "name": "SYSTEM", "body": "mail"})
-	require.EqualError(t, err, "failed to send message: 'system' is an automated system notifier and does not accept incoming messages. Do not reply to system notifications.")
+
 }
 
 func TestEmbeddedAddressedToolsRejectContextOwnerBeforeAdmission(t *testing.T) {
@@ -63,22 +41,13 @@ func TestEmbeddedAddressedToolsRejectContextOwnerBeforeAdmission(t *testing.T) {
 }
 
 // The actual SDK records its call, enters Execute, then a new router process
-// wins before the mail/lifecycle transaction. Neither effect may be admitted.
-func TestEmbeddedAddressedSDKProcessRaceDoesNotSendOrCleanup(t *testing.T) {
-	for _, name := range []string{"mecha_mailbox_send", "mecha_worker"} {
+// wins before the mail transaction. Mail must not be admitted.
+func TestEmbeddedAddressedSDKProcessRaceDoesNotSend(t *testing.T) {
+	for _, name := range []string{"mecha_mailbox_send"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			m, db, provider, caller, root := requiredToolsFixture(t, "root")
 			args := map[string]any{"recipient": "race-recipient", "body": "must not be queued"}
-			if name == "mecha_worker" {
-				_, err := m.Launch(ctx, LaunchRequest{Name: "race-target", Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "settle"})
-				require.NoError(t, err)
-				require.Eventually(t, func() bool {
-					a, e := db.ManagedAgent(ctx, "race-target")
-					return e == nil && a.LifecycleState == "running"
-				}, 4*time.Second, 10*time.Millisecond)
-				args = map[string]any{"action": "cleanup", "name": "race-target"}
-			}
 			provider.SetResponses([]providers.FauxResponseStep{providers.FauxStatic(providers.FauxAssistantMessage(ai.ContentList{providers.FauxToolCall(name, args, "process-race-call")}, ai.StopToolUse))})
 			var raced bool
 			var faultErr error
@@ -107,40 +76,21 @@ func TestEmbeddedAddressedSDKProcessRaceDoesNotSendOrCleanup(t *testing.T) {
 			require.NoError(t, reader.QueryRowContext(ctx, `SELECT count(*) FROM managed_lifecycle_actions WHERE kind='terminate'`).Scan(&lifecycle))
 			require.Zero(t, mails)
 			require.Zero(t, lifecycle)
-			if name == "mecha_worker" {
-				a, err := db.ManagedAgent(ctx, "race-target")
-				require.NoError(t, err)
-				require.Equal(t, "running", a.DesiredState)
-			}
+
 		})
 	}
 }
 
 func TestEmbeddedSDKKnownCommitPermissionErrorHandsOffOriginalOnce(t *testing.T) {
-	for _, action := range []string{"mail", "launch", "cleanup"} {
+	for _, action := range []string{"mail"} {
 		t.Run(action, func(t *testing.T) {
 			ctx := context.Background()
 			m, db, provider, caller, root := requiredToolsFixture(t, "root")
 			m.mu.Lock()
 			owner := m.embeddedOwners[caller]
 			m.mu.Unlock()
-			if action == "cleanup" {
-				_, err := m.Launch(ctx, LaunchRequest{Name: "commit-target", Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "settle"})
-				require.NoError(t, err)
-				require.Eventually(t, func() bool {
-					a, e := db.ManagedAgent(ctx, "commit-target")
-					return e == nil && a.LifecycleState == "running"
-				}, 4*time.Second, 10*time.Millisecond)
-			}
-			name := "mecha_worker"
-			args := map[string]any{"action": action, "name": "commit-target"}
-			if action == "launch" {
-				args["cwd"], args["instruction"], args["model"] = root, "task", map[string]any{"provider": "openai-codex", "id": "gpt-5.6-terra"}
-			}
-			if action == "mail" {
-				name = "mecha_mailbox_send"
-				args = map[string]any{"recipient": "commit-recipient", "body": "committed body"}
-			}
+			name := "mecha_mailbox_send"
+			args := map[string]any{"recipient": "commit-recipient", "body": "committed body"}
 			call := providers.FauxToolCall(name, args, "committed-sdk-original")
 			provider.SetResponses([]providers.FauxResponseStep{providers.FauxStatic(providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))})
 			wal := filepath.Join(root, "router.db-wal")
@@ -170,18 +120,14 @@ func TestEmbeddedSDKKnownCommitPermissionErrorHandsOffOriginalOnce(t *testing.T)
 				publications++
 				require.Equal(t, caller, accepted.Message.From)
 				require.Equal(t, "committed body", accepted.Message.Body)
-				if action == "mail" {
-					panic("untrusted publication payload")
-				}
+				panic("untrusted publication payload")
 			})
 			saved, err := db.ManagedAgent(ctx, caller)
 			require.NoError(t, err)
 			err = m.runEmbeddedSessionPrompt(context.WithValue(ctx, embeddedOwnerContextKey{}, owner), *saved, "original committed action")
 			require.ErrorContains(t, err, "stat SQLite state file", "SDK failure must preserve the original permission error")
-			if action == "mail" {
-				require.ErrorContains(t, err, "committed mail publication failed")
-				require.NotContains(t, err.Error(), "untrusted publication payload")
-			}
+			require.ErrorContains(t, err, "committed mail publication failed")
+			require.NotContains(t, err.Error(), "untrusted publication payload")
 			require.True(t, injected)
 			require.True(t, restored)
 			require.Equal(t, 1, handoffs)
@@ -194,27 +140,13 @@ func TestEmbeddedSDKKnownCommitPermissionErrorHandsOffOriginalOnce(t *testing.T)
 			var accepted struct {
 				MessageID string `json:"message_id"`
 			}
-			if name == "mecha_mailbox_send" {
-				require.Equal(t, 1, publications, "no publication retry, including callback failure")
-				require.NoError(t, json.Unmarshal(content, &accepted))
-				mail, err := db.MessageFor(ctx, accepted.MessageID)
-				require.NoError(t, err)
-				require.Equal(t, "committed body", mail.Body)
-				_, err = db.EnqueueEmbeddedToolMail(ctx, original)
-				require.Error(t, err)
-			} else {
-				op, err := db.ManagedOperation(ctx, embeddedWorkerRequestID(owner.binding, call.ID))
-				require.NoError(t, err)
-				require.Equal(t, 202, op.ResponseStatus)
-				if action == "launch" {
-					require.Eventually(t, func() bool {
-						a, e := db.ManagedAgent(ctx, "commit-target")
-						return e == nil && a.LifecycleState == "running"
-					}, 4*time.Second, 10*time.Millisecond, "original committed launch must dispatch")
-				} else {
-					require.Eventually(t, func() bool { _, e := db.ManagedAgent(ctx, "commit-target"); return e == sql.ErrNoRows }, 4*time.Second, 10*time.Millisecond, "original committed cleanup must enter its executor")
-				}
-			}
+			require.Equal(t, 1, publications, "no publication retry, including callback failure")
+			require.NoError(t, json.Unmarshal(content, &accepted))
+			mail, err := db.MessageFor(ctx, accepted.MessageID)
+			require.NoError(t, err)
+			require.Equal(t, "committed body", mail.Body)
+			_, err = db.EnqueueEmbeddedToolMail(ctx, original)
+			require.Error(t, err)
 			effect, err := db.RecoverEmbeddedEffect(ctx, owner.binding, call.ID)
 			require.NoError(t, err)
 			require.Equal(t, "unknown", effect.State)
@@ -227,13 +159,8 @@ func TestEmbeddedSDKKnownCommitPermissionErrorHandsOffOriginalOnce(t *testing.T)
 			require.Zero(t, checked)
 			require.NoError(t, reader.QueryRowContext(ctx, `SELECT count(*) FROM managed_http_operations WHERE request_id=?`, embeddedWorkerRequestID(owner.binding, call.ID)).Scan(&operations))
 			require.NoError(t, reader.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE sender=?`, caller).Scan(&mails))
-			if name == "mecha_mailbox_send" {
-				require.Equal(t, 1, mails)
-				require.Zero(t, operations)
-			} else {
-				require.Zero(t, mails)
-				require.Equal(t, 1, operations)
-			}
+			require.Equal(t, 1, mails)
+			require.Zero(t, operations)
 		})
 	}
 }

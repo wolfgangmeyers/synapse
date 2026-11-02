@@ -1208,10 +1208,6 @@ func managedLifecycleActionForTx(ctx context.Context, db *sql.DB, actionID strin
 // ReserveManagedLifecycle resolves exact replay before inspecting an agent or
 // its binding. The caller supplies a complete live fence only after that lookup.
 func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation ManagedLifecycleReservation) (ManagedLifecycleAdmission, error) {
-	return s.reserveManagedLifecycle(ctx, reservation, nil)
-}
-
-func (s *Store) reserveManagedLifecycle(ctx context.Context, reservation ManagedLifecycleReservation, producer *EmbeddedToolInvocation) (ManagedLifecycleAdmission, error) {
 	if reservation.Source == "" {
 		reservation.Source = "direct"
 	}
@@ -1243,11 +1239,6 @@ func (s *Store) reserveManagedLifecycle(ctx context.Context, reservation Managed
 	}
 	var result ManagedLifecycleAdmission
 	transaction := func() error {
-		if producer != nil {
-			if err := s.embeddedToolCleanupGuardTx(ctx, producer, reservation); err != nil {
-				return err
-			}
-		}
 		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, reservation.Method, reservation.RequestID)
 		if err == nil {
 			if existing.CanonicalPath != reservation.CanonicalPath || existing.CanonicalBodyHash != reservation.CanonicalBodyHash {
@@ -1465,11 +1456,6 @@ func (s *Store) reserveManagedLifecycle(ctx context.Context, reservation Managed
 		}
 		result.Operation, result.Action, result.Agent = &reservation.Operation, action, agent
 		return nil
-	}
-	if producer != nil {
-		committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, transaction)
-		producer.recordDomainDisposition(committed, conclusive, err)
-		return result, err
 	}
 	err := s.runImmediate(ctx, transaction)
 	return result, err

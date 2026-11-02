@@ -59,7 +59,6 @@ ROOT_OPERATION_CONTRACT: dict[str, dict[str, frozenset[str] | None | bool]] = {
     "notifications.settled": {"fields": frozenset({"action"}), "actions": frozenset({"enable", "disable", "status"}), "available": True},
     "ops.state": {"fields": frozenset({"action", "task", "state", "alias", "type", "project", "description", "purpose", "window", "branch", "pr", "linear", "field", "value"}), "actions": frozenset({"query", "create", "update"}), "available": True},
     "ops.verification_handoff": {"fields": frozenset({"action", "task", "reminderId", "successor", "remoteVerified"}), "actions": frozenset({"record"}), "available": True},
-    "ops.worker": {"fields": frozenset({"action", "alias", "worker", "message", "subject"}), "actions": frozenset({"list", "cleanup", "send"}), "available": True},
     "web.search": {"fields": frozenset({"query", "freshness", "maxResults"}), "actions": None, "available": True},
 }
 
@@ -71,7 +70,7 @@ UNAVAILABLE_OPERATIONS = frozenset({
 
 
 def operation_unavailable(operation: str, arguments: dict[str, Any]) -> bool:
-    return operation in UNAVAILABLE_OPERATIONS or (operation == "ops.worker" and arguments.get("action") != "send")
+    return operation in UNAVAILABLE_OPERATIONS
 
 
 def validate_operation_dispatch(operation: str, arguments: dict[str, Any]) -> None:
@@ -534,15 +533,6 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
         if arguments.get("remoteVerified") is not None:
             values += ["--remote-verified", text(arguments["remoteVerified"], "remoteVerified")]
         return invoke_script("state_verification_handoff.py", values)
-    if operation == "ops.worker":
-        if action == "cleanup":
-            return invoke_script("worker_lifecycle.py", [action, "--alias", identifier(arguments.get("alias"), "alias")])
-        if action == "list":
-            return invoke_script("worker_list.py", [])
-        values = ["--to", identifier(arguments.get("worker"), "worker"), "--body", text(arguments.get("message"), "message"), "--from", agent_id, "--managed-control-request-id", identifier(request_id, "request_id")]
-        if arguments.get("subject") is not None:
-            values += ["--subject", text(arguments["subject"], "subject")]
-        return invoke_script("mailbox_send.py", values)
     if operation == "ops.pr_status":
         number = arguments.get("pullRequest")
         if not isinstance(number, int) or number < 1:
@@ -628,6 +618,17 @@ def run(mode: str, home: Path) -> int:
             now = time.time()
             prune_requests(state, now)
             prior = state["requests"].get(request_id)
+            # Go recovery has no retained raw arguments. Only the retired
+            # worker's reconcile path may read its immutable request-ID result
+            # without reconstructing the old input fingerprint. Go checks the
+            # complete current runtime fence before entering this path. Never
+            # dispatch or create a host record here, even when none is found.
+            if operation == "ops.worker":
+                if mode == "reconcile" and arguments == {} and isinstance(prior, dict) and isinstance(prior.get("result"), dict):
+                    print(canonical(prior["result"]))
+                else:
+                    print(canonical(result("error", "The retired worker operation is unavailable.", {}, "ROOT_OPERATION_UNAVAILABLE")))
+                return 0
             if prior is not None:
                 if not isinstance(prior, dict) or prior.get("fingerprint") != fingerprint or not isinstance(prior.get("result"), dict):
                     raise ValueError("request ID belongs to another root operation")
