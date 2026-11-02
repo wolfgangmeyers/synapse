@@ -1,8 +1,6 @@
-import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { discoverModels } from "pi-cursor-sdk/dist/model-discovery.js";
 import { streamCursorLazy } from "pi-cursor-sdk/dist/cursor-provider-lazy.js";
@@ -14,7 +12,6 @@ const PROVIDERS = {
   google: { label: "Google", authType: "api_key" },
   cursor: { label: "Cursor", authType: "api_key" },
   "google-vertex": { label: "Google Vertex AI", authType: "api_key" },
-  antigravity: { label: "Google Antigravity", authType: "oauth" },
 };
 
 function modelSummary(model) {
@@ -35,67 +32,6 @@ export function resolveHostAdcPath() {
   }
   const hostHome = process.env.MECHA_HOST_HOME?.trim() || os.homedir();
   return path.resolve(hostHome, ".config", "gcloud", "application_default_credentials.json");
-}
-
-export function resolveAntigravityExtensionPath() {
-  const envVal = process.env.MECHA_ANTIGRAVITY_EXTENSION?.trim();
-  if (!envVal) {
-    return null;
-  }
-  return path.resolve(envVal);
-}
-
-async function loadAntigravityModules(extensionPath) {
-  if (!extensionPath || !existsSync(extensionPath)) {
-    return null;
-  }
-
-  const dir = path.dirname(extensionPath);
-  const modelsPath = path.join(dir, "models", "index.ts");
-  const authPath = path.join(dir, "auth", "index.ts");
-  const streamPath = path.join(dir, "stream", "index.ts");
-
-  if (!existsSync(modelsPath) || !existsSync(authPath)) {
-    return null;
-  }
-
-  let createJiti;
-  try {
-    const loaderUrl = new URL("./core/extensions/jiti-static-loader.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
-    const mod = await import(loaderUrl.href);
-    createJiti = mod.createJiti;
-  } catch {
-    try {
-      const jitiUrl = new URL("../node_modules/jiti/lib/jiti.mjs", import.meta.resolve("@earendil-works/pi-coding-agent"));
-      const mod = await import(jitiUrl.href);
-      createJiti = mod.createJiti;
-    } catch {
-      const { createJiti: jitiFn } = await import("jiti");
-      createJiti = jitiFn;
-    }
-  }
-
-  const piAiPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
-  const piAiCompatPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/compat"));
-  const piCodingPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-  const undiciPath = fileURLToPath(import.meta.resolve("undici"));
-
-  const jiti = createJiti(import.meta.url, {
-    alias: {
-      "@earendil-works/pi-ai": piAiPath,
-      "@earendil-works/pi-ai/compat": piAiCompatPath,
-      "@earendil-works/pi-coding-agent": piCodingPath,
-      undici: undiciPath,
-    },
-  });
-
-  const [modelsMod, authMod, streamMod] = await Promise.all([
-    jiti.import(modelsPath),
-    jiti.import(authPath),
-    jiti.import(streamPath).catch(() => null),
-  ]);
-
-  return { modelsMod, authMod, streamMod };
 }
 
 // Shared-store helper discovery must neither resolve nor refresh the ordinary
@@ -251,30 +187,6 @@ function registerVertexAdcProvider(runtime) {
   });
 }
 
-async function registerAntigravityProvider(runtime) {
-  const extensionPath = resolveAntigravityExtensionPath();
-  const agMods = await loadAntigravityModules(extensionPath);
-  if (!agMods?.modelsMod || !agMods?.authMod) {
-    return false;
-  }
-
-  const catalog = agMods.modelsMod.getCurrentAntigravityCatalog();
-  runtime.registerProvider("antigravity", {
-    name: "Google Antigravity",
-    baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-    api: "antigravity",
-    models: catalog.models,
-    oauth: {
-      name: "Google Antigravity",
-      login: agMods.authMod.loginAntigravity,
-      refreshToken: agMods.authMod.refreshAntigravityToken,
-      getApiKey: agMods.authMod.getApiKey,
-    },
-    ...(agMods.streamMod?.streamAntigravity ? { streamSimple: agMods.streamMod.streamAntigravity } : {}),
-  });
-  return true;
-}
-
 async function createRuntime({ authPath, signal, ownedCodex = false }) {
   if (typeof authPath !== "string" || authPath.length === 0) {
     throw new Error("ordinary Pi auth path is required");
@@ -290,7 +202,6 @@ async function createRuntime({ authPath, signal, ownedCodex = false }) {
   if (ownedCodex) useRouterOwnedCodex(runtime);
   registerGoogleProvider(runtime);
   registerVertexAdcProvider(runtime);
-  await registerAntigravityProvider(runtime);
 
   // Pinned Cursor SDK registration
   runtime.registerProvider("cursor", {
@@ -391,17 +302,6 @@ export async function executeProviderOperation({
   }
   if (ownedCodex && provider === "openai-codex") {
     throw new Error("Codex auth belongs to the router");
-  }
-
-  if (provider === "antigravity" && operation === "login") {
-    const extPath = resolveAntigravityExtensionPath();
-    if (!extPath) {
-      throw new Error("Antigravity extension is disabled or not configured (MECHA_ANTIGRAVITY_EXTENSION is unset)");
-    }
-    const agMods = await loadAntigravityModules(extPath);
-    if (!agMods?.modelsMod || !agMods?.authMod) {
-      throw new Error(`Antigravity extension not found or invalid at ${extPath}`);
-    }
   }
 
   const runtime = await createRuntime({ authPath, signal, ownedCodex });

@@ -56,13 +56,13 @@ func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
 	config.CursorExtension = filepath.Join(paths["work"], "nonexistent.js")
 	require.Error(t, ValidateManagedLaunchConfig(config))
 
-	// AntigravityExtension is optional.
+	// Historical AntigravityExtension values are ignored, including missing files.
 	config, paths = managedLaunchConfigFixture(t)
 	config.AntigravityExtension = ""
 	require.NoError(t, ValidateManagedLaunchConfig(config))
 
 	config.AntigravityExtension = filepath.Join(paths["work"], "nonexistent-ag.ts")
-	require.Error(t, ValidateManagedLaunchConfig(config))
+	require.NoError(t, ValidateManagedLaunchConfig(config))
 }
 
 func TestManagedChildPathUsesNVMRuntimeBehindStableShim(t *testing.T) {

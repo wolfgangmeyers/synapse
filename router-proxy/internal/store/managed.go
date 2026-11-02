@@ -69,14 +69,12 @@ var managedProviderNames = map[string]bool{
 	"google":        true,
 	"cursor":        true,
 	"google-vertex": true,
-	"antigravity":   true,
 }
 var managedProviderLabels = map[string]string{
 	"openai-codex":  "ChatGPT",
 	"google":        "Google",
 	"cursor":        "Cursor",
 	"google-vertex": "Google Vertex AI",
-	"antigravity":   "Google Antigravity",
 }
 
 func validManagedProvider(value string) bool { return managedProviderNames[value] }
@@ -583,7 +581,9 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 		}
 		value.Authenticated = authenticated == 1
 		value.AccountLabel, value.Error = account.String, failure.String
-		snapshot.Providers = append(snapshot.Providers, value)
+		if validManagedProvider(value.Provider) {
+			snapshot.Providers = append(snapshot.Providers, value)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -604,7 +604,9 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 			return snapshot, err
 		}
 		value.Available = available == 1
-		snapshot.Models = append(snapshot.Models, value)
+		if validManagedProvider(value.Provider) {
+			snapshot.Models = append(snapshot.Models, value)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -621,8 +623,8 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 // canceled helper never calls this method, so the revision and catalog stay
 // unchanged together.
 func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []ManagedProviderStatus, models []ManagedProviderModel) (int64, error) {
-	if len(providers) != 5 {
-		return 0, errors.New("provider snapshot must contain exactly five providers")
+	if len(providers) != 4 {
+		return 0, errors.New("provider snapshot must contain exactly four providers")
 	}
 	seen := make(map[string]bool, len(providers))
 	authenticated := make(map[string]bool, len(providers))
@@ -633,7 +635,7 @@ func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []M
 		seen[provider.Provider] = true
 		authenticated[provider.Provider] = provider.Authenticated
 	}
-	for _, provider := range []string{"openai-codex", "google", "cursor", "google-vertex", "antigravity"} {
+	for _, provider := range []string{"openai-codex", "google", "cursor", "google-vertex"} {
 		if !seen[provider] {
 			return 0, errors.New("provider snapshot is incomplete")
 		}
@@ -651,6 +653,13 @@ func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []M
 	}
 	var revision int64
 	err := s.runImmediate(ctx, func() error {
+		// Retire legacy catalog rows in the same transaction as the new snapshot
+		// and revision. This does not read or mutate credential files.
+		for _, table := range []string{"managed_provider_models", "managed_provider_status"} {
+			if _, err := s.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE provider NOT IN ('google','google-vertex','openai-codex','cursor')"); err != nil {
+				return err
+			}
+		}
 		now := formatTimestamp(s.clock.Now())
 		for _, provider := range providers {
 			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_provider_status (provider,label,authenticated,status,account_label,updated_at,error)

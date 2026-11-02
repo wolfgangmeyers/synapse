@@ -35,7 +35,7 @@ func setupAdminToolsFixture(t *testing.T) (*Manager, *store.Store, embeddedOwner
 		},
 		CatalogSource: CatalogFromModels(
 			Model{Provider: "google-vertex", ID: "gemini-3.8-flash", Available: true},
-			Model{Provider: "antigravity", ID: "gemini-3.8-flash", Available: true},
+			Model{Provider: "google-vertex", ID: "gemini-3.8-flash", Available: true},
 		),
 	})
 	require.NoError(t, err)
@@ -253,7 +253,7 @@ func TestAdminTools_WorkerSetModel(t *testing.T) {
 	res, err := setModelTool.Execute(ctx, "call-set-model", map[string]any{
 		"worker_id": targetID,
 		"model": map[string]any{
-			"provider": "antigravity",
+			"provider": "google-vertex",
 			"id":       "gemini-3.8-flash",
 		},
 	}, nil)
@@ -266,7 +266,7 @@ func TestAdminTools_WorkerSetModel(t *testing.T) {
 	require.Equal(t, targetID, payload["worker_id"])
 	modelData, ok := payload["model"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "antigravity", modelData["provider"])
+	require.Equal(t, "google-vertex", modelData["provider"])
 	require.Equal(t, "gemini-3.8-flash", modelData["id"])
 }
 

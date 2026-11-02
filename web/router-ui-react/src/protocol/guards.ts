@@ -258,7 +258,7 @@ export function isManagedChildrenProjection(value: unknown): value is ManagedChi
 }
 
 export function isProviderName(value: unknown): value is ManagedProvider {
-  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex" || value === "antigravity";
+  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex";
 }
 function isSafeProviderURL(value: unknown): boolean {
   if (!isSafeString(value, 1, 2048)) return false;
