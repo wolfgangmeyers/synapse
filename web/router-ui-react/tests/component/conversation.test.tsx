@@ -105,7 +105,7 @@ describe("Conversation", () => {
     const { container, rerender } = render(<MessageList peerId="one" messages={[{ id: "1", body: "One" }]} />);
     const list = container.querySelector<HTMLDivElement>(".messages");
     if (!list) throw new Error("Message list was not rendered");
-    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 200 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1000 });
     let scrollTop = 30;
     let writes = 0;
     Object.defineProperty(list, "scrollTop", {
@@ -113,6 +113,9 @@ describe("Conversation", () => {
       get: () => scrollTop,
       set: (value: number) => { writes += 1; scrollTop = value; },
     });
+
+    // A changed DOM offset alone does not notify the component of user intent.
+    fireEvent.scroll(list);
 
     rerender(<MessageList peerId="one" messages={[{ id: "1", body: "Two" }]} />);
 

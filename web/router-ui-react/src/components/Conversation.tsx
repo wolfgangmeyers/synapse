@@ -58,7 +58,7 @@ export interface ConversationProps {
   expanded?: boolean | undefined;
   onOpenProgressHistory?: ((agentId: string) => void) | undefined;
   onOpenWorkflow?: (() => void) | undefined;
-  onLoadOlder?: (() => void) | undefined;
+  onLoadOlder?: ((beforeCommit?: () => void) => Promise<void>) | undefined;
   hasOlder?: boolean | undefined;
   loadingOlder?: boolean | undefined;
 }

@@ -24,7 +24,7 @@ export interface MessageListProps {
   loading?: boolean | undefined;
   error?: string | undefined;
   onNearBottomChange?: ((nearBottom: boolean) => void) | undefined;
-  onLoadOlder?: (() => void) | undefined;
+  onLoadOlder?: ((beforeCommit?: () => void) => Promise<void>) | undefined;
   hasOlder?: boolean | undefined;
   loadingOlder?: boolean | undefined;
 }
@@ -501,35 +501,84 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
   const effectiveHasOlder = hasOlder ?? internalHasOlder;
   const effectiveLoadingOlder = loadingOlder ?? internalLoadingOlder;
 
-  const prevScrollHeightRef = useRef<number | null>(null);
-  const prevScrollTopRef = useRef<number | null>(null);
-  const isPrependingRef = useRef(false);
-
-  const handleInternalLoadOlder = useCallback(() => {
+  type PaginationRequest = {
+    settled: boolean;
+    anchor?: { element: HTMLElement; offset: number };
+  };
+  const paginationRef = useRef<PaginationRequest | null>(null);
+  const [, renderPagination] = useState(0);
+  const lastScrollTopRef = useRef(0);
+  const frameRef = useRef<number | null>(null);
+  const readingViewportRef = useRef<{
+    firstItemKey: string | undefined;
+    anchors: Array<{ element: HTMLElement; offset: number }>;
+  } | null>(null);
+  const captureReadingViewport = useCallback(() => {
     const element = ref.current;
-    if (element) {
-      prevScrollHeightRef.current = element.scrollHeight;
-      prevScrollTopRef.current = element.scrollTop;
-      isPrependingRef.current = true;
-    }
-    if (onLoadOlder) {
-      onLoadOlder();
-      return;
-    }
-    if (!peerId || internalLoadingOlder) return;
+    if (!element) return;
+    const viewport = element.getBoundingClientRect();
+    const anchors = Array.from(element.querySelectorAll<HTMLElement>("[data-scroll-anchor]"));
+    readingViewportRef.current = {
+      firstItemKey: anchors[0]?.dataset.scrollAnchor,
+      anchors: anchors.flatMap((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom
+          ? [{ element: item, offset: rect.top - viewport.top }] : [];
+      }),
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    paginationRef.current = null;
+    readingViewportRef.current = null;
+    isNearBottomRef.current = true;
+    setInternalEvents([]);
+    setInternalHasOlder(false);
+    setInternalLoadingOlder(false);
+    setInternalLoading(false);
+    return () => {
+      paginationRef.current = null;
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    };
+  }, [conversationKey]);
+
+  const handleInternalLoadOlder = useCallback(async () => {
+    if (paginationRef.current || effectiveLoadingOlder || !effectiveHasOlder) return;
     const oldestSeq = internalEvents[0]?.seq;
-    if (!oldestSeq || oldestSeq <= 0) return;
-    setInternalLoadingOlder(true);
-    fetchConversationTimeline(peerId, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq, routerUrl)
-      .then((resp) => {
+    if (!onLoadOlder && (!peerId || !oldestSeq || oldestSeq <= 0)) return;
+    const request: PaginationRequest = { settled: false };
+    paginationRef.current = request;
+    const beforeCommit = () => {
+      if (paginationRef.current !== request) return;
+      const element = ref.current;
+      if (!element || isNearBottomRef.current) return;
+      const top = element.getBoundingClientRect().top;
+      const anchor = Array.from(element.querySelectorAll<HTMLElement>("[data-scroll-anchor]"))
+        .find((item) => item.getBoundingClientRect().bottom > top);
+      if (anchor) request.anchor = { element: anchor, offset: anchor.getBoundingClientRect().top - top };
+    };
+    try {
+      if (onLoadOlder) {
+        await onLoadOlder(beforeCommit);
+      } else if (peerId && oldestSeq) {
+        setInternalLoadingOlder(true);
+        const resp = await fetchConversationTimeline(peerId, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq, routerUrl);
+        if (paginationRef.current !== request) return;
+        beforeCommit();
         setInternalEvents((prev) => [...resp.events, ...prev]);
         setInternalHasOlder(Boolean(resp.next_before_seq && resp.next_before_seq > 0));
-      })
-      .catch(() => undefined)
-      .finally(() => {
+      }
+    } catch {
+      // History remains readable when pagination fails.
+    } finally {
+      if (paginationRef.current === request) {
+        request.settled = true;
         setInternalLoadingOlder(false);
-      });
-  }, [onLoadOlder, peerId, internalLoadingOlder, internalEvents, routerUrl]);
+        // Cleanup happens in layout, after the response's state updates commit.
+        renderPagination((version) => version + 1);
+      }
+    }
+  }, [onLoadOlder, peerId, effectiveLoadingOlder, effectiveHasOlder, internalEvents, routerUrl, conversationKey]);
 
   const items = useMemo<FeedItem[]>(() => {
     const seenIds = new Set<string>();
@@ -690,59 +739,63 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     }
     return result;
   }, [items]);
-  const latestItem = renderedItems.at(-1)?.item;
-  const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;
-  const oldestItem = renderedItems[0]?.item;
-  const oldestItemKey = oldestItem === undefined ? undefined : `${oldestItem.type}\u001f${oldestItem.id}`;
-
-  // Preserve scroll viewport position when prepending older history at the top,
-  // preventing the conversation feed from jumping or snapping to 0.
+  // Consume a response anchor on its render even if all returned IDs already exist.
   useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element || prevScrollHeightRef.current === null || prevScrollTopRef.current === null) return;
-    const heightDelta = element.scrollHeight - prevScrollHeightRef.current;
-    if (heightDelta > 0) {
-      element.scrollTop = prevScrollTopRef.current + heightDelta;
-    }
-    prevScrollHeightRef.current = null;
-    prevScrollTopRef.current = null;
-    isPrependingRef.current = false;
-  }, [oldestItemKey]);
-
-  useLayoutEffect(() => {
-    if (isPrependingRef.current) return;
     const element = ref.current;
     if (!element) return;
-
-    const isConversationSwitch = prevConversationKeyRef.current !== conversationKey;
+    const switched = prevConversationKeyRef.current !== conversationKey;
     prevConversationKeyRef.current = conversationKey;
+    if (switched) isNearBottomRef.current = true;
+    const request = paginationRef.current;
+    const previousViewport = readingViewportRef.current;
+    const remainingKeys = new Set(Array.from(element.querySelectorAll<HTMLElement>("[data-scroll-anchor]"),
+      (item) => item.dataset.scrollAnchor));
+    // Native anchoring is disabled here. Restore a surviving visible item when
+    // retention removes the front, not when an append merely grows total height.
+    const frontTrimmed = previousViewport?.firstItemKey !== undefined
+      && !remainingKeys.has(previousViewport.firstItemKey);
+    const anchor = request?.anchor ?? (frontTrimmed
+      ? previousViewport?.anchors.find((item) => element.contains(item.element)) : undefined);
+    if (!switched && anchor && !isNearBottomRef.current && element.contains(anchor.element)) {
+      element.scrollTop += anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset;
+    }
+    if (request) {
+      delete request.anchor;
+      if (request.settled) paginationRef.current = null;
+    }
+    if (isNearBottomRef.current) element.scrollTop = element.scrollHeight;
+    lastScrollTopRef.current = element.scrollTop;
+    captureReadingViewport();
+  });
 
-    // Sticky auto-scroll model:
-    // - Scrolls to bottom if user is within DEFAULT_AUTO_SCROLL_THRESHOLD (180px) of bottom
-    // - Locks viewport position when user scrolls up to read history
-    // - Forces scroll to bottom on peer/agent switch
-    // - Uses double-rAF (initial synchronous layout scroll + requestAnimationFrame) for DOM layout settlement
-    if (isConversationSwitch) {
-      isNearBottomRef.current = true;
-      element.scrollTop = element.scrollHeight;
-      const frame = requestAnimationFrame(() => {
-        if (isPrependingRef.current) return;
+  // Observe actual layout, including same-ID streaming, images, and viewport resize.
+  // Reattach after empty/loading views become a timeline.
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const key = conversationKey;
+    const align = () => {
+      captureReadingViewport();
+      if (!isNearBottomRef.current || paginationRef.current?.anchor) return;
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = null;
+        if (prevConversationKeyRef.current !== key || !isNearBottomRef.current || paginationRef.current?.anchor) return;
         element.scrollTop = element.scrollHeight;
+        lastScrollTopRef.current = element.scrollTop;
       });
-      return () => cancelAnimationFrame(frame);
-    }
-
-    if (!isNearBottomRef.current) {
-      return;
-    }
-
-    element.scrollTop = element.scrollHeight;
-    const frame = requestAnimationFrame(() => {
-      if (isPrependingRef.current) return;
-      element.scrollTop = element.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [conversationKey, latestItemKey]);
+    };
+    align();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(align);
+    observer?.observe(element);
+    const timeline = element.querySelector(".complete-timeline");
+    if (timeline) observer?.observe(timeline);
+    return () => {
+      observer?.disconnect();
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    };
+  });
   // Retained history belongs to the newly selected agent; it is not a live
   // announcement just because this component was already mounted for another.
   useEffect(() => {
@@ -768,12 +821,21 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     const element = ref.current;
     if (!element) return;
     const { scrollTop, scrollHeight, clientHeight } = element;
+    // Layout notifications at the same position are not a change of reading intent.
+    if (scrollTop === lastScrollTopRef.current) return;
+    lastScrollTopRef.current = scrollTop;
+    captureReadingViewport();
     const nearBottom = shouldFollowToBottom({ scrollTop, scrollHeight, clientHeight }, DEFAULT_AUTO_SCROLL_THRESHOLD);
     isNearBottomRef.current = nearBottom;
     onNearBottomChange?.(nearBottom);
+    // A user movement between response and layout supersedes the captured offset.
+    const anchor = paginationRef.current?.anchor;
+    if (anchor && element.contains(anchor.element)) {
+      anchor.offset = anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top;
+    }
     const isScrollable = scrollHeight > clientHeight + 20;
     if (isScrollable && scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder) {
-      handleInternalLoadOlder();
+      void handleInternalLoadOlder();
     }
   };
   const hasItems = renderedItems.length > 0;
@@ -817,7 +879,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
               return (
                 <Fragment key={itemKey}>
                   {separator}
-                  <li className="timeline-item timeline-item--context-reset">
+                  <li className="timeline-item timeline-item--context-reset" data-scroll-anchor={itemKey}>
                     <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />
                   </li>
                 </Fragment>
@@ -836,7 +898,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
                       <span className={`timeline-dot timeline-dot--${orbTone}`} />
                     </div>
                   )}
-                  <div className="timeline-content">
+                  <div className="timeline-content" data-scroll-anchor={itemKey}>
                     {item.type === "message" ? (
                       <MessageBubble
                         message={item.message}
