@@ -1,0 +1,19 @@
+{
+  "evaluator": "anthropic/claude-sonnet-5",
+  "compaction_deadline_ms": 30000,
+  "shutdown_deadline_ms": 10000,
+  "evaluator_timeout_ms": 60000,
+  "router_timeout_ms": 5000,
+  "source_max_bytes": 98304,
+  "source_message_max_bytes": 8192,
+  "tool_result_max_bytes": 2048,
+  "previous_summary_max_bytes": 8192,
+  "candidate_limit": 100,
+  "candidate_max_bytes": 65536,
+  "output_max_bytes": 32768,
+  "maximum_records": 6,
+  "maximum_title_bytes": 256,
+  "maximum_body_bytes_per_record": 16384,
+  "maximum_total_body_bytes": 32768,
+  "maximum_related_ids_per_record": 24
+}

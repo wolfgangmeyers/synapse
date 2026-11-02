@@ -25,10 +25,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.1",
-    "ajv": "8.20.0",
-    "ajv-formats": "3.0.1",
     "markdown-it": "14.3.0",
-    "nanoid": "5.1.6",
     "ws": "8.21.0"
   },
   "devDependencies": {

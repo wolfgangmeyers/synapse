@@ -8,7 +8,6 @@ on:
       - "package-lock.json"
       - "pi-extensions/mecha-messaging/**"
       - "pi-extensions/mecha-messaging/mailbox-client.js"
-      - "discord-gateway-bridge/main.mjs"
       - "tests/**"
   pull_request:
     paths:
@@ -17,7 +16,6 @@ on:
       - "package-lock.json"
       - "pi-extensions/mecha-messaging/**"
       - "pi-extensions/mecha-messaging/mailbox-client.js"
-      - "discord-gateway-bridge/main.mjs"
       - "tests/**"
 
 jobs:
@@ -35,4 +33,3 @@ jobs:
       - run: npm ci --prefix pi-extensions/mecha-messaging
       - run: npm run check:mecha-messaging
       - run: xvfb-run --auto-servernum -- npm test
-      - run: node --test tests/discord_gateway_bridge.test.mjs

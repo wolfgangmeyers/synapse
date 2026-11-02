@@ -25,7 +25,7 @@ func TestRootControlRouterOperationsUseConfiguredEndpointOnly(t *testing.T) {
 		targetPaths = append(targetPaths, request.URL.Path)
 		switch request.URL.Path {
 		case "/v1/messages":
-			_, _ = writer.Write([]byte(`{"message_id":"target-message"}`))
+			_, _ = writer.Write([]byte(`{"message":{"id":"target-message","state":"queued"}}`))
 		case "/v1/reminders":
 			body, _ := io.ReadAll(request.Body)
 			var reminder map[string]any
@@ -49,18 +49,12 @@ func TestRootControlRouterOperationsUseConfiguredEndpointOnly(t *testing.T) {
 	toolsDir := t.TempDir()
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)
-	runner, err := os.ReadFile(filepath.Join(repositoryRoot, ".claude", "skills", "supervisor", "tools", managedRootControlRunner))
+	runner, err := os.ReadFile(filepath.Join(repositoryRoot, "tools", managedRootControlRunner))
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, managedRootControlRunner), runner, 0o700))
-	mailSender := `#!/usr/bin/env python3
-import os
-from urllib.request import Request, urlopen
-base = os.environ["MECHA_ROUTER_URL"].rstrip("/")
-with urlopen(Request(base + "/v1/messages", data=b"{}", method="POST", headers={"content-type": "application/json"}), timeout=5) as response:
-    response.read()
-print("mail sent")
-`
-	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "mailbox_send.py"), []byte(mailSender), 0o700))
+	mailSender, err := os.ReadFile(filepath.Join(repositoryRoot, "tools", "mailbox_send.py"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "mailbox_send.py"), mailSender, 0o700))
 	t.Setenv("MECHA_SUPERVISOR_TOOLS", toolsDir)
 	executor, err := newMailboxRouterRootControlExecutor(managed.Config{ManagedHome: t.TempDir(), RouterURL: target.URL})
 	require.NoError(t, err)
@@ -101,7 +95,7 @@ func TestRootControlledWebSearchReturnsBoundedSourceResults(t *testing.T) {
 	}))
 	defer search.Close()
 	t.Setenv("MECHA_MANAGED_WEB_SEARCH_ENDPOINT", search.URL+"/search")
-	toolsDir, err := filepath.Abs(filepath.Join("..", "..", "..", ".claude", "skills", "supervisor", "tools"))
+	toolsDir, err := filepath.Abs(filepath.Join("..", "..", "..", "tools"))
 	require.NoError(t, err)
 	executor := mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: t.TempDir(), routerURL: "http://127.0.0.1:18775"}
 

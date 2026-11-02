@@ -28,7 +28,7 @@ function fakeRunner(result = { stdout: "ok" }) {
 
 function registered(options = {}) {
   const tools = new Map();
-  registerOperationalTools({ registerTool(tool) { tools.set(tool.name, tool); } }, options);
+  registerOperationalTools({ registerTool(tool) { tools.set(tool.name, tool); } }, { resolveCurrentAgentId: () => "test-sender", ...options });
   return tools;
 }
 
@@ -490,9 +490,9 @@ test("prefers adjacent supervisor tools when both layouts exist", (t) => {
   const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const extensionDirectory = join(root, "pi-extensions", "mecha-messaging");
-  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  const adjacentTools = join(extensionDirectory, "tools");
   mkdirSync(adjacentTools, { recursive: true });
-  mkdirSync(join(root, ".claude", "skills", "supervisor", "tools"), { recursive: true });
+  mkdirSync(join(root, "tools"), { recursive: true });
 
   assert.equal(resolveSupervisorTools(extensionDirectory), adjacentTools);
 });
@@ -501,7 +501,7 @@ test("falls back from the package directory to checkout supervisor tools", (t) =
   const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const extensionDirectory = join(root, "pi-extensions", "mecha-messaging");
-  const checkoutTools = join(root, ".claude", "skills", "supervisor", "tools");
+  const checkoutTools = join(root, "tools");
   mkdirSync(checkoutTools, { recursive: true });
 
   assert.equal(resolveSupervisorTools(extensionDirectory), checkoutTools);
@@ -511,53 +511,36 @@ test("falls back when the package adjacent supervisor tools path is a regular fi
   const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const extensionDirectory = join(root, "pi-extensions", "mecha-messaging");
-  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
-  mkdirSync(join(extensionDirectory, ".claude", "skills", "supervisor"), { recursive: true });
+  const adjacentTools = join(extensionDirectory, "tools");
+  mkdirSync(extensionDirectory, { recursive: true });
   writeFileSync(adjacentTools, "not a directory\n");
-  const checkoutTools = join(root, ".claude", "skills", "supervisor", "tools");
+  const checkoutTools = join(root, "tools");
   mkdirSync(checkoutTools, { recursive: true });
 
   assert.equal(resolveSupervisorTools(extensionDirectory), checkoutTools);
 });
 
-test("selects exact fixed script paths and passes safe argument arrays", async () => {
-  const runner = fakeRunner((file, args) => {
-    const script = basename(args[0]);
-    if (script === "pr_status.py" || script === "git_task_status.py") return { stdout: "[]" };
-    return { stdout: "ok" };
-  });
+test("retired operations fail before subprocess and worker send uses checkout adapter", async () => {
+  const runner = fakeRunner();
   const tools = registered({ runFile: runner.runFile });
-  const calls = [
+  for (const [name, input] of [
     ["mecha_state", { action: "query", task: "task-1" }],
-    ["mecha_state", { action: "create", alias: "task-2", type: "worker", project: "mecha", description: "Repair tools" }],
-    ["mecha_state", { action: "update", task: "task-2", field: "summary", value: "Ready" }],
     ["mecha_priority", { action: "create", priorityId: "p1", name: "Ship", taskIds: [3] }],
     ["mecha_verification_handoff", { action: "record", task: "task-1", reminderId: "r1", successor: "worker-1" }],
     ["mecha_worker", { action: "list" }],
     ["mecha_worker", { action: "launch", alias: "worker-1" }],
     ["mecha_worker", { action: "cleanup", alias: "worker-1" }],
-    ["mecha_worker", { action: "send", worker: "worker-1", message: "Check this" }],
     ["mecha_pr", { action: "status", pullRequest: 42 }],
     ["mecha_git", { action: "status", task: "task-1" }],
-  ];
-  for (const [name, input] of calls) {
+  ]) {
     const result = await execute(tools.get(name), input);
-    assert.equal(result.isError, undefined, `${name}: ${result.content[0].text}`);
+    assert.equal(result.isError, true);
+    assert.equal(result.details.error_code, "ROOT_OPERATION_UNAVAILABLE");
   }
-  const expectedDirectory = fileURLToPath(new URL("../.claude/skills/supervisor/tools", import.meta.url));
-  assert.deepEqual(runner.calls.map(({ args }) => args[0]), [
-    "state_query.py", "state_add.py", "state_update_status.py", "state_priority.py",
-    "state_verification_handoff.py", "worker_list.py", "worker_lifecycle.py",
-    "worker_lifecycle.py", "mailbox_send.py", "pr_status.py", "git_task_status.py",
-  ].map((name) => join(expectedDirectory, name)));
-  assert.equal(runner.calls[0].file, "python3");
-  assert.deepEqual(runner.calls[0].args, [join(expectedDirectory, "state_query.py"), "--alias", "task-1"]);
-  assert.equal(runner.calls[0].options.env, process.env);
-  assert.deepEqual(runner.calls[6].args.slice(1), ["launch", "--alias", "worker-1"]);
-  assert.deepEqual(runner.calls[7].args.slice(1), ["cleanup", "--alias", "worker-1"]);
-  assert.deepEqual(runner.calls[8].args.slice(1), ["--to", "worker-1", "--body", "Check this"]);
-  assert.deepEqual(runner.calls[9].args.slice(1), ["42", "--json"]);
-  assert.deepEqual(runner.calls[10].args.slice(1), ["--task", "task-1", "--json"]);
+  assert.equal(runner.calls.length, 0);
+  const sent = await execute(tools.get("mecha_worker"), { action: "send", worker: "worker-1", message: "hello", subject: "subject" });
+  assert.equal(sent.isError, undefined);
+  assert.deepEqual(runner.calls[0].args, [fileURLToPath(new URL("../tools/mailbox_send.py", import.meta.url)), "--to", "worker-1", "--body", "hello", "--from", "test-sender", "--subject", "subject"]);
 });
 
 test("injects runFile and fetchImpl through createMechaMessagingExtension", async () => {
@@ -575,7 +558,7 @@ test("injects runFile and fetchImpl through createMechaMessagingExtension", asyn
     },
   }));
   const tools = new Map(pi.tools.map((tool) => [tool.name, tool]));
-  await execute(tools.get("mecha_worker"), { action: "list" });
+  await execute(tools.get("mecha_worker"), { action: "send", worker: "worker", message: "hello" });
   await execute(tools.get("mecha_router"), { action: "health" });
   assert.equal(runner.calls.length, 1);
   assert.equal(requests.length, 1);
@@ -621,7 +604,7 @@ test("wraps top-level array router details and preserves top-level object router
 test("normalizes typed output and bounds successful and expected error responses", async () => {
   const long = "x".repeat(MAX_OPERATIONAL_OUTPUT + 100);
   const successTools = registered({ runFile: async () => ({ stdout: long }) });
-  const successful = await execute(successTools.get("mecha_worker"), { action: "list" });
+  const successful = await execute(successTools.get("mecha_worker"), { action: "send", worker: "worker", message: "hello" });
   assert.equal(successful.isError, undefined);
   assert.equal(successful.content[0].text.length, MAX_OPERATIONAL_OUTPUT + OPERATIONAL_TRUNCATION_MARKER.length);
   assert.ok(successful.content[0].text.endsWith(OPERATIONAL_TRUNCATION_MARKER));
@@ -701,7 +684,7 @@ test("redacts complete credential values across JSON, CLI, and error fixtures", 
   ];
   for (const { input, expected, secrets } of fixtures) {
     const tools = registered({ runFile: async () => ({ stdout: input }) });
-    const result = await execute(tools.get("mecha_worker"), { action: "list" });
+    const result = await execute(tools.get("mecha_worker"), { action: "send", worker: "worker", message: "hello" });
     assert.equal(result.content[0].text, expected, input);
     for (const secret of secrets) assert.equal(result.content[0].text.includes(secret), false, secret);
   }
@@ -730,7 +713,7 @@ test("redacts complete credential values across JSON, CLI, and error fixtures", 
   assert.doesNotMatch(JSON.stringify(expectedError), /expected-secret-value/);
 
   const unexpectedTools = registered({ runFile: async () => { throw new Error("token=unexpected-secret-value"); } });
-  const unexpected = await execute(unexpectedTools.get("mecha_worker"), { action: "list" });
+  const unexpected = await execute(unexpectedTools.get("mecha_worker"), { action: "send", worker: "worker", message: "hello" });
   assert.equal(unexpected.isError, true);
   assert.equal(unexpected.content[0].text, "Operational action failed.");
   assert.doesNotMatch(JSON.stringify(unexpected), /unexpected-secret-value/);
@@ -743,7 +726,7 @@ test("redacts credentials written to stderr by a successful script", async () =>
       stderr: "Authorization: Bearer successful-stderr-secret",
     }),
   });
-  const result = await execute(tools.get("mecha_worker"), { action: "list" });
+  const result = await execute(tools.get("mecha_worker"), { action: "send", worker: "worker", message: "hello" });
   assert.equal(result.isError, undefined);
   assert.match(result.content[0].text, /^operation complete\nAuthorization: \[redacted credential\]$/);
   assert.doesNotMatch(JSON.stringify(result), /successful-stderr-secret/);
@@ -763,7 +746,7 @@ test("preserves ordinary quoted and unquoted identifier fields while redacting c
     "--api-key-id=credential-record-8",
   ].join("\n");
   const textTools = registered({ runFile: async () => ({ stdout: ordinary }) });
-  const textResult = await execute(textTools.get("mecha_worker"), { action: "list" });
+  const textResult = await execute(textTools.get("mecha_worker"), { action: "send", worker: "worker", message: "hello" });
   assert.equal(textResult.content[0].text, ordinary);
 
   const detailTools = registered({

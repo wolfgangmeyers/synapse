@@ -5,11 +5,6 @@ import react from "@vitejs/plugin-react";
 // browser-facing Web UI URL, not an upstream: using it here proxies /v1 back
 // into Vite and makes remote managed launches fail.
 const routerUrl = process.env.MECHA_ROUTER_URL ?? "http://127.0.0.1:8765";
-const publicRouterUrl = process.env.MECHA_WEBUI_ROUTER_URL;
-const allowedHosts = (() => {
-  if (publicRouterUrl === undefined) return [];
-  try { return [new URL(publicRouterUrl).hostname]; } catch { return []; }
-})();
 
 export default defineConfig({
   plugins: [react()],

@@ -90,6 +90,17 @@ Specifications governing persistent agent scratchpad memory, notes retention, pi
 
 ---
 
+## Cleanup Contract Specifications
+
+| Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-MEMORY-001` | Memory Capture | `Mailbox` | [`memory-capture.spec.md`](./memory-capture.spec.md) | `tests/e2e/memory-capture.spec.ts` | `Active` |
+| `SPEC-ROUTER-TOOLS-001` | Router Native Tooling | `Mailbox` | [`router-native-tooling.spec.md`](./router-native-tooling.spec.md) | `tests/e2e/router-native-tooling.spec.ts` | `Active` |
+| `SPEC-DESKTOP-001` | Desktop Package Payload | `AgentManagement` | [`desktop-package-payload.spec.md`](./desktop-package-payload.spec.md) | `tests/e2e/desktop-package-payload.spec.ts` | `Active` |
+| `SPEC-MANAGED-RUNTIME-001` | Managed Runtime Contracts | `AgentManagement` | [`managed-runtime-contracts.spec.md`](./managed-runtime-contracts.spec.md) | Complete Playwright mapping pending | `Draft` |
+
+---
+
 ## Spec Authoring & Maintenance Workflow
 
 1. **Pre-Implementation Requirement**: No pull request or implementation commit modifying user behavior may land without an accompanying or pre-existing specification in `docs/specs/`.

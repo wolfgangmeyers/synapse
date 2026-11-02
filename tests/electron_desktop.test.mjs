@@ -43,15 +43,53 @@ test("desktop package options target local unsigned macOS app packaging", () => 
   assert.equal(options.executableName, "Mecha");
   assert.equal(options.osxSign, false);
   assert.equal(options.prune, true);
-  assert.ok(options.ignore.some((pattern) => pattern.test("/.worktrees/router-delivery-batching/.git")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/dist/desktop")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/app/src/main/java/life/meyers/mecha/MainActivity.kt")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/discord-gateway-bridge/main.mjs")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/personas/wolfgang.md")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/.gradle/caches/modules-2")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/node_modules/electron/index.js")));
-  assert.ok(options.ignore.every((pattern) => !pattern.test("/node_modules/ws/index.js")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/tools/run_router.sh")));
-  assert.ok(options.ignore.some((pattern) => pattern.test("/web/router-ui-react/src/App.tsx")));
+  assert.equal(desktopPackageOptions({ arch: "x64" }).arch, "x64");
+  assert.equal(options.ignore, undefined);
   assert.throws(() => desktopPackageOptions({ arch: "riscv64" }), /unsupported macOS desktop architecture/);
+});
+
+test("desktop staging copies the explicit payload and runtime dependency closure", async () => {
+  const { fixture, assertPayload } = await import("./fixtures/desktop-package/fixture.mjs");
+  const f = await fixture();
+  try { await assertPayload(f); } finally { await f.cleanup(); }
+});
+
+test("installed Packager metadata inference accepts the explicit installed Electron version only", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { createRequire } = await import("node:module");
+  const { pathToFileURL } = await import("node:url");
+  const { fixture } = await import("./fixtures/desktop-package/fixture.mjs");
+  const { installedElectronVersion } = await import("../desktop/electron/package.mjs");
+  const require = createRequire(import.meta.url);
+  // Internal metadata-only API of the actually installed Packager. No packager/download call.
+  const { getMetadataFromPackageJSON } = await import(new URL("./infer.js", pathToFileURL(require.resolve("@electron/packager"))));
+  const installed = JSON.parse(await readFile(require.resolve("electron/package.json"), "utf8"));
+  assert.equal(await installedElectronVersion(process.cwd()), installed.version);
+  const f = await fixture();
+  try {
+    await f.stage();
+    for (const arch of ["arm64", "x64"]) {
+      const options = { ...desktopPackageOptions({ arch }), dir: f.payload };
+      await assert.rejects(getMetadataFromPackageJSON(["darwin"], options, f.payload), /dependencies\.electron/);
+      const version = await installedElectronVersion(f.source);
+      assert.equal(version, "43.3.0");
+      await getMetadataFromPackageJSON(["darwin"], { ...options, electronVersion: version }, f.payload);
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("packaging fails honestly before staging when installed Electron is missing or invalid", async () => {
+  const { rm, writeFile, stat } = await import("node:fs/promises");
+  const { fixture } = await import("./fixtures/desktop-package/fixture.mjs");
+  const { packageDesktop } = await import("../desktop/electron/package.mjs");
+  for (const arch of ["arm64", "x64"]) for (const version of [undefined, "^43.3.0"]) {
+    const f = await fixture();
+    try {
+      const metadata = `${f.source}/node_modules/electron/package.json`;
+      if (version === undefined) await rm(metadata);
+      else await writeFile(metadata, JSON.stringify({ name: "electron", version }));
+      await assert.rejects(packageDesktop({ source: f.source, arch }), /cannot resolve installed Electron version/);
+      await assert.rejects(stat(f.payload), /ENOENT/);
+    } finally { await f.cleanup(); }
+  }
 });
