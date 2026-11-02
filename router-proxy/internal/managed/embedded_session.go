@@ -953,7 +953,7 @@ func (d embeddedOwnerSendDoer) Do(req *http.Request) (*http.Response, error) {
 
 // runEmbeddedSession uses no stock Pi storage or RPC. Provider selection is
 // host-pluggable; a missing model fails closed before prompting. Root and
-// worker sessions get fixed router-owned read and worker launch tools; other
+// worker sessions get fixed router-owned read and worker management tools; other
 // tools require explicit host registration.
 func (m *Manager) runEmbeddedSession(ctx context.Context, saved store.ManagedAgentRecord) error {
 	return m.runEmbeddedSessionPrompt(ctx, saved, "")
@@ -1213,7 +1213,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	}
 	// Only an intent admitted by this SDK turn may cross the first reservation
 	// window. A recovered intent has no such in-memory admission.
-	freshWorkerIntents := make(map[string]bool)
 	freshToolIntents := make(map[string]*store.EmbeddedToolInvocation)
 	toolExecutions := make(map[string]*store.EmbeddedToolInvocation)
 	freshGoalIntents := make(map[string]*store.EmbeddedGoalInvocation)
@@ -1406,7 +1405,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, err
 	}
 	if role == "root" || role == "worker" {
-		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_mailbox_send", toolAdmitted, toolCompleted, nil))
+		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_mailbox_send", toolAdmitted, toolCompleted))
 		tools = append(tools, m.embeddedSendImageTool(owner, toolAdmitted, toolCompleted))
 		tools = append(tools, m.embeddedGoalTool(owner, goalAdmitted, goalCompleted))
 		tools = append(tools, m.embeddedGoalSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
@@ -1509,13 +1508,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		tools = append(tools, m.embeddedWorkflowManagementTools(owner)...)
 	}
 	if embeddedShouldAppendWorkerLaunch(role, binding.OwnerToken, saved.PendingInitialInstruction != "", explicitPrompt == "" && mail == nil && continuation == nil && wake == nil) {
-		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted, func(id string) bool {
-			freshWorkerMu.Lock()
-			defer freshWorkerMu.Unlock()
-			fresh := freshWorkerIntents[id]
-			delete(freshWorkerIntents, id)
-			return fresh
-		}))
+		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_worker", toolAdmitted, toolCompleted))
 	}
 	if m.embeddedExternalTool != nil {
 		tool := *m.embeddedExternalTool
@@ -1928,7 +1921,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			}
 			if call.ToolCall.Name == "mecha_worker" || call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" {
 				freshWorkerMu.Lock()
-				delete(freshWorkerIntents, call.ToolCall.ID)
 				delete(freshToolIntents, call.ToolCall.ID)
 				delete(toolExecutions, call.ToolCall.ID)
 				freshWorkerMu.Unlock()
@@ -1982,9 +1974,6 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			if toolAdmission != nil {
 				freshWorkerMu.Lock()
 				freshToolIntents[call.ToolCall.ID] = toolAdmission
-				if call.ToolCall.Name == "mecha_worker" && call.ToolCall.Arguments["action"] == "launch" {
-					freshWorkerIntents[call.ToolCall.ID] = true
-				}
 				freshWorkerMu.Unlock()
 			}
 			return nil

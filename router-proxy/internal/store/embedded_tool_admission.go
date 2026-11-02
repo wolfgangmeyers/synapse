@@ -151,6 +151,9 @@ func (s *Store) RecordEmbeddedToolInvocation(ctx context.Context, b EmbeddedBind
 	if call.ID == "" || len(call.ID) > 256 || (call.Name != "mecha_mailbox_send" && call.Name != "mecha_worker" && call.Name != "mecha_send_image") {
 		return nil, errors.New("invalid managed tool call")
 	}
+	if call.Name == "mecha_worker" && call.Arguments["action"] == "launch" {
+		return nil, errors.New("mecha_worker action launch is not supported")
+	}
 	intent, err := json.Marshal(call)
 	if err != nil || embeddedBody(intent) != nil {
 		return nil, errors.New("invalid managed tool intent")
@@ -552,22 +555,4 @@ func (s *Store) embeddedToolCleanupGuardTx(ctx context.Context, w *EmbeddedToolI
 		return errors.New("worker cleanup requires termination admission")
 	}
 	return s.embeddedToolWorkerTargetTx(ctx, w, reservation.AgentID)
-}
-
-func (s *Store) ReserveEmbeddedToolWorkerLaunch(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, owner EmbeddedBinding, w *EmbeddedToolInvocation) error {
-	if w == nil || agent.Runtime != "embedded" || w.origin.binding != owner || w.call.Name != "mecha_worker" || w.call.Arguments["action"] != "launch" || w.call.Arguments["name"] != agent.AgentID {
-		return errors.New("worker launch differs from current SDK producer")
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.domainSettled {
-		return errors.New("worker launch admission already consumed")
-	}
-	err := s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "worker", &owner, w)
-	if w.domainCommitted && w.domainConclusive {
-		var encodeErr error
-		w.domainContent, encodeErr = json.Marshal(map[string]any{"status": "accepted", "worker_id": agent.AgentID, "operation_id": operation.RequestID, "replayed": false})
-		err = errors.Join(err, encodeErr)
-	}
-	return err
 }

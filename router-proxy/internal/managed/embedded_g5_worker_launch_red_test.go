@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,9 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// RED: a real SDK provider call must see the router's fixed worker-launch
-// registration, not a model-invented name or a stock root-control alias.
-func TestEmbeddedG5WorkerLaunchFixedHostRegistrationRED(t *testing.T) {
+// A stale model call is rejected by the real SDK before reserving a worker.
+func TestEmbeddedWorkerLaunchRejectedBySDK(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db, err := store.Open(ctx, filepath.Join(root, "router.db"), store.Options{})
@@ -79,15 +79,20 @@ func TestEmbeddedG5WorkerLaunchFixedHostRegistrationRED(t *testing.T) {
 			fixed = true
 		}
 	}
-	require.True(t, fixed, "embedded SDK provider lacks the fixed host-registered worker launch tool")
+	require.True(t, fixed, "embedded SDK provider lacks the fixed host-registered worker management tool")
 	select {
 	case second := <-observed:
 		require.NotNil(t, second.result, "same-turn SDK toolResult must retain original call ID")
-		require.False(t, second.result.IsError)
+		require.True(t, second.result.IsError)
 	case <-time.After(3 * time.Second):
 		t.Fatal("no same-turn provider continuation")
 	}
 	workers, err := db.ManagedAgents(ctx)
 	require.NoError(t, err)
-	require.Len(t, workers, 2, "exactly one independent worker must be saved")
+	require.Len(t, workers, 1, "rejected launch must not save an independent worker")
+	parent, err := db.ManagedAgent(ctx, "g5-root")
+	require.NoError(t, err)
+	binding := store.EmbeddedBinding{AgentID: parent.AgentID, SessionID: parent.PiSessionID, Epoch: parent.SessionEpoch, Generation: parent.RuntimeGeneration}
+	_, err = db.ManagedOperation(ctx, embeddedWorkerRequestID(binding, callID))
+	require.ErrorIs(t, err, sql.ErrNoRows, "rejected launch must not reserve an operation")
 }

@@ -46,7 +46,7 @@ func TestEmbeddedRootLaunchPredicateSDKDeclarations(t *testing.T) {
 				tools = append(tools, agent.AgentTool{Name: name, Description: "retained synthetic " + name, Parameters: ai.Object(ai.Prop("sentinel", ai.String()))})
 			}
 			if embeddedShouldAppendWorkerLaunch(tc.role, tc.token, tc.pending, tc.initialTurn) {
-				tools = append(tools, agent.AgentTool{Name: "mecha_worker", Description: "synthetic launch", Parameters: embeddedWorkerLaunchSchema()})
+				tools = append(tools, agent.AgentTool{Name: "mecha_worker", Description: "synthetic launch", Parameters: embeddedWorkerSchema()})
 			}
 			sdk := coding.NewSession(coding.SessionOptions{SessionID: "predicate-" + tc.name, Model: reg.GetModel(), Cwd: t.TempDir(), Tools: tools})
 			_, err := sdk.Run(context.Background(), "synthetic input")

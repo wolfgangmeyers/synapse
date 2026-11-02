@@ -255,7 +255,7 @@ func TestEmbeddedAddressedCleanupChecksProducerAndSavedWorkerInsideAdmission(t *
 }
 
 func TestEmbeddedToolKnownCommitPermissionErrorRetainsActualAdmission(t *testing.T) {
-	for _, action := range []string{"mail", "launch", "cleanup"} {
+	for _, action := range []string{"mail", "cleanup"} {
 		t.Run(action, func(t *testing.T) {
 			ctx := context.Background()
 			s, _ := embeddedRedStore(t)
@@ -272,18 +272,12 @@ func TestEmbeddedToolKnownCommitPermissionErrorRetainsActualAdmission(t *testing
 				name = "mecha_mailbox_send"
 				args = map[string]any{"recipient": "commit-recipient", "body": "committed body"}
 			}
-			if action == "launch" {
-				args["cwd"], args["instruction"] = t.TempDir(), "task"
-			}
 			call := providers.FauxToolCall(name, args, "commit-original")
 			producer := receiptSDKAppend(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
 			w, err := s.RecordEmbeddedToolInvocation(ctx, b, g, user.Sequence, user.Digest, "", call)
 			require.NoError(t, err)
 			require.NoError(t, s.StartEmbeddedToolInvocation(ctx, w, call))
 			request := "a6666666-6666-4666-8666-666666666601"
-			op := ManagedOperation{OperationID: request, RequestID: request, Method: "POST", CanonicalPath: "/v1/managed-agents", CanonicalBodyHash: strings.Repeat("a", 64), ResponseStatus: 202}
-			cwd, _ := args["cwd"].(string)
-			agent := ManagedAgentRecord{AgentID: "commit-target", Name: "commit-target", Runtime: "embedded", Cwd: cwd, PiSessionID: "new-target-session", RuntimeGeneration: "new-target-runtime", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash, SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}}
 			reservation := ManagedLifecycleReservation{AgentID: "commit-target", Kind: "terminate", Method: "DELETE", CanonicalPath: "/v1/managed-agents/commit-target", RequestID: request, CanonicalBodyHash: strings.Repeat("a", 64), Operation: ManagedOperation{ResponseStatus: 202}}
 			originalPath := s.path
 			blocker := filepath.Join(t.TempDir(), "regular-file")
@@ -295,8 +289,6 @@ func TestEmbeddedToolKnownCommitPermissionErrorRetainsActualAdmission(t *testing
 				case "mail":
 					_, err := s.EnqueueEmbeddedToolMail(ctx, w)
 					return err
-				case "launch":
-					return s.ReserveEmbeddedToolWorkerLaunch(ctx, agent, op, 32, b, w)
 				default:
 					_, err := s.ReserveEmbeddedToolCleanup(ctx, reservation, w)
 					return err
@@ -412,3 +404,10 @@ func TestListEmbeddedToolWorkers_IncludesTmuxWorkers(t *testing.T) {
 	require.Equal(t, "idle", payload.Workers[1]["lifecycle_state"])
 }
 
+func TestEmbeddedToolRejectsRetiredWorkerLaunch(t *testing.T) {
+	s := &Store{}
+	call := providers.FauxToolCall("mecha_worker", map[string]any{"action": "launch", "name": "forbidden", "cwd": "/project", "instruction": "task"}, "stale-launch")
+	w, err := s.RecordEmbeddedToolInvocation(context.Background(), EmbeddedBinding{}, 0, 0, "", "", call)
+	require.Nil(t, w)
+	require.EqualError(t, err, "mecha_worker action launch is not supported")
+}

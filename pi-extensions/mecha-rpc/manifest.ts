@@ -75,7 +75,7 @@ const BASELINE_DEFINITION_SHA256: Readonly<Record<typeof BASELINE_TOOL_NAMES[num
   mecha_settled_notifications: "bdcfd97bf8cec67ce70a641370fcf90affa0ab31a80c7c40ee07d123311b1f1f",
   mecha_state: "15f43e468b451bba3b3f1fd7ed823ef4fc0a3333ec892f226c145bd8c0fe7c02",
   mecha_verification_handoff: "8f723b1630e1d0b4a2c9c862566f640302a4cbed37794511a49469d24e43358d",
-  mecha_worker: "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
+  mecha_worker: "11da86c3834df8a3c478df658dd554fe1af668aec8ba2c35b092c5649db2247d",
 });
 
 function isRecord(value: unknown): value is JsonRecord {

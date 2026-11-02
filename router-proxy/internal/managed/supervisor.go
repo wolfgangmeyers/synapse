@@ -904,33 +904,14 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 	lane := m.laneFor(agent.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
-	var toolProducer *store.EmbeddedToolInvocation
 	if agent.Runtime == "embedded" {
 		if parent != nil {
-			if producer, ok := ctx.Value(embeddedToolInvocationContextKey{}).(*store.EmbeddedToolInvocation); ok {
-				toolProducer = producer
-				if m.embeddedBeforeToolDomain != nil {
-					m.embeddedBeforeToolDomain()
-				}
-				err = m.store.ReserveEmbeddedToolWorkerLaunch(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding, producer)
-			} else {
-				err = m.store.ReserveManagedEmbeddedWorkerFromOwner(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding)
-			}
+			err = m.store.ReserveManagedEmbeddedWorkerFromOwner(ctx, agent, op, m.config.Limits.MaxAgents, parent.binding)
 		} else {
 			err = m.store.ReserveManagedEmbeddedLaunch(ctx, agent, op, m.config.Limits.MaxAgents, embeddedRole)
 		}
 	} else {
 		err = m.store.ReserveManagedLaunchWithLimit(ctx, agent, op, m.config.Limits.MaxAgents)
-	}
-	if toolProducer != nil {
-		if !m.claimEmbeddedToolHandoff(toolProducer) {
-			return LaunchResult{}, errors.Join(err, errors.New("worker launch admission not known committed"))
-		}
-		if m.isClosed() {
-			return LaunchResult{Agent: &agent}, errors.Join(err, errors.New("committed worker handoff unavailable: manager closed"))
-		}
-		m.startEmbeddedRoot(agent, request.RequestID, false)
-		return LaunchResult{Agent: &agent}, err
 	}
 	if err != nil {
 		return LaunchResult{}, err

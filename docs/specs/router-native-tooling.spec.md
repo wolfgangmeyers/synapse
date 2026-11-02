@@ -14,7 +14,7 @@ Agents can send durable mail using the checked-in Python adapter and native work
 1. Mail requires a recipient agent ID and body. Explicit `--from` uses the caller's verified identity without tmux; otherwise the current pane's valid mailbox window name supplies the sender using a bounded tmux query. Missing/invalid current identity fails; arbitrary environment sender labels are not substituted. The adapter posts to the configured HTTP(S) base URL only, rejects credentials/path/query/fragment and redirects, reads at most 512 KiB, and never starts or restarts a service.
 2. Success prints the router's accepted message ID and actual delivery state, including deduplicated IDs. Rejection, invalid acceptance, oversized response and transport failure exit nonzero.
 3. Managed mail and worker-send forward `X-Mecha-Managed-Control-Request-ID` unchanged. Correlation is provenance, not authentication. Ordinary direct mail needs no control header.
-4. Existing operation names, action schemas and registries remain intact. State, priority, verification handoff, PR status, task git status, and worker list/launch/cleanup have no supported implementation in this checkout. They return stable structured `ROOT_OPERATION_UNAVAILABLE` errors before subprocess execution. No aliases, inferred task mappings or legacy state are introduced.
+4. Existing operation names and registries remain intact; `mecha_worker` exposes only list, send and cleanup, never launch. State, priority, verification handoff, PR status, task git status, and worker list/cleanup have no supported implementation in this checkout. They return stable structured `ROOT_OPERATION_UNAVAILABLE` errors before subprocess execution. No aliases, inferred task mappings or legacy state are introduced.
 5. Native worker-send resolves current identity (or explicit configured agent identity), invokes checked-in `tools/mailbox_send.py`, and preserves subject/body/recipient. Existing native mailbox-send already uses its router client and is unchanged.
 6. Router health/retry/dismiss, reminder ownership/scheduling and goal controls retain their existing APIs. Host results replay by request ID and canonical input/fence; conflicting canonical arguments or fence reuse fails; key order alone does not conflict. The host ledger retains at most 200 records for at most 30 days, pruning on execution. Reconcile does not repeat an operation.
 7. This repair does not define new semantics for missing legacy capabilities. Other process-local controls, providers, initializers and UI scrolling are outside scope.
@@ -51,6 +51,12 @@ Agents can send durable mail using the checked-in Python adapter and native work
 - **When**: Health and reminder controls execute and a new result is recorded.
 - **Then**: Health and owned reminder create/list/update/delete work through the router; expired records are removed and no more than 200 remain.
 
+### Scenario: [RNT-006] Worker tool cannot launch workers
+- **User Goal**: Keep worker creation behind the existing administration tools.
+- **Given**: An embedded agent or Pi extension exposes `mecha_worker`.
+- **When**: The agent inspects its tool definition or submits an old `action: launch` call (including replayed arguments).
+- **Then**: Only list, send and cleanup are advertised. Launch is rejected before any worker reservation or subprocess execution. Launch-only fields are absent from the embedded definition. Existing list/send/cleanup behavior and permissions remain unchanged (including unavailable legacy adapters). Admin `worker_spawn`, its permissions, and public managed-agent creation remain unchanged. No other tool permissions change.
+
 ## 4. Automated E2E Verification Matrix
 
 | Scenario ID | Scenario Description | E2E Test Suite | Test Case Name |
@@ -60,3 +66,4 @@ Agents can send durable mail using the checked-in Python adapter and native work
 | RNT-003 | Stable unavailable operations | `tests/e2e/router-native-tooling.spec.ts` | `reports retired operations unavailable before subprocess` |
 | RNT-004 | Correlation and replay | `tests/e2e/router-native-tooling.spec.ts` | `forwards correlation and replays without resending` |
 | RNT-005 | Controls and retention | `tests/e2e/router-native-tooling.spec.ts` | `preserves router controls and prunes host history` |
+| RNT-006 | Reject removed worker launch, preserve other actions | `tests/e2e/worker-tool-actions.spec.ts` | `rejects stale launches and preserves worker operations and admin spawn` |

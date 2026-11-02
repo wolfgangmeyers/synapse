@@ -170,7 +170,7 @@ test("reports retired operations unavailable before subprocess", async () => {
     ["ops.state", { action: "query", task: "task" }], ["ops.priority", { action: "status", priorityId: "priority", status: "active" }],
     ["ops.verification_handoff", { action: "record", task: "task", reminderId: "reminder", successor: "worker" }],
     ["ops.pr_status", { action: "status", pullRequest: 1 }], ["ops.git_status", { action: "status", task: "task" }],
-    ...["list", "launch", "cleanup"].map(action => ["ops.worker", { action }] as [string, Record<string, unknown>]), ["mail.parent", { message: "hello" }],
+    ...["list", "cleanup"].map(action => ["ops.worker", { action }] as [string, Record<string, unknown>]), ["mail.parent", { message: "hello" }],
   ];
   for (const [index, [operation, args]] of retired.entries()) {
     const result = await host(home, invocation(`unavailable-${index}`, operation, args));
