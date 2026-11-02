@@ -153,10 +153,13 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 			return fmt.Errorf("subagent parent must be a top-level managed agent: %w", err)
 		}
 		if provider == "" {
-			provider = "antigravity"
+			provider = "google-vertex"
 		}
 		if model == "" {
 			model = "gemini-3.8-flash"
+		}
+		if !validManagedProvider(provider) {
+			return errors.New("subagent model provider is unavailable")
 		}
 		now := formatTimestamp(s.clock.Now())
 		hasParent, colErr := managedAgentColumnTx(ctx, s.db, "parent_agent_id")

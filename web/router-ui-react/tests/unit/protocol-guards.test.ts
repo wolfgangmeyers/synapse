@@ -233,7 +233,7 @@ describe("protocol guards", () => {
     expect(isUILiveFrame({ ...state, status: "provider-sdk-detail" })).toBe(false);
   });
 
-  it("accepts provider_auth frames for google-vertex and antigravity and rejects unsupported providers", () => {
+  it("accepts Vertex frames and rejects removed Antigravity frames", () => {
     const vertexPrompt = {
       type: "provider_auth_prompt",
       protocol: "mecha.web/v1",
@@ -252,7 +252,7 @@ describe("protocol guards", () => {
       provider: "antigravity",
       prompt: { id: "ag-code-1", kind: "text", message: "Paste callback URL", url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test" },
     };
-    expect(isUILiveFrame(antigravityPrompt)).toBe(true);
+    expect(isUILiveFrame(antigravityPrompt)).toBe(false);
 
     const vertexState = {
       type: "provider_auth_state",
@@ -272,7 +272,7 @@ describe("protocol guards", () => {
       provider: "antigravity",
       status: "pending",
     };
-    expect(isUILiveFrame(antigravityState)).toBe(true);
+    expect(isUILiveFrame(antigravityState)).toBe(false);
 
     const unsupportedPrompt = {
       ...vertexPrompt,

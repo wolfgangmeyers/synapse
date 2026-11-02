@@ -362,7 +362,7 @@ func (m *Manager) drainQueueLocked() {
 
 func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Model, agent.StreamFn, error) {
 	if record.SelectedModel.Provider == "" || record.SelectedModel.ID == "" {
-		record.SelectedModel.Provider = "antigravity"
+		record.SelectedModel.Provider = "google-vertex"
 		record.SelectedModel.ID = "gemini-3.8-flash"
 	}
 	model, err := ResolveModel(record.SelectedModel)
@@ -396,7 +396,7 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 		return nil, nil, errors.New("embedded model is unavailable")
 	}
 	if stream == nil {
-		if model.Provider == "antigravity" || model.Provider == "google" || record.SelectedModel.Provider == "antigravity" || record.SelectedModel.Provider == "google" {
+		if model.Provider == "google" || record.SelectedModel.Provider == "google" {
 			stream = func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 				return m.streamEmbeddedGoogle(requestCtx, requestModel, transcript, opts)
 			}

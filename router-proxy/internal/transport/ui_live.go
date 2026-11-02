@@ -280,7 +280,6 @@ func managedModelSummary(value map[string]any) string {
 		"google":        "Google",
 		"cursor":        "Cursor",
 		"google-vertex": "Google Vertex AI",
-		"antigravity":   "Google Antigravity",
 	}[provider]
 	if label == "" {
 		label = "Selected model"

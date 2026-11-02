@@ -407,7 +407,7 @@ function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   return { path: root.path, parent: root.parent, ...(breadcrumbItems === undefined ? {} : { breadcrumbs: breadcrumbItems.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) }), directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
 function providerName(value: unknown): value is ProviderModel["provider"] {
-  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex" || value === "antigravity";
+  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex";
 }
 function providerModel(value: unknown): value is ProviderModel {
   const item = recordValue(value);
@@ -422,13 +422,12 @@ function providerStatus(value: unknown): value is ProviderStatus {
     google: ["Google"],
     cursor: ["Cursor"],
     "google-vertex": ["Google Vertex AI", "Vertex AI", "Google Cloud Vertex AI", "Vertex"],
-    antigravity: ["Google Antigravity", "Antigravity", "Google Account"],
   };
   return typeof item.label === "string" && (labels[item.provider]?.includes(item.label) ?? false);
 }
 function providerAuth(value: unknown): ProviderAuthResponse {
   const root = recordValue(value);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 5 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 5) throw invalidResponse("Router returned invalid provider state", value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 4 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 4) throw invalidResponse("Router returned invalid provider state", value);
   return { auth_revision: root.auth_revision, providers: root.providers };
 }
 function savedModel(value: unknown): { provider: string; id: string; name?: string } | null | undefined {

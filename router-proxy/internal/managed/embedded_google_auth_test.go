@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,356 +19,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGoogleAuth_ExpiredTokenAutoRefresh(t *testing.T) {
-	origURL := googleTokenURL
-	defer func() { googleTokenURL = origURL }()
-
-	var refreshCount int64
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&refreshCount, 1)
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if err := r.ParseForm(); err != nil {
-			t.Errorf("failed to parse form: %v", err)
-		}
-		if r.FormValue("client_id") != googleClientID {
-			t.Errorf("unexpected client_id: %s", r.FormValue("client_id"))
-		}
-		if r.FormValue("client_secret") != googleClientSecret {
-			t.Errorf("unexpected client_secret: %s", r.FormValue("client_secret"))
-		}
-		if r.FormValue("refresh_token") != "test-refresh-1" {
-			t.Errorf("unexpected refresh_token: %s", r.FormValue("refresh_token"))
-		}
-		if r.FormValue("grant_type") != "refresh_token" {
-			t.Errorf("unexpected grant_type: %s", r.FormValue("grant_type"))
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token":  "fresh-access-token-123",
-			"expires_in":    3600,
-			"token_type":    "Bearer",
-			"refresh_token": "next-refresh-token-456",
-		})
-	}))
-	defer mockOAuth.Close()
-
-	googleTokenURL = mockOAuth.URL
-
-	tempDir := t.TempDir()
-	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "expired-access-token",
-			"refresh":   "test-refresh-1",
-			"expires":   int64(1000), // long expired
-			"projectId": "test-project-alpha",
-			"type":      "oauth",
-		},
-		"openai": map[string]any{
-			"access":      "openai-secret-token",
-			"customKey":   "customValue",
-			"preservedOk": true,
-		},
-	}
-	initialBytes, err := json.Marshal(initialAuth)
-	if err != nil {
-		t.Fatalf("failed to marshal initial auth: %v", err)
-	}
-	if err := os.WriteFile(authPath, initialBytes, 0600); err != nil {
-		t.Fatalf("failed to write initial auth: %v", err)
-	}
-
-	m := &Manager{config: Config{PiAgentDir: tempDir}}
-	token, projectID, err := m.embeddedGoogleAuth(context.Background())
-	if err != nil {
-		t.Fatalf("embeddedGoogleAuth failed: %v", err)
-	}
-
-	if token != "fresh-access-token-123" {
-		t.Errorf("expected fresh-access-token-123, got %s", token)
-	}
-	if projectID != "test-project-alpha" {
-		t.Errorf("expected test-project-alpha, got %s", projectID)
-	}
-	if atomic.LoadInt64(&refreshCount) != 1 {
-		t.Errorf("expected 1 refresh call, got %d", refreshCount)
-	}
-
-	// Verify auth.json content and permissions
-	info, err := os.Stat(authPath)
-	if err != nil {
-		t.Fatalf("failed to stat auth.json: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("expected file mode 0600, got %o", perm)
-	}
-
-	updatedData, err := os.ReadFile(authPath)
-	if err != nil {
-		t.Fatalf("failed to read updated auth.json: %v", err)
-	}
-	var updatedAuth map[string]any
-	if err := json.Unmarshal(updatedData, &updatedAuth); err != nil {
-		t.Fatalf("failed to unmarshal updated auth.json: %v", err)
-	}
-
-	anti := updatedAuth["antigravity"].(map[string]any)
-	if anti["access"] != "fresh-access-token-123" {
-		t.Errorf("expected updated access token, got %v", anti["access"])
-	}
-	if anti["refresh"] != "next-refresh-token-456" {
-		t.Errorf("expected updated refresh token, got %v", anti["refresh"])
-	}
-	expVal, _ := anti["expires"].(float64)
-	if int64(expVal) <= time.Now().UnixMilli() {
-		t.Errorf("expected future expiry, got %v", expVal)
-	}
-
-	// Verify non-antigravity keys are completely preserved
-	openai, ok := updatedAuth["openai"].(map[string]any)
-	if !ok {
-		t.Fatalf("openai section missing or not a map: %v", updatedAuth["openai"])
-	}
-	if openai["access"] != "openai-secret-token" {
-		t.Errorf("openai.access modified: %v", openai["access"])
-	}
-	if openai["customKey"] != "customValue" {
-		t.Errorf("openai.customKey modified: %v", openai["customKey"])
-	}
-	if openai["preservedOk"] != true {
-		t.Errorf("openai.preservedOk modified: %v", openai["preservedOk"])
-	}
-}
-
-func TestGoogleAuth_WithinSixtySecondsRefresh(t *testing.T) {
-	origURL := googleTokenURL
-	defer func() { googleTokenURL = origURL }()
-
-	var refreshCount int64
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&refreshCount, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "token-renewed-within-window",
-			"expires_in":   3600,
-		})
-	}))
-	defer mockOAuth.Close()
-
-	googleTokenURL = mockOAuth.URL
-
-	tempDir := t.TempDir()
-	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "expiring-soon-token",
-			"refresh":   "refresh-token-soon",
-			"expires":   time.Now().UnixMilli() + 30*1000, // Expires in 30s (<= 60s)
-			"projectId": "test-project-soon",
-		},
-	}
-	data, _ := json.Marshal(initialAuth)
-	_ = os.WriteFile(authPath, data, 0600)
-
-	m := &Manager{config: Config{PiAgentDir: tempDir}}
-	token, _, err := m.embeddedGoogleAuth(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if token != "token-renewed-within-window" {
-		t.Errorf("expected token-renewed-within-window, got %s", token)
-	}
-	if atomic.LoadInt64(&refreshCount) != 1 {
-		t.Errorf("expected 1 refresh call, got %d", refreshCount)
-	}
-}
-
-func TestGoogleAuth_ValidTokenNoRefresh(t *testing.T) {
-	origURL := googleTokenURL
-	defer func() { googleTokenURL = origURL }()
-
-	var refreshCount int64
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&refreshCount, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer mockOAuth.Close()
-
-	googleTokenURL = mockOAuth.URL
-
-	tempDir := t.TempDir()
-	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "valid-long-lived-token",
-			"refresh":   "refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000, // Expires in 1h
-			"projectId": "test-project-valid",
-		},
-	}
-	data, _ := json.Marshal(initialAuth)
-	_ = os.WriteFile(authPath, data, 0600)
-
-	m := &Manager{config: Config{PiAgentDir: tempDir}}
-	token, projectID, err := m.embeddedGoogleAuth(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if token != "valid-long-lived-token" {
-		t.Errorf("expected valid-long-lived-token, got %s", token)
-	}
-	if projectID != "test-project-valid" {
-		t.Errorf("expected test-project-valid, got %s", projectID)
-	}
-	if atomic.LoadInt64(&refreshCount) != 0 {
-		t.Errorf("expected 0 refresh calls, got %d", refreshCount)
-	}
-}
-
-func TestGoogleAuth_StreamRetry401(t *testing.T) {
-	origTokenURL := googleTokenURL
-	origContentURL := googleGenerateContentURL
-	defer func() {
-		googleTokenURL = origTokenURL
-		googleGenerateContentURL = origContentURL
-	}()
-
-	var refreshCount int64
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&refreshCount, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "token-after-401-refresh",
-			"expires_in":   3600,
-		})
-	}))
-	defer mockOAuth.Close()
-	googleTokenURL = mockOAuth.URL
-
-	var apiAttempts int64
-	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempt := atomic.AddInt64(&apiAttempts, 1)
-		authHeader := r.Header.Get("Authorization")
-		if attempt == 1 {
-			if authHeader != "Bearer initial-stale-token" {
-				t.Errorf("first attempt expected 'Bearer initial-stale-token', got %s", authHeader)
-			}
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error": {"code": 401, "message": "Request had invalid authentication credentials."}}`))
-			return
-		}
-
-		if authHeader != "Bearer token-after-401-refresh" {
-			t.Errorf("second attempt expected 'Bearer token-after-401-refresh', got %s", authHeader)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello from Antigravity after retry!\"}],\"role\":\"model\"}}]}}\n\n"))
-	}))
-	defer mockAntigravityAPI.Close()
-	googleGenerateContentURL = mockAntigravityAPI.URL
-
-	tempDir := t.TempDir()
-	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "initial-stale-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project-401",
-		},
-	}
-	data, _ := json.Marshal(initialAuth)
-	_ = os.WriteFile(authPath, data, 0600)
-
-	m := &Manager{config: Config{PiAgentDir: tempDir}}
-	transcript := ai.TranscriptContext{
-		Messages: []ai.Message{
-			ai.UserMessage{
-				Content: []ai.Content{
-					ai.TextContent{Text: "Test message"},
-				},
-			},
-		},
-	}
-
-	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
-
-	var receivedText strings.Builder
-	var streamError error
-	for event := range stream.Events() {
-		if event.Type == ai.EventTextDelta {
-			receivedText.WriteString(event.Delta)
-		} else if event.Type == ai.EventError {
-			if event.Error != nil {
-				streamError = fmt.Errorf("%s", event.Error.ErrorMessage)
-			} else {
-				streamError = fmt.Errorf("unknown stream error")
-			}
-		}
-	}
-
-	if streamError != nil {
-		t.Fatalf("stream encountered error: %v", streamError)
-	}
-
-	if atomic.LoadInt64(&apiAttempts) != 2 {
-		t.Errorf("expected 2 API attempts, got %d", apiAttempts)
-	}
-	if atomic.LoadInt64(&refreshCount) != 1 {
-		t.Errorf("expected 1 OAuth refresh call, got %d", refreshCount)
-	}
-	if !strings.Contains(receivedText.String(), "Hello from Antigravity after retry!") {
-		t.Errorf("expected response text, got %q", receivedText.String())
-	}
-}
-
 func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
-	origTokenURL := googleTokenURL
-	origContentURL := googleGenerateContentURL
+	origContentURL := googleGenerativeLanguageURLBase
 	defer func() {
-		googleTokenURL = origTokenURL
-		googleGenerateContentURL = origContentURL
+		googleGenerativeLanguageURLBase = origContentURL
 	}()
 
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "token-test",
-			"expires_in":   3600,
-		})
-	}))
-	defer mockOAuth.Close()
-	googleTokenURL = mockOAuth.URL
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
 
 	var capturedReqBody map[string]any
-	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockGeminiAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
 		var envelope map[string]any
 		_ = json.Unmarshal(bodyBytes, &envelope)
-		if req, ok := envelope["request"].(map[string]any); ok {
-			capturedReqBody = req
-		}
+		require.NotContains(t, envelope, "request")
+		require.Equal(t, "test-api-key", r.URL.Query().Get("key"))
+		capturedReqBody = envelope
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"All done\"}],\"role\":\"model\"}}]}}\n\n"))
 	}))
-	defer mockAntigravityAPI.Close()
-	googleGenerateContentURL = mockAntigravityAPI.URL
+	defer mockGeminiAPI.Close()
+	googleGenerativeLanguageURLBase = mockGeminiAPI.URL
 
 	tempDir := t.TempDir()
 	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "test-access-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project-123",
-		},
-	}
+	initialAuth := map[string]any{"google": map[string]any{"key": "test-api-key"}}
 	data, _ := json.Marshal(initialAuth)
 	_ = os.WriteFile(authPath, data, 0600)
 
@@ -408,7 +83,7 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 		},
 	}
 
-	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, transcript, nil)
 
 	for event := range stream.Events() {
 		if event.Type == ai.EventError {
@@ -517,48 +192,31 @@ func TestGoogleAuth_StreamDroppedToolCallsConversion(t *testing.T) {
 }
 
 func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
-	origTokenURL := googleTokenURL
-	origContentURL := googleGenerateContentURL
+	origContentURL := googleGenerativeLanguageURLBase
 	defer func() {
-		googleTokenURL = origTokenURL
-		googleGenerateContentURL = origContentURL
+		googleGenerativeLanguageURLBase = origContentURL
 	}()
 
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "token-test",
-			"expires_in":   3600,
-		})
-	}))
-	defer mockOAuth.Close()
-	googleTokenURL = mockOAuth.URL
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
 
 	var capturedReqBody map[string]any
-	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockGeminiAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
 		var envelope map[string]any
 		_ = json.Unmarshal(bodyBytes, &envelope)
-		if req, ok := envelope["request"].(map[string]any); ok {
-			capturedReqBody = req
-		}
+		require.NotContains(t, envelope, "request")
+		require.Equal(t, "test-api-key", r.URL.Query().Get("key"))
+		capturedReqBody = envelope
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Final answer\"}],\"role\":\"model\"}}]}}\n\n"))
 	}))
-	defer mockAntigravityAPI.Close()
-	googleGenerateContentURL = mockAntigravityAPI.URL
+	defer mockGeminiAPI.Close()
+	googleGenerativeLanguageURLBase = mockGeminiAPI.URL
 
 	tempDir := t.TempDir()
 	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "test-access-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project-123",
-		},
-	}
+	initialAuth := map[string]any{"google": map[string]any{"key": "test-api-key"}}
 	data, _ := json.Marshal(initialAuth)
 	_ = os.WriteFile(authPath, data, 0600)
 
@@ -597,7 +255,7 @@ func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
 		},
 	}
 
-	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, transcript, nil)
 
 	for event := range stream.Events() {
 		if event.Type == ai.EventError {
@@ -659,42 +317,24 @@ func TestGoogleAuth_StreamDroppedToolCallsOnlyToolCallNoText(t *testing.T) {
 }
 
 func TestGoogleAuth_StreamUniqueToolCallIDsForDuplicateToolNames(t *testing.T) {
-	origURL := googleTokenURL
-	defer func() { googleTokenURL = origURL }()
-	origGenURL := googleGenerateContentURL
-	defer func() { googleGenerateContentURL = origGenURL }()
+	origGenURL := googleGenerativeLanguageURLBase
+	defer func() { googleGenerativeLanguageURLBase = origGenURL }()
 
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "test-token",
-			"expires_in":   3600,
-			"token_type":   "Bearer",
-		})
-	}))
-	defer mockOAuth.Close()
-	googleTokenURL = mockOAuth.URL
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
 
-	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockGeminiAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		// SSE stream emitting multiple FunctionCall parts with the same tool name "read"
 		sseChunk := "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"file1.txt\"}}},{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"file2.txt\"}}}],\"role\":\"model\"}}]}}\n\n"
 		_, _ = w.Write([]byte(sseChunk))
 	}))
-	defer mockAntigravityAPI.Close()
-	googleGenerateContentURL = mockAntigravityAPI.URL
+	defer mockGeminiAPI.Close()
+	googleGenerativeLanguageURLBase = mockGeminiAPI.URL
 
 	tempDir := t.TempDir()
 	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "test-access-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project-123",
-		},
-	}
+	initialAuth := map[string]any{"google": map[string]any{"key": "test-api-key"}}
 	data, _ := json.Marshal(initialAuth)
 	_ = os.WriteFile(authPath, data, 0600)
 
@@ -712,7 +352,7 @@ func TestGoogleAuth_StreamUniqueToolCallIDsForDuplicateToolNames(t *testing.T) {
 		},
 	}
 
-	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, transcript, nil)
 
 	var toolCalls []ai.ToolCall
 	for event := range stream.Events() {
@@ -750,48 +390,31 @@ func TestGoogleAuth_StreamUniqueToolCallIDsForDuplicateToolNames(t *testing.T) {
 }
 
 func TestGoogleAuth_StreamReasoningOff_ThinkingDisabled(t *testing.T) {
-	origTokenURL := googleTokenURL
-	origContentURL := googleGenerateContentURL
+	origContentURL := googleGenerativeLanguageURLBase
 	defer func() {
-		googleTokenURL = origTokenURL
-		googleGenerateContentURL = origContentURL
+		googleGenerativeLanguageURLBase = origContentURL
 	}()
 
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "token-test",
-			"expires_in":   3600,
-		})
-	}))
-	defer mockOAuth.Close()
-	googleTokenURL = mockOAuth.URL
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
 
 	var capturedReqBody map[string]any
-	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockGeminiAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
 		var envelope map[string]any
 		_ = json.Unmarshal(bodyBytes, &envelope)
-		if req, ok := envelope["request"].(map[string]any); ok {
-			capturedReqBody = req
-		}
+		require.NotContains(t, envelope, "request")
+		require.Equal(t, "test-api-key", r.URL.Query().Get("key"))
+		capturedReqBody = envelope
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Response\"}],\"role\":\"model\"}}]}}\n\n"))
 	}))
-	defer mockAntigravityAPI.Close()
-	googleGenerateContentURL = mockAntigravityAPI.URL
+	defer mockGeminiAPI.Close()
+	googleGenerativeLanguageURLBase = mockGeminiAPI.URL
 
 	tempDir := t.TempDir()
 	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "test-access-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project-123",
-		},
-	}
+	initialAuth := map[string]any{"google": map[string]any{"key": "test-api-key"}}
 	data, _ := json.Marshal(initialAuth)
 	_ = os.WriteFile(authPath, data, 0600)
 
@@ -812,7 +435,7 @@ func TestGoogleAuth_StreamReasoningOff_ThinkingDisabled(t *testing.T) {
 
 	// 1. Test gemini-3.8-flash: thinkingLevel: "MINIMAL" and no includeThoughts
 	capturedReqBody = nil
-	stream38 := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, opts)
+	stream38 := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, transcript, opts)
 	for event := range stream38.Events() {
 		if event.Type == ai.EventError {
 			t.Fatalf("stream encountered error: %v", event.Error)
@@ -829,7 +452,7 @@ func TestGoogleAuth_StreamReasoningOff_ThinkingDisabled(t *testing.T) {
 
 	// 2. Test gemini-2.5-flash: thinkingBudget: 0 and no includeThoughts
 	capturedReqBody = nil
-	stream25 := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-2.5-flash", Provider: "antigravity"}, transcript, opts)
+	stream25 := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-2.5-flash", Provider: "google"}, transcript, opts)
 	for event := range stream25.Events() {
 		if event.Type == ai.EventError {
 			t.Fatalf("stream encountered error: %v", event.Error)
@@ -846,24 +469,13 @@ func TestGoogleAuth_StreamReasoningOff_ThinkingDisabled(t *testing.T) {
 }
 
 func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
-	origURL := googleTokenURL
-	defer func() { googleTokenURL = origURL }()
-	origGenURL := googleGenerateContentURL
-	defer func() { googleGenerateContentURL = origGenURL }()
+	origGenURL := googleGenerativeLanguageURLBase
+	defer func() { googleGenerativeLanguageURLBase = origGenURL }()
 
-	mockOAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "test-token",
-			"expires_in":   3600,
-			"token_type":   "Bearer",
-		})
-	}))
-	defer mockOAuth.Close()
-	googleTokenURL = mockOAuth.URL
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
 
 	turn := 0
-	mockAntigravityAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockGeminiAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		turn++
@@ -875,19 +487,12 @@ func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
 		sseChunk := fmt.Sprintf("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":%q}}}],\"role\":\"model\"}}]}}\n\n", path)
 		_, _ = w.Write([]byte(sseChunk))
 	}))
-	defer mockAntigravityAPI.Close()
-	googleGenerateContentURL = mockAntigravityAPI.URL
+	defer mockGeminiAPI.Close()
+	googleGenerativeLanguageURLBase = mockGeminiAPI.URL
 
 	tempDir := t.TempDir()
 	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "test-access-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project-123",
-		},
-	}
+	initialAuth := map[string]any{"google": map[string]any{"key": "test-api-key"}}
 	data, _ := json.Marshal(initialAuth)
 	_ = os.WriteFile(authPath, data, 0600)
 
@@ -902,7 +507,7 @@ func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
 		AgentID:           "test-agent",
 		Name:              "test-agent",
 		Cwd:               tempDir,
-		SelectedModel:     store.ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		SelectedModel:     store.ManagedModel{Provider: "google", ID: "gemini-3.8-flash"},
 		Runtime:           "embedded",
 		PiSessionID:       "test-session",
 		SessionEpoch:      1,
@@ -945,7 +550,7 @@ func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
 	}
 
 	// First turn stream
-	stream1 := m.streamEmbeddedGoogle(ctx, &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, ai.TranscriptContext{}, nil)
+	stream1 := m.streamEmbeddedGoogle(ctx, &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, ai.TranscriptContext{}, nil)
 	var call1 ai.ToolCall
 	for event := range stream1.Events() {
 		if event.Type == ai.EventDone && event.Message != nil {
@@ -961,7 +566,7 @@ func TestGoogleAuth_MultiTurnRepeatedToolEffects(t *testing.T) {
 	}
 
 	// Second turn stream
-	stream2 := m.streamEmbeddedGoogle(ctx, &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, ai.TranscriptContext{}, nil)
+	stream2 := m.streamEmbeddedGoogle(ctx, &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, ai.TranscriptContext{}, nil)
 	var call2 ai.ToolCall
 	for event := range stream2.Events() {
 		if event.Type == ai.EventDone && event.Message != nil {
@@ -1449,8 +1054,9 @@ func TestOpenAI_ImageConversion(t *testing.T) {
 }
 
 func TestGoogleAuth_StreamThinkingTrace(t *testing.T) {
-	origURL := googleGenerateContentURL
-	defer func() { googleGenerateContentURL = origURL }()
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
+	origURL := googleGenerativeLanguageURLBase
+	defer func() { googleGenerativeLanguageURLBase = origURL }()
 
 	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1459,18 +1065,11 @@ func TestGoogleAuth_StreamThinkingTrace(t *testing.T) {
 		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Here is the answer.\"}],\"role\":\"model\"}}]}}\n\n"))
 	}))
 	defer mockAPI.Close()
-	googleGenerateContentURL = mockAPI.URL
+	googleGenerativeLanguageURLBase = mockAPI.URL
 
 	tempDir := t.TempDir()
 	authPath := filepath.Join(tempDir, "auth.json")
-	initialAuth := map[string]any{
-		"antigravity": map[string]any{
-			"access":    "test-token",
-			"refresh":   "test-refresh-token",
-			"expires":   time.Now().UnixMilli() + 3600*1000,
-			"projectId": "test-project",
-		},
-	}
+	initialAuth := map[string]any{"google": map[string]any{"key": "test-api-key"}}
 	data, _ := json.Marshal(initialAuth)
 	_ = os.WriteFile(authPath, data, 0600)
 
@@ -1485,7 +1084,7 @@ func TestGoogleAuth_StreamThinkingTrace(t *testing.T) {
 		},
 	}
 
-	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "antigravity"}, transcript, nil)
+	stream := m.streamEmbeddedGoogle(context.Background(), &ai.Model{ID: "gemini-3.8-flash", Provider: "google"}, transcript, nil)
 
 	var thinkingEvents []ai.AssistantMessageEvent
 	var textEvents []ai.AssistantMessageEvent
@@ -2208,41 +1807,8 @@ func TestSanitizeGeminiParameters(t *testing.T) {
 	require.Equal(t, "string", p1["type"])
 }
 
-func TestAntigravityModelProviderPreservation(t *testing.T) {
-	// Baseline: the Pi catalog registers gemini-3.8-flash under "google".
-	catalogGoogleModel := ai.GetModel("google", "gemini-3.8-flash")
-	require.NotNil(t, catalogGoogleModel)
-	require.Equal(t, "google", catalogGoogleModel.Provider)
-
-	m := &Manager{}
-	record := store.ManagedAgentRecord{
-		SelectedModel: store.ManagedModel{
-			Provider: "antigravity",
-			ID:       "gemini-3.8-flash",
-		},
-	}
-
-	model, stream, err := m.resolveSubagentModel(record)
-	require.NoError(t, err)
-	require.NotNil(t, model)
-	require.Equal(t, "antigravity", model.Provider, "resolved model Provider must preserve antigravity, not fall back to google")
-	require.Equal(t, "gemini-3.8-flash", model.ID)
-	require.NotNil(t, stream)
-
-	// Ensure the global catalog model was not mutated by the resolution.
-	require.Equal(t, "google", catalogGoogleModel.Provider)
-
-	// Verify standard google selection still resolves with Provider "google".
-	googleRecord := store.ManagedAgentRecord{
-		SelectedModel: store.ManagedModel{
-			Provider: "google",
-			ID:       "gemini-3.8-flash",
-		},
-	}
-	gModel, gStream, err := m.resolveSubagentModel(googleRecord)
-	require.NoError(t, err)
-	require.NotNil(t, gModel)
-	require.Equal(t, "google", gModel.Provider)
-	require.Equal(t, "gemini-3.8-flash", gModel.ID)
-	require.NotNil(t, gStream)
+func TestAntigravityRemovalRejectsModel(t *testing.T) {
+	_, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"})
+	require.Error(t, err)
+	require.False(t, validProviderAuthProvider("antigravity"))
 }

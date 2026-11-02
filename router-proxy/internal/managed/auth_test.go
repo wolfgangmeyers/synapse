@@ -52,7 +52,6 @@ func providerTerminal(id, provider string) ProviderAuthEvent {
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
 		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
-		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: false, Status: "signed_out"},
 	}, Models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}}}
 }
 
@@ -67,7 +66,6 @@ func TestProviderAuthCoordinatorReadsCurrentOrdinaryPiStatusBeforeAnyLogin(t *te
 			{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 			{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
 			{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
-			{Provider: "antigravity", Label: "Google Antigravity", Authenticated: false, Status: "signed_out"},
 		},
 		models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}},
 	}
@@ -78,7 +76,7 @@ func TestProviderAuthCoordinatorReadsCurrentOrdinaryPiStatusBeforeAnyLogin(t *te
 	snapshot, err := coordinator.Snapshot(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(1), snapshot.AuthRevision)
-	require.Len(t, snapshot.Providers, 5)
+	require.Len(t, snapshot.Providers, 4)
 	foundChatGPT := false
 	for _, provider := range snapshot.Providers {
 		if provider.Provider == "openai-codex" && provider.Authenticated && provider.Status == "authenticated" {

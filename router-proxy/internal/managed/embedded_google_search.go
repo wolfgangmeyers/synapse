@@ -18,7 +18,6 @@ import (
 const vertexGroundingModel = "gemini-2.5-flash"
 
 var (
-	antigravityGroundingURL    = "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
 	vertexGroundingURLTemplate = "https://%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
 	geminiGroundingURLTemplate = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
 )
@@ -34,15 +33,11 @@ func embeddedGoogleSearchSchema() *ai.Schema {
 	return s
 }
 
-// hasGoogleSearchAuth reports true if Antigravity credentials, Gemini API key, or Vertex AI ADC credentials
+// hasGoogleSearchAuth reports true if Gemini API key or Vertex AI ADC credentials
 // are available on this system.
 func (m *Manager) hasGoogleSearchAuth(ctx context.Context) bool {
 	if m == nil {
 		return false
-	}
-	token, _, err := m.embeddedGoogleAuth(ctx)
-	if err == nil && token != "" {
-		return true
 	}
 	if apiKey, aErr := m.resolveGoogleAPIKey(ctx); aErr == nil && apiKey != "" {
 		return true
@@ -123,21 +118,8 @@ func (m *Manager) embeddedGoogleSearchTool(owner embeddedOwner) agent.AgentTool 
 	}
 }
 
-// executeGoogleSearch attempts to execute search grounding via Antigravity first,
-// falling back to Gemini API key grounding, and then to Vertex AI if prior methods fail or are uncredentialed.
+// executeGoogleSearch tries Gemini API-key grounding, then Vertex ADC.
 func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruction string, urls []string) (string, error) {
-	var antigravityErr error
-	token, projectID, err := m.embeddedGoogleAuth(ctx)
-	if err == nil && token != "" {
-		res, aErr := m.executeAntigravityGrounding(ctx, token, projectID, query, instruction, urls)
-		if aErr == nil {
-			return res, nil
-		}
-		antigravityErr = aErr
-	} else if err != nil {
-		antigravityErr = err
-	}
-
 	var geminiAPIErr error
 	apiKey, keyErr := m.resolveGoogleAPIKey(ctx)
 	if keyErr == nil && apiKey != "" {
@@ -155,8 +137,8 @@ func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruc
 		if vExecErr == nil {
 			return res, nil
 		}
-		if antigravityErr != nil || geminiAPIErr != nil {
-			return "", fmt.Errorf("google search failed (antigravity: %v; gemini: %v; vertex: %v)", antigravityErr, geminiAPIErr, vExecErr)
+		if geminiAPIErr != nil {
+			return "", fmt.Errorf("google search failed (gemini: %v; vertex: %v)", geminiAPIErr, vExecErr)
 		}
 		return "", fmt.Errorf("vertex google search failed: %w", vExecErr)
 	}
@@ -164,10 +146,7 @@ func (m *Manager) executeGoogleSearch(ctx context.Context, query string, instruc
 	if geminiAPIErr != nil {
 		return "", fmt.Errorf("gemini api google search failed: %w", geminiAPIErr)
 	}
-	if antigravityErr != nil {
-		return "", fmt.Errorf("antigravity google search failed: %w", antigravityErr)
-	}
-	return "", errors.New("no Google credentials available for search (neither Antigravity, Gemini API key, nor Vertex AI)")
+	return "", errors.New("no Google credentials available for search (Gemini API key or Vertex AI ADC required)")
 }
 
 type groundingChunkWeb struct {
@@ -273,82 +252,6 @@ func formatGroundingResponse(resp *generateContentResponse) (string, error) {
 	}
 
 	return strings.TrimSpace(sb.String()), nil
-}
-
-func (m *Manager) executeAntigravityGrounding(ctx context.Context, token, projectID, query, instruction string, urls []string) (string, error) {
-	if projectID == "" {
-		projectID = "antigravity"
-	}
-	reqID := fmt.Sprintf("req-%d", time.Now().UnixNano())
-
-	tools := []any{
-		map[string]any{"googleSearch": map[string]any{}},
-	}
-	if len(urls) > 0 {
-		tools = append(tools, map[string]any{"urlContext": map[string]any{}})
-	}
-
-	var contents []any
-	contents = append(contents, map[string]any{
-		"role":  "user",
-		"parts": []any{map[string]any{"text": query}},
-	})
-
-	innerReq := map[string]any{
-		"contents": contents,
-		"tools":    tools,
-	}
-	if instruction != "" {
-		innerReq["systemInstruction"] = map[string]any{
-			"role":  "user",
-			"parts": []any{map[string]any{"text": instruction}},
-		}
-	}
-
-	envelope := map[string]any{
-		"project":     projectID,
-		"model":       "gemini-3.8-flash-low",
-		"request":     innerReq,
-		"requestType": "agent",
-		"userAgent":   "antigravity",
-		"requestId":   reqID,
-	}
-
-	bodyBytes, err := json.Marshal(envelope)
-	if err != nil {
-		return "", err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, antigravityGroundingURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("antigravity grounding request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var parsed generateContentResponse
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("parsing grounding response: %w", err)
-	}
-
-	return formatGroundingResponse(&parsed)
 }
 
 func (m *Manager) executeVertexGrounding(ctx context.Context, token, projectID, location, query, instruction string, urls []string) (string, error) {

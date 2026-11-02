@@ -99,24 +99,13 @@ func TestResolveModelCanonical(t *testing.T) {
 	require.Equal(t, "google", direct.Provider)
 	require.Equal(t, "gemini-3.8-flash", direct.ID)
 
-	// 2. Antigravity alias to Google catalog model: must preserve "antigravity" provider
-	agResolved, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"})
-	require.NoError(t, err)
-	require.NotNil(t, agResolved)
-	require.Equal(t, "antigravity", agResolved.Provider)
-	require.Equal(t, "gemini-3.8-flash", agResolved.ID)
-	// Must not have mutated the catalog model
+	for _, id := range []string{"gemini-3.8-flash", "gemini-custom-future", "gemini-4-argon"} {
+		removed, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: id})
+		require.Error(t, err)
+		require.Nil(t, removed)
+		require.True(t, IsModelUnavailable(err))
+	}
 	require.Equal(t, "google", catalogGoogle.Provider)
-
-	// 3. Antigravity model not in catalog: fallback metadata provided
-	agFallback, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-custom-future"})
-	require.NoError(t, err)
-	require.NotNil(t, agFallback)
-	require.Equal(t, "antigravity", agFallback.Provider)
-	require.Equal(t, "gemini-custom-future", agFallback.ID)
-	require.Equal(t, "google-generative-ai", agFallback.Api)
-	require.Equal(t, 1048576, agFallback.ContextWindow)
-	require.Equal(t, 8192, agFallback.MaxTokens)
 
 	// 3b. Gemini-4-argon synthesized metadata
 	argonGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "gemini-4-argon"})
@@ -136,15 +125,6 @@ func TestResolveModelCanonical(t *testing.T) {
 	require.Equal(t, "google-vertex", argonVertex.Api)
 	require.Equal(t, 1048576, argonVertex.ContextWindow)
 	require.Equal(t, 65536, argonVertex.MaxTokens)
-
-	argonAG, err := ResolveModel(store.ManagedModel{Provider: "antigravity", ID: "gemini-4-argon"})
-	require.NoError(t, err)
-	require.NotNil(t, argonAG)
-	require.Equal(t, "antigravity", argonAG.Provider)
-	require.Equal(t, "gemini-4-argon", argonAG.ID)
-	require.Equal(t, "google-generative-ai", argonAG.Api)
-	require.Equal(t, 1048576, argonAG.ContextWindow)
-	require.Equal(t, 65536, argonAG.MaxTokens)
 
 	// 4. Missing model under non-antigravity provider: returns error, does NOT fall back to openai-codex
 	missingGoogle, err := ResolveModel(store.ManagedModel{Provider: "google", ID: "nonexistent-model"})

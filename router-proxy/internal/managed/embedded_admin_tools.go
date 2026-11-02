@@ -28,7 +28,7 @@ var AdminToolNames = []string{
 func embeddedWorkerSpawnSchema() *ai.Schema {
 	closed := false
 	model := ai.Object(
-		ai.Prop("provider", ai.String("Model provider name, e.g. openai-codex, google-vertex, antigravity.")),
+		ai.Prop("provider", ai.String("Model provider name, e.g. openai-codex, google-vertex, google.")),
 		ai.Prop("id", ai.String("Model identifier string.")),
 	)
 	model.AdditionalAllowed = &closed
@@ -196,7 +196,7 @@ func (m *Manager) embeddedWorkerTerminateAdminTool(owner embeddedOwner) agent.Ag
 func embeddedWorkerSetModelSchema() *ai.Schema {
 	closed := false
 	model := ai.Object(
-		ai.Prop("provider", ai.String("Model provider name, e.g. openai-codex, google-vertex, antigravity.")),
+		ai.Prop("provider", ai.String("Model provider name, e.g. openai-codex, google-vertex, google.")),
 		ai.Prop("id", ai.String("Model identifier string.")),
 	)
 	model.AdditionalAllowed = &closed
