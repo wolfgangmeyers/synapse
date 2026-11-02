@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendConversation, reconcileConversation } from "../state/conversation-projection";
 import { CONVERSATION_UNLOAD_THRESHOLD, DEFAULT_CONVERSATION_CHUNK_LIMIT, type HistoryMessage } from "../domain/history";
 import type { RouterTransport } from "../transport/router-transport";
@@ -14,7 +14,7 @@ export interface ConversationHook {
   hasOlder: boolean;
   error?: Error;
   refresh(): Promise<void>;
-  loadOlder(): Promise<void>;
+  loadOlder(beforeCommit?: () => void): Promise<void>;
   send(message: unknown): Promise<Record<string, unknown>>;
 }
 export function useConversation(transport: RouterTransport, scope: RouterScope, peer: string | undefined, onReconcile?: (peer: string, messages: HistoryMessage[], highWaterSequence: number) => void): ConversationHook {
@@ -28,6 +28,18 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
   const [nextBeforeSeq, setNextBeforeSeq] = useState<number | null | undefined>(undefined);
   const [error, setError] = useState<Error | undefined>();
   const requestGeneration = useRef(0);
+  // Pagination belongs to a conversation lifetime, not an individual refresh.
+  const conversationEpoch = useRef(0);
+  const olderRequest = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    conversationEpoch.current += 1;
+    olderRequest.current = null;
+    setLoadingOlder(false);
+    return () => {
+      conversationEpoch.current += 1;
+      olderRequest.current = null;
+    };
+  }, [scopeKey, transport]);
   const previousScope = useRef({ routerUrl: scope.routerUrl, agentId: scope.agentId, peer });
   const freshHistoryScope = useRef<string | undefined>(undefined);
   // effectiveLoading: Computes loading state synchronously during peer/agent switches
@@ -109,15 +121,22 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
     }
   }, [transport, peer, scope.routerUrl, scope.agentId, scopeKey, onReconcile]);
 
-  const loadOlder = useCallback(async () => {
-    if (peer === undefined || peer === "" || loadingOlder) return;
+  const loadOlder = useCallback(async (beforeCommit?: () => void) => {
+    if (peer === undefined || peer === "" || olderRequest.current !== null) return;
+    const request = {};
+    const epoch = conversationEpoch.current;
+    olderRequest.current = request;
+    const isCurrent = () => conversationEpoch.current === epoch && olderRequest.current === request;
+    setLoadingOlder(true);
+    try {
 
     if (timelineEvents.length > 0 && (typeof transport.http?.fetchConversationTimeline === "function" || typeof transport.fetchConversationTimeline === "function")) {
       const oldestSeq = timelineEvents[0]?.seq ?? nextBeforeSeq;
       if (oldestSeq !== null && oldestSeq !== undefined && oldestSeq > 0) {
-        setLoadingOlder(true);
         try {
           const result = await transport.http.fetchConversationTimeline(peer, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq);
+          if (!isCurrent()) return;
+          beforeCommit?.();
           setTimelineEvents((prev) => [...result.events, ...prev]);
           setNextBeforeSeq(result.next_before_seq);
           setNextBefore(result.next_before_seq);
@@ -150,17 +169,17 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
           });
           return;
         } catch {
-          // fall through
-        } finally {
-          setLoadingOlder(false);
+          if (!isCurrent()) return;
+          // Keep the same request lock through the compatibility fallback.
         }
       }
     }
 
     if (nextBefore === null || nextBefore === undefined || nextBefore <= 0) return;
-    setLoadingOlder(true);
     try {
       const result = await transport.conversation(scope.agentId, peer, { before: nextBefore, limit: DEFAULT_CONVERSATION_CHUNK_LIMIT });
+      if (!isCurrent()) return;
+      beforeCommit?.();
       setNextBefore(result.next_before ?? null);
       setMessages((current) => {
         const reconciled = reconcileConversation({ messages: current, highWaterSequence: 0, followMessages: true }, result.messages, result.high_water_sequence).messages;
@@ -168,10 +187,14 @@ export function useConversation(transport: RouterTransport, scope: RouterScope, 
       });
     } catch {
       // ignore
-    } finally {
-      setLoadingOlder(false);
     }
-  }, [peer, nextBefore, nextBeforeSeq, timelineEvents, loadingOlder, transport, scope.agentId]);
+    } finally {
+      if (isCurrent()) {
+        olderRequest.current = null;
+        setLoadingOlder(false);
+      }
+    }
+  }, [peer, nextBefore, nextBeforeSeq, timelineEvents, transport, scope.agentId]);
 
   useEffect(() => {
     const prior = previousScope.current;

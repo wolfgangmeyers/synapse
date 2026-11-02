@@ -3,7 +3,10 @@ import { setupE2EHarness, type E2ETestHarness } from "./harness";
 import { WebSocket } from "ws";
 
 test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural Unload E2E", () => {
+  test.setTimeout(60_000);
   let harness: E2ETestHarness;
+  const sockets: WebSocket[] = [];
+  test.afterEach(() => { for (const socket of sockets) socket.terminate(); sockets.length = 0; });
 
   test.beforeAll(async () => {
     harness = await setupE2EHarness({ useProxy: true });
@@ -18,6 +21,21 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
   test("SCN-SCROLL-001..004 & SCN-UNLOAD-001..002: proximity auto-scroll, read locking, agent switch reset, and 150-message unload threshold", async ({
     page,
   }) => {
+    await page.clock.install();
+    let browserRenewals = 0;
+    const browserErrors: string[] = [];
+    page.on('websocket', ws => {
+      const pending = new Set<string>();
+      ws.on('framesent', event => {
+        const f = JSON.parse(String(event.payload));
+        if (f.type === 'lease_renew') pending.add(f.frame_id);
+      });
+      ws.on('framereceived', event => {
+        const f = JSON.parse(String(event.payload));
+        if (f.type === 'registered' && pending.delete(f.request_id)) browserRenewals++;
+        if (f.type === 'error' || f.type === 'lease_rejected') browserErrors.push(JSON.stringify(f));
+      });
+    });
     const targetRouterUrl = harness.proxy ? harness.proxy.url : harness.router.httpUrl;
     const agentId1 = "agent-scroll-worker-1";
     const agentId2 = "agent-scroll-worker-2";
@@ -26,6 +44,10 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
     const agent1Ws = new WebSocket(`${targetRouterUrl.replace(/^http/, "ws")}/v1/agents`);
     const agent1InstanceId = "inst-" + Date.now();
     let agent1LeaseId = "";
+    sockets.push(agent1Ws);
+    const received1 = new Set<string>();
+    const pending1 = new Set<string>();
+    const batches1 = new Map<string, string[]>();
 
     const agent1Ready = new Promise<void>((resolve, reject) => {
       agent1Ws.on("open", () => {
@@ -50,7 +72,14 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
           if (parsed.type === "registered") {
             agent1LeaseId = parsed.lease_id;
             resolve();
+          } else if (parsed.type === "delivery_acknowledged") {
+            for (const id of batches1.get(parsed.message_id) ?? [parsed.message_id]) pending1.delete(id);
+            batches1.delete(parsed.message_id);
           } else if (parsed.type === "message") {
+            const key = `${parsed.message.id}:${parsed.message_incarnation_id}:${parsed.attempt_number}`;
+            if (received1.has(key)) return;
+            received1.add(key);
+            batches1.set(parsed.message.id, parsed.delivery_items?.map((item: { message_id: string }) => item.message_id) ?? [parsed.message.id]);
             // Mailbox V2 delivery lifecycle: send injection_requested, then wait for ack / send ack sequentially
             const receiptFrame = {
               version: "v1",
@@ -68,7 +97,6 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
                 type: "injection_requested",
               })
             );
-            setTimeout(() => {
               agent1Ws.send(
                 JSON.stringify({
                   ...receiptFrame,
@@ -76,7 +104,6 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
                   type: "ack",
                 })
               );
-            }, 10);
           } else if (parsed.type === "error") {
             console.log("Agent 1 WS error frame:", parsed);
           } else {
@@ -92,6 +119,8 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
     const agent2Ws = new WebSocket(`${targetRouterUrl.replace(/^http/, "ws")}/v1/agents`);
     const agent2InstanceId = "inst-" + (Date.now() + 1);
     let agent2LeaseId = "";
+    sockets.push(agent2Ws);
+    const received2 = new Set<string>();
 
     const agent2Ready = new Promise<void>((resolve, reject) => {
       agent2Ws.on("open", () => {
@@ -117,6 +146,9 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
             agent2LeaseId = parsed.lease_id;
             resolve();
           } else if (parsed.type === "message") {
+            const key = `${parsed.message.id}:${parsed.message_incarnation_id}:${parsed.attempt_number}`;
+            if (received2.has(key)) return;
+            received2.add(key);
             const receiptFrame = {
               version: "v1",
               agent_id: agentId2,
@@ -133,7 +165,6 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
                 type: "injection_requested",
               })
             );
-            setTimeout(() => {
               agent2Ws.send(
                 JSON.stringify({
                   ...receiptFrame,
@@ -141,7 +172,6 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
                   type: "ack",
                 })
               );
-            }, 10);
           }
         } catch {}
       });
@@ -363,12 +393,40 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
     await agent1SidebarItem.first().click();
     await expect(page.locator('h2:has-text("Agent Scroll Worker 1")')).toBeVisible({ timeout: 5000 });
 
-    // Push 160 messages over REST in batches with small delays to exceed CONVERSATION_UNLOAD_THRESHOLD (150)
-    // Alternate between "user" and agentId1 so delivery queue is promptly cleared and rate limits aren't breached
+    // Use the displayed user/worker conversation, not unrelated subworker mail.
+    // Ten-row batches preserve admission order, durable ACKs and the 150-row threshold.
+    async function renewRecipient(ws: WebSocket, agent: string, instance: string, lease: string) {
+      const id = `renew-unload-${agent}-${Date.now()}`;
+      const confirmed = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { ws.off('message', receive); reject(new Error(`No renewal for ${agent}`)); }, 5000);
+        function receive(raw: import('ws').RawData) {
+          const f = JSON.parse(raw.toString());
+          if (f.type === 'registered' && f.request_id === id) {
+            clearTimeout(timer); ws.off('message', receive); resolve();
+          }
+        }
+        ws.on('message', receive);
+      });
+      ws.send(JSON.stringify({ version: 'v1', type: 'lease_renew', frame_id: id,
+        agent_id: agent, instance_id: instance, lease_id: lease }));
+      await confirmed;
+    }
     const totalPushed = 160;
     const baseTime = Date.now();
     for (let i = 1; i <= totalPushed; i++) {
-      const sender = `agent-subworker-${i % 30}`;
+      if ((i - 1) % 10 === 0) {
+        await harness.advanceClock(20_000);
+        await Promise.all([
+          renewRecipient(agent1Ws, agentId1, agent1InstanceId, agent1LeaseId),
+          renewRecipient(agent2Ws, agentId2, agent2InstanceId, agent2LeaseId),
+        ]);
+        const prior = browserRenewals;
+        await page.clock.fastForward(10_000);
+        await expect.poll(() => browserRenewals, { message: 'browser user lease renewed' }).toBeGreaterThan(prior);
+        expect(browserErrors).toEqual([]);
+      }
+      const sender = "user";
+      pending1.add(`msg-unload-stream-${i}`);
       const res = await fetch(`${targetRouterUrl}/v1/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -389,10 +447,14 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
 
       // Brief yield every 10 messages to let agent1 WebSocket drain delivery queue
       if (i % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 80));
+        // Ten outstanding rows stay below the 15-row recipient cap. Wait for
+        // durable ACK of every merged delivery item, not a scheduler sleep.
+        await expect.poll(() => pending1.size, { message: "all unload batch rows durably acknowledged" }).toBe(0);
       }
     }
 
+    const retained = await (await fetch(`${targetRouterUrl}/v1/conversation?agent_id=${agentId1}&limit=200`)).json();
+    expect(retained.events.filter((event: { content?: string }) => event.content?.startsWith('Streaming message payload index '))).toHaveLength(totalPushed);
     // Verify newest message is present
     await expect(
       page.locator(".bubble-wrap").filter({

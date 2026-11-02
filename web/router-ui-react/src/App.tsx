@@ -498,8 +498,8 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   useEffect(() => { setCompleteHistoryReadyAgent(undefined); }, [activeUrl, selectedAgent?.agent_id, selectedAgent?.source]);
 
 
-  const handleLoadOlder = useCallback(() => {
-    void conversation.loadOlder();
+  const handleLoadOlder = useCallback((beforeCommit?: () => void) => {
+    return conversation.loadOlder(beforeCommit);
   }, [conversation]);
   const arrival = selectedLegacyPeer ? selectArrival(session.state, selectedLegacyPeer) : undefined;
   const setSelection = (peer: string): void => {

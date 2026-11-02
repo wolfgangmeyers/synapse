@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MessageList } from "../../src/components/MessageList";
 import type { HistoryMessage } from "../../src/domain/history";
 import type { ManagedHistoryEntry } from "../../src/protocol/types";
@@ -260,8 +260,9 @@ describe("MessageList", () => {
     expect(screen.getByText("Timeline message body 50")).toBeInTheDocument();
   });
 
-  it("handles pagination via load older button and scroll up", () => {
-    const onLoadOlder = vi.fn();
+  it("handles pagination via load older button and scroll up", async () => {
+    let finishLoad: () => void = () => { throw new Error("Pagination has not started"); };
+    const onLoadOlder = vi.fn(() => new Promise<void>((resolve) => { finishLoad = resolve; }));
     const events: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
       id: `evt-${i + 51}`,
       agent_id: "agent-1",
@@ -287,80 +288,22 @@ describe("MessageList", () => {
     fireEvent.click(loadOlderBtn);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
 
-    // 2. Verify scrolling up (scrollTop < 100 on scrollable container) triggers onLoadOlder
+    // Scrolling upward while the button request is pending must not overlap it.
     const list = container.querySelector<HTMLDivElement>(".messages");
     if (!list) throw new Error("Messages container not found");
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
     list.scrollTop = 50;
     fireEvent.scroll(list);
-    expect(onLoadOlder).toHaveBeenCalledTimes(2);
-  });
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
 
-  it("renders prepended older events when pagination loads more and maintains scroll position", () => {
-    const initialEvents: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
-      id: `evt-${i + 51}`,
-      agent_id: "agent-1",
-      seq: i + 51,
-      kind: "message",
-      role: "assistant",
-      content: `Message ${i + 51}`,
-      created_at: 1700000000000 + (i + 51) * 1000,
-    }));
+    await act(async () => { finishLoad(); });
 
-    const onLoadOlder = vi.fn();
-    const { container, rerender } = render(
-      <MessageList
-        peerId="agent-1"
-        events={initialEvents}
-        hasOlder={true}
-        onLoadOlder={onLoadOlder}
-      />
-    );
-
-    expect(screen.getByText("Message 100")).toBeInTheDocument();
-    expect(screen.queryByText("Message 1")).not.toBeInTheDocument();
-
-    const list = container.querySelector<HTMLDivElement>(".messages");
-    if (!list) throw new Error("Messages container not found");
-
-    // Simulate initial scroll state before pagination
-    Object.defineProperty(list, "clientHeight", { configurable: true, value: 500 });
-    Object.defineProperty(list, "scrollHeight", { configurable: true, writable: true, value: 2000 });
-    list.scrollTop = 50;
-
-    // Trigger load older (which records prevScrollHeight = 2000 and prevScrollTop = 50)
+    // After settlement, another upward movement can request the next page.
+    list.scrollTop = 40;
     fireEvent.scroll(list);
-    expect(onLoadOlder).toHaveBeenCalled();
-
-    const olderEvents: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
-      id: `evt-${i + 1}`,
-      agent_id: "agent-1",
-      seq: i + 1,
-      kind: "message",
-      role: "assistant",
-      content: `Message ${i + 1}`,
-      created_at: 1700000000000 + (i + 1) * 1000,
-    }));
-
-    // ScrollHeight increases after prepending items to 4000 (delta = +2000)
-    Object.defineProperty(list, "scrollHeight", { configurable: true, writable: true, value: 4000 });
-
-    // Prepend older events
-    rerender(
-      <MessageList
-        peerId="agent-1"
-        events={[...olderEvents, ...initialEvents]}
-        hasOlder={false}
-        onLoadOlder={onLoadOlder}
-      />
-    );
-
-    // Verify scroll position was compensated: prevScrollTop (50) + delta (2000) = 2050
-    expect(list.scrollTop).toBe(2050);
-
-    // After loading older, 100 items exist, and load older button disappears
-    expect(screen.queryByRole("button", { name: /Load older history/i })).not.toBeInTheDocument();
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+    await act(async () => { finishLoad(); });
   });
 
   it("fetchConversationTimeline calls GET /v1/conversation with agent_id, limit, and before_seq", async () => {

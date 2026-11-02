@@ -3,7 +3,7 @@
 - **ID**: `SPEC-CONV-003`
 - **Status**: `Active`
 - **Domain**: `Conversation`
-- **Target E2E Suite**: `tests/e2e/conversation-scroll-and-pagination.spec.ts`
+- **Target E2E Suite**: `tests/e2e/conversation-scroll-and-pagination.spec.ts`, `tests/e2e/conversation-scroll-regressions.spec.ts`
 
 ---
 
@@ -23,7 +23,7 @@ This specification defines the behavior for eliminating the manual scroll lock t
 
 1. **Elimination of Manual Toggle**: No manual "Scroll Lock" button or control shall exist in the conversation header toolbar or agent controls dropdown.
 2. **Proximity Threshold (`DEFAULT_AUTO_SCROLL_THRESHOLD = 180`)**: Distance from bottom is defined as `scrollHeight - (scrollTop + clientHeight)`. When `distance <= 180`, the user is considered "near bottom".
-3. **Viewport Position Preservation**: If `distance > 180`, incoming events or messages MUST NOT adjust `scrollTop`. The user's reading position MUST be preserved.
+3. **Viewport Position Preservation**: If `distance > 180`, incoming events or messages MUST preserve the visible reading position. Appending below the viewport MUST NOT adjust `scrollTop`; prepending or trimming above it MUST compensate as needed for a surviving visible item.
 4. **Conversation Switch Reset**: Switching the active conversation/peer (`conversationKey` change) MUST reset `isNearBottomRef` to `true` and scroll to the bottom.
 5. **Double-rAF DOM Settlement**: Layout changes and auto-scrolling use synchronous layout alignment followed by a `requestAnimationFrame` callback to ensure settled DOM layout.
 6. **Conversation Chunking Constants**: `DEFAULT_CONVERSATION_CHUNK_LIMIT = 50`, `CONVERSATION_UNLOAD_THRESHOLD = 150` (3x chunk limit).
@@ -31,6 +31,11 @@ This specification defines the behavior for eliminating the manual scroll lock t
 8. **No Bottom Trimming on Scroll-Up**: Prepending older chunks via `loadOlder()` MUST NOT trim messages or timeline events from the bottom.
 9. **Older History Availability (`hasOlder`)**: `hasOlder` remains active (`true`) whenever the oldest in-memory item sequence > 1 or cursor (`nextBeforeSeq` / `nextBefore`) > 0.
 10. **No Zombie Resurrection**: Unloaded messages and activity entries must not be resurrected from secondary stores (`messagesByPeer`, `managedHistory`). Fallback entries with `sequence < oldestEventSeq` (or sequence <= 0 when oldestEventSeq > 1) are skipped.
+
+11. **True bottom**: The 180px threshold decides whether following is enabled, not whether following succeeded. After followed content settles, bottom distance MUST be at most 2 CSS pixels.
+12. **Bounded pagination suspension**: Older-history loading may suspend following only while the request and prepend alignment are pending. Failure, empty results, or duplicate-only results MUST release suspension even when the oldest visible ID does not change.
+13. **Layout growth**: Following applies to height changes of existing items (streaming text and delayed images), not only newly appended IDs. Away from the bottom, those changes MUST preserve the reading position.
+14. **Isolation and cancellation**: A pending pagination request or scheduled scroll from one conversation MUST NOT affect another conversation. Scheduled alignment MUST respect a user scroll away before it executes.
 
 ---
 
@@ -95,6 +100,63 @@ This specification defines the behavior for eliminating the manual scroll lock t
 - **When**: New events are added.
 - **Then**: Distance from bottom is `<= 0`, which is `<= 180`, properly triggering auto-scroll without error.
 
+#### Scenario: [SCN-SCROLL-007] Pagination failure or no-progress result releases following
+- **User Goal**: Return to live activity after an unsuccessful history request.
+- **Given**: A scrollable conversation has older history available.
+- **When**: An older-history request fails, returns no items, or returns only already visible items.
+- **Then**: The visible history is not discarded and the reading position remains stable.
+- **When**: Wolfgang returns within 180px of the bottom and two successive messages arrive.
+- **Then**: Each message settles at true bottom (distance <= 2px), without reload or another successful pagination request.
+
+#### Scenario: [SCN-SCROLL-008] Pagination state cannot leak across conversation switches
+- **Given**: An older-history request is pending in conversation A.
+- **When**: Wolfgang opens scrollable conversation B before that request completes.
+- **Then**: B opens at true bottom and follows new messages.
+- **When**: A's request completes unsuccessfully or without new items.
+- **Then**: B remains at true bottom and continues following.
+- **When**: Wolfgang returns to A.
+- **Then**: A opens at true bottom and follows subsequent messages.
+
+#### Scenario: [SCN-SCROLL-009] Existing item grows without an ID change
+- **Given**: A scrollable conversation is at true bottom and its latest item contains a pending image or streaming response.
+- **When**: That item's layout grows without adding a new timeline item.
+- **Then**: The viewport follows to true bottom after layout settles.
+- **When**: Wolfgang scrolls more than 180px away and another existing item's image or text grows.
+- **Then**: The reading position stays within 2px of its previous scrollTop.
+- **When**: Wolfgang returns near bottom and further same-ID growth occurs.
+- **Then**: Following resumes to true bottom.
+
+#### Scenario: [SCN-SCROLL-010] User scrolling away cancels queued following
+- **Given**: Content growth has scheduled bottom alignment while the user is near bottom.
+- **When**: Wolfgang scrolls more than 180px away before that alignment runs.
+- **Then**: The queued alignment does not pull the viewport back down.
+
+#### Scenario: [SCN-SCROLL-011] Return to bottom during successful pagination
+- **Given**: An older-history request started while Wolfgang was reading earlier messages.
+- **When**: Wolfgang returns to bottom before the delayed successful response arrives.
+- **Then**: Prepending respects the newer bottom intent instead of restoring the request-start reading position.
+- **And**: The viewport remains at true bottom and follows subsequent live messages.
+
+#### Scenario: [SCN-SCROLL-012] Successful older history preserves a visible reading anchor during live updates
+- **Given**: Wolfgang is reading history with a visible message away from bottom.
+- **When**: An older-history request is delayed and a live message arrives before it completes successfully.
+- **Then**: The same reading message remains at its previous viewport offset within 2px after both updates settle.
+- **And**: Newly fetched older messages and the concurrent live message remain available.
+
+#### Scenario: [SCN-SCROLL-013] Successful stale pagination cannot contaminate another conversation
+- **Given**: An older-history request for conversation A is pending.
+- **When**: Wolfgang switches to B and A's successful response subsequently arrives.
+- **Then**: No A messages appear in B, B's visible reading anchor is unchanged, and returning to bottom resumes B's following.
+- **And**: Returning to A opens at true bottom and follows new messages.
+
+#### Scenario: [SCN-SCROLL-014] Front trimming preserves a surviving visible reading anchor
+- **Given**: The conversation has more than 150 persisted messages and Wolfgang has loaded a 150-message reading window or an expanded paginated window larger than 150.
+- **And**: Wolfgang is reading a visible message away from bottom that will survive the next front trim.
+- **When**: A live message arrives and the in-memory window is trimmed from the front to 150 messages.
+- **Then**: The same surviving message remains visible at its previous viewport offset within 2px after layout settles and throughout a bounded observation interval.
+- **And**: The live message is retained, removed oldest messages disappear, and the retained window is bounded at 150.
+- **And**: This does not require preserving the position of content removed by the trim, and does not depend on native browser scroll anchoring being enabled.
+
 ---
 
 ## 4. Playwright End-to-End Suite Mapping
@@ -108,3 +170,15 @@ This specification defines the behavior for eliminating the manual scroll lock t
 | `SCN-SCROLL-006` | `web/router-ui-react/tests/component/subagent-viewer-dialog.test.tsx` | Verify subagent viewer dialog follows proximity auto-scrolling when near bottom and locks when scrolled up |
 | `SCN-UNLOAD-001` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Natural unloading when exceeding 150 messages during streaming updates |
 | `SCN-UNLOAD-002` | `web/router-ui-react/tests/component/message-list-timeline.test.tsx`, `web/router-ui-react/tests/unit/use-conversation-unload.test.ts` | Re-fetching unloaded chunks via "Load older history" or scrollback |
+| `SCN-SCROLL-007` | `tests/e2e/conversation-scroll-regressions.spec.ts` | pagination failure/empty/duplicate releases follow after returning near bottom |
+| `SCN-SCROLL-008` | `tests/e2e/conversation-scroll-regressions.spec.ts` | pending pagination failure/empty/duplicate switch isolation |
+| `SCN-SCROLL-009` | `tests/e2e/conversation-scroll-regressions.spec.ts` | delayed same-ID image growth following/reading/resumed |
+| `SCN-SCROLL-010` | `tests/e2e/conversation-scroll-regressions.spec.ts` | supporting scheduler check cancels queued alignment |
+| `SCN-SCROLL-011` | `tests/e2e/conversation-scroll-regressions.spec.ts` | successful delayed pagination respects return to bottom |
+| `SCN-SCROLL-012` | `tests/e2e/conversation-scroll-regressions.spec.ts` | successful prepend preserves visible reading anchor with concurrent live update |
+| `SCN-SCROLL-013` | `tests/e2e/conversation-scroll-regressions.spec.ts` | successful stale pagination cannot contaminate another conversation |
+| `SCN-SCROLL-014` | `tests/e2e/conversation-scroll-regressions.spec.ts` | front trim preserves surviving reading anchor in bounded/expanded window |
+
+Regression verification uses real REST-seeded messages persisted by the isolated SQLite router, real WebSocket notifications and confirmed delivery receipts, and the reverse proxy. Targeted pagination HTTP responses and delayed image HTTP responses are controlled. Failure coverage also fails the legacy pagination fallback and waits for both requests. Following measures true-bottom geometry, not just proximity or visibility. Reading checks observe settled geometry over a bounded interval.
+
+SCN-SCROLL-010 is a supporting scheduler check in the same real-boundary fixture: it temporarily holds browser animation-frame callbacks to establish ordering, changes DOM scroll position, then releases callbacks. It does not claim native user-input E2E coverage. No component functions or stores are mocked. Component coverage was updated for pagination and same-ID conversation changes. The synthetic prepend check was retired in favor of real-boundary pagination and visible-anchor regressions in this suite.

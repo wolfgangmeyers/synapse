@@ -2589,6 +2589,7 @@ dialog,
 .managed-failure-code { padding: 1px 4px; border-radius: 4px; background: rgba(255,180,171,0.10); color: inherit; font-size: 0.82em; overflow-wrap: anywhere; }
 .peer-activity .subagent-indicator, .peer-activity .compacting-indicator { margin-top: 0; max-width: min(100%, 420px); }
 .messages {
+  overflow-anchor: none;
   flex: 1 1 0%;
   min-width: 0;
   max-width: 100%;
