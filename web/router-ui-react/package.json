@@ -17,6 +17,7 @@
     "test:acceptance:bcb": "node tests/acceptance/bcb-runner.mjs"
   },
   "dependencies": {
+    "@fortawesome/fontawesome-free": "6.7.2",
     "@xyflow/react": "^12.12.0",
     "dagre": "^0.8.5",
     "markdown-it": "14.3.0",

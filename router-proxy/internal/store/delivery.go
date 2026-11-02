@@ -389,6 +389,9 @@ func (s *Store) acquireOrRenewLease(ctx context.Context, request LeaseRequest, r
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO agents (agent_id, first_seen_at, last_connected_at, disconnected_at) VALUES (?, ?, ?, NULL) ON CONFLICT (agent_id) DO UPDATE SET last_connected_at = excluded.last_connected_at, disconnected_at = NULL`, request.AgentID, now, now); err != nil {
 			return err
 		}
+		if err := reactivateAgentIdentityTx(ctx, s.db, request.AgentID); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO agent_leases (lease_id, agent_id, instance_id, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?)`, request.LeaseID, request.AgentID, request.InstanceID, now, expires); err != nil {
 			return err
 		}

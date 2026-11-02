@@ -95,6 +95,7 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		"worktree":                 agent.Worktree,
 		"worktree_base_path":        agent.WorktreeBasePath,
 		"allow_inline_tools":       allowInline,
+		"urgent":                   agent.Urgent,
 		"manifest":                 map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": installedToolCount(agent.ManifestRevision)},
 		"created_at":               agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
 		"blocked":                  agent.Blocked,

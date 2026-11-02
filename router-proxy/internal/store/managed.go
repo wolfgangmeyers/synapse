@@ -100,6 +100,7 @@ const (
 )
 
 type ManagedAgentRecord struct {
+	Urgent                    bool // Hydrated from the shared agents row, never independently persisted.
 	AgentID                   string
 	Name                      string
 	SlotHeld                  bool
@@ -849,6 +850,15 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 				}
 			}
 			if (existingState == "failed" && existingID == agent.AgentID) || isStuck {
+				if existingID != agent.AgentID {
+					if enabled, err := agentUrgencyEnabledTx(ctx, s.db); err != nil {
+						return err
+					} else if enabled {
+						if _, err := s.db.ExecContext(ctx, `UPDATE agents SET urgent=0, identity_active=0 WHERE agent_id=?`, existingID); err != nil {
+							return err
+						}
+					}
+				}
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_readiness_sources WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id = ?`, existingID)
@@ -934,6 +944,12 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 // focused historical migration fixtures to open schemas that intentionally end
 // before 027.
 func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAgentRecord, operationID string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES (?,?) ON CONFLICT(agent_id) DO NOTHING`, agent.AgentID, agent.CreatedAt); err != nil {
+		return err
+	}
+	if err := reactivateAgentIdentityTx(ctx, s.db, agent.AgentID); err != nil {
+		return err
+	}
 	columns := `agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,
 		desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,
 		session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,
@@ -1652,6 +1668,13 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		}
 		if hasLink {
 			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET launch_operation_id=NULL WHERE agent_id=?`, action.AgentID); err != nil {
+				return err
+			}
+		}
+		if enabled, err := agentUrgencyEnabledTx(ctx, s.db); err != nil {
+			return err
+		} else if enabled {
+			if _, err := s.db.ExecContext(ctx, `UPDATE agents SET urgent=0, identity_active=0 WHERE agent_id=?`, action.AgentID); err != nil {
 				return err
 			}
 		}
@@ -4615,6 +4638,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err != nil {
 		return nil, err
 	}
+	if err := loadManagedUrgencyTx(ctx, s.db, []*ManagedAgentRecord{agent}); err != nil {
+		return nil, err
+	}
 	if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
@@ -4681,6 +4707,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 		result = append(result, item)
 	}
 	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := loadManagedUrgencyTx(ctx, s.db, result); err != nil {
 		return nil, err
 	}
 	for _, item := range result {
@@ -5181,6 +5210,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if err := rows.Close(); err != nil {
 		return rollback(err)
 	}
+	if err := loadManagedUrgencyTx(ctx, s.db, agents); err != nil {
+		return rollback(err)
+	}
 	goalPolicies := make(map[string]*ManagedGoalPolicy)
 	for _, agent := range agents {
 		if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
@@ -5318,6 +5350,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return ManagedAgentSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version}, nil
 	}
 	if err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedUrgencyTx(ctx, s.db, []*ManagedAgentRecord{agent}); err != nil {
 		return rollback(err)
 	}
 	if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {

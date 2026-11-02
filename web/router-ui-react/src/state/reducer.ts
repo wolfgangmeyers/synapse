@@ -42,6 +42,8 @@ function scoped(state: AppState, action: { scope?: RouterScope }): boolean { ret
 function retainManagedGoalStates(incoming: ManagedAgentView[], current: ManagedAgentView[] = []): ManagedAgentView[] {
   const prior = new Map(current.map((agent) => [agent.agent_id, agent.goal_state] as const));
   return incoming.map((agent) => {
+    const previous = current.find((candidate) => candidate.agent_id === agent.agent_id);
+    if (agent.urgent === undefined && previous?.urgent !== undefined) agent = { ...agent, urgent: previous.urgent };
     const goalState = prior.get(agent.agent_id);
     return agent.goal_state === undefined && goalState !== undefined ? { ...agent, goal_state: goalState } : agent;
   });
@@ -106,6 +108,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: retainManagedGoalStates(agents, state.managedAgents) };
     }
     case "managed/reconcile": {
+      if (state.managedProjectionVersion !== undefined && action.version < state.managedProjectionVersion) return state;
       const current = state.managedAgents ?? [];
       const currentMap = new Map(current.map((agent) => [agent.agent_id, agent]));
       const incomingIds = new Set(action.agents.map((agent) => agent.agent_id));
@@ -134,6 +137,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           existing.runtime !== incoming.runtime ||
           existing.last_error !== incoming.last_error ||
           existing.allow_inline_tools !== incoming.allow_inline_tools ||
+          (existing.urgent ?? false) !== (incoming.urgent ?? existing.urgent ?? false) ||
           JSON.stringify(existing.goal_state) !== JSON.stringify(goalState) ||
           JSON.stringify(existing.model) !== JSON.stringify(incoming.model);
 
@@ -142,6 +146,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           const merged = {
             ...existing,
             ...incoming,
+            urgent: incoming.urgent ?? existing.urgent ?? false,
             managedProjectionVersion: Math.max(existing.managedProjectionVersion ?? 0, action.version),
           };
           if (goalState !== undefined) {

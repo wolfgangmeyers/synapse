@@ -142,6 +142,7 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     raw = withoutArchivedSnapshotAgents(raw);
     if (!isUILiveFrame(raw)) { recover(protocolError("frame_invalid")); return; }
     const frame = withoutLegacyRecordKey(raw);
+    if (frame.type === "agent_urgency_changed") { options.onFrame(frame); return; }
     if (!agentSnapshotAccepted && frame.type !== "managed_agents_snapshot") { recover(protocolError("snapshot_missing")); return; }
     if (frame.type === "managed_agents_snapshot") {
       // The router deliberately uses an authoritative snapshot to repair a

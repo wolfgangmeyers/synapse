@@ -86,7 +86,11 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     },
     onFrame: (frame) => {
       const currentScope = scopeRef.current;
-      if (frame.type === "managed_agents_snapshot") {
+      if (frame.type === "agent_urgency_changed") {
+        // Invalidate shared snapshots, not one REST read per visible row.
+        void syncGroundTruthRef.current?.();
+        transport.invalidateAgents();
+      } else if (frame.type === "managed_agents_snapshot") {
         dispatch({ type: "managed/snapshot", scope: currentScope, version: frame.projection_version, agents: frame.agents });
         refreshManagedGoalProjection(transport, dispatch, currentScope, frame.agents);
       } else if (frame.type === "managed_agent_delta") {
@@ -353,6 +357,10 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           }
           wasConnected = true;
         }
+      }
+      if (event.type === "frame" && event.frame.type === "agent_urgency_changed") {
+        // The compatibility transport already schedules its connected-list read.
+        void reconcileGroundTruth();
       }
       const action = eventAction(event, scopeRef.current);
       if (action) dispatch(action);

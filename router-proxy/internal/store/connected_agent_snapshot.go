@@ -12,6 +12,7 @@ import (
 // ConnectedAgentStoreSnapshot is the durable portion of one connected-agent
 // response. The transport joins it with connection-local live state.
 type ConnectedAgentStoreSnapshot struct {
+	Urgency   map[string]bool
 	Leases    map[string]domain.Lease
 	Lifecycle map[string]ConnectedAgentLifecycle
 }
@@ -23,8 +24,8 @@ type ConnectedAgentLifecycle struct {
 	Agent    LifecycleAgent
 }
 
-// ConnectedAgentSnapshot reads the durable rows needed by /v1/agents in two
-// statements, regardless of the number of connected agents. Keeping the
+// ConnectedAgentSnapshot reads the durable rows needed by /v1/agents in at most
+// three batched statements, regardless of the number of connected agents. Keeping the
 // lease and lifecycle reads under the store mutex gives the response one
 // serialized SQLite snapshot while avoiding one lookup per agent.
 func (s *Store) ConnectedAgentSnapshot(ctx context.Context, agentIDs []string, includeLifecycle bool) (ConnectedAgentStoreSnapshot, error) {
@@ -32,6 +33,7 @@ func (s *Store) ConnectedAgentSnapshot(ctx context.Context, agentIDs []string, i
 		return ConnectedAgentStoreSnapshot{}, errors.New("context is required")
 	}
 	result := ConnectedAgentStoreSnapshot{
+		Urgency:   make(map[string]bool),
 		Leases:    make(map[string]domain.Lease),
 		Lifecycle: make(map[string]ConnectedAgentLifecycle),
 	}
@@ -66,6 +68,27 @@ func (s *Store) ConnectedAgentSnapshot(ctx context.Context, agentIDs []string, i
 		return ConnectedAgentStoreSnapshot{}, err
 	}
 	if err := rows.Close(); err != nil {
+		return ConnectedAgentStoreSnapshot{}, err
+	}
+
+	urgencyRows, err := s.db.QueryContext(ctx, `SELECT agent_id, urgent FROM agents WHERE agent_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return ConnectedAgentStoreSnapshot{}, err
+	}
+	for urgencyRows.Next() {
+		var id string
+		var urgent bool
+		if err := urgencyRows.Scan(&id, &urgent); err != nil {
+			_ = urgencyRows.Close()
+			return ConnectedAgentStoreSnapshot{}, err
+		}
+		result.Urgency[id] = urgent
+	}
+	if err := urgencyRows.Err(); err != nil {
+		_ = urgencyRows.Close()
+		return ConnectedAgentStoreSnapshot{}, err
+	}
+	if err := urgencyRows.Close(); err != nil {
 		return ConnectedAgentStoreSnapshot{}, err
 	}
 	if !includeLifecycle {
