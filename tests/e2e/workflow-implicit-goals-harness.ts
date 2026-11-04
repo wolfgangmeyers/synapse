@@ -43,6 +43,7 @@ export type WorkflowHarnessOptions = {
   // clear the configured default. Never select seeded Google credentials.
   defaultModel?: typeof model | null;
   kbDir?: (home: string) => string;
+  backgroundExpiryInterval?: string;
 };
 export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   const requests: Record<string, unknown>[] = [];
@@ -178,13 +179,14 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   };
   try {
     const repoRoot = resolve(import.meta.dirname, "../..");
-    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, fakeEmbeddedCatalog: true, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir } });
+    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, fakeEmbeddedCatalog: true, backgroundExpiryInterval: options.backgroundExpiryInterval, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
     await expect.poll(async () => {
       try { return (await fetch(proxy!.url + "/v1/health")).status; } catch { return 0; }
     }, { timeout: 5000 }).toBe(200);
     frontend = await serveFrontendDist(process.env.MECHA_E2E_FRONTEND_DIST || join(repoRoot, "web/router-ui-react/dist"));
     const f = { router, proxy, frontend, requests, violations, replies, wsFrames, close,
+      releaseHeld() { for (const res of held.splice(0)) res.destroy(); },
       async restart() {
         // Keep the provider server, request history and queued replies alive.
         // Do not replay browser lease/instance identity: normal reconnect owns it.

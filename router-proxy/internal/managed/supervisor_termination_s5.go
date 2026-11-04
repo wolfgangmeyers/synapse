@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/gitworktree"
@@ -240,6 +241,8 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 		if claudeStopErr != nil {
 			// Cleanup failures are recorded at the reap stage, not the initial abort stage.
 			if err := m.store.AdvanceManagedTermination(context.Background(), admission.Action.ActionID, "terminating", "abort", "terminating", "terminate_reap", sourcePtr); err != nil {
+				log.Printf("managed termination: action %s: advance: %v", admission.Action.ActionID, err)
+				m.failTermination(admission.Action.ActionID, "TERMINATION_CLEANUP_FAILED", true, sourcePtr)
 				return
 			}
 			m.failTermination(admission.Action.ActionID, "TERMINATION_CLEANUP_FAILED", true, sourcePtr)
@@ -260,14 +263,23 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 	// removed it, and exposes a retained failure when cleanup cannot complete.
 	defer m.publishProjection()
 	action, err := m.store.ManagedLifecycleAction(context.Background(), actionID)
-	if err != nil || action.Kind != "terminate" || lifecycleTerminal(action) {
+	if err != nil {
+		log.Printf("managed termination: action %s: read action: %v", actionID, err)
+		return
+	}
+	if action.Kind != "terminate" || lifecycleTerminal(action) {
 		return
 	}
 	m.cascadeAbortSubagents(action.AgentID)
 	ClearAgentContextUsage(action.AgentID)
 	_ = m.store.CascadeTerminateSubagents(context.Background(), action.AgentID)
 	agent, err := m.store.ManagedAgent(context.Background(), action.AgentID)
-	if err != nil || agent.DesiredState != "terminated" {
+	if err != nil {
+		log.Printf("managed termination: action %s: read agent: %v", actionID, err)
+		m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, action.SourceFence)
+		return
+	}
+	if agent.DesiredState != "terminated" {
 		return
 	}
 	source := action.SourceFence
@@ -278,10 +290,14 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			_ = m.store.RecordManagedTerminationDiagnostic(context.Background(), actionID, "ABORT_UNAVAILABLE")
 		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "terminating", "abort", "terminating", "terminate_reap", source); err != nil {
+			log.Printf("managed termination: action %s: advance: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 		action, err = m.store.ManagedLifecycleAction(context.Background(), actionID)
 		if err != nil {
+			log.Printf("managed termination: action %s: read action: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 	}
@@ -325,10 +341,14 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			candidate = nil
 		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "terminating", "terminate_reap", "cleanup", "direct_mail_retire", source); err != nil {
+			log.Printf("managed termination: action %s: advance: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 		action, err = m.store.ManagedLifecycleAction(context.Background(), actionID)
 		if err != nil {
+			log.Printf("managed termination: action %s: read action: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 	}
@@ -338,10 +358,14 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			return
 		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "cleanup", "direct_mail_retire", "cleanup", "agent_cleanup", source); err != nil {
+			log.Printf("managed termination: action %s: advance: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 		action, err = m.store.ManagedLifecycleAction(context.Background(), actionID)
 		if err != nil {
+			log.Printf("managed termination: action %s: read action: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 	}
@@ -369,10 +393,18 @@ func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBi
 			_ = gitworktree.RemoveWorktree(context.Background(), agent.WorktreeBasePath, agent.Cwd, true)
 		}
 		if err := m.store.AdvanceManagedTermination(context.Background(), actionID, "cleanup", "agent_cleanup", "cleanup", "durable_write", source); err != nil {
+			log.Printf("managed termination: action %s: advance: %v", actionID, err)
+			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
 		}
 	}
-	if action, err = m.store.ManagedLifecycleAction(context.Background(), actionID); err == nil && action.State == "cleanup" && action.Stage == "durable_write" {
+	action, err = m.store.ManagedLifecycleAction(context.Background(), actionID)
+	if err != nil {
+		log.Printf("managed termination: action %s: read action: %v", actionID, err)
+		m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
+		return
+	}
+	if action.State == "cleanup" && action.Stage == "durable_write" {
 		if err := m.store.CompleteManagedTermination(context.Background(), actionID); err != nil {
 			m.failTermination(actionID, "TERMINATION_CLEANUP_FAILED", true, source)
 			return
@@ -469,7 +501,11 @@ func terminationAbortCode(err error) string {
 }
 
 func (m *Manager) failTermination(actionID, code string, retryable bool, source *store.ManagedRuntimeFence) {
-	_ = m.store.FailManagedTermination(context.Background(), actionID, code, retryable, source)
+	if err := m.store.FailManagedTermination(context.Background(), actionID, code, retryable, source); err != nil {
+		log.Printf("managed termination: action %s: record failure %s: %v", actionID, code, err)
+		return
+	}
+	log.Printf("managed termination: action %s: %s (retryable=%t)", actionID, code, retryable)
 }
 
 func (m *Manager) recoverManagedTerminationActionInLane(action *store.ManagedLifecycleAction) {
