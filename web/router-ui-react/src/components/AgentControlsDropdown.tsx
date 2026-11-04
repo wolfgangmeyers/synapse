@@ -1,3 +1,4 @@
+import { isClaudeCodeAgent } from "../state/agent-projection";
 import { useEffect, useRef, type ReactElement } from "react";
 import type { Agent } from "../state/agent-projection";
 
@@ -122,7 +123,7 @@ export function AgentControlsDropdown({
           <span className="agent-controls-dropdown-title">Agent Controls</span>
         </div>
         <div className="agent-controls-dropdown-grid">
-          {controls.map((control) => {
+          {controls.filter(control => !isClaudeCodeAgent(_agent) || !["workflow", "inlineTools", "toolSettings", "workerTools"].includes(control.id)).map((control) => {
             const isPinned = pinnedControls.includes(control.id);
             return (
               <div

@@ -1,4 +1,4 @@
-import { mergeAgentModelSnapshot, normalizeModelSummaries, normalizeModelSummary, type ModelAgent } from "../domain/models";
+import { isClaudeCodeModel, mergeAgentModelSnapshot, normalizeModelSummaries, normalizeModelSummary, type ModelAgent } from "../domain/models";
 import { normalizeGoalProjection, normalizeGoalState, type GoalState } from "../domain/goals";
 import type { AgentProgress, ContextUsage, ManagedAgent, ManagedChildrenProjection } from "../protocol/types";
 export type { AgentProgress };
@@ -69,3 +69,7 @@ export function upsertPendingLifecycleAgent(pending: Map<string, Agent>, incomin
 export function applyLifecycleSnapshot(agents: Agent[], snapshotAgents: Agent[], snapshotVersion: number, lastSnapshotVersion = 0): { agents: Agent[]; lastSnapshotVersion: number } { if (!safeInteger(snapshotVersion) || snapshotVersion < lastSnapshotVersion) return { agents, lastSnapshotVersion }; const received = new Map(snapshotAgents.map((agent) => [agent.agent_id, agent])); let next = agents; for (const agent of received.values()) if (agents.some((candidate) => candidate.agent_id === agent.agent_id)) next = upsertLifecycleAgent(next, agent); for (const agent of next) if (!received.has(agent.agent_id) && (!safeInteger(agent.subagent_version) || agent.subagent_version <= snapshotVersion)) next = upsertLifecycleAgent(next, { agent_id: agent.agent_id, subagent_version: snapshotVersion, subagent_count: 0, subagents: [] }); return { agents: next, lastSnapshotVersion: snapshotVersion }; }
 export function applyLifecycleReplay(agents: Agent[], updates: Agent[], replayVersion: number, lastLifecycleVersion = 0): { agents: Agent[]; lastLifecycleVersion: number } { if (!safeInteger(replayVersion) || replayVersion < lastLifecycleVersion) return { agents, lastLifecycleVersion }; let next = agents; for (const update of updates) next = upsertLifecycleAgent(next, update); return { agents: next, lastLifecycleVersion: replayVersion }; }
 export { normalizeModelSummary, normalizeModelSummaries };
+
+export function isClaudeCodeAgent(agent: Agent | undefined): boolean {
+  return agent?.source === "router-managed" && isClaudeCodeModel(agent.managed_agent?.model ?? agent.current_model);
+}

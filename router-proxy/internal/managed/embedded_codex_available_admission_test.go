@@ -79,7 +79,8 @@ func TestEmbeddedCodexAvailableCatalogRechecksPrivateCredential(t *testing.T) {
 			catalog := StoreCatalogSource{Store: db}
 			before, err := catalog.Catalog(ctx)
 			require.NoError(t, err)
-			require.Len(t, before.Models, 1)
+			require.Len(t, before.Models, 5)
+			require.Equal(t, claudeCodeModels(), before.Models[1:])
 			project := filepath.Join(base, "project")
 			require.NoError(t, os.Mkdir(project, 0700))
 			path := filepath.Join(base, "private", "credential.json")

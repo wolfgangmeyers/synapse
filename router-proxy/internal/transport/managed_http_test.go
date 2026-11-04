@@ -515,8 +515,8 @@ func managedLegacyCommandsForTest() []string {
 }
 
 func expectedManagedActiveToolsForTransportTest(manifest managed.Manifest) []string {
-	active := make([]string, 0, len(manifest.Tools)+7)
-	active = append(active, "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent")
+	active := make([]string, 0, len(manifest.Tools)+9)
+	active = append(active, "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent")
 	for _, tool := range manifest.Tools {
 		active = append(active, tool.Name)
 	}

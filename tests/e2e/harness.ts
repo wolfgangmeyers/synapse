@@ -144,6 +144,7 @@ export async function startIsolatedRouter(options: {
   testClock?: boolean;
   embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string };
   codexCredentialPath?: string;
+  fakeEmbeddedCatalog?: boolean;
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
@@ -164,9 +165,11 @@ export async function startIsolatedRouter(options: {
       cwd: routerProxyDir,
       stdio: "pipe",
     });
+    let buildStderr = "";
+    cp.stderr.on("data", chunk => { buildStderr = (buildStderr + String(chunk)).slice(-16384); });
     cp.on("close", (code) => {
       if (code === 0) res();
-      else rej(new Error(`Failed to compile mailbox-router, code ${code}`));
+      else rej(new Error(`Failed to compile mailbox-router, code ${code}: ${buildStderr}`));
     });
   });
 
@@ -234,9 +237,28 @@ export async function startIsolatedRouter(options: {
       const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "terra-test-account" } })).toString("base64url");
       await writeFile(join(privateDir, "codex.json"), JSON.stringify({ access_token: `fake.${claims}.terra-test-secret`, refresh_token: "terra-refresh-secret", account_id: "terra-test-account", expires_at: "2099-01-01T00:00:00Z" }), { mode: 0o600 });
     }
-    // Real helper and owned credential projection, never the generic fake auth helper.
-    const helperIndex = args.indexOf("--managed-auth-helper");
-    args[helperIndex + 1] = join(options.repoRoot, "auth-helper/index.mjs");
+    args[args.indexOf("--managed-auth-helper") + 1] = join(options.repoRoot, "auth-helper/index.mjs");
+    if (options.fakeEmbeddedCatalog) {
+      // Catalog discovery is an external boundary too. The real helper imports
+      // the entire SDK and exceeds CodexBrowserAuth's 5s discovery deadline on
+      // this host. Use the supported deterministic catalog fixture, while keeping
+      // the real private credential consumer beside it (as providerFixture does).
+      const { copyFile, symlink } = await import("node:fs/promises");
+      const fixtureAuth = join(root, "provider-fixture");
+      await mkdir(fixtureAuth, { mode: 0o700 });
+      await copyFile(join(options.repoRoot, "web/router-ui-react/tests/functional/fixtures/fake-provider-auth.mjs"), join(fixtureAuth, "index.mjs"));
+      await copyFile(join(options.repoRoot, "auth-helper/codex-consumer.mjs"), join(fixtureAuth, "codex-consumer.mjs"));
+      await symlink(join(options.repoRoot, "auth-helper/node_modules"), join(fixtureAuth, "node_modules"), "dir");
+      const helperIndex = args.indexOf("--managed-auth-helper");
+      args[helperIndex + 1] = join(fixtureAuth, "index.mjs");
+      // Match providerFixture's disposable runtime root without relaxing path
+      // validation. Copy only the two required entrypoints into that root.
+      await copyFile(join(options.repoRoot, "router/contract/managed-tools-v1.json"), join(root, "manifest.json"));
+      await copyFile(join(options.repoRoot, "pi-extensions/mecha-rpc/index.ts"), join(root, "mecha-rpc.ts"));
+      args[args.indexOf("--managed-runtime-root") + 1] = root;
+      args[args.indexOf("--managed-manifest") + 1] = join(root, "manifest.json");
+      args[args.indexOf("--managed-mecha-rpc") + 1] = join(root, "mecha-rpc.ts");
+    }
     args.push("--codex-credential-path", join(privateDir, "codex.json"));
     await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify({ google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });
     await writeFile(join(root, "work/note.txt"), "terra harmless tool evidence", { mode: 0o600 });
@@ -287,7 +309,7 @@ export async function startIsolatedRouter(options: {
           child.kill("SIGQUIT");
           child.once("close", () => rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`)));
         }
-      }, 15_000);
+      }, options.embedded ? 45_000 : 15_000);
 
       const checkReady = (chunk: Buffer) => {
         const text = chunk.toString();

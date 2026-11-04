@@ -61,7 +61,8 @@ func TestEmbeddedCodexCredentialAdmitsWithoutPiCatalogRED(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	// Empty ordinary Pi auth yields no available Pi catalog model. This is
-	// independent of the complete local Codex credential above.
+	// independent of the complete local Codex credential above; Claude CLI aliases
+	// are offered separately without implying provider authentication.
 	_, err = db.CommitManagedProviderSnapshot(ctx,
 		[]store.ManagedProviderStatus{
 			{Provider: "openai-codex", Label: "ChatGPT", Status: "signed_out"},
@@ -73,7 +74,12 @@ func TestEmbeddedCodexCredentialAdmitsWithoutPiCatalogRED(t *testing.T) {
 	catalog := managed.StoreCatalogSource{Store: db}
 	snapshot, err := catalog.Catalog(ctx)
 	require.NoError(t, err)
-	require.Empty(t, snapshot.Models)
+	var aliases []string
+	for _, model := range snapshot.Models {
+		require.Equal(t, "claude-code", model.Provider, "ordinary Pi catalog must remain empty")
+		aliases = append(aliases, model.ID)
+	}
+	require.ElementsMatch(t, []string{"fable", "opus", "sonnet", "haiku"}, aliases)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	started := false

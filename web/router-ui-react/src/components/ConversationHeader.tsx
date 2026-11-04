@@ -1,3 +1,4 @@
+import { isClaudeCodeAgent } from "../state/agent-projection";
 import type { ReactElement, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { Agent } from "../state/agent-projection";
@@ -148,6 +149,7 @@ async function urgencyDeadline<T>(request: Promise<T>): Promise<T> {
 
 export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, onOpenProgressHistory, onOpenWorkflow }: ConversationHeaderProps): ReactElement {
 
+  const isClaude = isClaudeCodeAgent(agent);
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
   const managedFailure = failedManagedAgent(agent);
@@ -335,13 +337,13 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   };
 
   useEffect(() => {
-    if (!client || typeof client.listWorkflows !== "function" || !agent || agent.source !== "router-managed") return;
+    if (isClaude || !client || typeof client.listWorkflows !== "function" || !agent || agent.source !== "router-managed") return;
     let mounted = true;
     client.listWorkflows().then((res) => {
       if (mounted) setAvailableWorkflows(res || []);
     }).catch(() => {});
     return () => { mounted = false; };
-  }, [client, agent?.agent_id, agent?.source]);
+  }, [client, agent?.agent_id, agent?.source, isClaude]);
 
   useEffect(() => {
     if (!client || typeof client.listAgentMonitors !== "function" || !agent?.agent_id) {
@@ -531,7 +533,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                 </span>
               </h2>
 
-              {agent?.workflow_state ? (
+              {!isClaude && agent?.workflow_state ? (
                 onOpenWorkflow ? (
                   <button
                     type="button"
@@ -639,7 +641,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
+                {agent && !isClaude && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
                   <div className="workflow-header-control">
                     <HeaderActionButton
                       className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
@@ -720,7 +722,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   </div>
                 ) : null}
 
-                {agent && (allowInlineTools || pinnedControls.includes("inlineTools")) ? (
+                {agent && !isClaude && (allowInlineTools || pinnedControls.includes("inlineTools")) ? (
                   <HeaderActionButton
                     className={`inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
                     onClick={() => void handleToggleAllowInlineTools()}
@@ -768,7 +770,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && pinnedControls.includes("workerTools") ? (
+                {agent && !isClaude && pinnedControls.includes("workerTools") ? (
                   <HeaderActionButton
                     className="worker-tools-header-button"
                     onClick={() => setShowWorkerToolsDialog(true)}
@@ -779,7 +781,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && pinnedControls.includes("toolSettings") ? (
+                {agent && !isClaude && pinnedControls.includes("toolSettings") ? (
                   <HeaderActionButton
                     className="inline-tool-settings-button"
                     onClick={onInlineToolSettings}
@@ -900,7 +902,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
             </div>
 
           <div className="conversation-header-subagents-row">
-            {agent ? (
+            {agent && !isClaude ? (
             <div
               className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
               role="button"
@@ -1035,7 +1037,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
           ) : null}
         </div>
       </div>
-      {launchModalWorkflow && agent && client ? (
+      {!isClaude && launchModalWorkflow && agent && client ? (
   <WorkflowLaunchModal
     open={true}
     workflow={launchModalWorkflow}
@@ -1055,7 +1057,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
       setActiveWatchersCount(count);
     }}
   />
-) : null}{agent?.source === "router-managed" && client ? (
+) : null}{!isClaude && agent?.source === "router-managed" && client ? (
   <WorkerToolsDialog
     open={showWorkerToolsDialog}
     agentId={agent.agent_id}
@@ -1063,7 +1065,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     client={client}
     onClose={() => setShowWorkerToolsDialog(false)}
   />
-) : null}{agent && showSubagentViewerDialog ? (
+) : null}{!isClaude && agent && showSubagentViewerDialog ? (
   <SubagentViewerDialog
     open={showSubagentViewerDialog}
     onClose={() => setShowSubagentViewerDialog(false)}

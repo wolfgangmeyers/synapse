@@ -59,7 +59,7 @@ func TestEmbeddedCodexPrivateCredentialAdmissionFence(t *testing.T) {
 			catalog := StoreCatalogSource{Store: db}
 			before, err := catalog.Catalog(ctx)
 			require.NoError(t, err)
-			require.Empty(t, before.Models)
+			require.Equal(t, claudeCodeModels(), before.Models)
 			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 			require.NoError(t, err)
 			var credentials *store.LocalCodexCredentialStore

@@ -38,6 +38,12 @@ After upgrade, the serialized `identity_active` bit is the sole identity authori
 
 ## 3. User Scenarios (Behavioral Contract)
 
+### Scenario: Responsive conversation controls
+- **Given**: A selected Pi or Claude agent with header actions and model controls visible.
+- **When**: The conversation area narrows, including 1000px and 1280px browser viewports, or controls are pinned.
+- **Then**: Header columns and actions reflow as needed without overlapping; More agent controls, urgency pin/unpin and activation, and Claude interrupt remain reachable by ordinary pointer clicks.
+
+
 ### Scenario: [URG-001] Explicit native activation and deactivation
 - **User Goal**: Mark self or a target without cluttering the agent list.
 - **Given**: Real embedded root and worker sessions, an existing target (including a never-connected managed identity), and initially unmarked rows.
@@ -93,7 +99,7 @@ After upgrade, the serialized `identity_active` bit is the sole identity authori
 
 - **Given**: A selected agent and the existing Agent Controls menu.
 - **When**: The user pins or unpins Urgency, reloads, or selects another agent.
-- **Then**: Urgency is available as an actionable menu tile in either state. Its toolbar button appears only when pinned, and pinning alone never changes urgency. The existing toolbar pin preference persists across reload and agent selection, including existing saved preferences; urgency is unpinned by default. The menu action and pinned toggle share the same confirmed state, pending and failure protections.
+- **Then**: The controls menu and its pin buttons remain visible and pointer-actionable without sidebar interception at desktop widths, including widths at and below 1100 CSS pixels. Urgency is available as an actionable menu tile in either state. Its toolbar button appears only when pinned, and pinning alone never changes urgency. The existing toolbar pin preference persists across reload and agent selection, including existing saved preferences; urgency is unpinned by default. The menu action and pinned toggle share the same confirmed state, pending and failure protections.
 
 ### Scenario: [URG-006] Toggle urgency from the conversation toolbar
 - **User Goal**: Mark or clear the selected agent without asking an agent to run a tool.

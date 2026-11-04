@@ -43,6 +43,10 @@ func configureEmbeddedRestartFake(options config, out *managed.ManagerOptions) e
 	if out == nil {
 		return errors.New("embedded restart fake manager options missing")
 	}
+	wireClaudeEffectBarrier(options.database, out)
+	wireClaudeCleanupBarrier(options.database, out)
+	wireClaudeSerialBarrier(options.database)
+	wireClaudeRestartBarrier(options.database)
 	out.EmbeddedModelResolver = func(row store.ManagedAgentRecord) *ai.Model {
 		if row.SelectedModel.Provider != "openai-codex" || (row.SelectedModel.ID != "gpt-6-sol" && row.SelectedModel.ID != "gpt-6.1-sol" && row.SelectedModel.ID != "gpt-6.1-terra") {
 			return nil

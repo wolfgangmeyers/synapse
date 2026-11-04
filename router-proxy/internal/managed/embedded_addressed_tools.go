@@ -128,6 +128,9 @@ func (m *Manager) embeddedAddressedTool(owner embeddedOwner, name string, admitt
 			store.RecordEmbeddedToolHandoffError(invocation, err)
 			return agent.AgentToolResult{}, err
 		}
+		if err := m.observeEmbeddedEffect(ctx, "domain", owner.binding, id); err != nil {
+			return agent.AgentToolResult{}, err
+		}
 		payload, err := store.EmbeddedToolResultContent(invocation)
 		if err != nil {
 			return agent.AgentToolResult{}, err

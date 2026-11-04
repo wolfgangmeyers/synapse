@@ -78,6 +78,7 @@ type ManagerOptions struct {
 	EmbeddedExternalTool              *agent.AgentTool
 	EmbeddedAfterIntent               func(context.Context)
 	EmbeddedAfterCheckedIntent        func(context.Context)
+	EmbeddedEffectObserver            func(context.Context, EmbeddedEffectObservation) error
 	EmbeddedAfterGoalCommit           func(context.Context)
 	EmbeddedAfterWorkerLaunch         func(context.Context)
 	CatalogSource                     ModelSource
@@ -158,36 +159,56 @@ type ResetResult struct {
 	Replayed  bool
 }
 
+// incrementGoalAttempt atomically increments the attempt counter up to its cap.
+// A concurrent reset does not fence later increments.
+func incrementGoalAttempt(counter *atomic.Int64) {
+	for {
+		old := counter.Load()
+		if old >= 20 || counter.CompareAndSwap(old, old+1) {
+			return
+		}
+	}
+}
+
 // managedAgentLane survives a binding replacement. Restart execution, recovery,
 // close, and exit handling all acquire this one owner before they can touch the
 // durable transition or either process group.
 type managedAgentLane struct {
-	serial                   sync.Mutex
-	admission                sync.Mutex
-	selection                sync.Mutex // saved model snapshot at SDK turn admission only
-	activeMu                 sync.RWMutex
-	activeSession            *coding.Session
-	activePersistence        *embeddedPersistence
-	consecutiveContinuations int
-	consecutiveEmptyTurns    int
-	consecutiveErrors        int
-	goalAttempt              int
-	mailAttempts             map[string]int
-	warningEpoch             int64
-	warningEmitted           bool
-	extendedTimeoutUntil     time.Time
-	defaultTimeoutOverride   time.Duration
-	extendedTimeoutOverride  time.Duration
-	inlineAllowances         map[string]int
-	inlinePoolRemainingMs    int64
-	inlinePoolUpdatedAt      time.Time
+	serial                      sync.Mutex
+	admission                   sync.Mutex // short decisions only; never wait for serial here
+	resetPending                bool
+	resetToolGates              map[*contextResetRequest]struct{}
+	terminationPending          int
+	resetRunning                bool
+	resetDone                   chan struct{}
+	selection                   sync.Mutex // saved model snapshot at SDK turn admission only
+	activeMu                    sync.RWMutex
+	activeSession               embeddedRuntime
+	activePersistence           *embeddedPersistence
+	consecutiveContinuations    atomic.Int64
+	consecutiveEmptyTurns       atomic.Int64
+	consecutiveErrors           int
+	goalAttempt                 atomic.Int64
+	mailAttempts                map[string]int
+	warningEpoch                int64
+	warningEmitted              bool
+	claudeWindowBinding         store.EmbeddedBinding
+	claudeWindowModel           string
+	claudeWindowValue           int
+	claudeFreshResetGuard       *store.EmbeddedBinding // lane.serial-owned; one binding, cleared below reset threshold
+	extendedTimeoutUntil        time.Time
+	defaultTimeoutOverride      time.Duration
+	extendedTimeoutOverride     time.Duration
+	inlineAllowances            map[string]int
+	inlinePoolRemainingMs       int64
+	inlinePoolUpdatedAt         time.Time
 	subagentReadPoolRemainingMs int64
 	subagentReadPoolUpdatedAt   time.Time
-	contextUsage             *ContextUsage
-	baseTools                []agent.AgentTool
-	activeTools              []agent.AgentTool
-	restartRejectedAt        time.Time
-	restartConflictDetail    string
+	contextUsage                *ContextUsage
+	baseTools                   []agent.AgentTool
+	activeTools                 []agent.AgentTool
+	restartRejectedAt           time.Time
+	restartConflictDetail       string
 }
 
 func (l *managedAgentLane) recordRestartRouterRejection(t time.Time, reason string) {
@@ -439,16 +460,20 @@ type managedBinding struct {
 }
 
 type Manager struct {
-	store                      *store.Store
-	eventSink                  EventSink
-	config                     Config
-	manifest                   Manifest
-	processFactory             ProcessFactory
-	rpcFactory                 RPCFactory
-	mcpManager                 *mcp.Manager
-	gitSyncer                  gitsync.Syncer
-	embeddedRunnerFactory      func(context.Context, store.ManagedAgentRecord) error
-	embeddedModelResolver      func(store.ManagedAgentRecord) *ai.Model
+	claudeCodeMCP         *ClaudeCodeMCPServer
+	claudeCodeProcesses   claudeCodeProcessPool
+	store                 *store.Store
+	eventSink             EventSink
+	config                Config
+	manifest              Manifest
+	processFactory        ProcessFactory
+	rpcFactory            RPCFactory
+	mcpManager            *mcp.Manager
+	gitSyncer             gitsync.Syncer
+	embeddedRunnerFactory func(context.Context, store.ManagedAgentRecord) error
+	embeddedModelResolver func(store.ManagedAgentRecord) *ai.Model
+	// Test-only runtime wrapper, installed before a turn starts.
+	embeddedRuntimeTestWrapper func(embeddedRuntime, *embeddedTurnToolAuthority) embeddedRuntime
 	codexCredentialStore       *store.LocalCodexCredentialStore
 	codexRefresh               func(context.Context, store.CodexCredential) (store.CodexCredential, error)
 	codexHTTPTransport         http.RoundTripper
@@ -458,6 +483,7 @@ type Manager struct {
 	embeddedExternalTool       *agent.AgentTool
 	embeddedAfterIntent        func(context.Context)
 	embeddedAfterCheckedIntent func(context.Context)
+	embeddedEffectObserver     func(context.Context, EmbeddedEffectObservation) error
 	embeddedAfterUserAppend    func(context.Context)
 	embeddedBashAfterStart     func(int)
 	embeddedAfterGoalCommit    func(context.Context)
@@ -500,7 +526,7 @@ type Manager struct {
 	subagentsQueue                             []*subagentTask
 	subagentsRegistry                          map[string]*subagentTask
 	beforeSubagentWakeReservation              func(parent store.EmbeddedBinding)
-	activeEmbeddedSessions                     map[string]*coding.Session
+	activeEmbeddedSessions                     map[string]embeddedRuntime
 	activeSessionsMu                           sync.Mutex
 	projectionPublisher                        func()
 	completeHistoryPublisher                   CompleteHistoryPublisher
@@ -511,7 +537,9 @@ type Manager struct {
 	embeddedBeforeToolHandoff                  func(*store.EmbeddedToolInvocation) // test-only, original committed handoff
 	embeddedBeforeToolDomain                   func()                              // test-only, after owner checks, before producer transaction
 	goalContinuationDelay                      time.Duration
-	contextResetRequested                      map[string]contextResetRequest
+	contextResetRequested                      map[string]*contextResetRequest
+	embeddedResetReservationTestHook           func()
+	embeddedTerminationGateTestHook            func() // test-only, gate published and admission unlocked
 	workerSelfTerminateRequested               map[string]workerSelfTerminateRequest
 	maxConsecutiveGoalContinuations            int
 	artifacts                                  *sessionArtifactOwner
@@ -641,7 +669,13 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]*coding.Session), runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
+	// Complete orphan recovery before publishing a manager or admitting any
+	// embedded runtime. Unsafe identity is a startup failure, never a warning.
+	if err := manager.RecoverClaudeCodeOrphans(runCtx); err != nil {
+		cancel()
+		return nil, fmt.Errorf("Claude orphan startup recovery: %w", err)
+	}
 	manager.goalContinuationDelay = options.GoalContinuationDelay
 	manager.embeddedMailBackoff = options.EmbeddedMailBackoff
 	manager.restartExitTrigger = options.RestartExitTrigger
@@ -651,7 +685,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		manager.maxConsecutiveGoalContinuations = defaultMaxConsecutiveGoalContinuations
 	}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
-	manager.contextResetRequested = make(map[string]contextResetRequest)
+	manager.contextResetRequested = make(map[string]*contextResetRequest)
 	manager.workerSelfTerminateRequested = make(map[string]workerSelfTerminateRequest)
 	defaultManagerInstance = manager
 	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
@@ -709,8 +743,8 @@ func (m *Manager) InterruptAgent(ctx context.Context, agentID string) error {
 	m.activeSessionsMu.Lock()
 	s := m.activeEmbeddedSessions[agentID]
 	m.activeSessionsMu.Unlock()
-	if s != nil && s.Agent != nil {
-		s.Agent.Abort()
+	if s != nil {
+		s.Interrupt()
 	}
 	return nil
 }
@@ -768,6 +802,17 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 			saved, err = m.store.GetDefaultModel(ctx)
 			if err == nil {
 				selected, err = SelectModel(request.Model, saved, catalog)
+			}
+		}
+	}
+	if request.Model != nil && request.Model.Provider == claudeCodeProvider {
+		if request.Runtime != "embedded" || embeddedRole == "root" {
+			return LaunchResult{}, &EngineSelectionError{Reason: "Claude requires an embedded worker; root remains Pi"}
+		}
+		selected, err = claudeCodeModel(request.Model.ID)
+		if err == nil {
+			if _, preflightErr := PreflightClaudeCode(ctx, ClaudeCodeProcessConfig{Cwd: cwd}); preflightErr != nil {
+				return LaunchResult{}, &ClaudeUnavailableError{Cause: preflightErr}
 			}
 		}
 	}
@@ -1599,10 +1644,10 @@ func (m *Manager) markAgentTurnActive(agentID string, active ...bool) {
 	}
 	m.activeSessionsMu.Lock()
 	if m.activeEmbeddedSessions == nil {
-		m.activeEmbeddedSessions = make(map[string]*coding.Session)
+		m.activeEmbeddedSessions = make(map[string]embeddedRuntime)
 	}
 	if isActive {
-		m.activeEmbeddedSessions[agentID] = &coding.Session{}
+		m.activeEmbeddedSessions[agentID] = &piEmbeddedRuntime{Session: &coding.Session{}}
 	} else {
 		delete(m.activeEmbeddedSessions, agentID)
 	}
@@ -1611,7 +1656,7 @@ func (m *Manager) markAgentTurnActive(agentID string, active ...bool) {
 	lane := m.laneFor(agentID)
 	lane.activeMu.Lock()
 	if isActive {
-		lane.activeSession = &coding.Session{}
+		lane.activeSession = &piEmbeddedRuntime{Session: &coding.Session{}}
 	} else {
 		lane.activeSession = nil
 	}
@@ -1849,6 +1894,12 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if err != nil {
 		return RestartResult{}, err
 	}
+	if request.Model != nil && (agent.SelectedModel.Provider == claudeCodeProvider) != (request.Model.Provider == claudeCodeProvider) {
+		return RestartResult{}, &EngineSelectionError{Reason: "Cross-engine model changes are not supported; launch a new worker"}
+	}
+	if agent.Runtime == "embedded" && agent.SelectedModel.Provider == claudeCodeProvider && request.Model == nil {
+		return m.reserveClaudeCodeRestart(ctx, request, agent)
+	}
 	if agent.Runtime == "embedded" && request.Model != nil {
 		return m.reserveEmbeddedModelSelection(ctx, request, agent)
 	}
@@ -2082,9 +2133,9 @@ func (m *Manager) RestartAfterAuthChange(ctx context.Context, operationID string
 
 func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) error {
 	lane := m.laneFor(agentID)
-	lane.consecutiveContinuations = 0
-	lane.consecutiveEmptyTurns = 0
-	lane.goalAttempt = 0
+	lane.consecutiveContinuations.Store(0)
+	lane.consecutiveEmptyTurns.Store(0)
+	lane.goalAttempt.Store(0)
 	candidate, lookupErr := m.store.ManagedAgent(ctx, agentID)
 	if lookupErr == nil && candidate.Runtime == "embedded" {
 		id, err := m.ids.Next()
@@ -2382,21 +2433,14 @@ func (m *Manager) reapRestartGroup(parent context.Context, identity ProcessIdent
 	if probe.State == ProcessAbsent {
 		return true
 	}
-	// This local proof belongs to this reaping attempt. It is the only
-	// authorization that permits a leaderless continuation after TERM.
-	termSentUnderOwnedProof := false
 	if m.processOps.Probe(identity).State != ProcessOwned || m.processOps.SignalVerifiedProcessGroup(identity, syscall.SIGTERM) != nil {
 		return false
 	}
-	termSentUnderOwnedProof = true
 	term, cancel := context.WithTimeout(context.Background(), m.config.Limits.TermStop)
 	probe = m.processOps.WaitForProcessGroupEmpty(term, identity, waitDone)
 	cancel()
 	if probe.State == ProcessAbsent {
 		return true
-	}
-	if !termSentUnderOwnedProof {
-		return false
 	}
 	switch probe.State {
 	case ProcessOwned:
@@ -2404,6 +2448,7 @@ func (m *Manager) reapRestartGroup(parent context.Context, identity ProcessIdent
 			return false
 		}
 	case ProcessPresent:
+		// TERM was sent under owned proof in this same reaping attempt.
 		if m.processOps.SignalVerifiedProcessGroupAfterLeaderExit(identity) != nil {
 			return false
 		}
@@ -3041,13 +3086,22 @@ const managedDirectPersistenceRetry = 50 * time.Millisecond
 // lifecycle request can be admitted and arm settlement while a receipt or ACK
 // is still pending.
 func (m *Manager) OfferDirect(agentID string) {
+	m.offerDirectTagged(agentID, "", "")
+}
+
+func (m *Manager) offerDirectTagged(agentID, messageID, offerSite string) {
 	if agentID == "" {
 		return
 	}
 	if agent, err := m.store.ManagedAgent(context.Background(), agentID); err == nil && agent.Runtime == "embedded" {
 		m.startManagedTask(func() {
-			m.dispatchEmbeddedMail(agentID)
+			m.dispatchEmbeddedMailTagged(agentID, messageID, offerSite)
 			m.MaybeResumeEmbeddedGoal(agentID)
+			if offerSite == "launch" {
+				if err := restartMailTestBarrier(m.runCtx, agentID, "launch"); err != nil {
+					log.Printf("launch test receipt: %v", err)
+				}
+			}
 		})
 		return
 	}
@@ -3082,6 +3136,10 @@ func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code,
 		}
 		return
 	}
+	if errors.Is(err, store.ErrManagedDirectClaudeInputHeld) {
+		m.clearManagedDirectTurn(attempt)
+		return
+	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
 		m.clearManagedDirectTurn(attempt)
@@ -3107,6 +3165,10 @@ func (m *Manager) releaseManagedDirectRecovery(attempt store.ManagedDirectAttemp
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
 		}
+		return
+	}
+	if errors.Is(err, store.ErrManagedDirectClaudeInputHeld) {
+		m.clearManagedDirectTurn(attempt)
 		return
 	}
 	var inactive *store.ManagedDirectNotActiveError
@@ -3155,6 +3217,10 @@ func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, 
 				}
 				return
 			}
+			if errors.Is(err, store.ErrManagedDirectClaudeInputHeld) {
+				m.clearManagedDirectTurn(attempt)
+				return
+			}
 			var inactive *store.ManagedDirectNotActiveError
 			if errors.As(err, &inactive) {
 				return
@@ -3184,6 +3250,10 @@ func (m *Manager) acknowledgeManagedDirect(attempt store.ManagedDirectAttempt, r
 		}
 		return changed
 	}
+	if errors.Is(err, store.ErrManagedDirectClaudeInputHeld) {
+		m.clearManagedDirectTurn(attempt)
+		return false
+	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
 		return false
@@ -3206,6 +3276,10 @@ func (m *Manager) acknowledgeManagedDirectRecovered(attempt store.ManagedDirectA
 			m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
 		}
 		return changed
+	}
+	if errors.Is(err, store.ErrManagedDirectClaudeInputHeld) {
+		m.clearManagedDirectTurn(attempt)
+		return false
 	}
 	var inactive *store.ManagedDirectNotActiveError
 	if errors.As(err, &inactive) {
@@ -3254,6 +3328,10 @@ func (m *Manager) retryManagedDirectAcknowledgment(attempt store.ManagedDirectAt
 					m.emitEvent(managedMailboxEventText(EventManagedMailboxIncoming, attempt, attempt.Message.Body, "incoming", ManagedMailboxIncomingOperation, ManagedMailboxIncomingStatus))
 				}
 				m.OfferDirect(attempt.Fence.AgentID)
+				return
+			}
+			if errors.Is(err, store.ErrManagedDirectClaudeInputHeld) {
+				m.clearManagedDirectTurn(attempt)
 				return
 			}
 			var inactive *store.ManagedDirectNotActiveError
@@ -3598,7 +3676,11 @@ func (m *Manager) Agent(ctx context.Context, id string) (*store.ManagedAgentReco
 // Models returns the current launch catalog and provider-auth revision without
 // exposing helper internals or credentials.
 func (m *Manager) Models(ctx context.Context) (Catalog, error) {
-	return m.catalog.Catalog(ctx)
+	catalog, err := m.catalog.Catalog(ctx)
+	if err != nil {
+		return Catalog{}, err
+	}
+	return withClaudeCodeModels(catalog), nil
 }
 
 func (m *Manager) Agents(ctx context.Context) ([]*store.ManagedAgentRecord, error) {
@@ -3737,6 +3819,8 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.closeErr = nil
 	m.mu.Unlock()
 
+	m.closeClaudePrivateMCP()
+	m.recordCloseError(m.claudeCodeProcesses.stopAll())
 	if firstClose {
 		m.closeSubagents()
 	}

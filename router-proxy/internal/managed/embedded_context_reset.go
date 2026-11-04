@@ -14,7 +14,6 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
-	"github.com/sky-valley/pi/coding"
 )
 
 const ContextResetWakePrompt = "Context reset completed. You are now operating with fresh context headroom. Your recent conversation window has been preserved. Proceed with your next step."
@@ -93,8 +92,11 @@ const (
 )
 
 type contextResetRequest struct {
-	reason string
-	window int
+	reason         string
+	window         int
+	id             string
+	committed      bool
+	handoffBinding *store.EmbeddedBinding // guarded by lane.admission
 }
 
 type managerContextKey struct{}
@@ -104,14 +106,14 @@ var defaultManagerInstance *Manager
 func embeddedContextResetSchema() *ai.Schema {
 	closed := false
 	schema := ai.Object(
-		ai.Prop("reason", ai.String("Optional reason for triggering context reset.")),
-		ai.Prop("window", ai.Integer("Optional number of recent messages to preserve across the reset (default 20, max 100).")),
+		ai.Opt("reason", ai.String("Optional reason for triggering context reset.")),
+		ai.Opt("window", ai.Integer("Optional number of recent messages to preserve across the reset (default 20, max 100).")),
 	)
 	schema.AdditionalAllowed = &closed
 	return schema
 }
 
-func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(contextResetRequest), toolName string) agent.AgentTool {
+func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(*contextResetRequest), toolName string) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        toolName,
 		Description: "Trigger a clean context reset to wipe past conversation history down to 0 tokens with fresh headroom while preserving recent actions and scratchpad notes.",
@@ -145,7 +147,20 @@ func (m *Manager) embeddedContextResetTool(owner embeddedOwner, requested func(c
 			if window > MaxPreservedContextWindow {
 				window = MaxPreservedContextWindow
 			}
-			requested(contextResetRequest{reason: reason, window: window})
+			req := contextResetRequest{reason: reason, window: window, id: id}
+			// Block fresh admissions now, but let checked result callbacks settle.
+			lane := m.laneFor(owner.binding.AgentID)
+			lane.admission.Lock()
+			if len(lane.resetToolGates) != 0 {
+				lane.admission.Unlock()
+				return agent.AgentToolResult{}, errors.New("context reset already requested")
+			}
+			if lane.resetToolGates == nil {
+				lane.resetToolGates = make(map[*contextResetRequest]struct{})
+			}
+			lane.resetToolGates[&req] = struct{}{}
+			lane.admission.Unlock()
+			requested(&req)
 			return agent.AgentToolResult{
 				Content: ai.ContentList{
 					ai.TextContent{Text: "Context reset initiated. Stopping turn to perform epoch rotation and bootstrap fresh context."},
@@ -173,6 +188,82 @@ func messageContentText(msg ai.Message) string {
 // - Appends the genesis prompt + scratchpad entries (if any) + the ported recent messages.
 // - Immediately dispatches a wake turn to the agent with ContextResetWakePrompt.
 func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
+	lane := m.laneFor(binding.AgentID)
+	active, ok := lane.beginEmbeddedReset()
+	if !ok {
+		return &store.ManagedAgentNotReadyError{AgentID: binding.AgentID}
+	}
+	return m.executePendingEmbeddedReset(ctx, binding, reason, active, window...)
+}
+
+func (m *Manager) executePendingEmbeddedReset(ctx context.Context, binding store.EmbeddedBinding, reason string, active embeddedRuntime, window ...int) error {
+	lane := m.laneFor(binding.AgentID)
+	reoffer := true
+	defer func() {
+		if reoffer {
+			m.endEmbeddedReset(binding.AgentID, lane)
+		} else {
+			lane.endEmbeddedReset()
+		}
+	}()
+	if active != nil {
+		active.Interrupt()
+	}
+	// Run/Continue join callbacks before their caller releases serial.
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	if active != nil {
+		active.Close()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := m.claudeCodeProcesses.stop(binding.AgentID); err != nil {
+		reoffer = false
+		return m.recordClaudeStopFailure(binding, err)
+	}
+	err := m.executeContextResetOnLane(ctx, binding, reason, window...)
+	if errors.Is(err, errEmbeddedExecutionUnsettled) {
+		reoffer = false
+	}
+	return err
+}
+
+// Called with serial held, only after Run/Continue have joined callbacks.
+func (m *Manager) resetEmbeddedContextAfterDrain(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
+	lane := m.laneFor(binding.AgentID)
+	active, ok := lane.beginEmbeddedReset()
+	if !ok {
+		return &store.ManagedAgentNotReadyError{AgentID: binding.AgentID}
+	}
+	reoffer := true
+	defer func() {
+		if reoffer {
+			m.endEmbeddedReset(binding.AgentID, lane)
+		} else {
+			lane.endEmbeddedReset()
+		}
+	}()
+	if active != nil {
+		active.Interrupt()
+		active.Close()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := m.claudeCodeProcesses.stop(binding.AgentID); err != nil {
+		reoffer = false
+		return m.recordClaudeStopFailure(binding, err)
+	}
+	err := m.executeContextResetOnLane(ctx, binding, reason, window...)
+	if errors.Is(err, errEmbeddedExecutionUnsettled) {
+		reoffer = false
+	}
+	return err
+}
+
+// Requires serial and resetPending. Never snapshot before callback drain.
+func (m *Manager) executeContextResetOnLane(ctx context.Context, binding store.EmbeddedBinding, reason string, window ...int) error {
 	saved, err := m.store.ManagedAgent(ctx, binding.AgentID)
 	if err != nil {
 		return fmt.Errorf("managed agent: %w", err)
@@ -381,11 +472,17 @@ func (m *Manager) ExecuteContextReset(ctx context.Context, binding store.Embedde
 		log.Printf("[embedded:%s] failed to record context_reset history: %v", binding.AgentID, err)
 	}
 
+	// The epoch committed and fresh seed is installed. Old correlation is now
+	// detached; fresh runtime registration and admissions may proceed.
+	lane.activeMu.Lock()
+	lane.activeSession = nil
+	lane.activePersistence = nil
+	lane.activeMu.Unlock()
+	lane.reopenEmbeddedResetAdmissionsForBinding(binding)
 	if err := m.runEmbeddedSessionPrompt(runCtx, *updatedAgent, ContextResetWakePrompt); err != nil {
 		return fmt.Errorf("dispatch context reset wake turn: %w", err)
 	}
 
-	m.OfferDirect(binding.AgentID)
 	return nil
 }
 
@@ -401,25 +498,32 @@ func ExecuteContextReset(ctx context.Context, binding store.EmbeddedBinding, rea
 }
 
 // checkContextResetAfterTurn evaluates threshold monitoring and explicit reset requests after a turn.
-func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.EmbeddedBinding, model *ai.Model, session *coding.Session) {
+func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.EmbeddedBinding, model *ai.Model, session embeddedRuntime) {
 	if session == nil || model == nil {
 		return
 	}
-	m.mu.Lock()
-	req, resetRequested := m.contextResetRequested[binding.AgentID]
-	if resetRequested {
-		delete(m.contextResetRequested, binding.AgentID)
+	lane := m.laneFor(binding.AgentID)
+	lane.admission.Lock()
+	toolPending := len(lane.resetToolGates) > 0
+	lane.admission.Unlock()
+	if toolPending {
+		return
 	}
-	m.mu.Unlock()
-
-	if resetRequested {
-		if err := m.ExecuteContextReset(ctx, binding, req.reason, req.window); err != nil {
-			log.Printf("[embedded:%s] context reset failed: %v", binding.AgentID, err)
-		}
+	resetRunning := lane.embeddedResetRunning()
+	// Only Claude's new-binding wake may monitor usage before the reset
+	// coordinator releases ownership. Old-binding draining turns still skip it.
+	freshClaudeWake := model.Provider == claudeCodeProvider && resetRunning && !lane.embeddedResetPending()
+	if resetRunning && !freshClaudeWake {
 		return
 	}
 
-	currentTokens := embeddedProjectedTokens(session.History())
+	snapshot := session.Snapshot()
+	currentTokens := snapshot.ContextTokens
+	if model.Provider == claudeCodeProvider && snapshot.ContextWindow > 0 {
+		copy := *model
+		copy.ContextWindow = snapshot.ContextWindow
+		model = &copy
+	}
 	managedModel := Model{Provider: model.Provider, ID: model.ID, ContextWindow: model.ContextWindow}
 
 	warningPct := DefaultContextWarningPercent
@@ -430,14 +534,32 @@ func (m *Manager) checkContextResetAfterTurn(ctx context.Context, binding store.
 		}
 	}
 
-	if contextThresholdExceededWithPct(managedModel, currentTokens, resetPct) {
+	resetExceeded := contextThresholdExceededWithPct(managedModel, currentTokens, resetPct)
+	suppressReset := false
+	if model.Provider == claudeCodeProvider {
+		// This is deliberately not a token high-water mark: fresh seeds that
+		// cannot fit the configured boundary must not reset-loop as usage grows.
+		// A usable higher threshold or CLI compaction rearms normal monitoring.
+		if lane.claudeFreshResetGuard != nil && *lane.claudeFreshResetGuard != binding {
+			lane.claudeFreshResetGuard = nil
+		}
+		if model.ContextWindow > 0 && !resetExceeded {
+			lane.claudeFreshResetGuard = nil
+		}
+		if freshClaudeWake && resetExceeded {
+			guardBinding := binding
+			lane.claudeFreshResetGuard = &guardBinding
+		}
+		suppressReset = lane.claudeFreshResetGuard != nil
+	}
+
+	if resetExceeded && !suppressReset {
 		log.Printf("[embedded:%s] Context threshold exceeded: %d tokens (window: %d, reset: %d%%). Triggering auto-reset.",
 			binding.AgentID, currentTokens, model.ContextWindow, resetPct)
-		if err := m.ExecuteContextReset(ctx, binding, "threshold_exceeded", DefaultPreservedContextWindow); err != nil {
+		if err := m.resetEmbeddedContextAfterDrain(ctx, binding, "threshold_exceeded", DefaultPreservedContextWindow); err != nil {
 			log.Printf("[embedded:%s] auto context reset failed: %v", binding.AgentID, err)
 		}
 	} else if contextWarningThresholdExceeded(managedModel, currentTokens, warningPct) {
-		lane := m.laneFor(binding.AgentID)
 		if lane.warningEpoch != binding.Epoch {
 			lane.warningEpoch = binding.Epoch
 			lane.warningEmitted = false
@@ -519,4 +641,107 @@ func (m *Manager) emitContextWarningReminder(ctx context.Context, binding store.
 
 	m.OfferDirect(binding.AgentID)
 	return nil
+}
+
+// finishToolContextReset runs after the runtime has joined its callbacks. It
+// releases only this turn's gate; a separate coordinator retains its own gate.
+func (m *Manager) finishToolContextReset(ctx context.Context, binding store.EmbeddedBinding, settled bool) {
+	m.mu.Lock()
+	req := m.contextResetRequested[binding.AgentID]
+	if req != nil {
+		delete(m.contextResetRequested, binding.AgentID)
+	}
+	m.mu.Unlock()
+	if req == nil {
+		return
+	}
+	m.finishCommittedToolReset(ctx, binding, req, settled)
+}
+
+// Caller holds serial; a pending coordinator is joined asynchronously.
+func (m *Manager) finishCommittedToolReset(ctx context.Context, binding store.EmbeddedBinding, req *contextResetRequest, settled bool) {
+	lane := m.laneFor(binding.AgentID)
+	releaseGate := true
+	defer func() {
+		if releaseGate {
+			lane.admission.Lock()
+			delete(lane.resetToolGates, req)
+			lane.admission.Unlock()
+			m.offerEmbeddedMail(binding.AgentID)
+		}
+	}()
+	if !req.committed || !settled {
+		return
+	}
+	lane.admission.Lock()
+	wait := lane.resetDone
+	if wait != nil {
+		oldBinding := binding
+		req.handoffBinding = &oldBinding
+	}
+	if wait == nil {
+		lane.resetPending = true
+		lane.resetRunning = true
+		lane.resetDone = make(chan struct{})
+	}
+	lane.admission.Unlock()
+	if wait != nil {
+		// The current coordinator may only be provisional. Keep this exact
+		// request's gate until it finishes; never wait while holding serial.
+		if m.startManagedTask(func() {
+			<-wait
+			lane.serial.Lock()
+			defer lane.serial.Unlock()
+			current, err := m.store.ManagedAgent(ctx, binding.AgentID)
+			if err != nil || current.SessionEpoch != binding.Epoch || current.PiSessionID != binding.SessionID || current.RuntimeGeneration != binding.Generation {
+				lane.admission.Lock()
+				delete(lane.resetToolGates, req)
+				lane.admission.Unlock()
+				m.offerEmbeddedMail(binding.AgentID)
+				return
+			}
+			m.finishCommittedToolReset(ctx, binding, req, true)
+		}) {
+			// Ownership moved to the task, not the provisional coordinator.
+			releaseGate = false
+			return
+		}
+		return
+	}
+
+	// Ownership transferred atomically under admission above.
+	lane.activeMu.RLock()
+	active := lane.activeSession
+	lane.activeMu.RUnlock()
+	lane.admission.Lock()
+	delete(lane.resetToolGates, req)
+	lane.admission.Unlock()
+	// The coordinator now owns the release and its single re-offer.
+	releaseGate = false
+	reoffer := true
+	defer func() {
+		if reoffer {
+			m.endEmbeddedReset(binding.AgentID, lane)
+		} else {
+			lane.endEmbeddedReset()
+		}
+	}()
+	if active != nil {
+		active.Interrupt()
+		active.Close()
+	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	if err := m.claudeCodeProcesses.stop(binding.AgentID); err != nil {
+		reoffer = false
+		log.Printf("[embedded:%s] context reset stop failed: %v", binding.AgentID, m.recordClaudeStopFailure(binding, err))
+		return
+	}
+	if err := m.executeContextResetOnLane(ctx, binding, req.reason, req.window); err != nil {
+		if errors.Is(err, errEmbeddedExecutionUnsettled) {
+			reoffer = false
+		}
+		log.Printf("[embedded:%s] context reset failed: %v", binding.AgentID, err)
+	}
 }

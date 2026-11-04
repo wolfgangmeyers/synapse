@@ -118,7 +118,10 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: 
   // Complete history entry because it has presentation.kind === "tool".
   if (isActiveManagedSubagentLifecycle(entry)) return false;
   // Complete is an outcome timeline, not a lifecycle progress log.
-  if (entry.presentation?.kind === "lifecycle") return false;
+  // Background completion is an outcome, not lifecycle progress. The router's
+  // history transport omits category, so identify this dedicated notice by its
+  // lifecycle title, including on replay.
+  if (entry.presentation?.kind === "lifecycle" && entry.message !== "Background task finished") return false;
   if (entry.presentation?.kind === "state" && !entry.message?.toLowerCase().includes("workflow") && !entry.presentation?.summary?.toLowerCase().includes("workflow")) return false;
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||

@@ -455,6 +455,10 @@ export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTime
   // synthesis keeps an older router payload readable without reviving the
   // former generic “Agent activity” legacy card.
   const presentation = entry.presentation ?? { kind: entry.level === "error" ? "error" as const : "message" as const, outcome: entry.level === "error" ? "error" as const : "success" as const };
+  if (presentation.kind === "lifecycle" && entry.message === "Background task finished") {
+    return { icon: "fa-solid fa-circle-check", tone: "blue", label: entry.message,
+      detail: cleanOneLine(entry.message_content?.replace(/^\[Background task finished\]\s*/, "")), isHighValue: true };
+  }
   const hasInboundDetails = entry.message_content !== undefined || entry.sender_identity !== undefined;
   if (hasInboundDetails && (presentation.kind === "message" || presentation.kind === "reminder")) {
     const reminder = presentation.kind === "reminder";

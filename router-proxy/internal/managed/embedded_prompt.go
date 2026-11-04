@@ -9,10 +9,9 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
-	"github.com/sky-valley/pi/coding"
 )
 
-func (m *Manager) steerPrompt(ctx context.Context, agentID, message, requestID string, active *coding.Session) error {
+func (m *Manager) steerPrompt(ctx context.Context, agentID, message, requestID string, active embeddedRuntime) error {
 	nowMilli := time.Now().UnixMilli()
 	if m.clock != nil {
 		nowMilli = m.clock.Now().UnixMilli()
@@ -50,29 +49,32 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 		return m.AdmitPrompt(ctx, agentID, message)
 	}
 	lane := m.laneFor(agentID)
-	lane.consecutiveContinuations = 0
-	lane.consecutiveEmptyTurns = 0
-	lane.goalAttempt = 0
-
+	lane.consecutiveContinuations.Store(0)
+	lane.consecutiveEmptyTurns.Store(0)
+	lane.goalAttempt.Store(0)
+	// Admission protects only the steer/submit decision, never a whole turn.
+	lane.admission.Lock()
+	if (lane.resetPending || len(lane.resetToolGates) > 0) || lane.terminationPending > 0 {
+		lane.admission.Unlock()
+		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+	}
 	lane.activeMu.RLock()
 	active := lane.activeSession
 	lane.activeMu.RUnlock()
-	if active != nil {
-		return m.steerPrompt(ctx, agentID, message, requestID, active)
+	if _, claude := active.(*claudeCodeRuntime); active != nil && !claude {
+		err := m.steerPrompt(ctx, agentID, message, requestID, active)
+		lane.admission.Unlock()
+		return err
 	}
-
-	lane.admission.Lock()
-	defer lane.admission.Unlock()
-
-	lane.activeMu.RLock()
-	active = lane.activeSession
-	lane.activeMu.RUnlock()
-	if active != nil {
-		return m.steerPrompt(ctx, agentID, message, requestID, active)
-	}
-
+	lane.admission.Unlock()
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
+	if err := serialLaneTestBarrier(ctx, agentID); err != nil {
+		return err
+	}
+	if lane.embeddedResetPending() {
+		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+	}
 	lane.selection.Lock()
 	selectionHeld := true
 	defer func() {
@@ -96,7 +98,13 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	if !ok {
 		return &store.ManagedAgentNotReadyError{AgentID: agentID}
 	}
+	lane.admission.Lock()
+	if (lane.resetPending || len(lane.resetToolGates) > 0) || lane.terminationPending > 0 {
+		lane.admission.Unlock()
+		return &store.ManagedAgentNotReadyError{AgentID: agentID}
+	}
 	replay, err := m.store.ReserveEmbeddedPrompt(ctx, owner.binding, requestID, message)
+	lane.admission.Unlock()
 	lane.selection.Unlock()
 	selectionHeld = false
 	if err != nil {

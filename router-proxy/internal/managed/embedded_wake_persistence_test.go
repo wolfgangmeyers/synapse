@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -60,7 +61,7 @@ func TestClaimedWakeSDKFinalCheckedPersistence(t *testing.T) {
 	p := &embeddedPersistence{db: db, binding: b, digest: "genesis"}
 	session := coding.NewSession(coding.SessionOptions{SessionID: b.SessionID, Model: reg.GetModel(), Cwd: t.TempDir(), NoTools: coding.NoToolsAll, OrderedPersistence: p})
 	scope := embeddedClaimedWakeScope{binding: b, processGeneration: g, id: "wake-1", kind: "root-idle"}
-	require.NoError(t, p.runClaimedWake(ctx, session, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "wake"}}}}))
+	require.NoError(t, p.runClaimedWake(ctx, &piEmbeddedRuntime{Session: session}, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "wake"}}}}, nil))
 	snap, err := db.ReopenEmbedded(ctx, b)
 	require.NoError(t, err)
 	require.Len(t, snap.Entries, 3)
@@ -73,7 +74,7 @@ func TestClaimedWakeSDKFinalCheckedPersistence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "checked-complete", wake.State)
 	require.Error(t, reopened.CompleteEmbeddedRestartWake(ctx, b, g, "wake-1", final.Sequence, final.Digest), "completion is one-shot")
-	require.Error(t, p.runClaimedWake(ctx, session, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "duplicate"}}}}), "scope cannot be reused")
+	require.Error(t, p.runClaimedWake(ctx, &piEmbeddedRuntime{Session: session}, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "duplicate"}}}}, nil), "scope cannot be reused")
 }
 
 func TestClaimedWakeFragmentsGenericTurnsAndOwnerFence(t *testing.T) {
@@ -91,8 +92,8 @@ func TestClaimedWakeFragmentsGenericTurnsAndOwnerFence(t *testing.T) {
 		providers.FauxStatic(providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "ordinary answer"}}, ai.StopStop)),
 	})
 	session := coding.NewSession(coding.SessionOptions{SessionID: b.SessionID, Model: reg.GetModel(), Cwd: t.TempDir(), NoTools: coding.NoToolsAll, OrderedPersistence: p})
-	require.Error(t, p.runClaimedWake(ctx, session, stale, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "not dispatched"}}}}))
-	require.NoError(t, p.runClaimedWake(ctx, session, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "wake"}}}}))
+	require.Error(t, p.runClaimedWake(ctx, &piEmbeddedRuntime{Session: session}, stale, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "not dispatched"}}}}, nil))
+	require.NoError(t, p.runClaimedWake(ctx, &piEmbeddedRuntime{Session: session}, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "wake"}}}}, nil))
 	snap, err := db.ReopenEmbedded(ctx, b)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(snap.Entries), 4)
@@ -148,7 +149,7 @@ func TestClaimedInterruptedWakeContinuesAlreadyStartedNotice(t *testing.T) {
 	require.NoError(t, p.restore(ctx, session))
 	before := p.seq
 	scope := embeddedClaimedWakeScope{binding: b, processGeneration: g, id: notice.ID, kind: "interrupted"}
-	require.NoError(t, p.runClaimedWake(ctx, session, scope, nil))
+	require.NoError(t, p.runClaimedWake(ctx, &piEmbeddedRuntime{Session: session}, scope, nil, nil))
 	snap, err := db.ReopenEmbedded(ctx, b)
 	require.NoError(t, err)
 	require.Len(t, snap.Entries, int(before+1), "Continue must not append the notice a second time")
@@ -183,4 +184,48 @@ func TestClaimedWakeCrashAfterFinalAppendReconcilesExactOrigin(t *testing.T) {
 	require.Error(t, reopened.CompleteEmbeddedRestartWake(ctx, b, g, scope.id, p.wakeFinal.Sequence, "wrong digest"))
 	require.NoError(t, reopened.CompleteEmbeddedRestartWake(ctx, b, g, scope.id, p.wakeFinal.Sequence, p.wakeFinal.Digest))
 	require.Error(t, reopened.CompleteEmbeddedRestartWake(ctx, b, g, scope.id, p.wakeFinal.Sequence, p.wakeFinal.Digest))
+}
+
+// A checked final is not enough: the Claude scope must stop successfully first.
+func TestClaimedWakeClaudeCleanupBeforeCompletion(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cleanup_failure=%t", fail), func(t *testing.T) {
+			ctx := context.Background()
+			db, b, g, path := wakePersistenceFixture(t)
+			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+			defer reg.Unregister()
+			reg.SetResponses([]providers.FauxResponseStep{providers.FauxStatic(providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "done"}}, ai.StopStop))})
+			p := &embeddedPersistence{db: db, binding: b, digest: "genesis"}
+			session := coding.NewSession(coding.SessionOptions{SessionID: b.SessionID, Model: reg.GetModel(), Cwd: t.TempDir(), NoTools: coding.NoToolsAll, OrderedPersistence: p})
+			proc := cleanupTestProcess(scopedCloser{})
+			if fail {
+				proc.waitErr = errClaudeCodeGroupUnconfirmed
+			}
+			entry := &claudeCodeProcessEntry{binding: b, process: proc}
+			pool := &claudeCodeProcessPool{entries: map[string]*claudeCodeProcessEntry{b.AgentID: entry}}
+			runtime := &claudeCodeRuntime{p: p, pool: pool, process: proc}
+			scope := embeddedClaimedWakeScope{binding: b, processGeneration: g, id: "wake-1", kind: "root-idle"}
+			err := p.runClaimedWake(ctx, &piEmbeddedRuntime{Session: session}, scope, []agent.AgentMessage{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "wake"}}}}, func() error {
+				wake, e := db.EmbeddedRestartWake(ctx, b, g, scope.id)
+				require.NoError(t, e)
+				require.Equal(t, "claimed", wake.State)
+				return runtime.closeScoped()
+			})
+			if fail {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			reopened, err := store.Open(ctx, path, store.Options{})
+			require.NoError(t, err)
+			defer reopened.Close()
+			wake, err := reopened.EmbeddedRestartWake(ctx, b, g, scope.id)
+			require.NoError(t, err)
+			if fail {
+				require.Equal(t, "claimed", wake.State)
+			} else {
+				require.Equal(t, "checked-complete", wake.State)
+			}
+		})
+	}
 }

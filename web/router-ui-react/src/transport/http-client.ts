@@ -119,7 +119,7 @@ export interface MonitorEvaluationResult {
 }
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
-export interface ProviderModel { provider: ManagedProvider; id: string; name: string; available: boolean }
+export interface ProviderModel { provider: ManagedProvider | "claude-code"; id: string; name: string; available: boolean }
 export interface ProviderStatus { provider: ManagedProvider; label: string; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
 export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
@@ -407,13 +407,20 @@ function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || (breadcrumbItems !== undefined && (!Array.isArray(breadcrumbItems) || !breadcrumbItems.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); }))) || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
   return { path: root.path, parent: root.parent, ...(breadcrumbItems === undefined ? {} : { breadcrumbs: breadcrumbItems.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) }), directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
-function providerName(value: unknown): value is ProviderModel["provider"] {
+function providerName(value: unknown): value is ManagedProvider {
   return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex";
 }
 function providerModel(value: unknown): value is ProviderModel {
   const item = recordValue(value);
   const nameValid = typeof item?.name === "string" ? nonEmptyString(item.name) : true;
   return !!item && providerName(item.provider) && nonEmptyString(item.id) && nameValid;
+}
+// Catalog choices include a local engine without adding an auth provider.
+function modelChoice(value: unknown): value is ProviderModel {
+  if (providerModel(value)) return true;
+  const item = recordValue(value);
+  return !!item && item.provider === "claude-code" && nonEmptyString(item.id)
+    && (typeof item.name !== "string" || nonEmptyString(item.name));
 }
 function providerStatus(value: unknown): value is ProviderStatus {
   const item = recordValue(value);
@@ -439,7 +446,7 @@ function savedModel(value: unknown): { provider: string; id: string; name?: stri
 }
 function models(value: unknown): ModelsResponse {
   const root = recordValue(value); const defaultModel = savedModel(root?.default_model);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || !root.models.every(providerModel) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || !root.models.every(modelChoice) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
   return { auth_revision: root.auth_revision, models: root.models, default_model: defaultModel };
 }
 function defaultModel(value: unknown): DefaultModelResponse {
@@ -637,7 +644,7 @@ export interface RouterHttpClient {
   terminateManaged(id: string, options?: { cleanupWorktree?: boolean }): Promise<ManagedOperationResponse>;
   models(): Promise<ModelsResponse>;
   providerAuth(): Promise<ProviderAuthResponse>;
-  startProviderAuth(provider: ProviderModel["provider"], action: "login" | "logout"): Promise<ManagedOperationResponse>;
+  startProviderAuth(provider: ManagedProvider, action: "login" | "logout"): Promise<ManagedOperationResponse>;
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
   cancelProviderAuth(operationId: string): Promise<{ operation_id: string; status: string }>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;

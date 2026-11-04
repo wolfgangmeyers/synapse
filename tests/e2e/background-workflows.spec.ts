@@ -474,6 +474,11 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
 
     const sha256Hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
+    // Managed admissions also create shared agent identities.
+    const insertIdentity = db.prepare("INSERT INTO agents (agent_id, first_seen_at) VALUES (?, ?)");
+    insertIdentity.run(activeBgId, nowIso);
+    insertIdentity.run(completedBgId, nowIso);
+
     db.prepare(`
       INSERT INTO managed_agents (
         agent_id, name, cwd, selected_model_provider, selected_model_id,
@@ -536,29 +541,46 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
   });
 
   test("Scenario 5: Verify 1-hour retention policy / pruning behavior for background workers", async () => {
-    const db = new DatabaseSync(harness.router.databasePath);
+    // Wait briefly to ensure background sweeps/locks from previous tests have released
+    await new Promise((r) => setTimeout(r, 200));
 
+    const db = new DatabaseSync(harness.router.databasePath);
+    db.exec("PRAGMA busy_timeout = 5000;");
+
+    const runWithBusyRetry = (fn: () => void, maxRetries = 10, delayMs = 100) => {
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          return fn();
+        } catch (err: any) {
+          if (err && String(err.message).includes("database is locked") && attempt < maxRetries - 1) {
+            const start = Date.now();
+            while (Date.now() - start < delayMs) {
+              // synchronous spin-wait
+            }
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+
+    try {
     // Insert an old terminated background worker (terminated 65 minutes ago)
     const oldTerminatedBgId = "bg-worker-old-terminated";
     const recentTerminatedBgId = "bg-worker-recent-terminated";
     const sixtyFiveMinAgo = new Date(Date.now() - 65 * 60 * 1000).toISOString();
     const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
-    db.prepare(`
+    const insertStmt = db.prepare(`
       INSERT INTO managed_agents (
         agent_id, name, cwd, selected_model_provider, selected_model_id,
         desired_state, lifecycle_state, activity_state, runtime, session_epoch,
         manifest_revision, manifest_hash, created_at, updated_at, is_background
       ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, 'hash', ?, ?, 1)
-    `).run(oldTerminatedBgId, oldTerminatedBgId, sixtyFiveMinAgo, sixtyFiveMinAgo);
+    `);
 
-    db.prepare(`
-      INSERT INTO managed_agents (
-        agent_id, name, cwd, selected_model_provider, selected_model_id,
-        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
-        manifest_revision, manifest_hash, created_at, updated_at, is_background
-      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, 'hash', ?, ?, 1)
-    `).run(recentTerminatedBgId, recentTerminatedBgId, tenMinAgo, tenMinAgo);
+    runWithBusyRetry(() => insertStmt.run(oldTerminatedBgId, oldTerminatedBgId, sixtyFiveMinAgo, sixtyFiveMinAgo));
+    runWithBusyRetry(() => insertStmt.run(recentTerminatedBgId, recentTerminatedBgId, tenMinAgo, tenMinAgo));
 
     // Verify both exist before pruning
     const beforeOld = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(oldTerminatedBgId);
@@ -568,11 +590,14 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
 
     // Execute pruning query matching store.PruneExpiredBackgroundAgents (1 hour threshold)
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const result = db
-      .prepare(
-        "DELETE FROM managed_agents WHERE is_background = 1 AND (lifecycle_state = 'terminated' OR desired_state = 'terminated') AND updated_at < ?"
-      )
-      .run(cutoff);
+    let result: any;
+    runWithBusyRetry(() => {
+      result = db
+        .prepare(
+          "DELETE FROM managed_agents WHERE is_background = 1 AND (lifecycle_state = 'terminated' OR desired_state = 'terminated') AND updated_at < ?"
+        )
+        .run(cutoff);
+    });
 
     expect(result.changes).toBeGreaterThanOrEqual(1);
 
@@ -582,6 +607,8 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
     expect(afterOld).toBeUndefined();
     expect(afterRecent).toBeDefined();
 
-    db.close();
+    } finally {
+      db.close();
+    }
   });
 });

@@ -345,7 +345,7 @@ func TestEmbeddedBrowserCodexLoginRootWorkerRotationLogoutComposition(t *testing
 		Providers []store.ManagedProviderStatus `json:"providers"`
 	}
 	require.NoError(t, json.Unmarshal(status.Body.Bytes(), &peerSnapshot))
-	require.Len(t, peerSnapshot.Providers, 5)
+	require.Len(t, peerSnapshot.Providers, 4)
 	peerMap := make(map[string]store.ManagedProviderStatus, len(peerSnapshot.Providers))
 	for _, p := range peerSnapshot.Providers {
 		peerMap[p.Provider] = p
@@ -363,6 +363,7 @@ func TestEmbeddedBrowserCodexLoginRootWorkerRotationLogoutComposition(t *testing
 	require.False(t, peerMap["google-vertex"].Authenticated)
 	require.Equal(t, "Google Vertex AI", peerMap["google-vertex"].Label)
 	require.NotContains(t, peerMap, "antigravity")
+	require.NotContains(t, peerMap, "claude-code")
 	require.NoError(t, peer.Save(ctx, original))
 	status = f.call(t, "GET", "/v1/provider-auth", "", "")
 	require.Equal(t, 200, status.Code)

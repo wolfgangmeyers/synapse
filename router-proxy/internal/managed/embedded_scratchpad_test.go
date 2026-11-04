@@ -580,4 +580,3 @@ func TestEmbeddedScratchpadTruncate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Truncated 1 scratchpad entry.", res.Content[0].(ai.TextContent).Text)
 }
-

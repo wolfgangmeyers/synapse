@@ -742,7 +742,7 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 
 	// Verify lane counter reset to 0
 	lane := m.laneFor(launched.Agent.AgentID)
-	require.Equal(t, 0, lane.consecutiveContinuations, "human prompt must reset consecutive continuations")
+	require.Zero(t, lane.consecutiveContinuations.Load(), "human prompt must reset consecutive continuations")
 }
 
 func TestUnwrapEmbeddedMailText(t *testing.T) {

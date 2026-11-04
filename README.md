@@ -36,7 +36,13 @@ The separate browser UI keeps its existing boundary. It accepts loopback or its 
 {"default_agent":"pi"}
 ```
 
-Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers, PR-review workers, and their subagents use provider `google-vertex` and model `gemini-3.8-flash` by default. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
+Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers, PR-review workers, and their subagents use provider `google-vertex` and model `gemini-3.8-flash` by default.
+
+### Claude worker paths
+
+The router-managed Claude Code integration is **in progress; acceptance is pending**. Its intended launch path selects a Claude Code model for a router-managed worker, not the `worker_launch.py` runtime setting. Install Claude Code and sign in on the router host using the CLI. If `MECHA_CLAUDE_BIN` is non-empty, it is authoritative; the router does not fall back if it is invalid. When it is empty or unset, the router searches PATH, then `~/.local/bin/claude`. The router checks local authentication on launch and process acquisition. If launch or a turn reports Claude unavailable, check the executable and run `claude auth status --json` on that host; install or sign in with the CLI as needed. Model choices do not prove authentication or readiness. See `docs/specs/claude-code-workers-spec.md` for current scope and status.
+
+Separately, `worker_launch.py --agent claude` starts a Claude CLI worker in tmux with a Mailbox V2 sidecar. The sidecar delivers sanitized messages to the pane but does not scrape replies; the worker replies with `mailbox_send.py`. For launch failures, check the launcher stderr and `worker_capture.py`, and verify the CLI is installed and signed in on that host.
 
 ## Shell fallbacks and service scripts
 

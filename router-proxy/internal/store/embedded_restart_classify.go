@@ -112,9 +112,7 @@ func (s *Store) ClassifyEmbeddedRestart(ctx context.Context, b EmbeddedBinding, 
 	}
 	if previous.State == "claimed" && previous.ProcessGeneration != processGeneration {
 		if err = s.ReconcileEmbeddedRestartWake(ctx, b, previous.ProcessGeneration, previous.ID); err != nil {
-			// If an un-reconciled claimed slot from a dead process generation is present,
-			// reconcile it to unknown so rotation can proceed cleanly without failing boot.
-			_, _ = s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation != ?`, b.AgentID, processGeneration)
+			return out, err
 		}
 		previous, err = wakeRow(ctx, s.db, b, "current")
 		if err != nil {
@@ -123,9 +121,6 @@ func (s *Store) ClassifyEmbeddedRestart(ctx context.Context, b EmbeddedBinding, 
 		// The checked completion is terminal but can allow a new generation's
 		// separate awareness. UNKNOWN cannot authorize a chained call.
 	}
-	// If an un-reconciled claimed slot from a dead process generation is present,
-	// reconcile it to unknown so rotation can proceed cleanly without failing boot.
-	_, _ = s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation != ?`, b.AgentID, processGeneration)
 	if previous.ProcessGeneration == processGeneration {
 		if previous.State != "planned" {
 			out.Suppressed = true

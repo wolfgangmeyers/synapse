@@ -1,3 +1,4 @@
+import { isClaudeCodeAgent } from "../state/agent-projection";
 import { useState, useRef, useEffect, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import type { Agent, SubagentSummary } from "../state/agent-projection";
@@ -54,7 +55,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
         : managedSubagents.length)
     : agent.subagent_count ?? subagents.length;
   const subagentListID = `agent-row-subagents-${agent.agent_id}`;
-  const hasSubagents = subagentCount > 0;
+  const hasSubagents = !isClaudeCodeAgent(agent) && subagentCount > 0;
   const showSubagentBadge = hasSubagents && !compacting;
   const hasSignals = showSubagentBadge || arrival !== undefined;
   const hasGoal = agent.goal_state?.enabled || agent.goal?.enabled;
@@ -124,7 +125,7 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
                 />
               </span>
             ) : null}
-            {agent.workflow_state ? (
+            {!isClaudeCodeAgent(agent) && agent.workflow_state ? (
               <span
                 className="agent-row-workflow-badge"
                 title={`Workflow: ${agent.workflow_name || "Active"} • State: ${agent.workflow_state}`}

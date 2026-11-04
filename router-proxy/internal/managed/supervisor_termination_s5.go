@@ -51,8 +51,20 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 		return TerminateResult{}, err
 	}
 	lane := m.laneFor(request.AgentID)
+	// Registered before lock defers so dispatch starts only after both locks release.
+	reoffer := false
+	defer func() {
+		if reoffer {
+			m.offerEmbeddedMail(request.AgentID)
+		}
+	}()
 	lane.admission.Lock()
-	defer lane.admission.Unlock()
+	admissionHeld := true
+	defer func() {
+		if admissionHeld {
+			lane.admission.Unlock()
+		}
+	}()
 	// A concurrent identical DELETE can finish after the fast replay lookup and
 	// before this request enters the agent's admission lane. Replay again under
 	// the lane before reading mutable agent state.
@@ -79,8 +91,65 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 	if !errors.Is(rootErr, sql.ErrNoRows) {
 		return TerminateResult{}, rootErr
 	}
-	lane.serial.Lock()
-	defer lane.serial.Unlock()
+	if agent.Runtime == "embedded" {
+		// Mail and turn settlement take admission while owning serial. Fence
+		// new admissions, but never hold admission while waiting for serial.
+		// Count independently of reset and other DELETEs so neither can
+		// reopen the gate while another termination still owns it.
+		lane.terminationPending++
+		reoffer = true
+		defer func() {
+			if admissionHeld {
+				lane.terminationPending--
+				return
+			}
+			lane.admission.Lock()
+			lane.terminationPending--
+			lane.admission.Unlock()
+		}()
+	}
+	claude := agent.Runtime == "embedded" && agent.SelectedModel.Provider == claudeCodeProvider
+	if !claude {
+		lane.admission.Unlock()
+		admissionHeld = false
+		if m.embeddedTerminationGateTestHook != nil {
+			m.embeddedTerminationGateTestHook()
+		}
+		lane.serial.Lock()
+		defer lane.serial.Unlock()
+		// State may have changed while waiting for a turn or another DELETE.
+		// Reacquire in the same serial -> admission order as turn admission.
+		lane.admission.Lock()
+		admissionHeld = true
+		defer func() {
+			if admissionHeld {
+				lane.admission.Unlock()
+				admissionHeld = false
+			}
+		}()
+		if existing, lookupErr := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); lookupErr == nil {
+			if existing.CanonicalPath != request.CanonicalPath || existing.CanonicalBodyHash != request.CanonicalBodyHash {
+				return TerminateResult{}, &store.ManagedIdempotencyConflictError{}
+			}
+			return TerminateResult{Operation: existing, Replayed: true}, nil
+		} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return TerminateResult{}, lookupErr
+		}
+		agent, err = m.store.ManagedAgent(ctx, request.AgentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return TerminateResult{}, &store.ManagedAgentNotFoundError{AgentID: request.AgentID}
+		}
+		if err != nil {
+			return TerminateResult{}, err
+		}
+		failedRoot, rootErr = m.store.LatestRetryableManagedRootRecovery(ctx, request.AgentID)
+		if rootErr == nil {
+			return m.reserveFailedRootRecoveryTermination(ctx, request, agent, failedRoot)
+		}
+		if !errors.Is(rootErr, sql.ErrNoRows) {
+			return TerminateResult{}, rootErr
+		}
+	}
 	var source store.ManagedRuntimeFence
 	var sourcePtr *store.ManagedRuntimeFence
 	var retryOf string
@@ -96,9 +165,6 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 		source, sourcePtr = current, &source
 	}
 
-	if sourcePtr != nil {
-		_ = m.store.InterruptManagedParentWork(context.Background(), source)
-	}
 	responseAgent := *agent
 	responseAgent.DesiredState = "terminated"
 	responseAgent.LifecycleState = "terminating"
@@ -110,17 +176,41 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
 	reservation := store.ManagedLifecycleReservation{AgentID: request.AgentID, Kind: "terminate", Source: "direct", Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Fence: source, RetryOf: retryOf, Operation: operation}
 	admission, err := m.store.ReserveManagedLifecycle(ctx, reservation)
-	if err != nil {
+	admissionErr := err
+	if err != nil && !admission.Committed {
 		return TerminateResult{}, err
 	}
 	if admission.Replayed {
-		return TerminateResult{Operation: admission.Operation, Replayed: true}, nil
+		return TerminateResult{Operation: admission.Operation, Replayed: true}, admissionErr
+	}
+	if claude {
+		// Publish the committed terminating state before interrupting or draining.
+		m.publishProjection()
+	}
+	if sourcePtr != nil {
+		_ = m.store.InterruptManagedParentWork(context.Background(), source)
+	}
+	var claudeStopErr error
+	if claude {
+		// Capture identities while admission prevents a new turn from installing.
+		m.activeSessionsMu.Lock()
+		active := m.activeEmbeddedSessions[request.AgentID]
+		m.activeSessionsMu.Unlock()
+		m.claudeCodeProcesses.mu.Lock()
+		entry := m.claudeCodeProcesses.entries[request.AgentID]
+		m.claudeCodeProcesses.mu.Unlock()
+		lane.admission.Unlock()
+		admissionHeld = false
+		if active != nil {
+			active.Interrupt()
+		}
+		claudeStopErr = m.claudeCodeProcesses.stopEntry(request.AgentID, entry)
+		lane.serial.Lock()
+		defer lane.serial.Unlock()
 	}
 	m.cascadeAbortSubagents(request.AgentID)
 	_ = m.store.CascadeTerminateSubagents(ctx, request.AgentID)
-	// Admission is the durable point at which the selected worker becomes
-	// non-interactive. Wake UI-live now so the browser shows that in-progress
-	// state instead of presenting a running worker until cleanup finishes.
+	// Publish the separate subagent cascade after it has been applied.
 	m.publishProjection()
 
 	var binding *managedBinding
@@ -144,13 +234,24 @@ func (m *Manager) terminateManaged(ctx context.Context, request TerminateRequest
 		}
 	}
 	cleanupWT := request.CleanupWorktree
-	m.startManagedTask(func() {
+	started := m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
+		if claudeStopErr != nil {
+			// Cleanup failures are recorded at the reap stage, not the initial abort stage.
+			if err := m.store.AdvanceManagedTermination(context.Background(), admission.Action.ActionID, "terminating", "abort", "terminating", "terminate_reap", sourcePtr); err != nil {
+				return
+			}
+			m.failTermination(admission.Action.ActionID, "TERMINATION_CLEANUP_FAILED", true, sourcePtr)
+			m.publishProjection()
+			return
+		}
 		m.executeTerminationInLane(admission.Action.ActionID, binding, cleanupWT)
 	})
-
-	return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, nil
+	if !started {
+		admissionErr = errors.Join(admissionErr, errors.New("committed cleanup handoff unavailable: manager closed"))
+	}
+	return TerminateResult{Agent: &responseAgent, Operation: admission.Operation}, admissionErr
 }
 
 func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBinding, cleanupWorktree ...bool) {

@@ -7,8 +7,23 @@ import { join, resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { startIsolatedRouter, startRouterProxy, serveFrontendDist, type IsolatedRouter, type IsolatedProxy, type IsolatedFrontend } from "./harness";
 
-export type Reply = { tool: string; args: object } | { answer: string; evaluation?: true; advanceMS?: number } | { hold: true };
+export type Reply = { tool: string; args: object } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void> } | { failure: 503; evaluation: true; barrier?: Promise<void> } | { hold: true };
 export const model = { provider: "openai-codex", id: "gpt-6.1-terra" };
+
+// ResolveModel bypasses the worker resolver for Claude evaluations. Only this
+// Codex identity has a loopback-only transport in the tagged router launcher.
+// Guard both Node REST and browser control helpers, not just individual specs.
+export function assertLocalEvaluatorDefault(path: string, body?: object) {
+  if (path !== "/v1/settings/default-model" || body === undefined) return;
+  if (!("model" in body)) throw Error("Fixture default-model request is missing model");
+  const selected = body.model;
+  if (selected === null) return;
+  if (typeof selected !== "object" || selected === null ||
+    !("provider" in selected) || selected.provider !== model.provider ||
+    !("id" in selected) || selected.id !== model.id) {
+    throw Error("Fixture evaluator default must be null or the loopback-only Codex model; Google is not mocked");
+  }
+}
 
 // go run owns a separate executable: close that child before closing its parent.
 export async function closeWorkflowProxyChild(proxy: IsolatedProxy | undefined) {
@@ -23,7 +38,13 @@ export async function closeWorkflowProxyChild(proxy: IsolatedProxy | undefined) 
 
 // Only the provider boundary is mocked. Every response must be explicitly queued;
 // unexpected evaluator/autonomous requests fail closed and remain observable.
-export async function workflowHarness() {
+export type WorkflowHarnessOptions = {
+  // Keep the evaluator on the loopback-only Codex transport, or deliberately
+  // clear the configured default. Never select seeded Google credentials.
+  defaultModel?: typeof model | null;
+  kbDir?: (home: string) => string;
+};
+export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   const requests: Record<string, unknown>[] = [];
   const violations: string[] = [];
   const replies: Reply[] = [];
@@ -47,7 +68,7 @@ export async function workflowHarness() {
       requests.push(parsed);
       const reply = replies.shift();
       const isEvaluation = typeof parsed.instructions === "string" && parsed.instructions.toLowerCase().startsWith("goal:");
-      if (reply && (("answer" in reply && reply.evaluation === true) !== isEvaluation)) {
+      if (reply && (("evaluation" in reply && reply.evaluation === true) !== isEvaluation)) {
         violations.push(`unexpected ${isEvaluation ? "evaluator" : "worker"} request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);
         res.writeHead(400).end(); return;
       }
@@ -55,6 +76,16 @@ export async function workflowHarness() {
         violations.push(`unexpected provider request ${requests.length}: ${parsed.model}`); res.writeHead(400).end(); return;
       }
       if ("hold" in reply) { held.push(res); return; }
+      if (("answer" in reply || "failure" in reply) && reply.barrier) {
+        held.push(res);
+        await reply.barrier;
+        if (res.destroyed) return;
+      }
+      if ("failure" in reply) {
+        res.writeHead(reply.failure, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "deterministic evaluator failure", type: "server_error" } }));
+        return;
+      }
       if ("answer" in reply && reply.advanceMS) await fixture!.advance(reply.advanceMS);
       const id = `response_${requests.length}`;
       const events: object[] = [{ type: "response.created", response: { id } }];
@@ -147,12 +178,12 @@ export async function workflowHarness() {
   };
   try {
     const repoRoot = resolve(import.meta.dirname, "../..");
-    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, embedded: { endpoint: `http://127.0.0.1:${address.port}` } });
+    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, fakeEmbeddedCatalog: true, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
     await expect.poll(async () => {
       try { return (await fetch(proxy!.url + "/v1/health")).status; } catch { return 0; }
     }, { timeout: 5000 }).toBe(200);
-    frontend = await serveFrontendDist(join(repoRoot, "web/router-ui-react/dist"));
+    frontend = await serveFrontendDist(process.env.MECHA_E2E_FRONTEND_DIST || join(repoRoot, "web/router-ui-react/dist"));
     const f = { router, proxy, frontend, requests, violations, replies, wsFrames, close,
       async restart() {
         // Keep the provider server, request history and queued replies alive.
@@ -167,9 +198,12 @@ export async function workflowHarness() {
         f.clock += delta;
         return { now: new Date(f.clock).toISOString() };
       },
-      async api(path: string, body?: object, method = "POST") {
-        const res = await fetch(proxy!.url + path, body === undefined ? undefined : {
-          method, headers: { "Content-Type": "application/json", "X-Request-ID": randomUUID() }, body: JSON.stringify(body),
+      async api(path: string, body?: object, method = body === undefined ? "GET" : "POST") {
+        assertLocalEvaluatorDefault(path, body);
+        const res = await fetch(proxy!.url + path, {
+          method,
+          headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), "X-Request-ID": randomUUID() },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
         const text = await res.text();
         expect(res.ok, `${method} ${path}: ${res.status} ${text}`).toBeTruthy();
@@ -227,7 +261,7 @@ export async function workflowHarness() {
         entry.provider === model.provider && entry.id === model.id && entry.available);
     }, { timeout: 8000 }).toBe(true);
     checkingModels = false;
-    await f.api("/v1/settings/default-model", { model }, "PUT");
+    await f.api("/v1/settings/default-model", { model: options.defaultModel === undefined ? model : options.defaultModel }, "PUT");
     return f;
   } catch (error) {
     try {
@@ -240,7 +274,9 @@ export async function workflowHarness() {
 export type WorkflowHarness = Awaited<ReturnType<typeof workflowHarness>>;
 
 // Join receipt -> evaluation -> reservation and the actual saved final by the
-// complete identity. No production evidence is inserted or updated by tests.
+// complete identity. DONE has no reservation; retain it with nullable continuation
+// fields. Other evaluations still require reservation evidence, excluding UNKNOWN.
+// No production evidence is inserted or updated by tests.
 export function settled(f: WorkflowHarness, agent: string) {
   return f.rows(`SELECT e.*, c.state AS continuation_state, c.due_at, c.started_at,
     r.turn_key, final.body AS final_body FROM embedded_goal_evaluations e
@@ -249,13 +285,13 @@ export function settled(f: WorkflowHarness, agent: string) {
       AND r.turn_entry_digest=e.user_digest AND r.goal_revision=e.goal_revision
     JOIN embedded_entries final ON final.agent_id=e.agent_id AND final.session_id=e.session_id
       AND final.epoch=e.epoch AND final.generation=e.generation AND final.seq=e.final_seq AND final.digest=e.final_digest
-    JOIN embedded_goal_continuations c ON c.agent_id=e.agent_id AND c.session_id=e.session_id
+    LEFT JOIN embedded_goal_continuations c ON c.agent_id=e.agent_id AND c.session_id=e.session_id
       AND c.epoch=e.epoch AND c.generation=e.generation AND c.user_seq=e.user_seq
       AND c.user_digest=e.user_digest AND c.goal_revision=e.goal_revision
     JOIN embedded_append_keys final_receipt ON final_receipt.agent_id=e.agent_id
       AND final_receipt.session_id=e.session_id AND final_receipt.epoch=e.epoch
       AND final_receipt.generation=e.generation AND final_receipt.entry_seq=e.final_seq
-    WHERE e.agent_id=? ORDER BY e.user_seq`, agent);
+    WHERE e.agent_id=? AND (c.agent_id IS NOT NULL OR e.state='DONE') ORDER BY e.user_seq`, agent);
 }
 
 export async function createRunningWorkflow(f: WorkflowHarness, page: Page, duration = 600000, reminders = true) {
