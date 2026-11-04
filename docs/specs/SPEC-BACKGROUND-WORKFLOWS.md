@@ -14,9 +14,9 @@ Autonomous workflow execution in `mecha-developer` currently requires an existin
 1. Dynamically spawn a dedicated background worker to execute a workflow independently from beginning to completion.
 2. Schedule workflows to run at predetermined intervals or cron times.
 3. Strictly validate required runtime parameters for scheduled workflows, leading to potential silent execution failures.
-4. Keep the main conversation/agent list clean and uncluttered by background workers while still providing full observability, active/completed filtering, and a standard 1-hour cleanup lifecycle.
+4. Keep the main conversation/agent list clean and uncluttered by background workers while still providing full observability, active/completed filtering, and automatic age-based termination.
 
-This specification provides the behavioral contract for running background workflows dynamically and on schedule, parameter validation, UI sidebar tab isolation, and 1-hour retention cleanup.
+This specification provides the behavioral contract for running background workflows dynamically and on schedule, parameter validation, UI sidebar tab isolation, and automatic age-based termination.
 
 ---
 
@@ -41,9 +41,11 @@ This specification provides the behavioral contract for running background workf
     - Record `last_run_error = "missing required workflow parameter(s): <names>"`.
     - Advance `next_run_at` to the subsequent scheduled time.
 
-- **REQ-4 (1-Hour Cleanup Retention)**:
-  - When a background worker reaches a terminal state (`terminated` or `failed`), it remains queryable and visible in the Completed tab for 1 hour.
-  - Router sweeps must prune background worker records where `terminal_at < now - 1h` and bump the managed agent projection version so connected UIs update automatically.
+- **Historical expectation, not implemented**: The original specification expected completed background workers to remain visible for one hour and then be pruned. `PruneExpiredBackgroundAgents` exists in the store but has no production caller; it does not establish automatic one-hour retention or cleanup.
+
+- **REQ-4 (Automatic Background Termination)**:
+  - On startup and every minute, the router checks all background workers. On a pass at or after 24 hours since creation, it requests the existing managed worker termination, regardless of activity, progress, sleep, or lifecycle state.
+  - The normal termination path owns cancellation, cleanup, errors and UI updates. Admission and recorded cleanup failures are logged; eligible failures are retried on later sweeps. A stalled or failed termination has no completion deadline. Ordinary agents and schedule definitions are unaffected. No separate post-termination retention is promised.
 
 - **REQ-5 (UI Tab Isolation & Worker Consistency)**:
   - Background workers must not appear in the standard "Agents" list.
@@ -96,11 +98,10 @@ This specification provides the behavioral contract for running background workf
 - **Then** only the background worker is visible under "Active".
 - **And** clicking the background worker displays its active conversation timeline in the main panel.
 
-### Scenario 6: 1-Hour Automatic Cleanup of Completed Background Workers
-- **Given** a background worker that terminated 65 minutes ago.
-- **When** the router maintenance sweep executes.
-- **Then** the terminated background worker is pruned from the database.
-- **And** the UI removes it from the "Completed" background workers list.
+### Scenario 6: Automatic termination by age
+- **Given** background workers created less than and at least 24 hours ago, including active and sleeping workers, and an ordinary agent of the same age.
+- **When** router maintenance runs, including after restart.
+- **Then** each old background worker is sent through the normal worker termination path; younger workers, ordinary agents and schedules are untouched. A failed attempt is retried on a later sweep.
 
 ---
 
@@ -112,3 +113,8 @@ This specification provides the behavioral contract for running background workf
   - `test("UI sidebar tabs switch between standard agents and background workers")`
   - `test("UI background tab filters active vs completed workers")`
   - `test("workflow schedules management dialog enforces required parameters and manages schedules")`
+
+- `tests/e2e/background-expiry.spec.ts`: startup catch-up through real router, proxy, SQLite and worker termination; younger background worker and workflow definition remain.
+- `router-proxy/internal/managed/background_expiry_test.go`: inclusive age cutoff, active/sleeping/failed states, ordinary workers and invalid timestamps.
+
+- `tests/e2e/background-cleanup.spec.ts`: periodic and startup age sweeps; `background-scheduled-expiry.spec.ts`: scheduled expiry and later launch; `background-active-retry.spec.ts`: dispatch while active, failed admission and retry after release. Full cleanup acceptance remains Draft in `background-worker-cleanup.spec.md`.

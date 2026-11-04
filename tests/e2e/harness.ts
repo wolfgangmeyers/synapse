@@ -22,6 +22,7 @@ export interface IsolatedRouter {
   databasePath: string;
   logPath: string;
   readinessStderr: () => string;
+  stderr: () => string;
   port: number;
   httpUrl: string;
   websocketUrl: string;
@@ -145,8 +146,10 @@ export async function startIsolatedRouter(options: {
   embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string };
   codexCredentialPath?: string;
   fakeEmbeddedCatalog?: boolean;
+  backgroundExpiryInterval?: string;
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
+  if (options.backgroundExpiryInterval && options.testClock === false) throw new Error("Background expiry interval requires the test clock");
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
   let ownedChild: ChildProcess | undefined;
   try {
@@ -276,6 +279,9 @@ export async function startIsolatedRouter(options: {
       ...(options.embedded?.kbDir ? { MECHA_KB_DIR: options.embedded.kbDir(join(root, "managed-home")) } : {}),
     };
   }
+  if (options.backgroundExpiryInterval) {
+    runtimeEnvironment = { ...runtimeEnvironment, MECHA_TEST_BACKGROUND_EXPIRY_INTERVAL: options.backgroundExpiryInterval };
+  }
   // Stop the executable itself, not a launcher, and join its close event before
   // reopening SQLite or removing the fixture. Escalation is bounded and joined.
   const stop = async () => {
@@ -287,6 +293,7 @@ export async function startIsolatedRouter(options: {
     try { await closed; } finally { clearTimeout(escalation); }
   };
   let readinessStderr = "";
+  let capturedStderr = "";
   const launch = async () => {
     readinessStderr = "";
     const child = spawn(binaryPath, args, {
@@ -326,6 +333,7 @@ export async function startIsolatedRouter(options: {
       child.stdout.on("data", checkReady);
       child.stderr.on("data", (chunk) => {
         stderr += chunk.toString();
+        capturedStderr = (capturedStderr + chunk.toString()).slice(-65536);
         // Closed vocabulary only: never expose arbitrary helper stderr, auth,
         // stack locals or credentials through readiness artifacts.
         if (stderr.includes("managed provider status is unavailable")) {
@@ -367,6 +375,7 @@ export async function startIsolatedRouter(options: {
     databasePath,
     logPath,
     readinessStderr: () => readinessStderr,
+    stderr: () => capturedStderr,
     port,
     httpUrl,
     websocketUrl,
@@ -539,6 +548,7 @@ export async function setupE2EHarness(options?: {
   managed?: boolean;
   testClock?: boolean;
   codexCredentialPath?: string;
+  backgroundExpiryInterval?: string;
 }): Promise<E2ETestHarness> {
   const repoRoot = resolve(__dirname, "../..");
   const distDir = join(repoRoot, "web/router-ui-react/dist");
@@ -551,7 +561,7 @@ export async function setupE2EHarness(options?: {
 
   const [mockLLM, router, frontend] = await Promise.all([
     startMockLLMServer(),
-    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock, codexCredentialPath: options?.codexCredentialPath }),
+    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock, codexCredentialPath: options?.codexCredentialPath, backgroundExpiryInterval: options?.backgroundExpiryInterval }),
     serveFrontendDist(distDir),
   ]);
 

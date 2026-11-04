@@ -964,6 +964,9 @@ func (r *Router) runStartup(ctx context.Context) error {
 			}
 		}
 	}
+	if r.managed != nil {
+		r.managed.StartBackgroundExpiry()
+	}
 	log.Printf("STARTUP: runSweep")
 	return r.runSweep(ctx)
 }

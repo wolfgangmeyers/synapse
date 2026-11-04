@@ -498,6 +498,7 @@ type Manager struct {
 	clock                                      deterministic.Clock
 	ids                                        deterministic.IDSource
 	mu                                         sync.Mutex
+	backgroundExpiryInFlight                   map[string]struct{}
 	processes                                  map[string]Process
 	rpcs                                       map[string]RPC
 	operationIDs                               map[string]string
