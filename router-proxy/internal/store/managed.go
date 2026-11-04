@@ -485,6 +485,8 @@ type ManagedLifecycleReservation struct {
 }
 
 type ManagedLifecycleAdmission struct {
+	// Committed is true only when this reservation transaction conclusively committed.
+	Committed bool
 	Operation *ManagedOperation
 	Action    *ManagedLifecycleAction
 	Agent     *ManagedAgentRecord
@@ -514,7 +516,7 @@ func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 }
 
 func validDefaultModel(model *ManagedModel) error {
-	if model != nil && (!managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
+	if model != nil && (model.Provider == "claude-code" || !managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
 		return errors.New("invalid default model")
 	}
 	return nil
@@ -1457,7 +1459,8 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 		result.Operation, result.Action, result.Agent = &reservation.Operation, action, agent
 		return nil
 	}
-	err := s.runImmediate(ctx, transaction)
+	committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, transaction)
+	result.Committed = committed && conclusive
 	return result, err
 }
 

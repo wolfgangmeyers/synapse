@@ -12,7 +12,11 @@ import (
 	"github.com/sky-valley/pi/ai"
 )
 
-type embeddedGoalTimer struct{ cancel func() }
+type embeddedGoalTimer struct {
+	cancel  func()
+	binding store.EmbeddedBinding
+	key     store.EmbeddedGoalEvaluationKey
+}
 
 const defaultGoalContinuationDelay = 10 * time.Second
 const defaultMaxConsecutiveGoalContinuations = 20
@@ -78,8 +82,8 @@ func (m *Manager) dispatchEmbeddedGoalContinuation(binding store.EmbeddedBinding
 	if maxContinuations <= 0 {
 		maxContinuations = defaultMaxConsecutiveGoalContinuations
 	}
-	if lane.consecutiveContinuations >= maxContinuations {
-		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations)
+	if lane.consecutiveContinuations.Load() >= int64(maxContinuations) {
+		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations.Load())
 		return
 	}
 	if reservation.DueAt.Valid {
@@ -107,9 +111,12 @@ func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding
 		m.embeddedGoalTimers = make(map[string]*embeddedGoalTimer)
 	}
 	if previous := m.embeddedGoalTimers[binding.AgentID]; previous != nil {
+		if previous.binding == binding && previous.key == key {
+			return
+		}
 		previous.cancel()
 	}
-	timer := &embeddedGoalTimer{}
+	timer := &embeddedGoalTimer{binding: binding, key: key}
 	m.embeddedGoalTimers[binding.AgentID] = timer
 	fire := func() {
 		m.mu.Lock()
@@ -184,8 +191,8 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	if maxContinuations <= 0 {
 		maxContinuations = defaultMaxConsecutiveGoalContinuations
 	}
-	if lane.consecutiveContinuations >= maxContinuations {
-		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations)
+	if lane.consecutiveContinuations.Load() >= int64(maxContinuations) {
+		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", binding.AgentID, lane.consecutiveContinuations.Load())
 		return
 	}
 	lane.selection.Lock()
@@ -208,12 +215,16 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	if err != nil || !started {
 		return
 	}
-	lane.consecutiveContinuations++
-	if lane.goalAttempt < lane.consecutiveContinuations {
-		lane.goalAttempt = lane.consecutiveContinuations
-	}
-	if lane.goalAttempt > 20 {
-		lane.goalAttempt = 20
+	lane.consecutiveContinuations.Add(1)
+	for {
+		old := lane.goalAttempt.Load()
+		next := lane.consecutiveContinuations.Load()
+		if next > 20 {
+			next = 20
+		}
+		if old >= next || lane.goalAttempt.CompareAndSwap(old, next) {
+			break
+		}
 	}
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 
@@ -283,7 +294,7 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	// Empty turns own their keyed re-nudges. A fresh idle prompt can overtake
 	// the queued verdict and must not bypass the third-empty circuit breaker.
-	if lane.consecutiveEmptyTurns > 0 {
+	if lane.consecutiveEmptyTurns.Load() > 0 {
 		return
 	}
 
@@ -291,8 +302,8 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	if maxContinuations <= 0 {
 		maxContinuations = defaultMaxConsecutiveGoalContinuations
 	}
-	if lane.consecutiveContinuations >= maxContinuations {
-		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", agentID, lane.consecutiveContinuations)
+	if lane.consecutiveContinuations.Load() >= int64(maxContinuations) {
+		log.Printf("WARNING: agent %s reached consecutive continuation cap (%d); pausing continuation until user prompt", agentID, lane.consecutiveContinuations.Load())
 		return
 	}
 
@@ -346,8 +357,17 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	}
 	if found {
 		m.startManagedTask(func() {
-			m.startEmbeddedGoalContinuation(owner.binding, key)
+			m.dispatchEmbeddedGoalContinuation(owner.binding, key)
 		})
+		return
+	}
+
+	// Claude applies a revision only with a durable checked-turn receipt.
+	// After that, only a reserved evaluator continuation may wake it again:
+	// unavailable/failed evaluation must not become an unkeyed NOT_DONE.
+	// Pending initial/replacement revisions, mail and Pi retain their paths.
+	if curAgent.SelectedModel.Provider == claudeCodeProvider &&
+		policy.DesiredRevision > 0 && policy.AppliedRevision == policy.DesiredRevision && policy.ProjectionState == "applied" {
 		return
 	}
 
@@ -356,11 +376,8 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	if prompt == "" {
 		return
 	}
-	lane.consecutiveContinuations++
-	lane.goalAttempt++
-	if lane.goalAttempt > 20 {
-		lane.goalAttempt = 20
-	}
+	lane.consecutiveContinuations.Add(1)
+	incrementGoalAttempt(&lane.goalAttempt)
 	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
 	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
 		log.Printf("kickoffIdleGoalContinuation: runEmbeddedSessionTurn error for %s: %v", agentID, err)
@@ -418,9 +435,9 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 	}
 
 	lane := m.laneFor(binding.AgentID)
-	attempt := lane.goalAttempt
+	attempt := lane.goalAttempt.Load()
 	if attempt <= 0 {
-		attempt = lane.consecutiveContinuations
+		attempt = lane.consecutiveContinuations.Load()
 	}
 	if attempt <= 0 {
 		attempt = 1
@@ -428,7 +445,7 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 
 	var basePrompt string
 	if goal != "" {
-		basePrompt = fmt.Sprintf("%s\nVERDICT: NOT_DONE\nREASON: %s", notDoneWakeup(goal, attempt), rationale)
+		basePrompt = fmt.Sprintf("%s\nVERDICT: NOT_DONE\nREASON: %s", notDoneWakeup(goal, int(attempt)), rationale)
 	} else {
 		basePrompt = goalContinuationDefaultPrompt
 	}

@@ -508,7 +508,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                 >
                   <strong>Use ChatGPT default</strong>
                 </button>
-                {(catalog?.models ?? []).filter((model) => model.available).map((model) => (
+                {(catalog?.models ?? []).filter((model) => model.available && model.provider !== "claude-code").map((model) => (
                   <button
                     key={`${model.provider}:${model.id}`}
                     type="button"
@@ -540,7 +540,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
             }}
           >
             <option value="">Use ChatGPT default</option>
-            {(catalog?.models ?? []).filter((model) => model.available).map((model) => (
+            {(catalog?.models ?? []).filter((model) => model.available && model.provider !== "claude-code").map((model) => (
               <option key={`${model.provider}:${model.id}`} value={`${model.provider}:${model.id}`}>
                 {model.name}
               </option>

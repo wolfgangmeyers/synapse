@@ -120,7 +120,8 @@ async function put(f: WorkflowHarness, id: string, body: string) {
 test.describe("Agent urgency native contract", () => {
   test.setTimeout(120_000);
 
-  test("pins and unpins urgency in agent controls", async ({ page }) => {
+  for (const width of [1000, 1280]) test(`pins and unpins urgency in agent controls at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
     const f = await fixture();
     try {
       await open(page, f, false); await select(page, target);

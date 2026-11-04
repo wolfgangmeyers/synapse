@@ -277,12 +277,12 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 
 	// Create a new state via workflow_state_save
 	resStateSave, err := stateSaveTool.Execute(ctx, "c11", map[string]any{
-		"workflow_id": importedWfID,
-		"name":        "Intermediate State",
-		"description": "Performs intermediate actions",
-		"goal":        "Process items",
-		"entry_text":  "Please process the items now.",
-		"allow_exit":  false,
+		"workflow_id":   importedWfID,
+		"name":          "Intermediate State",
+		"description":   "Performs intermediate actions",
+		"goal":          "Process items",
+		"entry_text":    "Please process the items now.",
+		"allow_exit":    false,
 		"allowed_tools": []any{"read", "edit"},
 	}, nil)
 	require.NoError(t, err)

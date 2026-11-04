@@ -131,6 +131,12 @@ func applyPermissiveCORS(w http.ResponseWriter, req *http.Request) bool {
 }
 
 func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
+	// Claude's grant-bearing endpoint is never available on the shared router,
+	// including CORS preflights. OAuth callback routes remain unaffected.
+	if req.URL.Path == "/v1/mcp" {
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+		return
+	}
 	correlation := req.Header.Get("X-Correlation-Id")
 	if correlation == "" {
 		correlation = req.Header.Get("X-Request-Id")
@@ -1006,7 +1012,7 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 		r.broadcastConversation(*result.ConversationMessage)
 	}
 	if r.managed != nil {
-		r.managed.OfferDirect(result.Message.To)
+		offerEnqueuedDirect(r.managed, result.Message.To, result.Message.ID, "initial")
 	}
 	// Source selection belongs to the router-owned durable directory. The
 	// caller's HTTP/reminder/policy origin never chooses a transport.
@@ -1019,19 +1025,19 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 		// recipient source, so source resolution intentionally leaves this row
 		// unclaimed until the router selects its in-memory delivery lease.
 		if r.managed != nil {
-			r.managed.OfferDirect(result.Message.To)
+			offerEnqueuedDirect(r.managed, result.Message.To, result.Message.ID, "resolved")
 		}
 		r.offerAgent(result.Message.To)
 		return
 	}
 	if target.SourceKind == "managed" {
 		if r.managed != nil {
-			r.managed.OfferDirect(target.OwnerIdentity)
+			offerEnqueuedDirect(r.managed, target.OwnerIdentity, result.Message.ID, "resolved")
 		}
 		return
 	}
 	if r.managed != nil {
-		r.managed.OfferDirect(result.Message.To)
+		offerEnqueuedDirect(r.managed, result.Message.To, result.Message.ID, "resolved")
 	}
 	r.offerAgent(result.Message.To)
 }

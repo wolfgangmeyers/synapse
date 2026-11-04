@@ -11,9 +11,12 @@ import (
 	"github.com/sky-valley/pi/ai"
 )
 
-// The shared Pi catalog remains broad. Embedded authority comes only from the
-// pinned Codex SDK model and this router's private credential, even for defaults.
+// Catalog selection is not credential authority. Pi keeps its existing admission;
+// Claude aliases use local CLI preflight at launch and process acquisition.
 func (m *Manager) admitEmbeddedModel(ctx context.Context, candidate Model) (Model, error) {
+	if candidate.Provider == claudeCodeProvider {
+		return claudeCodeModel(candidate.ID)
+	}
 	if candidate.Provider == "google" || candidate.Provider == "google-vertex" {
 		return candidate, nil
 	}
@@ -57,11 +60,12 @@ func (m *Manager) validateEmbeddedWorkingDirectory(cwd string) error {
 
 // admitWorkflowStateTool verifies whether the specified tool is permitted by the agent's current active workflow state or worker tool settings.
 // 1. Check if agent is currently in an active workflow state with allowed_tools defined:
-//    - If so: workflow state completely overrides. If tool is in allowed_tools (or required tool), allow. Otherwise block with reason.
+//   - If so: workflow state completely overrides. If tool is in allowed_tools (or required tool), allow. Otherwise block with reason.
+//
 // 2. If agent is NOT in an active workflow state with allowed_tools:
-//    - Fetch agent tools using s.GetAgentTools(ctx, agentID).
-//    - Find the tool by name. If tool is present and !tool.Enabled:
-//      - Return fmt.Errorf("tool %q is disabled for worker %q", toolName, agentID)
+//   - Fetch agent tools using s.GetAgentTools(ctx, agentID).
+//   - Find the tool by name. If tool is present and !tool.Enabled:
+//   - Return fmt.Errorf("tool %q is disabled for worker %q", toolName, agentID)
 func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolName string) error {
 	if s == nil || agentID == "" {
 		return nil

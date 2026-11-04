@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,7 +22,7 @@ import (
 )
 
 // Uses the ordinary SDK resolver. Only the external HTTP transport is mocked.
-func securityBoundaryManager(t *testing.T, script string) (*Manager, *store.Store, string, string, *atomic.Int32) {
+func securityBoundaryManager(t *testing.T, script string, captures ...http.RoundTripper) (*Manager, *store.Store, string, string, *atomic.Int32) {
 	t.Helper()
 	ctx := context.Background()
 	base := testfixture.PrivateDir(t)
@@ -39,9 +41,25 @@ func securityBoundaryManager(t *testing.T, script string) (*Manager, *store.Stor
 		{Provider: "openai-codex", Label: "ChatGPT", Status: "signed_out"},
 		{Provider: "google", Label: "Google", Status: "authenticated", Authenticated: true},
 		{Provider: "cursor", Label: "Cursor", Status: "signed_out"},
+		{Provider: "google-vertex", Label: "Google Vertex AI", Status: "signed_out"},
 	}, []store.ManagedProviderModel{{Provider: "google", ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Available: true}})
 	require.NoError(t, err)
 	calls := &atomic.Int32{}
+	// The embedded Google implementation uses a fresh client with the default
+	// transport, bypassing the SDK provider registry. Fail closed for every URL.
+	originalTransport := http.DefaultTransport
+	var capture http.RoundTripper
+	if len(captures) > 0 {
+		capture = captures[0]
+	}
+	if capture == nil {
+		capture = codexTestRoundTrip(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return &http.Response{StatusCode: 400, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("offline provider fixture")), Request: r}, nil
+		})
+	}
+	http.DefaultTransport = capture
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 	// Keep the real Google adapter and resolver. Inject only its HTTP boundary
 	// so a regressed guard cannot send even the synthetic ambient key externally.
 	google, ok := ai.GetApiProvider("google-generative-ai")
@@ -98,10 +116,10 @@ func securityNoReservation(t *testing.T, db *store.Store, name, request string) 
 	require.ErrorIs(t, err, sql.ErrNoRows)
 }
 
-func TestEmbeddedAvailableGoogleRejectedAtEverySelectionBoundary(t *testing.T) {
+func TestEmbeddedAvailableGoogleAcceptedAtEverySelectionBoundary(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "offline-ambient-google-key")
 	ctx := context.Background()
-	m, db, project, _, calls := securityBoundaryManager(t, securityDoneSSE)
+	m, db, project, _, calls := securityBoundaryManager(t, securityDoneSSE, nil)
 	google := Model{Provider: "google", ID: "gemini-2.5-flash"}
 	catalog, err := m.catalog.Catalog(ctx)
 	require.NoError(t, err)
@@ -115,36 +133,61 @@ func TestEmbeddedAvailableGoogleRejectedAtEverySelectionBoundary(t *testing.T) {
 		} else {
 			_, err = m.Launch(ctx, request)
 		}
-		require.True(t, IsModelUnavailable(err))
-		securityNoReservation(t, db, request.Name, request.RequestID)
+		require.NoError(t, err)
+		saved, err := db.ManagedAgent(ctx, request.Name)
+		require.NoError(t, err)
+		require.Equal(t, google.Provider, saved.SelectedModel.Provider)
 	}
 	require.NoError(t, db.SetDefaultModel(ctx, &store.ManagedModel{Provider: google.Provider, ID: google.ID}))
 	_, err = m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "google-default", Cwd: project, Runtime: "embedded", RequestID: "google-default-launch"})
-	require.True(t, IsModelUnavailable(err))
-	securityNoReservation(t, db, "google-default", "google-default-launch")
+	require.NoError(t, err)
+	defaultAgent, err := db.ManagedAgent(ctx, "google-default")
+	require.NoError(t, err)
+	require.Equal(t, google.Provider, defaultAgent.SelectedModel.Provider)
 	require.NoError(t, db.SetDefaultModel(ctx, nil))
 	_, err = m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "codex-root", Cwd: project, Runtime: "embedded", RequestID: "codex-root-launch"})
 	require.NoError(t, err)
 	owner := securityReady(t, m, db, "codex-root")
-	before, err := db.ManagedAgent(ctx, "codex-root")
-	require.NoError(t, err)
 	_, err = m.launchEmbeddedWorkerFromOwner(ctx, LaunchRequest{Name: "google-child", Cwd: project, Runtime: "embedded", Model: &google, RequestID: "google-child-launch"}, owner)
-	require.True(t, IsModelUnavailable(err))
-	securityNoReservation(t, db, "google-child", "google-child-launch")
-	_, err = m.ReserveRestart(ctx, RestartRequest{AgentID: "codex-root", Model: &google, Method: "POST", CanonicalPath: "/v1/managed-agents/codex-root/restart", RequestID: "google-restart", CanonicalBodyHash: "google"})
-	require.True(t, IsModelUnavailable(err))
-	after, err := db.ManagedAgent(ctx, "codex-root")
 	require.NoError(t, err)
-	require.Equal(t, before.SelectedModel, after.SelectedModel)
+	child, err := db.ManagedAgent(ctx, "google-child")
+	require.NoError(t, err)
+	require.Equal(t, google.Provider, child.SelectedModel.Provider)
+	_, err = m.ReserveRestart(ctx, RestartRequest{AgentID: "codex-root", Model: &google, Method: "POST", CanonicalPath: "/v1/managed-agents/codex-root/restart", RequestID: "google-restart", CanonicalBodyHash: "google"})
+	require.NoError(t, err)
+	restarted, err := db.ManagedAgent(ctx, "codex-root")
+	require.NoError(t, err)
+	require.Equal(t, google.Provider, restarted.SelectedModel.Provider)
+	require.Equal(t, google.ID, restarted.SelectedModel.ID)
 	_, err = db.ManagedOperation(ctx, "google-restart")
-	require.ErrorIs(t, err, sql.ErrNoRows)
+	require.NoError(t, err)
+	unsupported := Model{Provider: "unsupported-fixture", ID: "fixture-model"}
+	_, err = m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "unsupported-root", Cwd: project, Runtime: "embedded", Model: &unsupported, RequestID: "unsupported-launch"})
+	require.True(t, IsModelUnavailable(err))
+	securityNoReservation(t, db, "unsupported-root", "unsupported-launch")
 	require.Zero(t, calls.Load())
 }
 
-func TestEmbeddedRestoredNonCodexFailsBeforeSDKAndPersistence(t *testing.T) {
+func TestEmbeddedRestoredGoogleDispatchesAndPersists(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "offline-ambient-google-key")
 	ctx := context.Background()
-	m, db, project, _, calls := securityBoundaryManager(t, securityDoneSSE)
+	type capturedRequest struct {
+		method, url, body string
+		headers           http.Header
+	}
+	var mu sync.Mutex
+	var requests []capturedRequest
+	capture := codexTestRoundTrip(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		requests = append(requests, capturedRequest{r.Method, r.URL.String(), string(body), r.Header.Clone()})
+		mu.Unlock()
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"restored fixture answer\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n")), Request: r}, nil
+	})
+	m, db, project, _, _ := securityBoundaryManager(t, securityDoneSSE, capture)
 	_, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: "restore-provider", Cwd: project, Runtime: "embedded", RequestID: "restore-provider-launch"})
 	require.NoError(t, err)
 	owner := securityReady(t, m, db, "restore-provider")
@@ -159,17 +202,47 @@ func TestEmbeddedRestoredNonCodexFailsBeforeSDKAndPersistence(t *testing.T) {
 	saved, err = db.ManagedAgent(ctx, owner.binding.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "google", saved.SelectedModel.Provider)
-	err = m.runEmbeddedSessionPrompt(context.WithValue(ctx, embeddedOwnerContextKey{}, owner), *saved, "must not dispatch")
-	require.Error(t, err)
+	err = m.runEmbeddedSessionPrompt(context.WithValue(ctx, embeddedOwnerContextKey{}, owner), *saved, "restored Google prompt")
+	require.NoError(t, err)
 	after, err := db.ReopenEmbedded(ctx, owner.binding)
 	require.NoError(t, err)
-	require.Equal(t, before.Entries, after.Entries)
-	require.Zero(t, calls.Load())
+	mu.Lock()
+	captured := append([]capturedRequest(nil), requests...)
+	mu.Unlock()
+	require.Len(t, captured, 1)
+	request := captured[0]
+	require.Equal(t, "POST", request.method)
+	parsedURL, err := url.Parse(request.url)
+	require.NoError(t, err)
+	require.Equal(t, "https", parsedURL.Scheme)
+	require.Equal(t, "generativelanguage.googleapis.com", parsedURL.Host)
+	require.Equal(t, "/v1beta/models/gemini-2.5-flash:streamGenerateContent", parsedURL.Path)
+	require.Equal(t, []string{"offline-ambient-google-key"}, parsedURL.Query()["key"])
+	require.Equal(t, 1, strings.Count(request.url, "offline-ambient-google-key"))
+	require.Equal(t, "sse", parsedURL.Query().Get("alt"))
+	var parsedBody map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(request.body), &parsedBody))
+	require.Contains(t, string(parsedBody["contents"]), "restored Google prompt")
+	headers, err := json.Marshal(request.headers)
+	require.NoError(t, err)
+	require.NotContains(t, string(headers), "offline-ambient-google-key")
+	require.NotContains(t, request.body, "offline-ambient-google-key")
+	for _, secret := range []string{"security-private-secret-sentinel", "security-refresh-sentinel", "offline-account"} {
+		require.NotContains(t, request.url, secret)
+		require.NotContains(t, string(headers), secret)
+		require.NotContains(t, request.body, secret)
+	}
+	require.GreaterOrEqual(t, len(after.Entries), len(before.Entries)+2)
+	require.Equal(t, before.Entries, after.Entries[:len(before.Entries)])
+	final := after.Entries[len(after.Entries)-1]
+	require.Equal(t, "assistant", final.Kind)
+	require.Contains(t, string(final.Body), "restored fixture answer")
+	require.Contains(t, string(final.Body), `"stopReason":"stop"`)
 }
 
 func TestEmbeddedCredentialTreeDeniedBeforeRootWorkerAndRestoredTools(t *testing.T) {
 	ctx := context.Background()
-	m, db, project, credentialPath, calls := securityBoundaryManager(t, securityDoneSSE)
+	m, db, project, credentialPath, calls := securityBoundaryManager(t, securityDoneSSE, nil)
 	private := filepath.Dir(credentialPath)
 	child := filepath.Join(private, "child")
 	require.NoError(t, os.Mkdir(child, 0700))
@@ -232,7 +305,7 @@ func TestEmbeddedCredentialTreeDeniedBeforeRootWorkerAndRestoredTools(t *testing
 // Ensures configuration/admission does not impose the embedded exclusion on RPC.
 func TestRPCCwdAndCatalogRemainBroadWithCredentialOverlap(t *testing.T) {
 	ctx := context.Background()
-	m, db, _, credentialPath, _ := securityBoundaryManager(t, securityDoneSSE)
+	m, db, _, credentialPath, _ := securityBoundaryManager(t, securityDoneSSE, nil)
 	identity := ProcessIdentity{PID: 123, StartMarker: "rpc-security-start", Incarnation: "rpc-security-incarnation"}
 	process := &launchProcess{identity: identity, stopped: make(chan struct{})}
 	rpc := &launchRPC{}

@@ -176,6 +176,7 @@ type embeddedPersistence struct {
 	goalInvocation           func(string) *store.EmbeddedGoalInvocation
 	toolInvocation           func(string) *store.EmbeddedToolInvocation
 	toolChecked              func(string)
+	resetChecked             func(ai.ToolResultMessage)
 	goalEntry                store.EmbeddedEntry
 	compactionResult         func(ai.ToolResultMessage) (bool, error)
 	pendingCompaction        string
@@ -286,19 +287,7 @@ func (p *embeddedPersistence) bindExecutionUser(ctx context.Context) error {
 	return nil
 }
 
-func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) (retErr error) {
-	// Every user writer (ordinary, mail, steer and recovery notice) converges
-	// here. Bind only after checked persistence, before SDK provider/tool entry.
-	defer func() {
-		if retErr == nil && message.MessageRole() == ai.RoleUser && p.executionToken > 0 {
-			retErr = p.bindExecutionUser(ctx)
-		}
-	}()
-	defer func() {
-		if retErr != nil {
-			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", p.binding.AgentID, p.source, p.msgID, retErr)
-		}
-	}()
+func (p *embeddedPersistence) projectMessage(ctx context.Context, message agent.AgentMessage) {
 	if message.MessageRole() == ai.RoleUser {
 		p.currentThinking = ""
 		p.currentTurnAssistantText = ""
@@ -480,6 +469,39 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 			}
 		}
 	}
+}
+
+func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.AgentMessage) error {
+	return p.appendMessage(ctx, message, false)
+}
+
+// AppendCheckedMessage retains checked validators and callbacks, but projects
+// thinking/tool success only after the checked append and result observations.
+// Unlike Pi's SDK callback this is suitable for serialized Claude translation.
+func (p *embeddedPersistence) AppendCheckedMessage(ctx context.Context, message agent.AgentMessage) error {
+	if err := p.appendMessage(ctx, message, true); err != nil {
+		return err
+	}
+	p.projectMessage(ctx, message)
+	return nil
+}
+
+func (p *embeddedPersistence) appendMessage(ctx context.Context, message agent.AgentMessage, checkedFirst bool) (retErr error) {
+	// Every user writer (ordinary, mail, steer and recovery notice) converges
+	// here. Bind only after checked persistence, before SDK provider/tool entry.
+	defer func() {
+		if retErr == nil && message.MessageRole() == ai.RoleUser && p.executionToken > 0 {
+			retErr = p.bindExecutionUser(ctx)
+		}
+	}()
+	defer func() {
+		if retErr != nil {
+			log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", p.binding.AgentID, p.source, p.msgID, retErr)
+		}
+	}()
+	if !checkedFirst {
+		p.projectMessage(ctx, message)
+	}
 	if result, ok := message.(ai.ToolResultMessage); ok && result.ToolName == "mecha_context" && p.compactionResult != nil {
 		compact, err := p.compactionResult(result)
 		if err != nil {
@@ -645,6 +667,9 @@ func (p *embeddedPersistence) AppendMessage(ctx context.Context, message agent.A
 	if err == nil {
 		p.seq, p.digest = entry.Sequence, entry.Digest
 		p.traceChecked(message)
+		if result, ok := message.(ai.ToolResultMessage); ok && p.resetChecked != nil {
+			p.resetChecked(result)
+		}
 		if result, ok := message.(ai.ToolResultMessage); ok && p.toolChecked != nil {
 			p.toolChecked(result.ToolCallID)
 		}
@@ -1027,19 +1052,21 @@ const (
 	embeddedThinkingOnlyPrompt = "You generated internal thinking without taking action or responding. Please execute your next tool call or provide your response to proceed."
 )
 
-func (m *Manager) nudgeEmbeddedSessionIfNeeded(ctx context.Context, session *coding.Session, p *embeddedPersistence) {
+func (m *Manager) nudgeEmbeddedSessionIfNeeded(ctx context.Context, session embeddedRuntime, p *embeddedPersistence) {
 	if p != nil && m.isWorkerSelfTerminationPending(p.binding.AgentID) {
 		return
 	}
-	if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+	if p.toolExecuted && len(strings.TrimSpace(session.Snapshot().LastAssistantText)) == 0 {
 		_, _ = session.Run(ctx, embeddedSynthesisPrompt)
-	} else if !p.toolExecuted && !p.toolCallReceived && len(strings.TrimSpace(session.LastAssistantText())) == 0 && p.thinkingGenerated {
+	} else if !p.toolExecuted && !p.toolCallReceived && len(strings.TrimSpace(session.Snapshot().LastAssistantText)) == 0 && p.thinkingGenerated {
 		_, _ = session.Run(ctx, embeddedThinkingOnlyPrompt)
-		if p.toolExecuted && len(strings.TrimSpace(session.LastAssistantText())) == 0 {
+		if p.toolExecuted && len(strings.TrimSpace(session.Snapshot().LastAssistantText)) == 0 {
 			_, _ = session.Run(ctx, embeddedSynthesisPrompt)
 		}
 	}
 }
+
+var errEmbeddedExecutionUnsettled = errors.New("embedded execution did not settle")
 
 func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.ManagedAgentRecord, explicitPrompt string, mail *store.EmbeddedMailAttempt, continuation *store.EmbeddedGoalEvaluationKey, wake *embeddedClaimedWakeScope, wakePrompts []agent.AgentMessage) (finalSeq int64, turnErr error) {
 	owner, ok := ctx.Value(embeddedOwnerContextKey{}).(embeddedOwner)
@@ -1047,12 +1074,25 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, errors.New("embedded runner requires claimed owner")
 	}
 	binding := owner.binding
+	if m.laneFor(binding.AgentID).embeddedResetPending() {
+		return 0, &store.ManagedAgentNotReadyError{AgentID: binding.AgentID}
+	}
+
 	executionToken, executionErr := m.store.EnterEmbeddedSDKExecution(ctx, binding, continuation)
 	if executionErr != nil {
 		return 0, executionErr
 	}
 	var p *embeddedPersistence
+	var runtime embeddedRuntime
+	var claudeCloseOnce sync.Once
+	var claudeCloseErr error
 	settleExecution := func() error {
+		if claude, ok := runtime.(*claudeCodeRuntime); ok {
+			claudeCloseOnce.Do(func() { claudeCloseErr = claude.closeScoped() })
+			if claudeCloseErr != nil {
+				return claudeCloseErr
+			}
+		}
 		if p != nil {
 			return p.clearExecution()
 		}
@@ -1068,8 +1108,8 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return nil
 	}
 	defer func() {
-		if err := settleExecution(); err != nil && turnErr == nil {
-			turnErr = err
+		if err := settleExecution(); err != nil {
+			turnErr = errors.Join(turnErr, errEmbeddedExecutionUnsettled, err)
 		}
 	}()
 
@@ -1105,7 +1145,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if settleErr != nil && turnErr == nil {
 			turnErr = settleErr
 		}
-		if session != nil {
+		if runtime != nil {
 			isStaleEpoch := false
 			if m.store != nil {
 				if currentAgent, err := m.store.ManagedAgent(context.Background(), binding.AgentID); err == nil && currentAgent != nil && currentAgent.SessionEpoch > binding.Epoch {
@@ -1113,12 +1153,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				}
 			}
 			if !isStaleEpoch {
-				tokens := embeddedProjectedTokens(session.History())
+				snapshot := runtime.Snapshot()
+				tokens := snapshot.ContextTokens
 				window := 0
-				if model != nil && model.ContextWindow > 0 {
+				if model != nil && model.Provider == claudeCodeProvider {
+					window = snapshot.ContextWindow
+					m.laneFor(binding.AgentID).setClaudeWindow(binding, saved.SelectedModel.ID, window)
+				} else if model != nil && model.ContextWindow > 0 {
 					window = model.ContextWindow
-				} else if session.Model != nil {
-					window = session.Model.ContextWindow
+				} else {
+					window = snapshot.ContextWindow
 				}
 				m.updateAgentContextUsage(binding.AgentID, &tokens, window)
 			}
@@ -1131,7 +1175,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			log.Printf("[embedded:%s] Turn finished successfully (seq: %d)", binding.AgentID, p.seq)
 		}
 		if p != nil && p.toolExecuted {
-			m.laneFor(binding.AgentID).consecutiveContinuations = 0
+			m.laneFor(binding.AgentID).consecutiveContinuations.Store(0)
 		}
 		if errors.Is(turnErr, context.Canceled) || (turnErr != nil && strings.Contains(turnErr.Error(), "context canceled")) {
 			_ = m.store.ResetEmbeddedAgentInterrupt(context.Background(), binding.AgentID)
@@ -1139,7 +1183,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			_ = m.store.SetEmbeddedActivityState(context.Background(), binding, "idle")
 		}
 		m.publishProjection()
-		if settleErr == nil && (mail == nil || turnErr == nil) && !m.isWorkerSelfTerminationPending(binding.AgentID) {
+		if explicitPrompt != ContextResetWakePrompt && settleErr == nil && (mail == nil || turnErr == nil) && !m.isWorkerSelfTerminationPending(binding.AgentID) {
 			m.OfferDirect(binding.AgentID)
 		}
 		m.checkWorkerSelfTerminationAfterTurn(context.Background(), binding.AgentID)
@@ -1154,12 +1198,16 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, err
 	}
 	var err error
-	model, err = ResolveModel(saved.SelectedModel)
+	if saved.SelectedModel.Provider == claudeCodeProvider {
+		model = &ai.Model{Provider: claudeCodeProvider, Api: claudeCodeProvider, ID: saved.SelectedModel.ID, ContextWindow: 1000000}
+	} else {
+		model, err = ResolveModel(saved.SelectedModel)
+	}
 	if err != nil && m.embeddedModelResolver == nil {
 		return 0, err
 	}
 	var injectedStreamModel *ai.Model
-	if m.embeddedModelResolver != nil {
+	if m.embeddedModelResolver != nil && saved.SelectedModel.Provider != claudeCodeProvider {
 		resolved := m.embeddedModelResolver(saved)
 		if resolved == nil {
 			return 0, errors.New("embedded model is unavailable")
@@ -1204,348 +1252,21 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, err
 		}
 	}
-	// Only an intent admitted by this SDK turn may cross the first reservation
-	// window. A recovered intent has no such in-memory admission.
-	freshToolIntents := make(map[string]*store.EmbeddedToolInvocation)
-	toolExecutions := make(map[string]*store.EmbeddedToolInvocation)
-	freshGoalIntents := make(map[string]*store.EmbeddedGoalInvocation)
-	m.mu.Lock()
-	goalProcess := m.embeddedStartupGeneration
-	m.mu.Unlock()
-	type goalExecution struct {
-		invocation *store.EmbeddedGoalInvocation
-		expected   *ai.ToolResultMessage
-	}
-	goalExecutions := make(map[string]goalExecution)
-	var freshWorkerMu sync.Mutex
-	p.toolInvocation = func(id string) *store.EmbeddedToolInvocation {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		return toolExecutions[id]
-	}
-	p.toolChecked = func(id string) {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		delete(toolExecutions, id)
-	}
-	toolAdmitted := func(id string) *store.EmbeddedToolInvocation {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		w := freshToolIntents[id]
-		delete(freshToolIntents, id)
-		// Retain only this actual Execute's witness for its safe error disposition.
-		// Store still requires post-domain completion before any checked result.
-		toolExecutions[id] = w
-		return w
-	}
-	toolCompleted := func(id string, w *store.EmbeddedToolInvocation) {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		toolExecutions[id] = w
-	}
-	freshReminderIntents := make(map[string]bool)
-
-	p.goalInvocation = func(id string) *store.EmbeddedGoalInvocation {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		return goalExecutions[id].invocation
-	}
-	p.goalResult = func(resultCtx context.Context, result ai.ToolResultMessage, commit bool) error {
-		freshWorkerMu.Lock()
-		execution := goalExecutions[result.ToolCallID]
-		if commit {
-			delete(goalExecutions, result.ToolCallID)
-		}
-		freshWorkerMu.Unlock()
-		if execution.expected == nil && result.ToolName != "goal" && result.ToolName != "goal_snooze" && result.ToolName != "workflow_snooze" {
-			return nil
-		}
-		if !commit {
-			if execution.expected == nil {
-				// Pure pre-intent denials may be checked; saved DOMAIN/SDK
-				// evidence is never a substitute for this Execute's completion.
-				if result.IsError {
-					_, err := m.store.RecoverEmbeddedEffect(resultCtx, binding, result.ToolCallID)
-					if errors.Is(err, sql.ErrNoRows) {
-						return nil
-					}
-					if err != nil {
-						return err
-					}
-				}
-				return errors.New("goal outcome unknown: no current Host Execute completion")
-			}
-			actual, err := json.Marshal(result.Content)
-			if err != nil {
-				return err
-			}
-			expected, err := json.Marshal(execution.expected.Content)
-			if err != nil {
-				return err
-			}
-			if result.ToolCallID != execution.expected.ToolCallID || result.ToolName != execution.expected.ToolName || result.IsError || !bytes.Equal(actual, expected) {
-				return errors.New("goal SDK result differs from current Host Execute")
-			}
-			return m.store.RenewEmbeddedOwner(resultCtx, binding, owner.identity, embeddedOwnerTTL)
-		}
-		if execution.invocation != nil {
-			return m.store.ObserveEmbeddedGoalInvocation(resultCtx, execution.invocation, p.goalEntry)
-		}
-		return nil
-	}
-	goalAdmitted := func(id string) *store.EmbeddedGoalInvocation {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		w := freshGoalIntents[id]
-		delete(freshGoalIntents, id)
-		return w
-	}
-	goalCompleted := func(id string, w *store.EmbeddedGoalInvocation, result ai.ToolResultMessage) {
-		freshWorkerMu.Lock()
-		defer freshWorkerMu.Unlock()
-		goalExecutions[id] = goalExecution{invocation: w, expected: &result}
-	}
-	compactionResults := make(map[string]*ai.ToolResultMessage)
-	p.compactionResult = func(result ai.ToolResultMessage) (bool, error) {
-		freshWorkerMu.Lock()
-		expected := compactionResults[result.ToolCallID]
-		delete(compactionResults, result.ToolCallID)
-		freshWorkerMu.Unlock()
-		if expected == nil {
-			return false, nil
-		} // status never starts a compaction
-		if result.IsError || result.ToolName != expected.ToolName || result.ToolCallID != expected.ToolCallID {
-			return false, errors.New("compaction SDK result has no fresh checked request")
-		}
-		actual, err := json.Marshal(result.Content)
-		if err != nil {
-			return false, err
-		}
-		saved, err := json.Marshal(expected.Content)
-		if err != nil {
-			return false, err
-		}
-		if !bytes.Equal(actual, saved) {
-			return false, errors.New("compaction SDK result differs from saved request")
-		}
-		return true, nil
-	}
-	// Each SDK execution has its own expected result. A reused call ID must not
-	// inherit the fresh execution's permission to observe an effect again.
-	type reminderExecution struct {
-		expected  *ai.ToolResultMessage
-		replay    bool
-		uncertain bool
-	}
-	reminderExecutions := make(map[string]reminderExecution)
-	p.reminderResult = func(resultCtx context.Context, result ai.ToolResultMessage, commit bool) error {
-		freshWorkerMu.Lock()
-		execution := reminderExecutions[result.ToolCallID]
-		freshWorkerMu.Unlock()
-		if result.IsError {
-			if commit {
-				if !execution.replay {
-					body, err := json.Marshal(result)
-					if err != nil {
-						return err
-					}
-					_ = m.store.ObserveEmbeddedEffect(resultCtx, binding, result.ToolCallID, body)
-				}
-				freshWorkerMu.Lock()
-				delete(reminderExecutions, result.ToolCallID)
-				delete(freshReminderIntents, result.ToolCallID)
-				freshWorkerMu.Unlock()
-			}
-			return nil
-		}
-		if execution.uncertain {
-			return errors.New("reminder outcome unknown: no checked SDK result")
-		}
-		if !commit && execution.expected != nil {
-			actualContent, err := json.Marshal(result.Content)
-			if err != nil {
-				return err
-			}
-			expectedContent, err := json.Marshal(execution.expected.Content)
-			if err != nil {
-				return err
-			}
-			if result.ToolCallID != execution.expected.ToolCallID || result.ToolName != execution.expected.ToolName || result.IsError != execution.expected.IsError || !bytes.Equal(actualContent, expectedContent) {
-				return errors.New("reminder SDK result differs from saved effect")
-			}
-		}
-		if commit {
-			if execution.expected != nil && !execution.replay {
-				body, err := json.Marshal(result)
-				if err != nil {
-					return err
-				}
-				if err := m.store.ObserveEmbeddedEffect(resultCtx, binding, result.ToolCallID, body); err != nil {
-					return err
-				}
-			}
-			freshWorkerMu.Lock()
-			delete(reminderExecutions, result.ToolCallID)
-			delete(freshReminderIntents, result.ToolCallID)
-			freshWorkerMu.Unlock()
-		}
-		return nil
-	}
-	// A non-nil list, even when empty, excludes every SDK built-in.
-	tools := []agent.AgentTool{}
-	role, err := m.store.EmbeddedSessionRole(ctx, binding)
+	authority, err := m.newEmbeddedTurnToolAuthority(ctx, owner, p, saved, explicitPrompt == "" && mail == nil && continuation == nil && wake == nil)
 	if err != nil {
 		return 0, err
 	}
-	if role == "root" || role == "worker" {
-		tools = append(tools, m.embeddedAddressedTool(owner, "mecha_mailbox_send", toolAdmitted, toolCompleted))
-		tools = append(tools, m.embeddedSendImageTool(owner, toolAdmitted, toolCompleted))
-		tools = append(tools, m.embeddedGoalTool(owner, goalAdmitted, goalCompleted))
-		tools = append(tools, m.embeddedGoalSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
-			return store.EmbeddedGoalSnoozeTurn{UserSeq: p.turnSeq, UserDigest: p.turnDigest}
-		}, goalAdmitted, goalCompleted))
-		tools = append(tools, m.embeddedWorkflowSnoozeTool(owner, func() store.EmbeddedGoalSnoozeTurn {
-			return store.EmbeddedGoalSnoozeTurn{UserSeq: p.turnSeq, UserDigest: p.turnDigest}
-		}, goalAdmitted, goalCompleted))
-		tools = append(tools, m.embeddedCompactionTool(owner))
-		tools = append(tools, m.embeddedReminderTool(owner, func(id string) bool {
-			freshWorkerMu.Lock()
-			defer freshWorkerMu.Unlock()
-			fresh := freshReminderIntents[id]
-			delete(freshReminderIntents, id)
-			return fresh
-		}, func(id string) {
-			freshWorkerMu.Lock()
-			state := reminderExecutions[id]
-			state.uncertain = true
-			reminderExecutions[id] = state
-			freshWorkerMu.Unlock()
-		}, func(id string, expected ai.ToolResultMessage, replay bool) {
-			freshWorkerMu.Lock()
-			reminderExecutions[id] = reminderExecution{expected: &expected, replay: replay}
-			freshWorkerMu.Unlock()
-		}))
-		resetCB := func(req contextResetRequest) {
-			m.mu.Lock()
-			if m.contextResetRequested == nil {
-				m.contextResetRequested = make(map[string]contextResetRequest)
-			}
-			m.contextResetRequested[owner.binding.AgentID] = req
-			m.mu.Unlock()
-		}
-		tools = append(tools, m.embeddedContextResetTool(owner, resetCB, "context_reset"))
-		if role == "worker" {
-			terminateCB := func(req workerSelfTerminateRequest) {
-				m.mu.Lock()
-				if m.workerSelfTerminateRequested == nil {
-					m.workerSelfTerminateRequested = make(map[string]workerSelfTerminateRequest)
-				}
-				m.workerSelfTerminateRequested[owner.binding.AgentID] = req
-				m.mu.Unlock()
-			}
-			tools = append(tools, m.embeddedWorkerTerminateTool(owner, terminateCB))
-		}
-		tools = append(tools, m.embeddedScratchpadTool(owner))
-		tools = append(tools, m.embeddedKBSearchTool(owner))
-		tools = append(tools, m.embeddedKBReadTool(owner))
-		tools = append(tools, m.embeddedKBWriteTool(owner))
-		tools = append(tools, m.embeddedKBDeleteTool(owner))
-		tools = append(tools, m.embeddedKBListTool(owner))
-		tools = append(tools, m.embeddedWorkflowTransitionTool(owner, "mecha_workflow_transition"))
-		tools = append(tools, m.embeddedToolTimeoutTool(owner, "mecha_tool_timeout"))
-		tools = append(tools, m.embeddedRestartRouterTool(owner))
-		tools = append(tools, m.embeddedRequestInlineToolAllowanceTool(owner))
-		tools = append(tools, m.embeddedBashTool(owner, saved.Cwd))
-		readTool, err := coding.CreateTool("read", saved.Cwd)
-		if err != nil {
-			return 0, fmt.Errorf("embedded read tool: %w", err)
-		}
-		readTool.PromptGuidelines = append(readTool.PromptGuidelines, "When you run a command or tool to investigate, continue until the task is complete, or write your answer to the user.", "When a user asks a question or steers your work and you need to gather information or run tools to formulate your answer, always acknowledge the user with a brief conversational response first before starting information gathering.")
-		editTool, err := coding.CreateTool("edit", saved.Cwd)
-		if err != nil {
-			return 0, fmt.Errorf("embedded edit tool: %w", err)
-		}
-		writeTool, err := coding.CreateTool("write", saved.Cwd)
-		if err != nil {
-			return 0, fmt.Errorf("embedded write tool: %w", err)
-		}
-		wrapTool := func(tool agent.AgentTool) agent.AgentTool {
-			original := tool.Execute
-			tool.Execute = func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
-				if err := m.store.RenewEmbeddedOwner(callCtx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
-					return agent.AgentToolResult{}, err
-				}
-				role, err := m.store.EmbeddedSessionRole(callCtx, owner.binding)
-				if err != nil {
-					return agent.AgentToolResult{}, err
-				}
-				if role != "root" && role != "worker" {
-					return agent.AgentToolResult{}, fmt.Errorf("%s requires embedded root or worker", tool.Name)
-				}
-				return original(callCtx, id, args, update)
-			}
-			return tool
-		}
-		tools = append(tools, wrapTool(readTool), wrapTool(editTool), wrapTool(writeTool))
-		if m.hasGoogleSearchAuth(ctx) {
-			tools = append(tools, m.embeddedGoogleSearchTool(owner))
-		}
-		if m.hasCodexSearchAuth(ctx) {
-			tools = append(tools, m.embeddedCodexSearchTool(owner))
-		}
-		tools = append(tools, m.EmbeddedSubagentPublicTools(binding)...)
-		tools = append(tools, m.embeddedAgentUrgencyTool(owner, toolAdmitted, toolCompleted))
-		tools = append(tools, m.embeddedProgressTool(owner))
-		tools = append(tools, m.embeddedBlockedTool(owner))
-		tools = append(tools, m.buildSessionTools(&saved)...)
-		tools = append(tools, m.embeddedSessionTools(owner)...)
-		tools = append(tools, m.embeddedWorkflowManagementTools(owner)...)
-	}
-	if m.embeddedExternalTool != nil {
-		tool := *m.embeddedExternalTool
-		if tool.Name == "" || tool.Parameters == nil || tool.Execute == nil {
-			return 0, errors.New("invalid registered embedded external tool")
-		}
-		original := tool.Execute
-		tool.Execute = func(callCtx context.Context, id string, args map[string]any, update agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
-			if m.embeddedAfterIntent != nil {
-				m.embeddedAfterIntent(callCtx)
-			}
-			// The checked SDK admission commits intent before this point. Renew
-			// again at the final boundary: failure cannot authorize Execute.
-			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-				return agent.AgentToolResult{}, err
-			}
-			return original(callCtx, id, args, update)
-		}
-		tools = append(tools, tool)
-	}
-	for i := range tools {
-		tools[i] = m.wrapEmbeddedToolTimeout(binding.AgentID, tools[i])
-	}
-	baseTools := append([]agent.AgentTool(nil), tools...)
+	tools, role := authority.Tools(), authority.role
 	lane := m.laneFor(binding.AgentID)
-	activeWorkflowState, activeStateErr := m.store.GetManagedAgentActiveWorkflowState(ctx, binding.AgentID)
-	if activeStateErr == nil && activeWorkflowState != nil && len(activeWorkflowState.AllowedTools) > 0 {
-		var filteredTools []agent.AgentTool
-		for _, tool := range baseTools {
-			if store.IsToolAllowedInWorkflowState(tool.Name, activeWorkflowState.AllowedTools) {
-				filteredTools = append(filteredTools, tool)
-			}
-		}
-		tools = filteredTools
-	} else if filteredTools, err := m.filterToolsForAgent(ctx, binding.AgentID, baseTools); err == nil {
-		tools = filteredTools
-	}
-	if lane != nil {
-		lane.setTools(baseTools, tools)
-	}
 	var appliedReceipt *store.EmbeddedGoalAppliedReceipt
 	// The SDK invokes StreamFn only when it has selected a provider request.
 	// MessageEnd persistence has already checked the initiating user and any
 	// goal tool result. Never mark a desired revision applied at goal set time.
 	stream := func(requestCtx context.Context, requestModel *ai.Model, transcript ai.TranscriptContext, opts *ai.SimpleStreamOptions) *ai.AssistantMessageEventStream {
 		fail := func(err error) *ai.AssistantMessageEventStream { return ai.ErrorStream(requestModel, err) }
+		if lane.embeddedResetPending() {
+			return fail(&store.ManagedAgentNotReadyError{AgentID: binding.AgentID})
+		}
 		if p.noticeStart {
 			if err := m.store.StartEmbeddedInterruptedNotice(requestCtx, binding, *p.notice); err != nil {
 				return fail(err)
@@ -1657,6 +1378,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if model.MaxTokens > 0 && model.MaxTokens < maxTokens {
 		maxTokens = model.MaxTokens
 	}
+	activeWorkflowState := authority.workflowState
 	workerPrompt := resolveEmbeddedWorkerSystemPrompt(role, binding.AgentID, saved.Cwd)
 	if activeWorkflowState != nil {
 		wfVars := saved.WorkflowVariables
@@ -1664,338 +1386,99 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			workerPrompt = workerPrompt + "\n\n" + guidance
 		}
 	}
-	session = coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
-		ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
-			return nil, nil
-		}, BeforeToolCall: func(callCtx context.Context, call agent.BeforeToolCallContext) *agent.BeforeToolCallResult {
-			if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, call.ToolCall.Name); err != nil {
-				return &agent.BeforeToolCallResult{
-					Block:  true,
-					Reason: err.Error(),
-				}
-			}
-			toolName := call.ToolCall.Name
-			normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
-			if isInlineTool {
-				if m.IsInlineToolsAllowed(callCtx, binding.AgentID) {
-					return nil
-				}
-				// Check if mecha_request_inline_tool_allowance is available to the agent.
-				// If it is NOT available, do not block inline tools.
-				lookupTools := tools
-				if currentLane := m.laneFor(binding.AgentID); currentLane != nil {
-					if dynTools := currentLane.getActiveTools(); len(dynTools) > 0 {
-						lookupTools = dynTools
-					} else if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
-						lookupTools = dynBase
+	if saved.SelectedModel.Provider != claudeCodeProvider {
+		session = coding.NewSession(coding.SessionOptions{SessionID: binding.SessionID, Model: model, Cwd: saved.Cwd, Tools: tools, SystemPrompt: workerPrompt, OrderedPersistence: p, StreamFn: stream, MaxTokens: &maxTokens,
+			ReplayToolResult: func(callCtx context.Context, call agent.BeforeToolCallContext) (*ai.ToolResultMessage, error) {
+				return nil, nil
+			}, BeforeToolCall: func(callCtx context.Context, call agent.BeforeToolCallContext) *agent.BeforeToolCallResult {
+				if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, call.ToolCall.Name); err != nil {
+					return &agent.BeforeToolCallResult{
+						Block:  true,
+						Reason: err.Error(),
 					}
 				}
-				hasAllowanceTool := false
-				for _, t := range lookupTools {
-					if t.Name == InlineToolAllowanceToolName {
-						hasAllowanceTool = true
-						break
+				toolName := call.ToolCall.Name
+				normalizedToolName, isInlineTool := normalizeInlineActionTool(toolName)
+				if isInlineTool {
+					if m.IsInlineToolsAllowed(callCtx, binding.AgentID) {
+						return nil
 					}
-				}
-				if !hasAllowanceTool {
-					return nil
-				}
+					// Check if mecha_request_inline_tool_allowance is available to the agent.
+					// If it is NOT available, do not block inline tools.
+					lookupTools := tools
+					if currentLane := m.laneFor(binding.AgentID); currentLane != nil {
+						if dynTools := currentLane.getActiveTools(); len(dynTools) > 0 {
+							lookupTools = dynTools
+						} else if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
+							lookupTools = dynBase
+						}
+					}
+					hasAllowanceTool := false
+					for _, t := range lookupTools {
+						if t.Name == InlineToolAllowanceToolName {
+							hasAllowanceTool = true
+							break
+						}
+					}
+					if !hasAllowanceTool {
+						return nil
+					}
 
-				// Otherwise, check allowance credits
-				lane := m.laneFor(binding.AgentID)
-				if lane != nil && lane.consumeInlineAllowance(normalizedToolName, time.Now()) {
-					return nil
-				}
-				return &agent.BeforeToolCallResult{
-					Block:  true,
-					Reason: InlineToolBlockReason,
-				}
-			}
-			return nil
-		}, BeforeToolExecute: func(callCtx context.Context, call agent.BeforeToolCallContext) error {
-			if err := p.bindExecutionUser(callCtx); err != nil {
-				return err
-			}
-			toolName := call.ToolCall.Name
-			if err := admitWorkflowStateTool(callCtx, m.store, binding.AgentID, toolName); err != nil {
-				return &agent.PolicyDenial{Reason: err.Error()}
-			}
-			toolCallID := call.ToolCall.ID
-			if toolCallID != "" && toolName != "" {
-				var companionText string
-				if p != nil && p.currentTurnAssistantText != "" {
-					companionText = p.currentTurnAssistantText
-					p.currentTurnAssistantText = ""
-					if p.toolCompanionTexts == nil {
-						p.toolCompanionTexts = make(map[string]string)
+					// Otherwise, check allowance credits
+					lane := m.laneFor(binding.AgentID)
+					if lane != nil && lane.consumeInlineAllowance(normalizedToolName, time.Now()) {
+						return nil
 					}
-					p.toolCompanionTexts[toolCallID] = companionText
-				}
-				if p != nil && toolName != "goal" && toolName != "goal_snooze" && toolName != "workflow_snooze" && toolName != "context_reset" && toolName != "reset" {
-					p.toolExecuted = true
-					if p.toolInputs == nil {
-						p.toolInputs = make(map[string]any)
-					}
-					p.toolInputs[toolCallID] = call.ToolCall.Arguments
-				}
-				invocationKey := fmt.Sprintf("tool:%s:%s", binding.AgentID, toolCallID)
-				entry, err := m.store.RecordManagedCompleteHistoryWithPresentationAndInput(callCtx, binding.AgentID, "managed_tool", "info", "Running "+toolName, invocationKey, &store.ManagedHistoryPresentation{
-					Kind:          "tool",
-					ToolName:      toolName,
-					Outcome:       "active",
-					Summary:       "Running",
-					CompanionText: companionText,
-				}, call.ToolCall.Arguments)
-				if err == nil {
-					m.publishCompleteHistory(entry)
-				}
-			}
-			lookupTools := tools
-			if currentLane := m.laneFor(binding.AgentID); currentLane != nil {
-				if dynTools := currentLane.getActiveTools(); len(dynTools) > 0 {
-					lookupTools = dynTools
-				} else if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
-					lookupTools = dynBase
-				}
-			}
-			var registered *agent.AgentTool
-			for i := range lookupTools {
-				if call.ToolCall.Name == lookupTools[i].Name {
-					registered = &lookupTools[i]
-					break
-				}
-			}
-			if registered == nil || !registered.Parameters.Check(call.ToolCall.Arguments) {
-				return &agent.PolicyDenial{Reason: "embedded external tool schema mismatch"}
-			}
-			// Check the original, uncoerced arguments before durable intent.
-			if call.ToolCall.Name == "goal" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "goal requires embedded root or worker"}
-				}
-				if _, err := embeddedGoalCommand(call.ToolCall.Arguments); err != nil {
-					return &agent.PolicyDenial{Reason: err.Error()}
-				}
-			}
-			if call.ToolCall.Name == "mecha_context" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "context requires own root or worker"}
-				}
-				if len(call.ToolCall.Arguments) != 1 || call.ToolCall.Arguments["action"] != "status" {
-					return &agent.PolicyDenial{Reason: "mecha_context only supports action=status; context is managed via context_reset and scratchpad"}
-				}
-			}
-			if call.ToolCall.Name == "mecha_reminder" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "reminder requires embedded root or worker"}
-				}
-				if _, err := embeddedReminderArguments(call.ToolCall.Arguments); err != nil {
-					return &agent.PolicyDenial{Reason: err.Error()}
-				}
-			}
-			if call.ToolCall.Name == "workflow_snooze" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "workflow snooze requires embedded root or worker"}
-				}
-				if _, _, err := embeddedWorkflowSnoozeArguments(call.ToolCall.Arguments, 600000); err != nil {
-					return &agent.PolicyDenial{Reason: err.Error()}
-				}
-			}
-
-			if call.ToolCall.Name == "goal_snooze" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "goal snooze requires embedded root or worker"}
-				}
-				if call.ToolCall.Arguments == nil {
-					call.ToolCall.Arguments = make(map[string]any)
-				}
-				limitMs := m.goalSnoozeLimitMS(callCtx, binding.AgentID)
-				if _, err := embeddedGoalSnoozeArguments(call.ToolCall.Arguments, limitMs); err != nil {
-					return &agent.PolicyDenial{Reason: err.Error()}
-				}
-			}
-			if call.ToolCall.Name == "context_reset" || call.ToolCall.Name == "reset" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "context reset requires embedded root or worker"}
-				}
-				return nil
-			}
-			if call.ToolCall.Name == "scratchpad" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "scratchpad requires embedded root or worker"}
-				}
-				return nil
-			}
-			if call.ToolCall.Name == "kb_search" || call.ToolCall.Name == "kb_read" || call.ToolCall.Name == "kb_write" || call.ToolCall.Name == "kb_list" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
-				}
-				return nil
-			}
-			if call.ToolCall.Name == "mecha_tool_timeout" || call.ToolCall.Name == "extend_tool_timeout" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
-				}
-				return nil
-			}
-			if call.ToolCall.Name == "read" || call.ToolCall.Name == "edit" || call.ToolCall.Name == "write" || call.ToolCall.Name == "bash" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: call.ToolCall.Name + " requires embedded root or worker"}
-				}
-				if call.ToolCall.Name == "bash" {
-					if _, parseErr := parseEmbeddedBash(call.ToolCall.Arguments); parseErr != nil {
-						return &agent.PolicyDenial{Reason: parseErr.Error()}
+					return &agent.BeforeToolCallResult{
+						Block:  true,
+						Reason: InlineToolBlockReason,
 					}
 				}
 				return nil
-			}
-			if call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
-				if role != "root" && role != "worker" {
-					return &agent.PolicyDenial{Reason: "addressed managed tools require a saved root or worker"}
-				}
-				if call.ToolCall.Name == "mecha_agent_urgency" {
-					if _, err := store.AgentUrgencyArguments(call.ToolCall.Arguments, binding.AgentID); err != nil {
-						return &agent.PolicyDenial{Reason: err.Error()}
-					}
-				} else if call.ToolCall.Name != "mecha_send_image" {
-					if err := embeddedAddressedArguments(call.ToolCall.Name, call.ToolCall.Arguments); err != nil {
-						return &agent.PolicyDenial{Reason: err.Error()}
-					}
-				}
-				if p.notice != nil || p.wake != nil {
-					return &agent.PolicyDenial{Reason: "recovery control sources do not authorize new addressed effects"}
-				}
-				if err := m.authorizeEmbeddedWorkerLaunch(callCtx, owner); err != nil {
-					return err
-				}
-			}
-			intent, err := json.Marshal(call.ToolCall)
-			if err != nil {
-				return err
-			}
-			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-				return err
-			}
-			if call.ToolCall.Name == "goal" && call.ToolCall.Arguments["action"] == "status" {
-				return nil // Read-only status has no unresolved effect intent.
-			}
-			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
-				freshWorkerMu.Lock()
-				delete(freshGoalIntents, call.ToolCall.ID)
-				delete(goalExecutions, call.ToolCall.ID)
-				freshWorkerMu.Unlock()
-				prior, err := m.store.RecoverEmbeddedEffect(callCtx, binding, call.ToolCall.ID)
-				if err == nil {
-					if !bytes.Equal(prior.Intent, intent) {
-						return errors.New("goal call ID conflicts with prior arguments")
-					}
-					return errors.New("goal call outcome unknown or already committed: no new admission")
-				}
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
-				}
-			}
+			}, BeforeToolExecute: authority.BeforeToolExecute})
+		runtime = &piEmbeddedRuntime{Session: session}
+	} else {
+		runtime, err = m.buildClaudeCodeRuntime(ctx, saved, owner, p, authority, workerPrompt, func(receipt *store.EmbeddedGoalAppliedReceipt) { appliedReceipt = receipt })
+		if err != nil {
+			return 0, err
+		}
+	}
 
-			if call.ToolCall.Name == "mecha_reminder" {
-				freshWorkerMu.Lock()
-				reminderExecutions[call.ToolCall.ID] = reminderExecution{}
-				delete(freshReminderIntents, call.ToolCall.ID)
-				freshWorkerMu.Unlock()
-				prior, err := m.store.RecoverEmbeddedEffect(callCtx, binding, call.ToolCall.ID)
-				if err == nil {
-					// A conflicting call is converted to a checked SDK error by Execute.
-					// An identical unknown intent cannot execute again.
-					if bytes.Equal(prior.Intent, intent) && prior.State == "unknown" {
-						return errors.New("reminder outcome unknown: no checked SDK result")
-					}
-					return nil
-				}
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
-				}
-			}
-			if call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
-				freshWorkerMu.Lock()
-				delete(freshToolIntents, call.ToolCall.ID)
-				delete(toolExecutions, call.ToolCall.ID)
-				freshWorkerMu.Unlock()
-				prior, err := m.store.RecoverEmbeddedEffect(callCtx, binding, call.ToolCall.ID)
-				if err == nil {
-					if !bytes.Equal(prior.Intent, intent) {
-						return errors.New("addressed tool call ID conflicts with original arguments")
-					}
-					return errors.New("addressed tool outcome UNKNOWN or already checked: no new execution")
-				}
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
-				}
-			}
-			if call.ToolCall.Name == "mecha_context" && call.ToolCall.Arguments["action"] == "status" {
-				return nil // read-only; no durable effect intent or compaction request
-			}
-			var goalAdmission *store.EmbeddedGoalInvocation
-			var toolAdmission *store.EmbeddedToolInvocation
-			if call.ToolCall.Name == "mecha_mailbox_send" || call.ToolCall.Name == "mecha_send_image" || call.ToolCall.Name == "mecha_agent_urgency" {
-				toolAdmission, err = m.store.RecordEmbeddedToolInvocation(callCtx, binding, goalProcess, p.turnSeq, p.turnDigest, p.mailAttempt, call.ToolCall)
-			} else if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
-				goalAdmission, err = m.store.RecordEmbeddedGoalInvocation(callCtx, binding, goalProcess, p.turnSeq, p.turnDigest, p.mailAttempt, call.ToolCall.ID, intent)
-			} else {
-				err = m.store.RecordEmbeddedEffectIntent(callCtx, binding, call.ToolCall.ID, intent)
-			}
-			if err != nil {
-				return err
-			}
-			aliasTrace("checked-intent", binding.AgentID, binding.SessionID, binding.Generation, call.ToolCall.ID)
-			if m.embeddedAfterCheckedIntent != nil {
-				m.embeddedAfterCheckedIntent(callCtx)
-			}
-			// Intent is durable, but ownership may change before this callback
-			// returns. Fail admission here, not inside Execute's checked result path.
-			if err := m.store.RenewEmbeddedOwner(callCtx, binding, owner.identity, embeddedOwnerTTL); err != nil {
-				return err
-			}
-
-			if call.ToolCall.Name == "mecha_reminder" {
-				freshWorkerMu.Lock()
-				freshReminderIntents[call.ToolCall.ID] = true
-				freshWorkerMu.Unlock()
-			}
-			if call.ToolCall.Name == "goal" || call.ToolCall.Name == "goal_snooze" || call.ToolCall.Name == "workflow_snooze" {
-				freshWorkerMu.Lock()
-				freshGoalIntents[call.ToolCall.ID] = goalAdmission
-				freshWorkerMu.Unlock()
-			}
-
-			if toolAdmission != nil {
-				freshWorkerMu.Lock()
-				freshToolIntents[call.ToolCall.ID] = toolAdmission
-				freshWorkerMu.Unlock()
-			}
-			return nil
-		}})
+	if m.embeddedRuntimeTestWrapper != nil {
+		runtime = m.embeddedRuntimeTestWrapper(runtime, authority)
+	}
 	lane = m.laneFor(saved.AgentID)
-	lane.activeMu.Lock()
-	lane.activeSession = session
-	lane.activePersistence = p
-	lane.activeMu.Unlock()
+	if !lane.installEmbeddedRuntime(runtime, p) {
+		runtime.Close()
+		return 0, &store.ManagedAgentNotReadyError{AgentID: binding.AgentID}
+	}
+	defer lane.removeEmbeddedRuntime(runtime)
 	defer func() {
-		lane.activeMu.Lock()
-		lane.activeSession = nil
-		lane.activePersistence = nil
-		lane.activeMu.Unlock()
+		var closeErr error
+		if claude, ok := runtime.(*claudeCodeRuntime); ok {
+			claudeCloseOnce.Do(func() { claudeCloseErr = claude.closeScoped() })
+			closeErr = claudeCloseErr
+		} else {
+			runtime.Close()
+		}
+		settleErr := settleExecution()
+		turnErr = errors.Join(turnErr, closeErr, settleErr)
+		m.finishToolContextReset(context.Background(), binding, closeErr == nil && settleErr == nil)
 	}()
 	m.activeSessionsMu.Lock()
-	m.activeEmbeddedSessions[saved.AgentID] = session
+	m.activeEmbeddedSessions[saved.AgentID] = runtime
 	m.activeSessionsMu.Unlock()
 	defer func() {
 		m.activeSessionsMu.Lock()
-		if m.activeEmbeddedSessions[saved.AgentID] == session {
+		if m.activeEmbeddedSessions[saved.AgentID] == runtime {
 			delete(m.activeEmbeddedSessions, saved.AgentID)
 		}
 		m.activeSessionsMu.Unlock()
 	}()
-	if err := p.restore(ctx, session); err != nil {
-		return 0, err
+	if session != nil {
+		if err := p.restore(ctx, session); err != nil {
+			return 0, err
+		}
 	}
 	var recoveryNotice *store.EmbeddedInterruptedNotice
 	var resumeUnentered bool
@@ -2028,22 +1511,18 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	}
 	// The SDK transform runs on the serial provider lane after AppendMessage
 	// persisted the checked tool result, including on tool continuations.
-	session.Agent.TransformContext = func(requestCtx context.Context, messages []agent.AgentMessage) []agent.AgentMessage {
-		view, err := m.fitEmbeddedContext(requestCtx, p, owner, model, stream, messages)
-		if err != nil {
-			// The SDK transform has no error return. Its ordered run boundary
-			// converts this into a failed turn before ordinary provider entry.
-			panic(err)
-		}
-		return view
-	}
-	hasUser := false
-	for _, message := range session.History() {
-		if message.MessageRole() == "user" {
-			hasUser = true
-			break
+	if session != nil {
+		session.Agent.TransformContext = func(requestCtx context.Context, messages []agent.AgentMessage) []agent.AgentMessage {
+			view, err := m.fitEmbeddedContext(requestCtx, p, owner, model, stream, messages)
+			if err != nil {
+				// The SDK transform has no error return. Its ordered run boundary
+				// converts this into a failed turn before ordinary provider entry.
+				panic(err)
+			}
+			return view
 		}
 	}
+	hasUser := runtime.Snapshot().HasUser
 	handleTurnErr := func(err error) error {
 		if err != nil {
 			turnErr = err
@@ -2074,7 +1553,14 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if wake != nil {
 		// ClaimEmbeddedRestartWake already starts an interrupted 076 notice.
 		// Do not enter the ordinary recovery path, which starts it again.
-		if err := handleTurnErr(p.runClaimedWake(ctx, session, *wake, wakePrompts)); err != nil {
+		var beforeComplete func() error
+		if claude, ok := runtime.(*claudeCodeRuntime); ok {
+			beforeComplete = func() error {
+				claudeCloseOnce.Do(func() { claudeCloseErr = claude.closeScoped() })
+				return claudeCloseErr
+			}
+		}
+		if err := handleTurnErr(p.runClaimedWake(ctx, runtime, *wake, wakePrompts, beforeComplete)); err != nil {
 			return 0, err
 		}
 		return p.seq, nil
@@ -2087,7 +1573,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				return 0, err
 			}
 			p.noticeStart = true
-			if err := handleTurnErr(session.Continue(ctx)); err != nil {
+			if err := handleTurnErr(runtime.Continue(ctx)); err != nil {
 				return 0, err
 			}
 			return p.seq, nil
@@ -2098,7 +1584,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if err != nil {
 			return 0, err
 		}
-		_, err = session.RunMessages(ctx, []agent.AgentMessage{message})
+		_, err = runtime.RunMessages(ctx, []agent.AgentMessage{message})
 		if err := handleTurnErr(err); err != nil {
 			return 0, err
 		}
@@ -2108,7 +1594,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		p.turnSeq, p.turnDigest = p.seq, p.digest
 		// Continue the restored checked user, never append a duplicate user.
 		// StreamFn fences and commits provider entry before dispatch.
-		if err := session.Continue(ctx); err != nil {
+		if err := runtime.Continue(ctx); err != nil {
 			return 0, handleTurnErr(err)
 		}
 		if generation, ok := ctx.Value(embeddedOriginalRestartGenerationKey{}).(int64); ok {
@@ -2123,9 +1609,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	// its own empty final remains the first counted turn, not erased on return.
 	if continuation == nil && (explicitPrompt != "" || mail != nil) {
 		lane := m.laneFor(binding.AgentID)
-		lane.consecutiveContinuations = 0
-		lane.consecutiveEmptyTurns = 0
-		lane.goalAttempt = 0
+		lane.consecutiveContinuations.Store(0)
+		lane.consecutiveEmptyTurns.Store(0)
+		lane.goalAttempt.Store(0)
 	}
 	if continuation != nil {
 		promptText := m.formatGoalContinuationPrompt(ctx, binding, continuation)
@@ -2135,28 +1621,28 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if explicitPrompt != "" {
 			promptText = explicitPrompt
 		}
-		runRes, err := session.RunMessages(ctx, []agent.AgentMessage{ai.UserMessage{
+		runRes, err := runtime.RunMessages(ctx, []agent.AgentMessage{ai.UserMessage{
 			Content: ai.ContentList{ai.TextContent{Text: promptText}},
 		}})
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
-				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 				if err := settleExecution(); err != nil {
 					return 0, err
 				}
-				m.checkContextResetAfterTurn(ctx, binding, model, session)
+				m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 				return p.seq, nil
 			}
 			return 0, handleTurnErr(err)
 		}
-		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+		m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
 		if err := settleExecution(); err != nil {
 			return 0, err
 		}
-		m.checkContextResetAfterTurn(ctx, binding, model, session)
+		m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 		return p.seq, nil
 	}
 	// A failed system declaration can leave only a system entry; the first
@@ -2175,7 +1661,7 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 			return 0, err
 		}
 		p.mail = mail
-		runRes, err := session.RunMessages(ctx, []agent.AgentMessage{message})
+		runRes, err := runtime.RunMessages(ctx, []agent.AgentMessage{message})
 		// The SDK may turn a rejected checked append into a local synthetic
 		// error. Preserve the Store's transaction outcome, not its error text.
 		if p.mailAppendErr != nil {
@@ -2183,23 +1669,23 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		}
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
-				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 				if err := settleExecution(); err != nil {
 					return 0, err
 				}
-				m.checkContextResetAfterTurn(ctx, binding, model, session)
+				m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 				return p.seq, nil
 			}
 			return 0, handleTurnErr(err)
 		}
-		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+		m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
 		if err := settleExecution(); err != nil {
 			return 0, err
 		}
-		m.checkContextResetAfterTurn(ctx, binding, model, session)
+		m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 		return p.seq, nil
 	}
 	if explicitPrompt != "" {
@@ -2207,29 +1693,31 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if role != "root" && !hasUser && saved.PendingInitialInstruction != "" && explicitPrompt == saved.PendingInitialInstruction {
 			promptToRun = formatGenesisPrompt(saved.AgentID, explicitPrompt)
 		}
-		runRes, err := session.Run(ctx, promptToRun)
+		runRes, err := runtime.Run(ctx, promptToRun)
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
-				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
-				if explicitPrompt != ContextResetWakePrompt {
+				m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
+				// Claude reports fresh usage on the wake itself. Settle before monitoring
+				// while the reset coordinator still owns the fresh-binding guard.
+				if explicitPrompt != ContextResetWakePrompt || model.Provider == claudeCodeProvider {
 					if err := settleExecution(); err != nil {
 						return 0, err
 					}
-					m.checkContextResetAfterTurn(ctx, binding, model, session)
+					m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 				}
 				return p.seq, nil
 			}
 			return 0, handleTurnErr(err)
 		}
-		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+		m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
-		if explicitPrompt != ContextResetWakePrompt {
+		if explicitPrompt != ContextResetWakePrompt || model.Provider == claudeCodeProvider {
 			if err := settleExecution(); err != nil {
 				return 0, err
 			}
-			m.checkContextResetAfterTurn(ctx, binding, model, session)
+			m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 		}
 		return p.seq, nil
 	}
@@ -2238,32 +1726,32 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		if role != "root" {
 			instruction = formatGenesisPrompt(saved.AgentID, saved.PendingInitialInstruction)
 		}
-		runRes, err := session.Run(ctx, instruction)
+		runRes, err := runtime.Run(ctx, instruction)
 		if err != nil {
 			if (runRes != nil && runRes.StopReason == ai.StopError) || p.lastStopReason == ai.StopError {
-				m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+				m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 				if err := settleExecution(); err != nil {
 					return 0, err
 				}
-				m.checkContextResetAfterTurn(ctx, binding, model, session)
+				m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 				return p.seq, nil
 			}
 			return 0, handleTurnErr(err)
 		}
-		m.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+		m.nudgeEmbeddedSessionIfNeeded(ctx, runtime, p)
 		if err := m.evaluateEmbeddedTurn(ctx, binding, p, appliedReceipt, model, stream); err != nil {
 			return 0, handleTurnErr(err)
 		}
 		if err := settleExecution(); err != nil {
 			return 0, err
 		}
-		m.checkContextResetAfterTurn(ctx, binding, model, session)
+		m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 		return p.seq, nil
 	}
 	if err := settleExecution(); err != nil {
 		return 0, err
 	}
-	m.checkContextResetAfterTurn(ctx, binding, model, session)
+	m.checkContextResetAfterTurn(ctx, binding, model, runtime)
 	return p.seq, nil
 }
 
@@ -2285,6 +1773,19 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	if receipt == nil || !receipt.GoalEnabled ||
 		receipt.TurnEntrySeq != p.turnSeq || receipt.TurnEntryDigest != p.turnDigest {
 		return nil
+	}
+
+	claudeEvaluation := model != nil && model.Provider == claudeCodeProvider
+	if claudeEvaluation && m.embeddedGoalEvaluator == nil {
+		selected, selectionErr := m.claudeCodeEvaluatorModel(ctx)
+		if selectionErr != nil {
+			entry, _ := m.store.RecordManagedCompleteHistory(ctx, binding.AgentID, "managed_goal", "error", selectionErr.Error(), fmt.Sprintf("claude-evaluator-unavailable:%s:%d", binding.AgentID, p.turnSeq))
+			if entry.ID != "" {
+				m.publishCompleteHistory(entry)
+			}
+			return nil
+		}
+		model = selected
 	}
 	policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID)
 	if err != nil {
@@ -2450,15 +1951,12 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 	}
 	lane := m.laneFor(binding.AgentID)
 	if !hasActiveWorkflow && toolCalls == 0 && !hasText && !calledGoalSnooze {
-		lane.consecutiveEmptyTurns++
-		if lane.consecutiveEmptyTurns < 3 {
-			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns)
-			lane.goalAttempt++
-			if lane.goalAttempt > 20 {
-				lane.goalAttempt = 20
-			}
+		lane.consecutiveEmptyTurns.Add(1)
+		if lane.consecutiveEmptyTurns.Load() < 3 {
+			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns.Load())
+			incrementGoalAttempt(&lane.goalAttempt)
 			goal := policy.Config.Goal
-			nudge := notDoneWakeup(goal, lane.goalAttempt)
+			nudge := notDoneWakeup(goal, int(lane.goalAttempt.Load()))
 			continuationPrompt := "You emitted an empty response without taking action. You must take concrete action now on this goal: " + goal + ". Execute a bash command, read a file, or edit code to make progress.\n" + nudge
 
 			key := store.EmbeddedGoalEvaluationKey{UserSeq: p.turnSeq, UserDigest: p.turnDigest,
@@ -2500,7 +1998,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		log.Printf("GOAL CIRCUIT BREAKER: agent %s emitted 3 consecutive empty responses; pausing continuation loop", binding.AgentID)
 		return nil
 	}
-	lane.consecutiveEmptyTurns = 0
+	lane.consecutiveEmptyTurns.Store(0)
 	key := store.EmbeddedGoalEvaluationKey{UserSeq: p.turnSeq, UserDigest: p.turnDigest,
 		GoalRevision: receipt.GoalRevision, FinalSeq: last.Sequence, FinalDigest: last.Digest}
 	_, claimed, err := m.store.ClaimEmbeddedGoalEvaluation(ctx, binding, key)
@@ -2555,6 +2053,16 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			rawDetails = evalRes.rawContent
 			evalErr = err
 		}
+		if evalErr != nil && claudeEvaluation {
+			entry, _ := m.store.RecordManagedCompleteHistory(context.Background(), binding.AgentID, "managed_goal", "error", "Claude goal evaluation unavailable; continuation stopped", fmt.Sprintf("claude-evaluator-failed:%s:%d", binding.AgentID, p.turnSeq))
+			if entry.ID != "" {
+				m.publishCompleteHistory(entry)
+			}
+			_ = m.store.ClearEmbeddedExecution(context.Background(), binding, token)
+			lane.serial.Unlock()
+			m.publishProjection()
+			return
+		}
 		if evalErr != nil {
 			log.Printf("[embedded:%s] Goal evaluation error (%v); falling back to NOT_DONE to ensure worker never stalls", binding.AgentID, evalErr)
 			outcome = store.EmbeddedGoalEvaluationNotDone
@@ -2573,13 +2081,10 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			m.recordGoalEvaluationActivity(binding, key, outcome, reason, rawDetails)
 		}
 		if outcome == store.EmbeddedGoalEvaluationDone || outcome == store.EmbeddedGoalEvaluationCompleted {
-			lane.consecutiveContinuations = 0
-			lane.goalAttempt = 0
+			lane.consecutiveContinuations.Store(0)
+			lane.goalAttempt.Store(0)
 		} else if outcome == store.EmbeddedGoalEvaluationNotDone {
-			lane.goalAttempt++
-			if lane.goalAttempt > 20 {
-				lane.goalAttempt = 20
-			}
+			incrementGoalAttempt(&lane.goalAttempt)
 		}
 		clearErr := m.store.ClearEmbeddedExecution(context.Background(), binding, token)
 		if clearErr != nil {
@@ -2592,5 +2097,35 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 		}
 		m.dispatchEmbeddedGoalContinuation(binding, key)
 	})
+	return nil
+}
+
+// Notices inside an execution advance the append head, not its initiating user.
+func (p *embeddedPersistence) appendInExecutionNotice(ctx context.Context, message ai.UserMessage) error {
+	body, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("root:%s:%s:%d:%s:%d", p.binding.AgentID, p.binding.SessionID, p.binding.Epoch, p.binding.Generation, p.seq+1)
+	entry, err := p.db.AppendEmbeddedEntryAt(ctx, p.binding, p.seq, p.digest, key, "user", body)
+	if err != nil {
+		return err
+	}
+	p.seq, p.digest = entry.Sequence, entry.Digest
+	p.projectMessage(ctx, message)
+	return p.projectNotification(ctx, entry, claudeCodeMessageText(message))
+}
+
+// Notification uses the existing generic timeline activity card, not a user
+// speech bubble or a mailbox envelope. No frontend component change is needed.
+func (p *embeddedPersistence) projectNotification(ctx context.Context, entry store.EmbeddedEntry, text string) error {
+	key := fmt.Sprintf("embedded-notification:%s:%d:%s", p.binding.AgentID, entry.Sequence, entry.Digest)
+	history, err := p.db.RecordManagedCompleteHistoryWithDetails(ctx, p.binding.AgentID, "managed_notification", "info", "Background task finished", key, &store.ManagedHistoryPresentation{Kind: "lifecycle", Outcome: "success", Summary: "Background task finished"}, nil, &text)
+	if err != nil {
+		return err
+	}
+	if p.publishComplete != nil && history.ID != "" {
+		p.publishComplete(history)
+	}
 	return nil
 }

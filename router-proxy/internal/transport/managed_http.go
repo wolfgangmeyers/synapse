@@ -238,6 +238,10 @@ func (r *Router) handleDefaultModelPUT(w http.ResponseWriter, req *http.Request)
 	}
 	var selected *managed.Model
 	if !clearing {
+		if provider == "claude-code" {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_ENGINE_SELECTION", "Router default must remain a Pi model"})
+			return
+		}
 		for _, candidate := range catalog.Models {
 			if candidate.Provider == provider && candidate.ID == id && candidate.Available {
 				candidateCopy := candidate
@@ -1002,6 +1006,14 @@ func managedRestartAllError(err error) error {
 }
 
 func managedRestartError(err error) error {
+	var engine *managed.EngineSelectionError
+	if errors.As(err, &engine) {
+		return &managedHTTPError{422, "INVALID_ENGINE_SELECTION", engine.Error()}
+	}
+	var cli *managed.ClaudeUnavailableError
+	if errors.As(err, &cli) {
+		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
+	}
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
 	}
@@ -1150,6 +1162,14 @@ func cleanGitWorktreeError(err error) string {
 }
 
 func managedLaunchError(err error) error {
+	var engine *managed.EngineSelectionError
+	if errors.As(err, &engine) {
+		return &managedHTTPError{422, "INVALID_ENGINE_SELECTION", engine.Error()}
+	}
+	var cli *managed.ClaudeUnavailableError
+	if errors.As(err, &cli) {
+		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
+	}
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
 	}

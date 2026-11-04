@@ -307,7 +307,7 @@ describe("MessageList", () => {
   });
 
   it("fetchConversationTimeline calls GET /v1/conversation with agent_id, limit, and before_seq", async () => {
-    const originalFetch = globalThis.fetch;
+    const originalFetch = global.fetch;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/v1/conversation?agent_id=agent-test&limit=50&before_seq=42")) {
@@ -331,7 +331,7 @@ describe("MessageList", () => {
       return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
     });
 
-    globalThis.fetch = fetchMock;
+    global.fetch = fetchMock;
     try {
       // 1. Initial load without before_seq
       const initial = await fetchConversationTimeline("agent-test", 50, undefined, "http://127.0.0.1:8765");
@@ -349,7 +349,7 @@ describe("MessageList", () => {
       expect(older.events[0]?.seq).toBe(1);
       expect(older.next_before_seq).toBeNull();
     } finally {
-      globalThis.fetch = originalFetch;
+      global.fetch = originalFetch;
     }
   });
 

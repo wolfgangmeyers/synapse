@@ -504,7 +504,7 @@ func TestEmbeddedGoalReNudgesOnSingleEmptyResponse(t *testing.T) {
 
 	// Verify the lane empty counter was reset to 0 after tool execution
 	lane := m.laneFor(launched.Agent.AgentID)
-	require.Equal(t, 0, lane.consecutiveEmptyTurns, "consecutiveEmptyTurns must be reset to 0 after tool execution")
+	require.Zero(t, lane.consecutiveEmptyTurns.Load(), "consecutiveEmptyTurns must be reset to 0 after tool execution")
 
 	// Verify agent settles cleanly to idle
 	require.Eventually(t, func() bool {

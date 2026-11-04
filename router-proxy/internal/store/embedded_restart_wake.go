@@ -249,9 +249,10 @@ func (s *Store) reserveEmbeddedRestartWakeTx(ctx context.Context, b EmbeddedBind
 	// origin. Implicitly marking it unknown would discard proven completion.
 	// Stale claims from prior dead process generations are reconciled:
 	if current.State == "claimed" && current.ProcessGeneration != g {
-		_ = s.reconcileEmbeddedRestartWakeTx(ctx, b, current.ProcessGeneration, current.ID)
+		if err := s.reconcileEmbeddedRestartWakeTx(ctx, b, current.ProcessGeneration, current.ID); err != nil {
+			return err
+		}
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state='unknown' WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation!=?`, b.AgentID, g)
 
 	var claimed int
 	if err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_slots WHERE agent_id=? AND slot='current' AND state='claimed' AND process_generation=?`, b.AgentID, g).Scan(&claimed); err != nil {
@@ -416,6 +417,13 @@ func (s *Store) reconcileEmbeddedRestartWakeTx(ctx context.Context, b EmbeddedBi
 	if err != nil {
 		return fmt.Errorf("restart wake reconciliation denied: %w", err)
 	}
+	// This bit is persisted before Claude stdin, under this exact binding. A
+	// claimed wake has no durable cleanup receipt, so its final alone cannot
+	// prove Claude settlement. Pi keeps its checked-final semantics.
+	var claudeStarted bool
+	if err := s.db.QueryRowContext(ctx, `SELECT claude_started FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=?`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&claudeStarted); err != nil {
+		return err
+	}
 	var kind string
 	var body []byte
 	var savedDigest string
@@ -436,6 +444,9 @@ func (s *Store) reconcileEmbeddedRestartWakeTx(ctx context.Context, b EmbeddedBi
 		return err
 	} else if savedDigest == "" || !embeddedCheckedStop(kind, body) {
 		return errors.New("restart wake checked final invalid")
+	}
+	if claudeStarted {
+		state = "unknown"
 	}
 	r, err := s.db.ExecContext(ctx, `UPDATE embedded_restart_wake_slots SET state=? WHERE agent_id=? AND slot='current' AND session_id=? AND epoch=? AND runtime_generation=? AND process_generation=? AND wake_id=? AND claim_owner_token=? AND state='claimed'`, state, b.AgentID, b.SessionID, b.Epoch, b.Generation, g, id, claimToken)
 	if err != nil {

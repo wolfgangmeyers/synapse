@@ -243,6 +243,9 @@ func (m *Manager) embeddedSendImageTool(owner embeddedOwner, admitted func(strin
 				_ = m.publishEmbeddedToolMail(ctx, accepted)
 			}
 
+			if err := m.observeEmbeddedEffect(ctx, "domain", owner.binding, id); err != nil {
+				return agent.AgentToolResult{}, err
+			}
 			payload, err := store.EmbeddedToolResultContent(invocation)
 			if err != nil {
 				return agent.AgentToolResult{}, err

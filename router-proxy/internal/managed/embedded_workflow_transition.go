@@ -382,9 +382,7 @@ func (m *Manager) SyncEmbeddedAgentTools(ctx context.Context, agentID string) er
 	session := lane.activeSession
 	lane.activeMu.Unlock()
 
-	if session != nil && session.Agent != nil {
-		session.Agent.SetTools(filteredTools)
-	}
+	refreshPiEmbeddedTools(session, filteredTools)
 
 	return nil
 }

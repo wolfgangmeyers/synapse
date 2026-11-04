@@ -16,7 +16,7 @@ import (
 )
 
 // 1. In `router-proxy/internal/managed/`: write a test verifying that when an agent calls `goal_snooze` alone
-// (tool-only turn without assistant text), it does NOT count as an empty turn / re-nudge (`lane.consecutiveEmptyTurns` remains 0,
+// (tool-only turn without assistant text), it does NOT count as an empty turn / re-nudge (`lane.consecutiveEmptyTurns.Load()` remains 0,
 // no empty turn re-nudge prompt is sent).
 func TestEmbeddedGoalSnoozeToolOnlyTurnDoesNotCountAsEmptyTurn(t *testing.T) {
 	ctx := context.Background()
@@ -92,13 +92,13 @@ func TestEmbeddedGoalSnoozeToolOnlyTurnDoesNotCountAsEmptyTurn(t *testing.T) {
 	}
 
 	lane := mgr.laneFor(agentID)
-	lane.consecutiveEmptyTurns = 0
+	lane.consecutiveEmptyTurns.Store(0)
 
 	err = mgr.evaluateEmbeddedTurn(ctx, binding, p, &appliedReceipt, nil, nil)
 	require.NoError(t, err)
 
-	// Verify that lane.consecutiveEmptyTurns remains 0 (not counted as an empty turn)
-	require.Equal(t, 0, lane.consecutiveEmptyTurns, "goal_snooze tool call alone must not be counted as empty turn")
+	// Verify that lane.consecutiveEmptyTurns.Load() remains 0 (not counted as an empty turn)
+	require.Zero(t, lane.consecutiveEmptyTurns.Load(), "goal_snooze tool call alone must not be counted as empty turn")
 }
 
 // 2. Write a test verifying that when `SetManagedAgentActiveWorkflowState` / `embeddedWorkflowTransitionTool` transitions

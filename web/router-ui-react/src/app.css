@@ -1578,6 +1578,7 @@ dialog,
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   flex: 1 1 auto;
   min-width: 0;
   gap: 16px;
@@ -1586,8 +1587,8 @@ dialog,
 .conversation-header-left {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 380px;
+  min-width: min(100%, 380px);
   gap: 4px;
 }
 
@@ -1638,6 +1639,7 @@ dialog,
 .peer-title-line {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   min-width: 0;
 }
@@ -1645,6 +1647,7 @@ dialog,
 .peer-title-line h2 {
   display: flex;
   align-items: center;
+  min-width: 0;
   margin: 0;
   padding: 0;
   font-size: 1.35rem;
@@ -2406,7 +2409,7 @@ dialog,
 }
 .inline-tool-settings-button:hover,
 .managed-agent-header-button:hover { background: rgba(181,188,208,0.22); }
-.conversation-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.conversation-header-actions { display: flex; align-items: center; flex-wrap: wrap; max-width: 100%; gap: 8px; flex: 0 1 auto; }
 .conversation-view-tabs { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .conversation-view-tabs button { display: inline-grid; place-items: center; width: 30px; min-width: 30px; min-height: 30px; height: 30px; padding: 0; border-radius: 999px; font-size: 12px; }
 .conversation-view-tabs button:focus-visible { outline: 2px solid var(--secondary); outline-offset: 2px; }

@@ -86,7 +86,7 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 		}
 		return *explicit, nil
 	}
-	if saved != nil {
+	if saved != nil && saved.Provider != claudeCodeProvider {
 		for _, model := range catalog.Models {
 			if model.Provider == saved.Provider && model.ID == saved.ID && model.Available {
 				return model, nil
@@ -99,7 +99,7 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 		return Model{Provider: saved.Provider, ID: saved.ID, Name: name, Available: false}, nil
 	}
 	for _, model := range catalog.Models {
-		if model.Available {
+		if model.Available && model.Provider != claudeCodeProvider {
 			return model, nil
 		}
 	}
@@ -131,17 +131,17 @@ func (s StoreCatalogSource) Catalog(ctx context.Context) (Catalog, error) {
 		for _, model := range persisted.Models {
 			models = append(models, Model{Provider: model.Provider, ID: model.ID, Name: model.Name, Available: model.Available})
 		}
-		return Catalog{AuthRevision: persisted.AuthRevision, Models: models}, nil
+		return withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: models}), nil
 	}
 	if s.Helper == nil {
-		return Catalog{AuthRevision: persisted.AuthRevision, Models: []Model{}}, nil
+		return withClaudeCodeModels(Catalog{AuthRevision: persisted.AuthRevision, Models: []Model{}}), nil
 	}
 	catalog, err := s.Helper.Catalog(ctx)
 	if err != nil {
 		return Catalog{}, err
 	}
 	catalog.AuthRevision = persisted.AuthRevision
-	return catalog, nil
+	return withClaudeCodeModels(catalog), nil
 }
 
 func (s StoreCatalogSource) DefaultModel(ctx context.Context) (*store.ManagedModel, error) {

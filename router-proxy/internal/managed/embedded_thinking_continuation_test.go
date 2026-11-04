@@ -149,7 +149,7 @@ func TestEmbeddedThinking_NudgeSessionWhenThinkingOnly(t *testing.T) {
 	require.Empty(t, strings.TrimSpace(session.LastAssistantText()))
 
 	mgr := &Manager{}
-	mgr.nudgeEmbeddedSessionIfNeeded(ctx, session, p)
+	mgr.nudgeEmbeddedSessionIfNeeded(ctx, &piEmbeddedRuntime{Session: session}, p)
 
 	// Continuation prompt must have been sent
 	require.Len(t, promptLog, 2)

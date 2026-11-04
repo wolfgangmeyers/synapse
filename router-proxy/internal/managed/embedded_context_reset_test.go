@@ -458,9 +458,8 @@ func TestExplicitContextResetToolInvocation(t *testing.T) {
 	require.Equal(t, int64(2), curAgent.SessionEpoch, "agent must be at session epoch 2")
 }
 
-// TestAutoResetAtThreshold verifies auto-reset triggering:
-// - At 80% for <1M models
-// - At 50% for 1M+ models
+// TestAutoResetAtThreshold verifies configured threshold triggering at 80% and
+// threshold calculation and reset execution at 50% for a 1M-token model.
 func TestAutoResetAtThreshold(t *testing.T) {
 	ctx := context.Background()
 
@@ -469,6 +468,7 @@ func TestAutoResetAtThreshold(t *testing.T) {
 		db, err := store.Open(ctx, dbPath, store.Options{})
 		require.NoError(t, err)
 		defer db.Close()
+		require.NoError(t, db.SetContextThresholdConfig(ctx, store.ContextThresholdConfig{WarningPercent: 70, ResetPercent: 80}))
 
 		const window = 100_000 // < 1M model, 80% threshold = 80,000 tokens
 		reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
@@ -602,10 +602,10 @@ func TestAutoResetAtThreshold(t *testing.T) {
 
 		// Verify 400,000 tokens does NOT exceed 50% of 1M
 		model1M := Model{Provider: "test", ID: "1m", ContextWindow: window}
-		require.False(t, contextThresholdExceeded(model1M, 400_000))
+		require.False(t, contextThresholdExceededWithPct(model1M, 400_000, 50))
 
 		// Verify 500,000 tokens DOES exceed 50% of 1M
-		require.True(t, contextThresholdExceeded(model1M, 500_000))
+		require.True(t, contextThresholdExceededWithPct(model1M, 500_000, 50))
 
 		// Execute threshold reset with 500,000 tokens
 		// We verify ExecuteContextReset executes cleanly for the 1M+ model
@@ -1415,8 +1415,12 @@ func TestEmbeddedContextResetToolWithWindow(t *testing.T) {
 	}
 
 	var capturedReq contextResetRequest
-	tool := mgr.embeddedContextResetTool(owner, func(req contextResetRequest) {
-		capturedReq = req
+	tool := mgr.embeddedContextResetTool(owner, func(req *contextResetRequest) {
+		capturedReq = *req
+		lane := mgr.laneFor(owner.binding.AgentID)
+		lane.admission.Lock()
+		delete(lane.resetToolGates, req)
+		lane.admission.Unlock()
 	}, "context_reset")
 
 	// Call with default / missing args
@@ -1457,5 +1461,3 @@ func TestEmbeddedContextResetToolWithWindow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, DefaultPreservedContextWindow, capturedReq.window)
 }
-
-
