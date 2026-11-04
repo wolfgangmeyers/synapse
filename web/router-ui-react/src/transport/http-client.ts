@@ -618,6 +618,7 @@ export interface RouterHttpClient {
   deleteWorkflowSchedule(id: string): Promise<void>;
   setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }): Promise<unknown>;
   setManagedAgentWorkflow(agentId: string, workflowId: string, variables?: Record<string, string>): Promise<unknown>;
+  setAgentUrgency(agentId: string, urgent: boolean): Promise<unknown>;
   setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
   attachmentUrl(reference: string): string;
   managedAgents(): Promise<ManagedAgentsResponse>;
@@ -798,6 +799,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       if (variables !== undefined) payload.variables = variables;
       return managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", payload);
     },
+    setAgentUrgency: async (agentId, urgent) => request(`/v1/agents/${encodeURIComponent(agentId)}/urgency`, { method: "PUT", credentials: "omit", headers: { "content-type": "application/json" }, body: JSON.stringify({ urgent }) }),
     setManagedAgentAllowInlineTools: async (agentId: string, allowed: boolean) =>
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/allow-inline-tools`, "POST", { allow_inline_tools: allowed }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
