@@ -7,9 +7,9 @@
 
 ## 1. Intent & User Outcome
 
-Wolfgang can ask an embedded agent to mark itself or a named agent urgent, or clear that mark, using a router-native tool. Only marked agents display a small amber exclamation triangle. Unmarked rows have no urgency button, indicator, placeholder, or reserved space.
+Wolfgang can ask an embedded agent to mark itself or a named agent urgent, or clear that mark, using a router-native tool. Marked agents display a prominent warm red-orange card glow and URGENT badge. Unmarked rows have no urgency button, indicator, placeholder, or reserved space.
 
-This supersedes the row/header toggle design. Workflows already use a bolt; urgency must not use one. The minimal UI is a passive active-only marker, not another action toolbar. There is no urgency header action, including an off-state action. Activation and deactivation both happen through the tool. No new command palette, dialog, or direct human tool-runner UI is required.
+The selected conversation offers urgency in the existing Agent Controls menu, in addition to the native tool. Users can pin it to the compact toolbar or unpin it while retaining access through the menu. Workflows use a bolt; urgency uses a passive, active-only badge.
 
 Urgency is explicit visual metadata, not blocked state, execution priority, or a workflow transition. No automatic activation, scheduling, sorting, pinning, notifications, urgency levels, animations, or worker instructions result from setting it. Agents should use the tool when explicitly directed, not infer urgency from task wording or failures.
 
@@ -23,10 +23,10 @@ Scoped acceptance is complete: the exact 51-file overlay passed all five native-
 4. One shared SQLite boolean belongs to router + exact logical `agent_id`. It is not keyed by display name, browser, source, lease, or session. New identities default false, including managed identities before first connection. Existing managed and legacy projections may retain compatibility: two rows for one exact ID share the value, but navigation remains source-specific. This is not a requirement to launch tmux workers or add extension tooling.
 5. Ordinary turns, disconnect/reconnect, context reset, worker/router restart, recovery, and same-ID replacement preserve urgency while the identity exists. Failed/pending termination preserves it. Final managed deletion or different-ID retirement clears and invalidates the old value even if mailbox/history retains its shared row. Stale saves cannot reactivate it, even after audit expiry. Legitimate new admission or successful new lease acquisition starts a retired identity non-urgent; renewal/enqueue are not admission. Already-active same-ID admission preserves the mark.
 6. Retention is one in-place urgency boolean plus the existing design's same-row identity-validity boolean, not a toggle history, archive, tombstone registry, or parallel metadata system. Routine transport/reminder cleanup must preserve extant managed identities. Legacy final shared-row pruning remains its existing one-hour stale cutoff subject to message/reminder protections; urgency does not extend it. Final removal removes urgency; recreation starts false. No new accumulating ledger is introduced; native invocation/history records use existing bounded retention.
-7. The internal/common `PUT /v1/agents/{id}/urgency` may remain. It accepts exactly `{ "urgent": boolean }`; missing/null/non-boolean values, extra/duplicate/case-alias fields, malformed/trailing JSON and non-object bodies return 400. Unknown/retired targets return 404 without insertion; store failure returns 5xx. A successful response has the same committed output as the tool. Existing inline-tools routes are unchanged. The route retains permissive non-credentialed browser CORS, arbitrary Origin support, and omitted credentials. It is not the user-facing activation mechanism.
+7. The internal/common `PUT /v1/agents/{id}/urgency` may remain. It accepts exactly `{ "urgent": boolean }`; missing/null/non-boolean values, extra/duplicate/case-alias fields, malformed/trailing JSON and non-object bodies return 400. Unknown/retired targets return 404 without insertion; store failure returns 5xx. A successful response has the same committed output as the tool. Existing inline-tools routes are unchanged. The route retains permissive non-credentialed browser CORS, arbitrary Origin support, and omitted credentials. The conversation toolbar uses this route for direct user activation and clearing.
 8. Native tool and internal REST writes share mutation/identity validation and ordered post-commit publication. Both REST projections and existing WebSocket observer paths expose the committed value. Connected browsers converge without reload; reload/reconnect/restart restore it. Failed reads do not fabricate false, and stale HTTP responses or old-router events cannot replace newer authority. No per-row polling or new socket is needed.
-9. A confirmed true renders one small, steady amber **exclamation triangle** (12px Font Awesome Free 6.7.2 font glyph, with bundled local CSS and webfonts available without external network access), accessible as `Urgent`. It is passive, not a button, not focusable, and has no toggle or `aria-pressed`. No bolt, repeated `Urgent` text badge, amber rail, card recoloring, or animation is required. False renders nothing, including on hover/focus. The conversation header has no urgency action or duplicate urgency marker. Keep existing blocked, selected, progress, compacting, workflow, and lifecycle presentation unchanged. The triangle must not truncate the title or grow the card height.
-10. Tool failures stay in the ordinary tool-result/conversation error channel. No row/header saving text, error paragraph, retry button, pending placeholder, or off-state control. The passive marker changes only with authoritative confirmation. Retrying uses a new explicit tool call with the desired value, not a UI toggle. A committed change may appear in another browser even if the caller lost its result; reconciliation recovers current state.
+9. A confirmed true renders a steady text badge reading **URGENT**, without an exclamation mark. It is passive, not a button, not focusable, and has no toggle or `aria-pressed`. Urgent cards have a steady bright red-orange outline and glow, warm dark red surface clipped to the rounded card outline, upper-right URGENT badge, including when selected or in another lifecycle state. There are no urgency exclamation marks or bottom stripes on cards. The badge remains distinct from workflow bolts. False removes this treatment, including on hover/focus. The pinned conversation header toggle visibly highlights its confirmed pressed state. Keep blocked, progress, compacting, workflow, and lifecycle indicators available. The treatment must preserve usable titles and existing card controls.
+10. Tool failures stay in the ordinary tool-result/conversation error channel. The toolbar prevents duplicate submissions while a request is pending and reports failures accessibly. The passive marker follows the live projection. The toggle may briefly show the successful committed response while the projection catches up; this temporary indication expires and never permanently overrides later live state. Conclusive HTTP 400/404 rejections permit retry; transport failures and server errors can be post-commit and fence further writes for that router and identity for the page lifetime. Do not automatically invert the value. A committed change may appear in another browser even if the caller lost its result; reconciliation recovers current state.
 
 ### Upgrade boundary
 
@@ -45,8 +45,8 @@ After upgrade, the serialized `identity_active` bit is the sole identity authori
 - **Then**:
   - Omitted target resolves to the caller; explicit target resolves exactly, independent of selection.
   - Checked tool results contain the resolved ID and committed boolean; SQLite and live observers agree.
-  - Only marked rows show the accessible 12px amber Font Awesome exclamation triangle, including when external requests are blocked. Cleared/unmarked rows show nothing, even on hover/focus.
-  - No urgency button, bolt, rail, repeated text badge, header action, header marker, or retry block appears. Selection, titles, height, order, and unrelated agents remain intact.
+  - Only marked rows show the URGENT badge, including when external requests are blocked. Cleared/unmarked rows show nothing, even on hover/focus.
+  - No row urgency button, bolt, rail, or retry block appears; the URGENT badge appears only while marked. Selection, titles, height, order, and unrelated agents remain intact.
   - Tool availability follows enabled tools/workflow policy; the implementation is not merely a REST or extension-only stub.
 
 ### Scenario: [URG-002] Synchronize and restore confirmed state
@@ -63,7 +63,7 @@ After upgrade, the serialized `identity_active` bit is the sole identity authori
 - **Given**: An embedded worker is blocked and selected, with workflow/progress/lifecycle presentation visible.
 - **When**: The tool marks and clears it, selection changes, ordinary state updates occur, and a representative reconnect/context reset happens while marked.
 - **Then**:
-  - Blocked/selected/progress/compacting indicators remain intact. Workflow bolts are unchanged and distinguishable from the urgency triangle.
+  - Blocked/selected/progress/compacting indicators remain intact. Workflow bolts are unchanged and distinguishable from the urgency badge.
   - Surviving identity retains urgency through ordinary lifecycle updates.
   - No messages to the target, goal changes, interruption, rescheduling, reordering, automatic urgency, or urgency animation occur.
 
@@ -89,6 +89,23 @@ After upgrade, the serialized `identity_active` bit is the sole identity authori
   - Upgrade initialization honors available final-deletion evidence and proven later/extant admission under the upgrade boundary above. Expired evidence and ambiguous pre-feature equal-clock admission follow that boundary only.
   - Legacy final pruning, if exercised for compatibility, removes urgency without extending existing retention. Unrelated mailbox/history retention is unchanged.
 
+### Scenario: [URG-007] Pin and unpin urgency
+
+- **Given**: A selected agent and the existing Agent Controls menu.
+- **When**: The user pins or unpins Urgency, reloads, or selects another agent.
+- **Then**: Urgency is available as an actionable menu tile in either state. Its toolbar button appears only when pinned, and pinning alone never changes urgency. The existing toolbar pin preference persists across reload and agent selection, including existing saved preferences; urgency is unpinned by default. The menu action and pinned toggle share the same confirmed state, pending and failure protections.
+
+### Scenario: [URG-006] Toggle urgency from the conversation toolbar
+- **User Goal**: Mark or clear the selected agent without asking an agent to run a tool.
+- **Given**: Two browsers observe existing agents through the router and proxy.
+- **When**: The user clicks the selected agent’s urgency toggle, then clears it; a request also fails.
+- **Then**: The accessible pressed state, highlighted pinned button and urgent card treatment follow committed state in both browsers and after reload; clearing restores their inactive appearance. Only the selected identity changes. Pending requests cannot be duplicated for the same agent, and do not block other agents. Before each write it reads current state from the managed projection for managed agents, including offline agents, and the connected-agent projection for other agents; missing identities or read failures permit retry without a write. A successful response briefly updates the toolbar while projection delivery catches up; any subsequent projection change or a short timeout clears that indication, so it cannot permanently mask newer state. The row always follows the live projection. Concurrent writers can still change that state before the write; the API has no conditional update. A conclusive HTTP 400/404 rejection permits retry. A transport failure or 5xx response is uncertain because it may follow commit. An uncertain PUT disables further urgency writes for that router and agent for the lifetime of this page, even if a later read succeeds: the request might still commit. The user is warned that reloading does not prove the old request has finished. State and pending operations are isolated by router URL and agent. Selection, ordering, and execution are unchanged.
+
+
+If the header unmounts and remounts while an operation is pending, the remounted header reflects its eventual success or error without waiting for another render. Notifications are scoped to the router and agent.
+
+The action requests the opposite of the state shown on its label at click time, never the opposite of a later read. The read verifies identity, not the desired value. A successful response may temporarily supplement the projection only if no intervening projection change or selection change occurred since the click, including a change away and back. After its two-second expiry, the label and the next action both follow the projection. Reads and writes each have a bounded ten-second deadline: a timed-out read permits retry without writing; a timed-out PUT has an uncertain outcome and fences further writes exactly like other transport failures. Late completions cannot undo that fence or update the confirmation. Merely viewing identities creates no operation records. At most 256 router/identity operation records are retained per page; non-pending, non-uncertain records may be evicted. If all slots are fenced or pending, new identity actions are refused rather than dropping a fence.
+
 ## 4. Automated E2E Verification Matrix
 
 Final scoped acceptance: the exact 51-file archive at base `4cfa57338311c09158a4869ce2d6fdb87c40043e`, patch SHA256 `ff7cf8f40afdb81049ccb8aa201bdbdac302a6aaf17d2b75ddf5cf3ec1a33873`, passed all five Chromium cases (one worker, zero retries, exit 0, 191.9s). Normal production and tagged fixture Go builds, scoped urgency suites in `internal/store`, `internal/managed` and `internal/transport`, UI typecheck and production build all exited 0. Production/test sources and production dist remained unchanged. Evidence: `/tmp/urgent-native-final-overlay-validation.md` and `/home/wolfgang/code/.urgent-validation-Crv9iyKA/browser-final.log`.
@@ -101,9 +118,11 @@ Use fast Playwright tests with a real headless browser, router-proxy, router, RE
 
 | Scenario ID | Scenario Description | E2E Test Suite | Test Case Name |
 | :--- | :--- | :--- | :--- |
-| `URG-001` | Native self/target calls and active-only triangle | `tests/e2e/agent-urgency.spec.ts` | `sets and clears urgency through embedded native tools without off controls` |
+| `URG-007` | Menu action, pin/unpin and persisted preference | `tests/e2e/agent-urgency.spec.ts` | `pins and unpins urgency in agent controls` |
+| `URG-006` | Toolbar toggle, synchronization and failure | `tests/e2e/agent-urgency.spec.ts` | `toggles urgency from the conversation toolbar` |
+| `URG-001` | Native self/target calls and active-only badge | `tests/e2e/agent-urgency.spec.ts` | `sets and clears urgency through embedded native tools without off controls` |
 | `URG-002` | Two browsers, WS and persistence | `tests/e2e/agent-urgency.spec.ts` | `synchronizes native urgency across clients reload and restart` |
-| `URG-003` | Independent execution/workflow presentation | `tests/e2e/agent-urgency.spec.ts` | `keeps active urgency triangle independent of execution and workflow state` |
+| `URG-003` | Independent execution/workflow presentation | `tests/e2e/agent-urgency.spec.ts` | `keeps active urgency badge independent of execution and workflow state` |
 | `URG-004` | Tool/API errors, fencing, replay and result loss | `tests/e2e/agent-urgency.spec.ts` | `rejects invalid urgency calls and reconciles uncertain outcomes without row errors` |
 | `URG-005` | Lifetime and bounded retention | `tests/e2e/agent-urgency.spec.ts` | `bounds native urgency to logical identity lifetime` |
 

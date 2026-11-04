@@ -1,4 +1,3 @@
-import { AgentUrgencyMarker } from "./AgentUrgency";
 import { useState, useRef, useEffect, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import type { Agent, SubagentSummary } from "../state/agent-projection";
@@ -92,22 +91,21 @@ export function AgentRow({ agent, client, selected = false, expanded = false, re
     };
   }, [showBlockedPopover]);
 
-  const className = ["agent-row", selected ? "active" : "", working ? "working" : "", compacting ? "compacting" : "", terminating ? "terminating" : "", failed ? "failed" : "", expanded ? "expanded" : "", hasSubagents ? "has-subagents" : ""].filter(Boolean).join(" ");
+  const className = ["agent-row", agent.urgent === true ? "urgent" : "", selected ? "active" : "", working ? "working" : "", compacting ? "compacting" : "", terminating ? "terminating" : "", failed ? "failed" : "", expanded ? "expanded" : "", hasSubagents ? "has-subagents" : ""].filter(Boolean).join(" ");
   const stopActionPropagation = (event: React.SyntheticEvent): void => { event.stopPropagation(); };
 
   return <div role="listitem" className={className} aria-selected={selected} data-agent-id={agent.agent_id}
     data-managed-projection-version={managed ? agent.managedProjectionVersion : undefined}
     data-managed-lifecycle={managed ? agent.managed_agent?.lifecycle_state : agent.lifecycle_state}
     data-managed-activity={managed ? agent.managed_agent?.activity_state : undefined}>
-    <div className="agent-row-select" role="button" tabIndex={0} onClick={() => onSelect?.(agent.agent_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect?.(agent.agent_id); } }} aria-pressed={selected} aria-label={`${humanName(agent.agent_id)} (${agent.agent_id})${failed ? ", failed" : ""}`}>
+    <div className="agent-row-select" role="button" tabIndex={0} onClick={() => onSelect?.(agent.agent_id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect?.(agent.agent_id); } }} aria-pressed={selected} aria-label={`${humanName(agent.agent_id)} (${agent.agent_id})${agent.urgent === true ? ", urgent" : ""}${failed ? ", failed" : ""}`}>
       <span className={`avatar ${working ? "working" : compacting ? "compacting" : terminating ? "terminating" : ""}`} aria-hidden="true"><AgentAvatar agentId={agent.agent_id} /></span>
       <span className="agent-row-text">
         <span className="agent-name-line">
           {hasGoal ? onGoal ? <button type="button" className="goal-indicator" title="Set goal" aria-label="Set goal" onClick={(event) => { stopActionPropagation(event); onGoal(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-flag" aria-hidden="true" /></button> : <span className="goal-indicator" title="Goal active" aria-label="Goal active"><i className="fa-solid fa-flag" aria-hidden="true" /></span> : null}
           {hasReminders ? onReminders ? <button type="button" className="reminder-row-indicator" title="Add reminder" aria-label="Add reminder" onClick={(event) => { stopActionPropagation(event); onReminders(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-clock" aria-hidden="true" /></button> : <span className="reminder-row-indicator" title={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`} aria-label={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`}><i className="fa-solid fa-clock" aria-hidden="true" /></span> : null}
           {arrival ? <span className="agent-row-arrival" onClick={(event) => event.stopPropagation()}><ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /></span> : null}
-          <AgentUrgencyMarker agent={agent} />
-          <strong>{humanName(agent.agent_id)}</strong>{agent.source !== "router-managed" ? <small className="agent-source">tmux</small> : null}
+          <strong>{humanName(agent.agent_id)}</strong>{agent.urgent === true ? <span className="agent-row-urgent-badge">Urgent</span> : null}{agent.source !== "router-managed" ? <small className="agent-source">tmux</small> : null}
         </span>
         {(showSubagentBadge || agent.workflow_state || agent.blocked) ? (
           <span className="agent-meta-line">

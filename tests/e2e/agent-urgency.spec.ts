@@ -11,7 +11,7 @@ import { workflowHarness, model, lastToolOutput, type WorkflowHarness, type Repl
 const caller = "urgency-caller", target = "urgency-target";
 const tool = "mecha_agent_urgency";
 const row = (page: Page, id = caller) => page.locator(`.agent-row[data-agent-id="${id}"]`);
-const marker = (page: Page, id = caller) => row(page, id).getByRole("img", { name: "Urgent", exact: true });
+const marker = (page: Page, id = caller) => row(page, id).locator(".agent-row-urgent-badge");
 const urgencyPath = (id: string) => `/v1/agents/${encodeURIComponent(id)}/urgency`;
 
 function query(f: WorkflowHarness, sql: string, ...args: (string | number)[]) {
@@ -27,13 +27,14 @@ async function fixture() {
   try { await create(f, caller); await create(f, target); return f; }
   catch (error) { await f.close(); throw error; }
 }
-async function open(page: Page, f: WorkflowHarness) {
+async function open(page: Page, f: WorkflowHarness, pinUrgency = true) {
   await page.route("**/*", route => ["127.0.0.1", "localhost"].includes(new URL(route.request().url()).hostname) ? route.continue() : route.abort());
-  await page.addInitScript(({ url, observer }) => {
+  await page.addInitScript(({ url, observer, pinUrgency }) => {
+    if (pinUrgency && !localStorage.getItem("mecha.toolbar.pinnedControls.v2")) localStorage.setItem("mecha.toolbar.pinnedControls.v2", JSON.stringify(["urgency"]));
     localStorage.setItem("mecha.web.activeRouter", url);
     localStorage.setItem("mecha.web.routers", JSON.stringify([url]));
     localStorage.setItem("mecha.web.agentIds", JSON.stringify({ [url]: observer }));
-  }, { url: f.proxy.url, observer: `urgency-observer-${randomUUID()}` });
+  }, { url: f.proxy.url, observer: `urgency-observer-${randomUUID()}`, pinUrgency });
   await page.goto(f.frontend.url);
   await expect(row(page)).toBeVisible();
   await expect(row(page, target)).toBeVisible();
@@ -43,9 +44,9 @@ async function select(page: Page, id = caller) {
   await expect(row(page, id)).toHaveAttribute("aria-selected", "true");
 }
 async function noControls(page: Page) {
-  await expect(page.getByRole("button", { name: /mark .*urgent|clear urgency|retry.*urgency/i })).toHaveCount(0);
+  await expect(page.locator(".agent-row").getByRole("button", { name: /mark .*urgent|clear urgency|retry.*urgency/i })).toHaveCount(0);
   await expect(page.locator(".urgency-rail, .urgency-toggle, .urgency-error, .urgency-pending")).toHaveCount(0);
-  await expect(page.locator(".conversation-header [aria-label='Urgent'], .conversation-header [aria-label*='urgency' i]")).toHaveCount(0);
+  await expect(page.locator(".conversation-header [aria-label='Urgent']")).toHaveCount(0);
 }
 async function fontAwesomeGlyph(page: Page, selector: string, glyph: string) {
   const icon = page.locator(selector);
@@ -67,17 +68,13 @@ async function fontAwesomeGlyph(page: Page, selector: string, glyph: string) {
 async function saved(page: Page, f: WorkflowHarness, id: string, urgent: boolean) {
   await expect.poll(() => query(f, "SELECT urgent FROM agents WHERE agent_id=?", id)).toEqual([{ urgent: Number(urgent) }]);
   await expect(marker(page, id)).toHaveCount(urgent ? 1 : 0);
+  const selector = row(page, id).locator('.agent-row-select');
+  if (urgent) await expect(selector).toHaveAccessibleName(/, urgent(?:, failed)?$/);
+  else await expect(selector).not.toHaveAccessibleName(/, urgent(?:, failed)?$/);
   if (urgent) {
     await expect(marker(page, id)).toBeVisible();
-    await expect(marker(page, id)).toHaveClass(/fa-triangle-exclamation/);
-    await fontAwesomeGlyph(page, `.agent-row[data-agent-id="${id}"] .agent-urgency-marker`, "\uf071");
-    expect(await marker(page, id).evaluate(e => {
-      const bounds = e.getBoundingClientRect();
-      return { tag: e.tagName, width: bounds.width, height: bounds.height, size: getComputedStyle(e).fontSize, text: e.textContent, svg: e.querySelectorAll("svg").length };
-    })).toEqual({ tag: "I", width: 12, height: 12, size: "12px", text: "", svg: 0 });
-    expect(await marker(page, id).evaluate(e => ({ tab: e.tabIndex, button: e.closest("button") !== null, pressed: e.hasAttribute("aria-pressed"), animation: getComputedStyle(e).animationName })))
-      .toEqual({ tab: -1, button: false, pressed: false, animation: "none" });
-    await expect(marker(page, id)).toHaveCSS("color", "rgb(251, 191, 36)");
+    await expect(marker(page, id)).toHaveText("Urgent");
+    await expect(row(page, id).locator(".agent-urgency-marker")).toHaveCount(0);
   }
   await noControls(page);
 }
@@ -122,6 +119,324 @@ async function put(f: WorkflowHarness, id: string, body: string) {
 
 test.describe("Agent urgency native contract", () => {
   test.setTimeout(120_000);
+
+  test("pins and unpins urgency in agent controls", async ({ page }) => {
+    const f = await fixture();
+    try {
+      await open(page, f, false); await select(page, target);
+      const toggle = page.locator(".urgency-header-button");
+      await expect(toggle).toHaveCount(0);
+      await page.getByRole("button", { name: "More agent controls" }).click();
+      await expect(page.getByRole("button", { name: "Urgency", exact: true })).toHaveAttribute("aria-pressed", "false");
+      await page.getByRole("button", { name: "Pin Urgency" }).click();
+      await expect(toggle).toBeVisible();
+      await saved(page, f, target, false);
+      await page.reload(); await select(page, target);
+      await expect(toggle).toBeVisible();
+      await select(page, caller); await expect(toggle).toBeVisible();
+      await select(page, target);
+      await page.getByRole("button", { name: "More agent controls" }).click();
+      await page.getByRole("button", { name: "Unpin Urgency" }).click();
+      await expect(toggle).toHaveCount(0);
+      await page.getByRole("button", { name: "Urgency", exact: true }).click();
+      await saved(page, f, target, true);
+      await page.reload(); await select(page, target);
+      await expect(toggle).toHaveCount(0);
+      await page.getByRole("button", { name: "More agent controls" }).click();
+      await expect(page.getByRole("button", { name: "Urgency", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(page.getByRole("button", { name: "Pin Urgency" })).toBeVisible();
+      await page.getByRole("button", { name: "Urgency", exact: true }).click();
+      await saved(page, f, target, false);
+    } finally { await f.close(); }
+  });
+
+  test("urgent card exposes its state and keeps a rounded, stripe-free surface", async ({ page }, testInfo) => {
+    const f = await fixture();
+    try {
+      await open(page, f);
+      await saved(page, f, target, false);
+      expect((await put(f, target, '{"urgent":true}')).status).toBe(200);
+      await saved(page, f, target, true);
+      const card = row(page, target);
+      await expect(card.locator('.fa-triangle-exclamation, .fa-exclamation')).toHaveCount(0);
+      const surface = await card.evaluate(e => {
+        const style = getComputedStyle(e);
+        return { radius: parseFloat(style.borderTopLeftRadius), clip: style.backgroundClip, image: style.backgroundImage };
+      });
+      expect(surface.radius).toBeGreaterThan(0);
+      expect(surface.clip).toBe('padding-box');
+      expect(surface.image).not.toMatch(/repeating-linear-gradient/);
+      await card.screenshot({ path: testInfo.outputPath('urgent-card.png') });
+      expect((await put(f, target, '{"urgent":false}')).status).toBe(200);
+      await saved(page, f, target, false);
+    } finally { await f.close(); }
+  });
+
+  test("urgent appearance retains independent selected and failed cues", async ({ page }) => {
+    const f = await fixture();
+    try {
+      await open(page, f);
+      await page.addStyleTag({ content: '.agent-row { transition: none !important; }' });
+      expect((await put(f, target, '{"urgent":true}')).status).toBe(200);
+      await saved(page, f, target, true);
+      const card = row(page, target);
+      const styles = () => card.evaluate(e => {
+        const s = getComputedStyle(e);
+        return { shadow: s.boxShadow, leftWidth: s.borderLeftWidth, leftColor: s.borderLeftColor, border: s.borderTopColor, background: s.backgroundImage };
+      });
+      const plain = await styles();
+      await select(page, target);
+      const selected = await styles();
+      expect(selected.shadow).not.toBe(plain.shadow);
+      expect(selected.shadow).toContain('rgb(129, 140, 248)');
+      expect(selected.border).toBe(plain.border);
+      expect(selected.background).toBe(plain.background);
+      // Exercise the real stylesheet on the live card for both failure states;
+      // the fixture does not force a managed agent into failed lifecycle.
+      await card.evaluate(e => e.classList.add('failed'));
+      const selectedFailed = await styles();
+      expect(selectedFailed.shadow).toBe(selected.shadow);
+      expect(selectedFailed.leftWidth).toBe('3px');
+      expect(selectedFailed.leftColor).toBe('rgb(239, 68, 68)');
+      await select(page, caller);
+      // Selection re-renders the row, so reapply the simulated failure state.
+      await card.evaluate(e => e.classList.add('failed'));
+      const failed = await styles();
+      expect(failed.shadow).toBe(plain.shadow);
+      expect(failed.leftWidth).toBe('3px');
+      expect(failed.leftColor).toBe('rgb(239, 68, 68)');
+      expect(failed.background).toBe(plain.background);
+      await expect(marker(page, target)).toBeVisible();
+    } finally { await f.close(); }
+  });
+
+  test("toggles urgency from the conversation toolbar", async ({ page, browser }, testInfo) => {
+    const f = await fixture();
+    const other = await browser.newPage();
+    try {
+      await open(page, f); await open(other, f); await select(page, target); await select(other, target);
+      const toggle = page.locator(".urgency-header-button");
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      const order = await page.locator(".agent-row").evaluateAll(nodes => nodes.map(n => n.getAttribute("data-agent-id")));
+      const inactiveStyle = await row(page, target).evaluate(e => ({ border: getComputedStyle(e).borderColor, background: getComputedStyle(e).backgroundImage, shadow: getComputedStyle(e).boxShadow }));
+      await expect(marker(page, target)).toHaveCount(0);
+      await toggle.click();
+      await saved(page, f, target, true); await saved(other, f, target, true);
+      await expect(row(page, target)).toHaveClass(/\burgent\b/);
+      await expect(marker(page, caller)).toHaveCount(0);
+      await expect.poll(() => row(page, target).evaluate(e => getComputedStyle(e).borderColor)).not.toBe(inactiveStyle.border);
+      const urgentStyle = await row(page, target).evaluate(e => ({ border: getComputedStyle(e).borderColor, background: getComputedStyle(e).backgroundImage, shadow: getComputedStyle(e).boxShadow }));
+      expect(urgentStyle.border).not.toBe(inactiveStyle.border);
+      expect(urgentStyle.background).not.toBe(inactiveStyle.background);
+      expect(urgentStyle.shadow).not.toBe(inactiveStyle.shadow);
+      await row(page, target).screenshot({ path: testInfo.outputPath("urgent-card.png") });
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      await expect(other.locator(".urgency-header-button")).toHaveAttribute("aria-pressed", "true");
+      await saved(page, f, caller, false);
+      await other.reload(); await select(other, target);
+      await expect(other.locator(".urgency-header-button")).toHaveAttribute("aria-pressed", "true");
+      await toggle.click(); await saved(other, f, target, false); await saved(page, f, target, false);
+      await expect(row(page, target)).not.toHaveClass(/\burgent\b/);
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      expect(await page.locator(".agent-row").evaluateAll(nodes => nodes.map(n => n.getAttribute("data-agent-id")))).toEqual(order);
+      await page.route(`**${urgencyPath(target)}`, route => route.request().method() === "PUT" ? route.fulfill({ status: 503, contentType: "application/json", body: '{}' }) : route.continue());
+      await toggle.click();
+      await expect(page.getByRole("alert").filter({ hasText: "Urgency update outcome is unknown" })).toBeVisible();
+      await saved(page, f, target, false); await saved(other, f, target, false);
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    } finally { await other.close(); await f.close(); }
+  });
+
+  test("serializes each toolbar independently and reconciles a lost committed response", async ({ page }) => {
+    const f = await fixture();
+    try {
+      await open(page, f); await select(page, target);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      let targetWrites = 0;
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() !== "PUT") return route.continue();
+        targetWrites++;
+        if (targetWrites === 1) { entered(); await gate; }
+        await route.continue();
+      });
+      await page.locator(".urgency-header-button").click();
+      await started;
+      await expect(page.locator(".urgency-header-button")).toBeDisabled();
+      await select(page, caller);
+      await expect(page.locator(".urgency-header-button")).toBeEnabled();
+      await page.locator(".urgency-header-button").click();
+      await saved(page, f, caller, true);
+      await select(page, target);
+      await expect(page.locator(".urgency-header-button")).toBeDisabled();
+      release();
+      await saved(page, f, target, true);
+      await expect(page.locator(".urgency-header-button")).toHaveAttribute("aria-pressed", "true");
+      await page.unroute(`**${urgencyPath(target)}`);
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() !== "PUT") return route.continue();
+        const response = await route.fetch();
+        expect(response.ok()).toBeTruthy();
+        await route.abort("failed");
+      });
+      await page.locator(".urgency-header-button").click();
+      await expect(page.getByRole("alert").filter({ hasText: "Urgency update outcome is unknown" })).toBeVisible();
+      await expect(page.locator(".urgency-header-button")).toHaveAttribute("aria-pressed", "false");
+      await saved(page, f, target, false);
+      await page.unroute(`**${urgencyPath(target)}`);
+      await expect(page.locator(".urgency-header-button")).toBeDisabled();
+    } finally { await f.close(); }
+  });
+
+  test("ignores an older successful response after a newer projection", async ({ page }) => {
+    const f = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const committed = new Promise<void>(resolve => { entered = resolve; });
+    try {
+      await open(page, f); await select(page, target);
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() !== "PUT") return route.continue();
+        const response = await route.fetch();
+        expect(response.ok()).toBeTruthy();
+        entered();
+        await gate;
+        await route.fulfill({ response });
+      });
+      const toggle = page.locator(".urgency-header-button");
+      await toggle.click();
+      await committed;
+      await saved(page, f, target, true);
+      expect((await put(f, target, '{"urgent":false}')).status).toBe(200);
+      await saved(page, f, target, false);
+      release();
+      await expect(toggle).toBeEnabled();
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await saved(page, f, target, false);
+    } finally { release(); await f.close(); }
+  });
+
+  test("fences a write lost before the server receives it", async ({ page }) => {
+    const f = await fixture();
+    try {
+      await open(page, f); await select(page, target);
+      let writes = 0;
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() !== "PUT") return route.continue();
+        writes++;
+        await route.abort("failed");
+      });
+      const toggle = page.locator(".urgency-header-button");
+      await toggle.click();
+      await expect(page.getByRole("alert").filter({ hasText: "Urgency update outcome is unknown" })).toBeVisible();
+      await expect(toggle).toBeDisabled();
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await saved(page, f, target, false);
+      expect(writes).toBe(1);
+    } finally { await f.close(); }
+  });
+
+  test("allows retry after a pre-write read failure", async ({ page }) => {
+    const f = await fixture();
+    try {
+      await open(page, f); await select(page, target);
+      let writes = 0;
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() === "PUT") writes++;
+        await route.continue();
+      });
+      await page.route("**/v1/managed-agents", route => route.fulfill({ status: 503, contentType: "application/json", body: "{}" }));
+      const toggle = page.locator(".urgency-header-button");
+      await toggle.click();
+      await expect(page.getByRole("alert").filter({ hasText: "Could not check urgency" })).toBeVisible();
+      await expect(toggle).toBeEnabled();
+      expect(writes).toBe(0);
+      await page.unroute("**/v1/managed-agents");
+      await toggle.click();
+      await saved(page, f, target, true);
+      expect(writes).toBe(1);
+    } finally { await f.close(); }
+  });
+
+  test("toggles an offline managed identity absent from connected agents", async ({ page }) => {
+    const f = await fixture();
+    try {
+      // Simulate an offline projection at the transport boundary while retaining
+      // the real managed identity, router, store and urgency mutation.
+      await page.route("**/v1/agents?models=omit", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.agents = body.agents.filter((agent: { agent_id: string }) => agent.agent_id !== target);
+        await route.fulfill({ response, json: body });
+      });
+      await open(page, f); await select(page, target);
+      const toggle = page.locator(".urgency-header-button");
+      await toggle.click();
+      await saved(page, f, target, true);
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      await toggle.click();
+      await saved(page, f, target, false);
+    } finally { await f.close(); }
+  });
+
+  test("prevents a second toggle when the response precedes its projection", async ({ page }) => {
+    const f = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let hold = false, writes = 0;
+    try {
+      await open(page, f); await select(page, target);
+      await page.route("**/v1/managed-agents**", async route => {
+        if (hold && route.request().method() === "GET") await gate;
+        await route.continue();
+      });
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() === "PUT") { writes++; hold = true; }
+        await route.continue();
+      });
+      const toggle = page.locator(".urgency-header-button");
+      await toggle.click();
+      await expect.poll(() => query(f, "SELECT urgent FROM agents WHERE agent_id=?", target)).toEqual([{ urgent: 1 }]);
+      // A stale displayed false must never invite another inverse write.
+      if (await toggle.getAttribute("aria-pressed") === "false") await expect(toggle).toBeDisabled();
+      release();
+      await saved(page, f, target, true);
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      expect(writes).toBe(1);
+    } finally { release(); await f.close(); }
+  });
+
+  test("does not resurrect a committed true after a later false and delayed projections", async ({ page }) => {
+    const f = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let hold = false;
+    try {
+      await open(page, f); await select(page, target);
+      await page.route("**/v1/managed-agents**", async route => {
+        if (hold && route.request().method() === "GET") await gate;
+        await route.continue();
+      });
+      await page.route(`**${urgencyPath(target)}`, async route => {
+        if (route.request().method() === "PUT") hold = true;
+        await route.continue();
+      });
+      const toggle = page.locator(".urgency-header-button");
+      await toggle.click();
+      await expect.poll(() => query(f, "SELECT urgent FROM agents WHERE agent_id=?", target)).toEqual([{ urgent: 1 }]);
+      expect((await put(f, target, '{"urgent":false}')).status).toBe(200);
+      // Deliberately exceed the old two-second confirmation expiry while
+      // projection reads are held, then deliver the current false projection.
+      await page.waitForTimeout(2300);
+      release();
+      await saved(page, f, target, false);
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await expect(toggle).toBeEnabled();
+    } finally { release(); await f.close(); }
+  });
 
   test("sets and clears urgency through embedded native tools without off controls", async ({ page }) => {
     const f = await fixture();
@@ -174,7 +489,7 @@ test.describe("Agent urgency native contract", () => {
     } finally { await context.close(); await f.close(); }
   });
 
-  test("keeps active urgency triangle independent of execution and workflow state", async ({ page }, testInfo) => {
+  test("keeps active urgency badge independent of execution and workflow state", async ({ page }, testInfo) => {
     const f = await fixture();
     try {
       await open(page, f);
