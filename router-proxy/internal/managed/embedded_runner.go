@@ -41,12 +41,18 @@ func (m *Manager) ensureEmbeddedOwner(ctx context.Context, agentID string, saved
 		Epoch:      saved.SessionEpoch,
 		Generation: saved.RuntimeGeneration,
 	}
-	if ok && owner.binding.AgentID == agentID && owner.binding.SessionID == saved.PiSessionID && owner.binding.Epoch == saved.SessionEpoch && owner.binding.Generation == saved.RuntimeGeneration {
+	if ok {
+		if owner.binding.AgentID != agentID || owner.binding.SessionID != saved.PiSessionID || owner.binding.Epoch != saved.SessionEpoch || owner.binding.Generation != saved.RuntimeGeneration {
+			return embeddedOwner{}, errors.New("cached embedded owner binding mismatch")
+		}
+		if err := m.store.RenewEmbeddedOwner(ctx, owner.binding, owner.identity, embeddedOwnerTTL); err != nil {
+			return embeddedOwner{}, fmt.Errorf("validate cached embedded owner: %w", err)
+		}
 		return owner, nil
 	}
 	ownerID, err := newEmbeddedOwnerIdentity()
 	if err != nil {
-		ownerID = "local:" + agentID
+		return embeddedOwner{}, fmt.Errorf("create embedded owner identity: %w", err)
 	}
 	token, err := m.store.AcquireEmbeddedOwner(ctx, binding, ownerID, embeddedOwnerTTL)
 	if err != nil {
@@ -187,6 +193,16 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 		runCtx, cancel := context.WithCancel(m.runCtx)
 		defer cancel()
 		owner := embeddedOwner{binding: binding, identity: ownerID}
+		// Publish the acquired identity before any fallible recovery work. Even
+		// failed startup must not leave an obsolete cached identity behind.
+		m.mu.Lock()
+		if _, cached := m.embeddedOwners[agent.AgentID]; cached || recovered {
+			if m.embeddedOwners == nil {
+				m.embeddedOwners = make(map[string]embeddedOwner)
+			}
+			m.embeddedOwners[agent.AgentID] = owner
+		}
+		m.mu.Unlock()
 		runCtx = context.WithValue(runCtx, embeddedOwnerContextKey{}, owner)
 		runner := m.embeddedRunnerFactory
 		if runner == nil {
@@ -219,6 +235,7 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 			}
 			return
 		}
+		lane.goalOwnerInvalid = false
 		_ = m.store.MarkManagedOperationTerminal(runCtx, operationID)
 		if m.embeddedRunnerFactory == nil && runCtx.Err() == nil {
 			published := false

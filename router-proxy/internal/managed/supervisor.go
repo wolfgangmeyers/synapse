@@ -162,32 +162,34 @@ type ResetResult struct {
 // close, and exit handling all acquire this one owner before they can touch the
 // durable transition or either process group.
 type managedAgentLane struct {
-	serial                   sync.Mutex
-	admission                sync.Mutex
-	selection                sync.Mutex // saved model snapshot at SDK turn admission only
-	activeMu                 sync.RWMutex
-	activeSession            *coding.Session
-	activePersistence        *embeddedPersistence
-	consecutiveContinuations int
-	consecutiveEmptyTurns    int
-	consecutiveErrors        int
-	goalAttempt              int
-	mailAttempts             map[string]int
-	warningEpoch             int64
-	warningEmitted           bool
-	extendedTimeoutUntil     time.Time
-	defaultTimeoutOverride   time.Duration
-	extendedTimeoutOverride  time.Duration
-	inlineAllowances         map[string]int
-	inlinePoolRemainingMs    int64
-	inlinePoolUpdatedAt      time.Time
+	serial                      sync.Mutex
+	admission                   sync.Mutex
+	selection                   sync.Mutex // saved model snapshot at SDK turn admission only
+	activeMu                    sync.RWMutex
+	activeSession               *coding.Session
+	activePersistence           *embeddedPersistence
+	consecutiveContinuations    int
+	goalNextAttempt             time.Time
+	goalOwnerInvalid            bool
+	consecutiveEmptyTurns       int
+	consecutiveErrors           int
+	goalAttempt                 int
+	mailAttempts                map[string]int
+	warningEpoch                int64
+	warningEmitted              bool
+	extendedTimeoutUntil        time.Time
+	defaultTimeoutOverride      time.Duration
+	extendedTimeoutOverride     time.Duration
+	inlineAllowances            map[string]int
+	inlinePoolRemainingMs       int64
+	inlinePoolUpdatedAt         time.Time
 	subagentReadPoolRemainingMs int64
 	subagentReadPoolUpdatedAt   time.Time
-	contextUsage             *ContextUsage
-	baseTools                []agent.AgentTool
-	activeTools              []agent.AgentTool
-	restartRejectedAt        time.Time
-	restartConflictDetail    string
+	contextUsage                *ContextUsage
+	baseTools                   []agent.AgentTool
+	activeTools                 []agent.AgentTool
+	restartRejectedAt           time.Time
+	restartConflictDetail       string
 }
 
 func (l *managedAgentLane) recordRestartRouterRejection(t time.Time, reason string) {
