@@ -21,11 +21,14 @@ export interface IsolatedRouter {
   root: string;
   databasePath: string;
   logPath: string;
+  readinessStderr: () => string;
+  stderr: () => string;
   port: number;
   httpUrl: string;
   websocketUrl: string;
   process: ChildProcess;
   close: () => Promise<void>;
+  restart: (prepareDatabase?: (databasePath: string) => Promise<void>) => Promise<void>;
   advanceClock: (deltaMs: number) => Promise<{ now: string; advanced_ms: number }>;
 }
 
@@ -140,9 +143,14 @@ export async function startIsolatedRouter(options: {
   repoRoot: string;
   managed?: boolean;
   testClock?: boolean;
-  embedded?: { endpoint: string; signedOut?: boolean };
+  embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string };
+  codexCredentialPath?: string;
+  fakeEmbeddedCatalog?: boolean;
+  backgroundExpiryInterval?: string;
+  rootControlFixture?: boolean;
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
+  if (options.backgroundExpiryInterval && options.testClock === false) throw new Error("Background expiry interval requires the test clock");
   const root = await mkdtemp(join(tmpdir(), "mecha-e2e-"));
   let ownedChild: ChildProcess | undefined;
   try {
@@ -161,9 +169,11 @@ export async function startIsolatedRouter(options: {
       cwd: routerProxyDir,
       stdio: "pipe",
     });
+    let buildStderr = "";
+    cp.stderr.on("data", chunk => { buildStderr = (buildStderr + String(chunk)).slice(-16384); });
     cp.on("close", (code) => {
       if (code === 0) res();
-      else rej(new Error(`Failed to compile mailbox-router, code ${code}`));
+      else rej(new Error(`Failed to compile mailbox-router, code ${code}: ${buildStderr}`));
     });
   });
 
@@ -195,7 +205,9 @@ export async function startIsolatedRouter(options: {
 
     const fixtureDir = resolve(options.repoRoot, "web/router-ui-react/tests/functional/fixtures");
     const piPath = join(root, "fake-managed-pi.mjs");
-    const authPath = resolve(fixtureDir, "fake-provider-auth.mjs");
+    const authPath = options.codexCredentialPath
+      ? resolve(options.repoRoot, "auth-helper/index.mjs")
+      : resolve(fixtureDir, "fake-provider-auth.mjs");
 
     const { readFile, copyFile } = await import("node:fs/promises");
     let fakePiContent = await readFile(resolve(fixtureDir, "fake-managed-pi.mjs"), "utf8");
@@ -229,68 +241,128 @@ export async function startIsolatedRouter(options: {
       const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "terra-test-account" } })).toString("base64url");
       await writeFile(join(privateDir, "codex.json"), JSON.stringify({ access_token: `fake.${claims}.terra-test-secret`, refresh_token: "terra-refresh-secret", account_id: "terra-test-account", expires_at: "2099-01-01T00:00:00Z" }), { mode: 0o600 });
     }
-    // Real helper and owned credential projection, never the generic fake auth helper.
-    const helperIndex = args.indexOf("--managed-auth-helper");
-    args[helperIndex + 1] = join(options.repoRoot, "auth-helper/index.mjs");
+    args[args.indexOf("--managed-auth-helper") + 1] = join(options.repoRoot, "auth-helper/index.mjs");
+    if (options.fakeEmbeddedCatalog) {
+      // Catalog discovery is an external boundary too. The real helper imports
+      // the entire SDK and exceeds CodexBrowserAuth's 5s discovery deadline on
+      // this host. Use the supported deterministic catalog fixture, while keeping
+      // the real private credential consumer beside it (as providerFixture does).
+      const { copyFile, symlink } = await import("node:fs/promises");
+      const fixtureAuth = join(root, "provider-fixture");
+      await mkdir(fixtureAuth, { mode: 0o700 });
+      await copyFile(join(options.repoRoot, "web/router-ui-react/tests/functional/fixtures/fake-provider-auth.mjs"), join(fixtureAuth, "index.mjs"));
+      await copyFile(join(options.repoRoot, "auth-helper/codex-consumer.mjs"), join(fixtureAuth, "codex-consumer.mjs"));
+      await symlink(join(options.repoRoot, "auth-helper/node_modules"), join(fixtureAuth, "node_modules"), "dir");
+      const helperIndex = args.indexOf("--managed-auth-helper");
+      args[helperIndex + 1] = join(fixtureAuth, "index.mjs");
+      // Match providerFixture's disposable runtime root without relaxing path
+      // validation. Copy only the two required entrypoints into that root.
+      await copyFile(join(options.repoRoot, "router/contract/managed-tools-v1.json"), join(root, "manifest.json"));
+      await copyFile(join(options.repoRoot, "pi-extensions/mecha-rpc/index.ts"), join(root, "mecha-rpc.ts"));
+      args[args.indexOf("--managed-runtime-root") + 1] = root;
+      args[args.indexOf("--managed-manifest") + 1] = join(root, "manifest.json");
+      args[args.indexOf("--managed-mecha-rpc") + 1] = join(root, "mecha-rpc.ts");
+    }
     args.push("--codex-credential-path", join(privateDir, "codex.json"));
     await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify({ google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });
     await writeFile(join(root, "work/note.txt"), "terra harmless tool evidence", { mode: 0o600 });
   }
+  if (options.codexCredentialPath) args.push("--codex-credential-path", options.codexCredentialPath);
+
   // Keep build/toolchain settings above; allow only disposable runtime config here.
   let runtimeEnvironment = process.env;
-  if (options.embedded) {
+  if (options.embedded || options.codexCredentialPath) {
     for (const directory of ["config", "cache", "tmp"]) await mkdir(join(root, directory), { mode: 0o700 });
     runtimeEnvironment = {
       PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
       XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), TMPDIR: join(root, "tmp"),
-      EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint,
+      ...(options.embedded ? { EMBEDDED_RESTART_FAKE_ENABLE: "1", EMBEDDED_RESTART_FAKE_ENDPOINT: options.embedded.endpoint } : {}),
+      ...(options.embedded?.kbDir ? { MECHA_KB_DIR: options.embedded.kbDir(join(root, "managed-home")) } : {}),
     };
   }
-  const child = spawn(binaryPath, args, {
-    cwd: options.repoRoot,
-    env: runtimeEnvironment,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  if (options.backgroundExpiryInterval) {
+    runtimeEnvironment = { ...runtimeEnvironment, MECHA_TEST_BACKGROUND_EXPIRY_INTERVAL: options.backgroundExpiryInterval };
+  }
+  if (options.rootControlFixture) {
+    if (!isManaged) throw new Error("Root control fixture requires managed mode");
+    await writeFile(join(root, "managed-home/sessions/root-control-fixture"), options.repoRoot, { mode: 0o600 });
+    const wrapper = join(root, "python-sentinel");
+    await writeFile(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${root}/python-spawns.log'\nexec "$MECHA_TEST_PYTHON" "$@"\n`, { mode: 0o700 });
+    runtimeEnvironment = { PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
+      PYTHON: wrapper, MECHA_TEST_PYTHON: process.env.PYTHON || "python3", PYTHONDONTWRITEBYTECODE: "1", MECHA_SUPERVISOR_TOOLS: join(options.repoRoot, "tools"),
+      MECHA_MANAGED_ROOT_CONTROL_HOME: join(root, "managed-home"), MECHA_TEST_ROOT_CONTROL: root,
+      MECHA_TEST_ROOT_MANIFEST: join(options.repoRoot, "router/contract/managed-tools-v1.json") };
+  }
+  // Stop the executable itself, not a launcher, and join its close event before
+  // reopening SQLite or removing the fixture. Escalation is bounded and joined.
+  const stop = async () => {
+    const child = ownedChild;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+    child.kill("SIGTERM");
+    const escalation = setTimeout(() => child.kill("SIGKILL"), 2000);
+    try { await closed; } finally { clearTimeout(escalation); }
+  };
+  let readinessStderr = "";
+  let capturedStderr = "";
+  const launch = async () => {
+    readinessStderr = "";
+    const child = spawn(binaryPath, args, {
+      cwd: options.repoRoot,
+      env: runtimeEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-  ownedChild = child;
-  let settled = false;
-  let stdout = "";
-  let stderr = "";
+    ownedChild = child;
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
 
-  await new Promise<void>((res, rej) => {
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`));
-      }
-    }, 15_000);
+    await new Promise<void>((res, rej) => {
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          // A Go stack dump makes a blocked startup actionable; close still
+          // joins the actual executable before deleting its disposable root.
+          child.kill("SIGQUIT");
+          child.once("close", () => rej(new Error(`Isolated router timed out during startup.\nStdout: ${stdout}\nStderr: ${stderr}`)));
+        }
+      }, options.embedded ? 45_000 : 15_000);
 
-    const checkReady = (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout += text;
-      if (text.includes("MECHA_V2_ROUTER_READY")) {
+      const checkReady = (chunk: Buffer) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (text.includes("MECHA_V2_ROUTER_READY")) {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            res();
+          }
+        }
+      };
+
+      child.stdout.on("data", checkReady);
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+        capturedStderr = (capturedStderr + chunk.toString()).slice(-65536);
+        // Closed vocabulary only: never expose arbitrary helper stderr, auth,
+        // stack locals or credentials through readiness artifacts.
+        if (stderr.includes("managed provider status is unavailable")) {
+          readinessStderr = "managed provider status is unavailable";
+        }
+      });
+
+      child.once("close", (code) => {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          res();
+          rej(new Error(`Isolated router exited prematurely (code ${code}).\nStderr: ${stderr}`));
         }
-      }
-    };
-
-    child.stdout.on("data", checkReady);
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      });
     });
 
-    child.once("close", (code) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        rej(new Error(`Isolated router exited prematurely (code ${code}).\nStderr: ${stderr}`));
-      }
-    });
-  });
+  };
+  await launch();
 
   const httpUrl = `http://127.0.0.1:${port}`;
   const websocketUrl = `ws://127.0.0.1:${port}/v1/agents`;
@@ -308,22 +380,31 @@ export async function startIsolatedRouter(options: {
     return res.json();
   };
 
+  let closing: Promise<void> | undefined;
   return {
     root,
     databasePath,
     logPath,
+    readinessStderr: () => readinessStderr,
+    stderr: () => capturedStderr,
     port,
     httpUrl,
     websocketUrl,
-    process: child,
+    get process() { return ownedChild!; },
+    restart: async (prepareDatabase) => {
+      if (closing) throw new Error("Cannot restart a closed isolated router");
+      await stop();
+      // Upgrade fixtures may replace SQLite only after its owning process exits.
+      if (prepareDatabase) await prepareDatabase(databasePath);
+      try { await launch(); } catch (error) { await stop(); throw error; }
+    },
     advanceClock,
-    close: async () => {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await new Promise((r) => setTimeout(r, 200));
-        if (child.exitCode === null) child.kill("SIGKILL");
-      }
-      await rm(root, { recursive: true, force: true }).catch(() => {});
+    close: () => {
+      closing ??= (async () => {
+        await stop();
+        await rm(root, { recursive: true, force: true });
+      })();
+      return closing;
     },
   };
   } catch (error) {
@@ -340,81 +421,54 @@ export async function startIsolatedRouter(options: {
 export async function startRouterProxy(options: {
   repoRoot: string;
   upstreamPort: number;
+  onSpawn?: (child: ChildProcess) => void;
 }): Promise<IsolatedProxy> {
-  const port = await allocatePort();
-  const routerProxyDir = join(options.repoRoot, "router-proxy");
-
-  const child = spawn(
-    "go",
-    [
-      "run",
-      "./",
-      "--upstream-host",
-      "127.0.0.1",
-      "--upstream-port",
-      String(options.upstreamPort),
-      "--listen-port",
-      String(port),
-      "--listen-host",
-      "127.0.0.1",
-    ],
-    {
-      cwd: routerProxyDir,
-      stdio: ["ignore", "pipe", "pipe"],
-    }
-  );
-
-  let settled = false;
-  let stdout = "";
-  let stderr = "";
-
-  await new Promise<void>((res, rej) => {
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        rej(new Error(`Router proxy timed out.\nStdout: ${stdout}\nStderr: ${stderr}`));
-      }
-    }, 15_000);
-
-    const checkReady = (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout += text;
-      if (text.includes("MECHA_ROUTER_PROXY_READY")) {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeout);
-          res();
-        }
-      }
-    };
-
-    child.stdout.on("data", checkReady);
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+  const root = await mkdtemp(join(tmpdir(), "mecha-e2e-proxy-"));
+  let child: ChildProcess | undefined;
+  let closed: Promise<void> | undefined;
+  const stop = async () => {
+    if (!child || !closed) return;
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      const timer = setTimeout(() => child?.kill("SIGKILL"), 2000);
+      try { await closed; } finally { clearTimeout(timer); }
+    } else await closed;
+  };
+  const cleanup = async () => { await stop(); await rm(root, { recursive: true, force: true }); };
+  try {
+    const binary = join(root, "router-proxy");
+    await new Promise<void>((res, rej) => {
+      const build = spawn("go", ["build", "-o", binary, "./"], { cwd: join(options.repoRoot, "router-proxy"), stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      build.stderr.on("data", chunk => { stderr += String(chunk); });
+      build.once("error", rej);
+      build.once("close", code => code === 0 ? res() : rej(new Error(`Proxy build failed (${code}): ${stderr}`)));
     });
-
-    child.once("close", (code) => {
-      if (!settled) {
+    const port = await allocatePort();
+    child = spawn(binary, ["--upstream-host", "127.0.0.1", "--upstream-port", String(options.upstreamPort), "--listen-port", String(port), "--listen-host", "127.0.0.1"], { stdio: ["ignore", "pipe", "pipe"] });
+    const processChild = child;
+    closed = new Promise(resolve => processChild.once("close", () => resolve()));
+    await new Promise<void>((res, rej) => {
+      let stdout = "", stderr = "", settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        rej(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`));
-      }
+        error ? rej(error) : res();
+      };
+      const timeout = setTimeout(() => finish(new Error(`Router proxy timed out.\nStdout: ${stdout}\nStderr: ${stderr}`)), 15_000);
+      processChild.stdout!.on("data", chunk => { stdout += String(chunk); if (stdout.includes("MECHA_ROUTER_PROXY_READY")) finish(); });
+      processChild.stderr!.on("data", chunk => { stderr += String(chunk); });
+      processChild.once("error", error => finish(error));
+      processChild.once("close", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
+      options.onSpawn?.(processChild);
     });
-  });
-
-  return {
-    port,
-    url: `http://127.0.0.1:${port}`,
-    process: child,
-    close: async () => {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await new Promise((r) => setTimeout(r, 200));
-        if (child.exitCode === null) child.kill("SIGKILL");
-      }
-    },
-  };
+    let closing: Promise<void> | undefined;
+    return { port, url: `http://127.0.0.1:${port}`, process: processChild, close: () => closing ??= cleanup() };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 }
 
 export async function serveFrontendDist(distDir: string): Promise<IsolatedFrontend> {
@@ -477,6 +531,8 @@ export async function setupE2EHarness(options?: {
   useProxy?: boolean;
   managed?: boolean;
   testClock?: boolean;
+  codexCredentialPath?: string;
+  backgroundExpiryInterval?: string;
 }): Promise<E2ETestHarness> {
   const repoRoot = resolve(__dirname, "../..");
   const distDir = join(repoRoot, "web/router-ui-react/dist");
@@ -489,7 +545,7 @@ export async function setupE2EHarness(options?: {
 
   const [mockLLM, router, frontend] = await Promise.all([
     startMockLLMServer(),
-    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock }),
+    startIsolatedRouter({ repoRoot, managed: options?.managed ?? false, testClock: options?.testClock, codexCredentialPath: options?.codexCredentialPath, backgroundExpiryInterval: options?.backgroundExpiryInterval }),
     serveFrontendDist(distDir),
   ]);
 

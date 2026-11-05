@@ -1,5 +1,6 @@
+import { attachmentBytes, OUTBOX_IMAGE_BYTES } from "./outbox-budget";
+import { canonicalSendId } from "./selectors";
 import { projectConnectedAgents, applyLifecycleReplay, applyLifecycleSnapshot, upsertLifecycleAgent, upsertPendingLifecycleAgent, type Agent } from "./agent-projection";
-import { appendConversation, reconcileConversation, replacePendingConversation, settlePendingConversation } from "./conversation-projection";
 import { matchesActiveScope, type RouterScope } from "./scopes";
 import type { Arrival } from "../domain/arrivals";
 import type { HistoryMessage } from "../domain/history";
@@ -22,6 +23,9 @@ export type AppAction =
   | { type: "managed/history"; scope: RouterScope; view: "quiet" | "complete"; entry: ManagedHistoryEntry }
   | { type: "message/append"; scope: RouterScope; peer: string; message: HistoryMessage }
   | { type: "history/reconcile"; scope: RouterScope; peer: string; snapshot: HistoryMessage[]; highWaterSequence: number }
+  | { type: "outbox/prune"; scope: RouterScope; now: number }
+  | { type: "outbox/reject-images"; scope: RouterScope; peer: string; message: HistoryMessage }
+  | { type: "outbox/dismiss"; scope: RouterScope }
   | { type: "send/replace"; scope: RouterScope; peer: string; localId: string; message: HistoryMessage }
   | { type: "send/settle"; scope: RouterScope; peer: string; localId: string; ok: boolean }
   | { type: "control/pending"; scope: RouterScope; id: string; pending: PendingControl }
@@ -42,23 +46,13 @@ function scoped(state: AppState, action: { scope?: RouterScope }): boolean { ret
 function retainManagedGoalStates(incoming: ManagedAgentView[], current: ManagedAgentView[] = []): ManagedAgentView[] {
   const prior = new Map(current.map((agent) => [agent.agent_id, agent.goal_state] as const));
   return incoming.map((agent) => {
+    const previous = current.find((candidate) => candidate.agent_id === agent.agent_id);
+    if (agent.urgent === undefined && previous?.urgent !== undefined) agent = { ...agent, urgent: previous.urgent };
     const goalState = prior.get(agent.agent_id);
     return agent.goal_state === undefined && goalState !== undefined ? { ...agent, goal_state: goalState } : agent;
   });
 }
 function cloneMaps(state: AppState): AppState { return { ...state, pendingControls: new Map(state.pendingControls), pendingLifecycle: new Map(state.pendingLifecycle ?? []), arrivals: new Map(state.arrivals), expandedSubagents: new Set(state.expandedSubagents), reminderLocks: new Map(state.reminderLocks), modelProjections: new Map(state.modelProjections) }; }
-function sameManagedHistoryEntry(left: ManagedHistoryEntry, right: ManagedHistoryEntry): boolean {
-  const leftPresentation = left.presentation;
-  const rightPresentation = right.presentation;
-  const samePresentation = leftPresentation === rightPresentation || (leftPresentation !== undefined && rightPresentation !== undefined
-    && leftPresentation.kind === rightPresentation.kind && leftPresentation.tool_name === rightPresentation.tool_name && leftPresentation.outcome === rightPresentation.outcome
-    && leftPresentation.from === rightPresentation.from && leftPresentation.to === rightPresentation.to && leftPresentation.child_label === rightPresentation.child_label
-    && leftPresentation.child_state === rightPresentation.child_state && leftPresentation.summary === rightPresentation.summary
-    && (leftPresentation.error === rightPresentation.error || (leftPresentation.error !== undefined && rightPresentation.error !== undefined
-      && leftPresentation.error.code === rightPresentation.error.code && leftPresentation.error.retryable === rightPresentation.error.retryable && leftPresentation.error.detail_available === rightPresentation.error.detail_available)));
-  return left.id === right.id && left.agent_id === right.agent_id && left.at === right.at && left.level === right.level && left.message === right.message && samePresentation;
-}
-
 export function compareManagedHistoryEntries(left: ManagedHistoryEntry, right: ManagedHistoryEntry): number {
   const matchLeft = /^complete:(\d+)(?::.*)?$/.exec(left.id);
   const matchRight = /^complete:(\d+)(?::.*)?$/.exec(right.id);
@@ -75,6 +69,26 @@ export function compareManagedHistoryEntries(left: ManagedHistoryEntry, right: M
     return leftTime - rightTime;
   }
   return left.id.localeCompare(right.id);
+}
+const OUTBOX_LIMIT = 150;
+const OUTBOX_AGE_MS = 24 * 60 * 60 * 1000;
+function pruneOutbox(state: AppState, now: number): AppState {
+  const entries = Object.entries(state.messagesByPeer).flatMap(([peer, messages]) => messages.map((message) => ({ peer, message })));
+  const valid = entries.filter(({ message }) => {
+    const time = Date.parse(message.created_at ?? message.createdAt ?? "");
+    return Number.isFinite(time) && now - time < OUTBOX_AGE_MS;
+  }).sort((a, b) => Date.parse(a.message.created_at ?? a.message.createdAt ?? "") - Date.parse(b.message.created_at ?? b.message.createdAt ?? ""));
+  let bytes = 0;
+  const kept = valid.slice().reverse().filter(({ message }, index) => {
+    const size = attachmentBytes(message);
+    if (index >= OUTBOX_LIMIT || bytes + size > OUTBOX_IMAGE_BYTES) return false;
+    bytes += size;
+    return true;
+  }).reverse();
+  if (kept.length === entries.length) return state;
+  const messagesByPeer: Record<string, HistoryMessage[]> = {};
+  for (const { peer, message } of kept) (messagesByPeer[peer] ??= []).push(message);
+  return { ...state, messagesByPeer, outboxNotice: "Some unsent or unconfirmed messages expired or were removed because the outbox is full. Check history before resending." };
 }
 export function reducer(state: AppState, action: AppAction): AppState {
   if (action.type === "scope/reset") {
@@ -106,6 +120,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: retainManagedGoalStates(agents, state.managedAgents) };
     }
     case "managed/reconcile": {
+      if (state.managedProjectionVersion !== undefined && action.version < state.managedProjectionVersion) return state;
       const current = state.managedAgents ?? [];
       const currentMap = new Map(current.map((agent) => [agent.agent_id, agent]));
       const incomingIds = new Set(action.agents.map((agent) => agent.agent_id));
@@ -134,6 +149,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           existing.runtime !== incoming.runtime ||
           existing.last_error !== incoming.last_error ||
           existing.allow_inline_tools !== incoming.allow_inline_tools ||
+          (existing.urgent ?? false) !== (incoming.urgent ?? existing.urgent ?? false) ||
           JSON.stringify(existing.goal_state) !== JSON.stringify(goalState) ||
           JSON.stringify(existing.model) !== JSON.stringify(incoming.model);
 
@@ -142,6 +158,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
           const merged = {
             ...existing,
             ...incoming,
+            urgent: incoming.urgent ?? existing.urgent ?? false,
             managedProjectionVersion: Math.max(existing.managedProjectionVersion ?? 0, action.version),
           };
           if (goalState !== undefined) {
@@ -227,29 +244,39 @@ export function reducer(state: AppState, action: AppAction): AppState {
       const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutVersions } = state;
       return withoutVersions;
     }
-    case "managed/history": {
-      const history = state.managedHistory ?? {};
-      const agentHistory = history[action.entry.agent_id] ?? { quiet: [], complete: [] };
-      const entries = agentHistory[action.view];
-      // The active router scope and agent history are the public fence. A
-      // repeated durable ID updates its existing timeline position.
-      const existingIndex = entries.findIndex((entry) => entry.id === action.entry.id);
-      if (existingIndex >= 0) {
-        if (sameManagedHistoryEntry(entries[existingIndex]!, action.entry)) return state;
-        const updated = entries.slice();
-        updated[existingIndex] = action.entry;
-        return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: updated } } };
-      }
-      const nextEntries = [...entries, action.entry].sort(compareManagedHistoryEntries).slice(-5000);
-      return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: nextEntries } } };
+    case "managed/history": return state;
+    case "outbox/prune": return pruneOutbox(state, action.now);
+    case "outbox/reject-images": {
+      const message = { ...action.message, pending: false, failed: true, attachments: [] };
+      const messages = [...(state.messagesByPeer[action.peer] ?? []), message];
+      const next = pruneOutbox({ ...state, messagesByPeer: { ...state.messagesByPeer, [action.peer]: messages } }, Date.now());
+      return { ...next, outboxNotice: "Images were not sent because the outbox image limit is full. Reattach them before resending." };
     }
+    case "outbox/dismiss": { const { outboxNotice: _notice, ...rest } = state; return rest; }
     case "message/append": {
-      const messages = appendConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.message).messages;
-      return { ...state, ...(state.selectedPeer === undefined ? { selectedPeer: action.peer } : {}), messagesByPeer: { ...state.messagesByPeer, [action.peer]: messages } };
+      if (!action.message.pending) return state;
+      const messages = [...(state.messagesByPeer[action.peer] ?? []), action.message];
+      const pendingSends = { ...state.pendingSends, [action.message.id]: action.peer };
+      const ids = Object.keys(pendingSends);
+      for (const id of ids.slice(0, Math.max(0, ids.length - 300))) delete pendingSends[id];
+      return pruneOutbox({ ...state, pendingSends, messagesByPeer: { ...state.messagesByPeer, [action.peer]: messages } }, Date.now());
     }
-    case "history/reconcile": return { ...state, messagesByPeer: { ...state.messagesByPeer, [action.peer]: reconcileConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.snapshot, action.highWaterSequence).messages } };
-    case "send/replace": return { ...state, messagesByPeer: { ...state.messagesByPeer, [action.peer]: replacePendingConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.localId, action.message).messages }, pendingSends: Object.fromEntries(Object.entries(state.pendingSends).filter(([id]) => id !== action.localId)) };
-    case "send/settle": return { ...state, messagesByPeer: { ...state.messagesByPeer, [action.peer]: settlePendingConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.localId, action.ok).messages } };
+    case "history/reconcile": {
+      const ids = new Set(action.snapshot.map((message) => canonicalSendId(message.id)));
+      const outbox = { ...state.messagesByPeer };
+      const remaining = (outbox[action.peer] ?? []).filter((message) => !ids.has(canonicalSendId(message.id)));
+      if (remaining.length) outbox[action.peer] = remaining; else delete outbox[action.peer];
+      const pendingSends = Object.fromEntries(Object.entries(state.pendingSends).filter(([id, peer]) => peer !== action.peer || !ids.has(canonicalSendId(id))));
+      return { ...state, messagesByPeer: outbox, pendingSends };
+    }
+    case "send/replace":
+    case "send/settle": {
+      const outbox = { ...state.messagesByPeer };
+      const found = (outbox[action.peer] ?? []).some((message) => message.id === action.localId);
+      const remaining = (outbox[action.peer] ?? []).flatMap((message) => message.id !== action.localId ? [message] : action.type === "send/settle" && !action.ok ? [{ ...message, pending: false, failed: true }] : []);
+      if (remaining.length) outbox[action.peer] = remaining; else delete outbox[action.peer];
+      return { ...state, messagesByPeer: outbox, ...(action.type === "send/settle" && !action.ok && (found || state.pendingSends[action.localId] === action.peer) ? { outboxNotice: `Message to ${action.peer} could not be confirmed. Check history before resending.` } : {}), pendingSends: Object.fromEntries(Object.entries(state.pendingSends).filter(([id]) => id !== action.localId)) };
+    }
     case "control/pending": { const next = cloneMaps(state); next.pendingControls.set(action.id, action.pending); return next; }
     case "control/clear": { const next = cloneMaps(state); next.pendingControls.delete(action.id); return next; }
     case "control/invalidate": { const next = cloneMaps(state); next.pendingControls.clear(); next.reminderLocks.clear(); next.modelProjections.clear(); return next; }

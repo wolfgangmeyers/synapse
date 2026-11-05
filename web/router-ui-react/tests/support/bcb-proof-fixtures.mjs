@@ -1,7 +1,5 @@
-export const PROMPT_EXPORT_HOOK = '[data-testid="prompt-export"]';
-export const PROMPT_TEMPLATE_FIXTURE = Object.freeze({ id: 'fixture-prompt', name: 'Fixture prompt', body: 'Review ${file}' });
-export const CLIPBOARD_PASTE_HOOK = '[data-testid="clipboard-paste-target"]';
-export const CLIPBOARD_IMAGE = Object.freeze({
+const CLIPBOARD_PASTE_HOOK = '[data-testid="clipboard-paste-target"]';
+const CLIPBOARD_IMAGE = Object.freeze({
   name: 'clipboard.png',
   type: 'image/png',
   dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',

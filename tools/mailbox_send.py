@@ -4,27 +4,20 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
 import re
 import secrets
-from datetime import datetime, timezone
-from pathlib import Path
 import subprocess
+import tempfile
+from datetime import datetime, timezone
 import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from _state import STATE_FILE, claim_task_notice, find_task_by_mailbox, locked_state
-from _tmux import current_agent_id
-
-
 DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
-DEFAULT_LAUNCHD_LABEL = "life.meyers.mecha-router"
-LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 MAX_RESPONSE_BYTES = 512 * 1024
 NANOID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MESSAGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -62,7 +55,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--to", required=True, help="Mailbox v2 agent ID")
     result.add_argument("--body", required=True, help="Message body")
     result.add_argument("--subject", help="Optional message subject")
-    result.add_argument("--from", dest="sender", help="Explicit sender agent ID")
+    result.add_argument("--from", dest="sender", help="Explicit verified sender agent ID (otherwise current tmux window)")
     result.add_argument("--managed-control-request-id", help=argparse.SUPPRESS)
     result.add_argument(
         "--router-url",
@@ -89,16 +82,28 @@ def rejection_message(error: dict[str, Any]) -> str:
 
 
 def resolve_sender(explicit: str | None) -> str:
-    if explicit:
+    if explicit is not None:
         return explicit
-    sender = current_agent_id()
-    if sender is None:
-        raise ValueError("Missing sender identity: pass --from or run from a tmux window with a valid name.")
+    pane = os.environ.get("TMUX_PANE", "")
+    if not os.environ.get("TMUX") or re.fullmatch(r"%\d+", pane) is None:
+        raise ValueError("Missing sender identity: pass --from or run from a valid current tmux pane.")
+    # Match the native extension's current-pane lookup, without legacy imports.
+    # Bound both the subprocess lifetime and the bytes accepted as an identity.
+    try:
+        with tempfile.TemporaryFile() as output:
+            subprocess.run(
+                ["tmux", "display-message", "-p", "-t", pane, "#{window_name}"],
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                timeout=2, check=True,
+            )
+            output.seek(0)
+            raw = output.read(122)
+        sender = raw.decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as error:
+        raise ValueError("Could not resolve the current tmux sender; pass --from with a verified identity.") from error
+    if len(raw) > 121 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}", sender) is None:
+        raise ValueError("Current tmux window is not a valid mailbox sender.")
     return sender
-
-
-def is_loopback_router(router_url: str) -> bool:
-    return urlparse(router_url).hostname in LOOPBACK_HOSTS
 
 
 def router_endpoint(router_url: str, path: str) -> str:
@@ -107,6 +112,7 @@ def router_endpoint(router_url: str, path: str) -> str:
             or parsed.username is not None or parsed.password is not None
             or parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment):
         raise ValueError("--router-url must be an exact http(s) base URL.")
+    parsed.port  # Validate malformed or out-of-range ports before I/O.
     return f"{router_url.rstrip('/')}{path}"
 
 
@@ -127,68 +133,8 @@ def post_json(url: str, payload: dict[str, Any], managed_control_request_id: str
         return error.code, read_json_response(error)
 
 
-def patch_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
-        method="PATCH",
-    )
-    try:
-        with build_opener(NoRedirect()).open(request, timeout=5) as response:
-            return response.status, read_json_response(response)
-    except HTTPError as error:
-        return error.code, read_json_response(error)
-
-
-def connection_refused(error: URLError) -> bool:
-    reason = error.reason
-    return isinstance(reason, ConnectionRefusedError) or getattr(reason, "errno", None) == errno.ECONNREFUSED
-
-
-def kickstart_once() -> str | None:
-    command = [
-        sys.executable,
-        str(Path(__file__).with_name("agent_router.py")),
-        "kickstart",
-        "--label",
-        os.environ.get("MECHA_ROUTER_LAUNCHD_LABEL", DEFAULT_LAUNCHD_LABEL),
-    ]
-    try:
-        result = subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as error:
-        return f"could not run launchctl: {error.strerror or error}"
-    if result.returncode != 0:
-        return f"exit status {result.returncode}"
-    return None
-
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def report_delivery_failure(recipient: str, message: str) -> int:
-    """Report one delivery failure per worker state without hiding the attempt.
-
-    The router call has already happened before this helper runs. A duplicate
-    failure therefore remains a failed command (so callers can react), but its
-    repeated durable notice is suppressed until the supervisor state changes.
-    If state is unavailable or the recipient is not a tracked worker, preserve
-    the existing fail-loud behavior rather than silently losing diagnostics.
-    """
-    should_report = True
-    if os.path.isfile(STATE_FILE):
-        try:
-            with locked_state() as state:
-                task = find_task_by_mailbox(state, recipient)
-                if task is not None:
-                    kind = "blocked_worker" if task.get("blocked") else "delivery_failure"
-                    should_report = claim_task_notice(task, kind)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            should_report = True
-    if should_report:
-        return fail(message, 1)
-    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,35 +158,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.subject is not None:
         envelope["subject"] = args.subject
 
-    retry_prefix = ""
     try:
         status, response = post_json(endpoint, envelope, args.managed_control_request_id)
     except ValueError as error:
-        return report_delivery_failure(args.to, f"Router response invalid: {error}")
-    except URLError as error:
-        if not connection_refused(error) or not is_loopback_router(args.router_url):
-            return report_delivery_failure(args.to, f"Router unavailable: {error.reason}")
-        kickstart_error = kickstart_once()
-        retry_prefix = (
-            f"Router kickstart failed ({kickstart_error}); retrying once.\n"
-            if kickstart_error is not None else ""
-        )
-        try:
-            status, response = post_json(endpoint, envelope, args.managed_control_request_id)
-        except ValueError as retry_error:
-            return report_delivery_failure(
-                args.to, f"{retry_prefix}Router response invalid after one kickstart retry: {retry_error}"
-            )
-        except URLError as retry_error:
-            return report_delivery_failure(
-                args.to, f"{retry_prefix}Router unavailable after one kickstart retry: {retry_error.reason}"
-            )
+        return fail(f"Router response invalid: {error}", 1)
+    except (URLError, OSError) as error:
+        return fail(f"Router unavailable: {error}", 1)
 
     if status not in {200, 201}:
         error = response.get("error", {})
-        return report_delivery_failure(
-            args.to, f"{retry_prefix}{rejection_message(error if isinstance(error, dict) else {})}"
-        )
+        return fail(rejection_message(error if isinstance(error, dict) else {}), 1)
     message = response.get("message")
     # A dedupe can return the existing delivery ID while conversation_message records the submitted envelope ID.
     # Validate the returned delivery record, but do not require those IDs to match.
@@ -249,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             or MESSAGE_ID_PATTERN.fullmatch(message["id"]) is None
             or not isinstance(message.get("state"), str)
             or message["state"] not in MESSAGE_STATES):
-        return report_delivery_failure(args.to, "Router returned an invalid acceptance response.")
+        return fail("Router returned an invalid acceptance response.", 1)
     print(f"Message {message['id']} accepted: {message['state']}")
     return 0
 

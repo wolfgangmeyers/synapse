@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
@@ -28,7 +27,7 @@ function fakeRunner(result = { stdout: "ok" }) {
 
 function registered(options = {}) {
   const tools = new Map();
-  registerOperationalTools({ registerTool(tool) { tools.set(tool.name, tool); } }, options);
+  registerOperationalTools({ registerTool(tool) { tools.set(tool.name, tool); } }, { resolveCurrentAgentId: () => "test-sender", ...options });
   return tools;
 }
 
@@ -81,18 +80,20 @@ function messagingOptions(overrides = {}) {
   };
 }
 
-test("registers exactly the eight approved tools once from the messaging extension", () => {
+test("registers exactly the seven approved operational tools once from the messaging extension", () => {
   const pi = messagingPi();
   createMechaMessagingExtension(pi, messagingOptions({ runFile: async () => ({ stdout: "ok" }) }));
   const names = pi.tools.map((tool) => tool.name).filter((name) => name.startsWith("mecha_") && [
     "mecha_state", "mecha_priority", "mecha_verification_handoff", "mecha_reminder",
-    "mecha_worker", "mecha_pr", "mecha_git", "mecha_router",
+    "mecha_pr", "mecha_git", "mecha_router",
   ].includes(name));
   assert.deepEqual(names, [
     "mecha_state", "mecha_priority", "mecha_verification_handoff", "mecha_reminder",
-    "mecha_worker", "mecha_pr", "mecha_git", "mecha_router",
+    "mecha_pr", "mecha_git", "mecha_router",
   ]);
   assert.equal(new Set(names).size, names.length);
+  assert.equal(pi.tools.some((tool) => tool.name === "mecha_worker"), false);
+  assert.equal(pi.tools.filter((tool) => tool.name === "mecha_mailbox_send").length, 1);
 });
 
 test("registers Cursor metadata for every messaging control tool", () => {
@@ -113,8 +114,6 @@ test("uses action-specific closed schemas for every approved action", () => {
   const tools = registered({ runFile: async () => ({ stdout: "ok" }) });
   assertClosedActionSchemas(tools);
   assert.ok(tools.get("mecha_state").parameters.properties.alias);
-  assert.ok(tools.get("mecha_worker").parameters.properties.alias);
-  assert.deepEqual(tools.get("mecha_worker").parameters.properties.alias.pattern, "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$");
   assert.deepEqual(tools.get("mecha_pr").parameters.properties.pullRequest, { type: "integer", minimum: 1 });
   assert.ok(tools.get("mecha_git").parameters.properties.task);
   assert.equal(tools.get("mecha_reminder").parameters.properties.target, undefined);
@@ -352,7 +351,6 @@ test("matches the approved actions exactly", () => {
     mecha_priority: ["create", "update", "status"],
     mecha_verification_handoff: ["record"],
     mecha_reminder: ["list", "create", "update", "delete"],
-    mecha_worker: ["list", "launch", "cleanup", "send"],
     mecha_pr: ["status"],
     mecha_git: ["status"],
     mecha_router: ["health", "retry", "dismiss"],
@@ -464,11 +462,6 @@ test("rejects unknown actions, missing fields, wrong types, and extras before ad
     fetchImpl: async (...args) => { requests.push(args); return { ok: true, status: 200, json: async () => ({}) }; },
   });
   for (const [name, input, expected] of [
-    ["mecha_worker", { action: "launch", task: "x" }, /unsupported field/],
-    ["mecha_worker", { action: "launch" }, /alias is required/],
-    ["mecha_worker", { action: "launch", alias: "bad.worker" }, /alias contains unsupported characters/],
-    ["mecha_worker", { action: "send", worker: "x" }, /message is required/],
-    ["mecha_worker", { action: "shutdown", worker: "x", verified: true }, /unsupported action/],
     ["mecha_pr", { action: "status", pullRequest: "12" }, /pullRequest must be an integer/],
     ["mecha_state", { action: "query", state: "paused" }, /state must be one of/],
     ["mecha_priority", { action: "status", priorityId: "p1", status: "unknown" }, /status must be one of/],
@@ -490,9 +483,9 @@ test("prefers adjacent supervisor tools when both layouts exist", (t) => {
   const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const extensionDirectory = join(root, "pi-extensions", "mecha-messaging");
-  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  const adjacentTools = join(extensionDirectory, "tools");
   mkdirSync(adjacentTools, { recursive: true });
-  mkdirSync(join(root, ".claude", "skills", "supervisor", "tools"), { recursive: true });
+  mkdirSync(join(root, "tools"), { recursive: true });
 
   assert.equal(resolveSupervisorTools(extensionDirectory), adjacentTools);
 });
@@ -501,7 +494,7 @@ test("falls back from the package directory to checkout supervisor tools", (t) =
   const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const extensionDirectory = join(root, "pi-extensions", "mecha-messaging");
-  const checkoutTools = join(root, ".claude", "skills", "supervisor", "tools");
+  const checkoutTools = join(root, "tools");
   mkdirSync(checkoutTools, { recursive: true });
 
   assert.equal(resolveSupervisorTools(extensionDirectory), checkoutTools);
@@ -511,53 +504,31 @@ test("falls back when the package adjacent supervisor tools path is a regular fi
   const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const extensionDirectory = join(root, "pi-extensions", "mecha-messaging");
-  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
-  mkdirSync(join(extensionDirectory, ".claude", "skills", "supervisor"), { recursive: true });
+  const adjacentTools = join(extensionDirectory, "tools");
+  mkdirSync(extensionDirectory, { recursive: true });
   writeFileSync(adjacentTools, "not a directory\n");
-  const checkoutTools = join(root, ".claude", "skills", "supervisor", "tools");
+  const checkoutTools = join(root, "tools");
   mkdirSync(checkoutTools, { recursive: true });
 
   assert.equal(resolveSupervisorTools(extensionDirectory), checkoutTools);
 });
 
-test("selects exact fixed script paths and passes safe argument arrays", async () => {
-  const runner = fakeRunner((file, args) => {
-    const script = basename(args[0]);
-    if (script === "pr_status.py" || script === "git_task_status.py") return { stdout: "[]" };
-    return { stdout: "ok" };
-  });
+test("retired operations fail before subprocess without exposing a worker adapter", async () => {
+  const runner = fakeRunner();
   const tools = registered({ runFile: runner.runFile });
-  const calls = [
+  for (const [name, input] of [
     ["mecha_state", { action: "query", task: "task-1" }],
-    ["mecha_state", { action: "create", alias: "task-2", type: "worker", project: "mecha", description: "Repair tools" }],
-    ["mecha_state", { action: "update", task: "task-2", field: "summary", value: "Ready" }],
     ["mecha_priority", { action: "create", priorityId: "p1", name: "Ship", taskIds: [3] }],
     ["mecha_verification_handoff", { action: "record", task: "task-1", reminderId: "r1", successor: "worker-1" }],
-    ["mecha_worker", { action: "list" }],
-    ["mecha_worker", { action: "launch", alias: "worker-1" }],
-    ["mecha_worker", { action: "cleanup", alias: "worker-1" }],
-    ["mecha_worker", { action: "send", worker: "worker-1", message: "Check this" }],
     ["mecha_pr", { action: "status", pullRequest: 42 }],
     ["mecha_git", { action: "status", task: "task-1" }],
-  ];
-  for (const [name, input] of calls) {
+  ]) {
     const result = await execute(tools.get(name), input);
-    assert.equal(result.isError, undefined, `${name}: ${result.content[0].text}`);
+    assert.equal(result.isError, true);
+    assert.equal(result.details.error_code, "ROOT_OPERATION_UNAVAILABLE");
   }
-  const expectedDirectory = fileURLToPath(new URL("../.claude/skills/supervisor/tools", import.meta.url));
-  assert.deepEqual(runner.calls.map(({ args }) => args[0]), [
-    "state_query.py", "state_add.py", "state_update_status.py", "state_priority.py",
-    "state_verification_handoff.py", "worker_list.py", "worker_lifecycle.py",
-    "worker_lifecycle.py", "mailbox_send.py", "pr_status.py", "git_task_status.py",
-  ].map((name) => join(expectedDirectory, name)));
-  assert.equal(runner.calls[0].file, "python3");
-  assert.deepEqual(runner.calls[0].args, [join(expectedDirectory, "state_query.py"), "--alias", "task-1"]);
-  assert.equal(runner.calls[0].options.env, process.env);
-  assert.deepEqual(runner.calls[6].args.slice(1), ["launch", "--alias", "worker-1"]);
-  assert.deepEqual(runner.calls[7].args.slice(1), ["cleanup", "--alias", "worker-1"]);
-  assert.deepEqual(runner.calls[8].args.slice(1), ["--to", "worker-1", "--body", "Check this"]);
-  assert.deepEqual(runner.calls[9].args.slice(1), ["42", "--json"]);
-  assert.deepEqual(runner.calls[10].args.slice(1), ["--task", "task-1", "--json"]);
+  assert.equal(runner.calls.length, 0);
+  assert.equal(tools.has("mecha_worker"), false);
 });
 
 test("injects runFile and fetchImpl through createMechaMessagingExtension", async () => {
@@ -575,9 +546,8 @@ test("injects runFile and fetchImpl through createMechaMessagingExtension", asyn
     },
   }));
   const tools = new Map(pi.tools.map((tool) => [tool.name, tool]));
-  await execute(tools.get("mecha_worker"), { action: "list" });
   await execute(tools.get("mecha_router"), { action: "health" });
-  assert.equal(runner.calls.length, 1);
+  assert.equal(runner.calls.length, 0);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "http://127.0.0.1:8765/v1/health");
 });
@@ -620,8 +590,8 @@ test("wraps top-level array router details and preserves top-level object router
 
 test("normalizes typed output and bounds successful and expected error responses", async () => {
   const long = "x".repeat(MAX_OPERATIONAL_OUTPUT + 100);
-  const successTools = registered({ runFile: async () => ({ stdout: long }) });
-  const successful = await execute(successTools.get("mecha_worker"), { action: "list" });
+  const successTools = registered({ fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ output: long }) }) });
+  const successful = await execute(successTools.get("mecha_router"), { action: "health" });
   assert.equal(successful.isError, undefined);
   assert.equal(successful.content[0].text.length, MAX_OPERATIONAL_OUTPUT + OPERATIONAL_TRUNCATION_MARKER.length);
   assert.ok(successful.content[0].text.endsWith(OPERATIONAL_TRUNCATION_MARKER));
@@ -700,8 +670,9 @@ test("redacts complete credential values across JSON, CLI, and error fixtures", 
     },
   ];
   for (const { input, expected, secrets } of fixtures) {
-    const tools = registered({ runFile: async () => ({ stdout: input }) });
-    const result = await execute(tools.get("mecha_worker"), { action: "list" });
+    const tools = registered({ fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({ error: { message: input } }) }) });
+    const result = await execute(tools.get("mecha_router"), { action: "health" });
+    assert.equal(result.isError, true);
     assert.equal(result.content[0].text, expected, input);
     for (const secret of secrets) assert.equal(result.content[0].text.includes(secret), false, secret);
   }
@@ -729,24 +700,11 @@ test("redacts complete credential values across JSON, CLI, and error fixtures", 
   assert.match(expectedError.content[0].text, /\[redacted credential\]/);
   assert.doesNotMatch(JSON.stringify(expectedError), /expected-secret-value/);
 
-  const unexpectedTools = registered({ runFile: async () => { throw new Error("token=unexpected-secret-value"); } });
-  const unexpected = await execute(unexpectedTools.get("mecha_worker"), { action: "list" });
+  const unexpectedTools = registered({ fetchImpl: async () => { throw new Error("token=unexpected-secret-value"); } });
+  const unexpected = await execute(unexpectedTools.get("mecha_router"), { action: "health" });
   assert.equal(unexpected.isError, true);
   assert.equal(unexpected.content[0].text, "Operational action failed.");
   assert.doesNotMatch(JSON.stringify(unexpected), /unexpected-secret-value/);
-});
-
-test("redacts credentials written to stderr by a successful script", async () => {
-  const tools = registered({
-    runFile: async () => ({
-      stdout: "operation complete",
-      stderr: "Authorization: Bearer successful-stderr-secret",
-    }),
-  });
-  const result = await execute(tools.get("mecha_worker"), { action: "list" });
-  assert.equal(result.isError, undefined);
-  assert.match(result.content[0].text, /^operation complete\nAuthorization: \[redacted credential\]$/);
-  assert.doesNotMatch(JSON.stringify(result), /successful-stderr-secret/);
 });
 
 test("preserves ordinary quoted and unquoted identifier fields while redacting credential fields", async () => {
@@ -762,8 +720,9 @@ test("preserves ordinary quoted and unquoted identifier fields while redacting c
     '"identifier":"api_key_id"',
     "--api-key-id=credential-record-8",
   ].join("\n");
-  const textTools = registered({ runFile: async () => ({ stdout: ordinary }) });
-  const textResult = await execute(textTools.get("mecha_worker"), { action: "list" });
+  const textTools = registered({ fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({ error: { message: ordinary } }) }) });
+  const textResult = await execute(textTools.get("mecha_router"), { action: "health" });
+  assert.equal(textResult.isError, true);
   assert.equal(textResult.content[0].text, ordinary);
 
   const detailTools = registered({
@@ -821,9 +780,6 @@ test("rejects arbitrary paths, repositories, working directories, and commands",
   const runner = fakeRunner();
   const tools = registered({ runFile: runner.runFile });
   for (const [name, input] of [
-    ["mecha_worker", { action: "send", worker: "x", message: "hello", directory: "/tmp" }],
-    ["mecha_worker", { action: "launch", alias: "x", directory: "/tmp" }],
-    ["mecha_worker", { action: "cleanup", alias: "x", command: "tmux kill-server" }],
     ["mecha_pr", { action: "status", pullRequest: 3, repo: "evil/repo" }],
     ["mecha_git", { action: "status", task: "x", cwd: "/tmp" }],
     ["mecha_router", { action: "health", script: "curl" }],
@@ -839,4 +795,5 @@ test("default definitions expose no generic execution surface", () => {
   assert.equal(names.includes("mecha_supervisor_runtime"), false);
   assert.equal(names.includes("shell"), false);
   assert.equal(names.includes("mecha_task"), false);
+  assert.equal(names.includes("mecha_worker"), false);
 });

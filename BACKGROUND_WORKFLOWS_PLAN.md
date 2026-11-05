@@ -1,11 +1,13 @@
 # Background Workflows & Scheduled Execution Plan
 
+> **Historical, superseded plan.** The implementation details and test proposals below are not governing requirements. For current contracts see [background workflows](docs/specs/SPEC-BACKGROUND-WORKFLOWS.md), [structured schedules](docs/specs/SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md), and the [background cleanup spec](docs/specs/background-worker-cleanup.spec.md) (Draft; acceptance pending). Selected UI option B is one combined Background list, active workers first, with no Active/Completed toggle. The background-workflows spec still describes the old toggle; that conflict remains to be reconciled in the spec, outside this docs-only cleanup. No implementation or acceptance is implied by this selection.
+
 ## 1. Overview & Motivation
 This plan defines the end-to-end design and implementation for **Background Workflows** and **Scheduled Execution** in `mecha-developer`.
 
 Users and supervisor agents require the capability to execute state-machine workflows autonomously in the background—either launched dynamically on-demand or automatically on a schedule. Because workflows may depend on specific runtime variables (e.g. `COMPONENT`, `TARGET_ENVIRONMENT`, `PR_NUMBER`), any scheduled execution must strictly enforce that all required parameters are provided before triggering, rejecting incomplete configurations with deterministic validation errors.
 
-In the Web UI, background workers must not clutter the primary agent list. Instead, users must be able to switch between standard agents and background workflow workers using dedicated tabs at the top of the sidebar agent list. Background workers must visually match standard worker cards (status dots, badges, action buttons), support active vs. completed filtering, and be automatically pruned 1 hour after completion in alignment with existing system cleanup policies. Navigation for managing background workflow definitions and recurring schedules is modeled after the Knowledge Base interface.
+In the Web UI, background workers must not clutter the primary agent list. Instead, users must be able to switch between standard agents and background workflow workers using dedicated tabs at the top of the sidebar agent list. Background workers must visually match standard worker cards (status dots, badges, action buttons), show active and completed workers together with active workers first, without a toggle. Navigation for managing background workflow definitions and recurring schedules is modeled after the Knowledge Base interface.
 
 ---
 
@@ -49,9 +51,7 @@ In the Web UI, background workers must not clutter the primary agent list. Inste
     - If required variables are missing: updates schedule `last_run_status = 'failed'`, records `last_run_error = "missing required workflow parameter(s): ..."`, advances `next_run_at`, and refuses to launch the worker.
     - If valid: triggers `LaunchBackgroundWorkflow`, updates `last_run_status = 'success'`, and advances `next_run_at`.
 
-- **REQ-4 (1-Hour Cleanup Retention)**:
-  - Completed background workers (`desired_state = 'terminated'` or `lifecycle_state = 'terminated'`) must be automatically purged 1 hour after reaching terminal state.
-  - Integrate background worker cleanup into router store sweep (`SweepExpiredBackgroundAgents(ctx, 1*time.Hour)`).
+- **REQ-4 (Cleanup)**: Historical proposal superseded; see the linked background cleanup spec.
 
 - **REQ-5 (Web UI Sidebar Tabs & Isolation)**:
   - Background workers must not appear in the primary "Agents" list.
@@ -59,7 +59,7 @@ In the Web UI, background workers must not clutter the primary agent list. Inste
     - **Agents** (standard active/managed agents)
     - **Background** (background workflow workers) with an active badge counter.
   - In the Background tab:
-    - Provide a segmented toggle control: **Active** vs **Completed**.
+    - Show active and completed workers together, active first; no toggle.
     - Render background workers using the exact same card layout, styling, and action controls as standard workers (`AgentRow` styling, status indicators, workflow badge, terminate button).
     - Selecting a background worker opens its continuous conversation timeline in the main view.
 
@@ -122,7 +122,7 @@ In the Web UI, background workers must not clutter the primary agent list. Inste
    - `managed.go`:
      - Update `ManagedAgentRecord` and queries to include `is_background`.
      - `ListManagedAgents`: support filtering by `is_background`.
-     - `PruneExpiredBackgroundAgents(ctx, cutoff time.Time)`: Cleans up terminated background agents older than 1 hour.
+     - Historical pruning proposal superseded; see the linked background cleanup spec.
 
 2. **Runner & Workflow Engine (`router-proxy/internal/managed/`)**:
    - `embedded_workflow_runner.go`:
@@ -142,8 +142,7 @@ In the Web UI, background workers must not clutter the primary agent list. Inste
      - Validates required parameters.
      - If invalid: records failure with descriptive error, advances `next_run_at`.
      - If valid: launches background worker via `LaunchBackgroundWorkflow`, advances `next_run_at`.
-   - Add background agent pruning (`PruneExpiredBackgroundAgents(ctx, 1*time.Hour)`):
-     - Calls `s.bumpManagedProjectionVersion(ctx)` so Web UI clients receive instant WebSocket timeline updates upon pruning.
+   - Historical pruning proposal superseded; see the linked background cleanup spec.
 
 4. **HTTP Transport Layer (`router-proxy/internal/transport/`)**:
    - `POST /v1/workflows/:id/run`: Dynamic background launch.
@@ -173,7 +172,7 @@ In the Web UI, background workers must not clutter the primary agent list. Inste
      - `Agents` tab (standard root agents).
      - `Background` tab (shows active background worker count badge).
    - In `Background` tab mode:
-     - Render segmented toggle: `Active` vs `Completed`.
+     - Render one combined active/completed list, active first, without a toggle.
      - Render background workers matching `AgentRow` styling and actions.
      - Hide background workers from the standard `Agents` tab view.
 
@@ -196,10 +195,10 @@ In the Web UI, background workers must not clutter the primary agent list. Inste
      - *Scenario 3: Scheduled workflow fires on time with valid variables.*
      - *Scenario 4: Scheduled workflow fails to execute and reports error if required variables are missing.*
      - *Scenario 5: UI agent list separation and sidebar tab switching.*
-     - *Scenario 6: Active vs Completed filtering of background workers.*
-     - *Scenario 7: Completed background workers pruned after 1 hour.*
+     - *Scenario 6: Combined active/completed list, active first, without a toggle.*
+     - *Scenario 7: See the linked background cleanup spec.*
 
 2. **Fast Frictionless E2E Tests**:
    - Create `tests/e2e/background-workflows.spec.ts`.
    - Exercise full system boundaries: SQLite store, Go router REST & WebSocket, Headless Browser UI, mock LLM execution.
-   - Verify sidebar tab switching, active/completed filtering, parameter validation errors, and scheduled runs.
+   - Verify sidebar tab switching, combined list ordering, parameter validation errors, and scheduled runs.

@@ -1,3 +1,4 @@
+import { isClaudeCodeAgent } from "../state/agent-projection";
 import type { ReactElement, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { Agent } from "../state/agent-projection";
@@ -8,6 +9,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import { AlienText } from "./AlienText";
 import type { Arrival } from "../domain/arrivals";
 import type { PromptTemplate } from "../domain/prompt-templates";
+import { HttpRequestError } from "../transport/http-client";
 import type { RouterHttpClient, AgentMonitor } from "../transport/http-client";
 
 import type { Workflow } from "../domain/workflow-states";
@@ -83,8 +85,71 @@ function isManagedAgent(agent: Agent | undefined): boolean {
   return agent.source === "router-managed" || agent.managed_agent?.runtime === "embedded" || (agent as { runtime?: string }).runtime === "embedded";
 }
 
+// Keep uncertain writes fenced across agent switches and header remounts. Client
+// URL scopes this state to the router; a GET cannot fence a lost PUT.
+type UrgencyOperation = { pending: boolean; uncertain: boolean; error?: string; confirmation?: { value: boolean; baseline: boolean; expires: number }; invalidated?: boolean; baseline?: boolean; observed?: boolean; observation: number };
+const urgencyOperations = new Map<string, Map<string, UrgencyOperation>>();
+const urgencyListeners = new Map<string, Map<string, Set<() => void>>>();
+function notifyUrgency(router: string, id: string) {
+  urgencyListeners.get(router)?.get(id)?.forEach(listener => listener());
+}
+function subscribeUrgency(router: string, id: string, listener: () => void) {
+  let agents = urgencyListeners.get(router);
+  if (!agents) { agents = new Map(); urgencyListeners.set(router, agents); }
+  let listeners = agents.get(id);
+  if (!listeners) { listeners = new Set(); agents.set(id, listeners); }
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) agents.delete(id);
+    if (!agents.size) urgencyListeners.delete(router);
+  };
+}
+const URGENCY_OPERATION_LIMIT = 256;
+const URGENCY_TIMEOUT_MS = 10_000;
+function urgencyOperation(client: RouterHttpClient, id: string) {
+  let agents = urgencyOperations.get(client.routerUrl);
+  const existing = agents?.get(id);
+  if (existing) return existing;
+  let count = 0;
+  for (const entries of urgencyOperations.values()) count += entries.size;
+  if (count >= URGENCY_OPERATION_LIMIT) {
+    for (const [router, entries] of urgencyOperations) {
+      for (const [key, entry] of entries) {
+        if (!entry.pending && !entry.uncertain) {
+          entries.delete(key);
+          notifyUrgency(router, key);
+          if (!entries.size) urgencyOperations.delete(router);
+          count--;
+          break;
+        }
+      }
+      if (count < URGENCY_OPERATION_LIMIT) break;
+    }
+  }
+  if (count >= URGENCY_OPERATION_LIMIT) return undefined;
+  // The eviction above may have removed this router's last entry.
+  agents = urgencyOperations.get(client.routerUrl);
+  if (!agents) { agents = new Map(); urgencyOperations.set(client.routerUrl, agents); }
+  const operation: UrgencyOperation = { pending: false, uncertain: false, observation: 0 };
+  agents.set(id, operation);
+  return operation;
+}
+
+async function urgencyDeadline<T>(request: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([request, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Urgency request timed out")), URGENCY_TIMEOUT_MS);
+    })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export function ConversationHeader({ agent, client, templates, onInterrupt, activeReminderCount = 0, arrival, modelControls, promptControls, conversationView, onConversationViewChange, showAgentControls = true, showGoalControl = showAgentControls, onGoal, onReminders, onInlineToolSettings, onAction, onConfirmTermination, onScratchpad, onContextThresholds, onOpenArrival, onDismissArrival, onToggleSubagents, onStopSubagent, expanded = false, onOpenProgressHistory, onOpenWorkflow }: ConversationHeaderProps): ReactElement {
 
+  const isClaude = isClaudeCodeAgent(agent);
   const isManaged = isManagedAgent(agent);
   const showConversationViews = !isManaged && agent !== undefined && conversationView !== undefined && onConversationViewChange !== undefined;
   const managedFailure = failedManagedAgent(agent);
@@ -136,6 +201,110 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   const [availableWorkflows, setAvailableWorkflows] = useState<Workflow[]>([]);
   const [showWorkflowDropdown, setShowWorkflowDropdown] = useState(false);
   const [workflowUpdating, setWorkflowUpdating] = useState(false);
+  const [, refreshUrgency] = useState(0);
+  useEffect(() => {
+    if (!client?.routerUrl || !agent?.agent_id) return;
+    const unsubscribe = subscribeUrgency(client.routerUrl, agent.agent_id, () => refreshUrgency(value => value + 1));
+    // Reconcile any change between render and subscription.
+    refreshUrgency(value => value + 1);
+    return () => {
+      // A detached selection cannot observe projection changes while the write
+      // is in flight, so its eventual response must not create an overlay.
+      const operation = urgencyOperations.get(client.routerUrl)?.get(agent.agent_id);
+      if (operation?.pending) { operation.invalidated = true; operation.observation++; }
+      unsubscribe();
+    };
+  }, [client?.routerUrl, agent?.agent_id]);
+  const urgencyOperationState = client && agent ? urgencyOperations.get(client.routerUrl)?.get(agent.agent_id) : undefined;
+  const [urgencyCapacityError, setUrgencyCapacityError] = useState(false);
+  const projection = useRef({ router: client?.routerUrl, id: agent?.agent_id, value: Boolean(agent?.urgent), revision: 0 });
+  if (projection.current.router !== client?.routerUrl || projection.current.id !== agent?.agent_id || projection.current.value !== Boolean(agent?.urgent)) {
+    projection.current = { router: client?.routerUrl, id: agent?.agent_id, value: Boolean(agent?.urgent), revision: projection.current.revision + 1 };
+  }
+  if (urgencyOperationState && urgencyOperationState.observed !== Boolean(agent?.urgent)) {
+    urgencyOperationState.observed = Boolean(agent?.urgent);
+    urgencyOperationState.observation++;
+  }
+  if (urgencyOperationState?.pending && urgencyOperationState.baseline !== Boolean(agent?.urgent)) {
+    urgencyOperationState.invalidated = true;
+  }
+  const urgencyConfirmation = urgencyOperationState?.confirmation;
+  useEffect(() => {
+    if (!urgencyConfirmation || !urgencyOperationState || !client || !agent) return;
+    const clear = () => {
+      if (urgencyOperationState.confirmation !== urgencyConfirmation) return;
+      delete urgencyOperationState.confirmation;
+      notifyUrgency(client.routerUrl, agent.agent_id);
+    };
+    if (Boolean(agent.urgent) !== urgencyConfirmation.baseline) { clear(); return; }
+    const timer = window.setTimeout(clear, Math.max(0, urgencyConfirmation.expires - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [urgencyConfirmation, urgencyOperationState, client, agent?.agent_id, agent?.urgent]);
+  const toggleUrgency = async () => {
+    if (!client || !agent) return;
+    const id = agent.agent_id;
+    const operation = urgencyOperation(client, id);
+    if (!operation) { setUrgencyCapacityError(true); return; }
+    setUrgencyCapacityError(false);
+    if (operation.pending || operation.uncertain) return;
+    const revision = projection.current.revision;
+    const desired = !displayedUrgency;
+    operation.pending = true;
+    operation.baseline = Boolean(agent.urgent);
+    operation.observed = Boolean(agent.urgent);
+    operation.invalidated = false;
+    delete operation.confirmation;
+    delete operation.error;
+    notifyUrgency(client.routerUrl, id);
+    try {
+      try {
+        const result = isManaged ? await urgencyDeadline(client.managedAgents()) : await urgencyDeadline(client.agents({ includeModels: false }));
+        const found = result.agents.find(item => item.agent_id === id);
+        if (!found) throw new Error("Agent no longer exists");
+      } catch {
+        operation.error = "Could not check urgency; retry the action.";
+        return;
+      }
+      try {
+        await urgencyDeadline(client.setAgentUrgency(id, desired));
+        if (projection.current.revision === revision && !operation.invalidated) {
+          operation.confirmation = { value: desired, baseline: Boolean(agent.urgent), expires: Date.now() + 2000 };
+        } else {
+          // The write is settled, but the requested value may already have
+          // changed again. Read after the PUT rather than waiting for it in
+          // the projection. Never overlay a projection observed during GET.
+          const readRevision = operation.observation;
+          try {
+            const result = isManaged ? await urgencyDeadline(client.managedAgents()) : await urgencyDeadline(client.agents({ includeModels: false }));
+            const found = result.agents.find(item => item.agent_id === id);
+            if (!found) throw new Error("Agent no longer exists");
+            if (urgencyListeners.get(client.routerUrl)?.get(id)?.size && operation.observation === readRevision && operation.observed !== undefined) {
+              operation.confirmation = { value: Boolean(found.urgent), baseline: operation.observed, expires: Date.now() + 2000 };
+            }
+          } catch {
+            operation.error = "Could not refresh urgency after update; retry the action.";
+          }
+        }
+      } catch (error) {
+        if (error instanceof HttpRequestError && (error.status === 400 || error.status === 404)) {
+          operation.error = "Urgency update was rejected; retry the action.";
+        } else {
+          operation.uncertain = true;
+          operation.error = "Urgency update outcome is unknown. Further changes are disabled for this page; reloading does not guarantee the request has finished.";
+        }
+      }
+    } finally {
+      operation.pending = false;
+      if (!operation.uncertain && !operation.error && !operation.confirmation) {
+        const agents = urgencyOperations.get(client.routerUrl);
+        agents?.delete(id);
+        if (agents?.size === 0) urgencyOperations.delete(client.routerUrl);
+      }
+      notifyUrgency(client.routerUrl, id);
+    }
+  };
+  const displayedUrgency = urgencyConfirmation && Date.now() < urgencyConfirmation.expires && Boolean(agent?.urgent) === urgencyConfirmation.baseline
+    ? urgencyConfirmation.value : Boolean(agent?.urgent);
   const [allowInlineToolsUpdating, setAllowInlineToolsUpdating] = useState(false);
   const [launchModalWorkflow, setLaunchModalWorkflow] = useState<Workflow | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
@@ -168,13 +337,13 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   };
 
   useEffect(() => {
-    if (!client || typeof client.listWorkflows !== "function" || !agent || agent.source !== "router-managed") return;
+    if (isClaude || !client || typeof client.listWorkflows !== "function" || !agent || agent.source !== "router-managed") return;
     let mounted = true;
     client.listWorkflows().then((res) => {
       if (mounted) setAvailableWorkflows(res || []);
     }).catch(() => {});
     return () => { mounted = false; };
-  }, [client, agent?.agent_id, agent?.source]);
+  }, [client, agent?.agent_id, agent?.source, isClaude]);
 
   useEffect(() => {
     if (!client || typeof client.listAgentMonitors !== "function" || !agent?.agent_id) {
@@ -364,7 +533,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                 </span>
               </h2>
 
-              {agent?.workflow_state ? (
+              {!isClaude && agent?.workflow_state ? (
                 onOpenWorkflow ? (
                   <button
                     type="button"
@@ -433,6 +602,18 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
 
               {/* Action Buttons Toolbar directly adjacent to title */}
               <div className="conversation-header-actions">
+                {agent && pinnedControls.includes("urgency") ? <HeaderActionButton
+                  className="urgency-header-button"
+                  aria-label={displayedUrgency ? "Clear urgency" : "Mark urgent"}
+                  title={displayedUrgency ? "Clear urgency" : "Mark urgent"}
+                  aria-pressed={displayedUrgency}
+                  disabled={!client || urgencyOperationState?.pending || urgencyOperationState?.uncertain}
+                  icon="fa-solid fa-triangle-exclamation"
+                  active={displayedUrgency}
+                  activeTone="teal"
+                  onClick={() => void toggleUrgency()}
+                /> : null}
+                {urgencyOperationState?.error ? <span role="alert">{urgencyOperationState.error}</span> : urgencyCapacityError ? <span role="alert">Too many pending or uncertain urgency operations; further changes are unavailable.</span> : null}
                 {agent?.activity_state === "active" ? (
                   <HeaderActionButton
                     className="interrupt-worker-button header-button-interrupt"
@@ -460,7 +641,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
+                {agent && !isClaude && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
                   <div className="workflow-header-control">
                     <HeaderActionButton
                       className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
@@ -541,7 +722,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   </div>
                 ) : null}
 
-                {agent && (allowInlineTools || pinnedControls.includes("inlineTools")) ? (
+                {agent && !isClaude && (allowInlineTools || pinnedControls.includes("inlineTools")) ? (
                   <HeaderActionButton
                     className={`inline-tools-toggle-button ${allowInlineTools ? "allowed" : "restricted"}`}
                     onClick={() => void handleToggleAllowInlineTools()}
@@ -589,7 +770,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && pinnedControls.includes("workerTools") ? (
+                {agent && !isClaude && pinnedControls.includes("workerTools") ? (
                   <HeaderActionButton
                     className="worker-tools-header-button"
                     onClick={() => setShowWorkerToolsDialog(true)}
@@ -600,7 +781,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && pinnedControls.includes("toolSettings") ? (
+                {agent && !isClaude && pinnedControls.includes("toolSettings") ? (
                   <HeaderActionButton
                     className="inline-tool-settings-button"
                     onClick={onInlineToolSettings}
@@ -660,6 +841,9 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                       agent={agent}
                       pinnedControls={pinnedControls}
                       onTogglePin={handleTogglePin}
+                      onToggleUrgency={() => void toggleUrgency()}
+                      urgencyDisabled={!client || urgencyOperationState?.pending || urgencyOperationState?.uncertain}
+                      urgent={displayedUrgency}
                       onGoal={onGoal}
                       onReminders={onReminders}
                       onInlineToolSettings={onInlineToolSettings}
@@ -718,7 +902,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
             </div>
 
           <div className="conversation-header-subagents-row">
-            {agent ? (
+            {agent && !isClaude ? (
             <div
               className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
               role="button"
@@ -853,7 +1037,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
           ) : null}
         </div>
       </div>
-      {launchModalWorkflow && agent && client ? (
+      {!isClaude && launchModalWorkflow && agent && client ? (
   <WorkflowLaunchModal
     open={true}
     workflow={launchModalWorkflow}
@@ -873,7 +1057,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
       setActiveWatchersCount(count);
     }}
   />
-) : null}{agent?.source === "router-managed" && client ? (
+) : null}{!isClaude && agent?.source === "router-managed" && client ? (
   <WorkerToolsDialog
     open={showWorkerToolsDialog}
     agentId={agent.agent_id}
@@ -881,7 +1065,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
     client={client}
     onClose={() => setShowWorkerToolsDialog(false)}
   />
-) : null}{agent && showSubagentViewerDialog ? (
+) : null}{!isClaude && agent && showSubagentViewerDialog ? (
   <SubagentViewerDialog
     open={showSubagentViewerDialog}
     onClose={() => setShowSubagentViewerDialog(false)}

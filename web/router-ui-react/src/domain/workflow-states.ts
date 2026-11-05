@@ -184,5 +184,4 @@ export const KNOWN_WORKFLOW_TOOLS: KnownToolDefinition[] = [
   { id: "subagent", name: "subagent", category: "subagents", description: "Launch background subagents" },
   { id: "get_subagent_result", name: "get_subagent_result", category: "subagents", description: "Snapshot subagent outputs" },
   { id: "steer_subagent", name: "steer_subagent", category: "subagents", description: "Send steering messages to subagents" },
-  { id: "mecha_worker", name: "mecha_worker", category: "subagents", description: "Launch independent workers" },
 ];

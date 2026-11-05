@@ -42,9 +42,9 @@ func (m *Manager) managedLaunchRecipe(agent store.ManagedAgentRecord) (store.Man
 		MechaRPCExtension:    m.config.MechaRPCExtension,
 		PiSubagentsExtension: m.config.PiSubagentsExtension,
 		CursorExtension:      m.config.CursorExtension,
-		AntigravityExtension: m.config.AntigravityExtension,
-		TestOnlyExtensions:   append([]string(nil), m.config.TestOnlyExtensions...),
-		Environment:          stable,
+
+		TestOnlyExtensions: append([]string(nil), m.config.TestOnlyExtensions...),
+		Environment:        stable,
 	}
 	return store.ManagedLaunchRecipeDigest(recipe)
 }
@@ -246,7 +246,11 @@ func (m *Manager) MaybeResumeEmbeddedGoal(agentID string) {
 		return
 	}
 	now := formatManagedTime(m.clock.Now())
-	if pref, err := m.store.CurrentEmbeddedGoalSnoozePreference(m.runCtx, agentID); err == nil && pref != nil {
+	pref, err := m.store.CurrentEmbeddedGoalSnoozePreference(m.runCtx, agentID)
+	if err != nil {
+		return // Missing authority is not permission to dispatch fresh work.
+	}
+	if pref != nil {
 		if pref.SnoozeUntil != "" && pref.SnoozeUntil > now {
 			return
 		}
@@ -621,6 +625,16 @@ func (m *Manager) recoverManagedRoot(ctx context.Context, agent *store.ManagedAg
 	if err := m.validateColdRecoveryPreflight(ctx, agent, old, oldProbe); err != nil {
 		return err
 	}
+	// Preflight persists safe failures without returning an error. Do not
+	// claim recovery or start a process after that durable rejection (or after
+	// another owner has changed the fence or desired state).
+	current, err := m.store.ManagedAgent(ctx, agent.AgentID)
+	if err != nil {
+		return err
+	}
+	if current == nil || current.LifecycleState == "failed" || current.DesiredState != "running" || !sameBindingFence(storedAgentFence(current), old) {
+		return nil
+	}
 	recipe := *agent.LaunchRecipe
 
 	action, actionErr := m.store.ManagedRootRecoveryAction(ctx, agent.AgentID)
@@ -701,8 +715,14 @@ func (m *Manager) validateColdRecoveryPreflight(ctx context.Context, agent *stor
 	} else if err := store.ValidateManagedLaunchRecipe(*agent.LaunchRecipe); err != nil {
 		code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe is invalid"
 	} else if !m.config.AllowManagedLaunchRecipeMismatch {
+		// Integrity was checked against the original persisted recipe above.
+		// Ignore only the retired extension when comparing effective launch
+		// configuration; retain the original recipe and hash for recovery ownership.
+		effective := *agent.LaunchRecipe
+		effective.AntigravityExtension = ""
+		effective, effectiveErr := store.ManagedLaunchRecipeDigest(effective)
 		expected, err := m.managedLaunchRecipe(*agent)
-		if err != nil || store.ValidateManagedLaunchRecipe(expected) != nil || expected.SHA256 != agent.LaunchRecipe.SHA256 {
+		if effectiveErr != nil || err != nil || store.ValidateManagedLaunchRecipe(expected) != nil || expected.SHA256 != effective.SHA256 {
 			code, message = "RECOVERY_RECIPE_MISMATCH", "managed launch recipe does not match current manager configuration"
 		}
 	}
@@ -868,7 +888,7 @@ func (m *Manager) recoverManagedRootInLane(ctx context.Context, agent *store.Man
 		}
 		return err
 	}
-	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionPath: filepath.Join(m.config.SessionRoot, sessionRelativePath), SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, AntigravityExtension: recipe.AntigravityExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.TestOnlyEnvironment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: recipe.PiExecutable, SessionRoot: recipe.SessionRoot, SessionPath: filepath.Join(m.config.SessionRoot, sessionRelativePath), SessionID: old.PiSessionID, LaunchMode: ResumeExisting, Cwd: recipe.Cwd, Provider: recipe.Provider, ModelID: recipe.ModelID, MechaRPCExtension: recipe.MechaRPCExtension, PiSubagentsExtension: recipe.PiSubagentsExtension, CursorExtension: recipe.CursorExtension, TestOnlyExtensions: recipe.TestOnlyExtensions, Environment: recoveryEnvironment(recipe.Environment, m.config.TestOnlyEnvironment, m.config.RouterURL, action.TargetRuntimeGeneration, old.SessionEpoch)}
 	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		code := "RECOVERY_TARGET_UNKNOWN"
@@ -1095,6 +1115,9 @@ func recoveryEnvironment(stable, testOnly []string, routerURL, generation string
 	appendUnique := func(values ...string) {
 		for _, value := range values {
 			key, _, _ := strings.Cut(value, "=")
+			if key == "MECHA_ANTIGRAVITY_EXTENSION" || key == "ROUTER_MANAGED_ANTIGRAVITY_EXTENSION" {
+				continue
+			}
 			if _, exists := seen[key]; exists {
 				continue
 			}

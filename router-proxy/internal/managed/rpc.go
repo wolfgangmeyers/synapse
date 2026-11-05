@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
@@ -2852,12 +2851,4 @@ func (processRPCFactory) Open(_ context.Context, process Process) (RPC, error) {
 		return nil, errors.New("managed process pipes are unavailable")
 	}
 	return NewRPCClient(process.Stdin(), process.Stdout(), func() error { return nil }), nil
-}
-func waitForRPC(ctx context.Context, rpc RPC, timeout time.Duration, fn func(context.Context) error) error {
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	child, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return fn(child)
 }

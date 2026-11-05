@@ -32,11 +32,6 @@ function lifecycleAgent(agent: { agent_id: string; subagent_count: number; subag
   const subagents = agent.subagents.flatMap((child) => child.description === undefined || child.description === "" ? [] : [{ id: child.id, description: child.description, ...(child.type === undefined ? {} : { type: child.type }), ...(child.status === undefined ? {} : { status: child.status }) }]);
   return { agent_id: agent.agent_id, subagent_count: agent.subagent_count, subagents, subagent_version: agent.subagent_version };
 }
-function peerFor(message: { from?: string; to?: string }, owner: string): string | undefined {
-  if (message.from === owner) return message.to;
-  if (message.to === owner) return message.from;
-  return undefined;
-}
 function refreshManagedGoalProjection(transport: RouterTransport, dispatch: Dispatch<AppAction>, scope: RouterScope, agents: import("../protocol/types").ManagedAgent[]): void {
   void loadManagedGoalProjection(transport.http, agents).then((goals) => {
     for (const { agentId, goalState } of goals) dispatch({ type: "managed/goal-state", scope, agentId, goalState });
@@ -49,10 +44,6 @@ function eventAction(event: TransportEvent, scope: RouterScope): Parameters<type
   if (event.type === "controls-invalidated") return { type: "control/invalidate", scope };
   if (event.type === "agents") return { type: "agents/set", scope, agents: event.agents };
   if (event.type === "reminders") return { type: "reminders/set", scope, reminders: event.reminders };
-  if (event.type === "conversation" || event.type === "delivery") {
-    const message = event.message; const peer = peerFor(message, scope.agentId); if (peer === undefined) return undefined;
-    return { type: "message/append", scope, peer, message };
-  }
   if (event.type === "frame" && event.frame.type === "message_arrival") {
     const arrival = createArrival({ agent: event.frame.agent_id, from: event.frame.from, subject: event.frame.subject, sourceKind: event.frame.source.kind, preview: event.frame.preview, body: event.frame.body, createdAt: event.frame.created_at, messageId: event.frame.message_id }, scope.agentId);
     return arrival === undefined ? undefined : { type: "arrival/set", scope, arrival };
@@ -86,7 +77,11 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     },
     onFrame: (frame) => {
       const currentScope = scopeRef.current;
-      if (frame.type === "managed_agents_snapshot") {
+      if (frame.type === "agent_urgency_changed") {
+        // Invalidate shared snapshots, not one REST read per visible row.
+        void syncGroundTruthRef.current?.();
+        transport.invalidateAgents();
+      } else if (frame.type === "managed_agents_snapshot") {
         dispatch({ type: "managed/snapshot", scope: currentScope, version: frame.projection_version, agents: frame.agents });
         refreshManagedGoalProjection(transport, dispatch, currentScope, frame.agents);
       } else if (frame.type === "managed_agent_delta") {
@@ -95,7 +90,6 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       }
       else if (frame.type === "managed_agent_removed") dispatch({ type: "managed/removed", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agentId: frame.agent_id });
       else if (frame.type === "managed_children_snapshot") dispatch({ type: "managed/children", scope: currentScope, version: frame.lifecycle_version, children: frame.children });
-      else if (frame.type === "history_entry") dispatch({ type: "managed/history", scope: currentScope, view: frame.view, entry: frame.entry });
       else if (frame.type === "provider_auth_prompt" || frame.type === "provider_auth_state") providerAuthFrameRef.current?.(frame);
     },
     onRecovery: () => {
@@ -133,27 +127,6 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           if (children.length > 0) dispatch({ type: "managed/children", scope, children });
         } catch {
           // A child projection can be repaired by the next refresh or live frame.
-        }
-
-        const selected = stateRef.current.selectedPeer;
-        const peerId = selected
-          ? (selected.startsWith("router-managed:") ? selected.slice("router-managed:".length) : selected.startsWith("tmux:") ? selected.slice("tmux:".length) : selected)
-          : undefined;
-        const targetAgentId = (peerId && snapshot.agents.some((a) => a.agent_id === peerId))
-          ? peerId
-          : snapshot.agents.find((a) => a.activity_state === "active")?.agent_id;
-
-        if (targetAgentId) {
-          try {
-            const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 50 });
-            if (active) {
-              for (const entry of [...historyPage.entries].reverse()) {
-                dispatch({ type: "managed/history", scope: scopeRef.current, view: "complete", entry });
-              }
-            }
-          } catch {
-            // history can be loaded on selection
-          }
         }
 
         if (capabilities.ui_live_v1 !== false && canConnectUILive(options)) {
@@ -227,36 +200,6 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
             // child projection can be repaired on next pass
           }
 
-          const selected = stateRef.current.selectedPeer;
-          const peerId = selected
-            ? (selected.startsWith("router-managed:") ? selected.slice("router-managed:".length) : selected.startsWith("tmux:") ? selected.slice("tmux:".length) : selected)
-            : undefined;
-          const targetAgentId = (peerId && snapshot.agents.some((a) => a.agent_id === peerId))
-            ? peerId
-            : snapshot.agents.find((a) => a.activity_state === "active")?.agent_id;
-
-          if (targetAgentId) {
-            try {
-              const historyPage = await transport.http.managedHistory(targetAgentId, "complete", { limit: 50 });
-              if (active) {
-                for (const entry of [...historyPage.entries].reverse()) {
-                  dispatch({ type: "managed/history", scope: currentScope, view: "complete", entry });
-                }
-              }
-            } catch {
-              // history can be reloaded on next selection
-            }
-            try {
-              const quietPage = await transport.http.managedHistory(targetAgentId, "quiet", { limit: 50 });
-              if (active) {
-                for (const entry of [...quietPage.entries].reverse()) {
-                  dispatch({ type: "managed/history", scope: currentScope, view: "quiet", entry });
-                }
-              }
-            } catch {
-              // quiet history can be reloaded on next selection
-            }
-          }
         } else {
           const agentsToPoll = snapshot.agents.filter((agent) => {
             if (agent.lifecycle_state === "terminating" || agent.desired_state === "terminated") return false;
@@ -309,31 +252,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       void transport.refreshAgents().catch(() => undefined);
       void transport.refreshReminders().catch(() => undefined);
 
-      const selected = stateRef.current.selectedPeer;
-      const peerId = selected
-        ? (selected.startsWith("router-managed:")
-            ? selected.slice("router-managed:".length)
-            : selected.startsWith("tmux:")
-              ? selected.slice("tmux:".length)
-              : selected)
-        : undefined;
 
-      if (peerId) {
-        try {
-          const conv = await transport.conversation(currentScope.agentId, peerId);
-          if (active) {
-            dispatch({
-              type: "history/reconcile",
-              scope: currentScope,
-              peer: peerId,
-              snapshot: conv.messages,
-              highWaterSequence: conv.high_water_sequence,
-            });
-          }
-        } catch {
-          // conversation can be refreshed on next selection
-        }
-      }
     };
     resyncRef.current = resync;
 
@@ -353,6 +272,10 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
           }
           wasConnected = true;
         }
+      }
+      if (event.type === "frame" && event.frame.type === "agent_urgency_changed") {
+        // The compatibility transport already schedules its connected-list read.
+        void reconcileGroundTruth();
       }
       const action = eventAction(event, scopeRef.current);
       if (action) dispatch(action);

@@ -389,6 +389,9 @@ func (s *Store) acquireOrRenewLease(ctx context.Context, request LeaseRequest, r
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO agents (agent_id, first_seen_at, last_connected_at, disconnected_at) VALUES (?, ?, ?, NULL) ON CONFLICT (agent_id) DO UPDATE SET last_connected_at = excluded.last_connected_at, disconnected_at = NULL`, request.AgentID, now, now); err != nil {
 			return err
 		}
+		if err := reactivateAgentIdentityTx(ctx, s.db, request.AgentID); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO agent_leases (lease_id, agent_id, instance_id, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?)`, request.LeaseID, request.AgentID, request.InstanceID, now, expires); err != nil {
 			return err
 		}
@@ -790,6 +793,13 @@ func (s *Store) RetryDeadLetter(ctx context.Context, messageID string) (*domain.
 		if err != nil || current == nil || current.State != domain.MessageDeadLetter {
 			return err
 		}
+		var held bool
+		if err := s.db.QueryRowContext(ctx, `SELECT claude_stdin_started FROM messages WHERE id=?`, messageID).Scan(&held); err != nil {
+			return err
+		}
+		if held {
+			return errors.New("Claude stdin outcome uncertain; retry denied")
+		}
 		frozen, err := managedTerminationSettlementFrozenTx(ctx, s.db, current.To)
 		if err != nil {
 			return err
@@ -1007,7 +1017,7 @@ func (s *Store) nextAttempt(ctx context.Context, id string) (int, error) {
 }
 func (s *Store) queuedRows(ctx context.Context, recipient, owner, now string) ([]storedDeliveryRow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT enqueue_sequence,id,sender,recipient,subject,body,created_at,expires_at,message_incarnation_id,state,sentinel_json,source_kind,retry_batch_id
-		FROM messages WHERE recipient = ? AND state = 'queued' AND (claimed_at IS NOT NULL OR expires_at > ?)
+		FROM messages WHERE recipient = ? AND state = 'queued' AND claude_stdin_started=0 AND (claimed_at IS NOT NULL OR expires_at > ?)
 		AND (NOT EXISTS (SELECT 1 FROM message_target_snapshots target WHERE target.message_id = messages.id)
 			OR EXISTS (SELECT 1 FROM message_target_snapshots target JOIN recipient_sources source ON source.recipient_name = target.recipient_name
 				WHERE target.message_id = messages.id AND target.source_kind = 'tmux' AND source.source_kind = 'tmux'
@@ -1379,7 +1389,7 @@ func (s *Store) AllocateManagedDirectAttempt(ctx context.Context, fence ManagedR
 		row := s.db.QueryRowContext(ctx, `SELECT m.id,m.message_incarnation_id,m.enqueue_sequence FROM messages m
 			JOIN message_target_snapshots target ON target.message_id = m.id
 			JOIN recipient_sources source ON source.recipient_name = target.recipient_name
-			WHERE m.state = 'queued' AND m.expires_at > ? AND target.source_kind = 'managed' AND target.owner_identity = ?
+			WHERE m.state = 'queued' AND m.claude_stdin_started=0 AND m.expires_at > ? AND target.source_kind = 'managed' AND target.owner_identity = ?
 			AND source.source_kind = 'managed' AND source.state = 'active' AND source.owner_identity = target.owner_identity
 			AND (NOT EXISTS (SELECT 1 FROM managed_goal_wakeups wakeup WHERE wakeup.message_id=m.id)
 				OR EXISTS (SELECT 1 FROM managed_goal_wakeups wakeup WHERE wakeup.message_id=m.id AND wakeup.agent_id=? AND wakeup.pi_session_id=? AND wakeup.session_epoch=? AND wakeup.process_pid=? AND wakeup.process_start_marker=? AND wakeup.process_incarnation=? AND wakeup.runtime_generation=?))
@@ -1416,7 +1426,6 @@ func (s *Store) AllocateManagedDirectAttempt(ctx context.Context, fence ManagedR
 	return result, err
 }
 
-func attemptFence(attempt ManagedDirectAttempt) ManagedRuntimeFence { return attempt.Fence }
 func directAttemptMatches(result sql.Result) (bool, error) {
 	n, e := result.RowsAffected()
 	return n == 1, e
@@ -1493,6 +1502,13 @@ func (s *Store) AcknowledgeManagedDirectResultWithHistory(ctx context.Context, a
 		if requireCurrentFence && !validDirectFenceTx(ctx, s.db, attempt.Fence) {
 			return &ManagedDirectNotReadyError{AgentID: attempt.Fence.AgentID}
 		}
+		held, err := s.claudeDirectAttemptHeldTx(ctx, attempt)
+		if err != nil {
+			return err
+		}
+		if held {
+			return ErrManagedDirectClaudeInputHeld
+		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=? AND `+managedFenceWhere(""), append([]any{now, nullIfEmpty(receiptEntry), attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID}, managedFenceValues(attempt.Fence)...)...)
 		if err != nil {
@@ -1541,6 +1557,15 @@ func (s *Store) AcknowledgeManagedDirectResultWithHistory(ctx context.Context, a
 	return changed, historyEntry, nil
 }
 
+// claudeDirectAttemptHeldTx runs inside the settlement transaction. An older
+// Pi settlement cannot change a later uncertain Claude submission of the same
+// message incarnation, even if its direct attempt is still prompted.
+func (s *Store) claudeDirectAttemptHeldTx(ctx context.Context, attempt ManagedDirectAttempt) (bool, error) {
+	var held bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND message_incarnation_id=? AND state='queued' AND claude_stdin_started=1)`, attempt.MessageID, attempt.MessageIncarnationID).Scan(&held)
+	return held, err
+}
+
 // AcknowledgeManagedDirectRecovered settles an old prompted attempt after the
 // replacement Pi reads its exact persisted append marker. The old runtime
 // fence is intentionally not compared to the replacement binding: the marker
@@ -1570,6 +1595,13 @@ func (s *Store) AcknowledgeManagedDirectRecoveredResultWithHistory(ctx context.C
 		}
 		if frozen {
 			return nil
+		}
+		held, err := s.claudeDirectAttemptHeldTx(ctx, attempt)
+		if err != nil {
+			return err
+		}
+		if held {
+			return ErrManagedDirectClaudeInputHeld
 		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=?`, now, receiptEntry, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID)
@@ -1723,6 +1755,10 @@ func directRetryDelay(attempt int) time.Duration {
 	}
 }
 
+// ErrManagedDirectClaudeInputHeld means the exact message may have reached Claude.
+// No direct settlement or automatic retry is authorized.
+var ErrManagedDirectClaudeInputHeld = errors.New("managed direct message held after uncertain Claude stdin")
+
 func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectAttempt, code, detail string) (bool, error) {
 	terminal := false
 	err := s.runImmediate(ctx, func() error {
@@ -1732,6 +1768,13 @@ func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectA
 		}
 		if frozen {
 			return nil
+		}
+		held, err := s.claudeDirectAttemptHeldTx(ctx, attempt)
+		if err != nil {
+			return err
+		}
+		if held {
+			return ErrManagedDirectClaudeInputHeld
 		}
 		if code == "" {
 			code = "direct_failure"
@@ -1769,10 +1812,7 @@ func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectA
 			return err
 		}
 		if terminal {
-			if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
-				return err
-			}
-			if err := s.rearmFailedReminder(ctx, attempt.MessageID, nowText); err != nil {
+			if err := s.deadLetterDirectAttemptTx(ctx, attempt, nowText); err != nil {
 				return err
 			}
 			return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
@@ -1794,6 +1834,13 @@ func (s *Store) ReleaseManagedDirectRecovery(ctx context.Context, attempt Manage
 		}
 		if frozen {
 			return nil
+		}
+		held, err := s.claudeDirectAttemptHeldTx(ctx, attempt)
+		if err != nil {
+			return err
+		}
+		if held {
+			return ErrManagedDirectClaudeInputHeld
 		}
 		now := s.clock.Now()
 		nowText := formatTimestamp(now)
@@ -1831,15 +1878,25 @@ func (s *Store) ReleaseManagedDirectRecovery(ctx context.Context, attempt Manage
 			// a new independent source if the ordinary message is retried.
 			return nil
 		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
-			return err
-		}
-		if err := s.rearmFailedReminder(ctx, attempt.MessageID, nowText); err != nil {
+		if err := s.deadLetterDirectAttemptTx(ctx, attempt, nowText); err != nil {
 			return err
 		}
 		return s.recomputeManagedParentActivityForAgentTx(ctx, attempt.Fence.AgentID)
 	})
 	return terminal, err
+}
+
+// Only the exact message incarnation may be dead-lettered or have its reminder rearmed.
+func (s *Store) deadLetterDirectAttemptTx(ctx context.Context, attempt ManagedDirectAttempt, now string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND message_incarnation_id=? AND state='queued'`, attempt.MessageID, attempt.MessageIncarnationID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	return s.rearmFailedReminder(ctx, attempt.MessageID, now)
 }
 
 func managedDirectTargetActiveTx(ctx context.Context, db *sql.DB, attempt ManagedDirectAttempt, now string) (bool, error) {
@@ -1993,7 +2050,7 @@ func (s *Store) NextManagedDirectRetry(ctx context.Context, agentID string) (tim
 		return time.Time{}, false, errors.New("store is closed")
 	}
 	var due string
-	err := s.db.QueryRowContext(ctx, `SELECT next_attempt_at FROM managed_direct_delivery_attempts WHERE agent_id=? AND state='released' AND next_attempt_at IS NOT NULL ORDER BY next_attempt_at ASC LIMIT 1`, agentID).Scan(&due)
+	err := s.db.QueryRowContext(ctx, `SELECT a.next_attempt_at FROM managed_direct_delivery_attempts a JOIN messages m ON m.id=a.message_id AND m.message_incarnation_id=a.message_incarnation_id WHERE a.agent_id=? AND a.state='released' AND a.next_attempt_at IS NOT NULL AND m.claude_stdin_started=0 ORDER BY a.next_attempt_at ASC LIMIT 1`, agentID).Scan(&due)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -94,7 +95,7 @@ func newPolicyRouter(t *testing.T, options Options) (*Router, *store.Store, *det
 	dbPath := filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{Clock: clock, IDSource: deterministic.NewSequenceIDSource("audit-1", "audit-2", "audit-3", "audit-4")}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, dbPath); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}
@@ -172,7 +173,7 @@ func newPolicyRouterForValidation(t *testing.T, options Options) (*Router, error
 	dbPath := filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, dbPath); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

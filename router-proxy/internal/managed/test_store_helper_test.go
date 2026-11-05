@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 )
 
 // OpenTestStoreHelper exports openTestStore for black-box tests in package managed_test.
@@ -19,7 +20,7 @@ func openTestStore(t testing.TB, ctx context.Context, path string, options store
 	}
 	if options.Migrations == nil {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if err := store.CloneTemplateDB(t, path); err == nil {
+			if err := storetest.CloneTemplateDB(t, path); err == nil {
 				options.Migrations = []store.Migration{}
 			}
 		} else if err == nil {

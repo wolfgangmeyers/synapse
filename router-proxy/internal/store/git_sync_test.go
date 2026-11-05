@@ -5,12 +5,13 @@ import (
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGitSyncTargetStore(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 
 	// Initially not found
 	target, err := s.GetGitSyncTarget(ctx, "prompt_templates")
@@ -44,7 +45,7 @@ func TestGitSyncTargetStore(t *testing.T) {
 
 func TestReplaceAllPromptTemplates(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 
 	// Initially create one template
 	initial, err := s.CreatePromptTemplate(ctx, store.PromptTemplateRequest{

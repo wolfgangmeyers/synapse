@@ -9,6 +9,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,7 +19,7 @@ func processRetentionRouterFixture(t *testing.T) (*store.Store, *Router, *sql.DB
 	path := filepath.Join(t.TempDir(), "retry.db")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, path); err == nil {
+		if err := storetest.CloneTemplateDB(t, path); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

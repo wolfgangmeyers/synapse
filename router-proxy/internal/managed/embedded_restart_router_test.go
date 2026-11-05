@@ -664,5 +664,3 @@ func TestRestartRouter_Concurrency_AtomicSingleExit(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "75", strings.TrimSpace(string(content)))
 }
-
-

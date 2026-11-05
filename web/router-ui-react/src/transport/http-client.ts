@@ -119,7 +119,7 @@ export interface MonitorEvaluationResult {
 }
 export interface ManagedGoalResponse { goal_state: GoalState }
 export interface ManagedInlineToolsResponse { enabled: boolean }
-export interface ProviderModel { provider: ManagedProvider; id: string; name: string; available: boolean }
+export interface ProviderModel { provider: ManagedProvider | "claude-code"; id: string; name: string; available: boolean }
 export interface ProviderStatus { provider: ManagedProvider; label: string; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
 export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
@@ -210,6 +210,7 @@ function validStoredMessage(value: unknown): value is Record<string, unknown> {
 }
 function validAgent(value: unknown, includeModels = true): value is Agent {
   const item = recordValue(value);
+  if (item && Object.hasOwn(item, "urgent") && typeof item.urgent !== "boolean") return false;
   if (!item || !isAgentId(item.agent_id) || !nonEmptyString(item.instance_id) || !["agent", "user_interaction"].includes(String(item.agent_role)) || !timestamp(item.connected_at) || !timestamp(item.lease_expires_at) || !["active", "idle", "compacting"].includes(String(item.activity_state)) || !safeInteger(item.subagent_count) || !Array.isArray(item.subagents)) return false;
   if (!item.subagents.every((candidate) => { const child = recordValue(candidate); return !!child && nonEmptyString(child.id) && nonEmptyString(child.description) && validOptionalString(child, "type") && (!Object.hasOwn(child, "status") || ["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(String(child.status))); })) return false;
   if (includeModels && (!Array.isArray(item.available_models) || !item.available_models.every(isModelSummary) || !safeInteger(item.model_catalog_total_count) || typeof item.model_catalog_truncated !== "boolean")) return false;
@@ -406,13 +407,20 @@ function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || (breadcrumbItems !== undefined && (!Array.isArray(breadcrumbItems) || !breadcrumbItems.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); }))) || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
   return { path: root.path, parent: root.parent, ...(breadcrumbItems === undefined ? {} : { breadcrumbs: breadcrumbItems.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) }), directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
-function providerName(value: unknown): value is ProviderModel["provider"] {
-  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex" || value === "antigravity";
+function providerName(value: unknown): value is ManagedProvider {
+  return value === "openai-codex" || value === "google" || value === "cursor" || value === "google-vertex";
 }
 function providerModel(value: unknown): value is ProviderModel {
   const item = recordValue(value);
   const nameValid = typeof item?.name === "string" ? nonEmptyString(item.name) : true;
   return !!item && providerName(item.provider) && nonEmptyString(item.id) && nameValid;
+}
+// Catalog choices include a local engine without adding an auth provider.
+function modelChoice(value: unknown): value is ProviderModel {
+  if (providerModel(value)) return true;
+  const item = recordValue(value);
+  return !!item && item.provider === "claude-code" && nonEmptyString(item.id)
+    && (typeof item.name !== "string" || nonEmptyString(item.name));
 }
 function providerStatus(value: unknown): value is ProviderStatus {
   const item = recordValue(value);
@@ -422,13 +430,12 @@ function providerStatus(value: unknown): value is ProviderStatus {
     google: ["Google"],
     cursor: ["Cursor"],
     "google-vertex": ["Google Vertex AI", "Vertex AI", "Google Cloud Vertex AI", "Vertex"],
-    antigravity: ["Google Antigravity", "Antigravity", "Google Account"],
   };
   return typeof item.label === "string" && (labels[item.provider]?.includes(item.label) ?? false);
 }
 function providerAuth(value: unknown): ProviderAuthResponse {
   const root = recordValue(value);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 5 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 5) throw invalidResponse("Router returned invalid provider state", value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 4 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 4) throw invalidResponse("Router returned invalid provider state", value);
   return { auth_revision: root.auth_revision, providers: root.providers };
 }
 function savedModel(value: unknown): { provider: string; id: string; name?: string } | null | undefined {
@@ -439,7 +446,7 @@ function savedModel(value: unknown): { provider: string; id: string; name?: stri
 }
 function models(value: unknown): ModelsResponse {
   const root = recordValue(value); const defaultModel = savedModel(root?.default_model);
-  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || !root.models.every(providerModel) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 4_096 || !root.models.every(modelChoice) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
   return { auth_revision: root.auth_revision, models: root.models, default_model: defaultModel };
 }
 function defaultModel(value: unknown): DefaultModelResponse {
@@ -580,8 +587,8 @@ export interface RouterHttpClient {
   capabilities(): Promise<Capabilities>;
   agents(options?: { includeModels?: boolean } | boolean): Promise<AgentListResponse>;
   conversations(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<ConversationResponse>;
-  fetchConversationTimeline(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
-  sendMessage(message: unknown): Promise<Record<string, unknown>>;
+  fetchConversationTimeline(agentId: string, limit?: number, beforeSeq?: number, beforeEventId?: string): Promise<ConversationTimelineResponse>;
+  sendMessage(message: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
   message(id: string): Promise<unknown>;
   retryMessage(id: string): Promise<unknown>;
   deleteMessage(id: string): Promise<unknown>;
@@ -618,6 +625,7 @@ export interface RouterHttpClient {
   deleteWorkflowSchedule(id: string): Promise<void>;
   setManagedAgentWorkflowState(agentId: string, workflowStateId: string | null, options?: { workflow_id?: string; variables?: Record<string, string> }): Promise<unknown>;
   setManagedAgentWorkflow(agentId: string, workflowId: string, variables?: Record<string, string>): Promise<unknown>;
+  setAgentUrgency(agentId: string, urgent: boolean): Promise<unknown>;
   setManagedAgentAllowInlineTools(agentId: string, allowed: boolean): Promise<unknown>;
   attachmentUrl(reference: string): string;
   managedAgents(): Promise<ManagedAgentsResponse>;
@@ -636,7 +644,7 @@ export interface RouterHttpClient {
   terminateManaged(id: string, options?: { cleanupWorktree?: boolean }): Promise<ManagedOperationResponse>;
   models(): Promise<ModelsResponse>;
   providerAuth(): Promise<ProviderAuthResponse>;
-  startProviderAuth(provider: ProviderModel["provider"], action: "login" | "logout"): Promise<ManagedOperationResponse>;
+  startProviderAuth(provider: ManagedProvider, action: "login" | "logout"): Promise<ManagedOperationResponse>;
   respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
   cancelProviderAuth(operationId: string): Promise<{ operation_id: string; status: string }>;
   setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
@@ -685,6 +693,16 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     if (!response.ok) throw responseError(body, response.status, response.headers.get("x-correlation-id"));
     return body;
   };
+  const historyRequest = async (path: string, init: RequestInit = {}): Promise<unknown> => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        request(path, { ...init, signal: controller.signal }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("History request timed out. Please retry.")); }, 15_000); }),
+      ]);
+    } finally { if (timer !== undefined) clearTimeout(timer); }
+  };
   const jsonRequest = (path: string, method: string, payload?: unknown): Promise<unknown> => request(path, { method, headers: { "content-type": "application/json" }, ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
   // Managed P3 calls have no browser authority material. The request ID is a
   // worker-wide idempotency key, and fetch is explicitly forbidden to attach
@@ -693,7 +711,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     const headers: Record<string, string> = {};
     if (payload !== undefined) headers["content-type"] = "application/json";
     if (method !== "GET") headers["x-request-id"] = secureUuid();
-    return request(path, { method, credentials: "omit", ...(Object.keys(headers).length === 0 ? {} : { headers }), ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
+    return (method === "GET" && path.startsWith("/v1/history?") ? historyRequest : request)(path, { method, credentials: "omit", ...(method === "GET" && path.startsWith("/v1/history?") ? { cache: "no-store" as const } : {}), ...(Object.keys(headers).length === 0 ? {} : { headers }), ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
   };
   return {
     routerUrl: base,
@@ -722,15 +740,16 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       const params = new URLSearchParams({ owner, peer });
       if (options.before !== undefined && options.before > 0) params.set("before", String(options.before));
       if (options.limit !== undefined && options.limit > 0) params.set("limit", String(options.limit));
-      return conversation(await request(`/v1/conversations?${params.toString()}`), base);
+      return conversation(await historyRequest(`/v1/conversations?${params.toString()}`, { cache: "no-store" }), base);
     },
-    fetchConversationTimeline: async (agentId, limit = 50, beforeSeq) => {
+    fetchConversationTimeline: async (agentId, limit = 50, beforeSeq, beforeEventId) => {
       const params = new URLSearchParams({ agent_id: agentId });
       if (limit !== undefined && limit > 0) params.set("limit", String(limit));
       if (beforeSeq !== undefined && beforeSeq > 0) params.set("before_seq", String(beforeSeq));
-      return conversationTimeline(await request(`/v1/conversation?${params.toString()}`));
+      if (beforeEventId !== undefined) params.set("before_event_id", beforeEventId);
+      return conversationTimeline(await historyRequest(`/v1/conversation?${params.toString()}`, { cache: "no-store" }));
     },
-    sendMessage: async (message) => messageWrite(await jsonRequest("/v1/messages", "POST", message)),
+    sendMessage: async (message, signal) => messageWrite(await request("/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(message), ...(signal === undefined ? {} : { signal }) })),
     message: (id) => request(`/v1/messages/${encodeURIComponent(id)}`),
     retryMessage: (id) => jsonRequest(`/v1/messages/${encodeURIComponent(id)}/retry`, "POST"),
     deleteMessage: (id) => request(`/v1/messages/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -798,6 +817,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       if (variables !== undefined) payload.variables = variables;
       return managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/workflow-state`, "PUT", payload);
     },
+    setAgentUrgency: async (agentId, urgent) => request(`/v1/agents/${encodeURIComponent(agentId)}/urgency`, { method: "PUT", credentials: "omit", headers: { "content-type": "application/json" }, body: JSON.stringify({ urgent }) }),
     setManagedAgentAllowInlineTools: async (agentId: string, allowed: boolean) =>
       managedRequest(`/v1/managed-agents/${encodeURIComponent(agentId)}/allow-inline-tools`, "POST", { allow_inline_tools: allowed }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),

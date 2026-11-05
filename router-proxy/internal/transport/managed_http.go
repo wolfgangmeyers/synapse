@@ -238,6 +238,10 @@ func (r *Router) handleDefaultModelPUT(w http.ResponseWriter, req *http.Request)
 	}
 	var selected *managed.Model
 	if !clearing {
+		if provider == "claude-code" {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_ENGINE_SELECTION", "Router default must remain a Pi model"})
+			return
+		}
 		for _, candidate := range catalog.Models {
 			if candidate.Provider == provider && candidate.ID == id && candidate.Available {
 				candidateCopy := candidate
@@ -466,7 +470,7 @@ func providerAuthActionPath(path string) string {
 }
 
 func managedProvider(value string) bool {
-	return value == "openai-codex" || value == "google" || value == "cursor" || value == "google-vertex" || value == "antigravity"
+	return value == "openai-codex" || value == "google" || value == "cursor" || value == "google-vertex"
 }
 
 func decodeManagedObject(req *http.Request, max int, requireJSON bool) (map[string]json.RawMessage, []byte, error) {
@@ -1002,6 +1006,14 @@ func managedRestartAllError(err error) error {
 }
 
 func managedRestartError(err error) error {
+	var engine *managed.EngineSelectionError
+	if errors.As(err, &engine) {
+		return &managedHTTPError{422, "INVALID_ENGINE_SELECTION", engine.Error()}
+	}
+	var cli *managed.ClaudeUnavailableError
+	if errors.As(err, &cli) {
+		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
+	}
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
 	}
@@ -1150,8 +1162,20 @@ func cleanGitWorktreeError(err error) string {
 }
 
 func managedLaunchError(err error) error {
+	var engine *managed.EngineSelectionError
+	if errors.As(err, &engine) {
+		return &managedHTTPError{422, "INVALID_ENGINE_SELECTION", engine.Error()}
+	}
+	var cli *managed.ClaudeUnavailableError
+	if errors.As(err, &cli) {
+		return &managedHTTPError{422, "CLAUDE_UNAVAILABLE", cli.Error()}
+	}
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
+	}
+	var orphan *store.ManagedOrphanSessionError
+	if errors.As(err, &orphan) {
+		return &managedHTTPError{409, "STALE_EMBEDDED_SESSION", orphan.Error()}
 	}
 	var slot *store.ManagedSlotLimitError
 	if errors.As(err, &slot) {
@@ -1176,6 +1200,7 @@ func managedLaunchError(err error) error {
 	return &managedHTTPError{422, "VALIDATION_FAILED", "Launch request is invalid"}
 }
 func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	query := req.URL.Query()
 	view := query.Get("view")
 	for key, values := range query {
@@ -1929,14 +1954,6 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		if r.managed != nil {
 			_ = r.managed.SyncEmbeddedWorkflowTools(req.Context(), agentID)
 		}
-		// Deactivate goal on workflow state deactivation
-		goalSettings := store.DefaultManagedGoalSettings()
-		goalSettings.GoalLockEnabled = false
-		_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
-			Enabled:  false,
-			Goal:     "",
-			Settings: goalSettings,
-		})
 		r.sweepReminders(req.Context())
 		r.broadcast(map[string]any{"type": "reminders_changed"})
 		r.writeManagedJSON(w, req, http.StatusOK, map[string]any{
@@ -2362,38 +2379,6 @@ func (r *Router) handleManagedSubagentStop(w http.ResponseWriter, req *http.Requ
 		return
 	}
 	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"ok": true}, nil)
-}
-
-type Handler struct {
-	manager *managed.Manager
-}
-
-func NewHandler(manager *managed.Manager) *Handler {
-	return &Handler{manager: manager}
-}
-
-func (h *Handler) handleManagedAgentInterrupt(w http.ResponseWriter, r *http.Request) {
-	id := managedInterruptPath(r.URL.Path)
-	if err := h.manager.InterruptAgent(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (h *Handler) handleManagedSubagentStop(w http.ResponseWriter, r *http.Request) {
-	id, childID := managedSubagentStopPath(r.URL.Path)
-	if err := h.manager.StopSubagent(r.Context(), id, childID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
 }
 
 func requestIDFromRequest(req *http.Request) any {

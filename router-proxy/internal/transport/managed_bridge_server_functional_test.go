@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managedbridge"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -144,7 +145,7 @@ func newPhase2BFixture(t *testing.T, options ManagedBridgeHandlerOptions) *phase
 	path := filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, path); err == nil {
+		if err := storetest.CloneTemplateDB(t, path); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

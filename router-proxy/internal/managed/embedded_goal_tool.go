@@ -133,9 +133,9 @@ func (m *Manager) embeddedGoalTool(owner embeddedOwner, admitted func(string) *s
 		automatic, _ := ctx.Value(embeddedAutomaticGoalKey{}).(bool)
 		if command.Action == "set" && !automatic {
 			lane := m.laneFor(owner.binding.AgentID)
-			lane.consecutiveEmptyTurns = 0
-			lane.goalAttempt = 0
-			lane.consecutiveContinuations = 0
+			lane.consecutiveEmptyTurns.Store(0)
+			lane.goalAttempt.Store(0)
+			lane.consecutiveContinuations.Store(0)
 		}
 		if m.embeddedAfterGoalCommit != nil {
 			m.embeddedAfterGoalCommit(ctx)

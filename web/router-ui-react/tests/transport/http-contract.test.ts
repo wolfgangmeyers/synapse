@@ -123,7 +123,6 @@ describe("direct HTTP transport", () => {
       { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.123456789Z" },
       { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.123456789Z" },
       { provider: "google-vertex", label: "Google Vertex AI", authenticated: true, status: "authenticated", account_label: "my-gcp-project", updated_at: "2030-01-01T00:00:00.123456789Z" },
-      { provider: "antigravity", label: "Google Antigravity", authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.123456789Z" },
     ] };
     const recordedRequests: Array<{ url: string; body?: string | undefined }> = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -139,14 +138,12 @@ describe("direct HTTP transport", () => {
     const client = createHttpClient("http://router.test", fetchImpl);
     await expect(client.startProviderAuth("google", "login")).resolves.toEqual({ operation_id: "auth-1" });
     await expect(client.startProviderAuth("google-vertex", "login")).resolves.toEqual({ operation_id: "auth-1" });
-    await expect(client.startProviderAuth("antigravity", "login")).resolves.toEqual({ operation_id: "auth-1" });
     await expect(client.startProviderAuth("google-vertex", "logout")).resolves.toEqual({ operation_id: "auth-1" });
     await expect(client.respondProviderAuth("auth-1", "project-id", "my-gcp-project")).resolves.toEqual({ operation_id: "auth-1" });
 
     expect(recordedRequests).toEqual([
       { url: "http://router.test/v1/provider-auth/google/login", body: "{}" },
       { url: "http://router.test/v1/provider-auth/google-vertex/login", body: "{}" },
-      { url: "http://router.test/v1/provider-auth/antigravity/login", body: "{}" },
       { url: "http://router.test/v1/provider-auth/google-vertex/logout", body: "{}" },
       { url: "http://router.test/v1/provider-auth/operations/auth-1/response", body: JSON.stringify({ prompt_id: "project-id", value: "my-gcp-project" }) },
     ]);
@@ -154,29 +151,28 @@ describe("direct HTTP transport", () => {
     const statusClient = createHttpClient("http://router.test", async (_input, init) => { expect(init?.credentials).toBe("omit"); return response(providerState); });
     await expect(statusClient.providerAuth()).resolves.toEqual(providerState);
 
-    // Rejects incomplete provider count (4 instead of 5)
-    const malformedClient = createHttpClient("http://router.test", async () => response({ ...providerState, providers: providerState.providers.slice(0, 4) }));
+    // Rejects incomplete provider count (3 instead of 4)
+    const malformedClient = createHttpClient("http://router.test", async () => response({ ...providerState, providers: providerState.providers.slice(0, 3) }));
     await expect(malformedClient.providerAuth()).rejects.toMatchObject({ code: "invalid_response" });
 
     // Rejects unsupported provider in state
     const unknownProviderClient = createHttpClient("http://router.test", async () => response({
       ...providerState,
       providers: [
-        ...providerState.providers.slice(0, 4),
+        ...providerState.providers.slice(0, 3),
         { provider: "unsupported-cloud", label: "Unsupported", authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.123456789Z" },
       ],
     }));
     await expect(unknownProviderClient.providerAuth()).rejects.toMatchObject({ code: "invalid_response" });
   });
 
-  it("decodes provider models for google-vertex and antigravity and rejects invalid provider models", async () => {
+  it("decodes provider models for supported providers and rejects invalid provider models", async () => {
     const catalogData = {
       auth_revision: 1,
       models: [
         { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
         { provider: "google", id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", available: true },
         { provider: "google-vertex", id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Vertex)", available: true },
-        { provider: "antigravity", id: "gemini-3.8-flash", name: "Gemini 3.8 Flash (Antigravity)", available: true },
       ],
       default_model: { provider: "google-vertex", id: "gemini-2.5-flash" },
     };

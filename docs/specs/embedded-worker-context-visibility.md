@@ -29,10 +29,14 @@ In `@earendil-works/pi-coding-agent` (and `@earendil-works/pi-ai`):
      - Total context tokens = `usageTokens + trailingTokens`.
    - If no assistant usage is found:
      - Sums `estimateMessageTokens` for all messages in the transcript (including system instructions).
-3. **Post-Compaction / Post-Reset Behavior**:
-   - If a compaction or reset entry exists, any assistant usage prior to the boundary is stale.
-   - If no post-boundary assistant response exists, `tokens = null`, `percent = null`.
-4. **Percentage**:
+3. **Post-Compaction Behavior**:
+   - Assistant usage prior to a compaction boundary is stale. If no post-boundary assistant response exists, `tokens = null`, `percent = null`.
+   - This remains a specification requirement; the reset decision below does not change it. Its end-to-end implementation is not established by this document.
+4. **Post-Reset Behavior**:
+   - Wolfgang's decision B: show an immediate estimate after reset; do not wait for fresh post-reset assistant usage or mark usage unknown solely because it is absent.
+   - The reset path must estimate the normalized reset messages: any pending genesis instruction, scratchpad handoff, and ported messages. The estimator may use valid assistant usage in those ported messages plus estimated trailing messages; otherwise it estimates the messages. This is not a fresh provider measurement, nor necessarily the complete provider prompt.
+   - Use the resolved selected model's positive context window for the percentage. If it cannot be resolved, retain the token estimate with `context_window = 0` and `percent = null`. Later turn usage updates the estimate.
+5. **Percentage**:
    - `percent = (tokens / contextWindow) * 100.0`.
    - If `tokens == null` or `contextWindow <= 0`, `percent = null`.
 
@@ -57,6 +61,7 @@ When an embedded worker completes a turn or handles a prompt in `embedded_sessio
 - `tokens`: calculated from `session.History()` using `embeddedProjectedTokens` (or `ai.EstimateContextTokens`).
 - `context_window`: `model.ContextWindow`.
 - `percent`: `float64(tokens) / float64(context_window) * 100.0`, rounded to 1 decimal place.
+- After reset, calculate and publish the reset-message estimate before the wake turn rather than waiting for its assistant usage.
 - Stored in-memory on the manager's lane for the agent (`lane.contextUsage`) and optionally on `ManagedAgentRecord` or attached at projection time.
 
 ---
@@ -132,11 +137,11 @@ In `web/router-ui-react/src/utils/format.ts` (or `ConversationHeader.tsx`):
   - `128_000` -> `"128k"`
   - `32_768` -> `"32k"`
 - Format tokens:
-  - Exact: `tokens.toLocaleString()` -> `"440,120"`
+  - Full numeric value, not a compact label: `tokens.toLocaleString()` -> `"440,120"`. This is the projected estimate; it may incorporate provider-reported usage and heuristic estimates, and is not necessarily an exact provider token count.
 - Label display:
   - `"${Math.round(percent)}% of ${formatCompact(context_window)}"` -> e.g. `"42% of 1M"`, `"75% of 200k"`.
 - Detailed Title / Tooltip:
-  - `"${tokens.toLocaleString()} / ${context_window.toLocaleString()} tokens (${percent.toFixed(1)}%)"`.
+  - `"${tokens.toLocaleString()} / ${context_window.toLocaleString()} tokens (${percent.toFixed(1)}%)"`. The displayed token number is the full numeric estimate, not a promise of exact provider usage.
 
 ### 4.3 UI Component & Header Layout
 
@@ -176,6 +181,8 @@ Add a `ContextUsageBar` component rendered in the header when `agent.context_usa
   - Run a simulated turn in an embedded session.
   - Verify that `context_usage` is populated with estimated tokens, valid window, and calculated percentage.
   - Verify `uiLive.publish` emits snapshot/delta with `context_usage`.
+  - Verify reset immediately replaces the old value with the reset-message estimate before fresh assistant usage, including retained messages and scratchpad; verify an unresolved window leaves percentage unknown. Verify later turn usage updates it.
+- **E2E coverage required:** Exercise the reset through the real router, REST/WebSocket and browser header with a deterministic model mock held before fresh assistant usage. Assert the immediate estimate and subsequent update; do not treat this plan as evidence that the test exists or passes.
 
 ### 5.2 Frontend React Tests
 - **Component Test (`web/router-ui-react/tests/component/ConversationHeader.test.tsx`)**:

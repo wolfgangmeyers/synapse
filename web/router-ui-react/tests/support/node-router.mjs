@@ -1,17 +1,5 @@
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
 import WebSocket from "ws";
-import {
-  REPOSITORY_ROOT,
-  allocateLoopbackPort,
-  assertPrivatePath,
-  assertTaskPath,
-  createTaskRoot,
-  fixturePeerAgent,
-  spawnRouterProcess,
-  stopRouterProcess,
-  verifyRouterReadiness,
-} from "./isolated-go-router.mjs";
+import { fixturePeerAgent } from "./isolated-go-router.mjs";
 
 function frameFromMessage(data) {
   const payload = data?.toString?.() ?? String(data);
@@ -77,19 +65,4 @@ export async function connectFixturePeer(router, overrides = {}) {
       });
     },
   };
-}
-
-export function sendFixtureReceipt(peer, type, messageId, attemptNumber = 1, overrides = {}) {
-  peer.send({
-    version: "v1",
-    frame_id: overrides.frame_id ?? `${type}-fixture`,
-    type,
-    agent_id: peer.agent_id,
-    instance_id: peer.instance_id,
-    lease_id: peer.registered.lease_id,
-    message_id: messageId,
-    attempt_number: attemptNumber,
-    ...(overrides.delivery_items === undefined ? {} : { delivery_items: overrides.delivery_items }),
-    ...(type === "nack" ? { reason: overrides.reason ?? "processing_failed" } : {}),
-  });
 }

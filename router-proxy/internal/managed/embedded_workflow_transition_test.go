@@ -275,6 +275,8 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 
 	// Transition to Deploy
+	// Also set snoozed_until on policy to test that transition clears it
+	require.NoError(t, db.SetManagedGoalSnoozeUntil(ctx, agentID, "2030-01-01T00:00:00Z"))
 	resVar, err := tool.Execute(ctx, "call-6", map[string]any{
 		"action":       "transition",
 		"target_state": "Deploy",
@@ -282,6 +284,11 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	resVarText := resVar.Content[0].(ai.TextContent).Text
 	require.Contains(t, resVarText, "Deploying auth-service")
+
+	// Verify snoozed_until was cleared by transition
+	pol, err := db.ManagedGoalPolicyFor(ctx, agentID)
+	require.NoError(t, err)
+	require.Empty(t, pol.SnoozedUntil)
 
 	// Verify goal remained intact
 	goalPolicy, err = db.ManagedGoalPolicyFor(ctx, agentID)

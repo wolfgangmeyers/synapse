@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sky-valley/pi/ai"
-	"strings"
 	"time"
 )
 
@@ -96,6 +95,17 @@ func (s *Store) embeddedOwnerFence(ctx context.Context, b EmbeddedBinding) error
 func (s *Store) embeddedFence(ctx context.Context, b EmbeddedBinding) error {
 	if err := s.embeddedOwnerFence(ctx, b); err != nil {
 		return err
+	}
+	// Runtime identities carry a positive durable token. Token-zero router control
+	// and session discovery remain supported; no lease/expiry authority is used.
+	if b.OwnerToken > 0 {
+		var token int64
+		if err := s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token); err != nil {
+			return err
+		}
+		if token != b.OwnerToken {
+			return errors.New("stale embedded owner token")
+		}
 	}
 	if err := s.embeddedManagedFence(ctx, b); err != nil {
 		return err
@@ -234,20 +244,23 @@ type EmbeddedOwnerLeaseHeld struct{ RetryAfter time.Duration }
 func (e *EmbeddedOwnerLeaseHeld) Error() string { return "embedded owner lease held" }
 
 // AcquireEmbeddedOwner installs or confirms an owner claim on an already
-// bound session. In Stage 2 (lease elimination), it is a harmless identity
-// confirmation that validates the active session, increments the token, and
-// ensures the session remains active without locking out subsequent callers.
+// bound session. Same-owner confirmation preserves its token; changing owner
+// advances the durable execution fence. This does not restore lease exclusion.
 func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner string, ttl time.Duration) (int64, error) {
 	if owner == "" || len(owner) > 256 {
 		return 0, errors.New("invalid embedded owner lease")
 	}
 	var token int64
 	err := s.runImmediate(ctx, func() error {
-		if err := s.embeddedFence(ctx, b); err != nil {
+		// Acquisition is a control operation: validate session/runtime, not the
+		// prior runtime token. It is the operation that mints the successor fence.
+		control := b
+		control.OwnerToken = 0
+		if err := s.embeddedFence(ctx, control); err != nil {
 			return err
 		}
 		expires := formatTimestamp(s.clock.Now().Add(100 * 365 * 24 * time.Hour))
-		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=CASE WHEN owner_token<=0 THEN 1 ELSE owner_token END,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation)
+		r, err := s.db.ExecContext(ctx, `UPDATE embedded_sessions SET owner_id=?,owner_token=CASE WHEN owner_token<=0 THEN 1 WHEN owner_id IS NOT ? THEN owner_token+1 ELSE owner_token END,owner_expires_at=? WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, owner, owner, expires, b.AgentID, b.SessionID, b.Epoch, b.Generation)
 		if err != nil {
 			return err
 		}
@@ -261,14 +274,6 @@ func (s *Store) AcquireEmbeddedOwner(ctx context.Context, b EmbeddedBinding, own
 		return s.db.QueryRowContext(ctx, `SELECT owner_token FROM embedded_sessions WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND current=1`, b.AgentID, b.SessionID, b.Epoch, b.Generation).Scan(&token)
 	})
 	return token, err
-}
-
-func isSQLiteBusy(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "busy") || strings.Contains(msg, "locked") || errors.Is(err, sql.ErrConnDone) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // RenewEmbeddedOwner is a harmless identity confirmation that validates the session
@@ -721,7 +726,9 @@ func (s *Store) ResetEmbeddedSession(ctx context.Context, old, next EmbeddedBind
 	})
 }
 
-// ResetEmbeddedSessionEpoch updates managed_agents and advances embedded_sessions to next in one transaction.
+// ResetEmbeddedSessionEpoch fences the old owner, releases only its unconsumed
+// mail reservations, and advances both epoch records in one immediate transaction.
+// Callers must drain callbacks before snapshotting preserved context and resetting.
 func (s *Store) ResetEmbeddedSessionEpoch(ctx context.Context, old, next EmbeddedBinding, role string) error {
 	if err := validateEmbedded(old); err != nil {
 		return err
@@ -740,13 +747,40 @@ func (s *Store) ResetEmbeddedSessionEpoch(ctx context.Context, old, next Embedde
 			return err
 		}
 		if session == next.SessionID && epoch == next.Epoch && generation == next.Generation && savedRole == role {
-			return s.embeddedOwnerFence(ctx, next)
+			// A committed retry must still identify the retired old owner.
+			// next commonly has token zero: ownership is acquired after reset.
+			var prior int
+			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_sessions
+WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND role=? AND current=0
+AND (?<=0 OR owner_token=?)`, old.AgentID, old.SessionID, old.Epoch, old.Generation, role, old.OwnerToken, old.OwnerToken).Scan(&prior); err != nil {
+				return err
+			}
+			if prior != 1 {
+				return errors.New("stale embedded reset owner")
+			}
+			return s.embeddedFence(ctx, next)
 		}
-		if err := s.embeddedOwnerFence(ctx, old); err != nil {
+		if err := s.embeddedFence(ctx, old); err != nil {
 			return err
 		}
 		if session != old.SessionID || epoch != old.Epoch || generation != old.Generation || savedRole != role {
 			return errors.New("stale embedded reset")
+		}
+		// Acceptance is not consumption. Keep ACKed attempts and checked user
+		// appends even if their ACK is absent. Correlate by the reserved append
+		// key, never by equal message text. No accepted message fields change.
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM embedded_attempts
+WHERE agent_id=? AND session_id=? AND epoch=? AND generation=?
+AND NOT EXISTS (SELECT 1 FROM embedded_acks a WHERE a.attempt_id=embedded_attempts.attempt_id)
+AND NOT EXISTS (
+ SELECT 1 FROM embedded_append_keys k JOIN embedded_entries e
+ ON e.agent_id=k.agent_id AND e.session_id=k.session_id AND e.epoch=k.epoch
+ AND e.generation=k.generation AND e.seq=k.entry_seq
+ WHERE k.append_key=embedded_attempts.append_key AND e.kind='user'
+ AND k.agent_id=embedded_attempts.agent_id AND k.session_id=embedded_attempts.session_id
+ AND k.epoch=embedded_attempts.epoch AND k.generation=embedded_attempts.generation
+)`, old.AgentID, old.SessionID, old.Epoch, old.Generation); err != nil {
+			return err
 		}
 		now := formatTimestamp(s.clock.Now())
 		if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?, session_epoch=?, updated_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND runtime_generation=?`, next.SessionID, next.Epoch, now, old.AgentID, old.SessionID, old.Epoch, old.Generation); err != nil {
@@ -804,6 +838,13 @@ func embeddedBody(body []byte) error {
 // appendEmbeddedTx runs only inside runImmediate. The caller checks its binding
 // and expected head in the same transaction as the insert.
 func (s *Store) appendEmbeddedTx(ctx context.Context, b EmbeddedBinding, kind string, body []byte, expectedSeq int64, expectedDigest string) (EmbeddedEntry, error) {
+	return s.appendEmbeddedAdmittedTx(ctx, b, kind, body, expectedSeq, expectedDigest, s.clock.Now().UnixMilli())
+}
+
+func (s *Store) appendEmbeddedAdmittedTx(ctx context.Context, b EmbeddedBinding, kind string, body []byte, expectedSeq int64, expectedDigest string, admittedAt int64) (EmbeddedEntry, error) {
+	if admittedAt <= 0 {
+		return EmbeddedEntry{}, errors.New("invalid retention admission time")
+	}
 	if kind == "" || len(kind) > 64 {
 		return EmbeddedEntry{}, errors.New("invalid embedded entry kind")
 	}
@@ -824,7 +865,7 @@ func (s *Store) appendEmbeddedTx(ctx context.Context, b EmbeddedBinding, kind st
 	}
 	e := EmbeddedEntry{Sequence: seq + 1, ParentDigest: digest, Kind: kind, Body: bytes.Clone(body)}
 	e.Digest = embeddedEntryDigest(b, e)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_entries(agent_id,session_id,epoch,generation,seq,parent_digest,kind,body,digest) VALUES(?,?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, e.Sequence, e.ParentDigest, e.Kind, e.Body, e.Digest)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_entries(agent_id,session_id,epoch,generation,seq,parent_digest,kind,body,digest,retention_admitted_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`, b.AgentID, b.SessionID, b.Epoch, b.Generation, e.Sequence, e.ParentDigest, e.Kind, e.Body, e.Digest, admittedAt)
 	return e, err
 }
 func (s *Store) embeddedHead(ctx context.Context, b EmbeddedBinding) (int64, string, error) {
@@ -1118,6 +1159,13 @@ func (s *Store) embeddedGoalInvocationFenceTx(ctx context.Context, w *EmbeddedGo
 	if err := s.embeddedFence(ctx, w.binding); err != nil {
 		return err
 	}
+	var revision int64
+	if err := s.db.QueryRowContext(ctx, `SELECT desired_revision FROM managed_agent_policies WHERE agent_id=?`, w.binding.AgentID).Scan(&revision); err != nil {
+		return err
+	}
+	if err := s.embeddedEvidenceReplayTx(ctx, w.binding, EmbeddedGoalEvaluationKey{UserSeq: w.userSeq, UserDigest: w.userDigest, GoalRevision: revision}, w.id); err != nil {
+		return err
+	}
 	var process int64
 	if err := s.db.QueryRowContext(ctx, `SELECT generation FROM embedded_process_generation_counter WHERE singleton=1`).Scan(&process); err != nil {
 		return err
@@ -1163,7 +1211,7 @@ func (s *Store) RecordEmbeddedGoalInvocation(ctx context.Context, b EmbeddedBind
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
 	}
-	if id == "" || len(id) > 256 || embeddedBody(intent) != nil || json.Unmarshal(intent, &call) != nil || call.ID != id || (call.Name != "goal" && call.Name != "goal_snooze") {
+	if id == "" || len(id) > 256 || embeddedBody(intent) != nil || json.Unmarshal(intent, &call) != nil || call.ID != id || (call.Name != "goal" && call.Name != "goal_snooze" && call.Name != "workflow_snooze") {
 		return nil, errors.New("invalid goal invocation intent")
 	}
 	if call.Name == "goal" && call.Arguments["action"] != "set" && call.Arguments["action"] != "off" {
@@ -1240,6 +1288,17 @@ func (s *Store) checkEmbeddedGoalInvocationDomainTx(ctx context.Context, w *Embe
 	}
 	if err != nil {
 		return err
+	}
+	if w.name == "workflow_snooze" {
+		var p EmbeddedGoalSnoozePreference
+		if err = json.Unmarshal([]byte(payload), &p); err != nil {
+			return err
+		}
+		expected, err := p.WorkflowResultJSON()
+		if err != nil {
+			return err
+		}
+		payload = string(expected)
 	}
 	if !bytes.Equal([]byte(text.Text), []byte(payload)) {
 		return errors.New("goal invocation result differs from successful domain transaction")
@@ -1378,7 +1437,8 @@ func (s *Store) ObserveEmbeddedGoalInvocation(ctx context.Context, w *EmbeddedGo
 }
 
 // EmbeddedMailAttempt is a frozen accepted envelope. Only a safely unstarted
-// reservation from an exact retired epoch can move to the current session.
+// legacy reservation surviving retirement by an older binary can move to the
+// current session; normal reset deletes unconsumed attempts for fresh allocation.
 type EmbeddedMailAttempt struct {
 	AttemptID, MessageID, MessageIncarnationID, SnapshotID string
 	Sender, Body, AcceptedDigest                           string
@@ -1421,8 +1481,9 @@ func (s *Store) embeddedMailAcceptedTx(ctx context.Context, a *EmbeddedMailAttem
 	return state, nil
 }
 
-// ReserveEmbeddedMail is the sole attempt allocator. Unstarted reservations
-// survive Store reopen and can be reconciled from an exact retired epoch.
+// ReserveEmbeddedMail is the sole attempt allocator. Reservations survive Store
+// reopen. Legacy unstarted reservations left by an older binary can be reconciled
+// only from an exact retired epoch; normal reset allocates a new attempt instead.
 func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, messageID string) (*EmbeddedMailAttempt, error) {
 	if messageID == "" {
 		return nil, errors.New("missing message ID")
@@ -1437,6 +1498,13 @@ func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, mess
 			return err
 		}
 		if a != nil {
+			var held bool
+			if err := s.db.QueryRowContext(ctx, `SELECT claude_stdin_started FROM messages WHERE id=? AND message_incarnation_id=?`, a.MessageID, a.MessageIncarnationID).Scan(&held); err != nil {
+				return err
+			}
+			if held {
+				return errors.New("Claude stdin outcome uncertain; mail held")
+			}
 			if a.Binding.AgentID != b.AgentID || a.Binding.SessionID != b.SessionID || a.Binding.Epoch != b.Epoch || a.Binding.Generation != b.Generation {
 				if a.Binding.AgentID != b.AgentID || a.Binding.Generation != b.Generation || a.Binding.Epoch >= b.Epoch {
 					return errors.New("embedded mail reserved by another binding")
@@ -1444,6 +1512,8 @@ func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, mess
 				if _, err := s.embeddedMailAcceptedTx(ctx, a, true); err != nil {
 					return err
 				}
+				// Compatibility only: older binaries could retire a session without
+				// releasing its unstarted reservations. Normal reset deletes them.
 				// The current requester is fenced above. Retired identity and absence
 				// of admission evidence must also hold in this same transaction;
 				// neither an expired lease nor a missing session grants takeover.
@@ -1485,11 +1555,12 @@ func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, mess
 			return nil
 		}
 		var incarnation, sender, recipient, body, state, expiry string
-		err = s.db.QueryRowContext(ctx, `SELECT message_incarnation_id,sender,recipient,body,state,expires_at FROM messages WHERE id=?`, messageID).Scan(&incarnation, &sender, &recipient, &body, &state, &expiry)
+		var held bool
+		err = s.db.QueryRowContext(ctx, `SELECT message_incarnation_id,sender,recipient,body,state,expires_at,claude_stdin_started FROM messages WHERE id=?`, messageID).Scan(&incarnation, &sender, &recipient, &body, &state, &expiry, &held)
 		if err != nil {
 			return err
 		}
-		if incarnation == "" || recipient != b.AgentID || state != "queued" || expiry <= formatTimestamp(s.clock.Now()) {
+		if held || incarnation == "" || recipient != b.AgentID || state != "queued" || expiry <= formatTimestamp(s.clock.Now()) {
 			return errors.New("embedded message is not a live fixed target")
 		}
 		target, err := snapshotForMessageTx(ctx, s.db, messageID)
@@ -1550,15 +1621,6 @@ type MailAttachment struct {
 	Data      string `json:"data,omitempty"`
 }
 
-type ClaimedEmbeddedMailAttempt struct {
-	ID          string           `json:"id"`
-	MessageID   string           `json:"message_id"`
-	Sender      string           `json:"sender"`
-	Recipient   string           `json:"recipient"`
-	Body        string           `json:"body"`
-	Attachments []MailAttachment `json:"attachments,omitempty"`
-}
-
 func (s *Store) loadMessageAttachmentsTx(ctx context.Context, messageID string) []MailAttachment {
 	var attachmentsJSON sql.NullString
 	_ = s.db.QueryRowContext(ctx, `SELECT attachments_json FROM conversation_messages WHERE message_id=? ORDER BY conversation_sequence DESC LIMIT 1`, messageID).Scan(&attachmentsJSON)
@@ -1589,174 +1651,6 @@ func (s *Store) loadMessageAttachmentsTx(ctx context.Context, messageID string) 
 	return attachments
 }
 
-func (s *Store) ClaimEmbeddedMailAttempt(ctx context.Context, messageID string) (*ClaimedEmbeddedMailAttempt, error) {
-	if messageID == "" {
-		return nil, errors.New("missing message ID")
-	}
-	var out *ClaimedEmbeddedMailAttempt
-	err := s.runImmediate(ctx, func() error {
-		var sender, recipient, body, state, expiry string
-		err := s.db.QueryRowContext(ctx, `SELECT sender, recipient, body, state, expires_at FROM messages WHERE id=?`, messageID).Scan(&sender, &recipient, &body, &state, &expiry)
-		if err != nil {
-			return err
-		}
-		if state != "queued" || expiry <= formatTimestamp(s.clock.Now()) {
-			return errors.New("embedded message is no longer queued or has expired")
-		}
-		var inFlight int
-		_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM embedded_attempts WHERE message_id=?`, messageID).Scan(&inFlight)
-		if inFlight > 0 {
-			return errors.New("embedded message is in-flight in an active turn")
-		}
-		res, err := s.db.ExecContext(ctx, `UPDATE messages SET state='acknowledged' WHERE id=? AND state='queued'`, messageID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return errors.New("embedded message already claimed or acknowledged")
-		}
-		_ = s.completeLinkedReminder(ctx, messageID)
-
-		attachments := s.loadMessageAttachmentsTx(ctx, messageID)
-
-		out = &ClaimedEmbeddedMailAttempt{
-			ID:          messageID,
-			MessageID:   messageID,
-			Sender:      sender,
-			Recipient:   recipient,
-			Body:        body,
-			Attachments: attachments,
-		}
-		return nil
-	})
-	return out, err
-}
-
-// PollAndAdmitEmbeddedPendingMessages checks if there are any unread queued
-// mailbox messages or user prompts in SQLite for b.AgentID. If any exist, it
-// marks them admitted/read and returns them as []ai.UserMessage.
-func (s *Store) PollAndAdmitEmbeddedPendingMessages(ctx context.Context, b EmbeddedBinding) ([]ai.UserMessage, error) {
-	var results []ai.UserMessage
-	err := s.runImmediate(ctx, func() error {
-		now := formatTimestamp(s.clock.Now())
-		nowMilli := s.clock.Now().UnixMilli()
-
-		// 1. Fetch and admit queued mailbox messages for b.AgentID
-		rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.message_incarnation_id, m.sender, m.body
-			FROM messages m
-			WHERE m.recipient = ? AND m.state = 'queued' AND m.expires_at > ?
-			ORDER BY m.created_at ASC, m.id ASC`, b.AgentID, now)
-		if err != nil {
-			return err
-		}
-		type mailItem struct {
-			id, incarnation, sender, body string
-		}
-		var mailItems []mailItem
-		for rows.Next() {
-			var it mailItem
-			if scanErr := rows.Scan(&it.id, &it.incarnation, &it.sender, &it.body); scanErr != nil {
-				_ = rows.Close()
-				return scanErr
-			}
-			mailItems = append(mailItems, it)
-		}
-		if closeErr := rows.Close(); closeErr != nil {
-			return closeErr
-		}
-
-		for _, item := range mailItems {
-			res, updateErr := s.db.ExecContext(ctx, `UPDATE messages SET state='acknowledged' WHERE id=? AND state='queued'`, item.id)
-			if updateErr != nil {
-				return updateErr
-			}
-			n, _ := res.RowsAffected()
-			if n == 0 {
-				continue
-			}
-			_ = s.completeLinkedReminder(ctx, item.id)
-
-			attemptID := ""
-			if s.ids != nil {
-				attemptID, _ = s.ids.Next()
-			}
-			if attemptID == "" {
-				attemptID = fmt.Sprintf("steer-%d-%s", nowMilli, item.id)
-			}
-			payload, _ := json.Marshal(struct {
-				Version       string `json:"Version"`
-				AttemptID     string `json:"AttemptID"`
-				MessageID     string `json:"MessageID"`
-				IncarnationID string `json:"IncarnationID"`
-				Sender        string `json:"Sender"`
-				Recipient     string `json:"Recipient"`
-				Body          string `json:"Body"`
-			}{
-				Version:       "embedded-mail/v1",
-				AttemptID:     attemptID,
-				MessageID:     item.id,
-				IncarnationID: item.incarnation,
-				Sender:        item.sender,
-				Recipient:     b.AgentID,
-				Body:          item.body,
-			})
-			results = append(results, ai.UserMessage{
-				Content:   ai.ContentList{ai.TextContent{Text: string(payload)}},
-				Timestamp: nowMilli,
-			})
-		}
-
-		// 2. Fetch and admit pending prompt requests for b.AgentID
-		pRows, err := s.db.QueryContext(ctx, `SELECT request_id, prompt
-			FROM embedded_prompt_requests
-			WHERE agent_id = ? AND session_id = ? AND epoch = ? AND generation = ? AND state = 'pending'
-			ORDER BY rowid ASC`, b.AgentID, b.SessionID, b.Epoch, b.Generation)
-		if err != nil {
-			return err
-		}
-		type promptItem struct {
-			reqID, prompt string
-		}
-		var promptItems []promptItem
-		for pRows.Next() {
-			var it promptItem
-			if scanErr := pRows.Scan(&it.reqID, &it.prompt); scanErr != nil {
-				_ = pRows.Close()
-				return scanErr
-			}
-			promptItems = append(promptItems, it)
-		}
-		if closeErr := pRows.Close(); closeErr != nil {
-			return closeErr
-		}
-
-		for _, item := range promptItems {
-			res, updateErr := s.db.ExecContext(ctx, `UPDATE embedded_prompt_requests SET state='complete' WHERE request_id=? AND state='pending'`, item.reqID)
-			if updateErr != nil {
-				return updateErr
-			}
-			n, _ := res.RowsAffected()
-			if n == 0 {
-				continue
-			}
-			results = append(results, ai.UserMessage{
-				Content:   ai.ContentList{ai.TextContent{Text: item.prompt}},
-				Timestamp: nowMilli,
-			})
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
 // NextEmbeddedMail selects the oldest queued, fixed managed target. Reservation
 // still checks every field atomically, so this read grants no authority.
 func (s *Store) NextEmbeddedMail(ctx context.Context, agentID string) (string, error) {
@@ -1766,7 +1660,7 @@ func (s *Store) NextEmbeddedMail(ctx context.Context, agentID string) (string, e
 		return "", errors.New("store is closed")
 	}
 	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.claude_stdin_started=0 AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -1782,7 +1676,7 @@ func (s *Store) NextEmbeddedSteerMail(ctx context.Context, agentID string) (stri
 		return "", errors.New("store is closed")
 	}
 	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' AND NOT EXISTS (SELECT 1 FROM embedded_attempts ea WHERE ea.message_id=m.id) ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN message_target_snapshots t ON t.message_id=m.id AND t.message_incarnation_id=m.message_incarnation_id JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE m.state='queued' AND m.claude_stdin_started=0 AND m.expires_at>? AND m.recipient=? AND t.source_kind='managed' AND t.owner_identity=? AND r.source_kind='managed' AND r.owner_identity=? AND r.state='active' AND NOT EXISTS (SELECT 1 FROM embedded_attempts ea WHERE ea.message_id=m.id) ORDER BY m.created_at ASC, m.id ASC LIMIT 1`, formatTimestamp(s.clock.Now()), agentID, agentID, agentID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

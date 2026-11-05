@@ -567,13 +567,7 @@ func (m *Manager) embeddedWorkflowAssignTool(owner embeddedOwner) agent.AgentToo
 				}
 				_ = m.SyncEmbeddedWorkflowTools(ctx, agentID)
 
-				goalSettings := store.DefaultManagedGoalSettings()
-				goalSettings.GoalLockEnabled = false
-				_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
-					Enabled:  false,
-					Goal:     "",
-					Settings: goalSettings,
-				})
+				m.retireEmbeddedGoalTimer(agentID)
 
 				respBytes, err := json.Marshal(map[string]any{
 					"status":                   "ok",

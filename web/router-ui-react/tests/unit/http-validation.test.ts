@@ -65,11 +65,11 @@ describe("strict external HTTP endpoint validation", () => {
   it("accepts default model response when effective_fallback name is missing, defaulting name to id", async () => {
     const responseBody = {
       operation_id: "op-1",
-      default_model: { provider: "antigravity", id: "gemini-3.8-flash" },
-      effective_fallback: { provider: "antigravity", id: "gemini-3.8-flash", available: false },
+      default_model: { provider: "google-vertex", id: "gemini-3.8-flash" },
+      effective_fallback: { provider: "google-vertex", id: "gemini-3.8-flash", available: false },
     };
     const client = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify(responseBody), { status: 200 })));
-    const result = await client.setDefaultModel({ provider: "antigravity", id: "gemini-3.8-flash" });
+    const result = await client.setDefaultModel({ provider: "google-vertex", id: "gemini-3.8-flash" });
     expect(result.operation_id).toBe("op-1");
     expect(result.effective_fallback.name).toBe("gemini-3.8-flash");
     expect(result.effective_fallback.id).toBe("gemini-3.8-flash");

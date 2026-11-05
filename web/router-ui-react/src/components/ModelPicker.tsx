@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { modelKey, modelOptionLabel, normalizeModelSummaries, type ModelSummary } from "../domain/models";
+import { isClaudeCodeModel, sameModelEngine, modelKey, modelOptionLabel, normalizeModelSummaries, type ModelSummary } from "../domain/models";
 
 export interface ModelPickerEmptyOption {
   label: string;
@@ -24,7 +24,7 @@ export interface ModelPickerProps {
   isEmbedded?: boolean;
 }
 
-const ADMITTED_EMBEDDED_PROVIDERS = new Set(['openai-codex', 'google', 'cursor', 'google-vertex', 'antigravity']);
+const ADMITTED_EMBEDDED_PROVIDERS = new Set(['openai-codex', 'google', 'cursor', 'google-vertex']);
 
 export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, status, onChange, label = "Model", isEmbedded }: ModelPickerProps) {
   const normalized = useMemo(() => normalizeModelSummaries(models), [models]);
@@ -40,8 +40,8 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
-  const pool = isEmbedded ? normalized.filter(m => ADMITTED_EMBEDDED_PROVIDERS.has(m.provider)) : normalized;
-  const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 10);
+  const pool = isEmbedded ? normalized.filter(m => sameModelEngine(currentModel, m) && (isClaudeCodeModel(m) || ADMITTED_EMBEDDED_PROVIDERS.has(m.provider))) : normalized;
+  const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   useEffect(() => {
     if (!open) return;
@@ -58,15 +58,29 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
     setMenuHost(dialog ?? document.body);
     const positionMenu = () => {
       const rect = trigger.getBoundingClientRect();
-      const width = Math.min(360, Math.max(0, window.innerWidth - 32));
-      const left = Math.min(Math.max(16, rect.right - width), Math.max(16, window.innerWidth - width - 16));
-      const spaceBelow = window.innerHeight - rect.bottom - 16;
-      const spaceAbove = rect.top - 16;
-      const above = spaceBelow < 280 && spaceAbove > spaceBelow;
       const dialogRect = dialog?.getBoundingClientRect();
-      // A native dialog is in the top layer. Keep its menu there, but position it
-      // against the dialog rather than treating its fixed containing block as the viewport.
-      setMenuPosition({ position: dialogRect ? "absolute" : "fixed", zIndex: 100, left: dialogRect ? left - dialogRect.left : left, right: "auto", width, ...(above ? { top: "auto", bottom: dialogRect ? dialogRect.bottom - rect.top + 8 : window.innerHeight - rect.top + 8 } : { top: dialogRect ? rect.bottom - dialogRect.top + 8 : rect.bottom + 8, bottom: "auto" }), maxHeight: Math.max(120, Math.min(440, (above ? spaceAbove : spaceBelow) - 8)) });
+      const leftBound = Math.max(16, dialogRect && dialog ? dialogRect.left + dialog.clientLeft : 16);
+      const rightBound = Math.min(window.innerWidth - 16, dialogRect && dialog ? dialogRect.left + dialog.clientLeft + dialog.clientWidth : window.innerWidth - 16);
+      const topBound = Math.max(16, dialogRect && dialog ? dialogRect.top + dialog.clientTop : 16);
+      const bottomBound = Math.min(window.innerHeight - 16, dialogRect && dialog ? dialogRect.top + dialog.clientTop + dialog.clientHeight : window.innerHeight - 16);
+      if (rightBound <= leftBound || bottomBound <= topBound || rect.bottom <= topBound || rect.top >= bottomBound || rect.right <= leftBound || rect.left >= rightBound) {
+        setOpen(false); setQuery(""); return;
+      }
+      const width = Math.min(360, Math.max(0, rightBound - leftBound));
+      const left = Math.max(leftBound, Math.min(rect.right - width, rightBound - width));
+      const spaceBelow = Math.max(0, bottomBound - rect.bottom - 8);
+      const spaceAbove = Math.max(0, rect.top - topBound - 8);
+      const above = spaceBelow < 280 && spaceAbove > spaceBelow;
+      const available = above ? spaceAbove : spaceBelow;
+      // When neither side has useful room, overlap the trigger instead of collapsing.
+      const overlap = available < 160;
+      const height = Math.min(440, overlap ? Math.max(0, bottomBound - topBound) : available);
+      const top = overlap ? topBound : above ? rect.top - 8 : rect.bottom + 8;
+      // Absolute coordinates are relative to the dialog padding edge and its scroll offset.
+      setMenuPosition({ position: dialogRect ? "absolute" : "fixed", zIndex: 100,
+        left: dialogRect && dialog ? left - dialogRect.left - dialog.clientLeft + dialog.scrollLeft : left,
+        top: dialogRect && dialog ? top - dialogRect.top - dialog.clientTop + dialog.scrollTop : top,
+        right: "auto", bottom: "auto", width, maxHeight: height, transform: above && !overlap ? "translateY(-100%)" : undefined });
     };
     positionMenu();
     window.addEventListener("resize", positionMenu);

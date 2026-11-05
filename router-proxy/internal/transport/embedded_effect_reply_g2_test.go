@@ -15,6 +15,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/sky-valley/pi/agent"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/ai/providers"
@@ -39,7 +40,7 @@ func effectReplyFixture(t *testing.T) (*embeddedHTTPG2Fixture, string, *atomic.I
 	f.dbPath = filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, f.dbPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, f.dbPath); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

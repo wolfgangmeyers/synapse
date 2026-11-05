@@ -74,13 +74,13 @@ func TestEmbeddedCodexAvailableCatalogRechecksPrivateCredential(t *testing.T) {
 				{Provider: "google", Label: "Google", Status: "signed_out"},
 				{Provider: "cursor", Label: "Cursor", Status: "signed_out"},
 				{Provider: "google-vertex", Label: "Google Vertex AI", Status: "signed_out"},
-				{Provider: "antigravity", Label: "Google Antigravity", Status: "signed_out"},
 			}, []store.ManagedProviderModel{{Provider: "openai-codex", ID: modelID, Name: "catalog model", Available: true}})
 			require.NoError(t, err)
 			catalog := StoreCatalogSource{Store: db}
 			before, err := catalog.Catalog(ctx)
 			require.NoError(t, err)
-			require.Len(t, before.Models, 1)
+			require.Len(t, before.Models, 5)
+			require.Equal(t, claudeCodeModels(), before.Models[1:])
 			project := filepath.Join(base, "project")
 			require.NoError(t, os.Mkdir(project, 0700))
 			path := filepath.Join(base, "private", "credential.json")

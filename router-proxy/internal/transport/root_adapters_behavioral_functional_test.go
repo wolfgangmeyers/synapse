@@ -20,6 +20,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +59,7 @@ func (e *rootAdapterPythonExecutor) run(ctx context.Context, mode string, identi
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
 	}
-	script := filepath.Join(root, ".claude", "skills", "supervisor", "tools", "managed_root_control.py")
+	script := filepath.Join(root, "tools", "managed_root_control.py")
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
@@ -157,7 +158,7 @@ func newRootAdapterFixture(t *testing.T) *rootAdapterFixture {
 	taskPath := filepath.Join(t.TempDir(), "task.db")
 	taskOpts := store.Options{Clock: clock}
 	if taskOpts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, taskPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, taskPath); err == nil {
 			taskOpts.Migrations = []store.Migration{}
 		}
 	}
@@ -167,7 +168,7 @@ func newRootAdapterFixture(t *testing.T) *rootAdapterFixture {
 	decoyPath := filepath.Join(t.TempDir(), "decoy.db")
 	decoyOpts := store.Options{Clock: clock}
 	if decoyOpts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, decoyPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, decoyPath); err == nil {
 			decoyOpts.Migrations = []store.Migration{}
 		}
 	}
@@ -299,67 +300,36 @@ func TestRootAdaptersBehavioralFunctionalTable(t *testing.T) {
 		run        func(*testing.T, *rootAdapterFixture, managed.ManifestTool)
 	}{
 		{capability: "mecha_state", run: func(t *testing.T, f *rootAdapterFixture, tool managed.ManifestTool) {
-			createRow, create := f.invoke(t, tool, map[string]any{"action": "create", "alias": "root-state", "type": "functional", "project": "root-adapters", "description": "root adapter state"})
-			requireRootAdapterOK(t, createRow)
-			state := rootAdapterState(t, f.stateFile)
-			tasks, ok := state["tasks"].([]any)
-			require.True(t, ok)
-			require.Len(t, tasks, 1)
-			task, ok := tasks[0].(map[string]any)
-			require.True(t, ok)
-			f.stateTaskID = int(task["id"].(float64))
-			require.Equal(t, "root-state", task["alias"])
-
-			row, _ := f.invoke(t, tool, map[string]any{"action": "update", "task": "root-state", "field": "summary", "value": "updated through root adapter"})
-			requireRootAdapterOK(t, row)
-			state = rootAdapterState(t, f.stateFile)
-			tasks = state["tasks"].([]any)
-			task = tasks[0].(map[string]any)
-			require.Equal(t, "updated through root adapter", task["last_summary"])
-
-			// Exact replay returns the same durable result and does not invoke the
-			// Python process a second time. A changed payload is a conflict.
-			beforeCalls := f.executor.callCount(tool.OperationID)
-			beforeState := string(mustReadFile(t, f.stateFile))
-			require.NoError(t, f.rpc.emit(create))
+			args := map[string]any{"action": "query", "task": "root-state"}
+			row, event := f.invoke(t, tool, args)
+			require.Equal(t, "error", row.ResultStatus)
+			require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", row.ErrorCode)
+			require.Zero(t, f.executor.callCount(tool.OperationID))
+			beforeState := string(optionalReadFile(t, f.stateFile))
+			require.NoError(t, f.rpc.emit(event))
 			domain1AssertNoSubmission(t, f.rpc)
-			replayed, err := f.store.ManagedControlRequest(f.ctx, create.RequestID)
+			replayed, err := f.store.ManagedControlRequest(f.ctx, event.RequestID)
 			require.NoError(t, err)
-			require.Equal(t, createRow.ResultID, replayed.ResultID)
-			require.Equal(t, createRow.ResultContent, replayed.ResultContent)
-			require.Equal(t, beforeCalls, f.executor.callCount(tool.OperationID))
-			require.Equal(t, beforeState, string(mustReadFile(t, f.stateFile)))
-			conflict := create
-			conflict.Arguments = map[string]any{"action": "create", "alias": "root-state", "type": "functional", "project": "root-adapters", "description": "changed"}
+			require.Equal(t, row.ResultID, replayed.ResultID)
+			require.Equal(t, row.ResultContent, replayed.ResultContent)
+			conflict := event
+			conflict.Arguments = map[string]any{"action": "query", "task": "different"}
 			require.NoError(t, f.rpc.emit(conflict))
 			domain1AssertNoSubmission(t, f.rpc)
-			require.Equal(t, beforeCalls, f.executor.callCount(tool.OperationID))
-			require.Equal(t, beforeState, string(mustReadFile(t, f.stateFile)))
+			require.Zero(t, f.executor.callCount(tool.OperationID))
+			require.Equal(t, beforeState, string(optionalReadFile(t, f.stateFile)))
 		}},
 		{capability: "mecha_priority", run: func(t *testing.T, f *rootAdapterFixture, tool managed.ManifestTool) {
-			ids := []any{json.Number(fmt.Sprint(f.stateTaskID))}
-			row, _ := f.invoke(t, tool, map[string]any{"action": "create", "priorityId": "root-priority", "name": "Root priority", "taskIds": ids})
-			requireRootAdapterOK(t, row)
-			row, _ = f.invoke(t, tool, map[string]any{"action": "update", "priorityId": "root-priority", "name": "Updated root priority", "status": "blocked", "taskIds": ids})
-			requireRootAdapterOK(t, row)
-			row, _ = f.invoke(t, tool, map[string]any{"action": "status", "priorityId": "root-priority", "status": "completed", "evidence": "functional fixture"})
-			requireRootAdapterOK(t, row)
-			state := rootAdapterState(t, f.stateFile)
-			priorities := state["priorities"].([]any)
-			require.Len(t, priorities, 1)
-			priority := priorities[0].(map[string]any)
-			require.Equal(t, "root-priority", priority["id"])
-			require.Equal(t, "completed", priority["status"])
-			require.Equal(t, "functional fixture", priority["completion"].(map[string]any)["evidence"])
+			row, _ := f.invoke(t, tool, map[string]any{"action": "status", "priorityId": "root-priority", "status": "completed"})
+			require.Equal(t, "error", row.ResultStatus)
+			require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", row.ErrorCode)
+			require.Zero(t, f.executor.callCount(tool.OperationID))
 		}},
 		{capability: "mecha_verification_handoff", run: func(t *testing.T, f *rootAdapterFixture, tool managed.ManifestTool) {
-			row, _ := f.invoke(t, tool, map[string]any{"action": "record", "task": "root-state", "reminderId": "root-verification", "successor": "root-successor", "remoteVerified": "true"})
-			requireRootAdapterOK(t, row)
-			task := rootAdapterState(t, f.stateFile)["tasks"].([]any)[0].(map[string]any)
-			handoff := task["verification_handoff"].(map[string]any)
-			require.Equal(t, "root-verification", handoff["reminder_id"])
-			require.Equal(t, true, handoff["remote_verified"])
-			require.Equal(t, "root-successor", handoff["successor"])
+			row, _ := f.invoke(t, tool, map[string]any{"action": "record", "task": "root-state", "reminderId": "root-verification", "successor": "root-successor"})
+			require.Equal(t, "error", row.ResultStatus)
+			require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", row.ErrorCode)
+			require.Zero(t, f.executor.callCount(tool.OperationID))
 		}},
 		{capability: "mecha_recall", run: func(t *testing.T, f *rootAdapterFixture, tool managed.ManifestTool) {
 			for _, args := range []map[string]any{{"action": "enable", "stores": []any{"fixture.md"}}, {"action": "status"}, {"action": "disable"}} {

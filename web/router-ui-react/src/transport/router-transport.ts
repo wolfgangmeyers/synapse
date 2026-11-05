@@ -107,10 +107,12 @@ export interface RouterTransport {
   connect(): void;
   close(): void;
   refreshAgents(): Promise<void>;
+  /** Invalidate the connected snapshot, queueing one follow-up behind an active read. */
+  invalidateAgents(): void;
   refreshReminders(): Promise<void>;
   conversation(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }>;
   fetchConversationTimeline?(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
-  sendMessage(message: unknown): Promise<Record<string, unknown>>;
+  sendMessage(message: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
   sendActivity(activityState: "active" | "settled" | "compacting", details?: Pick<Agent, "subagent_count" | "subagents" | "goal" | "current_model">): boolean;
   sendModelControl(targetAgentId: string, targetInstanceId: string, model: ModelSummary, controlId?: string): boolean;
   sendGoalControl(targetAgentId: string, targetInstanceId: string, control: { controlId: string; action: "set" | "off"; goal: string; settings: GoalControlSettings; revision?: number }): boolean;
@@ -253,6 +255,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       if (pending !== undefined) { removeControl(pending.controlId); emit({ type: "control-error", frame, pending }); }
       return;
     }
+    if (frame.type === "agent_urgency_changed") { emit({ type: "frame", frame, identity }); scheduleAgentRefresh("agent_projection_frame"); return; }
     if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); return; }
     if (frame.type === "agent_activity" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
     if (frame.type === "agent_model_catalog") return;
@@ -322,10 +325,11 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     connect: socket.connect,
     close() { clearInterval(refreshTimer); clearRefreshScheduling(); goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
+    invalidateAgents: () => scheduleAgentRefresh("agent_projection_frame"),
     refreshReminders,
     conversation: (owner, peer, options) => http.conversations(owner, peer, options),
     fetchConversationTimeline: (agentId, limit, beforeSeq) => http.fetchConversationTimeline(agentId, limit, beforeSeq),
-    async sendMessage(message) { const result = await http.sendMessage(message); void refreshAgents(); return result; },
+    async sendMessage(message, signal) { const result = await http.sendMessage(message, signal); void refreshAgents(); return result; },
     sendActivity(activityState, details = {}) { if (!socket.registered) return false; return socket.send(buildActivityFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, activityState, ...details })); },
     sendModelControl(targetAgentId, targetInstanceId, model, requestedControlId = controlId()) { if (!socket.registered) return false; const frame = buildModelControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: requestedControlId, model }); return sendControl(frame, controlFor("model", requestedControlId, targetAgentId, targetInstanceId, socket.identity)); },
     sendGoalControl(targetAgentId, targetInstanceId, control) { if (!socket.registered || !goalControlAvailable) return false; const frame = buildGoalControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: control.controlId, action: control.action, goal: control.goal, settings: control.settings }); return sendControl(frame, controlFor("goal", control.controlId, targetAgentId, targetInstanceId, socket.identity, control.revision)); },

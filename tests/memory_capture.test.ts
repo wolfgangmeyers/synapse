@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RECALL_POLICY } from "../harness/memory-catalog.js";
+import { readFileSync } from "node:fs";
+const capturePolicy = JSON.parse(readFileSync(new URL("./fixtures/memory-capture-policy.json", import.meta.url), "utf8"));
 import { createMemoryCaptureLifecycle, runMemoryExtractor, sanitizeCaptureSource, validateCaptureResult } from "../pi-extensions/mecha-messaging/memory-capture.ts";
 
 const policy = { capture: { compaction_deadline_ms: 30_000, shutdown_deadline_ms: 10_000, source_max_bytes: 4096, source_message_max_bytes: 1024, maximum_records: 6, maximum_title_bytes: 256, maximum_body_bytes_per_record: 16384, maximum_total_body_bytes: 32768, maximum_related_ids_per_record: 24 } };
@@ -70,7 +71,7 @@ test("capture lifecycle emits bounded outcome diagnostics without source text", 
 
 test("configured extractor permits sixty seconds and passes cancellation to its model process", async () => {
   const controller = new AbortController(); let call: { file: string; args: string[]; options: { timeout: number } } | undefined; let aborted = false; let stdinClosed = false;
-  const pending = runMemoryExtractor({ source: { messages: [] }, policy: RECALL_POLICY.capture, signal: controller.signal, spawn: (file, args, options, done) => {
+  const pending = runMemoryExtractor({ source: { messages: [] }, policy: capturePolicy, signal: controller.signal, spawn: (file, args, options, done) => {
     call = { file, args, options }; options.signal.addEventListener("abort", () => { aborted = true; done(new Error("aborted")); }, { once: true }); return { stdin: { end() { stdinClosed = true; } } };
   } });
   assert.equal(call!.file, "pi"); assert.equal(call!.args[call!.args.indexOf("--model") + 1], "anthropic/claude-sonnet-5"); assert.equal(call!.args.includes("--provider"), false); assert.equal(call!.args[call!.args.indexOf("--thinking") + 1], "off"); assert.equal(call!.options.timeout, 60_000);

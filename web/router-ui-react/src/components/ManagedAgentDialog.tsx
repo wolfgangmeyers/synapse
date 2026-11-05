@@ -22,7 +22,7 @@ export interface ManagedAgentDialogProps {
 }
 
 export function isGoogleProvider(provider: string | undefined): boolean {
-  return provider === "google" || provider === "google-vertex" || provider === "antigravity";
+  return provider === "google" || provider === "google-vertex";
 }
 
 export function ManagedAgentDialog({ open, agent, pending = false, error, recentFolders, onClose, onLaunch, onAction, onListDirectories, onModels, onWorktreeCheck }: ManagedAgentDialogProps): ReactElement {

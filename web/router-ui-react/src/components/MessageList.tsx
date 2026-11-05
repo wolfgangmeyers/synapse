@@ -17,14 +17,19 @@ export interface MessageListProps {
   timelineEvents?: ConversationTimelineEvent[] | undefined;
   activityEntries?: ManagedHistoryEntry[] | undefined;
   activityHistoryReady?: boolean | undefined;
+  liveActivityIds?: ReadonlySet<string> | undefined;
+  liveTimelineIds?: ReadonlySet<string> | undefined;
+  historyWindowReady?: boolean | undefined;
+  onDiscardHistoryBefore?: ((ids: ReadonlySet<string>) => void) | undefined;
   peerId?: string | undefined;
   agent?: Agent | undefined;
   ownerId?: string | undefined;
   routerUrl?: string | undefined;
   loading?: boolean | undefined;
   error?: string | undefined;
+  onRetryHistory?: (() => void) | undefined;
   onNearBottomChange?: ((nearBottom: boolean) => void) | undefined;
-  onLoadOlder?: (() => void) | undefined;
+  onLoadOlder?: ((beforeCommit?: () => void) => Promise<void>) | undefined;
   hasOlder?: boolean | undefined;
   loadingOlder?: boolean | undefined;
 }
@@ -103,9 +108,9 @@ function activitySequence(entry: ManagedHistoryEntry): number {
   return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
-function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: string, allEntries?: readonly ManagedHistoryEntry[]): boolean {
+function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: string, hasToolCalls: boolean = true): boolean {
   if (isContextResetEntry(entry)) return true;
-  if (isMailboxSendToUser(entry, currentUser, allEntries) !== undefined) return true;
+  if (isMailboxSendToUser(entry, currentUser, hasToolCalls) !== undefined) return true;
   if (currentUser) {
     const from = (entry.presentation?.from ?? entry.sender_identity)?.trim().toLowerCase();
     const user = currentUser.trim().toLowerCase();
@@ -118,7 +123,10 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: 
   // Complete history entry because it has presentation.kind === "tool".
   if (isActiveManagedSubagentLifecycle(entry)) return false;
   // Complete is an outcome timeline, not a lifecycle progress log.
-  if (entry.presentation?.kind === "lifecycle") return false;
+  // Background completion is an outcome, not lifecycle progress. The router's
+  // history transport omits category, so identify this dedicated notice by its
+  // lifecycle title, including on replay.
+  if (entry.presentation?.kind === "lifecycle" && entry.message !== "Background task finished") return false;
   if (entry.presentation?.kind === "state" && !entry.message?.toLowerCase().includes("workflow") && !entry.presentation?.summary?.toLowerCase().includes("workflow")) return false;
   const isOutboundMessage = entry.presentation?.kind === "message" && (
     entry.message === "Message sent" || entry.message === "Reply sent" ||
@@ -128,10 +136,7 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry, currentUser?: 
     const rawContent = entry.message_content ?? entry.presentation?.summary;
     const trimmed = rawContent?.trim();
     if (!trimmed || trimmed === "(Action completed without additional text)") {
-      const toolCallsExist = allEntries
-        ? allEntries.some((e) => e.presentation?.kind === "tool" || (e as { category?: unknown }).category === "managed_tool")
-        : true;
-      if (toolCallsExist) return false;
+      if (hasToolCalls) return false;
     }
   }
   if (entry.presentation?.kind !== "child") return true;
@@ -463,10 +468,10 @@ function isAlreadyInMessages(entry: ManagedHistoryEntry, messages: HistoryMessag
   });
 }
 
-export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, peerId, agent, ownerId, routerUrl, loading = false, error, onNearBottomChange, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
+export function MessageList({ id, messages, events, timelineEvents, activityEntries, activityHistoryReady = true, liveActivityIds, liveTimelineIds, historyWindowReady, onDiscardHistoryBefore, peerId, agent, ownerId, routerUrl, loading = false, error, onRetryHistory, onNearBottomChange, onLoadOlder, hasOlder, loadingOlder }: MessageListProps): ReactElement {
   const currentUser = ownerId ?? currentUsername(undefined, routerUrl);
   const ref = useRef<HTMLDivElement>(null);
-  const conversationKey = `${routerUrl ?? ""}\u001f${peerId ?? ""}`;
+  const conversationKey = JSON.stringify([routerUrl ?? "", ownerId ?? "", peerId ?? ""]);
   const isNearBottomRef = useRef(true);
   const prevConversationKeyRef = useRef<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -498,38 +503,57 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
   }, [peerId, routerUrl, timelineEvents, events, messages]);
 
   const effectiveEvents = timelineEvents ?? events ?? (internalEvents.length > 0 ? internalEvents : undefined);
-  const effectiveHasOlder = hasOlder ?? internalHasOlder;
+  const sourceHasOlder = hasOlder ?? internalHasOlder;
+  const [windowState, setWindowState] = useState<{ key: string; expanded: boolean; ready: boolean }>({ key: conversationKey, expanded: false, ready: false });
+  const windowCurrent = windowState.key === conversationKey ? windowState : { key: conversationKey, expanded: false, ready: false };
+  useLayoutEffect(() => {
+    setWindowState((current) => current.key !== conversationKey
+      ? { key: conversationKey, expanded: false, ready: historyWindowReady !== false }
+      : historyWindowReady !== false && !current.ready ? { ...current, ready: true } : current);
+  }, [conversationKey, historyWindowReady]);
   const effectiveLoadingOlder = loadingOlder ?? internalLoadingOlder;
 
-  const prevScrollHeightRef = useRef<number | null>(null);
-  const prevScrollTopRef = useRef<number | null>(null);
-  const isPrependingRef = useRef(false);
-
-  const handleInternalLoadOlder = useCallback(() => {
+  type PaginationRequest = {
+    settled: boolean;
+    anchor?: { element: HTMLElement; offset: number };
+  };
+  const paginationRef = useRef<PaginationRequest | null>(null);
+  const [, renderPagination] = useState(0);
+  const lastScrollTopRef = useRef(0);
+  const frameRef = useRef<number | null>(null);
+  const readingViewportRef = useRef<{
+    firstItemKey: string | undefined;
+    anchors: Array<{ element: HTMLElement; offset: number }>;
+  } | null>(null);
+  const captureReadingViewport = useCallback(() => {
     const element = ref.current;
-    if (element) {
-      prevScrollHeightRef.current = element.scrollHeight;
-      prevScrollTopRef.current = element.scrollTop;
-      isPrependingRef.current = true;
-    }
-    if (onLoadOlder) {
-      onLoadOlder();
-      return;
-    }
-    if (!peerId || internalLoadingOlder) return;
-    const oldestSeq = internalEvents[0]?.seq;
-    if (!oldestSeq || oldestSeq <= 0) return;
-    setInternalLoadingOlder(true);
-    fetchConversationTimeline(peerId, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq, routerUrl)
-      .then((resp) => {
-        setInternalEvents((prev) => [...resp.events, ...prev]);
-        setInternalHasOlder(Boolean(resp.next_before_seq && resp.next_before_seq > 0));
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        setInternalLoadingOlder(false);
-      });
-  }, [onLoadOlder, peerId, internalLoadingOlder, internalEvents, routerUrl]);
+    if (!element) return;
+    const viewport = element.getBoundingClientRect();
+    const anchors = Array.from(element.querySelectorAll<HTMLElement>("[data-scroll-anchor]"));
+    readingViewportRef.current = {
+      firstItemKey: anchors[0]?.dataset.scrollAnchor,
+      anchors: anchors.flatMap((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom
+          ? [{ element: item, offset: rect.top - viewport.top }] : [];
+      }),
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    paginationRef.current = null;
+    readingViewportRef.current = null;
+    isNearBottomRef.current = true;
+    setInternalEvents([]);
+    setInternalHasOlder(false);
+    setInternalLoadingOlder(false);
+    setInternalLoading(false);
+    return () => {
+      paginationRef.current = null;
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    };
+  }, [conversationKey]);
+
 
   const items = useMemo<FeedItem[]>(() => {
     const seenIds = new Set<string>();
@@ -539,6 +563,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       if (raw) seenIds.add(raw);
     };
     const rawItems: FeedItem[] = [];
+    const hasToolCalls = activityEntries?.some((entry) => entry.presentation?.kind === "tool" || entry.category === "managed_tool") ?? true;
 
     const isSeen = (id: string): boolean => {
       if (seenIds.has(id)) return true;
@@ -546,10 +571,18 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       return !!raw && seenIds.has(raw);
     };
 
+    const liveActivityEventIds = new Set<string>();
+    for (const entry of activityEntries ?? []) if (liveActivityIds?.has(entry.id)) {
+      liveActivityEventIds.add(entry.id);
+      liveActivityEventIds.add(`hist:${entry.id}`);
+      liveActivityEventIds.add(`hist:complete:${entry.id}`);
+    }
     if (effectiveEvents && effectiveEvents.length > 0) {
       const seenEventIds = new Set<string>();
       for (const ev of effectiveEvents) {
         if (seenEventIds.has(ev.id)) continue;
+        // Only a live update can supersede the timeline snapshot.
+        if (ev.kind !== "message" && liveActivityEventIds.has(ev.id)) continue;
         seenEventIds.add(ev.id);
         const converted = timelineEventToFeedItems(ev, currentUser, ownerId, peerId);
         for (const item of converted) {
@@ -568,7 +601,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
         const oldestEvent = effectiveEvents[0];
         const isPending = Boolean(message.pending);
         const isNewer = oldestEvent ? messageTime(message) >= oldestEvent.created_at : true;
-        if (!isPending && !isNewer) {
+        if (!isPending && !message.failed && !isNewer) {
           continue;
         }
       }
@@ -583,15 +616,9 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
 
     // Include live activity entries (from WebSocket) not already captured
     for (const entry of activityEntries ?? []) {
-      if (effectiveEvents && effectiveEvents.length > 0) {
-        const oldestEvent = effectiveEvents[0];
-        if (oldestEvent && activityTime(entry) < oldestEvent.created_at) {
-          continue;
-        }
-      }
       if (seenIds.has(entry.id) || seenIds.has(`hist:${entry.id}`) || seenIds.has(`hist:complete:${entry.id}`)) continue;
-      if (!isMeaningfulCompleteActivity(entry, currentUser, activityEntries)) continue;
-      const userMail = isMailboxSendToUser(entry, currentUser, activityEntries);
+      if (!isMeaningfulCompleteActivity(entry, currentUser, hasToolCalls)) continue;
+      const userMail = isMailboxSendToUser(entry, currentUser, hasToolCalls);
       if (userMail !== undefined) {
         if (isAlreadyInMessages(entry, messages ?? [])) continue;
         const thinkingText = getThinkingContent(entry);
@@ -654,12 +681,42 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
         left.sequence - right.sequence ||
         left.id.localeCompare(right.id)
     );
-  }, [effectiveEvents, messages, activityEntries, currentUser, ownerId, peerId]);
+  }, [effectiveEvents, messages, activityEntries, liveActivityIds, loading, internalLoading, currentUser, ownerId, peerId]);
+  // Compute the combined budget before releasing discarded source candidates.
+  const visibleItems = useMemo(() => {
+    if (historyWindowReady === undefined) return { items, deferred: false };
+    const protectedIds = new Set<string>();
+    for (const id of liveTimelineIds ?? []) { protectedIds.add(id); protectedIds.add(extractRawId(id)); }
+    for (const id of liveActivityIds ?? []) { protectedIds.add(id); protectedIds.add(extractRawId(id)); protectedIds.add(`${id}:thinking`); protectedIds.add(`activity-msg-${id}`); }
+    for (const message of messages ?? []) if (message.pending || message.failed) {
+      protectedIds.add(message.id); protectedIds.add(extractRawId(message.id));
+    }
+    const isProtected = (item: FeedItem) => protectedIds.has(item.id) || protectedIds.has(extractRawId(item.id))
+      || (item.type === "message" && (Boolean(item.message.pending) || Boolean(item.message.failed) || protectedIds.has(item.message.id)))
+      || (item.type === "activity" && protectedIds.has(item.entry.id));
+    const historical = items.filter((item) => !isProtected(item));
+    const allowance = windowCurrent.expanded ? historical.length : windowCurrent.ready ? DEFAULT_CONVERSATION_CHUNK_LIMIT : 0;
+    const visibleHistory = new Set(historical.slice(-allowance || historical.length));
+    if (allowance === 0) visibleHistory.clear();
+    return { items: items.filter((item) => isProtected(item) || visibleHistory.has(item)), deferred: historical.length > allowance };
+  }, [items, historyWindowReady, liveTimelineIds, liveActivityIds, messages, windowCurrent.expanded, windowCurrent.ready]);
+  useLayoutEffect(() => {
+    if (!onDiscardHistoryBefore || !windowCurrent.ready || windowCurrent.expanded) return;
+    const ids = new Set<string>();
+    for (const item of visibleItems.items) {
+      ids.add(item.id); ids.add(extractRawId(item.id));
+      if (item.type === "message") ids.add(item.message.id);
+      if (item.type === "activity") { ids.add(item.entry.id); ids.add(item.entry.id.replace(/:thinking$/, "")); }
+    }
+    onDiscardHistoryBefore(ids);
+  }, [onDiscardHistoryBefore, visibleItems, windowCurrent.ready, windowCurrent.expanded, liveTimelineIds, liveActivityIds]);
+  const effectiveHasOlder = sourceHasOlder || (windowCurrent.ready && visibleItems.deferred);
+
   const renderedItems = useMemo(() => {
     let lastThinking: string | undefined;
     let currentEpoch = 1;
     const result: Array<{ item: FeedItem; suppressThinking: boolean; epoch?: number | string }> = [];
-    for (const item of items) {
+    for (const item of visibleItems.items) {
       if (item.type === "message") {
         lastThinking = undefined;
         result.push({ item, suppressThinking: false });
@@ -689,60 +746,107 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       result.push({ item, suppressThinking: false });
     }
     return result;
-  }, [items]);
-  const latestItem = renderedItems.at(-1)?.item;
-  const latestItemKey = latestItem === undefined ? undefined : `${latestItem.type}\u001f${latestItem.id}`;
-  const oldestItem = renderedItems[0]?.item;
-  const oldestItemKey = oldestItem === undefined ? undefined : `${oldestItem.type}\u001f${oldestItem.id}`;
-
-  // Preserve scroll viewport position when prepending older history at the top,
-  // preventing the conversation feed from jumping or snapping to 0.
-  useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element || prevScrollHeightRef.current === null || prevScrollTopRef.current === null) return;
-    const heightDelta = element.scrollHeight - prevScrollHeightRef.current;
-    if (heightDelta > 0) {
-      element.scrollTop = prevScrollTopRef.current + heightDelta;
+  }, [visibleItems]);
+  const handleInternalLoadOlder = useCallback(async () => {
+    if (paginationRef.current || effectiveLoadingOlder || !effectiveHasOlder) return;
+    const oldestSeq = internalEvents[0]?.seq;
+    if (!visibleItems.deferred && !onLoadOlder && (!peerId || !oldestSeq || oldestSeq <= 0)) return;
+    const request: PaginationRequest = { settled: false };
+    paginationRef.current = request;
+    const beforeCommit = () => {
+      if (paginationRef.current !== request) return;
+      setWindowState({ key: conversationKey, expanded: true, ready: true });
+      if (request.anchor) return;
+      const element = ref.current;
+      if (!element || isNearBottomRef.current) return;
+      const top = element.getBoundingClientRect().top;
+      const anchor = Array.from(element.querySelectorAll<HTMLElement>("[data-scroll-anchor]"))
+        .find((item) => item.getBoundingClientRect().bottom > top);
+      if (anchor) request.anchor = { element: anchor, offset: anchor.getBoundingClientRect().top - top };
+    };
+    try {
+      if (visibleItems.deferred && !onDiscardHistoryBefore) {
+        beforeCommit();
+        setWindowState({ key: conversationKey, expanded: true, ready: true });
+      } else if (onLoadOlder) {
+        await onLoadOlder(beforeCommit);
+      } else if (peerId && oldestSeq) {
+        setInternalLoadingOlder(true);
+        const resp = await fetchConversationTimeline(peerId, DEFAULT_CONVERSATION_CHUNK_LIMIT, oldestSeq, routerUrl);
+        if (paginationRef.current !== request) return;
+        beforeCommit();
+        setInternalEvents((prev) => [...resp.events, ...prev]);
+        setInternalHasOlder(Boolean(resp.next_before_seq && resp.next_before_seq > 0));
+      }
+    } catch {
+      // History remains readable when pagination fails.
+    } finally {
+      if (paginationRef.current === request) {
+        request.settled = true;
+        setInternalLoadingOlder(false);
+        // Cleanup happens in layout, after the response's state updates commit.
+        renderPagination((version) => version + 1);
+      }
     }
-    prevScrollHeightRef.current = null;
-    prevScrollTopRef.current = null;
-    isPrependingRef.current = false;
-  }, [oldestItemKey]);
+  }, [onLoadOlder, peerId, effectiveLoadingOlder, effectiveHasOlder, internalEvents, routerUrl, conversationKey, visibleItems.deferred]);
 
+  // Consume a response anchor on its render even if all returned IDs already exist.
   useLayoutEffect(() => {
-    if (isPrependingRef.current) return;
     const element = ref.current;
     if (!element) return;
-
-    const isConversationSwitch = prevConversationKeyRef.current !== conversationKey;
+    const switched = prevConversationKeyRef.current !== conversationKey;
     prevConversationKeyRef.current = conversationKey;
+    if (switched) isNearBottomRef.current = true;
+    const request = paginationRef.current;
+    const previousViewport = readingViewportRef.current;
+    const remainingKeys = new Set(Array.from(element.querySelectorAll<HTMLElement>("[data-scroll-anchor]"),
+      (item) => item.dataset.scrollAnchor));
+    // Native anchoring is disabled here. Restore a surviving visible item when
+    // retention removes the front, not when an append merely grows total height.
+    const frontTrimmed = previousViewport?.firstItemKey !== undefined
+      && !remainingKeys.has(previousViewport.firstItemKey);
+    const anchor = request?.anchor ?? (frontTrimmed
+      ? previousViewport?.anchors.find((item) => element.contains(item.element)) : undefined);
+    if (!switched && anchor && !isNearBottomRef.current && element.contains(anchor.element)) {
+      element.scrollTop += anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset;
+    }
+    if (request) {
+      delete request.anchor;
+      if (request.settled) paginationRef.current = null;
+    }
+    if (isNearBottomRef.current) element.scrollTop = element.scrollHeight;
+    lastScrollTopRef.current = element.scrollTop;
+    captureReadingViewport();
+  });
 
-    // Sticky auto-scroll model:
-    // - Scrolls to bottom if user is within DEFAULT_AUTO_SCROLL_THRESHOLD (180px) of bottom
-    // - Locks viewport position when user scrolls up to read history
-    // - Forces scroll to bottom on peer/agent switch
-    // - Uses double-rAF (initial synchronous layout scroll + requestAnimationFrame) for DOM layout settlement
-    if (isConversationSwitch) {
-      isNearBottomRef.current = true;
-      element.scrollTop = element.scrollHeight;
-      const frame = requestAnimationFrame(() => {
-        if (isPrependingRef.current) return;
+  // Observe actual layout, including same-ID streaming, images, and viewport resize.
+  // Reattach after empty/loading views become a timeline.
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const key = conversationKey;
+    const align = () => {
+      captureReadingViewport();
+      if (!isNearBottomRef.current || paginationRef.current?.anchor) return;
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = null;
+        if (prevConversationKeyRef.current !== key || !isNearBottomRef.current || paginationRef.current?.anchor) return;
         element.scrollTop = element.scrollHeight;
+        lastScrollTopRef.current = element.scrollTop;
       });
-      return () => cancelAnimationFrame(frame);
-    }
-
-    if (!isNearBottomRef.current) {
-      return;
-    }
-
-    element.scrollTop = element.scrollHeight;
-    const frame = requestAnimationFrame(() => {
-      if (isPrependingRef.current) return;
-      element.scrollTop = element.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [conversationKey, latestItemKey]);
+    };
+    align();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(align);
+    observer?.observe(element);
+    const timeline = element.querySelector(".complete-timeline");
+    if (timeline) observer?.observe(timeline);
+    return () => {
+      observer?.disconnect();
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    };
+  });
   // Retained history belongs to the newly selected agent; it is not a live
   // announcement just because this component was already mounted for another.
   useEffect(() => {
@@ -768,12 +872,21 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     const element = ref.current;
     if (!element) return;
     const { scrollTop, scrollHeight, clientHeight } = element;
+    // Layout notifications at the same position are not a change of reading intent.
+    if (scrollTop === lastScrollTopRef.current) return;
+    lastScrollTopRef.current = scrollTop;
+    captureReadingViewport();
     const nearBottom = shouldFollowToBottom({ scrollTop, scrollHeight, clientHeight }, DEFAULT_AUTO_SCROLL_THRESHOLD);
     isNearBottomRef.current = nearBottom;
     onNearBottomChange?.(nearBottom);
+    // A user movement between response and layout supersedes the captured offset.
+    const anchor = paginationRef.current?.anchor;
+    if (anchor && element.contains(anchor.element)) {
+      anchor.offset = anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top;
+    }
     const isScrollable = scrollHeight > clientHeight + 20;
-    if (isScrollable && scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder) {
-      handleInternalLoadOlder();
+    if (isScrollable && scrollTop < 100 && effectiveHasOlder && !effectiveLoadingOlder && !error) {
+      void handleInternalLoadOlder();
     }
   };
   const hasItems = renderedItems.length > 0;
@@ -785,13 +898,13 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
     <div ref={ref} {...(id === undefined ? {} : { id, role: "tabpanel" })} className="messages" onScroll={onScroll}>
       {peerId === undefined ? (
         <EmptyState watermark title="Pick an agent" description="Select an agent from the sidebar to view activity and chat." />
-      ) : hasItems ? (
+      ) : hasItems || effectiveHasOlder ? (
         <ol className="complete-timeline" aria-label={hasActivity ? `Complete activity timeline for ${peerId ?? "selected agent"}` : "Conversation messages"}>
           <div className="timeline-rail" aria-hidden="true" />
           {effectiveHasOlder && (
-            <li key="pagination:load-older" className="timeline-load-older-item">
+            <li key="pagination:load-older" className="timeline-load-older-item" style={{ position: "sticky", top: 0, zIndex: 2 }}>
               <button type="button" className="load-older-button" onClick={handleInternalLoadOlder} disabled={effectiveLoadingOlder}>
-                {effectiveLoadingOlder ? "Loading older history…" : "Load older history"}
+                {effectiveLoadingOlder ? "Loading older history…" : error ? "Retry older history" : "Load older history"}
               </button>
             </li>
           )}
@@ -817,7 +930,7 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
               return (
                 <Fragment key={itemKey}>
                   {separator}
-                  <li className="timeline-item timeline-item--context-reset">
+                  <li className="timeline-item timeline-item--context-reset" data-scroll-anchor={itemKey}>
                     <CompleteTimelineEntry entry={item.entry} suppressThinking={suppressThinking} {...(epoch !== undefined ? { epoch } : {})} />
                   </li>
                 </Fragment>
@@ -836,10 +949,11 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
                       <span className={`timeline-dot timeline-dot--${orbTone}`} />
                     </div>
                   )}
-                  <div className="timeline-content">
+                  <div className="timeline-content" data-scroll-anchor={itemKey}>
                     {item.type === "message" ? (
                       <MessageBubble
                         message={item.message}
+                        {...(peerId !== undefined ? { cachePeer: peerId } : {})}
                         {...(ownerId !== undefined ? { ownerId } : {})}
                         {...(routerUrl !== undefined ? { routerUrl } : {})}
                         {...(hasActivity && peerId !== undefined ? { operationalAgentId: peerId } : {})}
@@ -860,14 +974,14 @@ export function MessageList({ id, messages, events, timelineEvents, activityEntr
       ) : effectiveLoading ? (
         <TimelineLoadingSkeleton />
       ) : error ? (
-        <p className="error" role="alert">{error}</p>
+        <div className="error" role="alert">{error} {onRetryHistory && <button type="button" onClick={onRetryHistory}>Retry history</button>}</div>
       ) : (
         <AgentWelcomeCard
           agentId={peerId}
           {...(agent !== undefined ? { agent } : {})}
         />
       )}
-      {hasItems && error ? <p className="error" role="alert">{error}</p> : null}
+      {(hasItems || effectiveHasOlder) && error ? <div className="error" role="alert">{error} {onRetryHistory && <button type="button" onClick={onRetryHistory}>Retry history</button>}</div> : null}
       <p className="timeline-live-region" aria-live="polite" aria-atomic="true">{announcement}</p>
     </div>
   );

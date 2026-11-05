@@ -388,3 +388,84 @@ describe("Managed Agent Periodic Polling & Reconnect Reconciliation", () => {
     expect(childrenFetched).toBe(true);
   }, 10_000);
 });
+
+it.each(["ui-live", "compatibility"] as const)("repairs both urgency projections from a common %s notification without row polling", async (source) => {
+  let urgent = false;
+  let revision = 1;
+  let managedReads = 0;
+  let connectedReads = 0;
+  const socket = new MockSocket();
+  const liveSocket = new MockSocket();
+  const fetchImpl = async (input: RequestInfo | URL) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/v1/capabilities") return jsonResponse({ managed_v1: true, ui_live_v1: true });
+    if (path === "/v1/managed-agents") { managedReads++; return jsonResponse({ generated_at: baseAgent.updated_at, projection_version: revision, agents: [{ ...baseAgent, urgent }] }); }
+    if (path === "/v1/agents") { connectedReads++; return jsonResponse({ agents: [{ agent_id: "agent-1", urgent, instance_id: "instance", agent_role: "agent", connected_at: baseAgent.created_at, lease_expires_at: "2030-01-01T01:00:00Z", activity_state: "idle", subagent_count: 0, subagents: [], available_models: [], model_catalog_total_count: 0, model_catalog_truncated: false }] }); }
+    if (path.endsWith("/children")) return jsonResponse({ agent_id: "agent-1", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+    return jsonResponse({});
+  };
+  const webSocketFactory = () => socket;
+  const uiLiveWebSocketFactory = () => liveSocket;
+  const { result } = renderHook(() => useRouterSession({ routerUrl: "http://router.test", agentId: "ui", fetchImpl, webSocketFactory, uiLiveWebSocketFactory }));
+  act(() => socket.emit("open", {}));
+  await waitFor(() => expect(result.current.state.managedAgents?.[0]?.urgent).toBe(false));
+  await waitFor(() => expect(result.current.state.agents[0]?.urgent).toBe(false));
+  const notify = () => (source === "ui-live" ? liveSocket : socket).emit("message", { data: JSON.stringify({ type: "agent_urgency_changed", agent_id: "agent-1", urgent }) });
+  for (const desired of [true, false]) {
+    urgent = desired; revision++;
+    const previousManaged = managedReads; const previousConnected = connectedReads;
+    act(notify);
+    await waitFor(() => expect(result.current.state.managedAgents?.[0]?.urgent).toBe(desired), { timeout: 500 });
+    await waitFor(() => expect(result.current.state.agents[0]?.urgent).toBe(desired), { timeout: 500 });
+    expect(managedReads - previousManaged).toBe(1);
+    expect(connectedReads - previousConnected).toBe(1);
+  }
+});
+
+it.each(["clear", "retire and recreate"] as const)("queues a connected refresh behind an old read on UI-live-only urgency %s", async (change) => {
+  vi.useFakeTimers();
+  const startedAt = Date.now();
+  const socket = new MockSocket();
+  const liveSocket = new MockSocket();
+  let urgent = true;
+  let instance = "old-instance";
+  let revision = 1;
+  let connectedReads = 0;
+  let releaseOld: (response: Response) => void = () => { throw new Error("old read not started"); };
+  const oldRead = new Promise<Response>((resolve) => { releaseOld = resolve; });
+  const connectedResponse = () => jsonResponse({ agents: [{ agent_id: "agent-1", urgent, instance_id: instance, agent_role: "agent", connected_at: baseAgent.created_at, lease_expires_at: "2030-01-01T01:00:00Z", activity_state: "idle", subagent_count: 0, subagents: [], available_models: [], model_catalog_total_count: 0, model_catalog_truncated: false }] });
+  // Capture true before the clear/recreation, not when the delayed read resolves.
+  const capturedTrue = connectedResponse();
+  const fetchImpl = async (input: RequestInfo | URL) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/v1/capabilities") return jsonResponse({ managed_v1: true, ui_live_v1: true });
+    if (path === "/v1/managed-agents") return jsonResponse({ generated_at: baseAgent.updated_at, projection_version: revision, agents: [{ ...baseAgent, urgent }] });
+    if (path === "/v1/agents") return ++connectedReads === 1 ? oldRead : connectedResponse();
+    if (path.endsWith("/children")) return jsonResponse({ agent_id: "agent-1", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+    return jsonResponse({});
+  };
+  const webSocketFactory = () => socket;
+  const uiLiveWebSocketFactory = vi.fn(() => liveSocket);
+  const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+  const { result } = renderHook(() => useRouterSession({ routerUrl: "http://router.test", agentId: "ui", fetchImpl, webSocketFactory, uiLiveWebSocketFactory }));
+  await act(async () => { socket.emit("open", {}); await flush(); });
+  expect(connectedReads).toBe(1);
+  expect(uiLiveWebSocketFactory).toHaveBeenCalledTimes(1);
+  expect(result.current.state.managedAgents?.[0]?.urgent).toBe(true);
+
+  urgent = false;
+  revision++;
+  if (change === "retire and recreate") instance = "new-instance";
+  await act(async () => {
+    // A burst must coalesce into one trailing shared GET; no compatibility frame.
+    for (let i = 0; i < 3; i++) liveSocket.emit("message", { data: JSON.stringify({ type: "agent_urgency_changed", agent_id: "agent-1", urgent: false }) });
+    await flush();
+  });
+  expect(connectedReads).toBe(1);
+  expect(result.current.state.managedAgents?.[0]?.urgent).toBe(false);
+  await act(async () => { releaseOld(capturedTrue); await flush(); });
+  expect(connectedReads).toBe(2);
+  expect(result.current.state.agents[0]?.urgent).toBe(false);
+  expect(result.current.state.agents[0]?.instance_id).toBe(instance);
+  expect(Date.now()).toBe(startedAt); // No background interval or retry timer advanced.
+});

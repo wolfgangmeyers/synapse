@@ -444,7 +444,7 @@ func (r *Router) connectedAgents(ctx context.Context, includeModels bool) map[st
 		if !leaseOK || lease.LeaseID != s.leaseID || lease.InstanceID != s.deliveryInstance || lease.ExpiresAt <= timestamp(now) {
 			continue
 		}
-		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "inline_tool_control_available": s.inlineToolControl}
+		item := map[string]any{"agent_id": s.agentID, "urgent": durableSnapshot.Urgency[s.agentID], "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "inline_tool_control_available": s.inlineToolControl}
 		if inlineToolState, ok := inlineToolStates[s.agentID]; ok && inlineToolState.instanceID == s.instanceID && inlineToolState.leaseID == lease.LeaseID {
 			item["inline_tool_enabled"] = inlineToolState.enabled
 		}

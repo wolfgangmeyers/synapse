@@ -55,6 +55,7 @@ export interface Reminder {
 }
 
 export interface Agent {
+  urgent?: boolean;
   agent_id: AgentId;
   instance_id: InstanceId;
   agent_role: AgentRole;
@@ -762,7 +763,14 @@ export type ClientFrame =
   | SubagentLifecycleEventFrame
   | SubagentStateResyncFrame;
 
+export interface AgentUrgencyChangedFrame {
+  type: "agent_urgency_changed";
+  agent_id: AgentId;
+  urgent: boolean;
+}
+
 export type ServerFrame =
+  | AgentUrgencyChangedFrame
   | RegisteredFrame
   | LeaseRejectedFrame
   | ErrorFrame
@@ -861,6 +869,7 @@ export interface AgentProgress {
 }
 
 export interface ManagedAgent {
+  urgent?: boolean;
   agent_id: AgentId;
   source: "router-managed";
   runtime?: "rpc" | "embedded";
@@ -1060,7 +1069,7 @@ export interface HistoryEntryFrame {
   view: "quiet" | "complete";
   entry: ManagedHistoryEntry;
 }
-export type ManagedProvider = "openai-codex" | "google" | "cursor" | "google-vertex" | "antigravity";
+export type ManagedProvider = "openai-codex" | "google" | "cursor" | "google-vertex";
 
 export interface ProviderAuthPrompt {
   id: string;
@@ -1086,4 +1095,4 @@ export interface ProviderAuthStateFrame {
   status: "pending" | "succeeded" | "failed" | "expired" | "cancelled";
   error?: string;
 }
-export type UILiveFrame = ManagedAgentsSnapshotFrame | ManagedAgentDeltaFrame | ManagedAgentRemovedFrame | ManagedChildrenSnapshotFrame | HistoryEntryFrame | ProviderAuthPromptFrame | ProviderAuthStateFrame;
+export type UILiveFrame = AgentUrgencyChangedFrame | ManagedAgentsSnapshotFrame | ManagedAgentDeltaFrame | ManagedAgentRemovedFrame | ManagedChildrenSnapshotFrame | HistoryEntryFrame | ProviderAuthPromptFrame | ProviderAuthStateFrame;

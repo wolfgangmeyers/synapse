@@ -14,9 +14,9 @@ AI-generated avatar sheets (from Midjourney, DALL-E, etc.) do not align to a uni
 2. **Radius Variations**: The circular borders vary in size across the canvas.
 3. **Neighbor Contamination**: Naive bounding boxes cut through neighbor circles or leave dark borders.
 
-## The Tool: `tools/slice_avatar_grid.py`
+## The Tool: `slice_avatar_grid.py`
 
-The repository provides a specialized CLI tool in `tools/slice_avatar_grid.py` that:
+The script beside this skill provides a specialized CLI tool that:
 1. Detects each avatar's circular glowing frame using Hough Circle Transform on color masks.
 2. Measures the exact outer boundary of each circular ring.
 3. Crops an exact, square canvas (default 292x292) centered on each detected avatar.
@@ -26,14 +26,16 @@ The repository provides a specialized CLI tool in `tools/slice_avatar_grid.py` t
 ## Usage
 
 ```bash
-uv run --with pillow --with opencv-python --with numpy python3 tools/slice_avatar_grid.py \
+uv run --with pillow --with opencv-python --with numpy python3 .claude/skills/slice-avatar-grid/slice_avatar_grid.py \
   --input "/path/to/avatar_sheet.png"
 ```
+
+Run this example from the repository root. The original `tools/slice_avatar_grid.py` path remains available as a compatibility entry point.
 
 ### Options
 
 * `--input`, `-i`: Path to the input image (PNG or JPG).
-* `--dest`, `-d`: Destination directory (default: `web/router-ui-react/avatars`).
+* `--dest`, `-d`: Destination directory (default: `web/router-ui-react/avatars`, relative to the current working directory).
 * `--rows`: Number of grid rows (default: `4`).
 * `--cols`: Number of grid columns (default: `4`).
 * `--start-index`, `-s`: Starting robot number (default: auto-detected next number in `--dest`).

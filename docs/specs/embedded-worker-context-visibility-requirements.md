@@ -13,8 +13,8 @@ This feature introduces real-time context token and percentage visibility direct
 | Area | Decision |
 | --- | --- |
 | **Placement** | Top conversation header (`ConversationHeader.tsx`), adjacent to the agent identity and status controls. |
-| **Visual representation** | Compact progress bar with text label (e.g., `"44% of 1M"`, `"72% of 200k"`). Tooltip or title showing exact token count (e.g. `440,120 / 1,000,000 tokens`). |
-| **Calculation standard** | Matches Pi's canonical context usage calculation: uses provider-reported usage when available (`totalTokens` or `input + output + cacheRead + cacheWrite`), plus character-heuristic estimates for trailing messages post-assistant turn, divided by model `contextWindow`. |
+| **Visual representation** | Compact progress bar with text label (e.g., `"44% of 1M"`, `"72% of 200k"`). Tooltip or title showing the full numeric token estimate (e.g. `440,120 / 1,000,000 tokens`), not a claim of exact provider usage. |
+| **Calculation standard** | Matches Pi's canonical context usage calculation: uses provider-reported usage when available (`totalTokens` or `input + output + cacheRead + cacheWrite`), plus character-heuristic estimates for trailing messages post-assistant turn, divided by model `contextWindow`. After reset, decision B requires an immediate reset-message estimate rather than waiting for fresh assistant usage. |
 | **Color coding / thresholds** | Matches system thresholds: < 50% normal (subtle/neutral/brand accent), 50%–79% warning (amber/yellow), ≥ 80% critical (red/coral). |
 | **Scope** | Embedded router-managed workers (`runtime == "embedded"`). Graceful omission or placeholder when context usage is unknown or agent is disconnected/starting. |
 | **Real-time updates** | Propagated via existing UI-live WebSocket updates (`managed_agents_snapshot` / `managed_agent_delta`) and REST polling endpoints (`/v1/managed-agents`), updating immediately when turns complete. |
@@ -43,6 +43,10 @@ This feature introduces real-time context token and percentage visibility direct
 - **R1.3 Live Calculation in Embedded Session:**
   - For active embedded sessions (`*coding.Session`), the router manager retrieves current context tokens using `coding.EstimateContextTokens(session.History())` (or provider usage blend) and the active model's `ContextWindow`.
   - Upon completion of an agent turn or prompt execution, updated usage is cached in the agent record/lane and published to UI-live.
+  - After compaction, pre-boundary assistant usage is stale; without a post-boundary assistant response, `tokens` and `percent` are `null`. Decision B applies to reset, not compaction. This remains a requirement, not a claim of verified end-to-end implementation.
+  - Immediately after reset and before the wake turn, replace the old projection with an estimate of normalized reset messages: any pending genesis instruction, scratchpad handoff, and ported messages. Retained assistant usage may contribute to this estimate; it is not fresh post-reset provider usage or necessarily the complete provider prompt. Do not show unknown solely because a fresh assistant has not reported usage.
+  - Resolve the selected model's context window for this estimate. If no positive window is available, keep estimated tokens and set `percent` to `null`. Subsequent turn usage updates the projection.
+  - Verification must cover the immediate pre-assistant estimate and subsequent update through real router, REST/WebSocket and browser boundaries with a deterministic model mock; this requirement is not evidence of existing or passing E2E coverage.
 
 ### 2. Frontend Data Model & State
 
@@ -59,7 +63,7 @@ This feature introduces real-time context token and percentage visibility direct
   - Display format:
     - Text label: `"<percent>% of <window>"` (e.g., `"44% of 1M"`, `"68% of 200k"`, `"12% of 128k"`).
     - Progress bar: A slim, accessible bar indicating percentage filled.
-    - Hover title/tooltip: Detailed token breakdown `"<tokens> / <context_window> tokens (<percent>%)"`.
+    - Hover title/tooltip: Detailed token breakdown `"<tokens> / <context_window> tokens (<percent>%)"`. The full numeric token value is an estimate that may blend provider-reported usage with heuristic estimates, not necessarily an exact provider token count.
 - **R3.2 Threshold Styling:**
   - Normal (< 50%): theme accent / muted green/blue.
   - Warning (50% – 79%): amber / warning color (aligns with pre-reset warning zone for 1M models).

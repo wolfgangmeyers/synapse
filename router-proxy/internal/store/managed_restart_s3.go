@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"time"
 )
 
@@ -31,10 +30,6 @@ type ManagedLifecycleRestartReservation struct {
 // installed.  It is deliberately stored in recovery_owner so migration 027
 // remains unchanged.
 const RestartStartAttemptPrefix = "restart-target-start:"
-
-func restartStartAttempt(owner string) bool {
-	return strings.HasPrefix(owner, RestartStartAttemptPrefix) && len(owner) > len(RestartStartAttemptPrefix)
-}
 
 func restartReservationInputValid(reservation ManagedLifecycleRestartReservation) bool {
 	modelOmitted := reservation.SelectedModel.Provider == "" && reservation.SelectedModel.ID == ""

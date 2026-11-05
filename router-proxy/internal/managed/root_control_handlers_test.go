@@ -59,7 +59,7 @@ func handlerIndexByOperation(t *testing.T, handlers []RootControlHandler, operat
 func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 	manifest := loadCurrentRootManifest(t)
 	require.Equal(t, 2, manifest.Revision)
-	require.Len(t, manifest.Tools, 17)
+	require.Len(t, manifest.Tools, 16)
 
 	operations := make(map[string]ManifestTool, len(manifest.Tools))
 	for _, tool := range manifest.Tools {
@@ -68,6 +68,7 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 		operations[tool.OperationID] = tool
 	}
 	require.Len(t, operations, len(manifest.Tools))
+	require.NotContains(t, operations, "ops.worker", "retired worker tool must not return to the manifest")
 
 	search, found := operations["web.search"]
 	require.True(t, found, "current manifest must include revision-two web.search")
@@ -103,13 +104,18 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 			require.NotNil(t, owner.executor)
 			executed, executeErr := handler.Execute(context.Background(), RootControlInvocation{OperationID: tool.OperationID})
 			require.NoError(t, executeErr)
-			require.Equal(t, "executed", executed.Content)
 			reconciled, reconcileErr := handler.Reconcile(context.Background(), RootControlInvocation{OperationID: tool.OperationID})
 			require.NoError(t, reconcileErr)
-			require.Equal(t, "reconciled", reconciled.Content)
+			if retiredRootControlOperation(tool.OperationID) {
+				require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", executed.ErrorCode)
+				require.Equal(t, "reconciled", reconciled.Content)
+			} else {
+				require.Equal(t, "executed", executed.Content)
+				require.Equal(t, "reconciled", reconciled.Content)
+			}
 		}
 	}
-	require.Equal(t, int32(32), calls.Load(), "each available owner must delegate execute and reconcile exactly once")
+	require.Equal(t, int32(25), calls.Load(), "retired owners reconcile only; other owners execute and reconcile")
 }
 
 func TestRootControlHandlerRegistryRejectsEveryClosureMutation(t *testing.T) {

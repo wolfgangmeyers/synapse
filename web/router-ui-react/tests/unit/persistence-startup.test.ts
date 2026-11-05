@@ -123,7 +123,7 @@ describe("settings identity persistence", () => {
 });
 
 describe("persistence startup migration", () => {
-  it("cleans deprecated local storage once while preserving current settings and records", async () => {
+  it("cleans deprecated local storage and history cache while preserving current settings and thumbnails", async () => {
     await deleteDatabase();
     const { factory, opens } = factoryWithOpenCount();
     const storage = new MemoryStorage();
@@ -166,7 +166,7 @@ describe("persistence startup migration", () => {
     expect(storage.getItem("mecha.web.drafts")).toContain("keep this");
 
     const historyRecords = await requestResult<unknown[]>(db.transaction(HISTORY_STORE_NAME, "readonly").objectStore(HISTORY_STORE_NAME).getAll());
-    expect(historyRecords).toEqual([expect.objectContaining({ message: expect.objectContaining({ id: "message-1", body: "keep this message" }) })]);
+    expect(historyRecords).toEqual([]);
     const thumbnailRecords = await requestResult<unknown[]>(db.transaction(IMAGE_STORE_NAME, "readonly").objectStore(IMAGE_STORE_NAME).getAll());
     expect(thumbnailRecords).toHaveLength(1);
     expect(thumbnailRecords[0]).toEqual(expect.objectContaining({ key: "thumbnail-key", savedAtMs: Date.parse("2030-01-01T00:00:00.000Z") }));

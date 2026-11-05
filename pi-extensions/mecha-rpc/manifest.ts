@@ -33,7 +33,7 @@ const MAX_NODES = 2_048;
 const MAX_STRING_BYTES = 8_192;
 const MAX_TOOL_TEXT_BYTES = 2_000;
 const MAX_TOOLS = 32;
-const MIN_TOOLS = 16;
+const MIN_TOOLS = 15;
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,127}$/;
 const SAFE_CAPABILITY_ID = /^[a-z][a-z0-9_]{0,59}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -52,7 +52,6 @@ export const BASELINE_TOOL_NAMES = Object.freeze([
   "mecha_priority",
   "mecha_verification_handoff",
   "mecha_reminder",
-  "mecha_worker",
   "mecha_pr",
   "mecha_git",
   "mecha_router",
@@ -75,7 +74,6 @@ const BASELINE_DEFINITION_SHA256: Readonly<Record<typeof BASELINE_TOOL_NAMES[num
   mecha_settled_notifications: "bdcfd97bf8cec67ce70a641370fcf90affa0ab31a80c7c40ee07d123311b1f1f",
   mecha_state: "15f43e468b451bba3b3f1fd7ed823ef4fc0a3333ec892f226c145bd8c0fe7c02",
   mecha_verification_handoff: "8f723b1630e1d0b4a2c9c862566f640302a4cbed37794511a49469d24e43358d",
-  mecha_worker: "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
 });
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -341,7 +339,7 @@ export function validateDesiredManifest(value: unknown, options: { requireBaseli
   requiredKeys(value, ["protocol", "revision", "tools"], "desired manifest");
   if (value.protocol !== "mecha.tools/v1") fail("unsupported desired manifest protocol");
   const revision = safeInteger(value.revision, "manifest revision", 1, Number.MAX_SAFE_INTEGER);
-  if (!Array.isArray(value.tools) || value.tools.length < MIN_TOOLS || value.tools.length > MAX_TOOLS) fail("manifest must contain 16 through 32 tools");
+  if (!Array.isArray(value.tools) || value.tools.length < MIN_TOOLS || value.tools.length > MAX_TOOLS) fail("manifest must contain 15 through 32 tools");
   const tools = value.tools.map(validateTool);
   for (let index = 1; index < tools.length; index++) {
     const previous = tools[index - 1]!;

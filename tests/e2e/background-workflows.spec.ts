@@ -474,6 +474,11 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
 
     const sha256Hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
+    // Managed admissions also create shared agent identities.
+    const insertIdentity = db.prepare("INSERT INTO agents (agent_id, first_seen_at) VALUES (?, ?)");
+    insertIdentity.run(activeBgId, nowIso);
+    insertIdentity.run(completedBgId, nowIso);
+
     db.prepare(`
       INSERT INTO managed_agents (
         agent_id, name, cwd, selected_model_provider, selected_model_id,
@@ -535,53 +540,4 @@ test.describe("Background Workflows & Scheduled Execution E2E", () => {
     expect(activeIndex).toBeLessThan(completedIndex);
   });
 
-  test("Scenario 5: Verify 1-hour retention policy / pruning behavior for background workers", async () => {
-    const db = new DatabaseSync(harness.router.databasePath);
-
-    // Insert an old terminated background worker (terminated 65 minutes ago)
-    const oldTerminatedBgId = "bg-worker-old-terminated";
-    const recentTerminatedBgId = "bg-worker-recent-terminated";
-    const sixtyFiveMinAgo = new Date(Date.now() - 65 * 60 * 1000).toISOString();
-    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-
-    db.prepare(`
-      INSERT INTO managed_agents (
-        agent_id, name, cwd, selected_model_provider, selected_model_id,
-        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
-        manifest_revision, manifest_hash, created_at, updated_at, is_background
-      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, 'hash', ?, ?, 1)
-    `).run(oldTerminatedBgId, oldTerminatedBgId, sixtyFiveMinAgo, sixtyFiveMinAgo);
-
-    db.prepare(`
-      INSERT INTO managed_agents (
-        agent_id, name, cwd, selected_model_provider, selected_model_id,
-        desired_state, lifecycle_state, activity_state, runtime, session_epoch,
-        manifest_revision, manifest_hash, created_at, updated_at, is_background
-      ) VALUES (?, ?, '/tmp', 'google', 'gemini-3.8-flash', 'terminated', 'terminated', 'stopped', 'embedded', 1, 1, 'hash', ?, ?, 1)
-    `).run(recentTerminatedBgId, recentTerminatedBgId, tenMinAgo, tenMinAgo);
-
-    // Verify both exist before pruning
-    const beforeOld = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(oldTerminatedBgId);
-    const beforeRecent = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(recentTerminatedBgId);
-    expect(beforeOld).toBeDefined();
-    expect(beforeRecent).toBeDefined();
-
-    // Execute pruning query matching store.PruneExpiredBackgroundAgents (1 hour threshold)
-    const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const result = db
-      .prepare(
-        "DELETE FROM managed_agents WHERE is_background = 1 AND (lifecycle_state = 'terminated' OR desired_state = 'terminated') AND updated_at < ?"
-      )
-      .run(cutoff);
-
-    expect(result.changes).toBeGreaterThanOrEqual(1);
-
-    // Verify the 65-min old worker was pruned while the 10-min old worker remains intact
-    const afterOld = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(oldTerminatedBgId);
-    const afterRecent = db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id = ?").get(recentTerminatedBgId);
-    expect(afterOld).toBeUndefined();
-    expect(afterRecent).toBeDefined();
-
-    db.close();
-  });
 });

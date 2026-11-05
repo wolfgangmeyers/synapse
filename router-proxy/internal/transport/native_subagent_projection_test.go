@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,7 +20,7 @@ func setupTestStoreWithParent(t *testing.T, parentID string) (*store.Store, stri
 	path := filepath.Join(t.TempDir(), "test.db")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, path); err == nil {
+		if err := storetest.CloneTemplateDB(t, path); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

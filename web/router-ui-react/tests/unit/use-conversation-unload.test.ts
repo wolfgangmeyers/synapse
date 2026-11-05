@@ -88,8 +88,8 @@ describe("useConversation natural unloading", () => {
     // Oldest items (1..10) are trimmed; in-memory window spans 11..160
     expect(result.current.messages[0]!.id).toBe("msg-11");
     expect(result.current.messages[149]!.id).toBe("msg-160");
-    expect(result.current.timelineEvents[0]!.seq).toBe(11);
-    expect(result.current.timelineEvents[149]!.seq).toBe(160);
+    expect(result.current.timelineEvents[0]!.seq).toBe(0);
+    expect(result.current.timelineEvents[149]!.seq).toBe(0);
 
     // hasOlder remains true because oldest item sequence (11) > 1
     expect(result.current.hasOlder).toBe(true);
@@ -289,3 +289,62 @@ describe("useConversation natural unloading", () => {
   });
 });
 
+
+describe("trimmed boundary recovery", () => {
+  it("requests the retained event once and preserves the window on failure and retry", async () => {
+    let subscriber: ((event: TransportEvent) => void) | undefined;
+    const fetch = vi.fn().mockResolvedValueOnce({ events: [], next_before_seq: null });
+    const transport = { http: { fetchConversationTimeline: fetch }, conversation: vi.fn(), subscribe: (cb: (event: TransportEvent) => void) => { subscriber = cb; return () => {}; }, sendMessage: vi.fn() } as unknown as RouterTransport;
+    const { result } = renderHook(() => useConversation(transport, { routerUrl: "http://localhost", agentId: "user" }, "agent-1"));
+    await act(async () => {});
+    act(() => { for (let i = 1; i <= 160; i++) subscriber?.({ type: "conversation", message: { id: `m${i}`, body: `m${i}`, direction: "incoming", from: "agent-1", to: "user", sequence: i, created_at: new Date().toISOString() } }); });
+    fetch.mockRejectedValueOnce(new Error("not persisted"));
+    await act(async () => { await result.current.loadOlder(); });
+    expect(result.current.timelineEvents).toHaveLength(150);
+    expect(result.current.hasOlder).toBe(true);
+    expect(result.current.error?.message).toMatch(/retry/i);
+    fetch.mockResolvedValueOnce({ events: [{ id: "older", agent_id: "agent-1", seq: 10, kind: "message", created_at: 1 }], next_before_seq: 10 });
+    await act(async () => { await result.current.loadOlder(); });
+    expect(fetch).toHaveBeenLastCalledWith("agent-1", 50, undefined, "msg:agent-1:m11");
+    expect(result.current.timelineEvents).toHaveLength(151);
+    expect(result.current.timelineEvents[0]?.id).toBe("older");
+    expect(result.current.messages.some((message) => message.id === "older")).toBe(true);
+    expect(result.current.timelineEvents[150]?.id).toBe("msg:agent-1:m160");
+  });
+});
+
+ it("never sends a timeline cursor to legacy history after a timeline page fails", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce({ events: [{ id: "e", agent_id: "agent-1", seq: 100, kind: "message", created_at: 1 }], next_before_seq: 100 }).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ events: [], next_before_seq: null });
+    const conversation = vi.fn();
+    const transport = { http: { fetchConversationTimeline: fetch }, conversation, subscribe: () => () => {}, sendMessage: vi.fn() } as unknown as RouterTransport;
+    const { result } = renderHook(() => useConversation(transport, { routerUrl: "http://localhost", agentId: "user" }, "agent-1"));
+    await act(async () => {});
+    await act(async () => result.current.loadOlder());
+    expect(conversation).not.toHaveBeenCalled();
+    expect(result.current.hasOlder).toBe(true);
+    expect(result.current.error?.message).toMatch(/retry/i);
+    await act(async () => result.current.loadOlder());
+    expect(fetch).toHaveBeenLastCalledWith("agent-1", 50, 100);
+ });
+
+it("retries recovery when a second live trim removes the pending boundary", async () => {
+  let subscriber: ((event: TransportEvent) => void) | undefined;
+  let resolve!: (value: { events: never[]; next_before_seq: null }) => void;
+  const pending = new Promise<{ events: never[]; next_before_seq: null }>((done) => { resolve = done; });
+  const fetch = vi.fn().mockResolvedValueOnce({ events: [], next_before_seq: null }).mockReturnValueOnce(pending).mockResolvedValueOnce({ events: [], next_before_seq: null });
+  const transport = { http: { fetchConversationTimeline: fetch }, conversation: vi.fn(), subscribe: (cb: (event: TransportEvent) => void) => { subscriber = cb; return () => {}; }, sendMessage: vi.fn() } as unknown as RouterTransport;
+  const { result } = renderHook(() => useConversation(transport, { routerUrl: "http://localhost", agentId: "user" }, "agent-1"));
+  await act(async () => {});
+  const emit = (i: number) => subscriber?.({ type: "conversation", message: { id: `m${i}`, body: `m${i}`, direction: "incoming", from: "agent-1", to: "user", sequence: i, created_at: new Date().toISOString() } });
+  act(() => { for (let i = 1; i <= 160; i++) emit(i); });
+  const anchor = vi.fn();
+  let loading!: Promise<void>;
+  act(() => { loading = result.current.loadOlder(anchor); });
+  act(() => emit(161));
+  await act(async () => { resolve({ events: [], next_before_seq: null }); await loading; });
+  expect(anchor).not.toHaveBeenCalled();
+  expect(result.current.hasOlder).toBe(true);
+  await act(async () => result.current.loadOlder(anchor));
+  expect(fetch).toHaveBeenLastCalledWith("agent-1", 50, undefined, "msg:agent-1:m12");
+  expect(anchor).toHaveBeenCalledTimes(1);
+});

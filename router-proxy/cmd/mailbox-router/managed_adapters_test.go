@@ -25,12 +25,12 @@ func TestFixedAuthHelperSnapshotUsesOrdinaryPiAgentDirectory(t *testing.T) {
 	helperPath := filepath.Join(root, "helper.mjs")
 	script := fmt.Sprintf(`if (process.env.PI_CODING_AGENT_DIR !== %q || process.env.MECHA_PI_AUTH_PATH !== %q) process.exit(1);
 if (!process.env.MECHA_HOST_HOME) process.exit(2);
-if (process.env.MECHA_ANTIGRAVITY_EXTENSION !== "/opt/pi/ag/src/index.ts") process.exit(3);
+if (process.env.MECHA_ANTIGRAVITY_EXTENSION !== undefined) process.exit(3);
 console.log(JSON.stringify({providers:[{provider:"openai-codex",label:"ChatGPT",authenticated:true,status:"authenticated"},{provider:"google",label:"Google",authenticated:false,status:"signed_out"},{provider:"cursor",label:"Cursor",authenticated:false,status:"signed_out"}],models:[{provider:"openai-codex",id:"gpt-5.6-terra",name:"GPT-5.6 Terra",available:true}]}));
 `, piAgentDir, filepath.Join(piAgentDir, "auth.json"))
 	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0o600))
 
-	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath, AntigravityExtension: "/opt/pi/ag/src/index.ts"}, nodeExecutable: node}).Snapshot(context.Background())
+	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath}, nodeExecutable: node}).Snapshot(context.Background())
 	require.NoError(t, err)
 	require.Len(t, providers, 3)
 	require.Equal(t, "openai-codex", providers[0].Provider)
@@ -87,7 +87,7 @@ func TestParseManagedRootsDropsEmptyValues(t *testing.T) {
 func TestSafeProviderPromptURL(t *testing.T) {
 	// Antigravity Google OAuth valid
 	validAG := "https://accounts.google.com/o/oauth2/v2/auth?client_id=123&redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Foauth-callback&response_type=code"
-	require.Equal(t, validAG, safeProviderPromptURL("antigravity", validAG))
+	require.Empty(t, safeProviderPromptURL("antigravity", validAG))
 
 	// Antigravity invalid paths / hosts
 	require.Empty(t, safeProviderPromptURL("antigravity", "https://accounts.google.com/signin/v2/identifier"))

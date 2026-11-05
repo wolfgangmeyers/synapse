@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -255,7 +256,7 @@ func newTmuxServer(t *testing.T, tmux transport.TmuxAdapter) *httptest.Server {
 	dbPath := filepath.Join(t.TempDir(), "router.sqlite")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, dbPath); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

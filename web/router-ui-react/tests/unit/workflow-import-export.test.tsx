@@ -119,10 +119,10 @@ describe("Workflow Import & Export UI", () => {
     const user = userEvent.setup();
     render(<WorkflowsPage client={mockClient as RouterHttpClient} />);
     await waitFor(() => {
-      expect(screen.getByText("Import Workflow")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Import" })).toBeInTheDocument();
     });
 
-    const importHeaderBtn = screen.getByRole("button", { name: /import workflow/i });
+    const importHeaderBtn = screen.getByRole("button", { name: "Import" });
     await user.click(importHeaderBtn);
 
     expect(screen.getByText("Upload a workflow JSON file to import it into your workspace.")).toBeInTheDocument();
