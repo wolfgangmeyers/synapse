@@ -14,6 +14,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/crypto"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/mcp"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,7 +31,7 @@ func strPtr(s string) *string {
 
 func TestManagerLifecycleAndAuth(t *testing.T) {
 	ctx := context.Background()
-	st, _ := store.OpenTestStore(t)
+	st, _ := storetest.OpenTestStore(t)
 	key := generateTestKey(t)
 
 	var asServer *httptest.Server
@@ -196,7 +197,7 @@ func TestManagerLifecycleAndAuth(t *testing.T) {
 
 func TestManagerProactiveRefreshAndCallTool(t *testing.T) {
 	ctx := context.Background()
-	st, _ := store.OpenTestStore(t)
+	st, _ := storetest.OpenTestStore(t)
 	key := generateTestKey(t)
 
 	var tokenRefreshCount int32
@@ -284,7 +285,7 @@ func TestManagerProactiveRefreshAndCallTool(t *testing.T) {
 
 func TestManagerReactive401Retry(t *testing.T) {
 	ctx := context.Background()
-	st, _ := store.OpenTestStore(t)
+	st, _ := storetest.OpenTestStore(t)
 	key := generateTestKey(t)
 
 	var tokenRefreshCount int32

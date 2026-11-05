@@ -62,7 +62,7 @@ func TestColdRecoveryLegacyAntigravityRecipe(t *testing.T) {
 				require.Equal(t, agent.SelectedModel.ID, factory.spec.ModelID)
 				require.Equal(t, ResumeExisting, factory.spec.LaunchMode)
 				require.Equal(t, agent.PiSessionID, factory.spec.SessionID)
-				require.Empty(t, factory.spec.AntigravityExtension)
+				require.NotContains(t, factory.spec.Args(), recipe.AntigravityExtension, "historical extension is not launched")
 				for _, value := range factory.spec.Environment {
 					require.NotContains(t, value, "ANTIGRAVITY")
 				}

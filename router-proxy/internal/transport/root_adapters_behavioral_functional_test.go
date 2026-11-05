@@ -20,6 +20,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +59,7 @@ func (e *rootAdapterPythonExecutor) run(ctx context.Context, mode string, identi
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
 	}
-	script := filepath.Join(root, ".claude", "skills", "supervisor", "tools", "managed_root_control.py")
+	script := filepath.Join(root, "tools", "managed_root_control.py")
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
@@ -157,7 +158,7 @@ func newRootAdapterFixture(t *testing.T) *rootAdapterFixture {
 	taskPath := filepath.Join(t.TempDir(), "task.db")
 	taskOpts := store.Options{Clock: clock}
 	if taskOpts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, taskPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, taskPath); err == nil {
 			taskOpts.Migrations = []store.Migration{}
 		}
 	}
@@ -167,7 +168,7 @@ func newRootAdapterFixture(t *testing.T) *rootAdapterFixture {
 	decoyPath := filepath.Join(t.TempDir(), "decoy.db")
 	decoyOpts := store.Options{Clock: clock}
 	if decoyOpts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, decoyPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, decoyPath); err == nil {
 			decoyOpts.Migrations = []store.Migration{}
 		}
 	}

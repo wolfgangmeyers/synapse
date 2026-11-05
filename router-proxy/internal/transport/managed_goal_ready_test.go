@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -24,7 +25,7 @@ func setupGoalTestServer(t *testing.T) (*httptest.Server, *store.Store, *managed
 	dbPath := filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, dbPath); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

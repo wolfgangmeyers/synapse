@@ -14,6 +14,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -27,7 +28,7 @@ func rateOutcomeFixture(t *testing.T) (*Router, *store.Store, *sql.DB, *determin
 	path := filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{Clock: clock}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, path); err == nil {
+		if err := storetest.CloneTemplateDB(t, path); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

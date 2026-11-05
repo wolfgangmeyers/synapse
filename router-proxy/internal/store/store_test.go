@@ -401,7 +401,7 @@ func openTestStoreWithOptions(t *testing.T, options Options) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "router.db")
 	if options.Migrations == nil {
-		if err := CloneTemplateDB(t, path); err == nil {
+		if err := cloneLocalTemplateDB(t, path); err == nil {
 			options.Migrations = []Migration{}
 		}
 	}

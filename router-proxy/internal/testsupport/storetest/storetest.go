@@ -1,7 +1,8 @@
-package store
+package storetest
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
 var (
@@ -18,40 +20,40 @@ var (
 	templateDBErr  error
 )
 
-// StoreOption is a functional option for configuring store Options in tests.
-type StoreOption func(*Options)
+// StoreOption is a functional option for configuring store.Options in tests.
+type StoreOption func(*store.Options)
 
 // WithClock configures a deterministic clock for the store.
 func WithClock(clock deterministic.Clock) StoreOption {
-	return func(o *Options) {
+	return func(o *store.Options) {
 		o.Clock = clock
 	}
 }
 
 // WithIDSource configures an ID source for the store.
 func WithIDSource(ids deterministic.IDSource) StoreOption {
-	return func(o *Options) {
+	return func(o *store.Options) {
 		o.IDSource = ids
 	}
 }
 
 // WithBusyTimeout configures SQLite busy timeout.
 func WithBusyTimeout(d time.Duration) StoreOption {
-	return func(o *Options) {
+	return func(o *store.Options) {
 		o.BusyTimeout = d
 	}
 }
 
 // WithMigrations configures explicit migrations.
-func WithMigrations(migrations []Migration) StoreOption {
-	return func(o *Options) {
+func WithMigrations(migrations []store.Migration) StoreOption {
+	return func(o *store.Options) {
 		o.Migrations = migrations
 	}
 }
 
-// WithStoreOptions sets raw store Options.
-func WithStoreOptions(opts Options) StoreOption {
-	return func(o *Options) {
+// WithStoreOptions sets raw store.Options.
+func WithStoreOptions(opts store.Options) StoreOption {
+	return func(o *store.Options) {
 		*o = opts
 	}
 }
@@ -65,16 +67,29 @@ func initTemplateDB() {
 	defer os.RemoveAll(tempDir)
 
 	dbPath := filepath.Join(tempDir, "template.db")
-	s, err := Open(context.Background(), dbPath, Options{})
+	s, err := store.Open(context.Background(), dbPath, store.Options{})
 	if err != nil {
 		templateDBErr = fmt.Errorf("open template db: %w", err)
 		return
 	}
 
-	// Checkpoint WAL completely into the main database file
-	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	// The template is private and quiescent. Checkpoint before closing the store;
+	// the store-local test fixture uses its private connection to avoid an import cycle.
+	checkpoint, err := sql.Open("sqlite", dbPath)
+	if err != nil {
 		_ = s.Close()
-		templateDBErr = fmt.Errorf("wal checkpoint template db: %w", err)
+		templateDBErr = fmt.Errorf("open template checkpoint: %w", err)
+		return
+	}
+	err = checkpointTemplate(checkpoint)
+	closeErr := checkpoint.Close()
+	if err != nil || closeErr != nil {
+		_ = s.Close()
+		if err != nil {
+			templateDBErr = fmt.Errorf("wal checkpoint template db: %w", err)
+		} else {
+			templateDBErr = fmt.Errorf("close template checkpoint: %w", closeErr)
+		}
 		return
 	}
 	if err := s.Close(); err != nil {
@@ -134,7 +149,7 @@ func CloneTemplateDB(t testing.TB, destPath string) error {
 // OpenTestStore initializes a new test database for testing, seeded quickly
 // from the template database snapshot with all migrations applied.
 // The store is registered for cleanup via t.Cleanup.
-func OpenTestStore(t testing.TB, options ...StoreOption) (*Store, string) {
+func OpenTestStore(t testing.TB, options ...StoreOption) (*store.Store, string) {
 	if t != nil {
 		t.Helper()
 	}
@@ -150,7 +165,7 @@ func OpenTestStore(t testing.TB, options ...StoreOption) (*Store, string) {
 	}
 	dbPath := filepath.Join(dir, "router.db")
 
-	opts := Options{}
+	opts := store.Options{}
 	for _, opt := range options {
 		opt(&opts)
 	}
@@ -158,11 +173,11 @@ func OpenTestStore(t testing.TB, options ...StoreOption) (*Store, string) {
 	if opts.Migrations == nil {
 		if err := CloneTemplateDB(t, dbPath); err == nil {
 			// Since schema migrations are already in place, avoid repeating them
-			opts.Migrations = []Migration{}
+			opts.Migrations = []store.Migration{}
 		}
 	}
 
-	s, err := Open(context.Background(), dbPath, opts)
+	s, err := store.Open(context.Background(), dbPath, opts)
 	if err != nil {
 		if t != nil {
 			t.Fatalf("OpenTestStore: failed to open store: %v", err)
@@ -176,4 +191,16 @@ func OpenTestStore(t testing.TB, options ...StoreOption) (*Store, string) {
 		})
 	}
 	return s, dbPath
+}
+
+// checkpointTemplate rejects a successful PRAGMA that could not finish.
+func checkpointTemplate(db *sql.DB) error {
+	var busy, logFrames, checkpointed int
+	if err := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 || logFrames != checkpointed {
+		return fmt.Errorf("incomplete checkpoint: busy=%d log=%d checkpointed=%d", busy, logFrames, checkpointed)
+	}
+	return nil
 }

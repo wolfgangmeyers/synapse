@@ -134,7 +134,7 @@ func TestProcessGroupOps(t *testing.T) {
 
 func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {
 	sessionPath := "/managed/sessions/session.jsonl"
-	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionPath: sessionPath, SessionID: "session", LaunchMode: CreateNew, Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts", CursorExtension: "cursor-sdk.js", AntigravityExtension: "/opt/pi/extensions/antigravity/src/index.ts"}
+	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionPath: sessionPath, SessionID: "session", LaunchMode: CreateNew, Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts", CursorExtension: "cursor-sdk.js"}
 	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session", sessionPath, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts", "-e", "cursor-sdk.js"}, spec.Args())
 	env := ChildEnvironmentFor(Config{ManagedHome: "/managed/home", PiAgentDir: "/ordinary/.pi/agent", SessionRoot: filepath.Join("/managed/home", "sessions"), RouterURL: "http://127.0.0.1:18775"}, "123e4567-e89b-42d3-a456-426614174000", 2)
 	hostHome, _ := os.UserHomeDir()

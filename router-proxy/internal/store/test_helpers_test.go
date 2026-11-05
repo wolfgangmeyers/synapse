@@ -8,12 +8,13 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestOpenTestStoreExportedHelper(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
-	s, path := store.OpenTestStore(t, store.WithClock(clock))
+	s, path := storetest.OpenTestStore(t, storetest.WithClock(clock))
 	require.NotEmpty(t, path)
 	require.NotNil(t, s)
 
@@ -39,7 +40,7 @@ func TestOpenTestStoreExportedHelper(t *testing.T) {
 func TestCloneTemplateDBExportedHelper(t *testing.T) {
 	tempDir := t.TempDir()
 	destPath := tempDir + "/custom/path/router.db"
-	err := store.CloneTemplateDB(t, destPath)
+	err := storetest.CloneTemplateDB(t, destPath)
 	require.NoError(t, err)
 
 	info, err := os.Stat(destPath)

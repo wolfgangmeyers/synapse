@@ -1,6 +1,6 @@
 # Behavioral Specifications Catalog
 
-This index serves as the master catalog and discovery portal for all behavioral specifications in `mecha-developer`. Every behavioral change, user-facing feature, or subsystem contract must be documented here and mapped to authoritative Playwright end-to-end (E2E) suites in `tests/e2e/`.
+This index catalogs behavioral specifications and their test targets. Some specifications or targets are missing, planned, or only partially covered; entries do not imply complete Playwright E2E coverage.
 
 For formatting guidelines and authoring conventions, refer to the [Behavioral Specification Standard](../behavioral-specification-standard.md).
 
@@ -12,11 +12,11 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `SPEC-CONV-001` | Feed Rendering & Real-Time Event Streaming | `Conversation` | [`conversation-timeline.md`](./conversation-timeline.md) | `tests/e2e/conversation-feed-rendering.spec.ts` | `Active` |
-| `SPEC-CONV-002` | Attachments & Thumbnail Gallery | `Conversation` | [`conv-attachments.spec.md`](./conv-attachments.spec.md) | `tests/e2e/conversation-attachments.spec.ts` | `Active` |
+| `SPEC-CONV-001` | Feed Rendering & Real-Time Event Streaming | `Conversation` | [`conversation-timeline.md`](./conversation-timeline.md) | `tests/e2e/conversation-feed.spec.ts`, `tests/e2e/conversation-architecture-simplification.spec.ts` (partial coverage) | `Active` |
+| `SPEC-CONV-002` | Attachments & Thumbnail Gallery | `Conversation` | [`conv-attachments.spec.md`](./conv-attachments.spec.md) | `tests/e2e/conversation-attachments.spec.ts` (planned) | Spec missing |
 | `SPEC-CONV-003` | Scroll Anchoring & Upward Pagination | `Conversation` | [`conv-scroll-and-pagination.spec.md`](./conv-scroll-and-pagination.spec.md) | `tests/e2e/conversation-scroll-and-pagination.spec.ts`, `tests/e2e/conversation-scroll-regressions.spec.ts` | `Active` |
-| `SPEC-CONV-004` | Composer Input Isolation & Drafts | `Composer` | [`conv-composer-isolation.spec.md`](./conv-composer-isolation.spec.md) | `tests/e2e/conversation-composer-isolation.spec.ts` | `Active` |
-| `SPEC-CONV-005` | Mailbox Envelope Cards | `Mailbox` | [`conv-envelope-cards.spec.md`](./conv-envelope-cards.spec.md) | `tests/e2e/conversation-envelope-cards.spec.ts` | `Active` |
+| `SPEC-CONV-004` | Composer Input Isolation & Drafts | `Composer` | [`conv-composer-isolation.spec.md`](./conv-composer-isolation.spec.md) | `tests/e2e/conversation-composer-isolation.spec.ts` (planned) | Spec missing |
+| `SPEC-CONV-005` | Mailbox Envelope Cards | `Mailbox` | [`conv-envelope-cards.spec.md`](./conv-envelope-cards.spec.md) | `tests/e2e/conversation-envelope-cards.spec.ts` (planned) | Spec missing |
 
 ---
 
@@ -40,16 +40,15 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | `SPEC-CLAUDE-PRIVATE-MCP-001` | Claude private MCP transport | `AgentManagement` | [`claude-private-mcp.spec.md`](./claude-private-mcp.spec.md) | `tests/e2e/claude-code-tools.spec.ts` (pending) | `Draft` |
 | `SPEC-LIFECYCLE-001` | Claude Code Managed Workers | `AgentManagement` | [`claude-code-workers-spec.md`](./claude-code-workers-spec.md) | `tests/e2e/claude-code-workers.spec.ts` (planned) | `Draft` |
 | `SPEC-LIFECYCLE-CODEX-CATALOG-001` | Codex Catalog and Embedded Launch Parity | `AgentManagement` | [`codex-model-catalog.spec.md`](./codex-model-catalog.spec.md) | `tests/e2e/codex-model-catalog.spec.ts` | `Active` |
-| `SPEC-LIFECYCLE-002` | Context Reset Window Config | `AgentManagement` | [`context-reset-window-spec.md`](./context-reset-window-spec.md) | `tests/e2e/context-reset-window.spec.ts` | `Active` |
-| `SPEC-LIFECYCLE-003` | Tmux Worker Registry & List | `AgentManagement` | [`tmux-worker-list-spec.md`](./tmux-worker-list-spec.md) | `tests/e2e/tmux-worker-list.spec.ts` | `Active` |
-| `SPEC-LIFECYCLE-004` | Router MCP & OAuth Tool Routing | `Settings` | [`router-mcp-oauth-tools-spec.md`](./router-mcp-oauth-tools-spec.md) | `tests/e2e/router-mcp-oauth.spec.ts` | `Active` |
+| `SPEC-LIFECYCLE-002` | Context Reset Window Config | `AgentManagement` | [`context-reset-window-spec.md`](./context-reset-window-spec.md) | `tests/e2e/context-reset-window.spec.ts` (planned) | `Active` |
+| `SPEC-LIFECYCLE-003` | Tmux Worker Registry & List | `AgentManagement` | [`tmux-worker-list-spec.md`](./tmux-worker-list-spec.md) | `tests/e2e/tmux-worker-list.spec.ts` (planned) | `Draft` |
+| `SPEC-LIFECYCLE-004` | Router MCP & OAuth Tool Routing | `Settings` | [`router-mcp-oauth-tools-spec.md`](./router-mcp-oauth-tools-spec.md) | `tests/e2e/router-mcp-oauth.spec.ts` (planned) | `Draft` |
 | `SPEC-LIFECYCLE-005` | Subagent Read Tools Budget & Redirection | `AgentManagement` | [`subagent-read-tools-budget.spec.md`](./subagent-read-tools-budget.spec.md) | `tests/e2e/subagent-read-tools-budget.spec.ts` | `Active` |
 | `SPEC-BACKGROUND-WORKFLOWS-001` | Background Workflows & Scheduled Execution | `Workflows` | [`SPEC-BACKGROUND-WORKFLOWS.md`](./SPEC-BACKGROUND-WORKFLOWS.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
 | `SPEC-BACKGROUND-CLEANUP-001` | Background Worker Cleanup (24-hour age sweep; acceptance pending) | `Workflows` | [`background-worker-cleanup.spec.md`](./background-worker-cleanup.spec.md) | `tests/e2e/background-expiry.spec.ts`, `tests/e2e/background-cleanup.spec.ts`, `tests/e2e/background-scheduled-expiry.spec.ts`, `tests/e2e/background-active-retry.spec.ts` (partial) | `Draft` |
 | `SPEC-LIFECYCLE-007` | Deterministic Embedded Own Reminder Delays & Idempotency | `AgentManagement` | [`embedded-own-reminder-delay.spec.md`](./embedded-own-reminder-delay.spec.md) | `router-proxy/internal/store/embedded_own_reminder_test.go` | `Active` |
 | `SPEC-WORKFLOWS-002` | Implicit Workflow Goals & Workflow-Level Snooze | `Workflows` | [`workflow-implicit-goals.spec.md`](./workflow-implicit-goals.spec.md) | `tests/e2e/workflow-implicit-goals.spec.ts` | `Active` |
 | `SPEC-WORKFLOWS-003` | Structured Workflow Schedules & Test Clock | `Workflows` | [`SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md`](./SPEC-STRUCTURED-WORKFLOW-SCHEDULES.md) | `tests/e2e/background-workflows.spec.ts` | `Active` |
-| `SPEC-LIFECYCLE-007` | Deterministic Embedded Own Reminder Delays & Idempotency | `AgentManagement` | [`embedded-own-reminder-delay.spec.md`](./embedded-own-reminder-delay.spec.md) | `router-proxy/internal/store/embedded_own_reminder_test.go` | `Active` |
 
 ---
 
@@ -69,7 +68,7 @@ Specifications governing agent search capabilities, tool integrations, and exter
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `SPEC-SEARCH-001` | Codex Search (`codex_search`) | `Tooling` | [`codex-search.md`](./codex-search.md) | `tests/e2e/codex-search.spec.ts` | `Active` |
+| `SPEC-SEARCH-001` | Codex Search (`codex_search`) | `Tooling` | [`codex-search.md`](./codex-search.md) | `tests/e2e/codex-search.spec.ts` (planned) | `Active / Proposed` |
 
 ---
 
@@ -79,7 +78,7 @@ Specifications governing provider settings, router MCP configurations, and serve
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `SPEC-ROUTER-CONFIG-001` | Router JSON Config File & Custom KB Directory | `Settings` | [`router-config-file-and-kb.spec.md`](./router-config-file-and-kb.spec.md) | `tests/e2e/router-config-file-and-kb.spec.ts` | `Draft` |
+| `SPEC-ROUTER-CONFIG-001` | Router JSON Config File & Custom KB Directory | `Settings` | [`router-config-file-and-kb.spec.md`](./router-config-file-and-kb.spec.md) | `tests/e2e/router-kb-root-selection.spec.ts` (partial coverage: CFG-009/010), `tests/e2e/router-config-file-and-kb.spec.ts` (planned) | `Draft` |
 | `SPEC-SETTINGS-002` | Server Management Dropdown Menu | `Settings` | [`SPEC-SERVER-MANAGEMENT-MENU.md`](./SPEC-SERVER-MANAGEMENT-MENU.md) | `tests/e2e/server-management-menu.spec.ts` | `Draft` |
 
 ---

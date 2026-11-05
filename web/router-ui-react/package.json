@@ -9,11 +9,12 @@
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
     "test:component": "vitest run",
-    "test:unit": "vitest run tests/component/mcp-servers-dialog.test.tsx",
+    "test:unit": "vitest run tests/unit tests/component/mcp-servers-dialog.test.tsx",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:transport": "vitest run tests/transport",
     "test:acceptance": "vitest run tests/acceptance",
+    "test:acceptance:node": "node --test tests/acceptance/*.test.mjs",
     "test:acceptance:bcb": "node tests/acceptance/bcb-runner.mjs"
   },
   "dependencies": {

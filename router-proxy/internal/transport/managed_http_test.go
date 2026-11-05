@@ -20,6 +20,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -159,7 +160,7 @@ func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
 
 func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	durable, _ := store.OpenTestStore(t)
+	durable, _ := storetest.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
