@@ -779,7 +779,7 @@ func TestEmbeddedGoalCircuitBreakerTurnErrorsHalt(t *testing.T) {
 				providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "error test"}, "goal_call_1"),
 			}, ai.StopToolUse)
 		}
-		// Subsequent turns: return assistant message with StopReason: ai.StopError
+		// Fail the initial launch immediately after setting the goal.
 		return &ai.AssistantMessage{
 			StopReason:   ai.StopError,
 			ErrorMessage: "Antigravity API error 400: function response turn comes immediately after a function call turn",
@@ -818,18 +818,18 @@ func TestEmbeddedGoalCircuitBreakerTurnErrorsHalt(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify that the system trips a circuit breaker and does NOT enter a runaway loop
-	// (it halts after bounded attempts, e.g. 3 consecutive errors, and activity state settles to idle).
-	// If there's a runaway loop, requests will keep climbing well beyond bounded attempts.
+	// The initial launch failure must stop visibly, not report idle success or
+	// trigger an automatic retry storm. Allow time for unintended retries to appear.
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify requests are bounded (e.g. at most 1 initial + 3 consecutive errors + 1 margin = <= 5)
 	reqCount := requests.Load()
 	require.LessOrEqual(t, reqCount, int32(5), "requests should be bounded by circuit breaker, got runaway loop with %d requests", reqCount)
 
-	// Verify activity state settles to idle
+	// Initial launch failure must remain visible and disable prompt acceptance.
 	require.Eventually(t, func() bool {
 		agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
-		return err == nil && agent.ActivityState == "idle"
+		return err == nil && agent.ActivityState == "failed" &&
+			agent.LifecycleState == "failed" && !agent.AcceptingPrompts
 	}, 3*time.Second, 10*time.Millisecond)
 }
