@@ -280,13 +280,6 @@ func ParseEmbeddedOwnReminderArguments(raw []byte) (EmbeddedOwnReminderArguments
 	return a, nil
 }
 
-func reminderFlagInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}
-
 // EmbeddedOwnReminderCall is the direct Store entry point; it cannot claim an
 // SDK intent without a fresh admission from BeforeToolExecute.
 func (s *Store) EmbeddedOwnReminderCall(ctx context.Context, b EmbeddedBinding, callID string, raw []byte) (EmbeddedOwnReminderResult, bool, error) {

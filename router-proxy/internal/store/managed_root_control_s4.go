@@ -81,10 +81,6 @@ type ManagedControlStaleError struct{ AgentID string }
 func (e *ManagedControlStaleError) Error() string { return "managed root control is stale" }
 func (e *ManagedControlStaleError) Code() string  { return "stale" }
 
-func managedControlTerminal(state string) bool {
-	return state == managedControlDelivered || state == managedControlFailed || state == managedControlCancelled
-}
-
 // Root controls are durable parent-work sources. A terminal append or handler
 // result must refresh the same activity projection used by child and tool work.
 func (s *Store) recomputeManagedControlActivityTx(ctx context.Context, fence ManagedRuntimeFence) error {

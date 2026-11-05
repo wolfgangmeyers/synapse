@@ -528,28 +528,6 @@ func rawInt(payload map[string]json.RawMessage, key string, required bool) (*int
 	}
 	return &value, nil
 }
-func rawObject(payload map[string]json.RawMessage, key string) (map[string]json.RawMessage, error) {
-	raw, ok := payload[key]
-	if !ok {
-		return nil, nil
-	}
-	var value map[string]json.RawMessage
-	if json.Unmarshal(raw, &value) != nil || value == nil {
-		return nil, &httpError{status: 400, code: "invalid_request"}
-	}
-	return value, nil
-}
-func rawAny(payload map[string]json.RawMessage, key string) (any, error) {
-	raw, ok := payload[key]
-	if !ok {
-		return nil, nil
-	}
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return nil, &httpError{status: 400, code: "invalid_request"}
-	}
-	return value, nil
-}
 
 func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 	owner, peer := req.URL.Query().Get("owner"), req.URL.Query().Get("peer")
