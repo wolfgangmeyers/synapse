@@ -1016,7 +1016,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
 		return 0, err
 	}
-	if automatic, _ := ctx.Value(embeddedAutomaticGoalKey{}).(bool); !automatic {
+	// Only deliberate fresh user admission may recover an ownership hold here.
+	// Renewal above must succeed first; passive/system turns are not recovery.
+	if explicitUser, _ := ctx.Value(embeddedExplicitUserPromptKey{}).(bool); explicitUser {
 		m.laneFor(binding.AgentID).goalOwnerInvalid = false
 	}
 	source := "prompt"

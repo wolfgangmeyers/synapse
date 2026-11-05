@@ -130,7 +130,8 @@ func (m *Manager) embeddedGoalTool(owner embeddedOwner, admitted func(string) *s
 		if err != nil {
 			return agent.AgentToolResult{}, err
 		}
-		if command.Action == "set" {
+		automatic, _ := ctx.Value(embeddedAutomaticGoalKey{}).(bool)
+		if command.Action == "set" && !automatic {
 			lane := m.laneFor(owner.binding.AgentID)
 			lane.consecutiveEmptyTurns = 0
 			lane.goalAttempt = 0

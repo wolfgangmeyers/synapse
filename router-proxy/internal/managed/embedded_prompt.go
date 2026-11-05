@@ -12,6 +12,10 @@ import (
 	"github.com/sky-valley/pi/coding"
 )
 
+// embeddedExplicitUserPromptKey marks only a fresh public user admission, not
+// passive mail, workflow activation, reset wakes, or replayed requests.
+type embeddedExplicitUserPromptKey struct{}
+
 func (m *Manager) steerPrompt(ctx context.Context, agentID, message, requestID string, active *coding.Session) error {
 	nowMilli := time.Now().UnixMilli()
 	if m.clock != nil {
@@ -138,6 +142,9 @@ func (m *Manager) AdmitPromptWithRequestID(ctx context.Context, agentID, message
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
 	runCtx := context.WithValue(turnCtx, embeddedOwnerContextKey{}, owner)
+	if from == "user" {
+		runCtx = context.WithValue(runCtx, embeddedExplicitUserPromptKey{}, true)
+	}
 	if err := m.runEmbeddedSessionPrompt(runCtx, *saved, message); err != nil {
 		return err
 	}
