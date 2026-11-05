@@ -352,6 +352,13 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 are not ac
 - **When**: The user launches with/without a worktree and an initial instruction.
 - **Then**: Exactly one worker appears; CLI cwd/config/model and initial instruction are correct. Root/default remains Pi. No provider settings row, auth mutation, credential write or polling/status event is added.
 
+### Scenario: [CC-001A] Browse the normalized launch model catalog
+- **User Goal**: Find and select a displayed available launch model without knowing its name in advance.
+- **Given**: The bounded, normalized launch catalog contains more than ten available models, including Claude aliases after the first ten. Normalization deduplicates and limits the catalog to 4,096 valid models.
+- **When**: The user opens the model picker without searching, at a 900 × 500 viewport, and scrolls its options.
+- **Then**: At that viewport, every model in the normalized available catalog is reachable within the visible scroll area, including the Claude aliases; selecting one updates the launch choice. Search filters that same bounded catalog, and a query with no matches shows the empty state. Unavailable models remain excluded.
+- **E2E**: `tests/e2e/launch-model-discovery.spec.ts`.
+
 ### Scenario: [CC-002] Get a helpful local launch failure
 - **User Goal**: Get a helpful local launch failure.
 - **Given**: A missing executable, signed-out, malformed or hung fake auth-status response (parameterized).

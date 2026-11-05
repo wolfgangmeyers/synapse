@@ -41,7 +41,7 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   const searchRef = useRef<HTMLInputElement>(null);
   const listId = useId();
   const pool = isEmbedded ? normalized.filter(m => sameModelEngine(currentModel, m) && (isClaudeCodeModel(m) || ADMITTED_EMBEDDED_PROVIDERS.has(m.provider))) : normalized;
-  const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 10);
+  const visible = pool.filter(model => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   useEffect(() => {
     if (!open) return;
