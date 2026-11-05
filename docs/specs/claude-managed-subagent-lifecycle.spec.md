@@ -11,7 +11,7 @@ A Claude worker can delegate to a router-managed subagent, retrieve its complete
 ## Core Invariants
 1. A permitted checked spawn creates a child tied to the parent; the child executes on the configured router default model.
 2. A completed child's result is available to its parent through the checked result tool. Its completion notice is delivered to the Claude process and acknowledged through the normal checked mailbox path.
-3. Child provider requests use the router-configured provider transport and credentials.
+3. Pi children use the configured provider transport and credentials. The planned Claude-default child uses the locally authenticated CLI without Pi provider credentials, subject to [CD-006–007](claude-router-default.spec.md); that behavior is not yet accepted.
 4. Disabling the router subagent tool blocks new spawns without affecting Claude native tools.
 
 ## User Scenarios
