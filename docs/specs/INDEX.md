@@ -26,6 +26,8 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-MAILBOX-001` | Mailbox Progress Across Session Replacement | `Mailbox` | [`mailbox-session-recovery.spec.md`](./mailbox-session-recovery.spec.md) | `tests/e2e/mailbox-session-recovery.spec.ts` (planned) | `Draft` |
+| `SPEC-GOAL-001` | Bounded Automatic Goal Wakeups | `AgentManagement` | [`goal-wake-safety.spec.md`](./goal-wake-safety.spec.md) | `tests/e2e/goal-wake-safety.spec.ts` (planned) | `Draft` |
 | `SPEC-LIFECYCLE-CODEX-CATALOG-001` | Codex Catalog and Embedded Launch Parity | `AgentManagement` | [`codex-model-catalog.spec.md`](./codex-model-catalog.spec.md) | `tests/e2e/codex-model-catalog.spec.ts` | `Active` |
 | `SPEC-OPENAI-CATALOG-001` | OpenAI GPT-6.1 Terra Catalog | `AgentManagement` | [`openai-model-catalog.spec.md`](./openai-model-catalog.spec.md) | `tests/e2e/openai-model-catalog.spec.ts` | `Active` |
 | `SPEC-LIFECYCLE-001` | Claude Code Managed Workers | `AgentManagement` | [`claude-code-workers-spec.md`](./claude-code-workers-spec.md) | `tests/e2e/claude-code-workers.spec.ts` | `Active` |
