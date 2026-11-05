@@ -124,3 +124,30 @@ func TestGoalWakeSafetyGoalOffCancelsFailedRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, policy.Config.Enabled)
 }
+
+// SCN-GWS-004/005/006: passive delivery is not an operator recovery action.
+func TestGoalWakeSafetyPassiveMailPreservesOwnerHold(t *testing.T) {
+	f := newFailureFixture(t)
+	f.reg.SetResponses([]providers.FauxResponseStep{f.response("passive mail received"), f.response("user recovery received")})
+	owner := f.launch(t, "")
+	lane := f.m.laneFor(owner.binding.AgentID)
+	lane.serial.Lock()
+	lane.goalOwnerInvalid = true
+	lane.consecutiveContinuations = 20
+	lane.serial.Unlock()
+	f.enqueue(t, "f1111111-1111-4111-8111-111111111111")
+	f.m.dispatchEmbeddedMail(owner.binding.AgentID)
+	f.laneBarrier(t, owner.binding.AgentID)
+	lane.serial.Lock()
+	held := lane.goalOwnerInvalid
+	lane.serial.Unlock()
+	if !held {
+		t.Error("passive mailbox delivery must not clear an automatic ownership hold")
+	}
+	require.NoError(t, f.m.AdmitPromptWithRequestID(context.Background(), owner.binding.AgentID, "deliberately resume useful work", "f2222222-2222-4222-8222-222222222222"))
+	f.laneBarrier(t, owner.binding.AgentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	require.False(t, lane.goalOwnerInvalid, "a deliberate admitted user prompt with valid ownership may recover")
+	require.Zero(t, lane.consecutiveContinuations)
+}
