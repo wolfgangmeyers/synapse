@@ -66,3 +66,60 @@ func TestMailboxSessionRecoveryUnstartedReservation(t *testing.T) {
 		})
 	}
 }
+
+// SCN-MSR-005: never relocate cross-runtime or already-started reservations.
+func TestMailboxSessionRecoveryFailsClosed(t *testing.T) {
+	for _, guard := range []string{"current-old-row", "cross-generation", "committed-ack-and-append", "append-key-without-ack", "accepted-body-changed"} {
+		t.Run(guard, func(t *testing.T) {
+			ctx := context.Background()
+			s, old, _ := embeddedMailFixture(t)
+			first := reserveEmbeddedMailTest(t, s, old, "embedded-mail-g2")
+			if guard == "committed-ack-and-append" {
+				require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, old, first.AttemptID, []byte(first.Body)))
+			}
+			if guard == "append-key-without-ack" {
+				var key string
+				require.NoError(t, s.db.QueryRow(`SELECT append_key FROM embedded_attempts WHERE attempt_id=?`, first.AttemptID).Scan(&key))
+				_, err := s.AppendEmbeddedEntryAt(ctx, old, 0, "genesis", key, "user", []byte(first.Body))
+				require.NoError(t, err)
+				require.Zero(t, embeddedRedCount(t, s, "embedded_acks"))
+			}
+			next := old
+			next.SessionID, next.Epoch, next.OwnerToken = "guard-successor", old.Epoch+1, 0
+			if guard == "cross-generation" {
+				next.Generation = "different-runtime-generation"
+				_, err := s.db.Exec(`UPDATE managed_agents SET pi_session_id=?,session_epoch=?,runtime_generation=? WHERE agent_id=?`, next.SessionID, next.Epoch, next.Generation, old.AgentID)
+				require.NoError(t, err)
+				require.NoError(t, s.ResetEmbeddedSession(ctx, old, next, "root"))
+			} else {
+				require.NoError(t, s.ResetEmbeddedSessionEpoch(ctx, old, next, "root"))
+			}
+			var err error
+			next.OwnerToken, err = s.AcquireEmbeddedOwner(ctx, next, "guard-owner", time.Minute)
+			require.NoError(t, err)
+			if guard == "current-old-row" {
+				_, err = s.db.Exec(`UPDATE embedded_sessions SET current=0 WHERE agent_id=?`, old.AgentID)
+				require.NoError(t, err)
+				_, err = s.db.Exec(`UPDATE embedded_sessions SET current=1 WHERE agent_id=? AND session_id=? AND epoch=?`, old.AgentID, old.SessionID, old.Epoch)
+				require.NoError(t, err)
+			}
+			if guard == "accepted-body-changed" {
+				_, err = s.db.Exec(`UPDATE messages SET body='tampered' WHERE id=?`, first.MessageID)
+				require.NoError(t, err)
+			}
+			var before string
+			require.NoError(t, s.db.QueryRow(`SELECT session_id FROM embedded_attempts WHERE attempt_id=?`, first.AttemptID).Scan(&before))
+			acks, entries, keys := embeddedRedCount(t, s, "embedded_acks"), embeddedRedCount(t, s, "embedded_entries"), embeddedRedCount(t, s, "embedded_append_keys")
+			for range 3 {
+				attempt, err := s.ReserveEmbeddedMail(ctx, next, first.MessageID)
+				require.True(t, err != nil || attempt == nil, "ineligible reservation must not be relocated")
+			}
+			var after string
+			require.NoError(t, s.db.QueryRow(`SELECT session_id FROM embedded_attempts WHERE attempt_id=?`, first.AttemptID).Scan(&after))
+			require.Equal(t, before, after)
+			require.Equal(t, acks, embeddedRedCount(t, s, "embedded_acks"))
+			require.Equal(t, entries, embeddedRedCount(t, s, "embedded_entries"))
+			require.Equal(t, keys, embeddedRedCount(t, s, "embedded_append_keys"))
+		})
+	}
+}
