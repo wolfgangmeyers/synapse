@@ -371,15 +371,6 @@ func (l *managedAgentLane) extendToolTimeout(durationMinutes int) (time.Time, in
 	return extendedUntil, durationMinutes
 }
 
-func (l *managedAgentLane) getExtendedTimeoutUntil() time.Time {
-	if l == nil {
-		return time.Time{}
-	}
-	l.activeMu.RLock()
-	defer l.activeMu.RUnlock()
-	return l.extendedTimeoutUntil
-}
-
 const (
 	maxQueuedManagedChildDeltas          = 64
 	maxQueuedManagedBuiltinToolLifecycle = 64

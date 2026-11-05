@@ -227,14 +227,6 @@ func managedChildCompactionProjection(state string, count int64, startedAt, outc
 	return result
 }
 
-func managedChildrenSnapshot(ctx context.Context, durable *store.Store) (int64, string, []map[string]any, error) {
-	snapshot, err := durable.ManagedAgentsProjectionSnapshot(ctx)
-	if err != nil {
-		return 0, "", nil, err
-	}
-	return managedChildrenSnapshotFromStoredWithStore(ctx, durable, snapshot)
-}
-
 func managedChildStatus(value string) string {
 	switch value {
 	case "queued", "running", "completed", "failed", "steered", "aborted", "stopped", "error", "cancelled":

@@ -1426,7 +1426,6 @@ func (s *Store) AllocateManagedDirectAttempt(ctx context.Context, fence ManagedR
 	return result, err
 }
 
-func attemptFence(attempt ManagedDirectAttempt) ManagedRuntimeFence { return attempt.Fence }
 func directAttemptMatches(result sql.Result) (bool, error) {
 	n, e := result.RowsAffected()
 	return n == 1, e

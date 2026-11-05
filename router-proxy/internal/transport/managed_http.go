@@ -2376,38 +2376,6 @@ func (r *Router) handleManagedSubagentStop(w http.ResponseWriter, req *http.Requ
 	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"ok": true}, nil)
 }
 
-type Handler struct {
-	manager *managed.Manager
-}
-
-func NewHandler(manager *managed.Manager) *Handler {
-	return &Handler{manager: manager}
-}
-
-func (h *Handler) handleManagedAgentInterrupt(w http.ResponseWriter, r *http.Request) {
-	id := managedInterruptPath(r.URL.Path)
-	if err := h.manager.InterruptAgent(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (h *Handler) handleManagedSubagentStop(w http.ResponseWriter, r *http.Request) {
-	id, childID := managedSubagentStopPath(r.URL.Path)
-	if err := h.manager.StopSubagent(r.Context(), id, childID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
 func requestIDFromRequest(req *http.Request) any {
 	value := req.Header.Get("X-Request-ID")
 	if canonicalUUID(value) {

@@ -120,14 +120,6 @@ type embeddedGoalEvaluationResult struct {
 	rawContent string
 }
 
-func (m *Manager) evaluateEmbeddedProductionGoal(ctx context.Context, binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, snapshot store.EmbeddedSnapshot, goal string, model *ai.Model, stream agent.StreamFn) (verdict string, reason string, err error) {
-	res, err := m.evaluateEmbeddedProductionGoalWithDetails(ctx, binding, key, snapshot, goal, model, stream)
-	if err != nil {
-		return "", "", err
-	}
-	return res.verdict, res.reason, nil
-}
-
 func (m *Manager) evaluateEmbeddedProductionGoalWithDetails(ctx context.Context, binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, snapshot store.EmbeddedSnapshot, goal string, model *ai.Model, stream agent.StreamFn) (res embeddedGoalEvaluationResult, err error) {
 	defer func() {
 		if err != nil {

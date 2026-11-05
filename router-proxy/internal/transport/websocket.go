@@ -839,15 +839,6 @@ func (r *Router) renew(s *session, frame map[string]json.RawMessage) error {
 	}
 	return s.send(fields)
 }
-func (r *Router) findTarget(agent, instance string) *session {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	candidate := r.sessions[agent]
-	if candidate == nil || candidate.instanceID != instance {
-		return nil
-	}
-	return candidate
-}
 
 func (r *Router) findControlTarget(agent, instance string) (*session, string) {
 	r.mu.RLock()
@@ -1613,9 +1604,7 @@ func (r *Router) isClosed() bool {
 	defer r.mu.RUnlock()
 	return r.closed
 }
-func deliveryEnvelope(r *Router, s *session, message domain.Message) map[string]any {
-	return deliveryEnvelopeContext(context.Background(), r, s, message)
-}
+
 func deliveryEnvelopeContext(ctx context.Context, r *Router, s *session, message domain.Message) map[string]any {
 	value := map[string]any{"id": message.ID, "from": message.From, "to": message.To, "body": message.Body, "created_at": message.CreatedAt, "source": message.Source}
 	if message.Subject != nil {

@@ -206,9 +206,6 @@ func defaultSleep(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-// options is kept private so diagnostics cannot expose dial URLs or config.
-func (b *Bridge) optionsValue() Options { return b.options }
-
 func (b *Bridge) String() string   { return "managed bridge [redacted]" }
 func (b *Bridge) GoString() string { return "managed bridge [redacted]" }
 
