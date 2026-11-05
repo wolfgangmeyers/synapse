@@ -15,6 +15,19 @@ import (
 type embeddedGoalTimer struct{ cancel func() }
 type embeddedAutomaticGoalKey struct{}
 
+// validatePublishedGoalOwner never acquires ownership after a failed turn. A
+// context reset may have legitimately published a newer owner in the same lane.
+func (m *Manager) validatePublishedGoalOwner(ctx context.Context, origin embeddedOwner) error {
+	m.mu.Lock()
+	selected, ok := m.embeddedOwners[origin.binding.AgentID]
+	m.mu.Unlock()
+	if !ok || (selected != origin && (selected.binding.AgentID != origin.binding.AgentID ||
+		selected.binding.Generation != origin.binding.Generation || selected.binding.Epoch <= origin.binding.Epoch)) {
+		return fmt.Errorf("no valid published goal owner for %s", origin.binding.AgentID)
+	}
+	return m.store.RenewEmbeddedOwner(ctx, selected.binding, selected.identity, embeddedOwnerTTL)
+}
+
 // All automatic paths share lane-serialized attempt accounting. Checks that
 // merely suppress work never consume an attempt.
 func (m *Manager) goalAttemptAllowed(lane *managedAgentLane) bool {
@@ -250,7 +263,7 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	// Start committed UNKNOWN before any SDK provider request. An error or
 	// process loss cannot authorize replay; the saved transcript is evidence.
 	if err := m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key); err != nil {
-		if ownerErr := m.store.RenewEmbeddedOwner(m.runCtx, owner.binding, owner.identity, embeddedOwnerTTL); ownerErr != nil {
+		if ownerErr := m.validatePublishedGoalOwner(m.runCtx, owner); ownerErr != nil {
 			lane.goalOwnerInvalid = true
 		}
 	}
@@ -393,7 +406,7 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	}
 	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
 	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
-		if ownerErr := m.store.RenewEmbeddedOwner(m.runCtx, owner.binding, owner.identity, embeddedOwnerTTL); ownerErr != nil {
+		if ownerErr := m.validatePublishedGoalOwner(m.runCtx, owner); ownerErr != nil {
 			lane.goalOwnerInvalid = true
 		}
 		log.Printf("kickoffIdleGoalContinuation: runEmbeddedSessionTurn error for %s: %v", agentID, err)
