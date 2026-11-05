@@ -11,6 +11,8 @@ Boundary prerequisite: [runtime-engine-boundary.spec.md](runtime-engine-boundary
 
 Implementation sequencing: [CLAUDE_CODE_ADAPTER_PLAN.md](../../CLAUDE_CODE_ADAPTER_PLAN.md) (Implementation in progress; current evidence and gaps).
 
+**Planned supersession:** [Claude router defaults](claude-router-default.spec.md) supersedes this document’s Pi-only root/default and evaluator restrictions, including CC-001, CC-010 and CC-013, once implemented and accepted. Those passages describe the earlier worker contract, not the new target. Unset automatic default selection remains Pi-only. The legacy launcher mentioned below is separate from this repository; its continued use or retirement requires the inventory and migration in CD-011. This specification remains Draft.
+
 ## 1. Summary
 
 Router-managed workers can run on Claude Code (the `claude` CLI) as well as on pi-go. A Claude Code worker is launched from the same dialog, appears in the same sidebar, and offers the same conversation experience as an embedded worker:

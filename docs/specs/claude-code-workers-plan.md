@@ -13,6 +13,8 @@ Revision: the [runtime adapter boundary draft](runtime-engine-boundary.spec.md) 
 
 Primary implementation sequence: [CLAUDE_CODE_ADAPTER_PLAN.md](../../CLAUDE_CODE_ADAPTER_PLAN.md), active **Implementation** under the simple workflow. See its current implementation evidence for passing checks and remaining gaps. This file retains detailed design/probe references; the root plan controls conflicting sequencing.
 
+**Supersession:** The draft [Claude router default contract](claude-router-default.spec.md) supersedes D9, the Pi-only evaluator and default/root exclusions in §§5, 7, 9 and their test summaries. They describe the earlier implementation, not the planned behavior. Unset automatic selection remains Pi-only; explicit saved Claude defaults are planned. Other historical decisions remain subject to their own status.
+
 ## 0. Constraints
 
 - Use the user-selected simple dev workflow, not dev-loop or its approval/review gates. Its active step is **Implementation**, authorized by Wolfgang on the `claude-integration` worktree/branch. This documentation update authorizes no commits or push.
