@@ -8,13 +8,13 @@ import { createRouterReminderReader, lockedReminderResult } from "./reminder-loc
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 export function resolveSupervisorTools(extensionDirectory = HERE) {
-  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  const adjacentTools = join(extensionDirectory, "tools");
   try {
     if (statSync(adjacentTools).isDirectory()) return adjacentTools;
   } catch {
     // A missing or inaccessible bundled path is safe to ignore; use the checkout layout below.
   }
-  return join(extensionDirectory, "..", "..", ".claude", "skills", "supervisor", "tools");
+  return join(extensionDirectory, "..", "..", "tools");
 }
 
 const SUPERVISOR_TOOLS = resolveSupervisorTools();
@@ -24,8 +24,6 @@ export const OPERATIONAL_TRUNCATION_MARKER = "\n[output truncated]";
 const MAX_RUNNER_BUFFER = 64 * 1024;
 const ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$";
 const ID = new RegExp(ID_PATTERN);
-const WORKER_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$";
-const WORKER_ID = new RegExp(WORKER_ID_PATTERN);
 const TASK_FIELDS = new Set([
   "branch",
   "window",
@@ -54,6 +52,7 @@ const CREDENTIAL_KEY_CONTEXT = new Set(["access", "api", "auth", "client", "encr
 
 class OperationalInputError extends TypeError {}
 class OperationalActionError extends Error {}
+class OperationalUnavailableError extends OperationalActionError {}
 
 type JsonObject = Record<string, unknown>;
 type CursorToolMetadata = { promptSnippet?: string; promptGuidelines?: string[] };
@@ -77,9 +76,6 @@ const SCRIPT_PATHS = Object.freeze({
   stateUpdateStatus: join(SUPERVISOR_TOOLS, "state_update_status.py"),
   priority: join(SUPERVISOR_TOOLS, "state_priority.py"),
   verificationHandoff: join(SUPERVISOR_TOOLS, "state_verification_handoff.py"),
-  workerList: join(SUPERVISOR_TOOLS, "worker_list.py"),
-  workerLifecycle: join(SUPERVISOR_TOOLS, "worker_lifecycle.py"),
-  workerSend: join(SUPERVISOR_TOOLS, "mailbox_send.py"),
   prStatus: join(SUPERVISOR_TOOLS, "pr_status.py"),
   gitStatus: join(SUPERVISOR_TOOLS, "git_task_status.py"),
 });
@@ -191,11 +187,6 @@ function scheduledReminderTime(value: unknown): string {
   return new Date(timestamp).toISOString();
 }
 
-function workerId(value: unknown, name = "worker alias"): string {
-  const normalized = text(value, name, 120);
-  if (!WORKER_ID.test(normalized)) throw new OperationalInputError(`${name} contains unsupported characters`);
-  return normalized;
-}
 
 function integer(value: unknown, name: string, minimum: number, maximum: number): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
@@ -405,7 +396,7 @@ function failure(error: unknown): { content: [{ type: "text"; text: string }]; d
   const expected = error instanceof OperationalInputError || error instanceof OperationalActionError;
   return {
     content: [{ type: "text", text: boundedOutput(expected ? error.message : "Operational action failed.") }],
-    details: {},
+    details: error instanceof OperationalUnavailableError ? { error_code: "ROOT_OPERATION_UNAVAILABLE" } : {},
     isError: true,
   };
 }
@@ -464,13 +455,6 @@ const CURSOR_TOOL_METADATA: Record<string, CursorToolMetadata> = Object.freeze({
     promptGuidelines: [
       "Use mecha_reminder with action list, create, update, or delete for supervisor reminders.",
       "Call pi__mecha_reminder through the Cursor pi bridge.",
-    ],
-  },
-  mecha_worker: {
-    promptSnippet: "List managed workers or send a worker a mailbox message",
-    promptGuidelines: [
-      "Use mecha_worker with action list, launch, cleanup, or send for managed worker operations.",
-      "Call pi__mecha_worker through the Cursor pi bridge.",
     ],
   },
   mecha_pr: {
@@ -549,11 +533,8 @@ export function createOperationalToolDefinitions({
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (typeof generateId !== "function") throw new TypeError("generateId must be a function");
 
-  const python = environment.PYTHON || "python3";
-  const runScript = async (scriptPath: string, args: string[] = []): Promise<string> => {
-    if (!Object.values(SCRIPT_PATHS).includes(scriptPath)) throw new OperationalActionError("operational script is not allowlisted");
-    const result = await runFile(python, [scriptPath, ...args], { env: environment });
-    return processOutput(result?.stdout, result?.stderr);
+  const runScript = async (_scriptPath: string, _args: string[] = []): Promise<string> => {
+    throw new OperationalUnavailableError("Legacy supervisor operation is unavailable in this checkout.");
   };
 
   async function request(path: string, { method = "GET", body }: { method?: string; body?: unknown } = {}): Promise<unknown> {
@@ -611,7 +592,6 @@ export function createOperationalToolDefinitions({
   });
 
   const task = { type: "string", minLength: 1, maxLength: 120, pattern: ID_PATTERN };
-  const workerAlias = { type: "string", minLength: 1, maxLength: 120, pattern: WORKER_ID_PATTERN };
   const shortText = { type: "string", minLength: 1, maxLength: MAX_TEXT };
   const subject = { type: "string", minLength: 1, maxLength: 200 };
   const priorityStatus = { type: "string", enum: ["active", "blocked", "completed", "deferred", "cancelled"] };
@@ -848,28 +828,6 @@ export function createOperationalToolDefinitions({
       if (input.subject !== undefined) payload.subject = text(input.subject, "subject", 200);
       const result = await request("/v1/reminders", { method: "POST", body: payload });
       return success("Reminder accepted.", result);
-    }),
-
-    descriptor("mecha_worker", "Managed worker", [
-      variant("list"),
-      variant("launch", { alias: workerAlias }, ["alias"]),
-      variant("cleanup", { alias: workerAlias }, ["alias"]),
-      variant("send", { worker: task, message: shortText, subject }, ["worker", "message"]),
-    ], async (input) => {
-      const definitions = {
-        list: { properties: {}, required: [] },
-        launch: { properties: { alias: true }, required: ["alias"] },
-        cleanup: { properties: { alias: true }, required: ["alias"] },
-        send: { properties: { worker: true, message: true, subject: true }, required: ["worker", "message"] },
-      };
-      validateAction(input, definitions);
-      if (input.action === "list") return success(await runScript(SCRIPT_PATHS.workerList));
-      if (input.action === "launch" || input.action === "cleanup") {
-        return success(await runScript(SCRIPT_PATHS.workerLifecycle, [input.action, "--alias", workerId(input.alias, "alias")]));
-      }
-      const args = ["--to", id(input.worker, "worker"), "--body", text(input.message, "message")];
-      if (input.subject !== undefined) args.push("--subject", text(input.subject, "subject", 200));
-      return success(await runScript(SCRIPT_PATHS.workerSend, args));
     }),
 
     descriptor("mecha_pr", "Pull request", [

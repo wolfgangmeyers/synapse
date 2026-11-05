@@ -54,9 +54,6 @@ type Config struct {
 	// CursorExtension is the optional fixed pi-cursor-sdk extension loaded only by
 	// managed Pi when available. It is never available to ordinary/tmux Pi sessions.
 	CursorExtension string
-	// AntigravityExtension is the optional fixed pi-antigravity extension loaded
-	// by managed Pi when available.
-	AntigravityExtension string
 	// RuntimeRoot is the checked project root that owns the thin extension,
 	// generated manifest, helper, and optional Cursor extension.
 	RuntimeRoot string
@@ -188,11 +185,6 @@ func ValidateManagedLaunchConfig(config Config) error {
 				name string
 				path string
 			}{"Cursor extension", copy.CursorExtension})
-		}
-		if copy.AntigravityExtension != "" {
-			if err := ValidateContainedRegularFile(copy.AntigravityExtension, "", "Antigravity extension"); err != nil {
-				return err
-			}
 		}
 		for _, input := range requiredFiles {
 			if err := ValidateContainedRegularFile(input.path, copy.RuntimeRoot, input.name); err != nil {

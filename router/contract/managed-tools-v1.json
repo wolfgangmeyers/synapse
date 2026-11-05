@@ -619,53 +619,6 @@
       "definition_sha256": "8f723b1630e1d0b4a2c9c862566f640302a4cbed37794511a49469d24e43358d"
     },
     {
-      "capability_id": "mecha_worker",
-      "label": "Managed worker",
-      "description": "Manage existing tmux workers through fixed operations.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "action"
-        ],
-        "properties": {
-          "action": {
-            "type": "string",
-            "maxLength": 64,
-            "enum": [
-              "list",
-              "launch",
-              "cleanup",
-              "send"
-            ]
-          },
-          "alias": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 120
-          },
-          "worker": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 120
-          },
-          "message": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4000
-          },
-          "subject": {
-            "type": "string",
-            "maxLength": 200
-          }
-        }
-      },
-      "operation_id": "ops.worker",
-      "name": "mecha_worker",
-      "definition_id": "def_95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
-      "definition_sha256": "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da"
-    },
-    {
       "capability_id": "web_search",
       "label": "Web search",
       "description": "Search the web and return source links from the managed search provider.",

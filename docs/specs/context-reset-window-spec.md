@@ -49,3 +49,35 @@ A hardcoded window of 6 messages is often too narrow to maintain conversational 
 - AC4: Default window tests pass and verify up to 20 messages ported.
 - AC5: Custom window and clamping tests pass.
 - AC6: Full package test suite `go test ./internal/managed/...` passes.
+
+## Browser reset overlap admission
+
+- When a reset coordinator is still running (including its wake), a new browser reset with a distinct request ID returns not-ready and creates no replayable operation. Retrying that ID after the coordinator finishes can start a reset.
+- An already accepted request replays its original response even while a coordinator is busy; reusing its ID with a different path or body returns an idempotency conflict.
+- If durable reservation fails, the failed request releases its own coordinator without releasing another reset or tool gate. A replay discovered during reservation likewise releases only the coordinator it acquired.
+- A newly reserved operation hands coordinator ownership to its reset task. Admission is never held while waiting for the serial lane.
+
+### Scenario: Committed tool reset overlaps browser reservation
+
+- **Given** a tool reset result has been successfully checked and committed on the current binding, and its turn is draining.
+- **When** a browser reset coordinator begins before its durable reservation resolves, and the tool turn finishes.
+- **Then** the committed tool request and its exact admission gate remain owned until the reservation outcome is known. No path waits for that outcome while holding the serial, admission, or selection lock.
+- **And when** the browser reservation fails or replays an existing operation, the tool request performs one rotation and one fresh wake, subject to the current-binding fence.
+- **And when** the browser reservation succeeds, the accepted browser coordinator performs one rotation and one fresh wake; it must not cause a second rotation for the same old binding.
+- **And** old-binding callbacks cannot append or run after rotation; a failed checked tool result does not initiate a tool reset.
+
+### Scenario: Mail arrives during a provisional reset gate
+
+- **Given** an embedded worker is runnable and a reset reservation has closed admission.
+- **When** a mail offer encounters that gate and the reservation fails or replays an existing operation,
+- **Then** the queued mail is offered again after admission reopens, without another external message.
+- **And** overlapping reset, tool-reset, or termination gates remain authoritative until their own release; uncertain Claude input remains held and is not replayed.
+
+### Scenario: Reset and termination gates release queued mail safely
+
+- **Given** a mail dispatch encounters a reset or termination admission gate,
+- **When** that gate releases without unconfirmed process cleanup,
+- **Then** eligible queued mail is offered once through the mail-only path; retry backoff is not bypassed and an unrelated idle goal is not awakened.
+- **When** Claude process cleanup cannot be confirmed during an external or tool-initiated reset, including when recording that failure also fails,
+- **Then** releasing the reset coordinator does not re-offer mail. Uncertain input remains held; a failure to persist is not evidence that cleanup succeeded.
+- **And** each overlapping gate remains authoritative until its own release.

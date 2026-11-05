@@ -216,12 +216,12 @@ func TestContextThresholdLifecycle(t *testing.T) {
 		defer s.Close()
 
 		// Global: 10% warn, 20% reset
-		// Model Override: 30% warn, 40% reset for "antigravity/custom-override-model"
+		// Model Override: 30% warn, 40% reset for "google-vertex/custom-override-model"
 		require.NoError(t, s.SetContextThresholdConfig(ctx, store.ContextThresholdConfig{
 			WarningPercent: 10,
 			ResetPercent:   20,
 			ModelThresholds: map[string]store.ModelContextThreshold{
-				"antigravity/custom-override-model": {
+				"google-vertex/custom-override-model": {
 					WarningPercent: 30,
 					ResetPercent:   40,
 				},
@@ -263,7 +263,7 @@ func TestContextThresholdLifecycle(t *testing.T) {
 
 		agentID := "override-worker"
 		parent := subagentTestParentWithModel(t, s, agentID, store.ManagedModel{
-			Provider: "antigravity",
+			Provider: "google-vertex",
 			ID:       "custom-override-model",
 		})
 		registerParentOwner(mgr, parent)

@@ -12,6 +12,8 @@ Any behavioral change, feature implementation, or bugfix in `mecha-developer` mu
 - **Retire Redundant Brittle Tests**: Integration tests that merely mock internal JavaScript functions or duplicate E2E test coverage without testing real end-to-end boundaries should be eliminated.
 - **Specification Index**: The complete catalog of active behavioral specifications is maintained in `docs/specs/INDEX.md`.
 
+Direct specifications: [memory capture](docs/specs/memory-capture.spec.md), [router native tooling](docs/specs/router-native-tooling.spec.md), [desktop package payload](docs/specs/desktop-package-payload.spec.md), and [managed runtime contracts](docs/specs/managed-runtime-contracts.spec.md) (Draft; acceptance incomplete). Each specification retains its own status. See the [retirement crosswalk](docs/retirement-crosswalk.md) and [CLI archive record](docs/cli-archive-migration.md) for archival disposition.
+
 ## How skills work
 
 A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, Cursor) reads `SKILL.md` and follows the instructions. Skills can reference other skills, but the file is always authoritative — never assume what a skill does, look it up.
@@ -96,7 +98,7 @@ When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
 In a Pi supervisor session with the Mailbox V2 extension, use the native top-level `mecha_mailbox_send` tool for supervisor replies. It returns the accepted message ID and state through the existing router client. Use the Mailbox V2 router sender below as the fallback for runtimes without the native tool or launcher-side sends:
 `/home/ubuntu/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py`.
 Successful fallback sends print the accepted message ID and actual router state. Do not use stale
-`mecha-wolfgang` mailbox sender copies; they write legacy disk mailbox files that
+legacy mailbox sender copies; they write legacy disk mailbox files that
 the active router does not deliver.
 
 After requesting Pi context compaction, stop the supervisor loop and let the
@@ -136,10 +138,6 @@ When Wolfgang directs an outcome be carried to completion or gives broad authori
 
 Wolfgang has authorized all ordinary scoped work in the current task. A concrete goal or `/goal set` is execution authorization. Do not ask for a second authorization or leave workers waiting. Immediately assign an owner, exact next action, base and branch, done conditions, and push limits. Only merge or undraft operations, deployment, IAM or ruleset changes, and genuinely irreversible, external, security, or legal actions remain separately gated.
 
-## Production Code Workflow
-
-For any production-code implementation or change, the canonical `dev-loop` workflow is mandatory. The worker or implementing agent must reference the `workflow-management` skill and follow the canonical router-managed `dev-loop` workflow before substantive implementation. Do not authorize production code, mark it complete, or open/advance a PR without dev-loop evidence for specification/plan, implementation, validation, coverage, and review.
-
 ## Automated testing policy
 
 Prioritize behavioral functional tests that put as many system-owned components and boundaries together as practical, with dependencies mocked as necessary, and prove the software works. Automated tests must not call LLMs or external services; replace those dependencies with deterministic mocks at the external boundary. Tests must satisfy and map every applicable requirement. Isolated unit tests are supporting evidence, not sufficient when an owned cross-component path can be exercised.
@@ -166,9 +164,4 @@ Specifically, user home directories and ancestor paths on macOS and Linux standa
 
 Before normal delegation, state the smallest observable outcome and explicit non-goals. At final review, map every changed file to an acceptance criterion or validated blocker; remove unsupported changes. Do not blame Pi or a model for a failure without controlled evidence separating it from the harness, prompt, extension, configuration, and process control.
 
-When PR review feedback reveals a reusable lesson, capture the tribal knowledge instead of treating it as a one-off fix. Update the appropriate `mecha-review` robot-review heuristic, review skill, or agent-facing guidance so future reviews catch the same class of issue, then route or implement the product-code fix separately.
-
-## Related repos
-
-- `mecha-review` — owns self-contained code-review and review-adjacent skills (`review-pr`, `robot-review`, `pr-context`, `pr-summary`, `pr-validate`, `explain`). Not duplicated here.
-- `mecha-developer` — original monorepo; non-review skills were migrated from there into this repo.
+When PR review feedback reveals a reusable lesson, capture the tribal knowledge instead of treating it as a one-off fix. Update the appropriate robot-review heuristic, review skill, or agent-facing guidance so future reviews catch the same class of issue, then route or implement the product-code fix separately.

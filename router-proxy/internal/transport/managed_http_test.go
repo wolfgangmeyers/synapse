@@ -20,6 +20,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -159,7 +160,7 @@ func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
 
 func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	durable, _ := store.OpenTestStore(t)
+	durable, _ := storetest.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
@@ -208,7 +209,6 @@ func (r *providerAuthHTTPRun) Respond(ctx context.Context, promptID, value strin
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
 		{Provider: "google-vertex", Label: "Google Vertex AI", Authenticated: false, Status: "signed_out"},
-		{Provider: "antigravity", Label: "Google Antigravity", Authenticated: false, Status: "signed_out"},
 	}, Models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}}}
 	close(r.events)
 	r.finish()
@@ -516,8 +516,8 @@ func managedLegacyCommandsForTest() []string {
 }
 
 func expectedManagedActiveToolsForTransportTest(manifest managed.Manifest) []string {
-	active := make([]string, 0, len(manifest.Tools)+7)
-	active = append(active, "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent")
+	active := make([]string, 0, len(manifest.Tools)+9)
+	active = append(active, "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent")
 	for _, tool := range manifest.Tools {
 		active = append(active, tool.Name)
 	}

@@ -82,11 +82,6 @@ func (s *Store) AdmissionLimits() AdmissionLimits {
 	return AdmissionLimits{MaxBodyBytes: s.maxBodyBytes, MaxQueuedMessages: s.maxQueuedMessages, MaxQueuedBytes: s.maxQueuedBytes, MaxBatchBodyChars: s.maxBatchBodyChars}
 }
 
-func (s *Store) conversationHistoryForPair(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
-	messages, _, err := s.conversationHistoryForPairPaged(ctx, owner, peer, 0, 0)
-	return messages, err
-}
-
 func (s *Store) conversationHistoryForPairPaged(ctx context.Context, owner, peer string, before int64, limit int) ([]domain.ConversationMessage, *int64, error) {
 	a, b := owner, peer
 	if b < a {

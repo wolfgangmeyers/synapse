@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
 	"github.com/sky-valley/pi/ai"
@@ -368,9 +369,9 @@ func TestEmbeddedGoalContinuationDetectsUnbackedSubagentClaims(t *testing.T) {
 		Generation: "gen-1",
 	}
 
-	// 1. When no entries exist, return default prompt.
+	// Missing agent authority must fail closed, not fabricate ordinary guidance.
 	prompt := m.formatGoalContinuationPrompt(ctx, binding, nil)
-	require.Equal(t, goalContinuationDefaultPrompt, prompt)
+	require.Empty(t, prompt)
 
 	// Insert row in managed_agents
 	raw, err := sql.Open("sqlite", path)
@@ -512,108 +513,141 @@ func TestEmbeddedStartupRecoveryResetsActiveToIdle(t *testing.T) {
 }
 
 func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		content ai.ContentList
-	}{
-		{"empty-content", ai.ContentList{}},
-		{"whitespace-text", ai.ContentList{ai.TextContent{Text: "   \n\t  "}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			root := t.TempDir()
-			path := filepath.Join(root, "router.db")
-			db, err := store.Open(ctx, path, store.Options{})
-			require.NoError(t, err)
-			defer db.Close()
-			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
-			require.NoError(t, err)
-			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
-			defer reg.Unregister()
+	for _, incoming := range []string{"initial", "mail"} {
+		for _, tc := range []struct {
+			name    string
+			content ai.ContentList
+		}{
+			{"empty-content", ai.ContentList{}},
+			{"whitespace-text", ai.ContentList{ai.TextContent{Text: "   \n\t  "}}},
+		} {
+			t.Run(incoming+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				root := t.TempDir()
+				path := filepath.Join(root, "router.db")
+				db, err := store.Open(ctx, path, store.Options{})
+				require.NoError(t, err)
+				defer db.Close()
+				manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+				require.NoError(t, err)
+				reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+				defer reg.Unregister()
 
-			var requests atomic.Int32
-			reg.SetResponses([]providers.FauxResponseStep{
-				// Turn 1 step 1: set goal
-				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-					requests.Add(1)
-					return providers.FauxAssistantMessage(ai.ContentList{
-						providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "circuit breaker test"}, "cb-set"),
-					}, ai.StopToolUse)
-				},
-				// Turn 1 step 2: empty or whitespace-only assistant message (empty turn 1/3 -> re-nudge)
-				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-					requests.Add(1)
-					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
-				},
-				// Turn 2: empty assistant message (empty turn 2/3 -> re-nudge)
-				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-					requests.Add(1)
-					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
-				},
-				// Turn 3: empty assistant message (empty turn 3/3 -> circuit breaker halts!)
-				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-					requests.Add(1)
-					return providers.FauxAssistantMessage(tc.content, ai.StopStop)
-				},
-				// Continuation step (should NOT be reached)
-				func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-					requests.Add(1)
-					return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "unreachable"}}, ai.StopStop)
-				},
+				var requests atomic.Int32
+				reg.SetResponses([]providers.FauxResponseStep{
+					// Turn 1 step 1: set goal
+					func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+						requests.Add(1)
+						return providers.FauxAssistantMessage(ai.ContentList{
+							providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": "circuit breaker test"}, "cb-set"),
+						}, ai.StopToolUse)
+					},
+					// Turn 1 step 2: empty or whitespace-only assistant message (empty turn 1/3 -> re-nudge)
+					func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+						requests.Add(1)
+						return providers.FauxAssistantMessage(tc.content, ai.StopStop)
+					},
+					// Turn 2: empty assistant message (empty turn 2/3 -> re-nudge)
+					func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+						requests.Add(1)
+						return providers.FauxAssistantMessage(tc.content, ai.StopStop)
+					},
+					// Turn 3: empty assistant message (empty turn 3/3 -> circuit breaker halts!)
+					func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+						requests.Add(1)
+						return providers.FauxAssistantMessage(tc.content, ai.StopStop)
+					},
+					// Continuation step (should NOT be reached)
+					func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
+						requests.Add(1)
+						return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "unreachable"}}, ai.StopStop)
+					},
+				})
+
+				var evaluations atomic.Int32
+				m, err := NewManager(ManagerOptions{
+					Store:                 db,
+					Manifest:              manifest,
+					Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
+					CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+					EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
+					CodexCredentialStore:  testfixture.CodexAdmission(t),
+					GoalContinuationDelay: 20 * time.Millisecond,
+					EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
+						evaluations.Add(1)
+						return store.EmbeddedGoalEvaluationNotDone, "still needs work", nil
+					},
+				})
+				require.NoError(t, err)
+				defer m.Close(ctx)
+				setEmbeddedRecoveryGeneration(t, ctx, db, m)
+
+				instruction := "start work"
+				if incoming == "mail" {
+					instruction = ""
+				}
+				launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
+					Name:               "circuit-breaker-" + tc.name,
+					Cwd:                root,
+					Runtime:            "embedded",
+					Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
+					InitialInstruction: instruction,
+					RequestID:          "cb111111-1111-4111-8111-111111111111",
+				})
+				require.NoError(t, err)
+
+				if incoming == "mail" {
+					require.NoError(t, db.ReconcileManagedRecipientSources(ctx))
+					// Bootstrap can be idle before ReadyEmbeddedRoot activates the recipient.
+					require.Eventually(t, func() bool {
+						source, err := db.RecipientSource(ctx, launched.Agent.AgentID)
+						return err == nil && source != nil && source.State == "active" &&
+							source.SourceKind == "managed" && source.OwnerIdentity == launched.Agent.AgentID
+					}, 3*time.Second, 10*time.Millisecond)
+					_, err = db.Enqueue(ctx, protocol.Envelope{
+						ID:   "cb222222-2222-4222-8222-222222222222",
+						From: "user", To: launched.Agent.AgentID, Body: "start work",
+						CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+					}, store.EnqueueOptions{})
+					require.NoError(t, err)
+					target, err := db.ResolveMessageTarget(ctx, "cb222222-2222-4222-8222-222222222222")
+					require.NoError(t, err)
+					require.NotNil(t, target)
+					next, err := db.NextEmbeddedMail(ctx, launched.Agent.AgentID)
+					require.NoError(t, err)
+					require.Equal(t, "cb222222-2222-4222-8222-222222222222", next)
+					m.OfferDirect(launched.Agent.AgentID)
+				}
+
+				// Wait for 3 empty turns to complete (4 requests: goal tool call + 3 empty responses)
+				require.Eventually(t, func() bool {
+					return requests.Load() == 4
+				}, 3*time.Second, 10*time.Millisecond)
+
+				// Verify circuit breaker tripped: evaluator was NEVER called
+				time.Sleep(100 * time.Millisecond)
+				// Repeated idle wake offers must not bypass the settled breaker.
+				for i := 0; i < 3; i++ {
+					m.kickoffIdleGoalContinuation(store.EmbeddedBinding{AgentID: launched.Agent.AgentID})
+				}
+				require.Zero(t, evaluations.Load(), "evaluator must not be called when assistant is empty")
+				require.Equal(t, int32(4), requests.Load(), "no continuation request should have been dispatched")
+
+				// Verify agent settles cleanly to idle
+				require.Eventually(t, func() bool {
+					agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
+					return err == nil && agent.ActivityState == "idle"
+				}, 3*time.Second, 10*time.Millisecond)
+
+				// Verify exactly 2 continuations were dispatched for the 2 re-nudges, and none after circuit breaker tripped
+				readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+				require.NoError(t, err)
+				defer readOnly.Close()
+				var contCount int
+				require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&contCount))
+				require.Equal(t, 2, contCount)
 			})
-
-			var evaluations atomic.Int32
-			m, err := NewManager(ManagerOptions{
-				Store:                 db,
-				Manifest:              manifest,
-				Config:                Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
-				CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
-				EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
-				CodexCredentialStore:  testfixture.CodexAdmission(t),
-				GoalContinuationDelay: 20 * time.Millisecond,
-				EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-					evaluations.Add(1)
-					return store.EmbeddedGoalEvaluationNotDone, "still needs work", nil
-				},
-			})
-			require.NoError(t, err)
-			defer m.Close(ctx)
-			setEmbeddedRecoveryGeneration(t, ctx, db, m)
-
-			launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{
-				Name:               "circuit-breaker-" + tc.name,
-				Cwd:                root,
-				Runtime:            "embedded",
-				Model:              &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
-				InitialInstruction: "start work",
-				RequestID:          "cb111111-1111-4111-8111-111111111111",
-			})
-			require.NoError(t, err)
-
-			// Wait for 3 empty turns to complete (4 requests: goal tool call + 3 empty responses)
-			require.Eventually(t, func() bool {
-				return requests.Load() == 4
-			}, 3*time.Second, 10*time.Millisecond)
-
-			// Verify circuit breaker tripped: evaluator was NEVER called
-			time.Sleep(100 * time.Millisecond)
-			require.Zero(t, evaluations.Load(), "evaluator must not be called when assistant is empty")
-			require.Equal(t, int32(4), requests.Load(), "no continuation request should have been dispatched")
-
-			// Verify agent settles cleanly to idle
-			require.Eventually(t, func() bool {
-				agent, err := db.ManagedAgent(ctx, launched.Agent.AgentID)
-				return err == nil && agent.ActivityState == "idle"
-			}, 3*time.Second, 10*time.Millisecond)
-
-			// Verify exactly 2 continuations were dispatched for the 2 re-nudges, and none after circuit breaker tripped
-			readOnly, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
-			require.NoError(t, err)
-			defer readOnly.Close()
-			var contCount int
-			require.NoError(t, readOnly.QueryRowContext(ctx, `SELECT count(*) FROM embedded_goal_continuations WHERE agent_id=?`, launched.Agent.AgentID).Scan(&contCount))
-			require.Equal(t, 2, contCount)
-		})
+		}
 	}
 }
 
@@ -708,7 +742,7 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 
 	// Verify lane counter reset to 0
 	lane := m.laneFor(launched.Agent.AgentID)
-	require.Equal(t, 0, lane.consecutiveContinuations, "human prompt must reset consecutive continuations")
+	require.Zero(t, lane.consecutiveContinuations.Load(), "human prompt must reset consecutive continuations")
 }
 
 func TestUnwrapEmbeddedMailText(t *testing.T) {

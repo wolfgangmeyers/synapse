@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -98,6 +99,34 @@ func (r *rootAdmissionRPC) SubmitRootControlResult(_ context.Context, _ RootCont
 	}, Watermark: 1}
 	close(receipts)
 	return receipts, nil
+}
+
+func (r *rootAdmissionRPC) ReconcileRootControlResult(_ context.Context, payload map[string]any) (RootControlPersistedReceipt, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.submissions) == 0 || (r.submitErr != nil && !r.recoverEntry) {
+		return RootControlPersistedReceipt{}, errors.New("persisted result unavailable")
+	}
+	persisted := r.submissions[len(r.submissions)-1]
+	want, err := canonicalJSON(payload)
+	if err != nil {
+		return RootControlPersistedReceipt{}, err
+	}
+	got, err := canonicalJSON(persisted)
+	if err != nil || string(got) != string(want) {
+		return RootControlPersistedReceipt{}, errors.New("persisted result does not match")
+	}
+	details := cloneJSONRecord(persisted)
+	entry := map[string]any{"details": details}
+	if r.recoveryMutate != nil {
+		r.recoveryMutate(entry)
+	}
+	request, _ := details["request_id"].(string)
+	result, _ := details["result_id"].(string)
+	generation, _ := details["runtime_generation"].(string)
+	manifest, _ := details["manifest_sha256"].(string)
+	epoch, _ := readinessInteger(details["target_session_epoch"])
+	return RootControlPersistedReceipt{ReceiptID: "opaque-pi-result-entry", RequestID: request, ResultID: result, PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(got)), RuntimeGeneration: generation, ManifestSHA256: manifest, SessionEpoch: epoch}, nil
 }
 
 func (r *rootAdmissionRPC) GetRootControlEntry(_ context.Context, entryID string) (map[string]any, error) {

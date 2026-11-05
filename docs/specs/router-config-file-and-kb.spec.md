@@ -142,6 +142,32 @@ Users and developers need:
   - The agent tool returns an error indicating path traversal is denied.
   - Files outside `/workspace/project-kb` are never accessed.
 
+### Scenario: [SCN-CFG-009] Embedded KB root selection preserves supported paths
+- **User Goal**: Resolve the active KB predictably without implicit access to retired storage.
+- **Given**:
+  - No custom router config or CLI KB directory is supplied.
+- **When**:
+  - Embedded KB tools resolve their storage root.
+- **Then**:
+  - A nonblank `MECHA_KB_DIR` takes precedence, with surrounding whitespace trimmed and the path cleaned, even if the directory does not exist.
+  - Otherwise an existing `~/.mecha-developer/kb/` directory takes precedence over an existing `~/.mecha/kb/` directory.
+  - If only `~/.mecha/kb/` exists, it remains the supported fallback.
+  - If neither supported directory exists, the root is `~/.mecha-developer/kb/`; a whitespace-only environment value behaves as unset.
+  - A file at either supported directory path is not treated as a directory.
+
+### Scenario: [SCN-CFG-010] Unsupported sibling KB directory is ignored without changing its data
+- **User Goal**: Stop implicit use of retired storage without losing documents.
+- **Given**:
+  - Only an unsupported sibling KB directory exists, containing documents.
+  - `MECHA_KB_DIR` is unset or blank.
+- **When**:
+  - Embedded KB tools resolve their storage root.
+- **Then**:
+  - The root is `~/.mecha-developer/kb/`, not the unsupported directory.
+  - Resolution does not create, delete, modify, or migrate any documents or directories.
+  - If the supported `~/.mecha/kb/` fallback also exists, that fallback is selected instead.
+  - An explicit `MECHA_KB_DIR` can still select any user-specified path; only implicit unsupported-directory discovery is removed.
+
 ---
 
 ## 4. Automated E2E Verification Matrix
@@ -156,3 +182,12 @@ Users and developers need:
 | `SCN-CFG-006` | Missing config file error | `tests/e2e/router-config-file-and-kb.spec.ts` | `fails immediately with clear error when config file does not exist` |
 | `SCN-CFG-007` | Malformed JSON error | `tests/e2e/router-config-file-and-kb.spec.ts` | `fails immediately with parse error on malformed json config` |
 | `SCN-CFG-008` | Path traversal denial in custom KB | `tests/e2e/router-config-file-and-kb.spec.ts` | `prevents path traversal out of custom kb directory` |
+| `SCN-CFG-009` | Supported root selection and precedence | `tests/e2e/router-kb-root-selection.spec.ts` | `SCN-CFG-009: <case> (real embedded KB tools)` (parameterized cases) |
+| `SCN-CFG-010` | Unsupported sibling ignored; data preserved | `tests/e2e/router-kb-root-selection.spec.ts` | `SCN-CFG-010: unknown sibling ignored without filesystem changes` |
+
+The focused Playwright suite uses the existing embedded harness: isolated HOME,
+real browser/WebSocket, REST through router-proxy, router and SQLite. Only the
+external provider is mocked with queued native KB tool calls. Root-selection
+cases also invoke read-only KB tools and compare filesystem snapshots. Supporting
+Go tests `TestResolveKBRoot` and `TestKBTools_UnsupportedRootIgnored` cover direct
+resolution and filesystem edge cases; they do not replace Playwright coverage.

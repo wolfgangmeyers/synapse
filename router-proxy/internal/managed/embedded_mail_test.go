@@ -265,17 +265,24 @@ func TestEmbeddedMailMidTurnSteering(t *testing.T) {
 	require.True(t, sawSteering.Load(), "steering message must be delivered to runLoop()")
 	require.True(t, sawAttachmentRef.Load(), "attachment path must be delivered in steering message")
 
-	// Verify that the final assistant response produces a reply in embedded_reply_outbox for the steered message sender
+	// Final assistant text is persisted for the user, never auto-routed as mail.
 	rawDB, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	defer rawDB.Close()
 
-	var replySender, replyRecipient, replyBody string
-	err = rawDB.QueryRowContext(ctx, `SELECT sender, recipient, body FROM embedded_reply_outbox WHERE attempt_id=(SELECT attempt_id FROM embedded_attempts WHERE message_id=?)`, steerMsgID).Scan(&replySender, &replyRecipient, &replyBody)
+	var finalBody string
+	err = rawDB.QueryRowContext(ctx, `SELECT body FROM embedded_entries WHERE agent_id=? AND kind='assistant' ORDER BY seq DESC LIMIT 1`, launched.Agent.AgentID).Scan(&finalBody)
 	require.NoError(t, err)
-	require.Equal(t, launched.Agent.AgentID, replySender)
-	require.Equal(t, "supervisor", replyRecipient)
-	require.Contains(t, replyBody, "handled steering and finished turn")
+	require.Contains(t, finalBody, "handled steering and finished turn")
+	var sender, recipient, content string
+	err = rawDB.QueryRowContext(ctx, `SELECT json_extract(presentation_json,'$.from'), json_extract(presentation_json,'$.to'), message_content FROM managed_complete_history WHERE agent_id=? AND category='assistant' ORDER BY sequence DESC LIMIT 1`, launched.Agent.AgentID).Scan(&sender, &recipient, &content)
+	require.NoError(t, err)
+	require.Equal(t, launched.Agent.AgentID, sender)
+	require.Equal(t, "user", recipient)
+	require.Equal(t, "handled steering and finished turn", content)
+	var outboxCount int
+	require.NoError(t, rawDB.QueryRowContext(ctx, `SELECT count(*) FROM embedded_reply_outbox`).Scan(&outboxCount))
+	require.Zero(t, outboxCount, "final text requires an explicit send tool to become outbound mail")
 }
 
 // TestEmbeddedMailMultiToolInterruptedByMidTurnSteering tests that an active multi-tool

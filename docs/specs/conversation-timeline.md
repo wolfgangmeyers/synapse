@@ -3,7 +3,7 @@
 - **ID**: `SPEC-CONV-001`
 - **Status**: `Active`
 - **Domain**: `Conversation`
-- **Target E2E Suite**: `tests/e2e/conversation-feed-rendering.spec.ts`
+- **Existing related E2E suites**: `tests/e2e/conversation-feed.spec.ts`, `tests/e2e/conversation-architecture-simplification.spec.ts` (partial coverage; see matrix)
 
 ---
 
@@ -128,10 +128,49 @@ Crucially, **real-time updates must flow directly into the conversation view wit
   - Once the fetch completes, the loading indicator cleanly resolves to either the conversation timeline (if items exist) or the agent welcome state (if empty).
 
 
+
+#### Scenario: [SCN-FEED-010] Agent encounters tool execution failure
+- **User Goal**: Inspect error details when an internal tool execution fails.
+- **Given**:
+  - Conversation view is open for `test-worker`.
+- **When**:
+  - A tool execution fails with a non-zero exit code or error output.
+- **Then**:
+  - The activity card renders with a red danger orb and border styling.
+  - The card summary indicates the failed action.
+  - Clicking the card opens the Activity Detail dialog displaying the full stderr/error log without breaking the feed layout.
+
+#### Scenario: [SCN-FEED-011] Context reset boundary event
+- **User Goal**: Clearly identify when an agent's memory window was compacted or reset.
+- **Given**:
+  - An agent triggers a context reset or reaches context limit threshold.
+- **When**:
+  - A `context_reset` event is recorded in the timeline.
+- **Then**:
+  - A distinct horizontal partition card renders across the feed indicating "Context Reset" with the epoch transition and reason.
+  - Prior conversation history remains scrollable above the reset partition.
+  - Subsequent conversation begins cleanly below the partition without wiping prior bubbles.
+
+
 ---
 
-## 4. Verification & Testing Standards
+## 4. Automated E2E Verification Matrix
 
-1. **Automated Playwright E2E Suite**: `tests/e2e/conversation-feed-rendering.spec.ts` must execute in headless browser mode against real router HTTP and WebSocket boundaries.
-2. **Real-time Push Verification**: The test suite must simulate live events streamed over WebSocket (such as an incoming message or tool event while the conversation view is mounted) and verify that the corresponding DOM nodes appear dynamically without page reloads.
-3. **Deterministic Mocks**: No external LLM APIs are invoked during testing. Agent turns and completions are driven by deterministic local test fixtures.
+These are existing test assertions, not a claim that the full scenario passes. The named tests have not been run for this docs-only consolidation. The former target `tests/e2e/conversation-feed-rendering.spec.ts` does not exist.
+
+Verification requires headless Playwright E2E tests exercising the real browser, router HTTP, proxy, WebSocket and SQLite boundaries for every scenario. Tests must simulate live events streamed over WebSocket, such as an incoming message or tool event while the conversation view is mounted, and verify that the corresponding DOM nodes appear dynamically without a page reload. No external LLM APIs may be called; drive agent turns and completions with deterministic local fixtures.
+
+| Scenario | Existing related test and asserted subset | Unverified gaps |
+| :--- | :--- | :--- |
+| `SCN-FEED-001` | `tests/e2e/conversation-feed.spec.ts`: `App loads cleanly, connects to isolated router proxy, and renders conversation feed` posts an agent message after the view is mounted and checks its incoming bubble without reload. | Live tool, thinking and status updates; transport attribution and timing beyond eventual visibility. |
+| `SCN-FEED-002` | Same test checks incoming and outgoing bubble selectors; `tests/e2e/conversation-architecture-simplification.spec.ts`: `renders user and assistant speech bubbles with avatars, compact envelope cards for peer messages, attachments without leaked paths, and maintains scroll stability` also checks both avatars and the user bubble label. | Assistant bubble label, full visual styling, timestamps and all exclusion requirements. |
+| `SCN-FEED-003` | The two tests above check an outgoing peer activity card and subject/header. | Both directions, complete header, collapsed default and expansion; exact envelope classification. |
+| `SCN-FEED-004` | No mapped complete E2E test. | Tool styling, collapsible thinking and final ordering. |
+| `SCN-FEED-005` | No mapped complete E2E test. | Pending-to-confirmed transition, node identity, markdown and layout stability. |
+| `SCN-FEED-006` | No mapped complete E2E test. | Failure status, retained body and copy/retry access. |
+| `SCN-FEED-008` | No mapped complete E2E test. | Empty-history welcome content and loading resolution. |
+| `SCN-FEED-009` | No mapped complete E2E test. | In-flight indicator and both completion outcomes. |
+| `SCN-FEED-010` | No mapped complete E2E test. | Failed tool styling, summary and full error detail dialog. |
+| `SCN-FEED-011` | No mapped complete E2E test. | Reset divider, epoch/reason and preserved history on both sides. |
+
+Deduplication and in-place finalization of streaming tokens and pending tool states are also invariants above; their full E2E verification remains unverified.

@@ -74,6 +74,7 @@ type EmbeddedGoalSnoozePreference struct {
 	AgentID, SessionID, Generation, Role string
 	Epoch, PolicyVersion                 int64
 	CallID, DueAt                        string
+	Workflow                             string `json:",omitempty"`
 	SnoozeUntil                          string
 	DurationMS                           int64
 	Active                               bool
@@ -101,6 +102,9 @@ func (s *Store) CurrentEmbeddedGoalSnoozePreference(ctx context.Context, agentID
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := s.embeddedEvidenceReadGate(ctx, EmbeddedBinding{AgentID: p.AgentID, SessionID: p.SessionID, Epoch: p.Epoch, Generation: p.Generation}, EmbeddedGoalEvaluationKey{UserSeq: p.UserSeq, UserDigest: p.UserDigest, GoalRevision: p.GoalRevision}, p.CallID); err != nil {
 		return nil, err
 	}
 	var snapshot EmbeddedGoalSnoozePreference
@@ -141,6 +145,9 @@ func (s *Store) EmbeddedGoalSnoozePreferenceFor(ctx context.Context, b EmbeddedB
 	if err != nil {
 		return nil, err
 	}
+	if err := s.embeddedEvidenceReadGate(ctx, EmbeddedBinding{AgentID: p.AgentID, SessionID: p.SessionID, Epoch: p.Epoch, Generation: p.Generation}, EmbeddedGoalEvaluationKey{UserSeq: p.UserSeq, UserDigest: p.UserDigest, GoalRevision: p.GoalRevision}, p.CallID); err != nil {
+		return nil, err
+	}
 	var snapshot EmbeddedGoalSnoozePreference
 	if err := json.Unmarshal([]byte(result), &snapshot); err != nil {
 		return nil, err
@@ -176,9 +183,14 @@ func (s *Store) SaveCurrentEmbeddedGoalSnoozePreference(ctx context.Context, b E
 }
 
 func (s *Store) saveEmbeddedGoalSnoozePreference(ctx context.Context, b EmbeddedBinding, turn EmbeddedGoalSnoozeTurn, callID string, rawArgs []byte, invocation *EmbeddedGoalInvocation) (EmbeddedGoalSnoozePreference, bool, error) {
-	args, err := ParseEmbeddedGoalSnoozeArguments(rawArgs)
-	if err != nil {
-		return EmbeddedGoalSnoozePreference{}, false, err
+	workflow := invocation != nil && invocation.name == "workflow_snooze"
+	var args EmbeddedGoalSnoozeArguments
+	var err error
+	if !workflow {
+		args, err = ParseEmbeddedGoalSnoozeArguments(rawArgs)
+		if err != nil {
+			return EmbeddedGoalSnoozePreference{}, false, err
+		}
 	}
 	if ctx == nil || turn.UserSeq <= 0 || turn.UserDigest == "" || turn.GoalRevision <= 0 || callID == "" || len(callID) > 256 || !utf8.ValidString(callID) || strings.ContainsAny(callID, "\x00\r\n") {
 		return EmbeddedGoalSnoozePreference{}, false, &EmbeddedGoalSnoozeDenial{Reason: "invalid call or turn"}
@@ -187,11 +199,29 @@ func (s *Store) saveEmbeddedGoalSnoozePreference(ctx context.Context, b Embedded
 	var preference EmbeddedGoalSnoozePreference
 	replay := false
 	err = s.runImmediate(ctx, func() error {
+		if err := s.embeddedEvidenceReplayTx(ctx, b, EmbeddedGoalEvaluationKey{UserSeq: turn.UserSeq, UserDigest: turn.UserDigest, GoalRevision: turn.GoalRevision}, callID); err != nil {
+			return err
+		}
 		if err := s.embeddedFence(ctx, b); err != nil {
 			return err
 		}
+		workflowName := ""
+		workflowDefaultMS := int64(600000)
+		if workflow {
+			var defaultMS int64
+			if err := s.db.QueryRowContext(ctx, `SELECT w.name,w.snooze_duration_ms FROM managed_agents a JOIN workflows w ON w.id=a.active_workflow_id WHERE a.agent_id=? AND a.active_workflow_state_id IS NOT NULL`, b.AgentID).Scan(&workflowName, &defaultMS); err != nil {
+				return err
+			}
+			var duration int64
+			workflowDefaultMS = defaultMS
+			canonical, duration, err = NormalizeEmbeddedWorkflowSnoozeArguments(rawArgs, defaultMS)
+			if err != nil {
+				return err
+			}
+			args.DurationMS = duration
+		}
 		if invocation != nil {
-			if err := s.embeddedGoalDomainInvocationTx(ctx, b, callID, "goal_snooze", invocation); err != nil {
+			if err := s.embeddedGoalDomainInvocationTx(ctx, b, callID, invocation.name, invocation); err != nil {
 				return err
 			}
 			if turn.UserSeq != invocation.userSeq || turn.UserDigest != invocation.userDigest {
@@ -203,16 +233,26 @@ func (s *Store) saveEmbeddedGoalSnoozePreference(ctx context.Context, b Embedded
 			if err := json.Unmarshal(invocation.intent, &original); err != nil {
 				return err
 			}
-			originalArgs, err := ParseEmbeddedGoalSnoozeArguments(original.Arguments)
-			if err != nil {
-				return err
-			}
-			originalCanonical, err := json.Marshal(originalArgs)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(originalCanonical, canonical) {
-				return errors.New("current snooze invocation arguments mismatch")
+			if workflow {
+				originalCanonical, _, err := NormalizeEmbeddedWorkflowSnoozeArguments(original.Arguments, workflowDefaultMS)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(originalCanonical, canonical) {
+					return errors.New("current workflow snooze invocation arguments mismatch")
+				}
+			} else if invocation.name == "goal_snooze" {
+				originalArgs, err := ParseEmbeddedGoalSnoozeArguments(original.Arguments)
+				if err != nil {
+					return err
+				}
+				originalCanonical, err := json.Marshal(originalArgs)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(originalCanonical, canonical) {
+					return errors.New("current snooze invocation arguments mismatch")
+				}
 			}
 		}
 		var role string
@@ -272,18 +312,10 @@ func (s *Store) saveEmbeddedGoalSnoozePreference(ctx context.Context, b Embedded
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if err == nil {
-			var active int
-			if err := s.db.QueryRowContext(ctx, `SELECT active FROM embedded_goal_snooze_preferences WHERE agent_id=? AND session_id=? AND epoch=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, turn.UserSeq, turn.UserDigest, turn.GoalRevision).Scan(&active); err != nil {
-				return err
-			}
-			if active != 1 {
-				return errors.New("goal snooze preference invalidated")
-			}
-		}
+
 		version++
 		due := s.clock.Now().UTC().Add(time.Duration(args.DurationMS) * time.Millisecond)
-		preference = EmbeddedGoalSnoozePreference{EmbeddedGoalSnoozeTurn: turn, AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, Role: role, PolicyVersion: version, CallID: callID, DueAt: formatTimestamp(due), DurationMS: args.DurationMS, Active: true}
+		preference = EmbeddedGoalSnoozePreference{EmbeddedGoalSnoozeTurn: turn, AgentID: b.AgentID, SessionID: b.SessionID, Epoch: b.Epoch, Generation: b.Generation, Role: role, PolicyVersion: version, CallID: callID, DueAt: formatTimestamp(due), DurationMS: args.DurationMS, Active: true, Workflow: workflowName}
 		result, err := json.Marshal(preference)
 		if err != nil {
 			return err
@@ -291,11 +323,36 @@ func (s *Store) saveEmbeddedGoalSnoozePreference(ctx context.Context, b Embedded
 		if _, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_snooze_calls(call_id,agent_id,session_id,epoch,generation,role,user_seq,user_digest,goal_revision,args_json,result_json,policy_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, callID, b.AgentID, b.SessionID, b.Epoch, b.Generation, role, turn.UserSeq, turn.UserDigest, turn.GoalRevision, string(canonical), string(result), version); err != nil {
 			return err
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO embedded_goal_snooze_preferences(agent_id,session_id,epoch,generation,role,user_seq,user_digest,goal_revision,policy_version,call_id,due_at,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT(agent_id,session_id,epoch,user_seq,user_digest,goal_revision) DO UPDATE SET policy_version=excluded.policy_version,call_id=excluded.call_id,due_at=excluded.due_at WHERE embedded_goal_snooze_preferences.active=1 AND embedded_goal_snooze_preferences.policy_version<excluded.policy_version`, b.AgentID, b.SessionID, b.Epoch, b.Generation, role, turn.UserSeq, turn.UserDigest, turn.GoalRevision, version, callID, preference.DueAt)
+		written, err := s.db.ExecContext(ctx, `INSERT INTO embedded_goal_snooze_preferences(agent_id,session_id,epoch,generation,role,user_seq,user_digest,goal_revision,policy_version,call_id,due_at,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT(agent_id,session_id,epoch,user_seq,user_digest,goal_revision) DO UPDATE SET active=1,policy_version=excluded.policy_version,call_id=excluded.call_id,due_at=excluded.due_at WHERE embedded_goal_snooze_preferences.policy_version+1=excluded.policy_version`, b.AgentID, b.SessionID, b.Epoch, b.Generation, role, turn.UserSeq, turn.UserDigest, turn.GoalRevision, version, callID, preference.DueAt)
+		if err != nil {
+			return err
+		}
+		affected, err := written.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errors.New("goal snooze preference was not saved")
+		}
+		// Only a new accepted call supersedes older active turn preferences.
+		// Replay returned above, and an ordinary unsnoozed turn never enters here.
+		if _, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_snooze_preferences SET active=0 WHERE agent_id=? AND active=1 AND call_id<>?`, b.AgentID, callID); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET snoozed_until=?,updated_at=? WHERE agent_id=? AND desired_revision=? AND goal_enabled=1`, preference.DueAt, formatTimestamp(s.clock.Now()), b.AgentID, turn.GoalRevision)
 		return err
 	})
 	if err != nil {
 		return EmbeddedGoalSnoozePreference{}, false, err
 	}
 	return preference, replay, nil
+}
+
+// SaveCurrentEmbeddedWorkflowSnoozePreference uses the original workflow intent,
+// not a synthetic goal_snooze payload. Policy and call evidence commit together.
+func (s *Store) SaveCurrentEmbeddedWorkflowSnoozePreference(ctx context.Context, b EmbeddedBinding, turn EmbeddedGoalSnoozeTurn, callID string, rawArgs []byte, invocation *EmbeddedGoalInvocation) (EmbeddedGoalSnoozePreference, bool, error) {
+	if invocation == nil || invocation.name != "workflow_snooze" {
+		return EmbeddedGoalSnoozePreference{}, false, errors.New("missing workflow snooze admission")
+	}
+	return s.SaveCurrentEmbeddedGoalSnoozePreference(ctx, b, turn, callID, rawArgs, invocation)
 }

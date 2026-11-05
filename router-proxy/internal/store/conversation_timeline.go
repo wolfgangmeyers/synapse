@@ -504,12 +504,28 @@ func (s *Store) recordTimelineHistoryTx(ctx context.Context, agentID, category, 
 	return err
 }
 
+// ErrTimelineBoundaryNotFound means the scoped event is absent or not persisted yet.
+var ErrTimelineBoundaryNotFound = errors.New("timeline boundary not found")
+
+// GetConversationTimelineBeforeEvent resolves the boundary within the agent scope.
+func (s *Store) GetConversationTimelineBeforeEvent(ctx context.Context, agentID, eventID string, limit int) ([]ConversationTimelineEvent, *int64, error) {
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `SELECT seq FROM conversation_timeline WHERE agent_id = ? AND id = ?`, agentID, eventID).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrTimelineBoundaryNotFound
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve timeline boundary: %w", err)
+	}
+	return s.GetConversationTimeline(ctx, agentID, limit, &seq)
+}
+
 // GetConversationTimeline retrieves events from conversation_timeline for an agent with pagination.
 // Pagination uses `seq < beforeSeq ORDER BY seq DESC LIMIT limit + 1`:
-// - Limit is clamped between 1 and 500 (default 50).
-// - Querying limit + 1 allows determining if older events exist (next_before_seq).
-// - Events are reversed to return chronological ascending order (oldest to newest)
-//   so callers can directly append/render the page.
+//   - Limit is clamped between 1 and 500 (default 50).
+//   - Querying limit + 1 allows determining if older events exist (next_before_seq).
+//   - Events are reversed to return chronological ascending order (oldest to newest)
+//     so callers can directly append/render the page.
 func (s *Store) GetConversationTimeline(ctx context.Context, agentID string, limit int, beforeSeq *int64) ([]ConversationTimelineEvent, *int64, error) {
 	if limit <= 0 {
 		limit = 50

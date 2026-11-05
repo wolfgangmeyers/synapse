@@ -36,3 +36,11 @@ export function mergeAgentModelProjection(agents: ModelAgent[], peer: string, in
 }
 export function modelControlStatusTitle(accepted: unknown, errorCode?: string): string { if (accepted === true) return "Model changed"; return REJECTIONS.has(errorCode ?? "") ? "Model change rejected" : "Model change not confirmed"; }
 export function isConfirmedModelRejection(errorCode: unknown): boolean { return typeof errorCode === "string" && REJECTIONS.has(errorCode); }
+
+// Claude is an embedded turn engine, not a provider-auth integration.
+export function isClaudeCodeModel(model: unknown): boolean {
+  return normalizeModelSummary(model)?.provider === "claude-code";
+}
+export function sameModelEngine(left: unknown, right: ModelSummary): boolean {
+  return isClaudeCodeModel(left) === isClaudeCodeModel(right);
+}

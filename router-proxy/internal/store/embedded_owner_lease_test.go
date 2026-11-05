@@ -147,5 +147,5 @@ func TestEmbeddedOwnerLeaseConcurrentContendersAndFaultRollback(t *testing.T) {
 	}
 	require.Equal(t, 2, wins)
 	require.NoError(t, a.db.QueryRow(`SELECT owner_token FROM embedded_sessions WHERE agent_id=?`, binding.AgentID).Scan(&token))
-	require.EqualValues(t, 1, token)
+	require.EqualValues(t, 2, token, "distinct successful owners advance the durable token")
 }

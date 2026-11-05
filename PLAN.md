@@ -2,7 +2,7 @@
 
 ## Scope and execution gates
 
-Target: current `main`; no branch/worktree, no unrelated edits. Requirements are `SPEC.md`, `SPEC-MAILBOX-001` and `SPEC-GOAL-001`. Production edits follow independently authored failing regression tests. The user explicitly directs execution without router-managed workflows or additional approval gates. Tests and implementation have separate authors. Preserve the user-stopped operational worker; any live router restart requires a durable wakeup reminder first. No messages to terminated `question` or unrelated workers.
+Target: current `main`; no branch/worktree, no unrelated edits. Requirements are `docs/specs/inbox-wake-repair-delivery.md`, `SPEC-MAILBOX-001` and `SPEC-GOAL-001`. Production edits follow independently authored failing regression tests. The user explicitly directs execution without router-managed workflows or additional approval gates. Tests and implementation have separate authors. Preserve the user-stopped operational worker; any live router restart requires a durable wakeup reminder first. No messages to terminated `question` or unrelated workers.
 
 ## Requirement-to-delivery mapping
 

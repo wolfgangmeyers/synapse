@@ -87,8 +87,12 @@ func main() {
       { message: "retired-epoch unstarted reservation must be consumed by successor" }).toBe(1);
     await expect(page.getByText("recovered mailbox reply", { exact: true })).toBeVisible();
     const recovered = f.db.prepare("SELECT * FROM embedded_attempts WHERE message_id=?").get(pending.id)!;
-    expect(recovered.attempt_id).toBe(attempt.attempt_id);
-    expect(recovered.append_key).toBe(attempt.append_key);
+    // Normal reset may retire the reservation and issue a new attempt/key.
+    // Accepted message identity, not internal attempt stability, is the contract.
+    expect(recovered.message_id).toBe(pending.id);
+    expect(recovered.message_incarnation_id).toBe(attempt.message_incarnation_id);
+    expect(recovered.snapshot_id).toBe(attempt.snapshot_id);
+    expect(recovered.accepted_digest).toBe(attempt.accepted_digest);
     expect(recovered.epoch).toBeGreaterThan(Number(attempt.epoch));
     expect(recovered.session_id).not.toBe(attempt.session_id);
     expect(recovered.generation).toBe(attempt.generation);

@@ -43,7 +43,6 @@ type CommandSpec struct {
 	MechaRPCExtension    string
 	PiSubagentsExtension string
 	CursorExtension      string
-	AntigravityExtension string
 	TestOnlyExtensions   []string
 	Environment          []string
 }
@@ -63,9 +62,6 @@ func (s CommandSpec) Args() []string {
 	arguments := []string{"--mode", "rpc", "--session-dir", s.SessionRoot, "--session", s.effectiveSessionPath(), "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--offline", "--provider", s.Provider, "--model", s.ModelID, "-e", s.MechaRPCExtension, "-e", s.PiSubagentsExtension}
 	if s.CursorExtension != "" {
 		arguments = append(arguments, "-e", s.CursorExtension)
-	}
-	if s.AntigravityExtension != "" {
-		arguments = append(arguments, "-e", s.AntigravityExtension)
 	}
 	for _, extension := range s.TestOnlyExtensions {
 		arguments = append(arguments, "-e", extension)
@@ -197,7 +193,14 @@ func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process,
 	}
 	command := exec.Command(spec.PiExecutable, spec.Args()...)
 	command.Dir = spec.Cwd
-	command.Env = append([]string(nil), spec.Environment...)
+	// Legacy recipes may retain obsolete extension environment. Never replay it.
+	for _, entry := range spec.Environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "MECHA_ANTIGRAVITY_EXTENSION" || key == "ROUTER_MANAGED_ANTIGRAVITY_EXTENSION" {
+			continue
+		}
+		command.Env = append(command.Env, entry)
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := command.StdinPipe()
 	if err != nil {

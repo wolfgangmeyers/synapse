@@ -249,7 +249,7 @@ func (m *Manager) startEmbeddedRoot(agent store.ManagedAgentRecord, operationID 
 			}
 			m.mu.Unlock()
 			if published {
-				m.OfferDirect(agent.AgentID) // queued during launch or cold recovery
+				m.offerLaunchDirect(agent.AgentID) // queued during launch or cold recovery
 				m.recoverReservedEmbeddedGoalSnoozes(binding)
 				if recovered {
 					if policy, err := m.store.ManagedGoalPolicyFor(runCtx, agent.AgentID); err == nil && policy != nil && policy.Config.Enabled {

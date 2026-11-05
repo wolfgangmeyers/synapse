@@ -69,14 +69,12 @@ var managedProviderNames = map[string]bool{
 	"google":        true,
 	"cursor":        true,
 	"google-vertex": true,
-	"antigravity":   true,
 }
 var managedProviderLabels = map[string]string{
 	"openai-codex":  "ChatGPT",
 	"google":        "Google",
 	"cursor":        "Cursor",
 	"google-vertex": "Google Vertex AI",
-	"antigravity":   "Google Antigravity",
 }
 
 func validManagedProvider(value string) bool { return managedProviderNames[value] }
@@ -102,6 +100,7 @@ const (
 )
 
 type ManagedAgentRecord struct {
+	Urgent                    bool // Hydrated from the shared agents row, never independently persisted.
 	AgentID                   string
 	Name                      string
 	SlotHeld                  bool
@@ -358,6 +357,15 @@ type ManagedAgentsSnapshot struct {
 	ReadinessSources map[string]*ManagedReadinessSource
 }
 
+// ManagedOrphanSessionError means an embedded identity is still reserved by
+// session state without a managed owner. Absence of that owner does not prove
+// the previous runtime has stopped, so launch must not repair it blindly.
+type ManagedOrphanSessionError struct{ AgentID string }
+
+func (e *ManagedOrphanSessionError) Error() string {
+	return "A stale embedded session prevents relaunch; investigate the previous agent before retrying, or choose another name."
+}
+
 type ManagedNameConflictError struct{ Name string }
 
 func (e *ManagedNameConflictError) Error() string { return "managed agent name is already reserved" }
@@ -486,6 +494,8 @@ type ManagedLifecycleReservation struct {
 }
 
 type ManagedLifecycleAdmission struct {
+	// Committed is true only when this reservation transaction conclusively committed.
+	Committed bool
 	Operation *ManagedOperation
 	Action    *ManagedLifecycleAction
 	Agent     *ManagedAgentRecord
@@ -515,7 +525,7 @@ func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 }
 
 func validDefaultModel(model *ManagedModel) error {
-	if model != nil && (!managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
+	if model != nil && (model.Provider == "claude-code" || !managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
 		return errors.New("invalid default model")
 	}
 	return nil
@@ -583,7 +593,9 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 		}
 		value.Authenticated = authenticated == 1
 		value.AccountLabel, value.Error = account.String, failure.String
-		snapshot.Providers = append(snapshot.Providers, value)
+		if validManagedProvider(value.Provider) {
+			snapshot.Providers = append(snapshot.Providers, value)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -604,7 +616,9 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 			return snapshot, err
 		}
 		value.Available = available == 1
-		snapshot.Models = append(snapshot.Models, value)
+		if validManagedProvider(value.Provider) {
+			snapshot.Models = append(snapshot.Models, value)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -621,8 +635,8 @@ func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSna
 // canceled helper never calls this method, so the revision and catalog stay
 // unchanged together.
 func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []ManagedProviderStatus, models []ManagedProviderModel) (int64, error) {
-	if len(providers) != 5 {
-		return 0, errors.New("provider snapshot must contain exactly five providers")
+	if len(providers) != 4 {
+		return 0, errors.New("provider snapshot must contain exactly four providers")
 	}
 	seen := make(map[string]bool, len(providers))
 	authenticated := make(map[string]bool, len(providers))
@@ -633,7 +647,7 @@ func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []M
 		seen[provider.Provider] = true
 		authenticated[provider.Provider] = provider.Authenticated
 	}
-	for _, provider := range []string{"openai-codex", "google", "cursor", "google-vertex", "antigravity"} {
+	for _, provider := range []string{"openai-codex", "google", "cursor", "google-vertex"} {
 		if !seen[provider] {
 			return 0, errors.New("provider snapshot is incomplete")
 		}
@@ -651,6 +665,13 @@ func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []M
 	}
 	var revision int64
 	err := s.runImmediate(ctx, func() error {
+		// Retire legacy catalog rows in the same transaction as the new snapshot
+		// and revision. This does not read or mutate credential files.
+		for _, table := range []string{"managed_provider_models", "managed_provider_status"} {
+			if _, err := s.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE provider NOT IN ('google','google-vertex','openai-codex','cursor')"); err != nil {
+				return err
+			}
+		}
 		now := formatTimestamp(s.clock.Now())
 		for _, provider := range providers {
 			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_provider_status (provider,label,authenticated,status,account_label,updated_at,error)
@@ -749,7 +770,7 @@ func (s *Store) ReserveManagedEmbeddedWorkerFromOwner(ctx context.Context, agent
 	return s.reserveManagedLaunchWithRole(ctx, agent, operation, maxAgents, "worker", &parent)
 }
 
-func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string, parent *EmbeddedBinding, current ...*EmbeddedToolInvocation) error {
+func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedAgentRecord, operation ManagedOperation, maxAgents int, role string, parent *EmbeddedBinding) error {
 	if maxAgents < 1 {
 		return errors.New("managed process limit must be positive")
 	}
@@ -784,14 +805,6 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 		operation.State = "pending"
 	}
 	transaction := func() error {
-		if len(current) != 0 {
-			if len(current) != 1 {
-				return errors.New("invalid current worker launch admission")
-			}
-			if err := s.admitEmbeddedToolTx(ctx, current[0]); err != nil {
-				return err
-			}
-		}
 		if parent != nil {
 			if err := s.embeddedFence(ctx, *parent); err != nil {
 				return err
@@ -848,6 +861,15 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 				}
 			}
 			if (existingState == "failed" && existingID == agent.AgentID) || isStuck {
+				if existingID != agent.AgentID {
+					if enabled, err := agentUrgencyEnabledTx(ctx, s.db); err != nil {
+						return err
+					} else if enabled {
+						if _, err := s.db.ExecContext(ctx, `UPDATE agents SET urgent=0, identity_active=0 WHERE agent_id=?`, existingID); err != nil {
+							return err
+						}
+					}
+				}
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_readiness_sources WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id = ?`, existingID)
 				_, _ = s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id = ?`, existingID)
@@ -868,6 +890,18 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 			}
 		} else if !errors.Is(checkErr, sql.ErrNoRows) {
 			return checkErr
+		}
+		// Check before reserving an operation or installing a replacement owner.
+		// A stale current row alone is not proof that its runtime was reaped.
+		if role != "" {
+			var orphan int
+			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_sessions s WHERE s.agent_id=? AND s.current=1 AND NOT EXISTS (SELECT 1 FROM managed_agents a WHERE a.agent_id=s.agent_id)`, agent.AgentID).Scan(&orphan)
+			if err == nil {
+				return &ManagedOrphanSessionError{AgentID: agent.AgentID}
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 		}
 		// Post-027 rows retain this pending operation as a reverse protection
 		// edge. Inserting it first lets the parent link be FK-valid in the same
@@ -926,11 +960,6 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	}
-	if len(current) == 1 && current[0] != nil {
-		committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, transaction)
-		current[0].recordDomainDisposition(committed, conclusive, err)
-		return err
-	}
 	return s.runImmediate(ctx, transaction)
 }
 
@@ -938,6 +967,12 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 // focused historical migration fixtures to open schemas that intentionally end
 // before 027.
 func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAgentRecord, operationID string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES (?,?) ON CONFLICT(agent_id) DO NOTHING`, agent.AgentID, agent.CreatedAt); err != nil {
+		return err
+	}
+	if err := reactivateAgentIdentityTx(ctx, s.db, agent.AgentID); err != nil {
+		return err
+	}
 	columns := `agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,
 		desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,
 		session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,
@@ -1196,10 +1231,6 @@ func managedLifecycleActionForTx(ctx context.Context, db *sql.DB, actionID strin
 // ReserveManagedLifecycle resolves exact replay before inspecting an agent or
 // its binding. The caller supplies a complete live fence only after that lookup.
 func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation ManagedLifecycleReservation) (ManagedLifecycleAdmission, error) {
-	return s.reserveManagedLifecycle(ctx, reservation, nil)
-}
-
-func (s *Store) reserveManagedLifecycle(ctx context.Context, reservation ManagedLifecycleReservation, producer *EmbeddedToolInvocation) (ManagedLifecycleAdmission, error) {
 	if reservation.Source == "" {
 		reservation.Source = "direct"
 	}
@@ -1231,11 +1262,6 @@ func (s *Store) reserveManagedLifecycle(ctx context.Context, reservation Managed
 	}
 	var result ManagedLifecycleAdmission
 	transaction := func() error {
-		if producer != nil {
-			if err := s.embeddedToolCleanupGuardTx(ctx, producer, reservation); err != nil {
-				return err
-			}
-		}
 		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, reservation.Method, reservation.RequestID)
 		if err == nil {
 			if existing.CanonicalPath != reservation.CanonicalPath || existing.CanonicalBodyHash != reservation.CanonicalBodyHash {
@@ -1454,12 +1480,8 @@ func (s *Store) reserveManagedLifecycle(ctx context.Context, reservation Managed
 		result.Operation, result.Action, result.Agent = &reservation.Operation, action, agent
 		return nil
 	}
-	if producer != nil {
-		committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, transaction)
-		producer.recordDomainDisposition(committed, conclusive, err)
-		return result, err
-	}
-	err := s.runImmediate(ctx, transaction)
+	committed, conclusive, err := s.runImmediateWithCommitOutcome(ctx, transaction)
+	result.Committed = committed && conclusive
 	return result, err
 }
 
@@ -1656,6 +1678,13 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		}
 		if hasLink {
 			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET launch_operation_id=NULL WHERE agent_id=?`, action.AgentID); err != nil {
+				return err
+			}
+		}
+		if enabled, err := agentUrgencyEnabledTx(ctx, s.db); err != nil {
+			return err
+		} else if enabled {
+			if _, err := s.db.ExecContext(ctx, `UPDATE agents SET urgent=0, identity_active=0 WHERE agent_id=?`, action.AgentID); err != nil {
 				return err
 			}
 		}
@@ -4619,6 +4648,9 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if err != nil {
 		return nil, err
 	}
+	if err := loadManagedUrgencyTx(ctx, s.db, []*ManagedAgentRecord{agent}); err != nil {
+		return nil, err
+	}
 	if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
 		return nil, err
 	}
@@ -4685,6 +4717,9 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 		result = append(result, item)
 	}
 	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := loadManagedUrgencyTx(ctx, s.db, result); err != nil {
 		return nil, err
 	}
 	for _, item := range result {
@@ -4947,7 +4982,7 @@ func loadManagedActiveWorkflowStateIDTx(ctx context.Context, db *sql.DB, agent *
 	return nil
 }
 
-func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID string, workflowStateID *string) error {
+func (s *Store) setManagedAgentActiveWorkflowStateTx(ctx context.Context, agentID string, workflowStateID *string) error {
 	hasCol, err := managedAgentColumnTx(ctx, s.db, "active_workflow_state_id")
 	if err != nil {
 		return err
@@ -5012,7 +5047,7 @@ func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID 
 	return nil
 }
 
-func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, agentID string, workflowID *string, workflowStateID *string, vars map[string]string) error {
+func (s *Store) setManagedAgentActiveWorkflowWithVariablesTx(ctx context.Context, agentID string, workflowID *string, workflowStateID *string, vars map[string]string) error {
 	hasStateCol, err := managedAgentColumnTx(ctx, s.db, "active_workflow_state_id")
 	if err != nil {
 		return err
@@ -5185,6 +5220,9 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 	if err := rows.Close(); err != nil {
 		return rollback(err)
 	}
+	if err := loadManagedUrgencyTx(ctx, s.db, agents); err != nil {
+		return rollback(err)
+	}
 	goalPolicies := make(map[string]*ManagedGoalPolicy)
 	for _, agent := range agents {
 		if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
@@ -5322,6 +5360,9 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 		return ManagedAgentSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version}, nil
 	}
 	if err != nil {
+		return rollback(err)
+	}
+	if err := loadManagedUrgencyTx(ctx, s.db, []*ManagedAgentRecord{agent}); err != nil {
 		return rollback(err)
 	}
 	if err := loadManagedRuntimeTx(ctx, s.db, agent); err != nil {
@@ -6120,3 +6161,45 @@ func (s *Store) TimeoutStuckLaunches(ctx context.Context, timeout time.Duration)
 }
 
 var _ = fmt.Sprintf
+
+// SetManagedAgentActiveWorkflowState commits binding and old snooze retirement
+// together. Started continuations retain their unknown-outcome replay fences.
+func (s *Store) SetManagedAgentActiveWorkflowState(ctx context.Context, agentID string, stateID *string) error {
+	if stateID != nil && *stateID == "" {
+		stateID = nil
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := s.setManagedAgentActiveWorkflowStateTx(ctx, agentID, stateID); err != nil {
+			return err
+		}
+		return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
+	})
+}
+
+func (s *Store) SetManagedAgentActiveWorkflowWithVariables(ctx context.Context, agentID string, workflowID, stateID *string, vars map[string]string) error {
+	if stateID != nil && *stateID == "" {
+		stateID = nil
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := s.setManagedAgentActiveWorkflowWithVariablesTx(ctx, agentID, workflowID, stateID, vars); err != nil {
+			return err
+		}
+		return s.retireWorkflowSnoozeTx(ctx, agentID, stateID == nil)
+	})
+}
+
+func (s *Store) retireEmbeddedGoalSnoozeEvidenceTx(ctx context.Context, agentID string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_snooze_preferences SET active=0 WHERE agent_id=? AND active=1`, agentID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE embedded_goal_continuations SET state='invalidated',disposition='invalidated' WHERE agent_id=? AND state='reserved'`, agentID)
+	return err
+}
+
+func (s *Store) retireWorkflowSnoozeTx(ctx context.Context, agentID string, deactivate bool) error {
+	if err := s.retireEmbeddedGoalSnoozeEvidenceTx(ctx, agentID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET snoozed_until=NULL,next_wakeup_at=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,goal_enabled=CASE WHEN ? THEN 0 ELSE goal_enabled END,goal_text=CASE WHEN ? THEN '' ELSE goal_text END,settings_json=CASE WHEN ? THEN json_set(settings_json,'$.goal_lock_enabled',json('false')) ELSE settings_json END,updated_at=? WHERE agent_id=?`, deactivate, deactivate, deactivate, formatTimestamp(s.clock.Now()), agentID)
+	return err
+}

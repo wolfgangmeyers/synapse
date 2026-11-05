@@ -266,34 +266,6 @@ func parseRouterLogQuery(raw string) (RouterLogQuery, error) {
 	return result, nil
 }
 
-func RouterLogLines(data []byte) []RouterLogLine {
-	lines := make([]RouterLogLine, 0)
-	start := 0
-	for i, b := range data {
-		if b == '\n' {
-			lines = append(lines, RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(data[start:i])})
-			start = i + 1
-		}
-	}
-	if start < len(data) {
-		lines = append(lines, RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(data[start:])})
-	}
-	return lines
-}
-
-type RawRouterLogReader []byte
-
-func (r RawRouterLogReader) ReadRouterLog(_ context.Context, q RouterLogQuery) (RouterLogResponse, error) {
-	lines := make([]RouterLogLine, 0)
-	for _, match := range splitRawLFWithOffsets([]byte(r)) {
-		if !routerLogLineMatches(match.line, q) {
-			continue
-		}
-		lines = append(lines, RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(match.line)})
-	}
-	return RouterLogResponse{Status: "complete", Lines: lines}, nil
-}
-
 type configuredRouterLogReader struct {
 	path string
 	key  [32]byte
@@ -595,15 +567,6 @@ func openRouterLogFile(directory *os.File, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), filepath.Join(directory.Name(), name)), nil
 }
 
-func readBounded(path string, size int64) ([]byte, error) {
-	f, e := os.Open(path)
-	if e != nil {
-		return nil, e
-	}
-	defer f.Close()
-	return readBoundedFile(f, size)
-}
-
 var routerLogReadBufferPool = sync.Pool{
 	New: func() any { return []byte{} },
 }
@@ -683,14 +646,6 @@ func fileOrder(a, b logFile) bool {
 		return a.dev < b.dev
 	}
 	return a.ino < b.ino
-}
-func splitRawLF(data []byte) [][]byte {
-	out := splitRawLFWithOffsets(data)
-	lines := make([][]byte, len(out))
-	for i := range out {
-		lines[i] = out[i].line
-	}
-	return lines
 }
 func splitRawLFWithOffsets(data []byte) []routerLogMatch {
 	out := make([]routerLogMatch, 0)
@@ -773,9 +728,6 @@ func activeTail(fs []logFile) bool {
 	return false
 }
 
-func cursorForSnapshot(offset, length int, digest [32]byte, files []logFile, q RouterLogQuery) logCursor {
-	return cursorForSnapshotWithInventory(offset, length, digest, inventoryDigest(files), files, q)
-}
 func cursorForSnapshotWithInventory(offset, length int, digest, inventory [32]byte, files []logFile, q RouterLogQuery) logCursor {
 	c := logCursor{Version: 1, Digest: digest, InventoryDigest: inventory, Offset: uint32(offset), Length: uint32(length), Tail: activeTail(files), Expires: time.Now().Add(routerLogCursorTTL).UnixNano(), Query: q.Query, From: optional(q.From), To: optional(q.To)}
 	for _, f := range files {
@@ -787,9 +739,6 @@ func cursorForSnapshotWithInventory(offset, length int, digest, inventory [32]by
 		}
 	}
 	return c
-}
-func cursorForByteBoundary(m routerLogMatch, length int, digest [32]byte, files []logFile, q RouterLogQuery) logCursor {
-	return cursorForByteBoundaryWithInventory(m, length, digest, inventoryDigest(files), files, q)
 }
 func cursorForByteBoundaryWithInventory(m routerLogMatch, length int, digest, inventory [32]byte, files []logFile, q RouterLogQuery) logCursor {
 	c := cursorForSnapshotWithInventory(0, length, digest, inventory, files, q)

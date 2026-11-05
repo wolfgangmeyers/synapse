@@ -401,7 +401,7 @@ func openTestStoreWithOptions(t *testing.T, options Options) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "router.db")
 	if options.Migrations == nil {
-		if err := CloneTemplateDB(t, path); err == nil {
+		if err := cloneLocalTemplateDB(t, path); err == nil {
 			options.Migrations = []Migration{}
 		}
 	}
@@ -414,4 +414,25 @@ func openTestStoreWithOptions(t *testing.T, options Options) *Store {
 func execTestData(store *Store, query string, args ...interface{}) error {
 	_, err := store.db.Exec(query, args...)
 	return err
+}
+
+func TestReplacementConnectionRetainsDurabilityAndForeignKeys(t *testing.T) {
+	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "state?#.db"), Options{BusyTimeout: 2300 * time.Millisecond})
+	require.NoError(t, err)
+	defer s.Close()
+	_, err = s.db.Exec(`CREATE TABLE replacement_parent(id INTEGER PRIMARY KEY); CREATE TABLE replacement_child(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES replacement_parent(id) ON DELETE CASCADE); INSERT INTO replacement_parent VALUES(1); INSERT INTO replacement_child VALUES(1,1)`)
+	require.NoError(t, err)
+	s.db.SetMaxIdleConns(0) // deterministically discard the configured connection
+	var fk, syncMode, busy int
+	require.NoError(t, s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk))
+	require.NoError(t, s.db.QueryRow(`PRAGMA synchronous`).Scan(&syncMode))
+	require.NoError(t, s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busy))
+	require.Equal(t, 1, fk)
+	require.Equal(t, 2, syncMode)
+	require.Equal(t, 2300, busy)
+	_, err = s.db.Exec(`DELETE FROM replacement_parent WHERE id=1`)
+	require.NoError(t, err)
+	var children int
+	require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM replacement_child`).Scan(&children))
+	require.Zero(t, children)
 }

@@ -839,15 +839,6 @@ func (r *Router) renew(s *session, frame map[string]json.RawMessage) error {
 	}
 	return s.send(fields)
 }
-func (r *Router) findTarget(agent, instance string) *session {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	candidate := r.sessions[agent]
-	if candidate == nil || candidate.instanceID != instance {
-		return nil
-	}
-	return candidate
-}
 
 func (r *Router) findControlTarget(agent, instance string) (*session, string) {
 	r.mu.RLock()
@@ -1275,6 +1266,18 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 	if s.role != "user_interaction" {
 		return s.sendError("goal_control_not_allowed", frameString(frame, "frame_id"))
 	}
+	// Managed workers need not have a legacy WS session. Reject manual workflow
+	// mutation for the exact current managed session before legacy resolution;
+	// this does not create an embedded dispatch path or borrow a legacy lease.
+	action := frameString(frame, "action")
+	if action == "set" || action == "off" {
+		agent, err := r.store.ManagedAgent(context.Background(), frameString(frame, "target_agent_id"))
+		if err == nil && agent != nil && agent.PiSessionID != "" &&
+			agent.PiSessionID == frameString(frame, "target_instance_id") &&
+			(agent.ActiveWorkflowID != "" || agent.ActiveWorkflowStateID != "") {
+			return s.sendError("WORKFLOW_ACTIVE", frameString(frame, "frame_id"))
+		}
+	}
 	target, targetError := r.findControlTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
 	if targetError != "" {
 		return s.sendError(targetError, frameString(frame, "frame_id"))
@@ -1601,9 +1604,7 @@ func (r *Router) isClosed() bool {
 	defer r.mu.RUnlock()
 	return r.closed
 }
-func deliveryEnvelope(r *Router, s *session, message domain.Message) map[string]any {
-	return deliveryEnvelopeContext(context.Background(), r, s, message)
-}
+
 func deliveryEnvelopeContext(ctx context.Context, r *Router, s *session, message domain.Message) map[string]any {
 	value := map[string]any{"id": message.ID, "from": message.From, "to": message.To, "body": message.Body, "created_at": message.CreatedAt, "source": message.Source}
 	if message.Subject != nil {

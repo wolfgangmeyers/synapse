@@ -6,7 +6,6 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/agent"
-	"github.com/sky-valley/pi/coding"
 )
 
 // The binding includes the agent, session, epoch, runtime generation and owner
@@ -35,7 +34,7 @@ func (p *embeddedPersistence) checkClaimedWake(ctx context.Context, scope embedd
 
 // Exactly one SDK run owns this persistence instance. Final append is checked
 // at BeforeMessageEnd; completion follows only after the serial SDK run returns.
-func (p *embeddedPersistence) runClaimedWake(ctx context.Context, session *coding.Session, scope embeddedClaimedWakeScope, prompts []agent.AgentMessage) error {
+func (p *embeddedPersistence) runClaimedWake(ctx context.Context, session embeddedRuntime, scope embeddedClaimedWakeScope, prompts []agent.AgentMessage, beforeComplete func() error) error {
 	if err := p.checkClaimedWake(ctx, scope); err != nil {
 		return err
 	}
@@ -55,6 +54,11 @@ func (p *embeddedPersistence) runClaimedWake(ctx context.Context, session *codin
 	}
 	if p.wakeFinal == nil {
 		return errors.New("claimed wake SDK run has no checked final")
+	}
+	if beforeComplete != nil {
+		if err := beforeComplete(); err != nil {
+			return err
+		}
 	}
 	return p.db.CompleteEmbeddedRestartWake(ctx, scope.binding, scope.processGeneration, scope.id, p.wakeFinal.Sequence, p.wakeFinal.Digest)
 }

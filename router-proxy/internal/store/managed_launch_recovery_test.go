@@ -19,7 +19,7 @@ func TestSubagentPrefixRootAgentSnapshotAndListing(t *testing.T) {
 		Name:              rootName,
 		SlotHeld:          true,
 		Cwd:               "/tmp",
-		SelectedModel:     ManagedModel{Provider: "antigravity", ID: "gemini-3.8-flash"},
+		SelectedModel:     ManagedModel{Provider: "google-vertex", ID: "gemini-3.8-flash"},
 		DesiredState:      "running",
 		LifecycleState:    "running",
 		ActivityState:     "idle",

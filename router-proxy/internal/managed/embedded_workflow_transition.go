@@ -171,6 +171,7 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if err := m.store.SetManagedAgentActiveWorkflowState(ctx, owner.binding.AgentID, &targetState.ID); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to transition workflow state: %w", err)
 				}
+				m.retireEmbeddedGoalTimer(owner.binding.AgentID)
 				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
 
 				// On state transition: do NOT wipe, rewrite, or deactivate the goal.
@@ -231,16 +232,8 @@ func (m *Manager) embeddedWorkflowTransitionTool(owner embeddedOwner, toolName s
 				if err := m.store.SetManagedAgentActiveWorkflowWithVariables(ctx, owner.binding.AgentID, nil, nil, nil); err != nil {
 					return agent.AgentToolResult{}, fmt.Errorf("failed to exit workflow state: %w", err)
 				}
+				m.retireEmbeddedGoalTimer(owner.binding.AgentID)
 				_ = m.SyncEmbeddedWorkflowTools(ctx, owner.binding.AgentID)
-
-				// Deactivate goal on exit
-				goalSettings := store.DefaultManagedGoalSettings()
-				goalSettings.GoalLockEnabled = false
-				_, _ = m.store.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{
-					Enabled:  false,
-					Goal:     "",
-					Settings: goalSettings,
-				})
 
 				// Record history presentation
 				eventKey := fmt.Sprintf("workflow-exit:%s:%s:%s", owner.binding.AgentID, currentState.ID, id)
@@ -307,9 +300,9 @@ func isSystemEscapeTool(toolName string) bool {
 }
 
 // filterToolsForAgent filters baseTools based on:
-// 1. If an active workflow state with AllowedTools exists, filter baseTools using store.IsToolAllowedInWorkflowState.
-// 2. Otherwise, fetch agent tools from store.GetAgentTools(ctx, agentID), and filter baseTools to include only tools
-//    where tool.Enabled == true, or system escape tools (workflow transition, mailbox replies, timeouts).
+//  1. If an active workflow state with AllowedTools exists, filter baseTools using store.IsToolAllowedInWorkflowState.
+//  2. Otherwise, fetch agent tools from store.GetAgentTools(ctx, agentID), and filter baseTools to include only tools
+//     where tool.Enabled == true, or system escape tools (workflow transition, mailbox replies, timeouts).
 func (m *Manager) filterToolsForAgent(ctx context.Context, agentID string, baseTools []agent.AgentTool) ([]agent.AgentTool, error) {
 	if m == nil || len(baseTools) == 0 {
 		return baseTools, nil
@@ -389,9 +382,7 @@ func (m *Manager) SyncEmbeddedAgentTools(ctx context.Context, agentID string) er
 	session := lane.activeSession
 	lane.activeMu.Unlock()
 
-	if session != nil && session.Agent != nil {
-		session.Agent.SetTools(filteredTools)
-	}
+	refreshPiEmbeddedTools(session, filteredTools)
 
 	return nil
 }

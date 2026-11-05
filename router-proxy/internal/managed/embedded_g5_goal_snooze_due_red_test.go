@@ -43,6 +43,10 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	finalEntered := make(chan struct{}, 1)
 	neutral := make(chan struct{}, 1)
 	continuation := make(chan struct{}, 2)
+	continuationRelease := make(chan struct{})
+	var continuationReleaseOnce sync.Once
+	unblockContinuation := func() { continuationReleaseOnce.Do(func() { close(continuationRelease) }) }
+	defer unblockContinuation()
 	coldNeutral := make(chan struct{}, 1)
 	assertPrompt := func(h ai.TranscriptContext, text, stage string) {
 		var latest ai.UserMessage
@@ -54,16 +58,6 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 		actual, err := json.Marshal(latest.Content)
 		expected, expectedErr := json.Marshal(ai.ContentList{ai.TextContent{Text: text}})
 		matches := err == nil && expectedErr == nil && bytes.Equal(actual, expected)
-		if !matches && text == "Continue working on the current goal." {
-			if strings.HasPrefix(ai.ContentText(latest.Content), "NOT_DONE: Continue ") || strings.HasPrefix(ai.ContentText(latest.Content), "NOT_DONE: ") {
-				matches = true
-			}
-		}
-		if !matches && text == "Continue working from your saved context." {
-			if strings.Contains(ai.ContentText(latest.Content), "interrupted") {
-				matches = true
-			}
-		}
 		if !matches {
 			transcript, transcriptErr := json.Marshal(h)
 			t.Logf("unexpected SDK prompt stage=%s expected=%q actual_content=%s content_error=%v expected_error=%v transcript=%s transcript_error=%v", stage, text, actual, err, expectedErr, transcript, transcriptErr)
@@ -116,19 +110,20 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "initial due final"}}, ai.StopStop)
 		},
 		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			assertPrompt(h, "Continue working from your saved context.", "first-cold-neutral")
+			assertPrompt(h, "The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context.", "first-cold-neutral")
 			starts.Add(1)
 			neutral <- struct{}{}
 			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "neutral awareness final"}}, ai.StopStop)
 		},
 		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			assertPrompt(h, "Continue working on the current goal.", "original-key-due-continuation")
+			assertPrompt(h, "NOT_DONE: Review finish due goal and take the next concrete action now.\nVERDICT: NOT_DONE\nREASON: more work remains", "original-key-due-continuation")
 			starts.Add(1)
 			continuation <- struct{}{}
+			<-continuationRelease
 			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "one due continuation"}}, ai.StopStop)
 		},
 		func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-			assertPrompt(h, "Continue working from your saved context.", "cold-UNKNOWN-neutral")
+			assertPrompt(h, "The addressed turn non-mail was interrupted. Its provider or tool outcome may be unknown. Do not replay the interrupted turn or any uncertain effect; continue only with new work.", "cold-UNKNOWN-interrupted")
 			starts.Add(1)
 			coldNeutral <- struct{}{}
 			return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "cold UNKNOWN neutral awareness final"}}, ai.StopStop)
@@ -152,7 +147,7 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	m := newManager(db)
 	setEmbeddedRecoveryGeneration(t, ctx, db, m)
 	// Close can wait on the blocked provider even after require.FailNow.
-	defer func() { unblock(); _ = m.Close(ctx); _ = db.Close() }()
+	defer func() { unblock(); unblockContinuation(); _ = m.Close(ctx); _ = db.Close() }()
 	launched, err := m.LaunchEmbeddedRoot(ctx, LaunchRequest{Name: agentID, Cwd: root, Runtime: "embedded", Model: &Model{Provider: "openai-codex", ID: "gpt-5.6-terra"}, InitialInstruction: "set and snooze goal", RequestID: "a5555555-5555-4555-8555-555555555593"})
 	require.NoError(t, err)
 	b := store.EmbeddedBinding{AgentID: launched.Agent.AgentID, SessionID: launched.Agent.PiSessionID, Epoch: launched.Agent.SessionEpoch, Generation: launched.Agent.RuntimeGeneration}
@@ -181,10 +176,9 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	require.EqualValues(t, 1, revision)
 	require.NotEmpty(t, userDigest)
 	require.Equal(t, clock.Now().Add(time.Second).Format("2006-01-02T15:04:05.000Z"), preferenceDue)
-	// Move the Store clock before the verdict. The due assertion must use the
-	// commit clock, not a stale preference timestamp or wall-clock timer.
+	// Move the Store clock before the verdict. Settlement must preserve the
+	// tool-call deadline, never restart the duration at verdict commit.
 	require.NoError(t, clock.Advance(250*time.Millisecond))
-	commitNow := clock.Now()
 	unblock()
 	var finalSeq int64
 	var finalDigest string
@@ -210,7 +204,7 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	err = ro.QueryRowContext(ctx, `SELECT count(*),max(due_at),max(state),max(disposition) FROM embedded_goal_continuations WHERE agent_id=? AND session_id=? AND epoch=? AND generation=? AND user_seq=? AND user_digest=? AND goal_revision=?`, b.AgentID, b.SessionID, b.Epoch, b.Generation, userSeq, userDigest, revision).Scan(&count, &due, &state, &disposition)
 	require.NoError(t, err, "G5/T6 RED: keyed 069 reservation lacks atomic due_at")
 	require.Equal(t, 1, count, "snooze must not create a second reservation")
-	require.Equal(t, commitNow.Add(time.Second).Format("2006-01-02T15:04:05.000Z"), due, "due must derive from injected Store clock at verdict commit")
+	require.Equal(t, preferenceDue, due, "verdict must preserve saved call-clock D, not settlement plus duration")
 	require.Equal(t, "reserved", state)
 	require.Equal(t, "pending", disposition)
 	require.EqualValues(t, 3, starts.Load(), "provider must not start early")
@@ -253,10 +247,10 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	var neutralFinalSeq int64
 	var neutralFinalDigest string
 	require.Eventually(t, func() bool {
-		return ro.QueryRowContext(ctx, `SELECT f.seq,f.digest FROM embedded_restart_wake_slots w JOIN embedded_sessions s ON s.agent_id=w.agent_id AND s.session_id=w.session_id AND s.epoch=w.epoch AND s.generation=w.runtime_generation JOIN embedded_restart_wake_checked_origins o ON o.agent_id=w.agent_id AND o.slot=w.slot AND o.wake_id=w.wake_id AND o.process_generation=w.process_generation AND o.claim_owner_token=w.claim_owner_token JOIN embedded_entries f ON f.agent_id=o.agent_id AND f.session_id=o.session_id AND f.epoch=o.epoch AND f.generation=o.runtime_generation AND f.seq=o.seq JOIN embedded_entries u ON u.agent_id=f.agent_id AND u.session_id=f.session_id AND u.epoch=f.epoch AND u.generation=f.generation AND u.seq=f.seq-1 JOIN embedded_nonmail_provider_entries p ON p.agent_id=u.agent_id AND p.session_id=u.session_id AND p.epoch=u.epoch AND p.generation=u.generation AND p.user_seq=u.seq AND p.user_digest=u.digest WHERE w.agent_id=? AND w.session_id=? AND w.epoch=? AND w.runtime_generation=? AND s.current=1 AND w.slot='current' AND w.kind='root-idle' AND w.state='checked-complete' AND w.notice_id IS NULL AND w.process_generation=(SELECT generation FROM embedded_process_generation_counter WHERE singleton=1) AND w.claim_owner_token=s.owner_token AND w.digest=? AND f.seq=? AND f.kind='assistant' AND json_extract(f.body,'$.stopReason')='stop' AND json_extract(f.body,'$.content[0].text')='neutral awareness final' AND u.kind='user' AND json_extract(u.body,'$.content[0].text')='Continue working from your saved context.'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, finalDigest, finalSeq+2).Scan(&neutralFinalSeq, &neutralFinalDigest) == nil
+		return ro.QueryRowContext(ctx, `SELECT f.seq,f.digest FROM embedded_restart_wake_slots w JOIN embedded_sessions s ON s.agent_id=w.agent_id AND s.session_id=w.session_id AND s.epoch=w.epoch AND s.generation=w.runtime_generation JOIN embedded_restart_wake_checked_origins o ON o.agent_id=w.agent_id AND o.slot=w.slot AND o.wake_id=w.wake_id AND o.process_generation=w.process_generation AND o.claim_owner_token=w.claim_owner_token JOIN embedded_entries f ON f.agent_id=o.agent_id AND f.session_id=o.session_id AND f.epoch=o.epoch AND f.generation=o.runtime_generation AND f.seq=o.seq JOIN embedded_entries u ON u.agent_id=f.agent_id AND u.session_id=f.session_id AND u.epoch=f.epoch AND u.generation=f.generation AND u.seq=f.seq-1 JOIN embedded_nonmail_provider_entries p ON p.agent_id=u.agent_id AND p.session_id=u.session_id AND p.epoch=u.epoch AND p.generation=u.generation AND p.user_seq=u.seq AND p.user_digest=u.digest WHERE w.agent_id=? AND w.session_id=? AND w.epoch=? AND w.runtime_generation=? AND s.current=1 AND w.slot='current' AND w.kind='root-idle' AND w.state='checked-complete' AND w.notice_id IS NULL AND w.process_generation=(SELECT generation FROM embedded_process_generation_counter WHERE singleton=1) AND w.claim_owner_token=s.owner_token AND w.digest=? AND f.seq=? AND f.kind='assistant' AND json_extract(f.body,'$.stopReason')='stop' AND json_extract(f.body,'$.content[0].text')='neutral awareness final' AND u.kind='user' AND json_extract(u.body,'$.content[0].text')='The mailbox router was restarted. Your session was restored from saved context. Continue working from your saved context.'`, b.AgentID, b.SessionID, b.Epoch, b.Generation, finalDigest, finalSeq+2).Scan(&neutralFinalSeq, &neutralFinalDigest) == nil
 	}, 3*time.Second, 10*time.Millisecond, "setup failure: neutral wake lacks exact checked owner/process/predecessor fence")
 	require.NotEqual(t, finalDigest, neutralFinalDigest)
-	require.NoError(t, clock.Advance(999*time.Millisecond))
+	require.NoError(t, clock.Advance(749*time.Millisecond))
 	snapshotAt := func(stage string) {
 		t.Logf("snapshot stage=%s neutral_final_seq=%d neutral_final_digest=%s", stage, neutralFinalSeq, neutralFinalDigest)
 		t.Logf("saved evaluation key agent=%s session=%s epoch=%d generation=%s user_seq=%d user_digest=%s revision=%d final_seq=%d final_digest=%s clock=%s", b.AgentID, b.SessionID, b.Epoch, b.Generation, userSeq, userDigest, revision, finalSeq, finalDigest, clock.Now().Format("2006-01-02T15:04:05.000Z"))
@@ -344,7 +338,13 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	require.Equal(t, "unknown", startedDisposition)
 	require.True(t, startedAt.Valid)
 	require.Equal(t, due, startedAt.String, "start authority must use the original due boundary")
-	require.NoError(t, m.Close(ctx))
+	// Hold the entered provider until shutdown cancellation. This deliberately
+	// leaves an interrupted UNKNOWN, not a race between idle and interruption.
+	closed := make(chan error, 1)
+	go func() { closed <- m.Close(ctx) }()
+	<-m.runCtx.Done()
+	unblockContinuation()
+	require.NoError(t, <-closed)
 	require.NoError(t, db.Close())
 	// A started UNKNOWN is evidence, never a replay token.
 	require.NoError(t, clock.Advance(embeddedOwnerTTL+time.Second))
@@ -357,14 +357,14 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 	select {
 	case <-coldNeutral:
 	case <-time.After(3 * time.Second):
-		t.Fatal("cold UNKNOWN reopen did not enter the exact saved-context awareness callback")
+		t.Fatal("cold UNKNOWN reopen did not enter the exact interrupted-notice callback")
 	}
 	// The extra callback is authorized only as the current process's checked
-	// idle wake. It is not another goal continuation or an arbitrary provider.
+	// interrupted notice. It is not another goal continuation or an arbitrary provider.
 	require.Eventually(t, func() bool {
 		var count int
-		return ro.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_slots w JOIN embedded_sessions s ON s.agent_id=w.agent_id AND s.session_id=w.session_id AND s.epoch=w.epoch AND s.generation=w.runtime_generation AND s.owner_token=w.claim_owner_token AND s.current=1 JOIN embedded_process_generation_counter g ON g.singleton=1 AND g.generation=w.process_generation JOIN embedded_restart_wake_checked_origins o ON o.agent_id=w.agent_id AND o.slot=w.slot AND o.session_id=w.session_id AND o.epoch=w.epoch AND o.runtime_generation=w.runtime_generation AND o.wake_id=w.wake_id AND o.process_generation=w.process_generation AND o.claim_owner_token=w.claim_owner_token JOIN embedded_entries f ON f.agent_id=o.agent_id AND f.session_id=o.session_id AND f.epoch=o.epoch AND f.generation=o.runtime_generation AND f.seq=o.seq JOIN embedded_entries u ON u.agent_id=f.agent_id AND u.session_id=f.session_id AND u.epoch=f.epoch AND u.seq=f.seq-1 AND f.parent_digest=u.digest JOIN embedded_nonmail_provider_entries p ON p.agent_id=u.agent_id AND p.session_id=u.session_id AND p.epoch=u.epoch AND p.generation=u.generation AND p.user_seq=u.seq AND p.user_digest=u.digest WHERE w.agent_id=? AND w.slot='current' AND w.kind='root-idle' AND w.notice_id IS NULL AND w.state='checked-complete' AND u.kind='user' AND f.kind='assistant' AND json_extract(u.body,'$.content[0].text')='Continue working from your saved context.' AND json_extract(f.body,'$.content[0].text')='cold UNKNOWN neutral awareness final' AND json_extract(f.body,'$.stopReason')='stop'`, b.AgentID).Scan(&count) == nil && count == 1
-	}, 3*time.Second, 10*time.Millisecond, "cold callback lacks exact current checked idle-wake authority")
+		return ro.QueryRowContext(ctx, `SELECT count(*) FROM embedded_restart_wake_slots w JOIN embedded_sessions s ON s.agent_id=w.agent_id AND s.session_id=w.session_id AND s.epoch=w.epoch AND s.generation=w.runtime_generation AND s.owner_token=w.claim_owner_token AND s.current=1 JOIN embedded_process_generation_counter g ON g.singleton=1 AND g.generation=w.process_generation JOIN embedded_restart_wake_checked_origins o ON o.agent_id=w.agent_id AND o.slot=w.slot AND o.session_id=w.session_id AND o.epoch=w.epoch AND o.runtime_generation=w.runtime_generation AND o.wake_id=w.wake_id AND o.process_generation=w.process_generation AND o.claim_owner_token=w.claim_owner_token JOIN embedded_entries f ON f.agent_id=o.agent_id AND f.session_id=o.session_id AND f.epoch=o.epoch AND f.generation=o.runtime_generation AND f.seq=o.seq JOIN embedded_entries u ON u.agent_id=f.agent_id AND u.session_id=f.session_id AND u.epoch=f.epoch AND u.seq=f.seq-1 AND f.parent_digest=u.digest JOIN embedded_nonmail_provider_entries p ON p.agent_id=u.agent_id AND p.session_id=u.session_id AND p.epoch=u.epoch AND p.generation=u.generation AND p.user_seq=u.seq AND p.user_digest=u.digest JOIN embedded_interrupted_notices n ON n.agent_id=w.agent_id AND n.session_id=w.session_id AND n.epoch=w.epoch AND n.generation=w.runtime_generation AND n.notice_id=w.notice_id AND n.notice_id=w.wake_id AND n.entry_seq=u.seq AND n.start_owner_token=w.claim_owner_token WHERE w.agent_id=? AND n.source_seq=? AND n.state='started' AND w.digest=u.digest AND w.slot='current' AND w.kind='interrupted' AND w.state='checked-complete' AND u.kind='user' AND f.kind='assistant' AND json_extract(u.body,'$.content[0].text')=n.notice_text AND n.notice_text='The addressed turn non-mail was interrupted. Its provider or tool outcome may be unknown. Do not replay the interrupted turn or any uncertain effect; continue only with new work.' AND json_extract(f.body,'$.content[0].text')='cold UNKNOWN neutral awareness final' AND json_extract(f.body,'$.stopReason')='stop'`, b.AgentID, neutralFinalSeq+1).Scan(&count) == nil && count == 1
+	}, 3*time.Second, 10*time.Millisecond, "cold callback lacks exact current checked interrupted-notice authority")
 	require.EqualValues(t, 6, starts.Load(), "only one separately authorized cold awareness may follow started UNKNOWN")
 	require.EqualValues(t, 1, evaluations.Load(), "cold awareness cannot reevaluate the original key")
 	var evaluationCount, originalKeyCount int

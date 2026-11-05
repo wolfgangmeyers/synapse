@@ -59,6 +59,11 @@ export function thumbnailCacheKey(
 }
 
 export const cacheKeyForAttachment = thumbnailCacheKey;
+export function attachmentCacheIdentity(attachment: { id?: string; url?: string }, index: number): string | number {
+  if (attachment.id) return attachment.id;
+  const match = attachment.url?.match(/\/v1\/attachments\/([^/?#]+)/);
+  return match?.[1] ?? index;
+}
 
 const persistenceInitializations = new WeakMap<IndexedDbFactory, Map<StorageAdapter | undefined, Promise<void>>>();
 

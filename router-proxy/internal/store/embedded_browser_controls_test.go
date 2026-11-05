@@ -94,3 +94,29 @@ func TestEmbeddedBrowserControlsRejectStaleOwnerAndPolicyCAS(t *testing.T) {
 	_, err = s.UpdateEmbeddedBrowserGoal(ctx, b, ManagedGoalConfig{Enabled: true, Goal: "old session", Settings: DefaultManagedGoalSettings()}, nil, browserGoalResponse)
 	require.Error(t, err)
 }
+
+func TestEmbeddedBrowserGoalWorkflowBindingTransactionDenial(t *testing.T) {
+	s, b, _ := browserStoreFixture(t)
+	ctx := context.Background()
+	before, err := s.ManagedGoalPolicyFor(ctx, b.AgentID)
+	require.NoError(t, err)
+	// Simulate workflow activation after the manager's read but before store admission.
+	wf, err := s.CreateWorkflow(ctx, WorkflowRequest{Name: "locked"})
+	require.NoError(t, err)
+	st, err := s.CreateWorkflowState(ctx, WorkflowStateRequest{Name: "active", WorkflowID: &wf.ID})
+	require.NoError(t, err)
+	require.NoError(t, s.SetManagedAgentActiveWorkflowWithVariables(ctx, b.AgentID, &wf.ID, &st.ID, nil))
+	for _, enabled := range []bool{false, true} {
+		_, err = s.UpdateEmbeddedBrowserGoal(ctx, b, ManagedGoalConfig{Enabled: enabled, Goal: "replacement", Settings: DefaultManagedGoalSettings()}, nil, browserGoalResponse, before.DesiredRevision)
+		require.ErrorContains(t, err, "workflow")
+	}
+	after, err := s.ManagedGoalPolicyFor(ctx, b.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, before.Config, after.Config)
+	require.Equal(t, before.DesiredRevision, after.DesiredRevision)
+	stale := b
+	stale.Epoch++
+	_, err = s.UpdateEmbeddedBrowserGoal(ctx, stale, ManagedGoalConfig{Settings: DefaultManagedGoalSettings()}, nil, browserGoalResponse)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "workflow")
+}

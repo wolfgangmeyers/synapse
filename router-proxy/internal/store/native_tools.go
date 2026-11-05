@@ -28,8 +28,8 @@ var NativeToolCatalog = []NativeToolDef{
 	{ToolName: "list_subagents", Category: "Subagent Lifecycle", Description: "List background subagents launched by this agent", DefaultEnabled: true},
 
 	// Messaging & Routing
+	{ToolName: "mecha_agent_urgency", Category: "Messaging & Routing", Description: "Set explicit attention metadata, not priority or blocked state", DefaultEnabled: true},
 	{ToolName: "mecha_mailbox_send", Category: "Messaging & Routing", Description: "Queue an independently addressed mailbox message", DefaultEnabled: true},
-	{ToolName: "mecha_worker", Category: "Messaging & Routing", Description: "Launch or send mail to independent embedded workers", DefaultEnabled: true},
 	{ToolName: "mecha_worker_terminate", Category: "Messaging & Routing", Description: "Terminate self and optionally remove assigned worktree", DefaultEnabled: true},
 	{ToolName: "mecha_reminder", Category: "Messaging & Routing", Description: "Create, list, update or delete reminders", DefaultEnabled: true},
 	{ToolName: "mecha_send_image", Category: "Messaging & Routing", Description: "Send an image to the user or another recipient", DefaultEnabled: true},
@@ -37,6 +37,7 @@ var NativeToolCatalog = []NativeToolDef{
 	// Workflow Management
 	{ToolName: "goal", Category: "Workflow Management", Description: "Set, inspect or turn off goal", DefaultEnabled: true},
 	{ToolName: "goal_snooze", Category: "Workflow Management", Description: "Set a delay preference for current goal", DefaultEnabled: true},
+	{ToolName: "workflow_snooze", Category: "Workflow Management", Description: "Set a delay preference for active workflow continuation", DefaultEnabled: true},
 	{ToolName: "scratchpad", Category: "Workflow Management", Description: "Persistent scratchpad memory for notes and milestones", DefaultEnabled: true},
 	{ToolName: "mecha_progress", Category: "Workflow Management", Description: "Track and report measurable task progress", DefaultEnabled: true},
 	{ToolName: "mecha_blocked", Category: "Execution Control", Description: "Set or clear blocked execution state when external assistance is required", DefaultEnabled: true},

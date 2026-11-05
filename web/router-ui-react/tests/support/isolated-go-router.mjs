@@ -16,17 +16,6 @@ export const EXPECTED_GOAL_MIGRATIONS = Object.freeze([
 ]);
 export const EXPECTED_CAPABILITIES = Object.freeze(["goal_control_v1", "subagent_lifecycle_v2"]);
 export const FIXTURE_TIME = "2030-01-01T00:00:00.000Z";
-export const PROMPT_EXPORT_TEST_ID = "prompt-export";
-export const CLIPBOARD_PASTE_TEST_ID = "clipboard-paste-target";
-
-export const LIVE_ROUTER_FINGERPRINT_DESIGN = Object.freeze({
-  timing: "capture immediately before and after the task",
-  inputs: Object.freeze(["router database files", "router JSONL event log", "attachment directory contents", "connected-agent snapshot"]),
-  mode: "read-only; no startup, mutation, or socket connection",
-  attribution: "compare task process IDs, working directories, arguments, and listeners before assigning a change",
-  missingRouter: "record unavailable as an environment condition",
-});
-
 export async function createTaskRoot(prefix = "router-test") {
   const root = await mkdtemp(join(tmpdir(), `mecha-${prefix}-`));
   await chmod(root, 0o700);
@@ -76,7 +65,7 @@ function pathInside(root, candidate) {
   return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`);
 }
 
-export function assertTaskPath(root, candidate, label) {
+function assertTaskPath(root, candidate, label) {
   if (!pathInside(root, candidate)) throw new Error(`${label} must be inside the task temporary root`);
   return resolve(candidate);
 }
@@ -363,12 +352,6 @@ export async function fingerprintTaskResources(router) {
   return { rootPath: router.rootPath, attachmentsDirectory, files };
 }
 
-export function compareLiveFingerprints(before, after) {
-  const beforeValue = JSON.stringify(before);
-  const afterValue = JSON.stringify(after);
-  return { unchanged: beforeValue === afterValue, changed: beforeValue !== afterValue };
-}
-
 export function fixturePeerAgent(overrides = {}) {
   return {
     agent_id: overrides.agent_id ?? "fixture-peer",
@@ -399,59 +382,5 @@ export function fixtureGoalSettings() {
     snooze_budget_cap_ms: 120_000,
     snooze_refill_yield_ms: 2_000,
     snooze_refill_elapsed_ms: 3_000,
-  };
-}
-
-export function fixtureModelCatalog() {
-  return { current_model: { provider: "fixture-provider", id: "fixture-model" }, model_summaries: [{ provider: "fixture-provider", id: "fixture-model", label: "Fixture model" }], total_count: 1, truncated: false };
-}
-
-export function fixtureActivity() {
-  return { activity_state: "working", subagent_count: 1, subagents: [{ id: "fixture-subagent", description: "Fixture worker", status: "running" }], generated_at: FIXTURE_TIME };
-}
-
-export function fixtureLifecycle() {
-  return { router_version: 1, agents: [{ id: "fixture-subagent", type: "worker", status: "running", description: "Fixture worker" }] };
-}
-
-export function fixtureReminder() {
-  return { id: "fixture-reminder", agent_id: "fixture-peer", body: "Fixture reminder", due_at: "2030-01-01T00:05:00.000Z", recurrence: null, status: "scheduled" };
-}
-
-export function fixtureDeliveryItem(id = "fixture-message", attempt_number = 1) {
-  return { message_id: id, message_incarnation_id: `00000000-0000-4000-8000-${String(attempt_number).padStart(12, "0")}`, attempt_number, delivery_expires_at: "2030-01-01T00:01:00.000Z" };
-}
-
-export function fixtureArrival() {
-  return { agent_id: "fixture-peer", from: "fixture-sender", subject: "Fixture arrival", preview: "Fixture preview", body: "Fixture arrival body", created_at: FIXTURE_TIME, message_id: "fixture-arrival" };
-}
-
-export function fixtureImage() {
-  return { type: "image", name: "fixture.png", data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" };
-}
-
-export function fixturePromptTemplate(overrides = {}) {
-  return { id: "fixture-prompt", name: "Fixture prompt", body: "Review ${file}", ...overrides };
-}
-
-export function fixtureClipboardImage() {
-  return { name: "clipboard.png", mimeType: "image/png", dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" };
-}
-
-export function createFixtureData(overrides = {}) {
-  return {
-    peer: fixturePeerAgent(),
-    catalog: fixtureModelCatalog(),
-    activity: fixtureActivity(),
-    lifecycle: fixtureLifecycle(),
-    goal: { enabled: true, goal: "Fixture goal", ...fixtureGoalSettings(), outcome_counts: { COMPLETED: 1, NOT_DONE: 0 } },
-    reminder: fixtureReminder(),
-    conversation: [fixtureMessage("fixture-message", "fixture-peer")],
-    delivery: fixtureDeliveryItem(),
-    arrival: fixtureArrival(),
-    image: fixtureImage(),
-    promptTemplates: [fixturePromptTemplate()],
-    clipboardImage: fixtureClipboardImage(),
-    ...overrides,
   };
 }

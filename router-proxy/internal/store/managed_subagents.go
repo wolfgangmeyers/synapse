@@ -153,12 +153,23 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 			return fmt.Errorf("subagent parent must be a top-level managed agent: %w", err)
 		}
 		if provider == "" {
-			provider = "antigravity"
+			provider = "google-vertex"
 		}
 		if model == "" {
 			model = "gemini-3.8-flash"
 		}
+		if !validManagedProvider(provider) {
+			return errors.New("subagent model provider is unavailable")
+		}
 		now := formatTimestamp(s.clock.Now())
+		// Match root admission: establish the shared exact-ID identity without
+		// resetting active urgency, and start a retired lifetime non-urgent.
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES (?,?) ON CONFLICT(agent_id) DO NOTHING`, child.AgentID, now); err != nil {
+			return err
+		}
+		if err := reactivateAgentIdentityTx(ctx, s.db, child.AgentID); err != nil {
+			return err
+		}
 		hasParent, colErr := managedAgentColumnTx(ctx, s.db, "parent_agent_id")
 		if colErr != nil {
 			return colErr

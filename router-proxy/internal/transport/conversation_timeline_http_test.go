@@ -27,9 +27,9 @@ func TestConversationTimelineHTTP(t *testing.T) {
 	require.Equal(t, 200, w.Code)
 
 	var resp struct {
-		AgentID       string                          `json:"agent_id"`
+		AgentID       string                            `json:"agent_id"`
 		Events        []store.ConversationTimelineEvent `json:"events"`
-		NextBeforeSeq *int64                          `json:"next_before_seq"`
+		NextBeforeSeq *int64                            `json:"next_before_seq"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, agentID, resp.AgentID)
@@ -71,4 +71,35 @@ func TestConversationTimelineHTTP(t *testing.T) {
 	require.Len(t, resp.Events, 1)
 	require.Nil(t, resp.NextBeforeSeq)
 	require.Equal(t, int64(1), resp.Events[0].Seq)
+}
+
+func TestConversationTimelineEventBoundary(t *testing.T) {
+	router, st, _ := newUILiveTestRouter(t)
+	ctx := httptest.NewRequest(http.MethodGet, "/", nil).Context()
+	for _, id := range []string{"one", "two", "three", "four"} {
+		_, err := st.RecordConversationTimelineTx(ctx, id, "alpha", "message", nil, nil, nil, 1)
+		require.NoError(t, err)
+	}
+	get := func(query string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/conversation?"+query, nil))
+		return w
+	}
+	w := get("agent_id=alpha&before_event_id=four&limit=2")
+	require.Equal(t, 200, w.Code)
+	var result struct {
+		Events []store.ConversationTimelineEvent `json:"events"`
+		Next   *int64                            `json:"next_before_seq"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+	require.Equal(t, []string{"two", "three"}, []string{result.Events[0].ID, result.Events[1].ID})
+	require.EqualValues(t, 2, *result.Next)
+	for _, query := range []string{"before_event_id=four", "agent_id=alpha&before_event_id=four&before_seq=2", "agent_id=alpha&before_event_id="} {
+		require.Equal(t, 400, get(query).Code)
+	}
+	for _, query := range []string{"agent_id=alpha&before_event_id=absent", "agent_id=other&before_event_id=four"} {
+		w := get(query)
+		require.Equal(t, 409, w.Code)
+		require.Contains(t, w.Body.String(), "timeline_boundary_not_found")
+	}
 }

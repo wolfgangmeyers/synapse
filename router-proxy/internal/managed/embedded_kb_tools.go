@@ -21,9 +21,8 @@ import (
 // Priority:
 // 1. MECHA_KB_DIR env var if set and non-empty.
 // 2. ~/.mecha-developer/kb/ if it exists.
-// 3. ~/.mecha-wolfgang/kb/ if it exists.
-// 4. ~/.mecha/kb/ if it exists.
-// 5. Default to ~/.mecha-developer/kb/ (will be created if needed on write).
+// 3. ~/.mecha/kb/ if it exists.
+// 4. Default to ~/.mecha-developer/kb/ (will be created if needed on write).
 func ResolveKBRoot() string {
 	if custom := strings.TrimSpace(os.Getenv("MECHA_KB_DIR")); custom != "" {
 		return filepath.Clean(custom)
@@ -40,11 +39,6 @@ func ResolveKBRoot() string {
 	primary := filepath.Join(home, ".mecha-developer", "kb")
 	if info, err := os.Stat(primary); err == nil && info.IsDir() {
 		return primary
-	}
-
-	wolfgangKB := filepath.Join(home, ".mecha-wolfgang", "kb")
-	if info, err := os.Stat(wolfgangKB); err == nil && info.IsDir() {
-		return wolfgangKB
 	}
 
 	fallback := filepath.Join(home, ".mecha", "kb")

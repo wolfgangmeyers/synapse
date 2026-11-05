@@ -280,7 +280,6 @@ func managedModelSummary(value map[string]any) string {
 		"google":        "Google",
 		"cursor":        "Cursor",
 		"google-vertex": "Google Vertex AI",
-		"antigravity":   "Google Antigravity",
 	}[provider]
 	if label == "" {
 		label = "Selected model"
@@ -509,6 +508,27 @@ func (h *uiLiveHub) publishHistory(view string, raw map[string]any) {
 	for _, peer := range peers {
 		if !peer.send(frame) {
 			h.unsubscribe(peer)
+		}
+	}
+}
+
+// publishAgentUrgencyChanged reuses UI-live peers for common logical-identity
+// metadata, including tmux identities absent from the managed projection.
+func (h *uiLiveHub) publishAgentUrgencyChanged(frame map[string]any) {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	peers := make([]*uiLiveClient, 0, len(h.peers))
+	for peer := range h.peers {
+		peers = append(peers, peer)
+	}
+	h.mu.Unlock()
+	for _, peer := range peers {
+		if !peer.send(frame) {
+			h.unsubscribe(peer)
+			_ = peer.conn.Close(websocket.StatusInternalError, "UI-live write failed")
 		}
 	}
 }

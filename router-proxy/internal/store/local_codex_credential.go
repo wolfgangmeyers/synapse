@@ -84,8 +84,8 @@ func OpenLocalCodexCredentialStore(path string) (*LocalCodexCredentialStore, err
 	return s, nil
 }
 
-// openDir walks from / using directory descriptors. Only root-owned safe
-// ancestors (including sticky /tmp) can precede the private 0700 state tree.
+// openDir walks from / without following symlinks, checking each ancestor
+// and requiring a private 0700 destination directory.
 func (s *LocalCodexCredentialStore) openDir(create bool) (int, string, error) {
 	parts := strings.Split(strings.TrimPrefix(s.path, "/"), "/")
 	name := parts[len(parts)-1]

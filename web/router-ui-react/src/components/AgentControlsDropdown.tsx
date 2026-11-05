@@ -1,3 +1,4 @@
+import { isClaudeCodeAgent } from "../state/agent-projection";
 import { useEffect, useRef, type ReactElement } from "react";
 import type { Agent } from "../state/agent-projection";
 
@@ -7,6 +8,8 @@ export interface AgentControlItem {
   icon: string;
   action?: (() => void) | undefined;
   danger?: boolean | undefined;
+  disabled?: boolean | undefined;
+  pressed?: boolean | undefined;
 }
 
 export interface AgentControlsDropdownProps {
@@ -25,6 +28,9 @@ export interface AgentControlsDropdownProps {
   onScratchpad?: (() => void) | undefined;
   onMonitors?: (() => void) | undefined;
   onWorkerTools?: (() => void) | undefined;
+  onToggleUrgency?: (() => void) | undefined;
+  urgencyDisabled?: boolean | undefined;
+  urgent?: boolean | undefined;
   allowInlineTools?: boolean | undefined;
   hasActiveWorkflow?: boolean | undefined;
   activeReminderCount?: number | undefined;
@@ -47,6 +53,9 @@ export function AgentControlsDropdown({
   onScratchpad,
   onMonitors,
   onWorkerTools,
+  onToggleUrgency,
+  urgencyDisabled,
+  urgent,
   allowInlineTools: _allowInlineTools,
   hasActiveWorkflow: _hasActiveWorkflow,
   activeReminderCount: _activeReminderCount,
@@ -85,6 +94,7 @@ export function AgentControlsDropdown({
   if (!open) return null;
 
   const controls: AgentControlItem[] = [
+    { id: "urgency", label: "Urgency", icon: "fa-solid fa-triangle-exclamation", action: onToggleUrgency, disabled: urgencyDisabled, pressed: urgent },
     { id: "goal", label: "Set goal", icon: "fa-solid fa-flag", action: onGoal },
     { id: "reminders", label: "Reminders", icon: "fa-solid fa-clock", action: onReminders },
     { id: "toolSettings", label: "Inline tool settings", icon: "fa-solid fa-gear", action: onInlineToolSettings },
@@ -113,7 +123,7 @@ export function AgentControlsDropdown({
           <span className="agent-controls-dropdown-title">Agent Controls</span>
         </div>
         <div className="agent-controls-dropdown-grid">
-          {controls.map((control) => {
+          {controls.filter(control => !isClaudeCodeAgent(_agent) || !["workflow", "inlineTools", "toolSettings", "workerTools"].includes(control.id)).map((control) => {
             const isPinned = pinnedControls.includes(control.id);
             return (
               <div
@@ -123,6 +133,8 @@ export function AgentControlsDropdown({
                 <button
                   type="button"
                   className="agent-control-tile-btn"
+                  disabled={control.disabled}
+                  aria-pressed={control.pressed}
                   onClick={() => {
                     control.action?.();
                     onClose();

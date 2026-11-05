@@ -19,16 +19,13 @@
     "check:mecha-rpc": "npm run check:mecha-rpc:fork && node tools/generate_managed_tools.mjs --check && npm --prefix pi-extensions/mecha-rpc run typecheck && npm --prefix pi-extensions/mecha-rpc run lint",
     "check": "node --check desktop/electron/config.mjs && node --check desktop/electron/main.mjs && node --check desktop/electron/package.mjs && node --check tests/electron_desktop.test.mjs && npm run check:mecha-messaging && npm run check:mecha-rpc",
     "check:mecha-messaging": "npm --prefix pi-extensions/mecha-messaging run typecheck && npm --prefix pi-extensions/mecha-messaging run lint && npm --prefix pi-extensions/mecha-messaging run check:mailbox-client-drift",
+    "pretest:e2e": "npm --prefix web/router-ui-react run build",
     "test:e2e": "playwright test --config=playwright.config.ts",
     "desktop:dev": "electron .",
     "desktop:package": "node desktop/electron/package.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.1",
-    "ajv": "8.20.0",
-    "ajv-formats": "3.0.1",
-    "markdown-it": "14.3.0",
-    "nanoid": "5.1.6",
     "ws": "8.21.0"
   },
   "devDependencies": {

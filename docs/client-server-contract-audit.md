@@ -2,6 +2,8 @@
 
 Contract audit across `router-proxy` (Go backend) and `web/router-ui-react` (TypeScript frontend).
 
+**Historical snapshot:** This report records observations and proposals from an earlier audit, not a verified description of the current system. Paths, callers, and line numbers may have changed. Except where explicitly noted as checked against the current checkout, claims and recommendations are hypotheses; an owner must verify current behavior, consumers, and compatibility before acting. No deployment status is implied.
+
 ---
 
 ## 1. Redundant Endpoints & Overlapping Protocols
@@ -13,10 +15,9 @@ Three separate endpoints serve message and activity streams. Two are actively fe
 - **`/v1/history?agent_id=...&view=complete` (Managed Complete History)**: Returns `entries: ManagedHistoryEntry[]` with `id`, `agent_id`, `at` (ISO timestamp), `level`, `category`, `presentation`, `tool_input`. Queried on mount and scroll by `App.tsx` and `use-router-session.ts`.
 - **`/v1/conversations?owner=...&peer=...` (Legacy Peer-to-Peer)**: Returns `messages: ConversationMessage[]` with sequence numbers and attachments. Still called as fallback in `useConversation`.
 
-**Failure mode**:
-When opening an agent, the frontend makes both a `/v1/conversation` call and a `/v1/history?view=complete` call. Both populate Redux/React state with duplicate copies of the same tool runs and messages, reconciled via ad-hoc heuristics in `MessageList.tsx` and `conversation-projection.ts`.
+**Historical hypothesis, not a verified failure**: The audit suspected overlapping timeline and complete-history retrieval and duplicate representations. Verify current call paths, actual overlap, reconciliation, and intended ownership before claiming duplication or a failure.
 
-**Direction**: Deprecate `/v1/history?view=complete` and `/v1/conversations` for UI display. Consolidate completely onto `/v1/conversation?agent_id=...`. Keep `/v1/history?view=quiet` only if headless agents require it.
+**Candidate direction (unverified)**: An owner should establish endpoint consumers and timeline ownership before considering consolidation or deprecation, including quiet history and legacy clients.
 
 ---
 
@@ -57,7 +58,7 @@ The attachment schema mutates across every boundary layer:
 | Frontend Reader (`AttachmentGallery.tsx`, `MessageList.tsx`) | Checks `meta.attachments ?? meta.images`, handles `url`, `id`, `data_url`, and relative `/v1/attachments/` prefixes |
 
 **Hacks present**:
-- `attachment-urls.ts`: Frontend must rewrite relative `/v1/attachments/...` URLs to absolute URLs using `activeRouterUrl()` because server emits origin-less root-relative paths.
+- `attachment-urls.ts`: Frontend must rewrite relative `/v1/attachments/...` URLs to absolute URLs using a supplied router URL because server emits origin-less root-relative paths. `attachment-urls.ts` takes `routerUrl`; it does not call `activeRouterUrl()` itself.
 - `MessageList.tsx` line 199: `const rawAttachments = meta.attachments ?? (event as any).attachments ?? meta.images;` — catches three conflicting backend naming conventions.
 
 **Direction**: Standardize on `{ id, url, mime_type, size_bytes, name }` everywhere on read, and `{ data_base64, mime_type, name }` on write. Eliminate `data_url` string parsing with regular expressions.
@@ -115,10 +116,10 @@ Backend and frontend maintain redundant fields to paper over a naming discrepanc
 ## 3. Hidden Hacks & Overengineering
 
 ### 1. The Idempotency UUID Requirement on Local Calls
-Every `PUT` / `POST` to managed worker routes (`/v1/managed-agents`, `/v1/settings/default-model`, `/v1/settings/context-thresholds`, etc.) requires an `X-Request-ID` header matching a canonical UUID regex (`[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`).
-- Backend rejects requests without it with HTTP 400 `INVALID_REQUEST_ID`.
-- Frontend has to call `secureUuid()` on every single button click.
-- For a local loopback developer workstation tool, this idempotency layer adds complexity to debugging via `curl` without delivering real distributed safety.
+Some managed operations require an idempotency key. The original audit claimed every `PUT` / `POST` to managed worker routes (`/v1/managed-agents`, `/v1/settings/default-model`, `/v1/settings/context-thresholds`, etc.) requires an `X-Request-ID` header matching a canonical UUID regex (`[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`).
+- Some backend handlers reject missing or invalid IDs with HTTP 400 `INVALID_REQUEST_ID`.
+- `managedRequest()` generates `secureUuid()` for non-GET requests; this does not establish that every button or route uses it.
+- The claim that this layer provides no useful safety is unverified. The backend records and replays managed operations by request ID (for example in `managed_http.go`); an owner must assess retry, conflict, and client contracts before changing it.
 
 ### 2. Manual URL Path Regex Parsers
 Instead of using standard routing (like `net/http` ServeMux patterns in Go 1.22+ or chi/gorilla), `managed_http.go` and `agent_monitors_http.go` contain dozens of handwritten string slicing functions:
@@ -138,7 +139,7 @@ Instead of using standard routing (like `net/http` ServeMux patterns in Go 1.22+
 Any variation in path structure (trailing slashes, `/v1/` prefix vs root) requires manual boilerplate and caused bugs (e.g. `managedInterruptPath` manually stripping `/v1/`).
 
 ### 3. Raw `fetch()` Invocations Bypassing HTTP Client
-In `web/router-ui-react/src/transport/http-client.ts:690-697`:
+In the current `web/router-ui-react/src/transport/http-client.ts` (line numbers may change):
 ```typescript
 async interruptManagedAgent(agentId: string): Promise<void> {
   const doFetch = fetchImpl ?? fetch;
@@ -149,14 +150,12 @@ async stopManagedSubagent(agentId: string, childId: string): Promise<void> {
   await doFetch(`${this.baseUrl ?? base}/v1/managed-agents/${encodeURIComponent(agentId)}/subagents/${encodeURIComponent(childId)}/stop`, { method: "POST" });
 }
 ```
-And in `ProgressHistoryModal.tsx`:
-```typescript
-fetch(`/v1/agents/${encodeURIComponent(agentId)}/progress/history`)
-```
-These calls bypass the configured HTTP client (`request()` wrapper), error handlers, correlation IDs, and relative base URL resolution.
+These managed calls use the configured base (`this.baseUrl ?? base`), but bypass `request()` and `managedRequest()`. They do not check `res.ok`, so HTTP error responses resolve without an exception; they also bypass the wrapper's structured error handling and managed request options. Assess the endpoint-specific contract before changing headers or credentials.
+
+`ProgressHistoryModal.tsx` uses `client.progressHistory(agentId)` when a client is supplied; that method uses `request()` and checks the response shape. Its fallback fetch uses `${activeRouterUrl()}/v1/agents/.../progress/history` and checks `res.ok`. It is not a root-relative fetch.
 
 ### 4. Overzealous Protocol Validation Guards
-`web/router-ui-react/src/protocol/guards.ts` (56KB) contains handwritten type assertors checking byte lengths, regexes, and key counts:
+The current `web/router-ui-react/src/transport/http-client.ts` defines `validSource` (not `protocol/guards.ts`):
 ```typescript
 function validSource(value: unknown): boolean {
   const source = recordValue(value);
@@ -167,7 +166,9 @@ If the backend adds an optional diagnostics or timestamp field to `source`, `Obj
 
 ---
 
-## 4. Dead Endpoints & Legacy Routes
+## 4. Potentially Unused Endpoints & Legacy Routes
+
+Historical hypotheses only: UI usage is not proof an endpoint has no external, native, test, or operational consumers. The relevant owners must verify callers, route ownership, and compatibility before removal or consolidation.
 
 | Route | Backend Location | Frontend Status | Recommendation |
 |---|---|---|---|
@@ -183,7 +184,9 @@ If the backend adds an optional diagnostics or timestamp field to `source`, `Obj
 
 ---
 
-## 5. Summary Action Items
+## 5. Historical Candidate Actions
+
+These are proposals, not validated instructions. Assign owners and verify current behavior and all consumers before changing contracts or removing routes.
 
 1. **Unify timeline retrieval**: Promote `/v1/conversation?agent_id=...` as canonical. Remove UI dependency on `/v1/history?view=complete` and `/v1/conversations`.
 2. **Standardize attachments**: Make attachment payload shapes identical across message sending, database persistence, timeline events, and image rendering (`{ id, url, mime_type, size_bytes, name }`).
@@ -192,6 +195,6 @@ If the backend adds an optional diagnostics or timestamp field to `source`, `Obj
    - Use ISO-8601 UTC strings everywhere.
    - Clean up `auth_type` vs `auth_mode`.
 4. **Clean frontend transports**:
-   - Replace bare `fetch()` calls in `ProgressHistoryModal` and `interruptManagedAgent` with `request()` methods on `RouterHttpClient`.
-   - Relax fragile strictness checks in `guards.ts` (e.g. `Object.keys(x).length === 1`).
-5. **Prune dead endpoints**: Drop `/v1/memory/*`, `/v1/tmux/windows/*`, and `/v1/messages/{id}/retry` from the UI HTTP client surface.
+   - Assess the managed interrupt and subagent-stop bare fetches and their error handling; assess whether the progress modal fallback is still needed.
+   - Assess strict source validation in `http-client.ts` (e.g. `Object.keys(x).length === 1`) against the intended contract.
+5. **Investigate potentially unused endpoints**: Before considering removal, verify ownership and consumers of the UI client wrappers for `/v1/memory/*`, `/v1/tmux/windows/*`, and `/v1/messages/{id}/retry`.

@@ -16,7 +16,7 @@ func setupTestStoreForTools(t *testing.T) (*Store, context.Context) {
 	ctx := context.Background()
 	clock := deterministic.NewFixedClock(time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
 	dbPath := filepath.Join(t.TempDir(), "router.db")
-	require.NoError(t, CloneTemplateDB(t, dbPath))
+	require.NoError(t, cloneLocalTemplateDB(t, dbPath))
 	s, err := Open(ctx, dbPath, Options{Clock: clock, Migrations: []Migration{}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -321,4 +321,3 @@ func TestManagedTools(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
-

@@ -12,9 +12,9 @@ For Wolfgang's supervisor session this is not just a local annoyance. When the s
 
 The goal is to get to the root cause, not only hide the symptom.
 
-## Known local reproduction/evidence
+## Historical local reproduction/evidence
 
-A local defensive branch exists:
+The original investigation recorded this local defensive branch and worktree (historical references, not a statement that they still exist):
 
 - Worktree: `/Users/wolfgang/code/mecha-developer/.worktrees/supervisor-crash-guard`
 - Branch: `codex/supervisor-crash-guard`
@@ -23,13 +23,13 @@ A local defensive branch exists:
 
 That commit adds a Pi extension `context` hook that scans the message list before provider replay and removes `toolResult` messages whose provider call id has no matching earlier successful assistant `toolCall`. It also adds tests for preserving valid tool results, dropping orphan results, and treating tool calls from errored assistant messages as unsafe.
 
-This branch is a safety net only. It has not been merged, pushed, installed, or run in production supervisor sessions.
+The original guard was a safety net, not a root-cause fix. The current checkout contains orphan quarantine in `pi-extensions/mecha-messaging/diagnostics-history.ts` and the `context` hook in `index.ts`, including structured diagnostics. The checkout also contains commit `9452fb7c` ("Guard orphan tool results before provider replay") in its history; this alone does not establish the disposition of the original worktree or whether the current guard is installed or running in any deployed supervisor session. Verify deployment separately.
 
-## Current gap in the defensive fix
+## Diagnostic requirements to verify
 
-The defensive guard's observability is not enough to find the root cause. It currently emits a UI notification with the quarantined call id/tool name and dedupes repeat notices. That tells us the guard fired, but it is not durable enough and lacks enough nearby context to explain where the orphan came from.
+The original guard reported quarantine through deduplicated UI notifications. The current checkout attempts bounded structured diagnostic writes to `MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH` when set to a nonempty path, otherwise to `~/.mecha-developer/logs/orphan-tool-results.jsonl` when `HOME` is available. Writes are best-effort: errors are swallowed so they cannot affect provider flow.
 
-Before merging a guard, add durable diagnostics that are safe to record without dumping sensitive message contents.
+The recorded `quarantined_count` counts fresh orphan call IDs after deduplication by session and call ID, not all tool results quarantined in the request. A request containing only previously reported IDs produces no orphan diagnostic record, even though quarantine still occurs. Verify diagnostics and their sufficiency in the relevant session; do not assume every field below is recorded.
 
 Useful diagnostic fields:
 
@@ -42,7 +42,7 @@ Useful diagnostic fields:
 - nearest previous assistant message stop reason
 - whether the nearest assistant message was `error` or `aborted`
 - whether a matching assistant tool call appears later in the context
-- count of quarantined tool results in that provider request
+- count of all quarantined tool results in that provider request (a diagnostic goal, not the current `quarantined_count`)
 - current Pi model/provider if available
 - active agent/window id if available
 - whether the message came from parent supervisor, subagent, worker, or post-compaction replay if detectable

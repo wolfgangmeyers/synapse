@@ -25,7 +25,6 @@ func TestEmbeddedCodexPrivateCredentialAdmissionFence(t *testing.T) {
 		admit, root                    bool
 	}{
 		{name: "root-expired-refreshable", runtime: "embedded", provider: "openai-codex", model: "gpt-6-sol", credential: true, admit: true, root: true},
-		{name: "fresh-sol61-worker", runtime: "embedded", provider: "openai-codex", model: "gpt-6.1-sol", credential: true, admit: true},
 		{name: "parentless-worker-opt-in", runtime: "embedded", provider: "openai-codex", model: "gpt-6-sol", credential: true, admit: true},
 		{name: "no-opt-in", runtime: "embedded", provider: "openai-codex", model: "gpt-6-sol", root: true},
 		{name: "ordinary-rpc", runtime: "rpc", provider: "openai-codex", model: "gpt-6-sol", credential: true},
@@ -54,13 +53,12 @@ func TestEmbeddedCodexPrivateCredentialAdmissionFence(t *testing.T) {
 				{Provider: "google", Label: "Google", Status: "signed_out"},
 				{Provider: "cursor", Label: "Cursor", Status: "signed_out"},
 				{Provider: "google-vertex", Label: "Google Vertex AI", Status: "signed_out"},
-				{Provider: "antigravity", Label: "Google Antigravity", Status: "signed_out"},
 			}, nil)
 			require.NoError(t, err)
 			catalog := StoreCatalogSource{Store: db}
 			before, err := catalog.Catalog(ctx)
 			require.NoError(t, err)
-			require.Empty(t, before.Models)
+			require.Equal(t, claudeCodeModels(), before.Models)
 			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 			require.NoError(t, err)
 			var credentials *store.LocalCodexCredentialStore

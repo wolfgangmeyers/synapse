@@ -694,3 +694,29 @@ func newCursorReader(t *testing.T) (RouterLogReader, string, string, string, []b
 	require.NoError(t, err)
 	return r, dir, active, rotated, second, cursor
 }
+
+type RawRouterLogReader []byte
+
+func (r RawRouterLogReader) ReadRouterLog(_ context.Context, q RouterLogQuery) (RouterLogResponse, error) {
+	lines := make([]RouterLogLine, 0)
+	for _, match := range splitRawLFWithOffsets([]byte(r)) {
+		if !routerLogLineMatches(match.line, q) {
+			continue
+		}
+		lines = append(lines, RouterLogLine{BytesBase64: base64.StdEncoding.EncodeToString(match.line)})
+	}
+	return RouterLogResponse{Status: "complete", Lines: lines}, nil
+}
+
+func splitRawLF(data []byte) [][]byte {
+	out := splitRawLFWithOffsets(data)
+	lines := make([][]byte, len(out))
+	for i := range out {
+		lines[i] = out[i].line
+	}
+	return lines
+}
+
+func cursorForSnapshot(offset, length int, digest [32]byte, files []logFile, q RouterLogQuery) logCursor {
+	return cursorForSnapshotWithInventory(offset, length, digest, inventoryDigest(files), files, q)
+}

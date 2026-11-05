@@ -135,7 +135,7 @@ func TestGoalWakeSafetyPassiveMailPreservesOwnerHold(t *testing.T) {
 	lane := f.m.laneFor(owner.binding.AgentID)
 	lane.serial.Lock()
 	lane.goalOwnerInvalid = true
-	lane.consecutiveContinuations = 20
+	lane.consecutiveContinuations.Store(20)
 	lane.serial.Unlock()
 	f.enqueue(t, "f1111111-1111-4111-8111-111111111111")
 	f.m.dispatchEmbeddedMail(owner.binding.AgentID)
@@ -151,7 +151,7 @@ func TestGoalWakeSafetyPassiveMailPreservesOwnerHold(t *testing.T) {
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
 	require.False(t, lane.goalOwnerInvalid, "a deliberate admitted user prompt with valid ownership may recover")
-	require.Zero(t, lane.consecutiveContinuations)
+	require.Zero(t, lane.consecutiveContinuations.Load())
 }
 
 // SCN-GWS-003/005/006: actual freshly admitted goal tool execution cannot
@@ -179,7 +179,7 @@ func TestGoalWakeSafetyGoalToolPreservesAutomaticCap(t *testing.T) {
 			require.NoError(t, err)
 			m := &Manager{store: db}
 			lane := m.laneFor(b.AgentID)
-			lane.consecutiveContinuations = 20
+			lane.consecutiveContinuations.Store(20)
 			if automatic {
 				ctx = context.WithValue(ctx, embeddedAutomaticGoalKey{}, true)
 			}
@@ -188,11 +188,11 @@ func TestGoalWakeSafetyGoalToolPreservesAutomaticCap(t *testing.T) {
 			_, err = tool.Execute(ctx, "cap-set", args, nil)
 			require.NoError(t, err)
 			require.True(t, completed, "must execute the admitted goal tool, not merely settle a provider turn")
-			want := 0
+			want := int64(0)
 			if automatic {
 				want = 20
 			}
-			require.Equal(t, want, lane.consecutiveContinuations, "automatic goal setting must not renew its own allowance")
+			require.Equal(t, want, lane.consecutiveContinuations.Load(), "automatic goal setting must not renew its own allowance")
 		})
 	}
 }
@@ -206,9 +206,11 @@ func TestGoalWakeSafetyFailedAutomaticResetDoesNotHoldSuccessor(t *testing.T) {
 		f.calls.Add(1)
 		f.m.mu.Lock()
 		if f.m.contextResetRequested == nil {
-			f.m.contextResetRequested = make(map[string]contextResetRequest)
+			f.m.contextResetRequested = make(map[string]*contextResetRequest)
 		}
-		f.m.contextResetRequested[id] = contextResetRequest{reason: "guard-reset-after-failure"}
+		// Model a committed reset request, as in the reset-gate fixtures;
+		// an uncommitted request must no longer rotate context.
+		f.m.contextResetRequested[id] = &contextResetRequest{reason: "guard-reset-after-failure", committed: true}
 		f.m.mu.Unlock()
 		return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "deterministic failed automatic turn"}}, ai.StopError)
 	}

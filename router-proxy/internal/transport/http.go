@@ -131,6 +131,12 @@ func applyPermissiveCORS(w http.ResponseWriter, req *http.Request) bool {
 }
 
 func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
+	// Claude's grant-bearing endpoint is never available on the shared router,
+	// including CORS preflights. OAuth callback routes remain unaffected.
+	if req.URL.Path == "/v1/mcp" {
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+		return
+	}
 	correlation := req.Header.Get("X-Correlation-Id")
 	if correlation == "" {
 		correlation = req.Header.Get("X-Request-Id")
@@ -159,6 +165,10 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if agentID, matched := managedRouterLogPath(req.URL.EscapedPath()); matched {
 		r.handleRouterLog(w, req, agentID)
+		return
+	}
+	if agentID, matched := agentUrgencyPath(req.URL.EscapedPath()); matched {
+		r.handleAgentUrgencyPUT(w, req, agentID)
 		return
 	}
 	if r.handleManagedHTTP(w, req) {
@@ -518,30 +528,9 @@ func rawInt(payload map[string]json.RawMessage, key string, required bool) (*int
 	}
 	return &value, nil
 }
-func rawObject(payload map[string]json.RawMessage, key string) (map[string]json.RawMessage, error) {
-	raw, ok := payload[key]
-	if !ok {
-		return nil, nil
-	}
-	var value map[string]json.RawMessage
-	if json.Unmarshal(raw, &value) != nil || value == nil {
-		return nil, &httpError{status: 400, code: "invalid_request"}
-	}
-	return value, nil
-}
-func rawAny(payload map[string]json.RawMessage, key string) (any, error) {
-	raw, ok := payload[key]
-	if !ok {
-		return nil, nil
-	}
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return nil, &httpError{status: 400, code: "invalid_request"}
-	}
-	return value, nil
-}
 
 func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	owner, peer := req.URL.Query().Get("owner"), req.URL.Query().Get("peer")
 	if owner == "" || peer == "" {
 		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
@@ -588,6 +577,7 @@ func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleConversationTimeline(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	agentID := req.URL.Query().Get("agent_id")
 	if agentID == "" {
 		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
@@ -611,7 +601,25 @@ func (r *Router) handleConversationTimeline(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	events, nextBeforeSeq, err := r.store.GetConversationTimeline(req.Context(), agentID, limit, beforeSeq)
+	query := req.URL.Query()
+	_, hasEvent := query["before_event_id"]
+	_, hasSeq := query["before_seq"]
+	if hasEvent && (hasSeq || strings.TrimSpace(query.Get("before_event_id")) == "") {
+		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+		return
+	}
+	var events []store.ConversationTimelineEvent
+	var nextBeforeSeq *int64
+	var err error
+	if hasEvent {
+		events, nextBeforeSeq, err = r.store.GetConversationTimelineBeforeEvent(req.Context(), agentID, query.Get("before_event_id"), limit)
+		if errors.Is(err, store.ErrTimelineBoundaryNotFound) {
+			r.writeError(w, &httpError{status: 409, code: "timeline_boundary_not_found"})
+			return
+		}
+	} else {
+		events, nextBeforeSeq, err = r.store.GetConversationTimeline(req.Context(), agentID, limit, beforeSeq)
+	}
 	if err != nil {
 		r.writeError(w, &httpError{status: 500, code: "internal_error"})
 		return
@@ -1002,7 +1010,7 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 		r.broadcastConversation(*result.ConversationMessage)
 	}
 	if r.managed != nil {
-		r.managed.OfferDirect(result.Message.To)
+		offerEnqueuedDirect(r.managed, result.Message.To, result.Message.ID, "initial")
 	}
 	// Source selection belongs to the router-owned durable directory. The
 	// caller's HTTP/reminder/policy origin never chooses a transport.
@@ -1015,19 +1023,19 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 		// recipient source, so source resolution intentionally leaves this row
 		// unclaimed until the router selects its in-memory delivery lease.
 		if r.managed != nil {
-			r.managed.OfferDirect(result.Message.To)
+			offerEnqueuedDirect(r.managed, result.Message.To, result.Message.ID, "resolved")
 		}
 		r.offerAgent(result.Message.To)
 		return
 	}
 	if target.SourceKind == "managed" {
 		if r.managed != nil {
-			r.managed.OfferDirect(target.OwnerIdentity)
+			offerEnqueuedDirect(r.managed, target.OwnerIdentity, result.Message.ID, "resolved")
 		}
 		return
 	}
 	if r.managed != nil {
-		r.managed.OfferDirect(result.Message.To)
+		offerEnqueuedDirect(r.managed, result.Message.To, result.Message.ID, "resolved")
 	}
 	r.offerAgent(result.Message.To)
 }

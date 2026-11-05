@@ -109,6 +109,10 @@ func (e mailboxRouterRootControlExecutor) ReconcileRootControl(ctx context.Conte
 	return e.run(ctx, "reconcile", identity, invocation)
 }
 
+func (e mailboxRouterRootControlExecutor) ReconcileRetiredRootControl(ctx context.Context, identity managed.RootControlHandlerIdentity, invocation managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
+	return e.run(ctx, "reconcile", identity, invocation)
+}
+
 func (e mailboxRouterRootControlExecutor) run(ctx context.Context, mode string, identity managed.RootControlHandlerIdentity, invocation managed.RootControlInvocation) (managed.RootControlHandlerResult, error) {
 	if mode != "execute" && mode != "reconcile" {
 		return managed.RootControlHandlerResult{}, errors.New("managed root control mode is invalid")

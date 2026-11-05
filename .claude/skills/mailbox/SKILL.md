@@ -1,17 +1,19 @@
 ---
 name: mailbox
-description: Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats, mandatory pre-read blocks, and tools. Load whenever you act as supervisor or handle worker mail; companion to the supervisor skill.
+description: Mailbox V2 async mailbox — Mailbox V2 router delivery formats, mandatory pre-read blocks, and tools. Load whenever you act as supervisor or handle worker mail; companion to the supervisor skill.
 ---
 
 # Mailbox Skill
 
 Mailbox V2 sends durable agent messages through the local router. In a Pi session with the Mailbox extension, use the native top-level `mecha_mailbox_send` tool first. It accepts `recipient`, `body`, and an optional `subject`, and returns the accepted message ID and state. It sends through the extension's existing Mailbox V2 HTTP client and does not run shell commands.
 
-Use the script only when the native tool is unavailable (for example, Claude sidecars, bare Codex, or older Pi sessions):
+Use the repository script only when the native tool is unavailable (for example, Claude sidecars, bare Codex, or older Pi sessions). From the repository root:
 
 ```bash
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to <agent> --body "<text>"
+python3 tools/mailbox_send.py --from <verified-agent-id> --to <agent> --body "<text>"
 ```
+
+Use only your verified sender agent ID; do not invent or impersonate an identity. `--from` is required outside a valid current tmux pane or when its identity cannot be resolved. In a valid tmux pane, you may omit it to use the current window name, subject to the identity restrictions below. From another working directory, use the path to `tools/mailbox_send.py` in your mecha-developer checkout.
 
 The script defaults to the local HTTP router; an explicitly configured invalid router URL is rejected. It prints the accepted message ID and actual router state. Router acceptance does not prove the recipient consumed the message.
 
@@ -73,7 +75,7 @@ The checked-in Mailbox V2 behavior is implemented in the supervisor router/tools
 | `mecha_mailbox_send` | Primary Pi top-level tool for posting a message through the Mailbox V2 router |
 | `mailbox_send.py` | Fallback sender for runtimes without the native Pi tool |
 
-Installed layout: `~/.claude/skills/supervisor/tools/…` (or your mecha-developer checkout).
+Repository fallback: `tools/mailbox_send.py` (relative to the mecha-developer checkout).
 
 ## Supervisor window identity
 

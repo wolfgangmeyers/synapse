@@ -111,7 +111,7 @@ function safeGoalActivityIdentity(value: unknown): string | undefined {
 const GOAL_ACTIVITY_EXCLUDED_TOOLS = new Set([
   "goal", "goal_snooze", "mecha_parent_message", "mecha_mailbox_send", "mecha_request_inline_tool_allowance",
   "mecha_recall", "mecha_settled_notifications", "mecha_context", "mecha_state", "mecha_priority",
-  "mecha_verification_handoff", "mecha_reminder", "mecha_worker", "mecha_pr", "mecha_git", "mecha_router",
+  "mecha_verification_handoff", "mecha_reminder", "mecha_pr", "mecha_git", "mecha_router",
 ]);
 
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");

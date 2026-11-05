@@ -36,6 +36,9 @@ func (s *Store) ReserveEmbeddedModelSelection(ctx context.Context, agentID strin
 		if agent.Runtime != "embedded" || agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld {
 			return &ManagedAgentNotReadyError{AgentID: agentID}
 		}
+		if (agent.SelectedModel.Provider == "claude-code") != (selected.Provider == "claude-code") {
+			return errors.New("invalid model: cross-engine changes are not supported")
+		}
 		var active int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_lifecycle_actions WHERE agent_id=? AND state NOT IN ('succeeded','failed','cancelled','superseded')`, agentID).Scan(&active); err != nil {
 			return err

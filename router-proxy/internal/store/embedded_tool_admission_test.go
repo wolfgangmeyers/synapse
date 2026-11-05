@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -219,88 +218,30 @@ func TestEmbeddedAddressedToolRejectedMailAdmissionHasNoReceipt(t *testing.T) {
 	require.Equal(t, "unknown", effect.State, "failed admission cannot fabricate an SDK success")
 }
 
-func TestEmbeddedAddressedCleanupChecksProducerAndSavedWorkerInsideAdmission(t *testing.T) {
-	for _, fault := range []string{"new-process", "root-target"} {
-		t.Run(fault, func(t *testing.T) {
-			ctx := context.Background()
-			s, _ := embeddedRedStore(t)
-			b := goalBind(t, s, "cleanup-caller", "caller-session", 1, "caller-runtime", "worker")
-			role := "worker"
-			if fault == "root-target" {
-				role = "root"
-			}
-			redBind(t, s, "cleanup-target", "target-session", 1, "target-runtime", role)
-			g, err := s.MintEmbeddedProcessGeneration(ctx, "cleanup-current-process")
-			require.NoError(t, err)
-			user := receiptProviderUser(t, s, b, "clean up an independent worker")
-			call := providers.FauxToolCall("mecha_worker", map[string]any{"action": "cleanup", "name": "cleanup-target"}, "cleanup-original")
-			receiptSDKAppend(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
-			w, err := s.RecordEmbeddedToolInvocation(ctx, b, g, user.Sequence, user.Digest, "", call)
-			require.NoError(t, err)
-			require.NoError(t, s.StartEmbeddedToolInvocation(ctx, w, call))
-			if fault == "new-process" {
-				_, err := s.MintEmbeddedProcessGeneration(ctx, "cleanup-replacement-process")
-				require.NoError(t, err)
-			}
-			requestID := "a5555555-5555-4555-8555-555555555501"
-			_, err = s.ReserveEmbeddedToolCleanup(ctx, ManagedLifecycleReservation{AgentID: "cleanup-target", Kind: "terminate", Method: "DELETE", CanonicalPath: "/v1/managed-agents/cleanup-target", RequestID: requestID, CanonicalBodyHash: strings.Repeat("a", 64)}, w)
-			require.Error(t, err)
-			require.Zero(t, embeddedRedCount(t, s, "managed_lifecycle_actions"))
-			target, err := s.ManagedAgent(ctx, "cleanup-target")
-			require.NoError(t, err)
-			require.Equal(t, "running", target.DesiredState)
-			require.Empty(t, w.domainContent)
-		})
-	}
-}
-
 func TestEmbeddedToolKnownCommitPermissionErrorRetainsActualAdmission(t *testing.T) {
-	for _, action := range []string{"mail", "launch", "cleanup"} {
+	for _, action := range []string{"mail"} {
 		t.Run(action, func(t *testing.T) {
 			ctx := context.Background()
 			s, _ := embeddedRedStore(t)
 			b := goalBind(t, s, "commit-caller", "commit-session", 1, "commit-runtime", "root")
-			if action == "cleanup" {
-				redBind(t, s, "commit-target", "target-session", 1, "target-runtime", "worker")
-			}
 			g, err := s.MintEmbeddedProcessGeneration(ctx, "commit-process")
 			require.NoError(t, err)
 			user := receiptProviderUser(t, s, b, "original committed operation")
-			name := "mecha_worker"
-			args := map[string]any{"action": action, "name": "commit-target"}
-			if action == "mail" {
-				name = "mecha_mailbox_send"
-				args = map[string]any{"recipient": "commit-recipient", "body": "committed body"}
-			}
-			if action == "launch" {
-				args["cwd"], args["instruction"] = t.TempDir(), "task"
-			}
+			name := "mecha_mailbox_send"
+			args := map[string]any{"recipient": "commit-recipient", "body": "committed body"}
 			call := providers.FauxToolCall(name, args, "commit-original")
 			producer := receiptSDKAppend(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
 			w, err := s.RecordEmbeddedToolInvocation(ctx, b, g, user.Sequence, user.Digest, "", call)
 			require.NoError(t, err)
 			require.NoError(t, s.StartEmbeddedToolInvocation(ctx, w, call))
-			request := "a6666666-6666-4666-8666-666666666601"
-			op := ManagedOperation{OperationID: request, RequestID: request, Method: "POST", CanonicalPath: "/v1/managed-agents", CanonicalBodyHash: strings.Repeat("a", 64), ResponseStatus: 202}
-			cwd, _ := args["cwd"].(string)
-			agent := ManagedAgentRecord{AgentID: "commit-target", Name: "commit-target", Runtime: "embedded", Cwd: cwd, PiSessionID: "new-target-session", RuntimeGeneration: "new-target-runtime", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash, SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}}
-			reservation := ManagedLifecycleReservation{AgentID: "commit-target", Kind: "terminate", Method: "DELETE", CanonicalPath: "/v1/managed-agents/commit-target", RequestID: request, CanonicalBodyHash: strings.Repeat("a", 64), Operation: ManagedOperation{ResponseStatus: 202}}
 			originalPath := s.path
 			blocker := filepath.Join(t.TempDir(), "regular-file")
 			require.NoError(t, os.WriteFile(blocker, []byte("fixture"), 0600))
 			s.path = filepath.Join(blocker, "db") // ENOTDIR after the real COMMIT; connection is unchanged.
 			t.Cleanup(func() { s.path = originalPath })
 			admit := func() error {
-				switch action {
-				case "mail":
-					_, err := s.EnqueueEmbeddedToolMail(ctx, w)
-					return err
-				case "launch":
-					return s.ReserveEmbeddedToolWorkerLaunch(ctx, agent, op, 32, b, w)
-				default:
-					_, err := s.ReserveEmbeddedToolCleanup(ctx, reservation, w)
-					return err
-				}
+				_, err := s.EnqueueEmbeddedToolMail(ctx, w)
+				return err
 			}
 			err = admit()
 			require.ErrorContains(t, err, "stat SQLite state file")
@@ -310,11 +251,7 @@ func TestEmbeddedToolKnownCommitPermissionErrorRetainsActualAdmission(t *testing
 			content, err := EmbeddedToolResultContent(w)
 			require.NoError(t, err)
 			require.Contains(t, string(content), `"status":"accepted"`)
-			if action == "mail" {
-				require.Equal(t, 1, embeddedRedCount(t, s, "messages"))
-			} else {
-				require.Equal(t, 1, embeddedRedCount(t, s, "managed_http_operations"))
-			}
+			require.Equal(t, 1, embeddedRedCount(t, s, "messages"))
 			require.True(t, ClaimEmbeddedToolHandoff(w))
 			require.False(t, ClaimEmbeddedToolHandoff(w), "original handoff is once-only")
 			result := addressedStoreResult(t, w)
@@ -365,50 +302,10 @@ func TestEmbeddedToolRollbackAndInconclusiveCommitHaveNoAcceptance(t *testing.T)
 	}
 }
 
-func TestListEmbeddedToolWorkers_IncludesTmuxWorkers(t *testing.T) {
-	ctx := context.Background()
-	s, _ := embeddedRedStore(t)
-	b := goalBind(t, s, "addressed-store", "addressed-session", 1, "addressed-runtime", "root")
-	g, err := s.MintEmbeddedProcessGeneration(ctx, "addressed-store-process")
-	require.NoError(t, err)
-
-	call := providers.FauxToolCall("mecha_worker", map[string]any{"action": "list"}, "list-call-id")
-	user := receiptSDKAppend(t, s, b, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "ordinary addressed work"}}})
-	require.NoError(t, s.EnterEmbeddedNonMailProviderTurn(ctx, b, user.Sequence, user.Digest))
-	receiptSDKAppend(t, s, b, *providers.FauxAssistantMessage(ai.ContentList{call}, ai.StopToolUse))
-
-	inv, err := s.RecordEmbeddedToolInvocation(ctx, b, g, user.Sequence, user.Digest, "", call)
-	require.NoError(t, err)
-	require.NoError(t, s.StartEmbeddedToolInvocation(ctx, inv, call))
-
-	// Register an embedded worker
-	_ = goalBind(t, s, "embedded-worker-alpha", "session-alpha", 1, "runtime-alpha", "worker")
-
-	// Register a tmux worker
-	_, err = s.ReserveTmuxRecipientSource(ctx, "worker-tmux-bravo", "tmux-source-v1:worker-tmux-bravo")
-	require.NoError(t, err)
-	require.NoError(t, s.ActivateTmuxRecipientSource(ctx, "worker-tmux-bravo", "tmux-source-v1:worker-tmux-bravo"))
-
-	// Register a reserved identity (should be filtered out)
-	_, err = s.ReserveTmuxRecipientSource(ctx, "supervisor", "tmux-source-v1:supervisor")
-	require.NoError(t, err)
-	require.NoError(t, s.ActivateTmuxRecipientSource(ctx, "supervisor", "tmux-source-v1:supervisor"))
-
-	workers, err := s.ListEmbeddedToolWorkers(ctx, inv)
-	require.NoError(t, err)
-	require.NotNil(t, workers)
-
-	var payload struct {
-		Workers []map[string]any `json:"workers"`
-	}
-	require.NoError(t, json.Unmarshal(inv.domainContent, &payload))
-
-	require.Len(t, payload.Workers, 2)
-	require.Equal(t, "embedded-worker-alpha", payload.Workers[0]["worker_id"])
-	require.Equal(t, "embedded", payload.Workers[0]["kind"])
-
-	require.Equal(t, "worker-tmux-bravo", payload.Workers[1]["worker_id"])
-	require.Equal(t, "tmux", payload.Workers[1]["kind"])
-	require.Equal(t, "idle", payload.Workers[1]["lifecycle_state"])
+func TestEmbeddedToolRejectsRetiredWorkerLaunch(t *testing.T) {
+	s := &Store{}
+	call := providers.FauxToolCall("mecha_worker", map[string]any{"action": "launch", "name": "forbidden", "cwd": "/project", "instruction": "task"}, "stale-launch")
+	w, err := s.RecordEmbeddedToolInvocation(context.Background(), EmbeddedBinding{}, 0, 0, "", "", call)
+	require.Nil(t, w)
+	require.EqualError(t, err, "invalid managed tool call")
 }
-
