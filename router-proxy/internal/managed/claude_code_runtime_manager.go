@@ -97,8 +97,12 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 		binding := &claudeCodeGrantBinding{incarnation: claudeCodeNewInputID()}
 
 		tools := make([]ClaudeCodeMCPTool, 0)
-		for _, tool := range authority.Tools() {
-			if !claudeCodeV1Tool(tool.Name) {
+		candidates := authority.baseTools
+		if candidates == nil {
+			candidates = authority.tools
+		}
+		for _, tool := range candidates {
+			if !claudeCodeApplicableTool(tool.Name) {
 				continue
 			}
 			schema, err := json.Marshal(tool.Parameters)
@@ -186,12 +190,15 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 	bridge.interrupt = func() { r.mu.Lock(); r.discardPartial = true; r.mu.Unlock(); r.Interrupt() }
 	return r, nil
 }
-func claudeCodeV1Tool(name string) bool {
+
+// Claude provides its own native file and shell tools. The inline allowance
+// tool cannot govern those native tools and must not promise otherwise.
+func claudeCodeApplicableTool(name string) bool {
 	switch name {
-	case "mecha_mailbox_send", "mecha_send_image", "mecha_agent_urgency", "scratchpad", "mecha_progress", "mecha_reminder", "goal", "goal_snooze", "context_reset", "mecha_context", "mecha_worker_terminate":
-		return true
+	case "bash", "read", "edit", "write", InlineToolAllowanceToolName:
+		return false
 	}
-	return false
+	return true
 }
 
 // Record against the exact embedded owner so a stale cleanup cannot fail a successor.

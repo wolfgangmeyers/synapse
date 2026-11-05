@@ -150,6 +150,16 @@ func (b *claudeCodeTurnBridge) execute(ctx context.Context, request ClaudeCodeMC
 		return nil, err
 	}
 	if err := b.authority.BeforeToolExecute(ctx, agent.BeforeToolCallContext{ToolCall: call}); err != nil {
+		var denial *agent.PolicyDenial
+		if errors.As(err, &denial) {
+			message := ai.ToolResultMessage{ToolCallID: call.ID, ToolName: call.Name, Timestamp: time.Now().UnixMilli(), IsError: true, Content: ai.ContentList{ai.TextContent{Text: err.Error()}}}
+			if appendErr := b.authority.AppendCheckedMessage(ctx, message); appendErr != nil {
+				b.fail(appendErr)
+				return nil, appendErr
+			}
+			item.result = &message
+			return claudeCodeMCPResult(message)
+		}
 		var observerError *embeddedEffectObserverError
 		if errors.As(err, &observerError) {
 			b.fail(err)
@@ -157,7 +167,11 @@ func (b *claudeCodeTurnBridge) execute(ctx context.Context, request ClaudeCodeMC
 		return nil, err
 	}
 	var tool *agent.AgentTool
-	for _, candidate := range b.authority.tools {
+	candidates := b.authority.baseTools
+	if candidates == nil {
+		candidates = b.authority.tools
+	}
+	for _, candidate := range candidates {
 		if candidate.Name == request.Name {
 			copy := candidate
 			tool = &copy

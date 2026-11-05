@@ -6,11 +6,12 @@ export interface WorkerToolsDialogProps {
   open: boolean;
   agentId: string;
   agentName?: string;
+  nativeToolsUnrestricted?: boolean;
   client: RouterHttpClient;
   onClose: () => void;
 }
 
-export function WorkerToolsDialog({ open, agentId, agentName, client, onClose }: WorkerToolsDialogProps): ReactElement {
+export function WorkerToolsDialog({ open, agentId, agentName, nativeToolsUnrestricted, client, onClose }: WorkerToolsDialogProps): ReactElement {
   const [data, setData] = useState<AgentToolsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +41,7 @@ export function WorkerToolsDialog({ open, agentId, agentName, client, onClose }:
     }
   }, [open, agentId]);
 
-  const tools = data?.tools ?? [];
+  const tools = (data?.tools ?? []).filter(tool => !nativeToolsUnrestricted || !["bash", "read", "edit", "write", "mecha_request_inline_tool_allowance"].includes(tool.tool_name));
   const workflowOverride = data?.workflow_override ?? false;
   const activeWorkflowState = data?.active_workflow_state ?? "";
 
@@ -126,6 +127,7 @@ export function WorkerToolsDialog({ open, agentId, agentName, client, onClose }:
       className="message-dialog worker-tools-dialog"
     >
       <div className="worker-tools-container" style={{ display: "flex", flexDirection: "column", gap: "16px", maxHeight: "70vh", overflowY: "auto" }}>
+        {nativeToolsUnrestricted ? <p>These settings apply to Mecha tools only. Claude native tools are not restricted by worker or workflow settings.</p> : null}
         {error ? (
           <div className="dialog-error" role="alert" style={{ color: "var(--color-danger, #ff5555)", padding: "8px", background: "rgba(255, 85, 85, 0.1)", borderRadius: "4px" }}>
             {error}
@@ -214,7 +216,7 @@ export function WorkerToolsDialog({ open, agentId, agentName, client, onClose }:
                       {grantedCount} / {catTools.length} granted
                     </span>
                   </div>
-                  <div
+                  {!nativeToolsUnrestricted ? <div
                     style={{ display: "flex", gap: "6px" }}
                     onClick={(e) => e.stopPropagation()}
                   >
@@ -236,7 +238,7 @@ export function WorkerToolsDialog({ open, agentId, agentName, client, onClose }:
                     >
                       Revoke All
                     </button>
-                  </div>
+                  </div> : null}
                 </div>
 
                 {!isCollapsed && (

@@ -152,6 +152,18 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if err != nil {
 			return fmt.Errorf("subagent parent must be a top-level managed agent: %w", err)
 		}
+		// Claude is an external parent runtime, not a supported embedded child
+		// provider. Select the router default atomically with child admission.
+		if provider == "claude-code" {
+			var defaultProvider, defaultModel sql.NullString
+			if err := s.db.QueryRowContext(ctx, `SELECT default_model_provider, default_model_id FROM managed_settings WHERE singleton_id=1`).Scan(&defaultProvider, &defaultModel); err != nil {
+				return err
+			}
+			if !defaultProvider.Valid || !defaultModel.Valid || !validManagedProvider(defaultProvider.String) || !managedModelIDRE.MatchString(defaultModel.String) {
+				return errors.New("subagent requires a configured router default model")
+			}
+			provider, model = defaultProvider.String, defaultModel.String
+		}
 		if provider == "" {
 			provider = "google-vertex"
 		}

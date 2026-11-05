@@ -423,6 +423,10 @@ func (m *Manager) resolveSubagentModel(record store.ManagedAgentRecord) (*ai.Mod
 					}
 					return payload, nil
 				}
+				// Preserve the SDK default for ordinary children; honor an explicitly configured transport.
+				if m.codexHTTPTransport != nil {
+					opts.HTTPClient = embeddedCodexTerminalDoer{newEmbeddedCodexClient(m.codexHTTPTransport)}
+				}
 				opts.CodexAuth = func(authCtx context.Context) (ai.ModelAuth, error) {
 					auth, authErr := m.embeddedCodexAuth(authCtx)
 					if authErr == nil {
