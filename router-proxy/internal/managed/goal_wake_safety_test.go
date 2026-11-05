@@ -2,6 +2,8 @@ package managed
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"testing"
 	"time"
 
@@ -150,4 +152,47 @@ func TestGoalWakeSafetyPassiveMailPreservesOwnerHold(t *testing.T) {
 	defer lane.serial.Unlock()
 	require.False(t, lane.goalOwnerInvalid, "a deliberate admitted user prompt with valid ownership may recover")
 	require.Zero(t, lane.consecutiveContinuations)
+}
+
+// SCN-GWS-003/005/006: actual freshly admitted goal tool execution cannot
+// renew its automatic caller's budget; manual execution retains reset semantics.
+func TestGoalWakeSafetyGoalToolPreservesAutomaticCap(t *testing.T) {
+	for _, automatic := range []bool{true, false} {
+		name := "manual"
+		if automatic {
+			name = "automatic"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			db, b, _ := completionFixture(t)
+			g, err := db.MintEmbeddedProcessGeneration(ctx, "cap-guard")
+			require.NoError(t, err)
+			body, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "continue work"}}})
+			require.NoError(t, err)
+			user, err := db.AppendEmbeddedEntry(ctx, b, "user", body)
+			require.NoError(t, err)
+			require.NoError(t, db.EnterEmbeddedNonMailProviderTurn(ctx, b, user.Sequence, user.Digest))
+			args := map[string]any{"action": "set", "goal": "bounded work"}
+			intent, err := json.Marshal(map[string]any{"id": "cap-set", "name": "goal", "arguments": args})
+			require.NoError(t, err)
+			invocation, err := db.RecordEmbeddedGoalInvocation(ctx, b, g, user.Sequence, user.Digest, "", "cap-set", intent)
+			require.NoError(t, err)
+			m := &Manager{store: db}
+			lane := m.laneFor(b.AgentID)
+			lane.consecutiveContinuations = 20
+			if automatic {
+				ctx = context.WithValue(ctx, embeddedAutomaticGoalKey{}, true)
+			}
+			completed := false
+			tool := m.embeddedGoalTool(embeddedOwner{binding: b, identity: "wake-fixture"}, func(string) *store.EmbeddedGoalInvocation { return invocation }, func(string, *store.EmbeddedGoalInvocation, ai.ToolResultMessage) { completed = true })
+			_, err = tool.Execute(ctx, "cap-set", args, nil)
+			require.NoError(t, err)
+			require.True(t, completed, "must execute the admitted goal tool, not merely settle a provider turn")
+			want := 0
+			if automatic {
+				want = 20
+			}
+			require.Equal(t, want, lane.consecutiveContinuations, "automatic goal setting must not renew its own allowance")
+		})
+	}
 }
