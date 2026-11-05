@@ -71,9 +71,19 @@ func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolNa
 		return nil
 	}
 	state, err := s.GetManagedAgentActiveWorkflowState(ctx, agentID)
-	if err != nil || state == nil {
-		if agent, aerr := s.ManagedAgent(ctx, agentID); aerr == nil && agent != nil && agent.ParentAgentID != "" {
-			state, _ = s.GetManagedAgentActiveWorkflowState(ctx, agent.ParentAgentID)
+	if err != nil {
+		return fmt.Errorf("workflow policy lookup failed: %w", err)
+	}
+	if state == nil {
+		agent, err := s.ManagedAgent(ctx, agentID)
+		if err != nil {
+			return fmt.Errorf("worker policy lookup failed: %w", err)
+		}
+		if agent != nil && agent.ParentAgentID != "" {
+			state, err = s.GetManagedAgentActiveWorkflowState(ctx, agent.ParentAgentID)
+			if err != nil {
+				return fmt.Errorf("parent workflow policy lookup failed: %w", err)
+			}
 		}
 	}
 	if state != nil && len(state.AllowedTools) > 0 {
@@ -85,7 +95,10 @@ func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolNa
 
 	// Agent is not in an active workflow state with allowed_tools: check agent tool overrides/defaults
 	tools, err := s.GetAgentTools(ctx, agentID)
-	if err == nil && len(tools) > 0 {
+	if err != nil {
+		return fmt.Errorf("worker tool policy lookup failed: %w", err)
+	}
+	if len(tools) > 0 {
 		for _, t := range tools {
 			if t.ToolName == toolName {
 				if !t.Enabled {

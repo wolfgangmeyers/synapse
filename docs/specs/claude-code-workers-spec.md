@@ -564,3 +564,10 @@ The full scenario rows below remain required acceptance targets, not passing cla
 - **Then** eligible mail is offered again without another incoming event. Mail with uncertain stdin remains held.
 - **Failure and synchronous-exit limitation**: A stop failure, reservation failure or replay, or failure to start the restart task retains baseline behavior and does not trigger this reoffer. An offer consumed during those gates may remain stranded until another event. Baseline failure recording and pool-wide closure behavior are unchanged; failure recording can fail and other Claude agents may be affected by a closed pool.
 - **Verification**: `TestClaudeRestartReoffersMail`, `TestClaudeRestartReofferSkipsUncertainMail`, and `TestClaudeRestartStopFailureDoesNotReoffer` exercise the manager and SQLite with a fake CLI where applicable. The browser E2E `claude-code-restart-lost-wake.spec.ts` covers two gated enqueue offers and the checked ACK.
+
+### Scenario: identify Claude workers in the worker list
+- **Given** the worker list contains a router-managed Claude Code worker,
+- **When** its row is displayed, including after a reload,
+- **Then** a lowercase `claude` tag appears beside its name with the same styling as the existing `tmux` tag.
+- **Given** a tmux worker or a non-Claude managed worker, **when** its row is displayed, **then** the tmux worker retains its `tmux` tag and the non-Claude managed worker does not gain a `claude` tag. A tmux worker using a Claude model is still labeled `tmux`, not `claude`.
+- **Verification**: `tests/e2e/claude-worker-label.spec.ts` exercises launch, browser projection and reload; `tests/component/claude-worker-label.test.tsx` covers source and model edge cases.

@@ -337,7 +337,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
   };
 
   useEffect(() => {
-    if (isClaude || !client || typeof client.listWorkflows !== "function" || !agent || agent.source !== "router-managed") return;
+    if (!client || typeof client.listWorkflows !== "function" || !agent || agent.source !== "router-managed") return;
     let mounted = true;
     client.listWorkflows().then((res) => {
       if (mounted) setAvailableWorkflows(res || []);
@@ -533,7 +533,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                 </span>
               </h2>
 
-              {!isClaude && agent?.workflow_state ? (
+              {agent?.workflow_state ? (
                 onOpenWorkflow ? (
                   <button
                     type="button"
@@ -641,7 +641,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && !isClaude && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
+                {agent && (hasActiveWorkflow || pinnedControls.includes("workflow")) ? (
                   <div className="workflow-header-control">
                     <HeaderActionButton
                       className={`workflow-header-button ${hasActiveWorkflow ? "has-workflow active" : ""}`}
@@ -658,6 +658,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                         <div style={{ fontSize: "0.8em", padding: "4px 8px", color: "var(--text-muted, #888)", borderBottom: "1px solid var(--border-color, #333)", marginBottom: 4 }}>
                           Workflows
                         </div>
+                        {isClaude ? <div style={{ padding: "6px 8px", fontSize: "0.8em" }}>Workflow tool restrictions apply to Mecha tools only, not Claude native tools.</div> : null}
                         {hasActiveWorkflow ? (
                           <button
                             type="button"
@@ -770,7 +771,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
                   />
                 ) : null}
 
-                {agent && !isClaude && pinnedControls.includes("workerTools") ? (
+                {agent && pinnedControls.includes("workerTools") ? (
                   <HeaderActionButton
                     className="worker-tools-header-button"
                     onClick={() => setShowWorkerToolsDialog(true)}
@@ -902,7 +903,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
             </div>
 
           <div className="conversation-header-subagents-row">
-            {agent && !isClaude ? (
+            {agent ? (
             <div
               className={`header-metric-card subagents-card clickable${activeSubagentsCount > 0 ? " active header-metric-subagents--active" : ""}`}
               role="button"
@@ -1037,7 +1038,7 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
           ) : null}
         </div>
       </div>
-      {!isClaude && launchModalWorkflow && agent && client ? (
+      {launchModalWorkflow && agent && client ? (
   <WorkflowLaunchModal
     open={true}
     workflow={launchModalWorkflow}
@@ -1057,15 +1058,16 @@ export function ConversationHeader({ agent, client, templates, onInterrupt, acti
       setActiveWatchersCount(count);
     }}
   />
-) : null}{!isClaude && agent?.source === "router-managed" && client ? (
+) : null}{agent?.source === "router-managed" && client ? (
   <WorkerToolsDialog
     open={showWorkerToolsDialog}
     agentId={agent.agent_id}
     agentName={humanName(agent.agent_id)}
+    nativeToolsUnrestricted={isClaude}
     client={client}
     onClose={() => setShowWorkerToolsDialog(false)}
   />
-) : null}{!isClaude && agent && showSubagentViewerDialog ? (
+) : null}{agent && showSubagentViewerDialog ? (
   <SubagentViewerDialog
     open={showSubagentViewerDialog}
     onClose={() => setShowSubagentViewerDialog(false)}

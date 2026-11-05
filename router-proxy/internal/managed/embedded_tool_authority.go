@@ -46,6 +46,7 @@ func (m *Manager) observeEmbeddedEffect(ctx context.Context, phase string, bindi
 // No map or recovered receipt is independent execution authority.
 type embeddedTurnToolAuthority struct {
 	tools             []agent.AgentTool
+	baseTools         []agent.AgentTool
 	role              string
 	beforeToolExecute func(context.Context, agent.BeforeToolCallContext) error
 	persistence       *embeddedPersistence
@@ -493,11 +494,12 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 				m.publishCompleteHistory(entry)
 			}
 		}
-		lookupTools := tools
+		// Policy has already been checked against the current store state. Use
+		// the unfiltered catalog for schema validation so a newly enabled tool
+		// is not rejected by a stale per-turn projection.
+		lookupTools := baseTools
 		if currentLane := m.laneFor(binding.AgentID); currentLane != nil {
-			if dynTools := currentLane.getActiveTools(); len(dynTools) > 0 {
-				lookupTools = dynTools
-			} else if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
+			if dynBase := currentLane.getBaseTools(); len(dynBase) > 0 {
 				lookupTools = dynBase
 			}
 		}
@@ -720,7 +722,7 @@ func (m *Manager) newEmbeddedTurnToolAuthority(ctx context.Context, owner embedd
 		}
 		return nil
 	}
-	return &embeddedTurnToolAuthority{tools: tools, role: role, beforeToolExecute: beforeToolExecute, persistence: p, workflowState: activeWorkflowState, observerFailure: getObserverFailure,
+	return &embeddedTurnToolAuthority{tools: tools, baseTools: baseTools, role: role, beforeToolExecute: beforeToolExecute, persistence: p, workflowState: activeWorkflowState, observerFailure: getObserverFailure,
 		observeChecked: func(ctx context.Context, message agent.AgentMessage) error {
 			result, ok := message.(ai.ToolResultMessage)
 			if !ok || result.IsError {

@@ -123,7 +123,7 @@ export function AgentControlsDropdown({
           <span className="agent-controls-dropdown-title">Agent Controls</span>
         </div>
         <div className="agent-controls-dropdown-grid">
-          {controls.filter(control => !isClaudeCodeAgent(_agent) || !["workflow", "inlineTools", "toolSettings", "workerTools"].includes(control.id)).map((control) => {
+          {controls.filter(control => !isClaudeCodeAgent(_agent) || !["inlineTools", "toolSettings"].includes(control.id)).map((control) => {
             const isPinned = pinnedControls.includes(control.id);
             return (
               <div

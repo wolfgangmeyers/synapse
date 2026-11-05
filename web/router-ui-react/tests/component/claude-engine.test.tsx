@@ -13,7 +13,14 @@ const pi: ProviderModel = { provider: "google-vertex", id: "gemini", name: "Gemi
 const claude: ProviderModel = { provider: "claude-code", id: "sonnet", name: "Sonnet", available: true };
 const opus = { ...claude, id: "opus", name: "Opus" };
 const catalog = { auth_revision: 0, default_model: pi, models: [pi, claude, opus] };
-afterEach(() => { cleanup(); localStorage.clear(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
+
+// jsdom has no layout; give the portal and its containing dialog visible bounds.
+function mockLayout() {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 40, y: 40, left: 40, top: 40, right: 840, bottom: 640, width: 800, height: 600, toJSON: () => ({}) });
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+}
 
 it("accepts Claude aliases through the existing model catalog without changing auth providers", async () => {
   const client = createHttpClient("http://127.0.0.1:8765", async () => new Response(JSON.stringify(catalog)));
@@ -21,6 +28,7 @@ it("accepts Claude aliases through the existing model catalog without changing a
 });
 
 it.each([claude, pi])("scopes embedded model choices to the current engine ($provider)", (currentModel) => {
+  mockLayout();
   render(<ModelPicker isEmbedded models={catalog.models} currentModel={currentModel} onChange={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: `${currentModel.provider}/${currentModel.id}` }));
   expect(screen.getAllByRole("option")).toHaveLength(currentModel === pi ? 1 : 2);
@@ -28,6 +36,7 @@ it.each([claude, pi])("scopes embedded model choices to the current engine ($pro
 });
 
 it("launches Claude using the existing model key and keeps router default implicit", async () => {
+  mockLayout();
   const onLaunch = vi.fn(async () => undefined);
   render(<ManagedAgentDialog open onClose={vi.fn()} onAction={vi.fn()} onLaunch={onLaunch} onListDirectories={async path => ({ path, parent: "/", directories: [] })} onModels={async () => catalog} error="Sign in with claude on the router host" />);
   await screen.findByRole("button", { name: "Use router default" });
@@ -44,18 +53,19 @@ it("launches Claude using the existing model key and keeps router default implic
   expect(screen.getByRole("alert")).toHaveTextContent("Sign in with claude on the router host");
 });
 
-it("hides Claude v1 controls even when pinned, retaining thresholds goals reset and timeline", () => {
+it("shows Claude router controls while hiding inline controls and retaining timeline", () => {
   localStorage.setItem("mecha.toolbar.pinnedControls.v2", JSON.stringify(["workflow", "inlineTools", "workerTools", "toolSettings", "goal"]));
   const thresholds = vi.fn();
   render(<Conversation peer={{ agent_id: "claude-worker", source: "router-managed", runtime: "embedded", current_model: claude, workflow_state: "Old state", context_usage: { tokens: 100, context_window: 1000, percent: 10 } }} messages={[{ id: "history", body: "Retained history" }]} onContextThresholds={thresholds} onGoal={vi.fn()} />);
-  for (const name of [/Workflow State/, /Inline tools/, /Inline tool settings/, /Manage Worker Tools/, /Subagents:/]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
-  expect(screen.queryByLabelText(/Workflow state:/)).not.toBeInTheDocument();
+  for (const name of [/Inline tools/, /Inline tool settings/, /Subagents:/]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+  expect(screen.getByLabelText(/Workflow state:/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Set goal" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /Context usage:/ }));
   expect(thresholds).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole("button", { name: "More agent controls" }));
   const menu = screen.getByRole("menu");
-  for (const name of ["Workflow", "Inline tools", "Inline tool settings", "Worker tools"]) expect(within(menu).queryByRole("button", { name })).not.toBeInTheDocument();
+  for (const name of ["Inline tools", "Inline tool settings"]) expect(within(menu).queryByRole("button", { name, exact: true })).not.toBeInTheDocument();
+  for (const name of ["Workflow", "Worker tools"]) expect(within(menu).getByRole("button", { name, exact: true })).toBeInTheDocument();
   expect(within(menu).getByRole("button", { name: "Reset" })).toBeInTheDocument();
   expect(screen.getByText("Retained history")).toBeInTheDocument();
 });
@@ -70,7 +80,7 @@ it("never offers Claude as the router default or an auth settings row", async ()
   expect(within(select).queryByRole("option", { name: /Sonnet|Opus/ })).not.toBeInTheDocument();
 });
 
-it("suppresses stale Claude sidebar subagents while keeping Pi native subagents", () => {
+it("suppresses Claude sidebar subagents while keeping Pi native subagents", () => {
   const agent = { agent_id: "worker", source: "router-managed" as const, runtime: "embedded", current_model: claude, subagent_count: 1, managed_children: [{ id: "child", parent_entry_id: "entry", task_id: "task", run_id: "run", sequence: 1, recovery: { state: "confirmed" as const, cause: null, observed_at: "2030-01-01T00:00:00Z" }, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 }, description: "Native child", status: "running" as const }] };
   const { rerender } = render(<AgentRow agent={agent} />);
   expect(screen.queryByRole("button", { name: /subagent/i })).not.toBeInTheDocument();
