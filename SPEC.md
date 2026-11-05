@@ -82,6 +82,8 @@ Review acceptance:
 4. Numerical policy is explicit and the former unconditional immediate-idle wording is reconciled, not silently contradicted.
 5. Implementation review maps each changed production/test file to these criteria and proves bounded cleanup of any new safety state. No unsupported scope additions.
 
-## Evidence limits and delivery
+## Executable mapping and proof limits
 
-Scenario mappings are planned, not passing-test claims. This docs-only correction changes no production code or tests and runs no tests. Delivery uses separate test/code authors with red/green proof, relevant E2E/regressions and coverage, and independent final review. The user explicitly directs execution without router-managed workflows or further approval gates. Missing architecture evidence and the unlogged historical owner identity remain explicit limitations; neither is represented as resolved by this document.
+The scenario matrices remain full acceptance requirements, not fourteen implemented/passing E2E TCs. `tests/e2e/goal-wake-safety.spec.ts` has one actual TC, `SCN-GWS-002/003: failed automatic turns are paced and exhaust twenty attempts`, covering provider-failure pacing/cap through real browser/WS/REST/proxy/store with local Codex mock. It does not cover every pre-model rejection or recovery path. `tests/e2e/mailbox-session-recovery.spec.ts` has one combined ordinary/reset case using canonical store Given and actual context reset; no REST notification steering. Supporting Go guards cover narrow cache, pacing/cancellation and transactional store invariants, not complete actor acceptance.
+
+Remaining proof includes full restart/replay/live-owner races, invalid-owner holds and deliberate recovery, all cancellation/snooze branches, automatic goal-set cap preservation, passive wake hold preservation and legitimate successor reset handling. No contract is weakened to fit executable coverage. Missing architecture state and historically unlogged owner A remain explicit limitations. Detailed execution, baseline, coverage and unresolved review evidence: [delivery report](docs/specs/reports/report-20261105-1650-main.md).
