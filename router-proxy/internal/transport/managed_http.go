@@ -1173,6 +1173,10 @@ func managedLaunchError(err error) error {
 	if managed.IsModelUnavailable(err) {
 		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
 	}
+	var orphan *store.ManagedOrphanSessionError
+	if errors.As(err, &orphan) {
+		return &managedHTTPError{409, "STALE_EMBEDDED_SESSION", orphan.Error()}
+	}
 	var slot *store.ManagedSlotLimitError
 	if errors.As(err, &slot) {
 		return &managedHTTPError{409, "CONFLICT", "The managed process limit has been reached"}

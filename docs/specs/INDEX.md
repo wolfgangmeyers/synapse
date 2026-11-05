@@ -34,6 +34,8 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-ROUTER-INIT-001` | Fresh-machine Router Initialization | `Settings` | [`router-initialization.spec.md`](./router-initialization.spec.md) | `tests/e2e/router-initialization.spec.ts` | `Active` |
 | `SPEC-ROUTER-MIGRATION-001` | Router Retention Migration Recovery | `Settings` | [`router-retention-migration.spec.md`](./router-retention-migration.spec.md) | `tests/e2e/router-retention-migration.spec.ts` | `Active` |
+| `SPEC-SQLITE-CONNECTION-LIFECYCLE` | SQLite connection lifecycle safety | `AgentManagement` | [`sqlite-connection-lifecycle.spec.md`](./sqlite-connection-lifecycle.spec.md) | `tests/e2e/embedded-stale-relaunch.spec.ts` (partial); replacement connection regression in store tests | `Draft` |
+| `SPEC-AGENT-STALE-RELAUNCH` | Embedded relaunch safety | `AgentManagement` | [`embedded-stale-relaunch.spec.md`](./embedded-stale-relaunch.spec.md) | `tests/e2e/embedded-stale-relaunch.spec.ts` | `Draft` |
 | `SPEC-AGENT-URGENCY-001` | Explicit Agent Urgency Tool | `AgentManagement` | [`agent-urgency.spec.md`](./agent-urgency.spec.md) | `tests/e2e/agent-urgency.spec.ts` | `Active` |
 | `SPEC-LAUNCH-MODEL-VISIBILITY-001` | Launch Model Picker Visibility | `AgentManagement` | [`launch-model-picker-visibility.spec.md`](./launch-model-picker-visibility.spec.md) | `tests/e2e/launch-model-discovery.spec.ts` | `Active` |
 | `SPEC-OPENAI-CATALOG-001` | OpenAI GPT-6.1 Terra Catalog | `AgentManagement` | [`openai-model-catalog.spec.md`](./openai-model-catalog.spec.md) | `tests/e2e/openai-model-catalog.spec.ts` | `Active` |
