@@ -515,3 +515,93 @@ export async function setupE2EHarness(options?: {
     },
   };
 }
+
+// Real embedded provider boundary shared by the session/goal regression slices.
+// Request bodies are bounded and discarded on close; credentials are not retained.
+export async function startEmbeddedSafetyFixture() {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { execFileSync } = await import("node:child_process");
+  const repoRoot = resolve(__dirname, "../..");
+  type Reply = { text: string } | { tool: string; args: object } | { failure: true };
+  let reply: Reply = { text: "startup settled" };
+  let gate: (() => void) | undefined;
+  let hold = false;
+  let requests = 0;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", chunk => {
+      body += chunk;
+      if (Buffer.byteLength(body) > 2 * 1024 * 1024) req.destroy();
+    });
+    req.on("end", () => {
+      if (req.method !== "POST" || req.url !== "/codex/responses") { res.writeHead(400).end(); return; }
+      const parsed = JSON.parse(body);
+      requests++;
+      const selected = reply;
+      const send = () => {
+        if ("failure" in selected) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "deterministic safety backend failure" } })); return;
+        }
+        const item = "tool" in selected
+          ? { type: "function_call", id: `fc_${requests}`, call_id: `call_${requests}`, name: selected.tool, arguments: JSON.stringify(selected.args) }
+          : { type: "message", id: `msg_${requests}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: selected.text }] };
+        const events: object[] = [{ type: "response.created", response: { id: `resp_${requests}` } },
+          { type: "response.output_item.added", output_index: 0, item: "tool" in selected ? { ...item, arguments: "" } : { ...item, content: [] } }];
+        if ("text" in selected) events.push(
+          { type: "response.content_part.added", output_index: 0, content_index: 0, part: { type: "output_text", text: "" } },
+          { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: selected.text },
+          { type: "response.output_text.done", output_index: 0, content_index: 0, text: selected.text });
+        events.push({ type: "response.output_item.done", output_index: 0, item },
+          { type: "response.completed", response: { id: `resp_${requests}`, status: "completed" } });
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.end(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+      };
+      if (hold) { hold = false; gate = send; } else send();
+    });
+  });
+  await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("No embedded fixture port");
+  let router: IsolatedRouter | undefined;
+  let proxy: IsolatedProxy | undefined;
+  let frontend: IsolatedFrontend | undefined;
+  const close = async () => {
+    gate?.(); gate = undefined;
+    if (proxy?.process.pid && proxy.process.exitCode === null) {
+      try {
+        const children = execFileSync("ps", ["-o", "pid=", "--ppid", String(proxy.process.pid)], { encoding: "utf8" });
+        for (const pid of children.trim().split(/\s+/).filter(Boolean)) {
+          try { process.kill(Number(pid), "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        }
+      } catch (error) { if (error.status !== 1) throw error; }
+    }
+    await Promise.allSettled([proxy?.close(), router?.close(), frontend?.close()]);
+    server.closeAllConnections();
+    await new Promise<void>(r => server.close(() => r()));
+  };
+  try {
+    router = await startIsolatedRouter({ repoRoot, managed: true, embedded: { endpoint: `http://127.0.0.1:${address.port}` } });
+    proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
+    frontend = await serveFrontendDist(join(repoRoot, "web/router-ui-react/dist"));
+    let stderr = "";
+    router.process.stderr?.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-16000); });
+    const db = new DatabaseSync(router.databasePath);
+    db.exec("PRAGMA busy_timeout=5000");
+    const url = proxy.url;
+    return {
+      router, proxy, frontend, db,
+      get diagnostics() { return stderr; },
+      get requests() { return requests; },
+      setReply(value: Reply, held = false) { reply = value; hold = held; },
+      release() { const send = gate; gate = undefined; send?.(); },
+      async api(path: string, body?: object, method = "POST") {
+        const response = await fetch(url + path, body === undefined ? undefined : {
+          method, headers: { "Content-Type": "application/json", "X-Request-ID": crypto.randomUUID() }, body: JSON.stringify(body),
+        });
+        return { status: response.status, body: await response.json() };
+      },
+      async close() { db.close(); await close(); },
+    };
+  } catch (error) { await close(); throw error; }
+}
