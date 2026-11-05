@@ -15,7 +15,7 @@ This specification unifies workflow goal management by removing state-level goal
 1. When an agent binds to or executes an active workflow, the router automatically activates an implicit goal: `"Complete active workflow: <workflow.name>"` with goal lock enabled.
 2. Goal snooze is configured at the workflow level via `snooze_duration_ms` (defaulting to 10 minutes / 600,000 ms).
 3. Internal state transitions maintain the implicit workflow goal continuously without re-initialization, interruption, or erasure.
-4. When a worker settles (`idle`), goal continuation resumes immediately if snooze is not active or has elapsed, while holding if snooze is currently active.
+4. The first legitimate worker idle goal wake may resume immediately when snooze is inactive or elapsed. Subsequent automatic attempts are paced (default 10 seconds after the preceding automatic attempt settles) and all automatic attempts, including failures before turn start, count toward a 20-attempt consecutive automatic-chain cap. Session-owner failure stops automatic continuation until deliberate recovery validates ownership. See [automatic wake safety](goal-wake-safety.spec.md).
 5. Exiting or deactivating the workflow cleanly unlocks and deactivates the agent goal.
 6. Legacy workflow bundles containing state-level goals are imported seamlessly with backward compatibility, discarding obsolete goal fields and applying default snooze durations.
 
@@ -29,8 +29,9 @@ This specification unifies workflow goal management by removing state-level goal
 4. **Transition Goal Continuity**: Internal workflow state transitions (`action="transition"`) MUST NEVER clear, reset, or rewrite the implicit workflow goal.
 5. **Workflow-Level Snooze Default**: Workflows define `snooze_duration_ms` (integer > 0, default `600000`). Snooze durations during active workflows inherit this value unless an explicit override is supplied.
 6. **Worker Settling Kickoff**: When a managed worker in an active workflow reaches the `idle` activity state:
-   - If goal snooze is active (`snooze_until > now`), continuation remains on hold until the snooze timer fires.
-   - If goal snooze is inactive or elapsed, the router kicks off goal continuation immediately without artificial delay.
+   - If goal snooze is active (`snooze_until > now`), continuation remains on hold until snooze expiry, subject also to retry delay, budget and valid ownership.
+   - With valid ownership, available budget and no snooze, the first legitimate automatic idle wake may run immediately without artificial delay.
+   - Repeated automatic attempts wait the applicable delay (default 10 seconds after the preceding automatic attempt settles); at most 20 automatic attempts are allowed per consecutive automatic chain, including failed admission and failed turns. Automatic failures and repeated idle notifications never reset their own chain count. Session-owner failure stops automatic continuation until explicit recovery validates ownership. [SPEC-GOAL-001](goal-wake-safety.spec.md) owns these safety and user-recovery rules.
 7. **Exit Goal Cleanup**: When an agent exits a workflow (`action="exit"`) or is deactivated from a workflow, the implicit workflow goal is deactivated, cleared, and unlocked.
 8. **Backward Compatibility**: Importers of legacy `mecha-workflows` bundles ignore obsolete state-level `goal` fields and populate `snooze_duration_ms` with `600000` when missing or non-positive.
 
@@ -83,13 +84,13 @@ This specification unifies workflow goal management by removing state-level goal
 - **Given**:
   - An agent is running an active workflow.
 - **When**:
-  - Case 1: The agent turn finishes and the worker settles into `idle` state while goal snooze is inactive (`snooze_until <= now` or unset).
+  - Case 1: The initial normal agent turn finishes and the worker settles into `idle` with valid ownership, an available automatic chain and inactive goal snooze (`snooze_until <= now` or unset).
 - **Then**:
-  - The router immediately kicks off idle goal continuation to advance workflow tasks without waiting.
+  - The first legitimate idle goal continuation may start immediately. Subsequent automatic attempts obey the default 10-second pacing and 20-attempt consecutive automatic-chain cap, including on failure; ownership failures stop automation as specified by `SPEC-GOAL-001`.
 - **When**:
   - Case 2: The agent invoked `goal_snooze` (defaulting to the workflow's configured snooze duration, e.g. 10 or 15 minutes) and settles into `idle`.
 - **Then**:
-  - The router holds execution and does not trigger goal continuation until the snooze timestamp elapses.
+  - The router holds execution until the snooze timestamp elapses; expiry cannot bypass retry delay, exhausted budget or invalid-owner holds.
 
 #### Scenario: [SCN-WFIG-005] Workflow exit deactivates and clears the goal
 - **User Goal**: Ensure leaving an active workflow restores normal agent goal state.
