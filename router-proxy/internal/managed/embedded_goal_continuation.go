@@ -13,6 +13,25 @@ import (
 )
 
 type embeddedGoalTimer struct{ cancel func() }
+type embeddedAutomaticGoalKey struct{}
+
+// All automatic paths share lane-serialized attempt accounting. Checks that
+// merely suppress work never consume an attempt.
+func (m *Manager) goalAttemptAllowed(lane *managedAgentLane) bool {
+	limit := m.maxConsecutiveGoalContinuations
+	if limit <= 0 {
+		limit = defaultMaxConsecutiveGoalContinuations
+	}
+	return !lane.goalOwnerInvalid && lane.consecutiveContinuations < limit && !m.clock.Now().Before(lane.goalNextAttempt)
+}
+
+func (m *Manager) settleGoalAttempt(lane *managedAgentLane) {
+	delay := m.goalContinuationDelay
+	if delay <= 0 {
+		delay = defaultGoalContinuationDelay
+	}
+	lane.goalNextAttempt = m.clock.Now().Add(delay)
+}
 
 const defaultGoalContinuationDelay = 10 * time.Second
 const defaultMaxConsecutiveGoalContinuations = 20
@@ -98,6 +117,10 @@ func (m *Manager) dispatchEmbeddedGoalContinuation(binding store.EmbeddedBinding
 }
 
 func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding, key store.EmbeddedGoalEvaluationKey, due time.Time) {
+	m.scheduleEmbeddedGoalWake(binding.AgentID, due, func() { m.startEmbeddedGoalContinuation(binding, key) })
+}
+
+func (m *Manager) scheduleEmbeddedGoalWake(agentID string, due time.Time, wake func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -106,20 +129,20 @@ func (m *Manager) scheduleEmbeddedGoalContinuation(binding store.EmbeddedBinding
 	if m.embeddedGoalTimers == nil {
 		m.embeddedGoalTimers = make(map[string]*embeddedGoalTimer)
 	}
-	if previous := m.embeddedGoalTimers[binding.AgentID]; previous != nil {
+	if previous := m.embeddedGoalTimers[agentID]; previous != nil {
 		previous.cancel()
 	}
 	timer := &embeddedGoalTimer{}
-	m.embeddedGoalTimers[binding.AgentID] = timer
+	m.embeddedGoalTimers[agentID] = timer
 	fire := func() {
 		m.mu.Lock()
-		if m.closed || m.embeddedGoalTimers[binding.AgentID] != timer {
+		if m.closed || m.embeddedGoalTimers[agentID] != timer {
 			m.mu.Unlock()
 			return
 		}
-		delete(m.embeddedGoalTimers, binding.AgentID)
+		delete(m.embeddedGoalTimers, agentID)
 		m.mu.Unlock()
-		m.startEmbeddedGoalContinuation(binding, key)
+		wake()
 	}
 	delay := due.Sub(m.clock.Now())
 	if delay < 0 {
@@ -155,6 +178,12 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	lane := m.laneFor(binding.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
+	if !m.goalAttemptAllowed(lane) {
+		if !lane.goalOwnerInvalid && m.clock.Now().Before(lane.goalNextAttempt) {
+			m.scheduleEmbeddedGoalContinuation(binding, key, lane.goalNextAttempt)
+		}
+		return
+	}
 	if m.runCtx.Err() != nil {
 		return
 	}
@@ -186,6 +215,9 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	}
 	owner, err := m.ensureEmbeddedOwner(m.runCtx, binding.AgentID, *saved)
 	if err != nil {
+		lane.consecutiveContinuations++
+		m.settleGoalAttempt(lane)
+		lane.goalOwnerInvalid = true
 		lane.selection.Unlock()
 		return
 	}
@@ -195,10 +227,14 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 	// semantic authority nor an admission fence against other Store callers.
 	_, started, err := m.store.StartEmbeddedGoalContinuation(m.runCtx, binding, key)
 	lane.selection.Unlock()
-	if err != nil || !started {
+	if err == nil && !started {
 		return
 	}
 	lane.consecutiveContinuations++
+	defer m.settleGoalAttempt(lane)
+	if err != nil {
+		return
+	}
 	if lane.goalAttempt < lane.consecutiveContinuations {
 		lane.goalAttempt = lane.consecutiveContinuations
 	}
@@ -206,13 +242,18 @@ func (m *Manager) startEmbeddedGoalContinuationWithPrompt(binding store.Embedded
 		lane.goalAttempt = 20
 	}
 	ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+	ctx = context.WithValue(ctx, embeddedAutomaticGoalKey{}, true)
 	prompt := overridePrompt
 	if prompt == "" {
 		prompt = m.formatGoalContinuationPrompt(ctx, owner.binding, &key)
 	}
 	// Start committed UNKNOWN before any SDK provider request. An error or
 	// process loss cannot authorize replay; the saved transcript is evidence.
-	_ = m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key)
+	if err := m.runEmbeddedSessionTurnWithContinuation(ctx, *saved, prompt, nil, &key); err != nil {
+		if ownerErr := m.store.RenewEmbeddedOwner(m.runCtx, owner.binding, owner.identity, embeddedOwnerTTL); ownerErr != nil {
+			lane.goalOwnerInvalid = true
+		}
+	}
 }
 
 func (m *Manager) hasActiveSubagents(agentID string) bool {
@@ -269,6 +310,9 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	lane := m.laneFor(agentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
+	if !m.goalAttemptAllowed(lane) {
+		return
+	}
 
 	if m.runCtx.Err() != nil || m.isClosed() {
 		return
@@ -314,6 +358,9 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 
 	owner, err := m.ensureEmbeddedOwner(m.runCtx, agentID, *curAgent)
 	if err != nil {
+		lane.consecutiveContinuations++
+		m.settleGoalAttempt(lane)
+		lane.goalOwnerInvalid = true
 		log.Printf("kickoffIdleGoalContinuation: ensureEmbeddedOwner for %s: %v", agentID, err)
 		return
 	}
@@ -331,14 +378,24 @@ func (m *Manager) kickoffIdleGoalContinuation(binding store.EmbeddedBinding) {
 	}
 
 	runCtx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
+	runCtx = context.WithValue(runCtx, embeddedAutomaticGoalKey{}, true)
 	prompt := m.formatGoalContinuationPrompt(runCtx, owner.binding, nil)
 	lane.consecutiveContinuations++
+	defer func() {
+		m.settleGoalAttempt(lane)
+		if !lane.goalOwnerInvalid {
+			m.scheduleEmbeddedGoalWake(agentID, lane.goalNextAttempt, func() { m.kickoffIdleGoalContinuation(owner.binding) })
+		}
+	}()
 	lane.goalAttempt++
 	if lane.goalAttempt > 20 {
 		lane.goalAttempt = 20
 	}
 	log.Printf("kickoffIdleGoalContinuation: starting turn for %s with prompt: %s", agentID, prompt)
 	if err := m.runEmbeddedSessionTurn(runCtx, *curAgent, prompt, nil); err != nil {
+		if ownerErr := m.store.RenewEmbeddedOwner(m.runCtx, owner.binding, owner.identity, embeddedOwnerTTL); ownerErr != nil {
+			lane.goalOwnerInvalid = true
+		}
 		log.Printf("kickoffIdleGoalContinuation: runEmbeddedSessionTurn error for %s: %v", agentID, err)
 	}
 }

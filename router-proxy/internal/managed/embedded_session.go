@@ -1013,7 +1013,12 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		return 0, errors.New("embedded runner requires claimed owner")
 	}
 	binding := owner.binding
-	_ = m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL)
+	if err := m.store.RenewEmbeddedOwner(ctx, binding, owner.identity, embeddedOwnerTTL); err != nil {
+		return 0, err
+	}
+	if automatic, _ := ctx.Value(embeddedAutomaticGoalKey{}).(bool); !automatic {
+		m.laneFor(binding.AgentID).goalOwnerInvalid = false
+	}
 	source := "prompt"
 	msgID := ""
 	if mail != nil {
@@ -1059,6 +1064,9 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 				m.updateAgentContextUsage(binding.AgentID, &tokens, window)
 			}
 		}
+		if turnErr == nil && p != nil && p.lastStopReason == ai.StopError {
+			turnErr = errors.New("embedded provider returned StopError")
+		}
 		if turnErr != nil {
 			if mail == nil {
 				log.Printf("[embedded:%s] ERROR turn failed (source: %s, message: %s): %v", binding.AgentID, source, msgID, turnErr)
@@ -1066,12 +1074,14 @@ func (m *Manager) runEmbeddedSessionTurnScoped(ctx context.Context, saved store.
 		} else if mail == nil && p != nil {
 			log.Printf("[embedded:%s] Turn finished successfully (seq: %d)", binding.AgentID, p.seq)
 		}
-		if p != nil && p.toolExecuted {
+		automatic, _ := ctx.Value(embeddedAutomaticGoalKey{}).(bool)
+		if !automatic && p != nil && p.toolExecuted && turnErr == nil {
 			m.laneFor(binding.AgentID).consecutiveContinuations = 0
-		} else if continuation == nil && (explicitPrompt != "" || mail != nil) {
+		} else if !automatic && continuation == nil && (explicitPrompt != "" || mail != nil) {
 			lane := m.laneFor(binding.AgentID)
 			lane.consecutiveContinuations = 0
 			lane.consecutiveEmptyTurns = 0
+			lane.goalNextAttempt = time.Time{}
 			lane.goalAttempt = 0
 		}
 		if errors.Is(turnErr, context.Canceled) || (turnErr != nil && strings.Contains(turnErr.Error(), "context canceled")) {
