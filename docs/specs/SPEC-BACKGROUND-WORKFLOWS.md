@@ -14,7 +14,7 @@ Autonomous workflow execution in `mecha-developer` currently requires an existin
 1. Dynamically spawn a dedicated background worker to execute a workflow independently from beginning to completion.
 2. Schedule workflows to run at predetermined intervals or cron times.
 3. Strictly validate required runtime parameters for scheduled workflows, leading to potential silent execution failures.
-4. Keep the main conversation/agent list clean and uncluttered by background workers while still providing full observability, active/completed filtering, and automatic age-based termination.
+4. Keep the main conversation/agent list clean and uncluttered by background workers while still providing full observability, a combined active/completed view with active workers first and no toggle, and automatic age-based termination.
 
 This specification provides the behavioral contract for running background workflows dynamically and on schedule, parameter validation, UI sidebar tab isolation, and automatic age-based termination.
 
@@ -50,7 +50,7 @@ This specification provides the behavioral contract for running background workf
 - **REQ-5 (UI Tab Isolation & Worker Consistency)**:
   - Background workers must not appear in the standard "Agents" list.
   - At the top of the sidebar agent list, tabs allow switching between "Agents" and "Background" (with an active counter badge).
-  - Inside the Background view, a segmented control allows filtering between "Active" and "Completed".
+  - The Background view shows active and completed workers together, with active workers first and no segmented toggle.
   - Background worker items must render using the standard worker card format (`AgentRow` styling, status indicators, badges, and action buttons).
   - Clicking a background worker selects it and displays its full timeline in the conversation view.
 
@@ -91,12 +91,12 @@ This specification provides the behavioral contract for running background workf
 - **And** advances `next_run_at` to the next interval.
 
 ### Scenario 5: Web UI Sidebar Tabs & View Isolation
-- **Given** 2 standard agents and 1 background worker running.
+- **Given** 2 standard agents, 1 active background worker, and 1 completed background worker.
 - **When** viewing the "Agents" tab in the sidebar.
-- **Then** only the 2 standard agents are visible; the background worker is not listed.
+- **Then** only the 2 standard agents are visible; neither background worker is listed.
 - **When** switching to the "Background" tab in the sidebar.
-- **Then** only the background worker is visible under "Active".
-- **And** clicking the background worker displays its active conversation timeline in the main panel.
+- **Then** both background workers are visible together, with the active worker first and no segmented toggle.
+- **And** clicking the active background worker displays its conversation timeline in the main panel.
 
 ### Scenario 6: Automatic termination by age
 - **Given** background workers created less than and at least 24 hours ago, including active and sleeping workers, and an ordinary agent of the same age.
@@ -107,12 +107,12 @@ This specification provides the behavioral contract for running background workf
 
 ## 4. Verification & Automated Test Mapping
 
-- `tests/e2e/background-workflows.spec.ts`:
-  - `test("dynamic launch validates required parameters and launches background agent")`
-  - `test("scheduled workflow sweep validates required parameters and advances run time")`
-  - `test("UI sidebar tabs switch between standard agents and background workers")`
-  - `test("UI background tab filters active vs completed workers")`
-  - `test("workflow schedules management dialog enforces required parameters and manages schedules")`
+- `tests/e2e/background-workflows.spec.ts` (partial coverage; test titles use their own scenario numbering):
+  - `test("Scenario 1 & 2: Dynamic Background Workflow Launch and Missing Required Variables Validation")`: exercises valid launch, missing/blank inputs, and tab isolation for one standard agent and one active background worker.
+  - `test("Scenario 3: Create, list, edit, and trigger a workflow schedule via /v1/workflow-schedules")`: exercises schedule API creation validation, list/edit, a successful scheduled run, and the schedule list UI.
+  - `test("SCN-001 & SCN-002: Specific Days and Specific Times schedule fires and UI creation workflow via Workflows window")`: exercises structured schedule creation and a successful scheduled run.
+  - `test("Scenario 4: Background tab displays active background workers followed by completed workers without a segmented toggle")`: checks both workers are visible and active precedes completed; its no-toggle assertion only checks the selector `.segmented-toggle-group[aria-label="Background worker state"]`.
+  - These tests do not cover Scenario 5's full Agents-tab isolation with both active and completed background workers, or selecting a worker to display its timeline. The selector-specific assertion does not establish that all possible active/completed toggles are absent. This mapping does not claim full E2E acceptance; in particular, scheduled sweep-time missing-parameter handling (Scenario 4) is not established by these tests.
 
 - `tests/e2e/background-expiry.spec.ts`: startup catch-up through real router, proxy, SQLite and worker termination; younger background worker and workflow definition remain.
 - `router-proxy/internal/managed/background_expiry_test.go`: inclusive age cutoff, active/sleeping/failed states, ordinary workers and invalid timestamps.
