@@ -71,20 +71,14 @@ func claudeCodeNewInputID() string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// acquire is lane-serialized. Local preflight runs even when reusing a process.
+// acquire is lane-serialized. Each foreground execution owns a fresh process.
 // A pool lock protects lifetime only; no persistence callback runs under it.
 func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.EmbeddedBinding, cfg ClaudeCodeProcessConfig, newGrant func() (claudeCodeProcessGrant, error)) (*ClaudeCodeProcess, error) {
 	pool.mu.Lock()
-	if pool.closed {
-		pool.mu.Unlock()
-		return nil, errors.New("Claude process pool closed")
-	}
-	existing := pool.entries[b.AgentID]
+	entry := pool.entries[b.AgentID]
 	pool.mu.Unlock()
-	if existing != nil {
-		if _, err := PreflightClaudeCode(ctx, cfg); err != nil {
-			return nil, errors.Join(err, pool.stopEntry(b.AgentID, existing))
-		}
+	if err := pool.stopEntry(b.AgentID, entry); err != nil {
+		return nil, err
 	}
 	pool.mu.Lock()
 	if pool.closed {
@@ -93,37 +87,6 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 	}
 	if pool.entries == nil {
 		pool.entries = make(map[string]*claudeCodeProcessEntry)
-	}
-	entry := pool.entries[b.AgentID]
-	if entry != nil && entry.stopping != nil {
-		done := entry.stopping
-		pool.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		if entry.stopErr != nil {
-			return nil, entry.stopErr
-		}
-		return pool.acquire(ctx, b, cfg, newGrant)
-	}
-	if entry != nil && entry.binding == b && entry.process.Err() == nil {
-		proc := entry.process
-		pool.mu.Unlock()
-		return proc, nil
-	} else {
-		pool.mu.Unlock()
-		if entry != nil {
-			if err := pool.stopEntry(b.AgentID, entry); err != nil {
-				return nil, err
-			}
-		}
-	}
-	pool.mu.Lock()
-	if pool.closed {
-		pool.mu.Unlock()
-		return nil, errors.New("Claude process pool closed")
 	}
 	pool.starts.Add(1)
 	pool.mu.Unlock()
@@ -479,6 +442,18 @@ func (r *claudeCodeRuntime) stop(err error) (*embeddedOutcome, error) {
 }
 
 func (r *claudeCodeRuntime) acquire(ctx context.Context) (*ClaudeCodeProcess, error) {
+	// Only this runtime's process can be reused: a pool entry from another
+	// foreground scope must still be stopped before a new process is admitted.
+	r.mu.Lock()
+	owned := r.process
+	r.mu.Unlock()
+	r.pool.mu.Lock()
+	entry := r.pool.entries[r.p.binding.AgentID]
+	if owned != nil && !r.pool.closed && entry != nil && entry.process == owned && entry.binding == r.p.binding && entry.stopping == nil && owned.Err() == nil {
+		r.pool.mu.Unlock()
+		return owned, nil
+	}
+	r.pool.mu.Unlock()
 	proc, err := r.pool.acquire(ctx, r.p.binding, r.config, r.newGrant)
 	var cleanup *claudeStartCleanupError
 	if errors.As(err, &cleanup) {
@@ -593,7 +568,6 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 		return nil, err
 	}
 	r.config.Resume = started
-	reused := r.pool.reusable(r.p.binding)
 	proc, err := r.acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -601,7 +575,7 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 	// Probe the control channel before any user submission. Resume loss is
 	// recoverable only here: no echoed input or effect may have been consumed.
 	fresh := !started
-	if !reused {
+	{
 		if _, probeErr := proc.Control(ctx, map[string]interface{}{"subtype": "interrupt"}); probeErr != nil {
 			fallback, cleanupErr := r.failedInitialProbe(proc, started, probeErr)
 			if !fallback {

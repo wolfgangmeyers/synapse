@@ -3,6 +3,7 @@ package managed
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,7 +34,8 @@ func mcpRequest(t *testing.T, url, token, method string, params any) (int, map[s
 	return resp.StatusCode, result
 }
 func TestClaudeCodeMCPHTTPGrantSQLiteFence(t *testing.T) {
-	db, b, _, _ := wakePersistenceFixtureWithClaim(t, false)
+	db, b, _, path := wakePersistenceFixtureWithClaim(t, false)
+	seedMCPIdentity(t, path, b.AgentID)
 	m := &Manager{store: db}
 	handler := m.ClaudeCodeMCP()
 	var calls atomic.Int32
@@ -156,4 +158,44 @@ func TestClaudeMCPStatelessVersionAndBatch(t *testing.T) {
 	w = request(`[{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":3,"result":{}}]`)
 	require.Equal(t, 202, w.Code)
 	require.Empty(t, w.Body.String())
+}
+
+func TestClaudeMCPListTracksWorkerPolicy(t *testing.T) {
+	db, b, _, path := wakePersistenceFixtureWithClaim(t, false)
+	seedMCPIdentity(t, path, b.AgentID)
+	handler := (&Manager{store: db}).ClaudeCodeMCP()
+	token, revoke, err := handler.Issue(context.Background(), ClaudeCodeMCPGrant{Binding: b, Owner: "wake-fixture", Incarnation: "policy", Tools: []ClaudeCodeMCPTool{{Name: "bash", InputSchema: json.RawMessage(`{"type":"object"}`)}, {Name: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}}, ExecuteChecked: func(context.Context, ClaudeCodeMCPCall) (json.RawMessage, error) { return nil, nil }})
+	require.NoError(t, err)
+	defer revoke()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	list := func() []any {
+		_, out := mcpRequest(t, server.URL, token, "tools/list", nil)
+		require.Contains(t, out, "result")
+		return out["result"].(map[string]any)["tools"].([]any)
+	}
+	require.Len(t, list(), 2)
+	require.NoError(t, db.SetAgentTool(context.Background(), b.AgentID, "bash", false))
+	got := list()
+	require.Len(t, got, 1)
+	require.Equal(t, "read", got[0].(map[string]any)["name"])
+	require.NoError(t, db.SetAgentTool(context.Background(), b.AgentID, "bash", true))
+	require.Len(t, list(), 2)
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`DROP TABLE managed_agent_tools`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	_, out := mcpRequest(t, server.URL, token, "tools/list", nil)
+	require.Contains(t, out, "error")
+	require.NotContains(t, out, "result")
+}
+
+func seedMCPIdentity(t *testing.T, path, id string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO agents(agent_id,first_seen_at) VALUES(?,?)`, id, "2026-01-01T00:00:00Z")
+	require.NoError(t, err)
 }

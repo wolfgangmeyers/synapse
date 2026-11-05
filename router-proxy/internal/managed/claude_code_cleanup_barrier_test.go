@@ -79,11 +79,11 @@ func TestClaudeCleanupClosedDuringPreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := store.EmbeddedBinding{AgentID: "a"}
-	p := cleanupTestProcess(&cleanupBarrierStdin{make(chan struct{}), make(chan struct{})})
-	pool := &claudeCodeProcessPool{entries: map[string]*claudeCodeProcessEntry{"a": {binding: b, process: p}}}
+	pool := &claudeCodeProcessPool{}
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
 	result := make(chan error, 1)
 	go func() {
-		_, err := pool.acquire(context.Background(), b, ClaudeCodeProcessConfig{Binary: bin, Cwd: dir}, nil)
+		_, err := pool.acquire(context.Background(), b, ClaudeCodeProcessConfig{Binary: bin, Cwd: dir, SessionID: "test-session", Model: "test-model"}, nil)
 		result <- err
 	}()
 	deadline := time.Now().Add(3 * time.Second)

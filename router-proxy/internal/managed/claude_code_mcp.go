@@ -367,7 +367,20 @@ func (s *ClaudeCodeMCPServer) handleMCPMessage(w http.ResponseWriter, ctx contex
 	case "server/discover":
 		reply(map[string]any{"serverInfo": map[string]string{"name": "mecha", "version": "1"}})
 	case "tools/list":
-		reply(map[string]any{"tools": g.spec.Tools})
+		tools := make([]ClaudeCodeMCPTool, 0, len(g.spec.Tools))
+		for _, tool := range g.spec.Tools {
+			err := admitWorkflowStateTool(ctx, s.db, g.spec.Binding.AgentID, tool.Name)
+			if err != nil {
+				var denial *toolPolicyDenial
+				if errors.As(err, &denial) {
+					continue
+				}
+				reject(-32603, "tool policy lookup failed")
+				return
+			}
+			tools = append(tools, tool)
+		}
+		reply(map[string]any{"tools": tools})
 	case "tools/call":
 		var params struct {
 			Name      string                     `json:"name"`

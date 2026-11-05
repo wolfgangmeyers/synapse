@@ -96,7 +96,7 @@ try {
         if (!value || typeof value.id !== 'string' || !value.id || typeof value.name !== 'string' ||
           !/^[a-zA-Z0-9_-]+$/.test(value.name) || ('input' in value &&
           (!value.input || Array.isArray(value.input) || typeof value.input !== 'object')) ||
-          Object.keys(value).some(k => !['id', 'name', 'input'].includes(k))) throw Error('invalid mcp_call');
+          Object.keys(value).some(k => !['id', 'name', 'input', 'require_catalog'].includes(k))) throw Error('invalid mcp_call');
       } else if (key === 'spawn_child') {
         if (!value || Array.isArray(value) || typeof value !== 'object' || Object.keys(value).length) throw Error('spawn_child needs {}');
       } else if (key === 'rate_limit') {
@@ -209,12 +209,19 @@ try {
         req.end(body);
       });
     }
+    let cachedTools;
     async function callMcp(server, tool, state) {
       const init = await mcpRequest(server, 'initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'fake-claude', version: '1' } }, state);
       if (init.protocolVersion !== '2025-03-26') throw Error('MCP unsupported protocol version');
       await mcpRequest(server, 'notifications/initialized', {}, state, true);
-      const list = await mcpRequest(server, 'tools/list', {}, state);
-      if (!Array.isArray(list.tools)) throw Error('MCP invalid tools list');
+      if (!cachedTools) {
+        const list = await mcpRequest(server, 'tools/list', {}, state);
+        if (!Array.isArray(list.tools)) throw Error('MCP invalid tools list');
+        cachedTools = list.tools;
+        record({ kind: 'catalog', pid: process.pid, names: cachedTools.map(tool => tool.name) });
+      }
+      if (tool.require_catalog && !cachedTools.some(item => item.name === tool.name)) throw Error('tool absent from cached catalog');
+      if (tool.require_catalog) record({ kind: 'cached_call', pid: process.pid, name: tool.name });
       await mcpRequest(server, 'ping', {}, state);
       const result = await mcpRequest(server, 'tools/call', { name: tool.name, arguments: tool.input ?? {}, _meta: { 'claudecode/toolUseId': tool.id } }, state);
       if (!Array.isArray(result.content) || ('isError' in result && typeof result.isError !== 'boolean')) throw Error('MCP invalid tool result');

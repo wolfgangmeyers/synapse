@@ -33,6 +33,8 @@ Claude workers use router tools without exposing their bearer grants through the
 | :--- | :--- | :--- |
 | Private tool access | `tests/e2e/claude-code-tools.spec.ts` | private transport integration pending |
 | Missing authority or stopped listener | `tests/e2e/claude-code-tools.spec.ts` | failure and shutdown integration pending |
+| Live worker tool policy | `tests/e2e/claude-code-tools.spec.ts` | MCP discovery follows live worker tool policy |
+| Cached catalog across turns | `tests/e2e/claude-code-tools.spec.ts` | cached catalog refreshes between turns without losing session |
 | Stateless Claude handshake | `tests/e2e/claude-code-tools.spec.ts` | fake CLI handshake before checked calls; written, not yet run |
 
 Supporting Go tests (not browser E2E): `claude_private_mcp_listener_test.go` covers listener lifecycle, idle connection closure and post-close grant denial; `claude_private_mcp_blocked_shutdown_test.go` adds a blocked checked callback with an already-performed simulated effect, grant cancellation and client connection closure. The new test is pending execution. It does not prove rollback of effects or real tool persistence. Concurrent issue/close has a probabilistic race test, not a deterministic lock-order test; no non-intrusive pre-lock barrier was identified. All coverage claims remain pending independent execution against the final source.
@@ -47,3 +49,14 @@ Supporting Go tests (not browser E2E): `claude_private_mcp_listener_test.go` cov
 - **Then** it receives a JSON-RPC error without executing an unauthorized tool.
 
 This is a Claude-specific stateless JSON-response subset, not a claim of full MCP conformance: no SSE, server-initiated requests, resumability or sessions. Origin is neither parsed nor used for authorization; loopback and bearer grants are the authority boundary. The fake CLI handshake test is written but has not yet been run.
+
+### Scenario: Tool policy changes during a Claude process
+- **Given** a Claude worker with a private MCP grant and a worker or inherited workflow tool policy,
+- **When** Claude requests `tools/list`, including after a policy change,
+- **Then** the catalog reflects the current effective policy, using the same precedence as checked tool execution. A policy lookup failure returns an error instead of an unfiltered catalog.
+- **When** a disabled tool is called from a cached catalog,
+- **Then** checked execution still enforces current policy.
+- A policy change does not interrupt an in-flight turn. Normal foreground execution closes its process and revokes its grant. The next execution starts a fresh process that discovers the current catalog and resumes the saved provider session, probing before submitting input. A missing saved session follows the existing safe fresh-session fallback. Policy lookup errors fail discovery closed.
+- Adding, removing and re-adding tools across turns becomes visible even to a client that caches `tools/list` for its process lifetime. A cached disabled-tool call remains denied by current admission policy.
+
+Discovery evaluates policy per tool; a concurrent policy edit can therefore produce a mixed catalog. Each call is independently checked against current policy, so discovery is not an authorization snapshot. An atomic catalog snapshot is not claimed by this change.

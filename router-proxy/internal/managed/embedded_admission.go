@@ -66,6 +66,10 @@ func (m *Manager) validateEmbeddedWorkingDirectory(cwd string) error {
 //   - Fetch agent tools using s.GetAgentTools(ctx, agentID).
 //   - Find the tool by name. If tool is present and !tool.Enabled:
 //   - Return fmt.Errorf("tool %q is disabled for worker %q", toolName, agentID)
+type toolPolicyDenial struct{ message string }
+
+func (e *toolPolicyDenial) Error() string { return e.message }
+
 func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolName string) error {
 	if s == nil || agentID == "" {
 		return nil
@@ -88,7 +92,7 @@ func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolNa
 	}
 	if state != nil && len(state.AllowedTools) > 0 {
 		if !store.IsToolAllowedInWorkflowState(toolName, state.AllowedTools) {
-			return fmt.Errorf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)
+			return &toolPolicyDenial{message: fmt.Sprintf("tool '%s' is not allowed in active workflow state '%s'", toolName, state.Name)}
 		}
 		return nil
 	}
@@ -102,7 +106,7 @@ func admitWorkflowStateTool(ctx context.Context, s *store.Store, agentID, toolNa
 		for _, t := range tools {
 			if t.ToolName == toolName {
 				if !t.Enabled {
-					return fmt.Errorf("tool %q is disabled for worker %q", toolName, agentID)
+					return &toolPolicyDenial{message: fmt.Sprintf("tool %q is disabled for worker %q", toolName, agentID)}
 				}
 				break
 			}

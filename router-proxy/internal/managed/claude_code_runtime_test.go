@@ -720,7 +720,9 @@ func TestClaudeToolResetOptionalArguments(t *testing.T) {
 
 func TestClaudeUsageHoldUserInterrupt(t *testing.T) {
 	reset := time.Now().Add(15 * time.Minute).Truncate(time.Second)
-	r, p, pool, _ := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns":[[{"rate_limit":{"resetsAt":%d}}],[{"text":"next answer"}]]}`, reset.Unix()))
+	// Foreground executions use fresh processes, so select responses by input
+	// rather than relying on a per-process turn counter surviving the interrupt.
+	r, p, pool, _ := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns_by_input":[{"contains":"limited user","steps":[{"rate_limit":{"resetsAt":%d}}]},{"contains":"next user","steps":[{"text":"next answer"}]}]}`, reset.Unix()))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -745,7 +747,9 @@ func TestClaudeUsageHoldUserInterrupt(t *testing.T) {
 		t.Fatal("interrupt did not end hold")
 	}
 	require.True(t, pool.reusable(p.binding))
-	_, err := r.Run(context.Background(), "next user")
+	nextCtx, nextCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer nextCancel()
+	_, err := r.Run(nextCtx, "next user")
 	require.NoError(t, err)
 	require.Equal(t, "next answer", r.Snapshot().LastAssistantText)
 }
@@ -812,7 +816,7 @@ func TestClaudeUsageRetryInterruptBeforeWrite(t *testing.T) {
 }
 
 func TestClaudeUsageHoldInterruptControlJoined(t *testing.T) {
-	r, p, _, _ := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns":[[{"rate_limit":{"resetsAt":%d}}],[{"text":"next"}]]}`, time.Now().Add(time.Hour).Unix()))
+	r, p, _, _ := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns_by_input":[{"contains":"first","steps":[{"rate_limit":{"resetsAt":%d}}]},{"contains":"next","steps":[{"text":"next"}]}]}`, time.Now().Add(time.Hour).Unix()))
 	done := make(chan error, 1)
 	go func() { _, e := r.Run(context.Background(), "first"); done <- e }()
 	require.Eventually(t, func() bool {
@@ -846,13 +850,16 @@ func TestClaudeUsageHoldInterruptControlJoined(t *testing.T) {
 	} else {
 		require.ErrorIs(t, <-done, context.Canceled)
 	}
-	_, err := r.Run(context.Background(), "next")
+	nextCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := r.Run(nextCtx, "next")
 	require.NoError(t, err)
+	require.Equal(t, "next", r.Snapshot().LastAssistantText)
 }
 
 func TestClaudeUsageLimitAfterInterruptedTurnCanBeInterrupted(t *testing.T) {
 	reset := time.Now().Add(time.Hour).Unix()
-	r, p, _, cfg := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns":[[{"wait":"interrupt"}],[{"rate_limit":{"resetsAt":%d}}]]}`, reset))
+	r, p, _, cfg := claudeRuntimeFixture(t, fmt.Sprintf(`{"turns_by_input":[{"contains":"first","steps":[{"wait":"interrupt"}]},{"contains":"next","steps":[{"rate_limit":{"resetsAt":%d}}]}]}`, reset))
 	appended := make(chan struct{}, 2)
 	p.afterUserAppend = func(context.Context) { appended <- struct{}{} }
 	done := make(chan error, 1)
@@ -1158,4 +1165,23 @@ func TestClaudeBridgeTerminalFencesPreregisteredCall(t *testing.T) {
 			require.ErrorIs(t, err, sql.ErrNoRows)
 		})
 	}
+}
+
+func TestClaudeAcquisitionRetiresOldGrant(t *testing.T) {
+	ctx := context.Background()
+	cfg := claudeTestConfig(t, `{}`)
+	pool := &claudeCodeProcessPool{}
+	b := store.EmbeddedBinding{AgentID: "catalog", SessionID: cfg.SessionID}
+	var revoked atomic.Int32
+	factory := func() (claudeCodeProcessGrant, error) {
+		return claudeCodeProcessGrant{Revoke: func() { revoked.Add(1) }}, nil
+	}
+	first, err := pool.acquire(ctx, b, cfg, factory)
+	require.NoError(t, err)
+	second, err := pool.acquire(ctx, b, cfg, factory)
+	require.NoError(t, err)
+	require.NotSame(t, first, second)
+	require.Equal(t, int32(1), revoked.Load())
+	require.NoError(t, pool.stop(b.AgentID))
+	require.Equal(t, int32(2), revoked.Load())
 }
