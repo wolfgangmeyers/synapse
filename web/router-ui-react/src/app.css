@@ -2544,6 +2544,7 @@ dialog,
 }
 .model-options {
   display: grid;
+  grid-auto-rows: max-content;
   gap: 2px;
   max-height: min(48vh, 350px);
   overflow-y: auto;
