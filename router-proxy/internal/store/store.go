@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -189,13 +190,26 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 		migrations = DefaultMigrations()
 	}
 
-	db, err := sql.Open("sqlite", databasePath)
+	// PRAGMAs are connection-local: database/sql can replace even its sole
+	// connection after cancellation or an error. Initialize every new one.
+	absolutePath, err := filepath.Abs(databasePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve SQLite database path: %w", err)
+	}
+	busyMS := int64(busyTimeout / time.Millisecond)
+	if busyTimeout%time.Millisecond != 0 {
+		return nil, errors.New("busy timeout must be a whole number of milliseconds")
+	}
+	dsn := (&url.URL{Scheme: "file", Path: absolutePath}).String()
+	params := url.Values{}
+	params.Add("_pragma", "foreign_keys(1)")
+	params.Add("_pragma", "synchronous(FULL)")
+	params.Add("_pragma", "busy_timeout("+strconv.FormatInt(busyMS, 10)+")")
+	db, err := sql.Open("sqlite", dsn+"?"+params.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
 	}
-	// SQLite connection-local PRAGMAs are safe because every operation uses
-	// this one connection. This also prevents concurrent writers from creating
-	// a second connection with different settings.
+	// Serialize access; the DSN also configures replacement connections.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)

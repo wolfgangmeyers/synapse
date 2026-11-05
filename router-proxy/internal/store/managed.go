@@ -357,6 +357,15 @@ type ManagedAgentsSnapshot struct {
 	ReadinessSources map[string]*ManagedReadinessSource
 }
 
+// ManagedOrphanSessionError means an embedded identity is still reserved by
+// session state without a managed owner. Absence of that owner does not prove
+// the previous runtime has stopped, so launch must not repair it blindly.
+type ManagedOrphanSessionError struct{ AgentID string }
+
+func (e *ManagedOrphanSessionError) Error() string {
+	return "A stale embedded session prevents relaunch; investigate the previous agent before retrying, or choose another name."
+}
+
 type ManagedNameConflictError struct{ Name string }
 
 func (e *ManagedNameConflictError) Error() string { return "managed agent name is already reserved" }
@@ -881,6 +890,18 @@ func (s *Store) reserveManagedLaunchWithRole(ctx context.Context, agent ManagedA
 			}
 		} else if !errors.Is(checkErr, sql.ErrNoRows) {
 			return checkErr
+		}
+		// Check before reserving an operation or installing a replacement owner.
+		// A stale current row alone is not proof that its runtime was reaped.
+		if role != "" {
+			var orphan int
+			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM embedded_sessions s WHERE s.agent_id=? AND s.current=1 AND NOT EXISTS (SELECT 1 FROM managed_agents a WHERE a.agent_id=s.agent_id)`, agent.AgentID).Scan(&orphan)
+			if err == nil {
+				return &ManagedOrphanSessionError{AgentID: agent.AgentID}
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 		}
 		// Post-027 rows retain this pending operation as a reverse protection
 		// edge. Inserting it first lets the parent link be FK-valid in the same
