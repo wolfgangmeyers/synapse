@@ -3,7 +3,7 @@
 - **ID**: `SPEC-GOAL-001`
 - **Status**: `Draft`
 - **Domain**: `AgentManagement`
-- **Target E2E Suite**: `tests/e2e/goal-wake-safety.spec.ts` (planned new suite)
+- **Target E2E Suite**: `tests/e2e/goal-wake-safety.spec.ts`
 
 ## 1. Intent & User Outcome
 
@@ -72,7 +72,9 @@ Every case has **Mode: real-capable**. External LLM/evaluator services use deter
 
 ## 4. Automated E2E Verification Matrix
 
-All mappings are **planned**, not inspected executable coverage. Use headless browser, real REST/WebSocket, router, proxy parity and SQLite with local model/evaluator fixtures. Distinguish actual admission/turn-start entries (including rejected attempts) from suppressed timer/idle checks, and count model requests separately: zero model requests cannot prove zero pre-model retries. Use deterministic time and external-boundary gates, not wall-clock sleeps. The documented schedule test clock is a reference, not evidence it already drives goal timers. Assert before/at the 10-second boundary and at/after attempt 20.
+Actual executable: `tests/e2e/goal-wake-safety.spec.ts` contains one TC, `SCN-GWS-002/003: failed automatic turns are paced and exhaust twenty attempts` (**Mode: real-capable**; executed with local Codex mock). It exercises real browser/WS/REST/router-proxy/SQLite, default boundary pacing and twenty provider-error attempts. This is partial SCN-GWS-002/003 proof, not all pre-model failures. Supporting Go guards: `TestGoalWakeSafetyFailedIdleAttemptsArePaced`, `TestGoalWakeSafetyFailedRecoveryEvictsOriginOwner`, `TestGoalWakeSafetyGoalOffCancelsFailedRetry`. They do not replace actor-visible acceptance. The seven titles below remain planned; no exact-title executable mapping is claimed. GWS-001/004/005/006, full GWS-007 and remaining GWS-002/003 branches are not run at browser acceptance level.
+
+Execution evidence and proof gaps: [delivery report](reports/report-20261105-1650-main.md). Planned acceptance remains unchanged. All dependencies must be deterministic/local in automated tests.
 
 | Scenario ID | Scenario Description | E2E Test Suite | Test Case Name |
 | :--- | :--- | :--- | :--- |
@@ -84,4 +86,4 @@ All mappings are **planned**, not inspected executable coverage. Use headless br
 | `SCN-GWS-006` | User recovery | `tests/e2e/goal-wake-safety.spec.ts` | `user recovery resumes only with valid ownership` |
 | `SCN-GWS-007` | Snooze/cancellation | `tests/e2e/goal-wake-safety.spec.ts` | `snooze goal off and workflow exit override retry` |
 
-Existing `tests/e2e/workflow-implicit-goals.spec.ts` is the regression target for workflow goal/lock continuity; `tests/e2e/background-workflows.spec.ts` protects independent schedule cadence. Their contents and coverage were not inspected in this code-blind contract pass.
+Existing `tests/e2e/workflow-implicit-goals.spec.ts` is the regression target for workflow goal/lock continuity; `tests/e2e/background-workflows.spec.ts` protects independent schedule cadence. Their passing executable results are recorded separately in the delivery report and do not discharge this matrix.

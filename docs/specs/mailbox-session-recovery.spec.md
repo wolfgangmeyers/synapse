@@ -3,7 +3,7 @@
 - **ID**: `SPEC-MAILBOX-001`
 - **Status**: `Draft`
 - **Domain**: `Mailbox`
-- **Target E2E Suite**: `tests/e2e/mailbox-session-recovery.spec.ts` (planned new suite)
+- **Target E2E Suite**: `tests/e2e/mailbox-session-recovery.spec.ts`
 
 ## 1. Intent & User Outcome
 
@@ -69,7 +69,9 @@ Recovery fixtures in SCN-MSR-002–004 use only the safely unstarted, exact reti
 
 ## 4. Automated E2E Verification Matrix
 
-All mappings are **planned**, not executable coverage claims. The suite is new. Use headless browser, real REST/WebSocket, router, SQLite and proxy parity with deterministic local model responses. Restart cases reuse the isolated store. Control external-boundary interleavings rather than sleeping. Assert replies, delivery outcomes and committed effects, not just reservation diagnostics. See the [existing E2E harness documentation](../../tests/e2e/README.md).
+Actual executable: `tests/e2e/mailbox-session-recovery.spec.ts` contains one combined TC, `SCN-MSR-001/002: context reset unblocks retired-epoch unstarted mail`. It uses canonical store Given for safely unstarted accepted reservation and actual context reset, not REST notification steering; real browser/WS/REST/proxy/store with deterministic local model fixture (**Mode: real-capable**). It provides partial ordinary/reset progress proof only. Supporting store guards `TestMailboxSessionRecoveryUnstartedReservation` and `TestMailboxSessionRecoveryFailsClosed` cover narrow transactional invariants, not full browser acceptance. The seven titles below remain planned; restart/live-owner/stale-owner/committed-replay browser acceptance is not run. No full SCN-MSR-001–007 completion is claimed.
+
+Execution evidence and proof gaps: [delivery report](reports/report-20261105-1650-main.md). Planned acceptance remains unchanged. All dependencies must be deterministic/local in automated tests.
 
 | Scenario ID | Scenario Description | E2E Test Suite | Test Case Name |
 | :--- | :--- | :--- | :--- |

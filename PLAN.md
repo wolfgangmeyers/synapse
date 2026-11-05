@@ -35,7 +35,12 @@ Target: current `main`; no branch/worktree, no unrelated edits. Requirements are
 - Test-clock support for goal scheduling must be demonstrated, not assumed from scheduled-workflow tests.
 - Current owner acquisition is not an exclusive lease between multiple managers. This task must not claim to add that guarantee or weaken current session fencing.
 
-## Current evidence
+## Current evidence and remaining work
 
-Specification and plan only; no production changes or executed red/green/coverage/review claims yet. Incident evidence: stale queued reservation bound to retired epoch22 while agent current epoch23; operational agent192 SDK error turns in38.986s after child completion. Source confirms idle fallback lacks delay, passes ordinary explicit prompt, and turn defer resets its own continuation count before OfferDirect re-enters goal kickoff.
+See [delivery report](docs/specs/reports/report-20261105-1650-main.md) for exact TC inventories and raw assertions. Focused Go: five top-level passes (three managed, two store); subcases are not added to counts. Existing browser: six passes; new goal: one pass in 11.4s, committed with harness as `52115ec4`. New mailbox combined ordinary/reset TC: one reported pass in 6.6s, committed `0f51282b` under `46170b06`, plus five repeated passes with no skips. Eight observed browser passes do not complete fourteen scenario contracts.
 
+Selected broad managed execution still has seven failed parents; baseline controls match invocation/mail failures, while turn-error circuit failure has a different baseline signature. Full store/managed timeouts and broad transport 200-second no-output timeout are not passes. Focused transport: two passes, one cold-owner recovery failure matching baseline line 82.
+
+Review `7070756f` remains unresolved: automatic goal-set resets cap; legitimate post-failure context reset renews old identity and falsely holds; passive mail/system wake clears deliberate hold. All three guard REDs committed: `9d686f81`, `edcefded`, `b22cbadc`; production owner `f53` fixing, GREEN/re-review pending. No completion or main-push readiness claim. Parent must check report before commit; docs owner does not commit. Preserve concurrent production/guard work. Remote divergence (20 commits, `56d36dc5`) awaits integration assessment; parent finalizes evidence after integration.
+
+Full acceptance remains required: finish unimplemented scenario TCs, dependency/race and bounded cleanup proof, review changed-file acceptance mapping. Do not narrow the contract or count supporting Go invariants as full browser coverage. Confirmed incident mechanisms remain stale reservation and fallback self-reset/no-delay; historical cached owner A remains unlogged, deterministically reproduced hypothesis only.
