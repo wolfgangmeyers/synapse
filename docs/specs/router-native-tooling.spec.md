@@ -38,7 +38,7 @@ Agents can send durable mail using the checked-in Python adapter and native `mec
 - **User Goal**: Know which operations are actually supported.
 - **Given**: Existing root/native operation registries.
 - **When**: A valid retired script-backed operation is requested.
-- **Then**: It returns structured `ROOT_OPERATION_UNAVAILABLE` without spawning Python or any missing legacy script. Native mailbox-send remains usable.
+- **Then**: It returns structured `ROOT_OPERATION_UNAVAILABLE` without spawning Python or any missing legacy script, including through the managed Go router. Validation and fencing still precede execution. For a retired request still in received state, recovery returns unavailable without executing it. For an executing or side-effect-committed request, cold recovery has no retained arguments and returns unknown without consulting the host ledger. The removed `ops.worker` cannot be newly admitted or replayed through current manifest admission, so its historical host result is not reachable through that entry point. For retired operations still admitted by the current manifest, a matching replay can supply arguments; reconciliation may return a historical host result only when the durable argument hash and host operation, arguments and full fence match. A missing or mismatched record yields unknown. Recovery never repeats the operation or falls back to execution. Already durable Go results can be delivered without the original arguments, subject to the current binding fence. Native mailbox-send remains usable.
 
 ### Scenario: [RNT-004] Correlate and replay host operations
 - **User Goal**: Recover a result without repeating an external operation.
@@ -64,7 +64,9 @@ Agents can send durable mail using the checked-in Python adapter and native `mec
 | :--- | :--- | :--- | :--- |
 | RNT-001 | Real sender and native mailbox-send persistence | `tests/e2e/router-native-tooling.spec.ts`; `tests/e2e/worker-tool-actions.spec.ts` | `persists Python and native worker mail through proxy`; `removes worker tool and preserves mailbox and admin lifecycle` (native mailbox-send) |
 | RNT-002 | CLI failures, limits, redirects | `tests/e2e/router-native-tooling.spec.ts` | `rejects invalid mail boundaries without recovery` |
-| RNT-003 | Stable unavailable operations | `tests/e2e/router-native-tooling.spec.ts` | `reports retired operations unavailable before subprocess` |
-| RNT-004 | Correlation and replay | `tests/e2e/router-native-tooling.spec.ts` | `forwards correlation and replays without resending` |
+| RNT-003 | Stable unavailable operations | `tests/e2e/router-native-tooling.spec.ts`; `tests/e2e/managed-root-control.spec.ts` | `reports retired operations unavailable before subprocess`; `managed root operations dispatch, reconcile and deduplicate across real boundaries` (partial: managed RPC fixture, one retired operation and Python spawn sentinel; crash recovery and fencing not covered by this test) |
+| RNT-004 | Correlation and replay | `tests/e2e/router-native-tooling.spec.ts`; `tests/e2e/managed-root-control.spec.ts` | `forwards correlation and replays without resending`; `managed root operations dispatch, reconcile and deduplicate across real boundaries` (partial: managed RPC fixture, result reconciliation and duplicate replay; not all correlation and recovery paths) |
 | RNT-005 | Controls and retention | `tests/e2e/router-native-tooling.spec.ts` | `preserves router controls and prunes host history` |
 | RNT-006 | Remove worker tool, preserve mailbox and admin controls | `tests/e2e/worker-tool-actions.spec.ts` | `removes worker tool and preserves mailbox and admin lifecycle` |
+
+The managed-root-control browser test uses browser fetch through the real proxy and router to SQLite, with a deterministic managed RPC fixture and Python host adapter. It does not exercise the frontend UI, a WebSocket, or a real Pi/LLM session. Its mapped scenarios are partial, not complete scenario acceptance.

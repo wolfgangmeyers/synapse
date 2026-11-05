@@ -85,13 +85,13 @@ func TestEmbeddedCodexLocalCredentialRejectsUnsafePaths(t *testing.T) {
 		_, err := store.OpenLocalCodexCredentialStore(path)
 		require.Error(t, err)
 	})
-	t.Run("ordinary directory permissions", func(t *testing.T) {
+	t.Run("world accessible directory", func(t *testing.T) {
 		publicDir := filepath.Join(root, "public")
 		require.NoError(t, os.Mkdir(publicDir, 0o755))
 		require.NoError(t, os.Chmod(publicDir, 0o755))
 		assertMode(t, publicDir, 0o755)
 		_, err := store.OpenLocalCodexCredentialStore(filepath.Join(publicDir, "codex.credential"))
-		require.NoError(t, err)
+		require.Error(t, err)
 	})
 }
 

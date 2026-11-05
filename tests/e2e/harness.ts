@@ -147,6 +147,7 @@ export async function startIsolatedRouter(options: {
   codexCredentialPath?: string;
   fakeEmbeddedCatalog?: boolean;
   backgroundExpiryInterval?: string;
+  rootControlFixture?: boolean;
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
   if (options.backgroundExpiryInterval && options.testClock === false) throw new Error("Background expiry interval requires the test clock");
@@ -282,6 +283,16 @@ export async function startIsolatedRouter(options: {
   if (options.backgroundExpiryInterval) {
     runtimeEnvironment = { ...runtimeEnvironment, MECHA_TEST_BACKGROUND_EXPIRY_INTERVAL: options.backgroundExpiryInterval };
   }
+  if (options.rootControlFixture) {
+    if (!isManaged) throw new Error("Root control fixture requires managed mode");
+    await writeFile(join(root, "managed-home/sessions/root-control-fixture"), options.repoRoot, { mode: 0o600 });
+    const wrapper = join(root, "python-sentinel");
+    await writeFile(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${root}/python-spawns.log'\nexec "$MECHA_TEST_PYTHON" "$@"\n`, { mode: 0o700 });
+    runtimeEnvironment = { PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(root, "managed-home"),
+      PYTHON: wrapper, MECHA_TEST_PYTHON: process.env.PYTHON || "python3", PYTHONDONTWRITEBYTECODE: "1", MECHA_SUPERVISOR_TOOLS: join(options.repoRoot, "tools"),
+      MECHA_MANAGED_ROOT_CONTROL_HOME: join(root, "managed-home"), MECHA_TEST_ROOT_CONTROL: root,
+      MECHA_TEST_ROOT_MANIFEST: join(options.repoRoot, "router/contract/managed-tools-v1.json") };
+  }
   // Stop the executable itself, not a launcher, and join its close event before
   // reopening SQLite or removing the fixture. Escalation is bounded and joined.
   const stop = async () => {
@@ -410,81 +421,54 @@ export async function startIsolatedRouter(options: {
 export async function startRouterProxy(options: {
   repoRoot: string;
   upstreamPort: number;
+  onSpawn?: (child: ChildProcess) => void;
 }): Promise<IsolatedProxy> {
-  const port = await allocatePort();
-  const routerProxyDir = join(options.repoRoot, "router-proxy");
-
-  const child = spawn(
-    "go",
-    [
-      "run",
-      "./",
-      "--upstream-host",
-      "127.0.0.1",
-      "--upstream-port",
-      String(options.upstreamPort),
-      "--listen-port",
-      String(port),
-      "--listen-host",
-      "127.0.0.1",
-    ],
-    {
-      cwd: routerProxyDir,
-      stdio: ["ignore", "pipe", "pipe"],
-    }
-  );
-
-  let settled = false;
-  let stdout = "";
-  let stderr = "";
-
-  await new Promise<void>((res, rej) => {
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        rej(new Error(`Router proxy timed out.\nStdout: ${stdout}\nStderr: ${stderr}`));
-      }
-    }, 15_000);
-
-    const checkReady = (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout += text;
-      if (text.includes("MECHA_ROUTER_PROXY_READY")) {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeout);
-          res();
-        }
-      }
-    };
-
-    child.stdout.on("data", checkReady);
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+  const root = await mkdtemp(join(tmpdir(), "mecha-e2e-proxy-"));
+  let child: ChildProcess | undefined;
+  let closed: Promise<void> | undefined;
+  const stop = async () => {
+    if (!child || !closed) return;
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      const timer = setTimeout(() => child?.kill("SIGKILL"), 2000);
+      try { await closed; } finally { clearTimeout(timer); }
+    } else await closed;
+  };
+  const cleanup = async () => { await stop(); await rm(root, { recursive: true, force: true }); };
+  try {
+    const binary = join(root, "router-proxy");
+    await new Promise<void>((res, rej) => {
+      const build = spawn("go", ["build", "-o", binary, "./"], { cwd: join(options.repoRoot, "router-proxy"), stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      build.stderr.on("data", chunk => { stderr += String(chunk); });
+      build.once("error", rej);
+      build.once("close", code => code === 0 ? res() : rej(new Error(`Proxy build failed (${code}): ${stderr}`)));
     });
-
-    child.once("close", (code) => {
-      if (!settled) {
+    const port = await allocatePort();
+    child = spawn(binary, ["--upstream-host", "127.0.0.1", "--upstream-port", String(options.upstreamPort), "--listen-port", String(port), "--listen-host", "127.0.0.1"], { stdio: ["ignore", "pipe", "pipe"] });
+    const processChild = child;
+    closed = new Promise(resolve => processChild.once("close", () => resolve()));
+    await new Promise<void>((res, rej) => {
+      let stdout = "", stderr = "", settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        rej(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`));
-      }
+        error ? rej(error) : res();
+      };
+      const timeout = setTimeout(() => finish(new Error(`Router proxy timed out.\nStdout: ${stdout}\nStderr: ${stderr}`)), 15_000);
+      processChild.stdout!.on("data", chunk => { stdout += String(chunk); if (stdout.includes("MECHA_ROUTER_PROXY_READY")) finish(); });
+      processChild.stderr!.on("data", chunk => { stderr += String(chunk); });
+      processChild.once("error", error => finish(error));
+      processChild.once("close", code => finish(new Error(`Router proxy exited (code ${code}).\nStderr: ${stderr}`)));
+      options.onSpawn?.(processChild);
     });
-  });
-
-  return {
-    port,
-    url: `http://127.0.0.1:${port}`,
-    process: child,
-    close: async () => {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await new Promise((r) => setTimeout(r, 200));
-        if (child.exitCode === null) child.kill("SIGKILL");
-      }
-    },
-  };
+    let closing: Promise<void> | undefined;
+    return { port, url: `http://127.0.0.1:${port}`, process: processChild, close: () => closing ??= cleanup() };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 }
 
 export async function serveFrontendDist(distDir: string): Promise<IsolatedFrontend> {

@@ -1,3 +1,5 @@
+import { attachmentCacheIdentity, cacheKeyForAttachment } from "../persistence/history-repository";
+import { canonicalSendId } from "../state/selectors";
 import type { ReactElement } from "react";
 import type { HistoryMessage } from "../domain/history";
 import { messageTime } from "../domain/history";
@@ -8,8 +10,8 @@ import { textWithoutMarkdownImages } from "../domain/markdown";
 
 import { AgentAvatar } from "./AgentAvatar";
 
-export interface MessageBubbleProps { message: HistoryMessage; ownerId?: string | undefined; routerUrl?: string | undefined; operationalAgentId?: string | undefined }
-export function MessageBubble({ message, ownerId, routerUrl, operationalAgentId }: MessageBubbleProps): ReactElement {
+export interface MessageBubbleProps { message: HistoryMessage; ownerId?: string | undefined; routerUrl?: string | undefined; operationalAgentId?: string | undefined; cachePeer?: string | undefined }
+export function MessageBubble({ message, ownerId, routerUrl, operationalAgentId, cachePeer }: MessageBubbleProps): ReactElement {
   const outgoing = message.direction === "outgoing" || (ownerId !== undefined && message.from === ownerId);
   const receivedBySelectedAgent = operationalAgentId !== undefined && message.to === operationalAgentId;
   const sentBySelectedAgent = operationalAgentId !== undefined && message.from === operationalAgentId;
@@ -52,7 +54,7 @@ export function MessageBubble({ message, ownerId, routerUrl, operationalAgentId 
           </div>
           <div className="bubble">
             <MarkdownBody body={stripAttachmentFooter(message.body)} />
-            <AttachmentGallery attachments={attachments} {...(routerUrl !== undefined ? { routerUrl } : {})} />
+            <AttachmentGallery attachments={routerUrl && ownerId && cachePeer ? attachments.map((attachment, index) => ({ ...attachment, cacheKey: attachment.cacheKey ?? cacheKeyForAttachment(routerUrl, ownerId, cachePeer, canonicalSendId(message.id), attachmentCacheIdentity(attachment, index)) })) : attachments} {...(routerUrl !== undefined ? { routerUrl } : {})} />
           </div>
         </div>
       </div>

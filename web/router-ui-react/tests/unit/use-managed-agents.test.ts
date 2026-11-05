@@ -14,7 +14,7 @@ const sampleAgent: ManagedAgent = {
   agent_id: "agent-alpha",
   source: "router-managed",
   cwd: "/workspace",
-  model: { provider: "antigravity", id: "gemini-3.8-flash" },
+  model: { provider: "google-vertex", id: "gemini-3.8-flash" },
   desired_state: "running",
   lifecycle_state: "running",
   activity_state: "active",

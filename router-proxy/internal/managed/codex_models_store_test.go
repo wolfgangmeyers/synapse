@@ -20,6 +20,7 @@ func TestLoadCodexModelsStoreAddsSupportedMissingModels(t *testing.T) {
 	dir := t.TempDir()
 	model := *ai.GetModel("openai-codex", "gpt-6-sol")
 	model.ID, model.Name = "store-fixture-model", "Store Fixture Model"
+	require.Nil(t, ai.GetModel("openai-codex", model.ID), "fixture must not already be registered")
 	invalid := model
 	invalid.ID, invalid.BaseURL = "wrong-endpoint", "https://example.org"
 	existing := model

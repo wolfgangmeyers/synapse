@@ -29,11 +29,18 @@ func (h *retirementHost) ExecuteRootControl(context.Context, RootControlHandlerI
 	h.t.Fatal("retired operation reached Execute")
 	return RootControlHandlerResult{}, nil
 }
+func (h *retirementHost) ReconcileRetiredRootControl(ctx context.Context, identity RootControlHandlerIdentity, in RootControlInvocation) (RootControlHandlerResult, error) {
+	return h.ReconcileRootControl(ctx, identity, in)
+}
 func (h *retirementHost) ReconcileRootControl(ctx context.Context, _ RootControlHandlerIdentity, in RootControlInvocation) (RootControlHandlerResult, error) {
 	h.reconciles++
-	data, err := json.Marshal(map[string]any{"request_id": in.RequestID, "operation_id": in.OperationID, "arguments": in.Arguments, "fence": map[string]any{"agent_id": in.Fence.AgentID}})
+	data, err := json.Marshal(map[string]any{"request_id": in.RequestID, "operation_id": in.OperationID, "arguments": in.Arguments, "fence": map[string]any{"agent_id": in.Fence.AgentID, "pi_session_id": in.Fence.PiSessionID, "session_epoch": in.Fence.SessionEpoch, "process_pid": in.Fence.ProcessPID, "process_start_marker": in.Fence.ProcessStartMarker, "process_incarnation": in.Fence.ProcessIncarnation, "runtime_generation": in.Fence.RuntimeGeneration, "manifest_revision": in.Fence.ManifestRevision, "manifest_hash": in.Fence.ManifestHash}})
 	require.NoError(h.t, err)
-	cmd := exec.CommandContext(ctx, "python3", "../../../tools/managed_root_control.py", "reconcile", "--home", h.home)
+	python := os.Getenv("PYTHON")
+	if python == "" {
+		python = "python3"
+	}
+	cmd := exec.CommandContext(ctx, python, "../../../tools/managed_root_control.py", "reconcile", "--home", h.home)
 	cmd.Stdin = bytes.NewReader(data)
 	out, err := cmd.CombinedOutput()
 	require.NoError(h.t, err, string(out))
@@ -55,6 +62,13 @@ func (r retirementRPC) ReconcileRootControlResult(ctx context.Context, payload m
 }
 
 func TestRetiredWorkerRootRecovery(t *testing.T) {
+	python := os.Getenv("PYTHON")
+	if python == "" {
+		python = "python3"
+	}
+	if _, err := exec.LookPath(python); err != nil {
+		t.Skipf("Python executable %q unavailable: %v", python, err)
+	}
 	for _, tc := range []struct {
 		name, state  string
 		saved, stale bool
@@ -112,18 +126,13 @@ func TestRetiredWorkerRootRecovery(t *testing.T) {
 				return
 			}
 			require.Equal(t, "delivered", row.State)
-			if tc.saved && tc.state != "received" {
-				require.Equal(t, "ok", row.ResultStatus)
-				require.Equal(t, "saved worker send success", row.ResultContent)
-			} else {
+			if tc.state == "received" {
 				require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", row.ErrorCode)
+			} else {
+				require.Equal(t, "ROOT_OPERATION_UNKNOWN", row.ErrorCode)
 			}
 			require.Zero(t, host.executes)
-			if tc.state == "received" {
-				require.Zero(t, host.reconciles)
-			} else {
-				require.Equal(t, 1, host.reconciles)
-			}
+			require.Zero(t, host.reconciles, "cold recovery has no verified arguments")
 			m.rootControlHandlers = nil
 			m.recoverRootControls(binding)
 			m.resumeRootControl(ctx, binding, requestID, nil)
@@ -134,11 +143,31 @@ func TestRetiredWorkerRootRecovery(t *testing.T) {
 
 func TestRetiredWorkerRecoveryPreservesOtherControlAndDurableResult(t *testing.T) {
 	ctx := context.Background()
-	m, durable, binding, fence, tool, rpc, handler := newRootAdmissionFixtureWithReceiver(t, false)
+	m, durable, binding, fence, _, rpc, _ := newRootAdmissionFixtureWithReceiver(t, false)
+	// The shared admission fixture selects retired ops.git_status. Use a live
+	// operation here so this test actually verifies unrelated dispatch.
+	var tool ManifestTool
+	for _, candidate := range m.manifest.Tools {
+		if candidate.OperationID == "reminder.control" {
+			tool = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, tool.Name)
+	handler := &rootAdmissionHandler{identity: RootControlHandlerIdentity{CapabilityID: tool.CapabilityID, ToolName: tool.Name, DefinitionID: tool.DefinitionID, DefinitionSHA256: tool.DefinitionSHA256, OperationID: tool.OperationID}}
+	handlers := defaultRootControlHandlers(m.manifest)
+	for i, candidate := range m.manifest.Tools {
+		if candidate.OperationID == tool.OperationID {
+			handlers[i] = handler
+		}
+	}
+	var err error
+	m.rootControlHandlers, err = NewRootControlHandlerRegistry(m.manifest, handlers)
+	require.NoError(t, err)
 	binding.rpc = retirementRPC{rpc}
 	rpc.armErr = context.Canceled
 	requestID := "123e4567-e89b-42d3-a456-426614174393"
-	m.admitAndRunRootControl(ctx, binding, rootAdmissionEvent(fence, tool, requestID, rootAdmissionArguments("unaffected")))
+	m.admitAndRunRootControl(ctx, binding, rootAdmissionEvent(fence, tool, requestID, map[string]any{"action": "list"}))
 	row, err := durable.ManagedControlRequest(ctx, requestID)
 	require.NoError(t, err)
 	require.Equal(t, "completed", row.State)
@@ -221,14 +250,8 @@ func TestRetiredWorkerRecoveryExecutorFunc(t *testing.T) {
 					require.NoError(t, err)
 					require.Zero(t, executes, "retired recovery must never fall back to Execute")
 					require.Equal(t, "delivered", row.State)
-					if explicitReconcile {
-						require.Equal(t, 1, reconciles)
-						require.Equal(t, "ok", row.ResultStatus)
-						require.Equal(t, "saved worker result", row.ResultContent)
-					} else {
-						require.Zero(t, reconciles)
-						require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", row.ErrorCode)
-					}
+					require.Zero(t, reconciles)
+					require.Equal(t, "ROOT_OPERATION_UNKNOWN", row.ErrorCode)
 					require.Equal(t, 1, rpc.submissionCount())
 				})
 			}

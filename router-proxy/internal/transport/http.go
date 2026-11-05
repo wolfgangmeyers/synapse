@@ -530,6 +530,7 @@ func rawInt(payload map[string]json.RawMessage, key string, required bool) (*int
 }
 
 func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	owner, peer := req.URL.Query().Get("owner"), req.URL.Query().Get("peer")
 	if owner == "" || peer == "" {
 		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
@@ -576,6 +577,7 @@ func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleConversationTimeline(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	agentID := req.URL.Query().Get("agent_id")
 	if agentID == "" {
 		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
@@ -599,7 +601,25 @@ func (r *Router) handleConversationTimeline(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	events, nextBeforeSeq, err := r.store.GetConversationTimeline(req.Context(), agentID, limit, beforeSeq)
+	query := req.URL.Query()
+	_, hasEvent := query["before_event_id"]
+	_, hasSeq := query["before_seq"]
+	if hasEvent && (hasSeq || strings.TrimSpace(query.Get("before_event_id")) == "") {
+		r.writeError(w, &httpError{status: 400, code: "invalid_request"})
+		return
+	}
+	var events []store.ConversationTimelineEvent
+	var nextBeforeSeq *int64
+	var err error
+	if hasEvent {
+		events, nextBeforeSeq, err = r.store.GetConversationTimelineBeforeEvent(req.Context(), agentID, query.Get("before_event_id"), limit)
+		if errors.Is(err, store.ErrTimelineBoundaryNotFound) {
+			r.writeError(w, &httpError{status: 409, code: "timeline_boundary_not_found"})
+			return
+		}
+	} else {
+		events, nextBeforeSeq, err = r.store.GetConversationTimeline(req.Context(), agentID, limit, beforeSeq)
+	}
 	if err != nil {
 		r.writeError(w, &httpError{status: 500, code: "internal_error"})
 		return

@@ -104,13 +104,18 @@ func TestRootControlHandlerRegistryClosesOverCurrentManifest(t *testing.T) {
 			require.NotNil(t, owner.executor)
 			executed, executeErr := handler.Execute(context.Background(), RootControlInvocation{OperationID: tool.OperationID})
 			require.NoError(t, executeErr)
-			require.Equal(t, "executed", executed.Content)
 			reconciled, reconcileErr := handler.Reconcile(context.Background(), RootControlInvocation{OperationID: tool.OperationID})
 			require.NoError(t, reconcileErr)
-			require.Equal(t, "reconciled", reconciled.Content)
+			if retiredRootControlOperation(tool.OperationID) {
+				require.Equal(t, "ROOT_OPERATION_UNAVAILABLE", executed.ErrorCode)
+				require.Equal(t, "reconciled", reconciled.Content)
+			} else {
+				require.Equal(t, "executed", executed.Content)
+				require.Equal(t, "reconciled", reconciled.Content)
+			}
 		}
 	}
-	require.Equal(t, int32(30), calls.Load(), "each available owner must delegate execute and reconcile exactly once")
+	require.Equal(t, int32(25), calls.Load(), "retired owners reconcile only; other owners execute and reconcile")
 }
 
 func TestRootControlHandlerRegistryRejectsEveryClosureMutation(t *testing.T) {

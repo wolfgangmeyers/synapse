@@ -26,6 +26,7 @@ export interface AppState extends RouterScope {
   filter: string;
   messagesByPeer: Record<string, HistoryMessage[]>;
   pendingSends: Record<string, string>;
+  outboxNotice?: string;
   pendingControls: Map<string, PendingControl>;
   modelProjections: Map<string, Agent>;
   lifecycleVersion: number;

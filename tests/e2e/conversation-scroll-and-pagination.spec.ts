@@ -475,6 +475,8 @@ test.describe("Conversation Scroll Anchoring, Proximity Auto-Scroll, and Natural
     // SCN-UNLOAD-002: hasOlder indicator / "Load older history" button remains available
     const loadOlderBtn = page.locator('.load-older-button, button:has-text("Load older history")');
     await expect(loadOlderBtn.first()).toBeVisible({ timeout: 5000 });
+    await loadOlderBtn.first().click();
+    await expect(trimmedMessageLocator.first()).toBeVisible({ timeout: 10000 });
 
     // Close agent WebSockets
     agent1Ws.close();

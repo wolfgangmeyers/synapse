@@ -166,12 +166,12 @@ test("preserves an invalid existing fork path", async () => {
 // WebSocket transports. No model is prompted and provider discovery is offline.
 import { setupE2EHarness, startIsolatedRouter } from "./harness";
 
-for (const mode of [0o750, 0o755, 0o775]) {
-  test(`starts with ordinary credential-directory permissions ${mode.toString(8)}`, async ({ page }) => {
+for (const mode of [0o750, 0o755]) {
+  test(`starts with ordinary ancestor-directory permissions ${mode.toString(8)}`, async ({ page }) => {
     const f = await fixture();
     expect((await f.run()).code).toBe(0);
     const credentialDirectory = join(f.home, ".mecha-developer");
-    await chmod(credentialDirectory, mode);
+    await chmod(f.home, mode);
     const credentialPath = join(credentialDirectory, "codex-credentials.json");
     const harness = await setupE2EHarness({ managed: true, useProxy: true, codexCredentialPath: credentialPath });
     try {
@@ -199,7 +199,8 @@ for (const mode of [0o750, 0o755, 0o775]) {
       expect(observed.socket).toBe("registered");
       expect(observed.auth.providers.find((p: { provider: string }) => p.provider === "openai-codex").authenticated).toBe(false);
       expect((await readFile(harness.router.databasePath)).subarray(0, 16).toString()).toBe("SQLite format 3\0");
-      expect((await stat(credentialDirectory)).mode & 0o777).toBe(mode);
+      expect((await stat(f.home)).mode & 0o777).toBe(mode);
+      expect((await stat(credentialDirectory)).mode & 0o777).toBe(0o700);
       await expect(stat(credentialPath)).rejects.toThrow();
       expect((await stat(`${credentialPath}.lock`)).mode & 0o777).toBe(0o600);
     } finally {
@@ -211,7 +212,7 @@ for (const mode of [0o750, 0o755, 0o775]) {
 test("rejects unsafe credential files before binding", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-unsafe-credential-"));
   cleanup.push(directory);
-  await chmod(directory, 0o755);
+  await chmod(directory, 0o700);
   const credential = join(directory, "credential.json");
   await writeFile(credential, "{}", { mode: 0o644 });
   await expect(startIsolatedRouter({ repoRoot: repo, managed: true, codexCredentialPath: credential })).rejects.toThrow(/credential file/);
@@ -219,3 +220,13 @@ test("rejects unsafe credential files before binding", async () => {
   await symlink(credential, link);
   await expect(startIsolatedRouter({ repoRoot: repo, managed: true, codexCredentialPath: link })).rejects.toThrow(/credential/);
 });
+
+for (const mode of [0o750, 0o755, 0o775]) {
+  test(`rejects non-private credential directory ${mode.toString(8)}`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mecha-credential-mode-"));
+    cleanup.push(directory);
+    await chmod(directory, mode);
+    await expect(startIsolatedRouter({ repoRoot: repo, managed: true, codexCredentialPath: join(directory, "credential.json") })).rejects.toThrow(/credential destination must be owner-only/);
+    expect((await stat(directory)).mode & 0o777).toBe(mode);
+  });
+}

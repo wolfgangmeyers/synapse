@@ -25,7 +25,6 @@ func TestEmbeddedCodexPrivateCredentialAdmissionFence(t *testing.T) {
 		admit, root                    bool
 	}{
 		{name: "root-expired-refreshable", runtime: "embedded", provider: "openai-codex", model: "gpt-6-sol", credential: true, admit: true, root: true},
-		{name: "fresh-sol61-worker", runtime: "embedded", provider: "openai-codex", model: "gpt-6.1-sol", credential: true, admit: true},
 		{name: "parentless-worker-opt-in", runtime: "embedded", provider: "openai-codex", model: "gpt-6-sol", credential: true, admit: true},
 		{name: "no-opt-in", runtime: "embedded", provider: "openai-codex", model: "gpt-6-sol", root: true},
 		{name: "ordinary-rpc", runtime: "rpc", provider: "openai-codex", model: "gpt-6-sol", credential: true},

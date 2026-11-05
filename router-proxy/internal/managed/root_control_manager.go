@@ -237,8 +237,8 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 	}
 	// Retirement is recovery-only, never admission or execution. Keep durable
 	// delivery above this branch and the full current binding fence before it.
-	if row.OperationID == "ops.worker" && row.CapabilityID == "mecha_worker" && row.ToolName == "mecha_worker" {
-		m.recoverRetiredWorkerControl(ctx, binding, row)
+	if (row.OperationID == "ops.worker" && row.CapabilityID == "mecha_worker" && row.ToolName == "mecha_worker") || retiredRootControlOperation(row.OperationID) {
+		m.recoverRetiredWorkerControl(ctx, binding, row, suppliedArguments)
 		return
 	}
 	tool, found := m.rootManifestTool(RootControlEvent{CapabilityID: row.CapabilityID, ToolName: row.ToolName, DefinitionID: row.DefinitionID, DefinitionSHA256: m.definitionSHA256ForStoredControl(row), OperationID: row.OperationID})
@@ -279,7 +279,7 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 // recoverRetiredWorkerControl settles only the removed worker operation. A
 // received request has no effect to recover. An uncertain request may consult
 // the host ledger, but must never reach Execute (including fallback executors).
-func (m *Manager) recoverRetiredWorkerControl(ctx context.Context, binding *managedBinding, row *store.ManagedControlRequest) {
+func (m *Manager) recoverRetiredWorkerControl(ctx context.Context, binding *managedBinding, row *store.ManagedControlRequest, arguments any) {
 	owner, err := m.ids.Next()
 	if err != nil {
 		return
@@ -296,35 +296,46 @@ func (m *Manager) recoverRetiredWorkerControl(ctx context.Context, binding *mana
 	if err != nil {
 		return
 	}
-	result := RootControlHandlerResult{Status: "error", Content: "The retired worker operation is unavailable.", Details: map[string]any{}, ErrorCode: "ROOT_OPERATION_UNAVAILABLE", ErrorMessage: "the retired worker operation has no recoverable host result"}
-	if row.State != "received" && m.rootControlHandlers != nil {
-		// Operational handlers share the host executor. Borrow only its explicit
-		// reconcile boundary; never register a retired handler in the live catalog.
-		for _, candidate := range m.rootControlHandlers.byOperation {
-			handler, ok := candidate.(operationRootControlHandler)
-			if !ok || handler.executor == nil {
-				continue
-			}
-			switch f := handler.executor.(type) {
-			case RootControlOperationExecutorFunc:
-				if f.ReconcileFunc == nil {
-					continue // This helper otherwise falls back to Execute.
+	result := retiredRootControlResult(row.OperationID)
+	if row.State != "received" {
+		result = RootControlHandlerResult{Status: "error", Content: "The root operation outcome is unknown.", Details: map[string]any{}, ErrorCode: "ROOT_OPERATION_UNKNOWN", ErrorMessage: "the host result cannot be verified"}
+		// Only a supplied candidate whose canonical bytes match the immutable
+		// SQLite admission hash can be used to query the host ledger. Cold
+		// recovery has no arguments; an empty object is not evidence.
+		canonical, canonicalErr := canonicalJSON(arguments)
+		argumentHash := sha256.Sum256(canonical)
+		verified := arguments != nil && canonicalErr == nil && fmt.Sprintf("%x", argumentHash) == row.CanonicalArgumentsSHA256
+		if verified && m.rootControlHandlers != nil {
+			for _, candidate := range m.rootControlHandlers.byOperation {
+				handler, ok := candidate.(operationRootControlHandler)
+				if !ok {
+					continue
 				}
-			case *RootControlOperationExecutorFunc:
-				if f == nil || f.ReconcileFunc == nil {
-					continue // A nil pointer cannot reconcile; otherwise avoid Execute fallback.
+				reconciler, ok := handler.executor.(RetiredRootControlReconciler)
+				if !ok {
+					continue
 				}
+				identity := RootControlHandlerIdentity{CapabilityID: row.CapabilityID, ToolName: row.ToolName, DefinitionID: row.DefinitionID, OperationID: row.OperationID}
+				invocation := RootControlInvocation{RequestID: row.RequestID, ResultID: row.ResultID, ToolCallID: row.ToolCallID, OperationID: row.OperationID, Arguments: arguments, Fence: row.Fence}
+				saved, reconcileErr := invokeRetiredReconciler(ctx, reconciler, identity, invocation)
+				if reconcileErr == nil && (saved.Status == "ok" || saved.Status == "error") {
+					result = saved
+				}
+				break
 			}
-			handler.identity = RootControlHandlerIdentity{CapabilityID: row.CapabilityID, ToolName: row.ToolName, DefinitionID: row.DefinitionID, OperationID: row.OperationID}
-			invocation := RootControlInvocation{RequestID: row.RequestID, ResultID: row.ResultID, ToolCallID: row.ToolCallID, OperationID: row.OperationID, Arguments: map[string]any{}, Fence: row.Fence}
-			saved, reconcileErr := invokeRootControlHandler(ctx, handler, invocation, true)
-			if reconcileErr == nil && saved.Status == "ok" {
-				result = saved
-			}
-			break
 		}
 	}
+
 	m.finishRootControlHandler(ctx, binding, nil, claim, result, nil, row.State == "side_effect_committed")
+}
+
+func invokeRetiredReconciler(ctx context.Context, reconciler RetiredRootControlReconciler, identity RootControlHandlerIdentity, invocation RootControlInvocation) (result RootControlHandlerResult, err error) {
+	defer func() {
+		if recover() != nil {
+			err = errRootControlHandlerPanic
+		}
+	}()
+	return reconciler.ReconcileRetiredRootControl(ctx, identity, invocation)
 }
 
 // invokeRootControlHandler contains only the dynamic handler call. A handler

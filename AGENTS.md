@@ -156,7 +156,7 @@ Run `npm run lint:mecha-messaging` (or `npm --prefix pi-extensions/mecha-messagi
 
 These are single-user developer workstations, not shared multi-user or hostile multi-tenant mainframes. Do not invent unrequested multi-user containment restrictions or hostile same-user permission gates.
 
-Specifically, user home directories and ancestor paths on macOS and Linux standard configurations often use 0750 or 0755 permissions by default. When verifying path safety for local state or credential stores, never require 0700 on ancestor directories. Verify that ancestors are not group- or world-writable (mode & 0o022 == 0). Create private state leaves with 0700 permissions. The Codex credential store accepts ordinary permission modes on its current-user-owned destination directory; do not reintroduce an exact 0700 destination requirement. Its credential and lock files still require owner-only 0600 permissions, regular files, and no symlinks or hardlinks.
+Specifically, user home directories and ancestor paths on macOS and Linux standard configurations often use 0750 or 0755 permissions by default. When verifying path safety for local state or credential stores, never require 0700 on ancestor directories. Only verify that ancestors are not group- or world-writable (mode & 0o022 == 0) and that the private leaf directory itself is owner-only (0700).
 
 ## Delegation and Review Discipline
 
