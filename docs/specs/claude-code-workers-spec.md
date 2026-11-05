@@ -21,7 +21,7 @@ Router-managed workers can run on Claude Code (the `claude` CLI) as well as on p
 - goals with auto-continuation;
 - restart, terminate and worktrees.
 
-A Claude Code worker is an embedded worker with a different turn engine. Each foreground execution starts its own headless `claude` process, resumes the worker's Claude conversation when available, and stops and reaps the process and its owned children before the execution is settled. An execution is the entire admitted foreground scope, including all Run and Continue calls in that scope; those calls share its process. The next execution starts a fresh process with a new PID after cleanup. Router tools are offered through a process-scoped MCP endpoint. The timeline uses the existing conversation store.
+A Claude Code worker is an embedded worker with a different turn engine. Each foreground execution starts its own headless `claude` process, resumes the worker's Claude conversation when available, and stops and reaps the process and its owned children before the execution is settled. An execution is the entire admitted foreground scope, including all Run and Continue calls in that scope; those calls share its process. The next execution starts a fresh process with a new PID after cleanup. Router tools are offered through a process-scoped MCP endpoint. Tool discovery filters the available catalog against current worker policy; enabling or disabling a tool is reflected when the next scope discovers tools, without carrying a stale filtered catalog across scopes. The timeline uses the existing conversation store.
 
 Out of scope: tmux and the legacy mailbox integration (disk mailboxes, `mailbox-deliver.py`, `claude_sidecar.mjs`, `mailbox_send.py`). The existing `worker_launch.py --agent claude` path is left as it is and is not used.
 
@@ -461,7 +461,8 @@ Fresh Claude sessions seed even when checked history is empty. A fresh session c
 ### Scenario: [CC-016] Bound each foreground process
 - **Given**: Consecutive foreground executions and a child started during one execution.
 - **When**: The first execution settles and the next starts, including after a model change.
-- **Then**: All Run/Continue calls in the first scope use the same PID; the first process and its owned child are stopped and reaped before a fresh process with a new PID resumes the session with the selected model. No idle notification turn runs. Unconfirmed cleanup fences the next execution.
+- **Then**: All Run/Continue calls in the first scope use the same PID; the first process and its owned child are stopped and reaped before a fresh process with a new PID resumes the session with the selected model. Tool discovery in each new scope includes newly enabled tools and excludes newly disabled tools. No idle notification turn runs. Unconfirmed cleanup fences the next execution.
+- **E2E**: `tests/e2e/claude-code-workers.spec.ts` (`CC-016 scoped executions resume queued mail and revoke the prior grant`); `tests/e2e/claude-code-tools.spec.ts` (`cached catalog refreshes between turns without losing session`).
 
 ### Scenario: [CC-017] Bound protocol memory and failures
 - **User Goal**: Bound protocol memory and failures.

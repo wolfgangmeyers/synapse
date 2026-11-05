@@ -90,6 +90,78 @@ test.describe("Claude successful router tools", () => {
   let f: ClaudeWorkersHarness | undefined;
   test.afterEach(async () => { try { await f?.close(); } finally { f = undefined; } });
 
+  test("MCP discovery follows live worker tool policy", async ({ page }) => {
+    f = await claudeWorkersHarness({ executions_by_input: [
+      { contains: "Inspect policy", turns: [[{ barrier: "policy-discovery" }, text("Policy ready")]] },
+    ] });
+    await f.open(page); const agent = await f.launch(page);
+    await f.userTurn(page, "Inspect policy");
+    await expect.poll(async () => (await f!.records()).some(row => row.kind === "barrier" && row.name === "policy-discovery")).toBe(true);
+    const receipt = (await f.records()).find(row => row.kind === "barrier" && row.name === "policy-discovery")!;
+    const grant = await f.grant();
+    const list = async () => {
+      const response = await fetch(grant.url, { method: "POST", headers: { ...grant.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: "list", method: "tools/list" }), signal: AbortSignal.timeout(6500) });
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data.error).toBeUndefined();
+      return data.result.tools.map((tool: { name: string }) => tool.name);
+    };
+    expect(await list()).toContain("mecha_agent_urgency");
+    expect((await f.request(page, `/v1/managed-agents/${agent}/tools`, { tool_name: "mecha_agent_urgency", enabled: false }, "PUT")).status).toBe(200);
+    expect(await list()).not.toContain("mecha_agent_urgency");
+    expect((await f.request(page, `/v1/managed-agents/${agent}/tools`, { tool_name: "mecha_agent_urgency", enabled: true }, "PUT")).status).toBe(200);
+    expect(await list()).toContain("mecha_agent_urgency");
+    expect(await f.grant()).toEqual(grant);
+    await f.releaseBarrier(receipt); await f.final(page, agent, "Policy ready");
+  });
+
+  test("cached catalog refreshes between turns without losing session", async ({ page }) => {
+    const cached = (id: string, urgent: boolean) => ({ mcp_call: { id, name: "mecha_agent_urgency", input: { urgent }, require_catalog: true } });
+    f = await claudeWorkersHarness({ executions_by_input: [
+      { contains: "Catalog one", turns: [[call("c1", "scratchpad", { action: "read" }), { barrier: "first-cached" }, text("Catalog first")]] },
+      { contains: "Catalog two", turns: [[cached("c2", true), { barrier: "catalog-stale" }, cached("stale", false), text("Catalog second")]] },
+      { contains: "Catalog three", turns: [[cached("c3", false), text("Catalog third")]] },
+      { contains: "Catalog four", turns: [[call("c4", "scratchpad", { action: "read" }), text("Catalog fourth")]] },
+    ] });
+    await f.open(page); const agent = await f.launch(page);
+    const policy = async (enabled: boolean) => expect((await f!.request(page, `/v1/managed-agents/${agent}/tools`, { tool_name: "mecha_agent_urgency", enabled }, "PUT")).status).toBe(200);
+    await policy(false);
+    await f.userTurn(page, "Catalog one");
+    await expect.poll(async () => (await f!.records()).some(row => row.kind === "barrier" && row.name === "first-cached")).toBe(true);
+    const firstRecords = await f.records();
+    const firstPID = Number(firstRecords.find(row => row.kind === "catalog")!.pid); const firstIdentity = identity(firstPID);
+    expect(alive(firstPID, firstIdentity)).toBe(true);
+    await f.releaseBarrier(firstRecords.find(row => row.kind === "barrier" && row.name === "first-cached")!);
+    await f.final(page, agent, "Catalog first");
+    await expect.poll(() => alive(firstPID, firstIdentity)).toBe(false);
+    await policy(true);
+    await f.userTurn(page, "Catalog two");
+    await expect.poll(async () => (await f!.records()).some(row => row.kind === "barrier" && row.name === "catalog-stale")).toBe(true);
+    const barrier = (await f.records()).find(row => row.kind === "barrier" && row.name === "catalog-stale")!;
+    const oldGrant = await f.grant();
+    expect(checkedTool(f, agent, "mecha_agent_urgency", { urgent: true }).payload.urgent).toBe(true);
+    await policy(false);
+    await f.releaseBarrier(barrier); await f.final(page, agent, "Catalog second");
+    const results = () => f!.rows("SELECT CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind IN ('toolResult','tool_result')", agent).map(row => JSON.parse(String(row.body)));
+    expect(results().some(row => row.toolName === "mecha_agent_urgency" && row.isError)).toBe(true);
+    expect(f.rows("SELECT urgent FROM agents WHERE agent_id=?", agent)).toEqual([{ urgent: 1 }]);
+    await expect.poll(async () => (await fetch(oldGrant.url, { method: "POST", headers: { ...oldGrant.headers, "Content-Type": "application/json" }, body: JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"}) })).status).not.toBe(200);
+    await policy(true);
+    await f.userTurn(page, "Catalog three"); await f.final(page, agent, "Catalog third");
+    expect(results().some(row => row.toolName === "mecha_agent_urgency" && !row.isError && JSON.parse(row.content[0].text).urgent === false)).toBe(true);
+    expect(f.rows("SELECT urgent FROM agents WHERE agent_id=?", agent)).toEqual([{ urgent: 0 }]);
+    await policy(false);
+    await f.userTurn(page, "Catalog four"); await f.final(page, agent, "Catalog fourth");
+    const records = await f.records();
+    expect(records.filter(row => row.kind === "catalog").map(row => (row.names as string[]).includes("mecha_agent_urgency"))).toEqual([false, true, true, false]);
+    expect(records.filter(row => row.kind === "cached_call" && row.name === "mecha_agent_urgency")).toHaveLength(3);
+    const starts = await f.starts(); expect(starts).toHaveLength(4);
+    expect(starts.slice(1).every(row => (row.argv as string[]).includes("--resume"))).toBe(true);
+    const sessions = starts.map(row => { const argv = row.argv as string[]; return argv[argv.indexOf(argv.includes("--resume") ? "--resume" : "--session-id") + 1]; });
+    expect(new Set(sessions).size).toBe(1);
+  });
+
   test("Claude MCP discovers and checks urgency set and clear", async ({ page }) => {
     f = await claudeWorkersHarness({ executions_by_input: [
       { contains: "Prepare urgency", turns: [[{ barrier: "urgency-discovery" }, text("Urgency ready")]] },
