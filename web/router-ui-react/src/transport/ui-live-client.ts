@@ -20,6 +20,7 @@ export interface UILiveClient {
   readonly projectionVersion: number | undefined;
   connect(): void;
   close(): void;
+  subscribe?(listener: (frame: UILiveFrame | "connected" | "disconnected") => void): () => void;
 }
 
 export class UILiveTransportError extends Error {
@@ -72,7 +73,8 @@ function withoutLegacyRecordKey(frame: UILiveFrame): UILiveFrame {
 }
 
 export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
-  const publish = (frame: UILiveFrame): void => { options.onFrame(frame); };
+  const listeners = new Set<(frame: UILiveFrame | "connected" | "disconnected") => void>();
+  const publish = (frame: UILiveFrame): void => { options.onFrame(frame); for (const listener of listeners) listener(frame); };
   const url = directUILiveURL(options.routerUrl);
   const factory = options.webSocketFactory ?? defaultFactory;
   const baseRetryDelay = options.retryDelayMs ?? 250;
@@ -130,6 +132,7 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     if (error !== undefined) options.onError?.(error);
     resetProjection();
     options.onRecovery?.();
+    for (const listener of listeners) listener("disconnected");
     const active = socket;
     socket = undefined;
     try { active?.close(1000, "projection recovery"); } catch { /* ignore */ }
@@ -203,27 +206,32 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
       }
     }, connectTimeoutMs);
     candidate.addEventListener("open", () => {
+      if (socket !== candidate || stopped) return;
       clearConnectTimeout();
       retryAttempts = 0;
       options.onConnect?.();
+      for (const listener of listeners) listener("connected");
     });
-    candidate.addEventListener("message", (event) => onMessage(event.data));
+    candidate.addEventListener("message", (event) => { if (socket === candidate && !stopped) onMessage(event.data); });
     candidate.addEventListener("close", () => {
-      clearConnectTimeout();
       if (socket !== candidate) return;
+      clearConnectTimeout();
       socket = undefined;
       if (stopped) return;
       resetProjection();
       options.onRecovery?.();
+      for (const listener of listeners) listener("disconnected");
       scheduleReconnect();
     });
     candidate.addEventListener("error", () => {
+      if (socket !== candidate || stopped) return;
       clearConnectTimeout();
       recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", "websocket_transport_failed"));
     });
   };
   return {
     url,
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     get projectionVersion() { return version; },
     connect,
     close() {

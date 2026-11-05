@@ -2,7 +2,8 @@
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { setImmediate } from "node:timers";
-import { existsSync, readFileSync, watch } from "node:fs";
+import { existsSync, readFileSync, watch, appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -22,19 +23,29 @@ if (sessionIndex >= 0) {
   }
 }
 const sessionRoot = process.env.MECHA_MANAGED_SESSION_ROOT ?? process.cwd();
+const fixtureMarker = join(sessionRoot, "root-control-fixture");
+if (existsSync(fixtureMarker)) {
+  process.env.MECHA_TEST_ROOT_CONTROL = dirname(dirname(sessionRoot));
+  process.env.MECHA_TEST_ROOT_MANIFEST = join(readFileSync(fixtureMarker, "utf8"), "router/contract/managed-tools-v1.json");
+}
 const hiddenCommands = [
   "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1",
   "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1",
   "mecha-post-compaction-notification-v1",
 ];
+if (process.env.MECHA_TEST_ROOT_CONTROL) hiddenCommands.push("mecha-control-result-reconcile-v1");
 const commands = [...hiddenCommands, "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"];
-const activeTools = [
+let activeTools = [
   "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent",
   "goal", "goal_snooze", "mecha_context", "mecha_git", "mecha_mailbox_send", "mecha_parent_message",
   "mecha_pr", "mecha_priority", "mecha_recall", "mecha_reminder", "mecha_request_inline_tool_allowance",
   "mecha_router", "mecha_settled_notifications", "mecha_state", "mecha_verification_handoff", "mecha_worker",
   "web_search__4f4ca2a3ae8ea237531b8c5264d53d15474c0848fc8d7eeada0fef5b85b139ac",
 ].sort();
+
+if (process.env.MECHA_TEST_ROOT_CONTROL) {
+  activeTools = [...["read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent", "list_subagents", "stop_subagent"], ...JSON.parse(readFileSync(process.env.MECHA_TEST_ROOT_MANIFEST, "utf8")).tools.map(tool => tool.name)].sort();
+}
 
 function emit(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
 function decodeMessage(message) {
@@ -188,6 +199,37 @@ async function emitDirectLifecycle(envelope) {
   emit({ type: "agent_settled" });
 }
 
+// Opt-in RPC boundary fixture: never enabled by ordinary functional tests.
+let rootBootstrap;
+const rootRequests = new Map();
+const rootResults = new Map();
+const canonical = value => value === null || typeof value !== "object" ? JSON.stringify(value) : Array.isArray(value) ? `[${value.map(canonical).join(",")}]` : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+const hash = value => createHash("sha256").update(canonical(value)).digest("hex");
+function rootLog(value) { appendFileSync(join(process.env.MECHA_TEST_ROOT_CONTROL, "root-fixture.jsonl"), JSON.stringify(value) + "\n"); }
+function rootRequest(content) {
+  const data = JSON.parse(content.slice("ROOT_CONTROL ".length).split("\n")[0]);
+  const tool = JSON.parse(readFileSync(process.env.MECHA_TEST_ROOT_MANIFEST, "utf8")).tools.find(item => item.operation_id === data.operation);
+  if (!tool || !rootBootstrap) throw new Error("fixture missing tool or bootstrap");
+  const details = { protocol: "mecha.control/v1", request_id: data.id, tool_call_id: `call-${data.id}`, capability_id: tool.capability_id, tool_name: tool.name, definition_id: tool.definition_id, definition_sha256: tool.definition_sha256, operation_id: tool.operation_id, manifest_sha256: rootBootstrap.manifest_sha256, runtime_generation: rootBootstrap.runtime_generation, session_epoch: rootBootstrap.session_epoch, context_ref: "root", arguments: data.arguments };
+  rootRequests.set(data.id, details);
+  rootLog({ kind: "request", details });
+  emit({ type: "custom_message", customType: "mecha.control.request.v1", content: "Router control request queued.", display: false, details });
+}
+if (process.env.MECHA_TEST_ROOT_CONTROL) {
+  const replayPath = join(process.env.MECHA_TEST_ROOT_CONTROL, "replay-request");
+  const replayed = new Set();
+  setInterval(() => {
+    if (!existsSync(replayPath)) return;
+    const replay = JSON.parse(readFileSync(replayPath, "utf8"));
+    const id = replay.id;
+    const details = rootRequests.get(id);
+    if (!details || replayed.has(id)) return;
+    replayed.add(id);
+    rootLog({ kind: "request", details });
+    emit({ type: "custom_message", customType: "mecha.control.request.v1", content: "Router control request queued.", display: false, details });
+    rootRequest(`ROOT_CONTROL ${JSON.stringify(replay.barrier)}`);
+  }, 50).unref();
+}
 const input = createInterface({ input: process.stdin });
 input.on("line", (line) => {
   let request;
@@ -208,12 +250,28 @@ input.on("line", (line) => {
   if (request.type !== "prompt") { response(request); return; }
 
   const message = typeof request.message === "string" ? request.message : "";
-  response(request, { command: "prompt", success: true });
-  if (!message.startsWith("/")) return;
+  if (!message.startsWith("/")) { response(request, { command: "prompt", success: true }); return; }
   const command = message.slice(1).split(" ", 1)[0];
   let envelope;
-  try { envelope = decodeMessage(message); } catch { return; }
+  try { envelope = decodeMessage(message); } catch { response(request); return; }
+  if (process.env.MECHA_TEST_ROOT_CONTROL && command === "mecha-control-result-v1") {
+    rootResults.set(envelope.request_id, envelope);
+    rootLog({ kind: "result", payload: envelope });
+    response(request, { kind: "accepted", result_id: envelope.result_id });
+    return;
+  }
+  if (process.env.MECHA_TEST_ROOT_CONTROL && command === "mecha-control-result-reconcile-v1") {
+    const result = rootResults.get(envelope.request_id);
+    if (!result || result.result_id !== envelope.result_id || hash(result) !== envelope.payload_hash || result.runtime_generation !== envelope.runtime_generation || result.target_session_epoch !== envelope.session_epoch || result.manifest_sha256 !== envelope.manifest_sha256) {
+      emit({ id: request.id, type: "response", command: request.type, success: false, error: "fixture reconciliation mismatch" }); return;
+    }
+    rootLog({ kind: "reconcile", envelope });
+    response(request, { protocol: "mecha.control.result.persisted.v1", receipt_id: `mcrr1_${hash(envelope)}`, request_id: envelope.request_id, result_id: envelope.result_id, payload_hash: envelope.payload_hash, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch, manifest_sha256: envelope.manifest_sha256 });
+    return;
+  }
+  response(request, { command: "prompt", success: true });
   if (command === "mecha-bootstrap-v1") {
+    if (process.env.MECHA_TEST_ROOT_CONTROL) rootBootstrap = envelope;
     if (existsSync(join(sessionRoot, "fail-ready"))) {
       privateReceipt("mecha.tools.accepted.v1", { runtime_generation: "wrong-generation", session_epoch: envelope.session_epoch, manifest_revision: 2, manifest_sha256: envelope.manifest_sha256, active_tools: activeTools });
       return;
@@ -225,6 +283,12 @@ input.on("line", (line) => {
     if (existsSync(join(sessionRoot, "omit-child"))) omitChild = true;
     privateReceipt("mecha.child.snapshot.v1", childSnapshot());
   } else if (command === "mecha-mailbox-deliver-v1") {
+    if (process.env.MECHA_TEST_ROOT_CONTROL && envelope.content?.startsWith("ROOT_CONTROL ")) {
+      privateReceipt("mecha.mailbox.appended.v1", { protocol: "mecha.mailbox/v1", message_id: envelope.message_id, runtime_generation: envelope.runtime_generation, session_epoch: envelope.session_epoch }, `functional-append-${envelope.message_id}`);
+      rootRequest(envelope.content);
+      emit({ type: "agent_settled" });
+      return;
+    }
     const childCommand = ["Start structured child", "Start child compaction", "Finish child compaction", "Finish structured child"].find((c) => envelope.content?.startsWith(c));
     if (childCommand) {
       // Each managed prompt commands exactly one source transition. The direct

@@ -7,7 +7,7 @@
 
 ## 1. Intent & User Outcome
 
-A developer runs `tools/initialize.sh` once after cloning the repository. It installs application dependencies, prepares local directories, and prints the commands to start the router and Web UI and the remaining provider sign-in step. Repeating initialization preserves existing local state and source changes. The router accepts ordinary permissions on its user-owned credential directory.
+A developer runs `tools/initialize.sh` once after cloning the repository. It installs application dependencies, prepares local directories, and prints the commands to start the router and Web UI and the remaining provider sign-in step. Repeating initialization preserves existing local state and source changes. The router accepts ordinary non-writable ancestor permissions and requires a private credential directory.
 
 ## 2. Core Invariants
 
@@ -16,7 +16,7 @@ A developer runs `tools/initialize.sh` once after cloning the repository. It ins
 3. Initialization installs locked repository, auth-helper, thin RPC extension, and Web UI dependencies and builds both the UI and router. Each failed step stops immediately with its name and the underlying command's diagnostics. Success is printed only after all steps pass.
 4. New runtime directories use private permissions. The script repairs the application's state root and required runtime leaves to 0700, never the user's home or other ancestors, and preserves existing credential, database, and configuration contents.
 5. Initialization never starts services, signs into providers, imports credentials, or changes the user's normal Pi extension configuration.
-6. The Codex credential directory must be a directory owned by the current user, but no exact permission mode is required. Credential files retain their existing owner, regular-file, single-link, 0600, and no-symlink requirements; ancestor checks remain unchanged.
+6. The Codex credential directory must be owned by the current user and mode 0700. User-owned ancestors may be 0750 or 0755 but must not be group- or world-writable. Credential files retain their existing owner, regular-file, single-link, 0600, and no-symlink requirements; ancestor checks remain unchanged.
 7. The script does not create accumulating logs, histories, or archives. Dependency caches retain their package-manager-owned cleanup policy; no new application retention mechanism is introduced.
 
 ## 3. User Scenarios (Behavioral Contract)
@@ -52,14 +52,14 @@ A developer runs `tools/initialize.sh` once after cloning the repository. It ins
 - **Then**: It reports the path and required source entry, exits nonzero, and neither replaces nor modifies that directory.
 
 ### Scenario: [SCN-INIT-006] Start with ordinary credential-directory permissions
-- **User Goal**: Start the router without manually changing a user-owned credential directory.
-- **Given**: The credential directory is user-owned with mode 0750, 0755, or 0775; no credential file exists.
+- **User Goal**: Keep credentials in a private directory without restricting ordinary ancestor permissions.
+- **Given**: A user-owned ancestor has mode 0750 or 0755, and the credential directory is user-owned with mode 0700; no credential file exists.
 - **When**: The managed router starts with that credential path.
 - **Then**: Startup succeeds, browser REST and WebSocket connections work with the real SQLite-backed router, and the provider remains signed out until explicit login. Directory permissions are not silently changed by the credential store.
 
 ### Scenario: [SCN-INIT-007] Retain credential-file validation
-- **User Goal**: Avoid accepting malformed credential storage while permitting normal directory permissions.
-- **Given**: A configured credential file is a symlink or has mode 0644.
+- **User Goal**: Avoid accepting malformed credential storage or a non-private credential directory.
+- **Given**: A configured credential file is a symlink or has mode 0644, or its containing directory has mode 0750, 0755, or 0775.
 - **When**: The managed router starts.
 - **Then**: Startup still fails before listener binding without exposing credential contents.
 
@@ -72,5 +72,5 @@ A developer runs `tools/initialize.sh` once after cloning the repository. It ins
 | SCN-INIT-003 | Prerequisites | `tests/e2e/router-initialization.spec.ts` | `reports prerequisite errors before installing` |
 | SCN-INIT-004 | Failed step | `tests/e2e/router-initialization.spec.ts` | `stops at the failing install or build step` |
 | SCN-INIT-005 | Invalid fork path | `tests/e2e/router-initialization.spec.ts` | `preserves an invalid existing fork path` |
-| SCN-INIT-006 | Directory permissions | `tests/e2e/router-initialization.spec.ts` | `starts with ordinary credential-directory permissions` |
-| SCN-INIT-007 | File validation | `tests/e2e/router-initialization.spec.ts` | `rejects unsafe credential files before binding` |
+| SCN-INIT-006 | Directory permissions | `tests/e2e/router-initialization.spec.ts` | `starts with ordinary ancestor-directory permissions` |
+| SCN-INIT-007 | File validation | `tests/e2e/router-initialization.spec.ts` | `rejects unsafe credential files before binding`; `rejects non-private credential directory` |

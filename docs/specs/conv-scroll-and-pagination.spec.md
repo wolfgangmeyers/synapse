@@ -30,7 +30,7 @@ This specification defines the behavior for eliminating the manual scroll lock t
 7. **Inbound-Only Natural Trimming**: When live inbound messages or timeline events increase the active in-memory collection beyond `CONVERSATION_UNLOAD_THRESHOLD` (150), excess items at the top/front are sliced off (`.slice(-CONVERSATION_UNLOAD_THRESHOLD)`).
 8. **No Bottom Trimming on Scroll-Up**: Prepending older chunks via `loadOlder()` MUST NOT trim messages or timeline events from the bottom.
 9. **Older History Availability (`hasOlder`)**: `hasOlder` remains active (`true`) whenever the oldest in-memory item sequence > 1 or cursor (`nextBeforeSeq` / `nextBefore`) > 0.
-10. **No Zombie Resurrection**: Unloaded messages and activity entries must not be resurrected from secondary stores (`messagesByPeer`, `managedHistory`). Fallback entries with `sequence < oldestEventSeq` (or sequence <= 0 when oldestEventSeq > 1) are skipped.
+10. **No Zombie Resurrection**: Unloaded messages and activity entries must not be resurrected from secondary stores (`messagesByPeer`, `managedHistory`). Fallback messages with `sequence < oldestEventSeq` (or sequence <= 0 when oldestEventSeq > 1) are skipped. Selected managed activity is independently paginated and is not filtered by the timeline boundary; see the draft selected-managed specification.
 
 11. **True bottom**: The 180px threshold decides whether following is enabled, not whether following succeeded. After followed content settles, bottom distance MUST be at most 2 CSS pixels.
 12. **Bounded pagination suspension**: Older-history loading may suspend following only while the request and prepend alignment are pending. Failure, empty results, or duplicate-only results MUST release suspension even when the oldest visible ID does not change.
@@ -82,14 +82,15 @@ This specification defines the behavior for eliminating the manual scroll lock t
 - **When**: A new inbound message or timeline event arrives via WebSocket or streaming update.
 - **Then**: The newest message is appended to the bottom.
 - **And**: The oldest item is trimmed from the top of the collection, preserving the collection size at `CONVERSATION_UNLOAD_THRESHOLD` (150).
-- **And**: The active `hasOlder` indicator remains `true` because the oldest in-memory item sequence is > 1.
-- **And**: Secondary caches (such as Redux store `messagesByPeer`) are reconciled with the trimmed set to prevent zombie resurrection.
+- **And**: The active `hasOlder` indicator remains `true` when items were trimmed, even if the previous persisted cursor was exhausted.
+- **And**: Trimmed history is not restored from secondary stores; it must be fetched again. Switching away also discards completed history under draft `SPEC-CONV-006`.
 
 #### Scenario: [SCN-UNLOAD-002] Re-fetching unloaded chunks via "Load older history" or scrollback
 - **Given**: Wolfgang is viewing a conversation where older items were trimmed due to natural unloading.
-- **And**: `hasOlder` is `true` because `oldestSeq > 1`.
+- **And**: `hasOlder` is `true` because items were trimmed.
 - **When**: Wolfgang clicks "Load older history" or scrolls to the top of the viewport.
-- **Then**: The system issues a fetch for the preceding chunk using `beforeSeq = oldestSeq`.
+- **Then**: The system recovers the boundary using the scoped persisted event boundary and server-provided timeline cursors, not message sequence numbers; see draft `SCN-SWITCH-010`.
+- **And**: If the persisted boundary cannot be found or a request fails, the visible window is retained and recovery remains available for retry.
 - **And**: The fetched older chunk is prepended to the top of the conversation.
 - **And**: Existing items at the bottom are NOT trimmed, expanding the reading window without jumping or losing context.
 
@@ -182,3 +183,14 @@ This specification defines the behavior for eliminating the manual scroll lock t
 Regression verification uses real REST-seeded messages persisted by the isolated SQLite router, real WebSocket notifications and confirmed delivery receipts, and the reverse proxy. Targeted pagination HTTP responses and delayed image HTTP responses are controlled. Failure coverage also fails the legacy pagination fallback and waits for both requests. Following measures true-bottom geometry, not just proximity or visibility. Reading checks observe settled geometry over a bounded interval.
 
 SCN-SCROLL-010 is a supporting scheduler check in the same real-boundary fixture: it temporarily holds browser animation-frame callbacks to establish ordering, changes DOM scroll position, then releases callbacks. It does not claim native user-input E2E coverage. No component functions or stores are mocked. Component coverage was updated for pagination and same-ID conversation changes. The synthetic prepend check was retired in favor of real-boundary pagination and visible-anchor regressions in this suite.
+
+### Owner switches and combined pagination
+- Switching the conversation owner resets the reading and pagination state even when router and peer are unchanged.
+- When both history sources have older pages, each prepend preserves the visible reading anchor independently, regardless of response timing.
+
+- Combined-source windows discard historical candidates outside the active window; older pagination refetches each affected source without skipping records, including when one source contributes no visible item. See `SPEC-CONV-SELECTED-MANAGED-001`.
+
+### Combined window identity and recovery
+- The selected combined window retains actual visible and protected source IDs, not a timestamp cutoff; timestamp ties and a source with no visible rows must not retain hidden candidates.
+- Discarded records are recovered from their durable source cursor, even when live updates reorder or overlap snapshots. Loading older refetches every affected source without gaps or duplicate rows.
+- Pending, failed, and live-protected rows remain visible and do not prevent discarded history from being recovered.

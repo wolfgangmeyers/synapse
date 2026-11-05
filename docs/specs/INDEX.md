@@ -17,6 +17,9 @@ The Conversation subsystem governs the core interaction interface between Wolfga
 | `SPEC-CONV-003` | Scroll Anchoring & Upward Pagination | `Conversation` | [`conv-scroll-and-pagination.spec.md`](./conv-scroll-and-pagination.spec.md) | `tests/e2e/conversation-scroll-and-pagination.spec.ts`, `tests/e2e/conversation-scroll-regressions.spec.ts` | `Active` |
 | `SPEC-CONV-004` | Composer Input Isolation & Drafts | `Composer` | [`conv-composer-isolation.spec.md`](./conv-composer-isolation.spec.md) | `tests/e2e/conversation-composer-isolation.spec.ts` (planned) | Spec missing |
 | `SPEC-CONV-005` | Mailbox Envelope Cards | `Mailbox` | [`conv-envelope-cards.spec.md`](./conv-envelope-cards.spec.md) | `tests/e2e/conversation-envelope-cards.spec.ts` (planned) | Spec missing |
+| `SPEC-CONV-006` | Web Agent Switch History | `Conversation` | [`web-agent-switch-history.spec.md`](./web-agent-switch-history.spec.md) | `tests/e2e/web-agent-switch-history.spec.ts`, `tests/e2e/web-history-isolation-edge.spec.ts`, `tests/e2e/web-pending-send-boundary.spec.ts` (partial) | `Draft`; acceptance incomplete |
+| `SPEC-CONV-SELECTED-MANAGED-001` | Selected managed activity pagination | `Conversation` | [`managed-selected-recent-activity.spec.md`](./managed-selected-recent-activity.spec.md) | `tests/e2e/selected-managed-activity-pagination.spec.ts`, `tests/e2e/combined-history-window.spec.ts`, `tests/e2e/combined-history-live-window.spec.ts` (partial) | `Draft`; acceptance incomplete |
+| `SPEC-CONV-RESIDUAL-001` | Conversation Residual Reliability | `Conversation` | [`web-residual-reliability.spec.md`](./web-residual-reliability.spec.md) | `tests/e2e/web-residual-reliability.spec.ts` (planned) | `Draft` |
 
 ---
 

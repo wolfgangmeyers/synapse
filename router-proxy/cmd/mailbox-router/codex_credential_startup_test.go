@@ -33,8 +33,7 @@ func TestEmbeddedRootBootstrapRequiresCodexCredentialPathBeforeDatabase(t *testi
 	require.ErrorIs(t, err, os.ErrNotExist, "rejection must not create a log")
 }
 
-// Portable private fixture: production still checks every ancestor, while tests
-// should not depend on a workstation-specific /srv/disk-tmp directory.
+// Use a private test directory without depending on a machine-specific path.
 func newCodexCredentialParent(t *testing.T) string {
 	t.Helper()
 	return testfixture.PrivateDir(t)
@@ -179,6 +178,15 @@ func TestCodexCredentialStartupOptIn(t *testing.T) {
 			link := filepath.Join(private, "linked.json")
 			require.NoError(t, os.Symlink(path, link))
 			return link
+		},
+		"public-parent": func() string {
+			dir := filepath.Join(private, "public")
+			require.NoError(t, os.Mkdir(dir, 0o755))
+			require.NoError(t, os.Chmod(dir, 0o755))
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+			return filepath.Join(dir, "cred.json")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

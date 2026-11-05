@@ -11,6 +11,65 @@ import { fetchConversationTimeline, type ConversationTimelineEvent } from "../..
 afterEach(cleanup);
 
 describe("MessageList", () => {
+  it("offers initial history retry without hiding live content", () => {
+    const retry = vi.fn();
+    const { rerender } = render(<MessageList peerId="agent-1" timelineEvents={[]} messages={[]} error="History request timed out" onRetryHistory={retry} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry history" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    rerender(<MessageList peerId="agent-1" timelineEvents={[]} messages={[{ id: "live", body: "Live content", direction: "incoming" }]} error="History request timed out" onRetryHistory={retry} />);
+    expect(screen.getByText("Live content")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry history" }));
+    expect(retry).toHaveBeenCalledTimes(2);
+  });
+  it("bounds combined historical items, preserves live and pending, and reveals deferred before fetching", async () => {
+    const time = Date.parse("2026-01-01T00:00:00Z");
+    const timeline: ConversationTimelineEvent[] = Array.from({ length: 40 }, (_, i) => ({ id: `msg:agent-1:t${i}`, agent_id: "agent-1", kind: "message", role: "assistant", seq: i + 1, created_at: time + i * 2000, content: `timeline-${i}` }));
+    const activity: ManagedHistoryEntry[] = Array.from({ length: 40 }, (_, i) => ({ id: `a${i}`, agent_id: "agent-1", at: new Date(time + i * 2000 + 1000).toISOString(), presentation: { kind: "tool", tool_name: "bash", summary: `activity-${i}`, outcome: "success" } }));
+    const pending: HistoryMessage = { id: "pending", body: "pending text", direction: "outgoing", pending: true };
+    const load = vi.fn(async () => {});
+    const props = { peerId: "agent-1", timelineEvents: timeline, activityEntries: activity, messages: [pending], liveTimelineIds: new Set(["msg:agent-1:t0"]), liveActivityIds: new Set(["a0"]), onLoadOlder: load, hasOlder: true };
+    const { rerender } = render(<MessageList {...props} historyWindowReady={false} />);
+    expect(screen.getByText("timeline-0")).toBeInTheDocument();
+    expect(screen.getByText("activity-0")).toBeInTheDocument();
+    expect(screen.getByText("pending text")).toBeInTheDocument();
+    expect(screen.queryByText("timeline-39")).not.toBeInTheDocument();
+    rerender(<MessageList {...props} historyWindowReady />);
+    expect(screen.queryByText("timeline-1")).not.toBeInTheDocument();
+    expect(screen.getByText("timeline-39")).toBeInTheDocument();
+    expect(screen.getByText("activity-39")).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-scroll-anchor]")).toHaveLength(53);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /load older history/i })));
+    expect(screen.getByText("timeline-1")).toBeInTheDocument();
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /load older history/i })));
+    expect(load).toHaveBeenCalledTimes(1);
+    rerender(<MessageList {...props} peerId="other" historyWindowReady />);
+    rerender(<MessageList {...props} historyWindowReady />);
+    expect(screen.queryByText("timeline-1")).not.toBeInTheDocument();
+  });
+  it("releases hidden source candidates without rendered overflow", () => {
+    const discard = vi.fn();
+    const hidden: ManagedHistoryEntry = { id: "complete:1", agent_id: "agent-1", message: "started", presentation: { kind: "lifecycle" } };
+    render(<MessageList peerId="agent-1" timelineEvents={[]} activityEntries={[hidden]} historyWindowReady onDiscardHistoryBefore={discard} />);
+    expect(discard).toHaveBeenCalled();
+    expect(discard.mock.lastCall?.[0].has("complete:1")).toBe(false);
+  });
+  it("does not expand the window when older loading fails before commit", async () => {
+    const timeline: ConversationTimelineEvent[] = Array.from({ length: 60 }, (_, i) => ({ id: `item-${i}`, agent_id: "agent-1", kind: "message", role: "assistant", seq: i + 1, created_at: i + 1, content: `item ${i}` }));
+    const discard = vi.fn();
+    const load = vi.fn(async () => {});
+    render(<MessageList peerId="agent-1" timelineEvents={timeline} historyWindowReady onDiscardHistoryBefore={discard} onLoadOlder={load} hasOlder />);
+    expect(screen.queryByText("item 0")).not.toBeInTheDocument();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /load older history/i })));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("item 0")).not.toBeInTheDocument();
+  });
+  it("allows paging when all current entries are hidden", () => {
+    const load = vi.fn();
+    render(<MessageList peerId="agent-1" timelineEvents={[]} activityEntries={[]} hasOlder onLoadOlder={load} />);
+    fireEvent.click(screen.getByRole("button", { name: /load older history/i }));
+    expect(load).toHaveBeenCalled();
+  });
   it("renders a message list with correct roles", () => {
     const messages: HistoryMessage[] = Array.from({ length: 50 }, (_, i) => ({
       id: `msg-${i}`,
@@ -33,6 +92,37 @@ describe("MessageList", () => {
 
     // Verify messages are rendered
     expect(screen.getByText("Message body content 49")).toBeInTheDocument();
+  });
+
+  it("renders managed-only activity independently of the timeline boundary", () => {
+    const timestamp = Date.parse("2026-10-27T10:00:00Z");
+    const snapshot: ManagedHistoryEntry = { id: "snapshot", agent_id: "agent-1", at: new Date(timestamp).toISOString(), presentation: { kind: "tool", tool_name: "bash", summary: "old snapshot", outcome: "success" } };
+    const live: ManagedHistoryEntry = { id: "live", agent_id: "agent-1", at: new Date(timestamp + 2000).toISOString(), presentation: { kind: "tool", tool_name: "bash", summary: "live activity", outcome: "success" } };
+    const ids = new Set(["live"]);
+    const { rerender } = render(<MessageList peerId="agent-1" timelineEvents={[]} loading activityEntries={[snapshot, live]} liveActivityIds={ids} />);
+    expect(screen.getByText("old snapshot")).toBeInTheDocument();
+    expect(screen.getByText("live activity")).toBeInTheDocument();
+    const timeline: ConversationTimelineEvent[] = [{ id: "boundary", agent_id: "agent-1", kind: "message", seq: 1, created_at: timestamp + 1000, content: "boundary", metadata: {} }];
+    rerender(<MessageList peerId="agent-1" timelineEvents={timeline} loading={false} activityEntries={[snapshot, live]} liveActivityIds={ids} />);
+    expect(screen.getByText("old snapshot")).toBeInTheDocument();
+    expect(screen.getByText("live activity")).toBeInTheDocument();
+  });
+
+  it("keeps a live update even when its original timestamp predates the timeline cutoff", () => {
+    const timestamp = Date.parse("2026-10-27T10:00:00Z");
+    const live: ManagedHistoryEntry = { id: "active", agent_id: "agent-1", at: new Date(timestamp).toISOString(), presentation: { kind: "tool", tool_name: "bash", summary: "still active", outcome: "active" } };
+    const timeline: ConversationTimelineEvent[] = [{ id: "boundary", agent_id: "agent-1", kind: "message", seq: 1, created_at: timestamp + 1000, content: "boundary", metadata: {} }];
+    render(<MessageList peerId="agent-1" timelineEvents={timeline} activityEntries={[live]} liveActivityIds={new Set(["active"])} />);
+    expect(screen.getByText("still active")).toBeInTheDocument();
+  });
+
+  it("replaces a stale timeline activity with its live update without duplication", () => {
+    const timestamp = Date.parse("2026-10-27T10:00:00Z");
+    const timeline: ConversationTimelineEvent[] = [{ id: "hist:complete:1", agent_id: "agent-1", kind: "activity", seq: 1, created_at: timestamp, content: "stale snapshot", metadata: { presentation: { kind: "tool", tool_name: "bash", summary: "stale snapshot" } } }];
+    const live: ManagedHistoryEntry = { id: "1", agent_id: "agent-1", at: new Date(timestamp).toISOString(), presentation: { kind: "tool", tool_name: "bash", summary: "live update", outcome: "success" } };
+    render(<MessageList peerId="agent-1" timelineEvents={timeline} activityEntries={[live]} liveActivityIds={new Set(["1"])} />);
+    expect(screen.getByText("live update")).toBeInTheDocument();
+    expect(screen.queryByText("stale snapshot")).not.toBeInTheDocument();
   });
 
   it("renders both messages and timeline activity entries in the virtual list", () => {
@@ -496,7 +586,7 @@ describe("MessageList", () => {
   });
 
   describe("natural unloading and zombie prevention", () => {
-    it("zombie prevention: does not re-inject fallback messages or activity entries older than oldestEventSeq", () => {
+    it("zombie prevention: skips stale messages but retains selected managed-only activity", () => {
       // Simulate that events only contains items starting from sequence 51 (items 1..50 were unloaded)
       const events: ConversationTimelineEvent[] = Array.from({ length: 50 }, (_, i) => ({
         id: `evt-${i + 51}`,
@@ -530,6 +620,8 @@ describe("MessageList", () => {
         },
       ];
 
+      staleMessages.push({ id: "failed-old", body: "Failed outgoing remains", direction: "outgoing", from: "user", to: "agent-1", failed: true, created_at: new Date(1700000000000).toISOString() });
+
       const staleActivityEntries: ManagedHistoryEntry[] = [
         {
           id: "complete:2",
@@ -562,7 +654,8 @@ describe("MessageList", () => {
       // Zombie items with sequence < oldestEventSeq (51) should NOT be injected
       expect(screen.queryByText("Zombie message 1")).not.toBeInTheDocument();
       expect(screen.queryByText("Zombie message 25")).not.toBeInTheDocument();
-      expect(screen.queryByText("Zombie tool summary")).not.toBeInTheDocument();
+      expect(screen.getByText("Failed outgoing remains")).toBeInTheDocument();
+      expect(screen.getByText("Zombie tool summary")).toBeInTheDocument();
     });
 
     it("calling loadOlder prepends older chunks and does NOT drop items from the bottom", () => {

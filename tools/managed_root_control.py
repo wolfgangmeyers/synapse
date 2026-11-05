@@ -490,56 +490,6 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
     if operation_unavailable(operation, arguments):
         return result("error", f"{operation} is unavailable in this checkout.", {"operation": operation}, "ROOT_OPERATION_UNAVAILABLE")
     action = arguments.get("action")
-    if operation == "ops.state":
-        if action == "query":
-            values: list[str] = []
-            if arguments.get("task") is not None:
-                values += ["--alias", identifier(arguments["task"], "task")]
-            if arguments.get("state") is not None:
-                values += ["--state", text(arguments["state"], "state")]
-            if not values:
-                raise ValueError("query requires task or state")
-            return invoke_script("state_query.py", values)
-        if action == "create":
-            values = ["--alias", identifier(arguments.get("alias"), "alias"), "--type", identifier(arguments.get("type"), "type"), "--project", identifier(arguments.get("project"), "project"), "--description", text(arguments.get("description"), "description")]
-            for key, flag in (("purpose", "--purpose"), ("window", "--window"), ("branch", "--branch"), ("pr", "--pr"), ("linear", "--linear")):
-                if arguments.get(key) is not None:
-                    values += [flag, text(arguments[key], key)]
-            return invoke_script("state_add.py", values)
-        if action == "update":
-            task, field, value = identifier(arguments.get("task"), "task"), text(arguments.get("field"), "field"), text(arguments.get("value"), "value")
-            if field == "summary":
-                return invoke_script("state_update_status.py", [task, value])
-            return invoke_script("state_update_field.py", [task, field, value])
-    if operation == "ops.priority":
-        if action == "status":
-            values = ["status", identifier(arguments.get("priorityId"), "priorityId"), text(arguments.get("status"), "status")]
-            if arguments.get("evidence") is not None:
-                values += ["--evidence", text(arguments["evidence"], "evidence")]
-            return invoke_script("state_priority.py", values)
-        values = ["upsert", "--id", identifier(arguments.get("priorityId"), "priorityId"), "--name", text(arguments.get("name"), "name")]
-        if arguments.get("status") is not None:
-            values += ["--status", text(arguments["status"], "status")]
-        task_ids = arguments.get("taskIds")
-        if not isinstance(task_ids, list) or not task_ids:
-            raise ValueError("taskIds is invalid")
-        for task_id in task_ids:
-            if not isinstance(task_id, int) or task_id < 1:
-                raise ValueError("taskIds is invalid")
-            values += ["--task-id", str(task_id)]
-        return invoke_script("state_priority.py", values)
-    if operation == "ops.verification_handoff":
-        values = [identifier(arguments.get("task"), "task"), "--reminder-id", identifier(arguments.get("reminderId"), "reminderId"), "--successor", text(arguments.get("successor"), "successor")]
-        if arguments.get("remoteVerified") is not None:
-            values += ["--remote-verified", text(arguments["remoteVerified"], "remoteVerified")]
-        return invoke_script("state_verification_handoff.py", values)
-    if operation == "ops.pr_status":
-        number = arguments.get("pullRequest")
-        if not isinstance(number, int) or number < 1:
-            raise ValueError("pullRequest is invalid")
-        return invoke_script("pr_status.py", [str(number), "--json"])
-    if operation == "ops.git_status":
-        return invoke_script("git_task_status.py", ["--task", identifier(arguments.get("task"), "task"), "--json"])
     if operation == "web.search":
         return managed_web_search(arguments)
     if operation == "mail.send":
@@ -618,21 +568,18 @@ def run(mode: str, home: Path) -> int:
             now = time.time()
             prune_requests(state, now)
             prior = state["requests"].get(request_id)
-            # Go recovery has no retained raw arguments. Only the retired
-            # worker's reconcile path may read its immutable request-ID result
-            # without reconstructing the old input fingerprint. Go checks the
-            # complete current runtime fence before entering this path. Never
-            # dispatch or create a host record here, even when none is found.
-            if operation == "ops.worker":
-                if mode == "reconcile" and arguments == {} and isinstance(prior, dict) and isinstance(prior.get("result"), dict):
-                    print(canonical(prior["result"]))
-                else:
-                    print(canonical(result("error", "The retired worker operation is unavailable.", {}, "ROOT_OPERATION_UNAVAILABLE")))
-                return 0
+            # Reconciliation never guesses ownership from a request ID. A
+            # mismatched fingerprint includes operation, arguments, or fence.
             if prior is not None:
                 if not isinstance(prior, dict) or prior.get("fingerprint") != fingerprint or not isinstance(prior.get("result"), dict):
+                    if mode == "reconcile":
+                        print(canonical(result("error", "The root operation outcome is unknown.", {}, "ROOT_OPERATION_UNKNOWN", "the host record cannot be verified")))
+                        return 0
                     raise ValueError("request ID belongs to another root operation")
                 print(canonical(prior["result"]))
+                return 0
+            if operation == "ops.worker" and mode == "execute":
+                print(canonical(result("error", "The retired worker operation is unavailable.", {}, "ROOT_OPERATION_UNAVAILABLE")))
                 return 0
             if mode == "reconcile":
                 print(canonical(result("error", "The root operation has no recoverable host record.", {}, "ROOT_OPERATION_UNKNOWN", "the root operation has no recoverable host record")))

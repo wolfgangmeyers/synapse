@@ -68,6 +68,35 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a replacement connection timeout when an old socket closes late", () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: UILiveSocket[] = [];
+      const errors: Error[] = [];
+      const client = createUILiveClient({
+        routerUrl: "http://router.test",
+        retryDelayMs: 1,
+        connectTimeoutMs: 100,
+        webSocketFactory: () => { const socket = new UILiveSocket(); socket.readyState = 0; sockets.push(socket); return socket; },
+        onFrame: () => {},
+        onError: (error) => errors.push(error),
+      });
+      client.connect();
+      sockets[0]?.emit("error", {});
+      vi.advanceTimersByTime(1);
+      expect(sockets).toHaveLength(2);
+      sockets[0]?.emit("close", {});
+      vi.advanceTimersByTime(100);
+      expect(errors).toHaveLength(2);
+      expect(errors[1]).toMatchObject({ cause: "websocket_connect_timeout" });
+      vi.advanceTimersByTime(3);
+      expect(sockets).toHaveLength(3);
+      client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("calls onConnect when the underlying websocket opens", () => {
     const sockets: UILiveSocket[] = [];
     const connects = vi.fn();

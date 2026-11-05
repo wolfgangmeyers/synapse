@@ -587,8 +587,8 @@ export interface RouterHttpClient {
   capabilities(): Promise<Capabilities>;
   agents(options?: { includeModels?: boolean } | boolean): Promise<AgentListResponse>;
   conversations(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<ConversationResponse>;
-  fetchConversationTimeline(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
-  sendMessage(message: unknown): Promise<Record<string, unknown>>;
+  fetchConversationTimeline(agentId: string, limit?: number, beforeSeq?: number, beforeEventId?: string): Promise<ConversationTimelineResponse>;
+  sendMessage(message: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
   message(id: string): Promise<unknown>;
   retryMessage(id: string): Promise<unknown>;
   deleteMessage(id: string): Promise<unknown>;
@@ -693,6 +693,16 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     if (!response.ok) throw responseError(body, response.status, response.headers.get("x-correlation-id"));
     return body;
   };
+  const historyRequest = async (path: string, init: RequestInit = {}): Promise<unknown> => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        request(path, { ...init, signal: controller.signal }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("History request timed out. Please retry.")); }, 15_000); }),
+      ]);
+    } finally { if (timer !== undefined) clearTimeout(timer); }
+  };
   const jsonRequest = (path: string, method: string, payload?: unknown): Promise<unknown> => request(path, { method, headers: { "content-type": "application/json" }, ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
   // Managed P3 calls have no browser authority material. The request ID is a
   // worker-wide idempotency key, and fetch is explicitly forbidden to attach
@@ -701,7 +711,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     const headers: Record<string, string> = {};
     if (payload !== undefined) headers["content-type"] = "application/json";
     if (method !== "GET") headers["x-request-id"] = secureUuid();
-    return request(path, { method, credentials: "omit", ...(Object.keys(headers).length === 0 ? {} : { headers }), ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
+    return (method === "GET" && path.startsWith("/v1/history?") ? historyRequest : request)(path, { method, credentials: "omit", ...(method === "GET" && path.startsWith("/v1/history?") ? { cache: "no-store" as const } : {}), ...(Object.keys(headers).length === 0 ? {} : { headers }), ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
   };
   return {
     routerUrl: base,
@@ -730,15 +740,16 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       const params = new URLSearchParams({ owner, peer });
       if (options.before !== undefined && options.before > 0) params.set("before", String(options.before));
       if (options.limit !== undefined && options.limit > 0) params.set("limit", String(options.limit));
-      return conversation(await request(`/v1/conversations?${params.toString()}`), base);
+      return conversation(await historyRequest(`/v1/conversations?${params.toString()}`, { cache: "no-store" }), base);
     },
-    fetchConversationTimeline: async (agentId, limit = 50, beforeSeq) => {
+    fetchConversationTimeline: async (agentId, limit = 50, beforeSeq, beforeEventId) => {
       const params = new URLSearchParams({ agent_id: agentId });
       if (limit !== undefined && limit > 0) params.set("limit", String(limit));
       if (beforeSeq !== undefined && beforeSeq > 0) params.set("before_seq", String(beforeSeq));
-      return conversationTimeline(await request(`/v1/conversation?${params.toString()}`));
+      if (beforeEventId !== undefined) params.set("before_event_id", beforeEventId);
+      return conversationTimeline(await historyRequest(`/v1/conversation?${params.toString()}`, { cache: "no-store" }));
     },
-    sendMessage: async (message) => messageWrite(await jsonRequest("/v1/messages", "POST", message)),
+    sendMessage: async (message, signal) => messageWrite(await request("/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(message), ...(signal === undefined ? {} : { signal }) })),
     message: (id) => request(`/v1/messages/${encodeURIComponent(id)}`),
     retryMessage: (id) => jsonRequest(`/v1/messages/${encodeURIComponent(id)}/retry`, "POST"),
     deleteMessage: (id) => request(`/v1/messages/${encodeURIComponent(id)}`, { method: "DELETE" }),

@@ -15,69 +15,47 @@ function entry(id: string, outcome: "active" | "success" | "failed" | "interrupt
   };
 }
 
-function append(state: ReturnType<typeof createInitialState>, next = entry("complete:1"), actionScope = scope) {
-  return reducer(state, { type: "managed/history", scope: actionScope, view: "complete", entry: next });
-}
-
-describe("managed Complete history reducer", () => {
-  it("replaces a same-ID transition in place and ignores duplicate replays", () => {
-    const initial = append(createInitialState(scope), entry("complete:1"));
-    const withLaterEntry = append(initial, entry("complete:2", "success"));
-    const terminal = entry("complete:1", "interrupted");
-
-    const replaced = append(withLaterEntry, terminal);
-
-    expect(replaced.managedHistory?.["managed-alpha"]?.complete).toEqual([terminal, entry("complete:2", "success")]);
-    expect(append(replaced, terminal)).toBe(replaced);
-  });
-
-  it("does not let another history fence mutate the current entry", () => {
-    const current = append(createInitialState(scope), entry("complete:1"));
-    const staleFence = { routerUrl: "http://other-router.test", agentId: "wolfgang" };
-
-    const rejected = append(current, entry("complete:1", "interrupted"), staleFence);
-
-    expect(rejected).toBe(current);
-    expect(rejected.managedHistory?.["managed-alpha"]?.complete).toEqual([entry("complete:1")]);
-  });
-
-  it("caps inserted history at 5000 while replacements keep their timeline position", () => {
-    let state = createInitialState(scope);
-    for (let index = 0; index < 5000; index += 1) state = append(state, entry(`complete:${index}`));
-
-    const updated = append(state, entry("complete:0", "success"));
-    const updatedEntries = updated.managedHistory?.["managed-alpha"]?.complete ?? [];
-    expect(updatedEntries).toHaveLength(5000);
-    expect(updatedEntries[0]).toEqual(entry("complete:0", "success"));
-    expect(updatedEntries.map((item) => item.id)).toEqual(Array.from({ length: 5000 }, (_, index) => `complete:${index}`));
-
-    const inserted = append(updated, entry("complete:5000", "success"));
-    const insertedEntries = inserted.managedHistory?.["managed-alpha"]?.complete ?? [];
-    expect(insertedEntries).toHaveLength(5000);
-    expect(insertedEntries.map((item) => item.id)).toEqual(Array.from({ length: 5000 }, (_, index) => `complete:${index + 1}`));
-  });
-
-  it("maintains chronological order and protects newest entries when page arrives descending", () => {
-    let state = createInitialState(scope);
-    // Simulate HTTP response where entries are returned descending: 4999 down to 0
-    for (let index = 4999; index >= 0; index -= 1) {
-      state = append(state, entry(`complete:${index}`));
+describe("managed history reducer", () => {
+  it.each(["quiet", "complete"] as const)("ignores active and terminal entries in the active scope for %s", (view) => {
+    const initial = createInitialState(scope);
+    let state = initial;
+    for (const outcome of ["active", "success", "failed", "interrupted"] as const) {
+      state = reducer(state, { type: "managed/history", scope, view, entry: entry("history:1", outcome) });
+      expect(state).toBe(initial);
+      expect(state.managedHistory).toEqual({});
     }
-    const entries = state.managedHistory?.["managed-alpha"]?.complete ?? [];
-    expect(entries).toHaveLength(5000);
-    expect(entries.map((item) => item.id)).toEqual(Array.from({ length: 5000 }, (_, index) => `complete:${index}`));
+  });
 
-    // When new live frames (complete:5000, 5001) arrive after context reset,
-    // the oldest entries (complete:0, 1) are evicted, NOT the recent entries (complete:4998, 4999)
-    state = append(state, entry("complete:5000"));
-    state = append(state, entry("complete:5001"));
+  it.each([
+    { routerUrl: "http://other-router.test", agentId: "wolfgang" },
+    { routerUrl: scope.routerUrl, agentId: "other-agent" },
+  ])("ignores history from an inactive scope: $routerUrl / $agentId", (staleScope) => {
+    const initial = createInitialState(scope);
+    for (const view of ["quiet", "complete"] as const) {
+      const result = reducer(initial, { type: "managed/history", scope: staleScope, view, entry: entry("history:1") });
+      expect(result).toBe(initial);
+      expect(result.managedHistory).toEqual({});
+    }
+    // Verify the scope fence independently of the history action's unconditional no-op.
+    expect(reducer(initial, { type: "filter/set", scope: staleScope, filter: "stale" })).toBe(initial);
+    expect(reducer(initial, { type: "filter/set", scope, filter: "current" }).filter).toBe("current");
+  });
 
-    const afterLive = state.managedHistory?.["managed-alpha"]?.complete ?? [];
-    expect(afterLive).toHaveLength(5000);
-    expect(afterLive[0]?.id).toBe("complete:2");
-    expect(afterLive.some((item) => item.id === "complete:4998")).toBe(true);
-    expect(afterLive.some((item) => item.id === "complete:4999")).toBe(true);
-    expect(afterLive.some((item) => item.id === "complete:5000")).toBe(true);
-    expect(afterLive[afterLive.length - 1]?.id).toBe("complete:5001");
+  it("retains no history after multiple entries, transitions, and scope resets", () => {
+    let state = createInitialState(scope);
+    for (let index = 0; index < 100; index += 1) {
+      for (const view of ["quiet", "complete"] as const) {
+        state = reducer(state, { type: "managed/history", scope, view, entry: entry(`history:${index}`) });
+        state = reducer(state, { type: "managed/history", scope, view, entry: entry(`history:${index}`, "success") });
+      }
+    }
+    expect(state.managedHistory).toEqual({});
+    const otherScope = { routerUrl: scope.routerUrl, agentId: "other-agent" };
+    state = reducer(state, { type: "scope/reset", scope: otherScope });
+    state = reducer(state, { type: "managed/history", scope, view: "complete", entry: entry("stale") });
+    state = reducer(state, { type: "managed/history", scope: otherScope, view: "complete", entry: entry("current") });
+    expect(state.managedHistory).toEqual({});
+    state = reducer(state, { type: "scope/reset", scope });
+    expect(state.managedHistory).toEqual({});
   });
 });

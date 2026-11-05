@@ -53,3 +53,11 @@ A user signed in to ChatGPT on a freshly initialized router can choose `openai-c
 | `CAT-004` | Existing SDK model preservation | `tests/e2e/codex-model-catalog.spec.ts` | `retains built-in Codex model catalog and embedded launch` |
 
 Focused Go tests additionally check full metadata registration, validation and SDK-precedence without credential reads or live network requests. Existing malformed optional models-store startup errors remain unchanged.
+
+### Scenario: [CAT-005] Invalid registered Codex definitions are not advertised
+- **User Goal**: Avoid selecting a model that cannot run safely.
+- **Given**: A signed-in user and registered Codex definitions with an unsupported endpoint, non-chat type, or missing token limits.
+- **When**: The user requests the model catalog.
+- **Then**: Those definitions are not advertised as available; valid registered Codex chat models remain available. A model is never advertised using a display-only fallback when no definition is registered.
+
+Focused Go snapshot coverage exercises invalid registry entries in an isolated process; the existing CAT-001 through CAT-004 browser tests cover the normal catalog-to-launch path. An E2E invalid-registry injection fixture is not currently available.

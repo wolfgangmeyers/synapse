@@ -45,6 +45,24 @@ type RootControlOperationExecutor interface {
 	ReconcileRootControl(context.Context, RootControlHandlerIdentity, RootControlInvocation) (RootControlHandlerResult, error)
 }
 
+// RetiredRootControlReconciler is an explicit read-only recovery boundary.
+// Implementations must never execute an operation while reconciling.
+type RetiredRootControlReconciler interface {
+	ReconcileRetiredRootControl(context.Context, RootControlHandlerIdentity, RootControlInvocation) (RootControlHandlerResult, error)
+}
+
+func retiredRootControlOperation(operation string) bool {
+	switch operation {
+	case "ops.state", "ops.priority", "ops.verification_handoff", "ops.pr_status", "ops.git_status":
+		return true
+	}
+	return false
+}
+
+func retiredRootControlResult(operation string) RootControlHandlerResult {
+	return RootControlHandlerResult{Status: "error", Content: operation + " is unavailable in this checkout.", Details: map[string]any{"operation": operation}, ErrorCode: "ROOT_OPERATION_UNAVAILABLE", ErrorMessage: "the root operation is unavailable in this checkout"}
+}
+
 type RootControlOperationExecutorFunc struct {
 	ExecuteFunc   func(context.Context, RootControlHandlerIdentity, RootControlInvocation) (RootControlHandlerResult, error)
 	ReconcileFunc func(context.Context, RootControlHandlerIdentity, RootControlInvocation) (RootControlHandlerResult, error)
@@ -156,9 +174,13 @@ type operationRootControlHandler struct {
 
 func (h operationRootControlHandler) Identity() RootControlHandlerIdentity { return h.identity }
 func (h operationRootControlHandler) Execute(ctx context.Context, invocation RootControlInvocation) (RootControlHandlerResult, error) {
+	if retiredRootControlOperation(h.identity.OperationID) {
+		return retiredRootControlResult(h.identity.OperationID), nil
+	}
 	return h.executor.ExecuteRootControl(ctx, h.identity, invocation)
 }
 func (h operationRootControlHandler) Reconcile(ctx context.Context, invocation RootControlInvocation) (RootControlHandlerResult, error) {
+
 	return h.executor.ReconcileRootControl(ctx, h.identity, invocation)
 }
 

@@ -19,6 +19,14 @@ function urlFor(attachment: MessageAttachment, routerUrl?: string): string {
 export function AttachmentGallery({ attachments = [], routerUrl }: AttachmentGalleryProps): ReactElement | null {
   const [selected, setSelected] = useState<string>();
   const [cachedUrls, setCachedUrls] = useState<Record<string, string>>({});
+  const [cacheVersion, setCacheVersion] = useState(0);
+  useEffect(() => {
+    const refresh = (event: Event): void => {
+      if (event instanceof CustomEvent && typeof event.detail === "string" && attachments.some((attachment) => attachment.cacheKey === event.detail)) setCacheVersion((version) => version + 1);
+    };
+    window.addEventListener("mecha:image-cached", refresh);
+    return () => window.removeEventListener("mecha:image-cached", refresh);
+  }, [attachments]);
   const cacheKeySignature = attachments.map((attachment) => attachment.cacheKey ?? "").join("\u001f");
   useEffect(() => {
     let active = true;
@@ -41,7 +49,7 @@ export function AttachmentGallery({ attachments = [], routerUrl }: AttachmentGal
     };
     void load();
     return () => { active = false; for (const url of objectUrls) URL.revokeObjectURL(url); };
-  }, [cacheKeySignature]);
+  }, [cacheKeySignature, cacheVersion]);
   const usable = attachments.map((attachment) => {
     const cached = typeof attachment.cacheKey === "string" ? cachedUrls[attachment.cacheKey] : undefined;
     return { attachment, url: cached ?? urlFor(attachment, routerUrl) };

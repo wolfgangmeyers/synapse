@@ -1200,6 +1200,7 @@ func managedLaunchError(err error) error {
 	return &managedHTTPError{422, "VALIDATION_FAILED", "Launch request is invalid"}
 }
 func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	query := req.URL.Query()
 	view := query.Get("view")
 	for key, values := range query {

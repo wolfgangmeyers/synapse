@@ -112,7 +112,7 @@ export interface RouterTransport {
   refreshReminders(): Promise<void>;
   conversation(owner: string, peer: string, options?: { before?: number; limit?: number }): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[]; next_before?: number | null }>;
   fetchConversationTimeline?(agentId: string, limit?: number, beforeSeq?: number): Promise<ConversationTimelineResponse>;
-  sendMessage(message: unknown): Promise<Record<string, unknown>>;
+  sendMessage(message: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>;
   sendActivity(activityState: "active" | "settled" | "compacting", details?: Pick<Agent, "subagent_count" | "subagents" | "goal" | "current_model">): boolean;
   sendModelControl(targetAgentId: string, targetInstanceId: string, model: ModelSummary, controlId?: string): boolean;
   sendGoalControl(targetAgentId: string, targetInstanceId: string, control: { controlId: string; action: "set" | "off"; goal: string; settings: GoalControlSettings; revision?: number }): boolean;
@@ -329,7 +329,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     refreshReminders,
     conversation: (owner, peer, options) => http.conversations(owner, peer, options),
     fetchConversationTimeline: (agentId, limit, beforeSeq) => http.fetchConversationTimeline(agentId, limit, beforeSeq),
-    async sendMessage(message) { const result = await http.sendMessage(message); void refreshAgents(); return result; },
+    async sendMessage(message, signal) { const result = await http.sendMessage(message, signal); void refreshAgents(); return result; },
     sendActivity(activityState, details = {}) { if (!socket.registered) return false; return socket.send(buildActivityFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, activityState, ...details })); },
     sendModelControl(targetAgentId, targetInstanceId, model, requestedControlId = controlId()) { if (!socket.registered) return false; const frame = buildModelControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: requestedControlId, model }); return sendControl(frame, controlFor("model", requestedControlId, targetAgentId, targetInstanceId, socket.identity)); },
     sendGoalControl(targetAgentId, targetInstanceId, control) { if (!socket.registered || !goalControlAvailable) return false; const frame = buildGoalControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: control.controlId, action: control.action, goal: control.goal, settings: control.settings }); return sendControl(frame, controlFor("goal", control.controlId, targetAgentId, targetInstanceId, socket.identity, control.revision)); },

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/sky-valley/pi/ai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -205,4 +206,38 @@ func TestCodexBrowserOtherProviderTerminalCannotOverwriteOwnedCodexStatus(t *tes
 	}, time.Second, 10*time.Millisecond)
 	_, err = credentials.Load(ctx)
 	require.NoError(t, err)
+}
+
+func TestCodexSnapshotRejectsInvalidRegisteredDefinitions(t *testing.T) {
+	if !isolatedCodexCatalogTest(t) {
+		return
+	}
+	base := *ai.GetModel("openai-codex", "gpt-6-sol")
+	for _, fixture := range []struct {
+		id     string
+		mutate func(*ai.Model)
+	}{
+		{"invalid-endpoint-fixture", func(m *ai.Model) { m.BaseURL = "https://example.org" }},
+		{"invalid-context-fixture", func(m *ai.Model) { m.ContextWindow = 0 }},
+		{"invalid-tokens-fixture", func(m *ai.Model) { m.MaxTokens = 0 }},
+	} {
+		model := base
+		model.ID = fixture.id
+		fixture.mutate(&model)
+		ai.RegisterModel(&model)
+	}
+	_, credentials, _ := browserAuthStore(t)
+	auth := CodexBrowserAuth{Ordinary: cachedOrdinarySnapshot(newFakeProviderAuthRun()), Credentials: credentials}
+	_, models, err := auth.Snapshot(context.Background())
+	require.NoError(t, err)
+	foundValid := false
+	for _, model := range models {
+		require.NotEqual(t, "invalid-endpoint-fixture", model.ID)
+		require.NotEqual(t, "invalid-context-fixture", model.ID)
+		require.NotEqual(t, "invalid-tokens-fixture", model.ID)
+		if model.Provider == "openai-codex" && model.ID == "gpt-6.1-sol" {
+			foundValid = true
+		}
+	}
+	require.True(t, foundValid)
 }

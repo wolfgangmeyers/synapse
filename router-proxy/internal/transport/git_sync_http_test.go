@@ -592,4 +592,3 @@ func TestGitSyncHTTP_KB_PushAndPull(t *testing.T) {
 	require.Equal(t, tempKB, pushedSource)
 	require.Equal(t, "Update kb files from app", pushedMsg)
 }
-
