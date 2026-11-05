@@ -21,6 +21,8 @@ func TestMailboxSessionRecoveryUnstartedReservation(t *testing.T) {
 			ctx := context.Background()
 			s, old, path := embeddedMailFixture(t)
 			first := reserveEmbeddedMailTest(t, s, old, "embedded-mail-g2")
+			var originalKey string
+			require.NoError(t, s.db.QueryRow(`SELECT append_key FROM embedded_attempts WHERE attempt_id=?`, first.AttemptID).Scan(&originalKey))
 			later := testEnvelope("recovery-later", "later accepted body")
 			later.To = old.AgentID
 			_, err := s.Enqueue(ctx, later)
@@ -29,10 +31,9 @@ func TestMailboxSessionRecoveryUnstartedReservation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, target)
 			next := old
-			next.SessionID, next.Epoch, next.Generation, next.OwnerToken = "recovered-session", old.Epoch+1, "recovered-generation", 0
-			_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?,session_epoch=?,runtime_generation=? WHERE agent_id=?`, next.SessionID, next.Epoch, next.Generation, old.AgentID)
-			require.NoError(t, err)
-			require.NoError(t, s.ResetEmbeddedSession(ctx, old, next, "root"))
+			next.SessionID, next.Epoch, next.OwnerToken = "recovered-session", old.Epoch+1, 0
+			// Context reset changes the session epoch, not the runtime generation.
+			require.NoError(t, s.ResetEmbeddedSessionEpoch(ctx, old, next, "root"))
 			next.OwnerToken, err = s.AcquireEmbeddedOwner(ctx, next, "recovery-owner", time.Minute)
 			require.NoError(t, err)
 			if reopen {
@@ -45,6 +46,9 @@ func TestMailboxSessionRecoveryUnstartedReservation(t *testing.T) {
 			require.NoError(t, err, "retired epoch must not block the oldest unstarted accepted mail")
 			require.NotNil(t, recovered)
 			require.Equal(t, first.AttemptID, recovered.AttemptID, "recovery retains accepted attempt identity")
+			var recoveredKey string
+			require.NoError(t, s.db.QueryRow(`SELECT append_key FROM embedded_attempts WHERE attempt_id=?`, recovered.AttemptID).Scan(&recoveredKey))
+			require.Equal(t, originalKey, recoveredKey, "recovery retains the original idempotency key")
 			require.Equal(t, first.Body, recovered.Body)
 			require.Error(t, s.AppendEmbeddedMailAndACK(ctx, old, first.AttemptID, []byte(first.Body)), "late obsolete owner cannot consume")
 			require.NoError(t, s.AppendEmbeddedMailAndACK(ctx, next, recovered.AttemptID, []byte(recovered.Body)))
