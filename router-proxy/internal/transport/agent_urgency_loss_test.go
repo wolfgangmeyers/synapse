@@ -16,6 +16,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/testfixture"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/ai/providers"
 	"github.com/stretchr/testify/require"
@@ -28,7 +29,7 @@ func TestAgentUrgencySDKComposedLossAndOrdering(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			db, _ := store.OpenTestStore(t)
+			db, _ := storetest.OpenTestStore(t)
 			root := t.TempDir()
 			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
 			defer reg.Unregister()

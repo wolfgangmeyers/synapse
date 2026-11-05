@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
 func TestKBFileHTTP(t *testing.T) {
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	r, err := transport.New(transport.Options{
 		Store: s,
 	})

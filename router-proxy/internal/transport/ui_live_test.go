@@ -16,12 +16,13 @@ import (
 	"github.com/coder/websocket"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
 func newUILiveTestRouter(t *testing.T) (*Router, *store.Store, *httptest.Server) {
 	t.Helper()
-	durable, _ := store.OpenTestStore(t)
+	durable, _ := storetest.OpenTestStore(t)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})

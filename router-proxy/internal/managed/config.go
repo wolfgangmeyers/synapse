@@ -54,8 +54,6 @@ type Config struct {
 	// CursorExtension is the optional fixed pi-cursor-sdk extension loaded only by
 	// managed Pi when available. It is never available to ordinary/tmux Pi sessions.
 	CursorExtension string
-	// AntigravityExtension is historical and ignored.
-	AntigravityExtension string
 	// RuntimeRoot is the checked project root that owns the thin extension,
 	// generated manifest, helper, and optional Cursor extension.
 	RuntimeRoot string

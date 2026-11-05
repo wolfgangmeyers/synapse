@@ -8,12 +8,13 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/crypto"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
 func TestMCPServerCRUD(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 
 	// 1. Create MCPServer
 	clientSecret := "test-client-secret-123"
@@ -118,7 +119,7 @@ func TestMCPServerCRUD(t *testing.T) {
 
 func TestMCPTokenRoundtrip(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 
 	// Create parent server
 	server := &store.MCPServer{
@@ -205,7 +206,7 @@ func TestMCPTokenRoundtrip(t *testing.T) {
 
 func TestCascadeDeletion(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 
 	server := &store.MCPServer{
 		ID:       "server-cascade-1",
@@ -272,7 +273,7 @@ func TestCascadeDeletion(t *testing.T) {
 
 func TestListAllActiveMCPTools(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 
 	// Server 1: connected
 	s1 := &store.MCPServer{

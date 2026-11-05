@@ -10,6 +10,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -17,8 +18,8 @@ import (
 func TestEmbeddedProgressIntegration(t *testing.T) {
 	ctx := context.Background()
 
-	// 1. Create a test store using store.OpenTestStore(t)
-	testStore, _ := store.OpenTestStore(t)
+	// 1. Create a test store using storetest.OpenTestStore(t)
+	testStore, _ := storetest.OpenTestStore(t)
 
 	// 2. Create a test router using transport.New(transport.Options{Store: testStore})
 	router, err := transport.New(transport.Options{

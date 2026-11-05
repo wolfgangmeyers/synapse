@@ -9,7 +9,7 @@ import (
 
 func TestManagedAgentBlockedState(t *testing.T) {
 	ctx := context.Background()
-	s, _ := OpenTestStore(t)
+	s, _ := openLocalTestStore(t)
 
 	// Check that migration 113 is applied
 	var count int

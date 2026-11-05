@@ -56,7 +56,6 @@ type LaunchResult struct {
 	Replayed bool
 }
 type RestartPreparationDeadlineFactory func(context.Context, time.Duration) (context.Context, context.CancelFunc)
-type RestartPreparationHook func(context.Context, string) error
 type ProcessGroupLeaderVerifier func(ProcessIdentity) bool
 
 type ManagerOptions struct {
@@ -87,7 +86,6 @@ type ManagerOptions struct {
 	ProcessGroupLeaderVerifier        ProcessGroupLeaderVerifier
 	ProcessGroupOps                   ProcessGroupOps
 	RestartPreparationDeadlineFactory RestartPreparationDeadlineFactory
-	RestartPreparationHook            RestartPreparationHook
 	// BeforeManagedDirectAcknowledge is a test seam for the durable
 	// append-before-ack crash boundary. Production leaves it nil.
 	BeforeManagedDirectAcknowledge func(context.Context, store.ManagedDirectAttempt) error
@@ -443,7 +441,6 @@ type managedBinding struct {
 	waitPending          atomic.Bool
 	expectedStop         atomic.Bool
 	waitErr              error
-	restartExecutionDone bool
 	restartShutdownDone  bool
 	restartShutdownError error
 	// retainBinding keeps a failed EOF cleanup owner available for retry.
@@ -498,7 +495,6 @@ type Manager struct {
 	groupLeader                                ProcessGroupLeaderVerifier
 	processOps                                 ProcessGroupOps
 	preparationDeadline                        RestartPreparationDeadlineFactory
-	preparationHook                            RestartPreparationHook
 	beforeDirectAcknowledge                    func(context.Context, store.ManagedDirectAttempt) error
 	beforeManagedDirectRecovery                func(context.Context, string)
 	beforeResetOldArtifactCleanup              func(context.Context, string) error
@@ -661,7 +657,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
 	// Complete orphan recovery before publishing a manager or admitting any
 	// embedded runtime. Unsafe identity is a startup failure, never a warning.
 	if err := manager.RecoverClaudeCodeOrphans(runCtx); err != nil {
@@ -1989,98 +1985,6 @@ func restartActionHigherPriority(action string) bool {
 	default:
 		return false
 	}
-}
-
-func (m *Manager) startRestartPreparation(binding *managedBinding, fence store.ManagedRestartFence, operationID string) {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
-	}
-	binding.preparationWG.Add(1)
-	m.startWG.Add(1)
-	m.mu.Unlock()
-	go func() {
-		defer m.startWG.Done()
-		defer binding.preparationWG.Done()
-		m.prepareRestart(binding, fence, operationID)
-	}()
-}
-
-func (m *Manager) prepareRestart(binding *managedBinding, fence store.ManagedRestartFence, operationID string) {
-	if m.preparationHook != nil {
-		if err := m.preparationHook(m.runCtx, "reserved"); err != nil {
-			if m.runCtx.Err() != nil {
-				return
-			}
-			binding.serial.Lock()
-			defer binding.serial.Unlock()
-			if m.runCtx.Err() == nil && binding.operationID == operationID && sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
-				_ = m.store.RollbackManagedRestartPreparation(context.Background(), fence, operationID, "RESTART_PREPARATION_FAILED", "restart preparation failed")
-				binding.lifecycleAction = ""
-			}
-			return
-		}
-	}
-	binding.serial.Lock()
-	rpc := binding.rpc
-	binding.serial.Unlock()
-	if rpc == nil {
-		return
-	}
-	deadlineCtx, cancel := m.preparationDeadline(m.runCtx, m.config.Limits.GracefulStop)
-	if cancel == nil {
-		cancel = func() {}
-	}
-	state, readErr := rpc.GetState(deadlineCtx)
-	cancel()
-	binding.serial.Lock()
-	if m.runCtx.Err() != nil || binding.reaped || binding.operationID != operationID || !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
-		binding.serial.Unlock()
-		return
-	}
-	if readErr != nil || !stateSessionMatches(state, fence.PiSessionID) {
-		if err := m.store.RollbackManagedRestartPreparation(context.Background(), fence, operationID, "RESTART_PREPARATION_FAILED", "restart preparation failed"); err == nil {
-			binding.lifecycleAction = ""
-		}
-		binding.serial.Unlock()
-		return
-	}
-	if err := m.store.MarkManagedRestartPrepared(context.Background(), fence, operationID); err != nil {
-		binding.serial.Unlock()
-		return
-	}
-	binding.serial.Unlock()
-	if m.preparationHook != nil {
-		_ = m.preparationHook(m.runCtx, "prepared")
-	}
-	// Older launch-only RPC doubles remain valid for the closed reservation
-	// slice. A real active replacement cannot continue without the narrow
-	// binding-scoped settlement capability.
-	_, transitionErr := m.store.ManagedRestartTransition(context.Background(), fence.AgentID)
-	if transitionErr == nil && supportsRestartSettlement(rpc) {
-		m.startRestartExecution(binding, fence, operationID)
-	}
-}
-
-func supportsRestartSettlement(rpc RPC) bool {
-	_, ok := rpc.(RestartTurnSettler)
-	return ok
-}
-
-func (m *Manager) startRestartExecution(binding *managedBinding, fence store.ManagedRestartFence, operationID string) {
-	m.mu.Lock()
-	if m.closed || binding.restartExecutionDone {
-		m.mu.Unlock()
-		return
-	}
-	binding.restartExecutionDone = true
-	m.startWG.Add(1)
-	m.mu.Unlock()
-	go func() {
-		defer m.startWG.Done()
-		m.ExecutePreparedRestart(binding, fence, operationID)
-	}()
 }
 
 // AdmitPrompt is intentionally internal. It shares restart's serializer so a

@@ -13,6 +13,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -322,7 +323,7 @@ func newTransportOrderingFixture(t *testing.T) (*store.Store, *Router) {
 	dbPath := filepath.Join(t.TempDir(), "router.db")
 	opts := store.Options{Clock: clock}
 	if opts.Migrations == nil {
-		if err := store.CloneTemplateDB(t, dbPath); err == nil {
+		if err := storetest.CloneTemplateDB(t, dbPath); err == nil {
 			opts.Migrations = []store.Migration{}
 		}
 	}

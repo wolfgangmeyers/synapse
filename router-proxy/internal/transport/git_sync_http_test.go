@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/testsupport/storetest"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,7 @@ func (m *mockGitSyncer) PushDirectory(ctx context.Context, repoURL, sourceDir, c
 }
 
 func TestGitSyncHTTP_TargetCRUD(t *testing.T) {
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	r, err := transport.New(transport.Options{
 		Store: s,
 	})
@@ -119,7 +120,7 @@ func TestGitSyncHTTP_TargetCRUD(t *testing.T) {
 
 func TestGitSyncHTTP_Pull(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	mock := &mockGitSyncer{}
 	r, err := transport.New(transport.Options{
 		Store:     s,
@@ -191,7 +192,7 @@ func TestGitSyncHTTP_Pull(t *testing.T) {
 
 func TestGitSyncHTTP_Push(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	mock := &mockGitSyncer{}
 	r, err := transport.New(transport.Options{
 		Store:     s,
@@ -242,7 +243,7 @@ func TestGitSyncHTTP_Push(t *testing.T) {
 
 func TestGitSyncHTTP_Validation(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	mock := &mockGitSyncer{}
 	r, err := transport.New(transport.Options{
 		Store:     s,
@@ -302,7 +303,7 @@ func TestGitSyncHTTP_Validation(t *testing.T) {
 
 func TestGitSyncHTTP_Workflows_PushAndPull(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	mock := &mockGitSyncer{}
 	r, err := transport.New(transport.Options{
 		Store:     s,
@@ -535,7 +536,7 @@ func TestGitSyncHTTP_Workflows_PushAndPull(t *testing.T) {
 
 func TestGitSyncHTTP_KB_PushAndPull(t *testing.T) {
 	ctx := context.Background()
-	s, _ := store.OpenTestStore(t)
+	s, _ := storetest.OpenTestStore(t)
 	mock := &mockGitSyncer{}
 	r, err := transport.New(transport.Options{
 		Store:     s,

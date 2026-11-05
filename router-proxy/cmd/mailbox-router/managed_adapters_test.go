@@ -30,7 +30,7 @@ console.log(JSON.stringify({providers:[{provider:"openai-codex",label:"ChatGPT",
 `, piAgentDir, filepath.Join(piAgentDir, "auth.json"))
 	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0o600))
 
-	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath, AntigravityExtension: "/opt/pi/ag/src/index.ts"}, nodeExecutable: node}).Snapshot(context.Background())
+	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath}, nodeExecutable: node}).Snapshot(context.Background())
 	require.NoError(t, err)
 	require.Len(t, providers, 3)
 	require.Equal(t, "openai-codex", providers[0].Provider)

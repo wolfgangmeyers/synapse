@@ -1,5 +1,14 @@
 # WORKFLOW_SNOOZE_TOOL_PLAN.md
 
+> **Historical, superseded plan.** The current contract and its scoped validation/acceptance limits are in [Implicit Workflow Goals & Workflow-Level Snooze](docs/specs/workflow-implicit-goals.spec.md). This plan is not evidence of implementation or acceptance.
+
+### Supersession map
+
+- Settling bypass and continuation prompt (§1.1): current spec invariant 5; its exact prompt and fallback rules supersede the quoted examples below.
+- `workflow_snooze` and `goal_snooze` (§1.2): invariants 2–4 and 6–9 govern arguments, bounds, compatibility, durable deadlines and lifecycle; the simpler storage proposal below is not the contract.
+- UI label (§1.3): scenario SCN-WFIG-001.
+- Implementation steps and tests (§2): historical proposals only; use the current spec scenarios and its validation record, including any stated acceptance limits.
+
 ## Overview
 
 Based on live testing feedback with Wolfgang:

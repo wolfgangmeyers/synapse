@@ -43,7 +43,6 @@ type CommandSpec struct {
 	MechaRPCExtension    string
 	PiSubagentsExtension string
 	CursorExtension      string
-	AntigravityExtension string
 	TestOnlyExtensions   []string
 	Environment          []string
 }

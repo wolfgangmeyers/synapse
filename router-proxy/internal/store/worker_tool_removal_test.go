@@ -13,7 +13,7 @@ import (
 func TestWorkerToolRemovalSavedDefaultsReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
-	require.NoError(t, CloneTemplateDB(t, path))
+	require.NoError(t, cloneLocalTemplateDB(t, path))
 	s, err := Open(ctx, path, Options{Migrations: []Migration{}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })

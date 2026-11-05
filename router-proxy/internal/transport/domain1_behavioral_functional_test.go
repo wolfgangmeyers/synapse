@@ -236,7 +236,7 @@ func (e *domain1PythonExecutor) run(ctx context.Context, mode string, identity m
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
 	}
-	script := filepath.Join(root, ".claude", "skills", "supervisor", "tools", "managed_root_control.py")
+	script := filepath.Join(root, "tools", "managed_root_control.py")
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
