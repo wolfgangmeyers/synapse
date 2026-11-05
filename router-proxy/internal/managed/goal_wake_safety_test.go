@@ -196,3 +196,41 @@ func TestGoalWakeSafetyGoalToolPreservesAutomaticCap(t *testing.T) {
 		})
 	}
 }
+
+// SCN-GWS-002/004/006: an automatic failure can legitimately rotate context
+// before settling. Its retired origin is not evidence the published owner failed.
+func TestGoalWakeSafetyFailedAutomaticResetDoesNotHoldSuccessor(t *testing.T) {
+	f := newFailureFixture(t)
+	var id string
+	failAndReset := func(ai.TranscriptContext, *ai.SimpleStreamOptions, *providers.FauxState, *ai.Model) *ai.AssistantMessage {
+		f.calls.Add(1)
+		f.m.mu.Lock()
+		if f.m.contextResetRequested == nil {
+			f.m.contextResetRequested = make(map[string]contextResetRequest)
+		}
+		f.m.contextResetRequested[id] = contextResetRequest{reason: "guard-reset-after-failure"}
+		f.m.mu.Unlock()
+		return providers.FauxAssistantMessage(ai.ContentList{ai.TextContent{Text: "deterministic failed automatic turn"}}, ai.StopError)
+	}
+	f.reg.SetResponses([]providers.FauxResponseStep{f.response("startup settled"), failAndReset, f.response("successor awake"), f.response("NOT_DONE\nREASON: Continue bounded work")})
+	owner := f.launch(t, "start")
+	id = owner.binding.AgentID
+	_, err := f.db.UpdateManagedGoalConfig(context.Background(), id, store.ManagedGoalConfig{Enabled: true, Goal: "continue bounded work", Settings: store.DefaultManagedGoalSettings()})
+	require.NoError(t, err)
+	f.m.kickoffIdleGoalContinuation(owner.binding)
+	f.laneBarrier(t, id)
+	saved, err := f.db.ManagedAgent(context.Background(), id)
+	require.NoError(t, err)
+	require.Greater(t, saved.SessionEpoch, owner.binding.Epoch, "fixture must actually rotate the failed turn's context")
+	f.m.mu.Lock()
+	successor, exists := f.m.embeddedOwners[id]
+	f.m.mu.Unlock()
+	require.True(t, exists, "reset must publish a successor")
+	require.Greater(t, successor.binding.Epoch, owner.binding.Epoch)
+	require.Equal(t, owner.binding.Generation, successor.binding.Generation)
+	require.NoError(t, f.m.refreshEmbeddedOwner(context.Background(), &successor), "published successor must have valid ownership")
+	lane := f.m.laneFor(id)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	require.False(t, lane.goalOwnerInvalid, "retired automatic origin must not falsely hold a valid published reset successor")
+}
