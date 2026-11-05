@@ -1377,8 +1377,8 @@ func (s *Store) ObserveEmbeddedGoalInvocation(ctx context.Context, w *EmbeddedGo
 	})
 }
 
-// EmbeddedMailAttempt is a frozen accepted envelope. An existing reservation
-// is never retargeted to a new session, owner or message incarnation.
+// EmbeddedMailAttempt is a frozen accepted envelope. Only a safely unstarted
+// reservation from an exact retired epoch can move to the current session.
 type EmbeddedMailAttempt struct {
 	AttemptID, MessageID, MessageIncarnationID, SnapshotID string
 	Sender, Body, AcceptedDigest                           string
@@ -1421,8 +1421,8 @@ func (s *Store) embeddedMailAcceptedTx(ctx context.Context, a *EmbeddedMailAttem
 	return state, nil
 }
 
-// ReserveEmbeddedMail is the sole attempt allocator. A matching unstarted
-// reservation survives Store reopen; another binding cannot take it over.
+// ReserveEmbeddedMail is the sole attempt allocator. Unstarted reservations
+// survive Store reopen and can be reconciled from an exact retired epoch.
 func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, messageID string) (*EmbeddedMailAttempt, error) {
 	if messageID == "" {
 		return nil, errors.New("missing message ID")
@@ -1438,7 +1438,35 @@ func (s *Store) ReserveEmbeddedMail(ctx context.Context, b EmbeddedBinding, mess
 		}
 		if a != nil {
 			if a.Binding.AgentID != b.AgentID || a.Binding.SessionID != b.SessionID || a.Binding.Epoch != b.Epoch || a.Binding.Generation != b.Generation {
-				return errors.New("embedded mail reserved by another binding")
+				if a.Binding.AgentID != b.AgentID || a.Binding.Generation != b.Generation || a.Binding.Epoch >= b.Epoch {
+					return errors.New("embedded mail reserved by another binding")
+				}
+				if _, err := s.embeddedMailAcceptedTx(ctx, a, true); err != nil {
+					return err
+				}
+				// The current requester is fenced above. Retired identity and absence
+				// of admission evidence must also hold in this same transaction;
+				// neither an expired lease nor a missing session grants takeover.
+				r, err := s.db.ExecContext(ctx, `UPDATE embedded_attempts SET session_id=?,epoch=?
+					WHERE attempt_id=? AND message_id=? AND agent_id=? AND session_id=? AND epoch=? AND generation=?
+					AND EXISTS (SELECT 1 FROM embedded_sessions s WHERE s.agent_id=embedded_attempts.agent_id
+						AND s.session_id=embedded_attempts.session_id AND s.epoch=embedded_attempts.epoch
+						AND s.generation=embedded_attempts.generation AND s.current=0)
+					AND NOT EXISTS (SELECT 1 FROM embedded_acks k WHERE k.attempt_id=embedded_attempts.attempt_id)
+					AND NOT EXISTS (SELECT 1 FROM embedded_append_keys k WHERE k.append_key=embedded_attempts.append_key)
+					AND NOT EXISTS (SELECT 1 FROM embedded_reply_outbox r WHERE r.attempt_id=embedded_attempts.attempt_id)`,
+					b.SessionID, b.Epoch, a.AttemptID, a.MessageID, a.Binding.AgentID, a.Binding.SessionID, a.Binding.Epoch, a.Binding.Generation)
+				if err != nil {
+					return err
+				}
+				n, err := r.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if n != 1 {
+					return errors.New("embedded mail reserved by another binding")
+				}
+				a.Binding.SessionID, a.Binding.Epoch = b.SessionID, b.Epoch
 			}
 			state, err := s.embeddedMailAcceptedTx(ctx, a, false)
 			if err != nil {
