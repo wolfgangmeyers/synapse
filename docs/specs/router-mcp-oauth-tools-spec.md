@@ -22,6 +22,45 @@ This specification details the architecture for **router-level Remote MCP Server
 
 ---
 
+## Startup discovery and restart scenarios
+
+**Intent:** Workers can use configured remote tools on their first turn, including after a router restart, without the operator re-saving a server.
+
+**Invariants:** The router shares one MCP manager with managed workers before startup and recovery. An explicitly supplied manager is preserved. Only active persisted tools are offered; inactive servers do not prevent startup.
+
+### Scenario: [MCP-START-001] Embedded startup and restart
+- **User Goal:** Use an existing MCP tool immediately from an embedded worker.
+- **Given** a connected MCP server and its tools are persisted before router startup.
+- **When** an embedded worker starts, including after a router restart.
+- **Then** its first turn discovers the persisted tool and can execute it without reconfiguration.
+
+### Scenario: [MCP-START-002] Inactive server
+- **User Goal:** Start a worker without offering unavailable tools.
+- **Given** persisted tools belong to an inactive server.
+- **When** the worker starts or restarts.
+- **Then** startup continues and those tools are not offered.
+
+### Scenario: [MCP-START-003] Explicit manager
+- **User Goal:** Keep a deliberately configured MCP manager in use.
+- **Given** the router receives an explicit MCP manager.
+- **When** managed startup begins.
+- **Then** the router and managed workers share that manager.
+
+### Scenario: [MCP-START-004] Claude discovery and restart
+- **User Goal:** Use configured remote MCP tools from a Claude worker without reconfiguration.
+- **Given** a connected server and its tools are persisted before router startup.
+- **When** a Claude worker discovers its tools, including after a router restart.
+- **Then** it discovers and can execute the active tool; inactive tools are not offered.
+
+### Automated verification matrix
+
+| Scenario | Boundary regression | Playwright E2E |
+| --- | --- | --- |
+| MCP-START-001 | Existing embedded MCP execution tests | `tests/e2e/embedded-mcp-startup.spec.ts` — `persisted MCP tools reach the first embedded turn after router startup`: first-turn discovery and execution after restart. |
+| MCP-START-002 | Existing active-tool filtering tests | `tests/e2e/embedded-mcp-startup.spec.ts` — same test: inactive tool excluded during recovery and new worker startup. `tests/e2e/claude-configured-mcp-discovery.spec.ts` — inactive tool excluded from Claude's catalog after restart. |
+| MCP-START-003 | `TestEmbeddedMCPExplicitManagerWiring` | Go construction boundary; browser E2E pending |
+| MCP-START-004 | Claude discovery/restart tests | `tests/e2e/claude-configured-mcp-discovery.spec.ts` — `configured MCP tools reach Claude through normal router startup`: active tool discovery and execution after restart, and inactive tool exclusion after a subsequent restart. |
+
 ## 2. Dev-Loop Phase 1: Observable Behavior
 
 ### 2.1 Router-Level Configuration
