@@ -119,7 +119,7 @@ func TestConversationReceiptExpiredResolvedReuseRateAdmission(t *testing.T) {
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "idempotency_conflict", conflict["error"].(map[string]any)["code"])
 	receipts, deliveries, history = counts()
-	require.Zero(t, receipts)
+	require.Equal(t, 1, receipts, "an unrelated expired receipt is left for independent cleanup")
 	require.Equal(t, beforeDeliveries, deliveries)
 	require.Equal(t, beforeHistory, history)
 	router.rateMu.Lock()

@@ -166,6 +166,36 @@ test("recovers count and byte capacity without partial sends", async ({ page }) 
   expect(state.messages.map(row => row.id)).toEqual(expect.arrayContaining([rejected.id, smaller.id]));
 });
 
+test("keeps protected replay and conflict available when cleanup fails", async ({ page }) => {
+  const url = f.proxy!.url;
+  await connect(page, url, "retry-observer", false);
+  const old = envelope("cleanup-blocker", "old-target", "old");
+  const protectedMessage = envelope("protected-retry", "protected-target", "protected");
+  expect((await post(page, url, old)).status).toBe(201);
+  await f.advanceClock(horizon / 2);
+  const first = await post(page, url, protectedMessage);
+  expect(first.status).toBe(201);
+  database(f.router.databasePath, db => db.exec(`CREATE TRIGGER fail_other_receipt_cleanup BEFORE DELETE ON conversation_send_receipts WHEN OLD.message_id='cleanup-blocker' BEGIN SELECT RAISE(ABORT,'unrelated cleanup failure'); END`));
+  await f.advanceClock(horizon / 2);
+  const before = counts(f.router.databasePath);
+  const replay = await post(page, url, protectedMessage);
+  expect(replay.status).toBe(200);
+  expect(replay.body.conversation_message).toEqual(first.body.conversation_message);
+  const conflict = await post(page, url, { ...protectedMessage, body: "changed" });
+  expect(conflict.status).toBe(409);
+  expect(conflict.body.error.code).toBe("idempotency_conflict");
+  expect(counts(f.router.databasePath)).toEqual(before);
+  const fresh = envelope("cleanup-fresh", "fresh-target", "fresh");
+  expect((await post(page, url, fresh)).status).toBe(500);
+  expect(counts(f.router.databasePath)).toEqual(before);
+  database(f.router.databasePath, db => db.exec("DROP TRIGGER fail_other_receipt_cleanup"));
+  expect((await post(page, url, fresh)).status).toBe(201);
+  const after = counts(f.router.databasePath);
+  expect(after.capacity.used_count).toBe(after.actual.count);
+  expect(after.capacity.used_bytes).toBe(after.actual.bytes);
+  expect(after.messages.map(row => row.id)).toEqual(expect.arrayContaining([old.id, protectedMessage.id, fresh.id]));
+});
+
 test("upgrades old deadlines and defaults without losing pending work", async ({ page }) => {
   const url = f.proxy!.url;
   await connect(page, url, "upgrade-observer", false);
@@ -192,7 +222,14 @@ test("upgrades old deadlines and defaults without losing pending work", async ({
     { message_id: "upgrade-short", deadline_at: shortDeadline },
   ]);
   const savedDeadlines = deadlines();
-  await f.router.restart(async path => database(path, db => db.exec(`DELETE FROM schema_migrations WHERE id='${migration}'; UPDATE conversation_send_receipt_capacity SET max_bytes=12345678`)));
+  // Model an installation that already applied 126 with a >200 MiB custom cap.
+  await f.router.restart(async path => database(path, db => db.exec(`DELETE FROM schema_migrations WHERE id='127_conversation_receipt_cap_ceiling'; UPDATE conversation_send_receipt_capacity SET max_bytes=314572800`)));
+  after = counts(f.router.databasePath);
+  expect(after.capacity.max_bytes).toBe(200 * 1024 * 1024);
+  expect(deadlines()).toEqual(savedDeadlines);
+  expect(after.messages).toEqual(before.messages);
+  expect(after.history).toEqual(before.history);
+  await f.router.restart(async path => database(path, db => db.exec(`DELETE FROM schema_migrations WHERE id='127_conversation_receipt_cap_ceiling'; UPDATE conversation_send_receipt_capacity SET max_bytes=12345678`)));
   after = counts(f.router.databasePath);
   expect(after.capacity.max_bytes).toBe(12345678);
   expect(deadlines()).toEqual(savedDeadlines);

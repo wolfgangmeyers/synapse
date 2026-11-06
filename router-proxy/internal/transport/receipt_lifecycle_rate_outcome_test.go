@@ -192,7 +192,7 @@ func TestReceiptRateOutcomeReplayExpiryAndResolvedReuse(t *testing.T) {
 	var receipts, history int
 	require.NoError(t, check.QueryRow(`SELECT count(*) FROM conversation_send_receipts`).Scan(&receipts))
 	require.NoError(t, check.QueryRow(`SELECT count(*) FROM conversation_messages`).Scan(&history))
-	require.Zero(t, receipts)
+	require.Equal(t, 1, receipts, "replaying a live ID need not prune unrelated expired receipts")
 	require.Equal(t, 2, history)
 	status, code = rateOutcomePost(r, "resolved", "new incarnation")
 	require.Equal(t, http.StatusCreated, status)

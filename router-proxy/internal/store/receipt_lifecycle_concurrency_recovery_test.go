@@ -26,10 +26,15 @@ func TestConversationReceiptLifecycleConcurrentExpiredResolvedSameID(t *testing.
 			var oldDelivery int
 			require.NoError(t, firstHandle.db.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id=? AND message_incarnation_id=?`, old.Message.ID, old.Message.MessageIncarnationID).Scan(&oldDelivery))
 			require.Zero(t, oldDelivery, "ACK removes delivery, not retained conversation history")
-			require.NoError(t, clock.Advance(receiptHorizon))
+			// Open both handles while the receipt is protected: opening after
+			// expiry would prune it before either contender starts.
 			secondHandle, err := Open(ctx, path, Options{Clock: clock})
 			require.NoError(t, err)
 			defer secondHandle.Close()
+			require.NoError(t, clock.Advance(receiptHorizon))
+			var expired int
+			require.NoError(t, firstHandle.db.QueryRowContext(ctx, `SELECT count(*) FROM conversation_send_receipts WHERE message_id=? AND deadline_at<=?`, old.Message.ID, formatTimestamp(clock.Now())).Scan(&expired))
+			require.Equal(t, 1, expired, "the actual expired row must enter the race")
 
 			type outcome struct {
 				result EnqueueResult
@@ -51,8 +56,23 @@ func TestConversationReceiptLifecycleConcurrentExpiredResolvedSameID(t *testing.
 					results <- outcome{result: result, err: err}
 				}(handle, body)
 			}
+			type cleanupOutcome struct {
+				pruned int
+				err    error
+			}
+			cleanup := make(chan cleanupOutcome, 1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				n, err := secondHandle.PruneExpiredConversationReceipts(ctx)
+				cleanup <- cleanupOutcome{n, err}
+			}()
 			close(start)
 			wg.Wait()
+			closedCleanup := <-cleanup
+			require.NoError(t, closedCleanup.err)
+			require.LessOrEqual(t, closedCleanup.pruned, 1, "cleanup must not delete a newly admitted receipt")
 			close(results)
 			created, replays, conflicts := 0, 0, 0
 			var fresh EnqueueResult

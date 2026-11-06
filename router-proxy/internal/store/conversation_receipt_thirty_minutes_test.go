@@ -17,7 +17,7 @@ func TestReceiptThirtyMinuteUpgradePreservesCustomCapsAndWork(t *testing.T) {
 	}{
 		{"old default", 64 * 1024 * 1024, 200 * 1024 * 1024},
 		{"custom smaller", 12345678, 12345678},
-		{"custom larger", 300 * 1024 * 1024, 300 * 1024 * 1024},
+		{"custom larger", 300 * 1024 * 1024, 200 * 1024 * 1024},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

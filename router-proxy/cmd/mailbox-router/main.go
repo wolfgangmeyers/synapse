@@ -227,6 +227,16 @@ func configureCodexCredentials(ctx context.Context, options config, managerOptio
 	return nil
 }
 
+// Unknown reference state must retain the file; startup can fail before the
+// database opens, and later failures can leave the reference query unavailable.
+func attachmentReferenced(ctx context.Context, durable *store.Store, id string) bool {
+	if durable == nil {
+		return true
+	}
+	referenced, err := durable.ConversationAttachmentReferenced(ctx, id)
+	return err != nil || referenced
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "codex-device-login" {
 		if err := productionCodexDeviceLogin(context.Background(), os.Args[2:], os.Stdout, os.Stderr); err != nil {
@@ -281,11 +291,7 @@ func main() {
 		Directory: options.database + ".attachments",
 		Clock:     attachmentsClock,
 		Referenced: func(id string) bool {
-			if durable == nil {
-				return false
-			}
-			referenced, _ := durable.ConversationAttachmentReferenced(context.Background(), id)
-			return referenced
+			return attachmentReferenced(context.Background(), durable, id)
 		},
 	})
 	if err != nil {
@@ -297,7 +303,7 @@ func main() {
 	}
 	durable, err = store.Open(ctx, options.database, storeOpts)
 	if err != nil {
-		_, _ = attachmentsStore.Sweep(nil)
+		// No database means no authoritative reference check; do not sweep.
 		log.Fatal(startupResult(stageStoreManifest, err))
 	}
 	routerLogReader, err := transport.NewConfiguredRouterLogReader(options.logPath)

@@ -167,16 +167,14 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 	if err != nil {
 		return EnqueueResult{}, err
 	}
-	// Commit expiry cleanup separately: a capacity, rate, or later admission
-	// failure must not roll it back and leave the ledger permanently full.
-	if conversation != nil {
-		if _, err := s.PruneExpiredConversationReceipts(ctx); err != nil {
-			if producer != nil {
-				// No mail transaction started, so this witness conclusively
-				// failed and must not be reused for another admission.
-				producer.recordDomainDisposition(false, true, err)
-			}
-			return EnqueueResult{}, err
+	// Replays and conflicts must not depend on unrelated cleanup. This is
+	// only a hint: the immediate transaction below always rechecks identity,
+	// expiry, and the producer fence. If cleanup fails (or a concurrent send
+	// creates this ID after the hint), the transaction still decides safely.
+	if conversation != nil && s.receiptLifecycle {
+		accepted, err := s.HasAcceptedSend(ctx, candidate.ID)
+		if err == nil && !accepted {
+			_, _ = s.PruneExpiredConversationReceipts(ctx)
 		}
 	}
 	var result EnqueueResult
@@ -232,11 +230,6 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 				return nil
 			}
 		}
-		if conversation != nil && s.receiptLifecycle {
-			if _, err := s.pruneConversationReceipts(ctx, now); err != nil {
-				return err
-			}
-		}
 		existing, err := s.messageForTx(ctx, candidate.ID)
 		if err != nil {
 			return err
@@ -247,6 +240,11 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 			}
 			result = EnqueueResult{Message: *existing}
 			return nil
+		}
+		if conversation != nil && s.receiptLifecycle {
+			if _, err := s.pruneConversationReceipts(ctx, now); err != nil {
+				return err
+			}
 		}
 		duplicate, err := s.selectLiveDuplicate(ctx, candidate, sentinelJSON)
 		if err != nil {
