@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const receiptHorizon = 30 * 24 * time.Hour
+const receiptHorizon = 30 * time.Minute
 
 func lifecycleFixture(t *testing.T) (*Store, *deterministic.FixedClock, string) {
 	t.Helper()
@@ -76,31 +76,28 @@ func TestConversationReceiptLifecycleREDProtectedUntilExactDeadline(t *testing.T
 	require.NoError(t, clock.Advance(time.Millisecond))
 	fresh, err := lifecycleSend(s, "horizon-id", "new incarnation")
 	require.NoError(t, err)
-	require.True(t, fresh.Created, "at the exact 30d deadline the ACKed receipt must be pruned, not replayed or conflicted")
+	require.True(t, fresh.Created, "at the exact 30-minute deadline the ACKed receipt must not be replayed or conflicted")
 	require.NotEqual(t, first.Message.MessageIncarnationID, fresh.Message.MessageIncarnationID)
 }
 
-func TestConversationReceiptLifecycleREDExpiredUnresolvedBlocksBothBodies(t *testing.T) {
+func TestConversationReceiptLifecycleExpiredUnresolvedKeepsDelivery(t *testing.T) {
 	s, clock, _ := lifecycleFixture(t)
 	first, err := lifecycleSend(s, "unresolved-id", "original")
 	require.NoError(t, err)
-	beforeCount, beforeBytes := lifecycleUsage(t, s)
 	require.NoError(t, clock.Advance(receiptHorizon))
-	for _, body := range []string{"original", "different"} {
-		_, err := lifecycleSend(s, "unresolved-id", body)
-		require.Error(t, err, "expired live delivery cannot replay or accept another incarnation")
-		coded, ok := err.(interface{ Code() string })
-		require.True(t, ok, "expiry needs a typed error: %v", err)
-		require.Equal(t, "conversation_receipt_expired_unresolved", coded.Code())
-		count, bytes := lifecycleUsage(t, s)
-		require.Equal(t, beforeCount, count)
-		require.Equal(t, beforeBytes, bytes)
-		var deliveries, histories int
-		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM messages WHERE id=? AND message_incarnation_id=?`, first.Message.ID, first.Message.MessageIncarnationID).Scan(&deliveries))
-		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM conversation_messages WHERE message_id=?`, first.Message.ID).Scan(&histories))
-		require.Equal(t, 1, deliveries)
-		require.Equal(t, 1, histories)
-	}
+	replayed, err := lifecycleSend(s, "unresolved-id", "original")
+	require.NoError(t, err)
+	require.False(t, replayed.Created, "the still-live delivery owns its ID")
+	_, err = lifecycleSend(s, "unresolved-id", "different")
+	require.ErrorAs(t, err, new(*IdempotencyConflictError))
+	count, bytes := lifecycleUsage(t, s)
+	require.Zero(t, count)
+	require.Zero(t, bytes)
+	var deliveries, histories int
+	require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM messages WHERE id=? AND message_incarnation_id=?`, first.Message.ID, first.Message.MessageIncarnationID).Scan(&deliveries))
+	require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM conversation_messages WHERE message_id=?`, first.Message.ID).Scan(&histories))
+	require.Equal(t, 1, deliveries)
+	require.Equal(t, 1, histories)
 }
 
 func TestConversationReceiptLifecycleREDPruneReleasesExactBytesAtCap(t *testing.T) {
@@ -149,7 +146,6 @@ func TestConversationReceiptLifecycleREDLegacyUpgradeBaselinePersists(t *testing
 	require.NoError(t, err)
 	_, err = lifecycleSend(legacy, "legacy-id", "original")
 	require.NoError(t, err)
-	lifecycleACK(t, legacy, "legacy-id")
 	beforeCount, beforeBytes := lifecycleUsage(t, legacy)
 	for _, id := range []string{"078_conversation_send_receipt", "079_conversation_send_receipt_capacity", "080_embedded_restart_wakes", "081_embedded_restart_wake_checked_origin"} {
 		var exists int
@@ -158,7 +154,8 @@ func TestConversationReceiptLifecycleREDLegacyUpgradeBaselinePersists(t *testing
 	}
 	require.NoError(t, legacy.Close(), "closing checkpoints this owned WAL fixture before migration")
 	require.NoError(t, clock.Advance(60*24*time.Hour))
-	upgraded, err := Open(ctx, path, Options{Clock: clock})
+	through082 := migrationIndex(t, migrations, "082_conversation_send_receipt_lifecycle") + 1
+	upgraded, err := Open(ctx, path, Options{Clock: clock, Migrations: migrations[:through082]})
 	require.NoError(t, err)
 	defer upgraded.Close()
 	var applied int
@@ -173,8 +170,8 @@ func TestConversationReceiptLifecycleREDLegacyUpgradeBaselinePersists(t *testing
 	require.Equal(t, beforeCount, count)
 	require.Equal(t, beforeBytes, bytes)
 	require.NoError(t, upgraded.Close())
-	require.NoError(t, clock.Advance(time.Hour))
-	reopened, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, clock.Advance(time.Minute))
+	reopened, err := Open(ctx, path, Options{Clock: clock, Migrations: migrations[:through082]})
 	require.NoError(t, err)
 	defer reopened.Close()
 	var persisted string

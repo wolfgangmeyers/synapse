@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -90,7 +89,7 @@ func TestConversationReceiptLifecycleHTTPStoreDelivery(t *testing.T) {
 	_, err = durable.AcknowledgeDelivery(ctx, ack)
 	require.NoError(t, err)
 
-	require.NoError(t, clock.Advance(30*24*time.Hour-time.Millisecond))
+	require.NoError(t, clock.Advance(30*time.Minute-time.Millisecond))
 	status, replay := post("resolved-id", originalBody)
 	require.Equal(t, http.StatusOK, status)
 	require.Equal(t, original["conversation_message"], replay["conversation_message"])
@@ -104,49 +103,22 @@ func TestConversationReceiptLifecycleHTTPStoreDelivery(t *testing.T) {
 	require.Equal(t, 2, receipts)
 	require.Equal(t, 1, deliveries)
 
-	require.NoError(t, clock.Advance(time.Millisecond)) // exact accepted-at + 30 days
-	// Saturate preflight with synthetic rate history: a receipt retry must not
-	// consume a rate token or be replaced by 429 before Store's 410 decision.
-	router.rateMu.Lock()
-	router.rates["receipt-sender"] = nil
-	for i := 0; i < 60; i++ {
-		router.rates["receipt-sender"] = append(router.rates["receipt-sender"], clock.Now())
-	}
-	router.rateMu.Unlock()
-	for _, body := range []string{"unresolved private content", "different private content"} {
-		status, response := post("unresolved-id", body, "receipt-unresolved-target")
-		require.Equal(t, http.StatusGone, status, response)
-		problem := response["error"].(map[string]any)
-		require.Equal(t, "conversation_receipt_expired_unresolved", problem["code"])
-		require.Equal(t, "unresolved-id", problem["message_id"])
-		require.NotEmpty(t, problem["accepted_at"])
-		require.NotEmpty(t, problem["deadline_at"])
-		require.NotEmpty(t, problem["delivery_state"])
-		encoded, e := json.Marshal(response)
-		require.NoError(t, e)
-		require.False(t, strings.Contains(string(encoded), "private content"), "410 must not expose message bodies")
-		receipts, deliveries = usage()
-		require.Equal(t, 2, receipts)
-		require.Equal(t, 1, deliveries)
-	}
-	router.rateMu.Lock()
-	require.Len(t, router.rates["receipt-sender"], 60, "rejected receipt retries must not touch pre-store rate accounting")
-	delete(router.rates, "receipt-sender")
-	router.rateMu.Unlock()
-
-	// ACKed receipt becomes eligible while the unresolved one remains pinned.
-	policy := store.DefaultRetentionPolicy
-	policy.QueuedMessageAge = 31 * 24 * time.Hour // keep the unresolved delivery live during history pruning
-	_, err = durable.SweepLifecycle(ctx, policy)
+	require.NoError(t, clock.Advance(time.Millisecond)) // exact accepted-at + 30 minutes
+	pruned, err := durable.PruneExpiredConversationReceipts(ctx)
 	require.NoError(t, err)
+	require.Equal(t, 2, pruned)
+	status, _ = post("unresolved-id", "unresolved private content", "receipt-unresolved-target")
+	require.Equal(t, http.StatusOK, status)
+	status, conflict = post("unresolved-id", "different private content", "receipt-unresolved-target")
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "idempotency_conflict", conflict["error"].(map[string]any)["code"])
 	receipts, deliveries = usage()
-	require.Equal(t, 1, receipts)
+	require.Zero(t, receipts)
 	require.Equal(t, 1, deliveries)
 	status, reused := post("resolved-id", "new incarnation", "receipt-second-target")
 	require.Equal(t, http.StatusCreated, status, reused)
 	require.NotEqual(t, firstIncarnation, reused["message"].(map[string]any)["message_incarnation_id"])
-	// History retains the old row at the exact boundary: pruning uses
-	// recorded_at < cutoff, while the accepted-at receipt expires at cutoff.
+	// Receipt expiry does not remove the older conversation history.
 	rows, err := check.QueryContext(ctx, `SELECT conversation_sequence, message_incarnation_id, sender, recipient, receipt_backed FROM conversation_messages WHERE message_id='resolved-id' ORDER BY conversation_sequence`)
 	require.NoError(t, err)
 	var histories []struct {
@@ -185,7 +157,7 @@ func TestConversationReceiptLifecycleHTTPStoreDelivery(t *testing.T) {
 	require.NoError(t, check.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE id='unresolved-id' AND recipient='receipt-unresolved-target' AND state='queued'`).Scan(&unresolvedDeliveries))
 	require.Equal(t, 1, unresolvedDeliveries, "unresolved delivery must remain live")
 	receipts, deliveries = usage()
-	require.Equal(t, 2, receipts)
+	require.Equal(t, 1, receipts)
 	require.Equal(t, 2, deliveries)
 	_, err = durable.AcquireAgentLease(ctx, store.LeaseRequest{AgentID: "receipt-second-target", InstanceID: "second-instance", LeaseID: "second-lease"})
 	require.NoError(t, err)
@@ -199,6 +171,6 @@ func TestConversationReceiptLifecycleHTTPStoreDelivery(t *testing.T) {
 	_, err = durable.AcknowledgeDelivery(ctx, freshACK)
 	require.NoError(t, err)
 	receipts, deliveries = usage()
-	require.Equal(t, 2, receipts)
+	require.Equal(t, 1, receipts)
 	require.Equal(t, 1, deliveries)
 }

@@ -150,7 +150,7 @@ func TestReceiptRateOutcomeReplayExpiryAndResolvedReuse(t *testing.T) {
 	require.NoError(t, err)
 	_, err = durable.AcknowledgeDelivery(ctx, ack)
 	require.NoError(t, err)
-	require.NoError(t, clock.Advance(30*24*time.Hour-time.Millisecond))
+	require.NoError(t, clock.Advance(30*time.Minute-time.Millisecond))
 	for _, tc := range []struct {
 		body   string
 		status int
@@ -182,16 +182,17 @@ func TestReceiptRateOutcomeReplayExpiryAndResolvedReuse(t *testing.T) {
 	require.NoError(t, check.QueryRow(`SELECT count(*) FROM messages WHERE id='unresolved' AND recipient=? AND state='queued'`, unresolvedTarget).Scan(&unresolvedDelivery))
 	require.Equal(t, 1, unresolvedReceipt)
 	require.Equal(t, 1, unresolvedDelivery)
-	for _, body := range []string{"unresolved original", "changed"} {
-		status, code = rateOutcomePost(r, "unresolved", body, unresolvedTarget)
-		require.Equal(t, http.StatusGone, status)
-		require.Equal(t, "conversation_receipt_expired_unresolved", code)
-	}
+	status, code = rateOutcomePost(r, "unresolved", "unresolved original", unresolvedTarget)
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, code)
+	status, code = rateOutcomePost(r, "unresolved", "changed", unresolvedTarget)
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "idempotency_conflict", code)
 	assertOriginalCharges()
 	var receipts, history int
 	require.NoError(t, check.QueryRow(`SELECT count(*) FROM conversation_send_receipts`).Scan(&receipts))
 	require.NoError(t, check.QueryRow(`SELECT count(*) FROM conversation_messages`).Scan(&history))
-	require.Equal(t, 2, receipts)
+	require.Zero(t, receipts)
 	require.Equal(t, 2, history)
 	status, code = rateOutcomePost(r, "resolved", "new incarnation")
 	require.Equal(t, http.StatusCreated, status)

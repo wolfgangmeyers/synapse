@@ -12,19 +12,8 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 )
 
-const conversationReceiptHorizon = 30 * 24 * time.Hour
+const conversationReceiptHorizon = 30 * time.Minute
 const receiptPruneBatch = 128
-
-type ConversationReceiptExpiredUnresolvedError struct {
-	MessageID, AcceptedAt, DeadlineAt, DeliveryState, Reason, IncarnationID string
-}
-
-func (e *ConversationReceiptExpiredUnresolvedError) Error() string {
-	return fmt.Sprintf("conversation receipt %s expired with unresolved delivery (%s)", e.MessageID, e.DeliveryState)
-}
-func (e *ConversationReceiptExpiredUnresolvedError) Code() string {
-	return "conversation_receipt_expired_unresolved"
-}
 
 type conversationCandidate struct {
 	protocol.Envelope
@@ -88,7 +77,9 @@ func (s *Store) HasAcceptedSend(ctx context.Context, id string) (bool, error) {
 	var accepted bool
 	query := `SELECT EXISTS(SELECT 1 FROM messages WHERE id=?) OR EXISTS(SELECT 1 FROM conversation_send_receipts WHERE message_id=?) OR EXISTS(SELECT 1 FROM conversation_messages WHERE message_id=?)`
 	if s.receiptLifecycle {
-		query = `SELECT EXISTS(SELECT 1 FROM messages WHERE id=?) OR EXISTS(SELECT 1 FROM conversation_send_receipts WHERE message_id=?) OR EXISTS(SELECT 1 FROM conversation_messages WHERE message_id=? AND receipt_backed=0)`
+		query = `SELECT EXISTS(SELECT 1 FROM messages WHERE id=?) OR EXISTS(SELECT 1 FROM conversation_send_receipts WHERE message_id=? AND deadline_at>?) OR EXISTS(SELECT 1 FROM conversation_messages WHERE message_id=? AND receipt_backed=0)`
+		err := s.db.QueryRowContext(ctx, query, id, id, formatTimestamp(s.clock.Now()), id).Scan(&accepted)
+		return accepted, err
 	}
 	err := s.db.QueryRowContext(ctx, query, id, id, id).Scan(&accepted)
 	return accepted, err
@@ -119,36 +110,8 @@ func (s *Store) conversationReceipt(ctx context.Context, id string) (*domain.Con
 	return &conversation, &delivery, acceptedAt, deadlineAt, nil
 }
 
-// A live original delivery incarnation (including dead letter) is unresolved.
-// The receipt key can be an alias: dedupe stores A's delivery under B's receipt.
-func (s *Store) receiptResolution(ctx context.Context, id, incarnation string) (bool, string, string, error) {
-	var deliveryJSON string
-	if err := s.db.QueryRowContext(ctx, `SELECT delivery_json FROM conversation_send_receipts WHERE message_id=?`, id).Scan(&deliveryJSON); err != nil {
-		return false, "", "", err
-	}
-	var identity struct {
-		ID          string `json:"id"`
-		Incarnation string `json:"message_incarnation_id"`
-	}
-	if err := json.Unmarshal([]byte(deliveryJSON), &identity); err != nil {
-		return false, "", "", fmt.Errorf("receipt %s has invalid delivery identity: %w", id, err)
-	}
-	if identity.ID == "" || identity.Incarnation == "" || identity.Incarnation != incarnation {
-		return false, "", "", fmt.Errorf("receipt %s has missing or inconsistent delivery identity", id)
-	}
-	var state, reason sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT state, (SELECT failure_reason FROM delivery_attempts WHERE message_id=messages.id ORDER BY attempt_number DESC LIMIT 1) FROM messages WHERE id=? AND message_incarnation_id=?`, identity.ID, identity.Incarnation).Scan(&state, &reason)
-	if errors.Is(err, sql.ErrNoRows) {
-		return true, "", "", nil
-	}
-	if err != nil {
-		return false, "", "", err
-	}
-	return false, state.String, reason.String, nil
-}
-
-// The indexed eligibility predicate skips unresolved prefixes; one call
-// touches at most receiptPruneBatch receipts regardless of ledger size.
+// Prune only the receipt. The delivery can still be queued, dead-lettered,
+// or shared by alias receipts and is owned by the delivery lifecycle.
 func (s *Store) pruneConversationReceipts(ctx context.Context, now string) (int, error) {
 	return s.pruneConversationReceiptsFor(ctx, now, "")
 }
@@ -157,67 +120,100 @@ func (s *Store) pruneConversationReceiptsFor(ctx context.Context, now, id string
 	if !s.receiptLifecycle {
 		return 0, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.message_id,
-	 length(CAST(r.message_id AS BLOB))+length(CAST(r.conversation_json AS BLOB))+length(CAST(r.delivery_json AS BLOB))
-	 FROM conversation_send_receipts r INDEXED BY conversation_send_receipts_deadline_idx
-	 WHERE r.deadline_at<=? AND (?='' OR r.message_id=?) AND CASE WHEN json_valid(r.delivery_json) THEN
-	   json_type(r.delivery_json,'$.id')='text' AND json_extract(r.delivery_json,'$.id')!=''
-	   AND json_type(r.delivery_json,'$.message_incarnation_id')='text'
-	   AND json_extract(r.delivery_json,'$.message_incarnation_id')!=''
-	   AND NOT EXISTS (
-	     SELECT 1 FROM messages m WHERE m.id=json_extract(r.delivery_json,'$.id')
-	     AND m.message_incarnation_id=json_extract(r.delivery_json,'$.message_incarnation_id'))
-	 ELSE 0 END
-	 ORDER BY r.deadline_at,r.message_id LIMIT ?`, now, id, id, receiptPruneBatch)
+	// Both queries select the same indexed batch under BEGIN IMMEDIATE. Sum
+	// persisted bytes, not character counts or reconstructed payload lengths.
+	selection := `SELECT message_id FROM conversation_send_receipts INDEXED BY conversation_send_receipts_deadline_idx
+	 WHERE deadline_at<=? AND (?='' OR message_id=?) ORDER BY deadline_at,message_id LIMIT ?`
+	args := []any{now, id, id, receiptPruneBatch}
+	var count int
+	var bytes int64
+	err := s.db.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(length(CAST(message_id AS BLOB))+length(CAST(conversation_json AS BLOB))+length(CAST(delivery_json AS BLOB))),0)
+	 FROM conversation_send_receipts WHERE message_id IN (`+selection+`)`, args...).Scan(&count, &bytes)
+	if err != nil || count == 0 {
+		return 0, err
+	}
+	removed, err := s.db.ExecContext(ctx, `DELETE FROM conversation_send_receipts WHERE message_id IN (`+selection+`)`, args...)
 	if err != nil {
 		return 0, err
 	}
-	type entry struct {
-		id    string
-		bytes int64
-	}
-	var selected []entry
-	for rows.Next() {
-		var e entry
-		if err := rows.Scan(&e.id, &e.bytes); err != nil {
-			_ = rows.Close()
-			return 0, err
-		}
-		selected = append(selected, e)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+	n, err := removed.RowsAffected()
+	if err != nil {
 		return 0, err
 	}
-	if err := rows.Close(); err != nil {
+	if n != int64(count) {
+		return 0, fmt.Errorf("receipt prune count changed: selected %d, deleted %d", count, n)
+	}
+	charged, err := s.db.ExecContext(ctx, `UPDATE conversation_send_receipt_capacity SET used_count=used_count-?,used_bytes=used_bytes-? WHERE singleton=1 AND used_count>=? AND used_bytes>=?`, count, bytes, count, bytes)
+	if err != nil {
 		return 0, err
 	}
-	for _, e := range selected {
-		removed, err := s.db.ExecContext(ctx, `DELETE FROM conversation_send_receipts WHERE message_id=?`, e.id)
-		if err != nil {
-			return 0, err
-		}
-		n, err := removed.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		if n != 1 {
-			return 0, fmt.Errorf("receipt %s disappeared during prune", e.id)
-		}
-		charged, err := s.db.ExecContext(ctx, `UPDATE conversation_send_receipt_capacity SET used_count=used_count-1,used_bytes=used_bytes-? WHERE singleton=1 AND used_count>=1 AND used_bytes>=?`, e.bytes, e.bytes)
-		if err != nil {
-			return 0, err
-		}
-		n, err = charged.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		if n != 1 {
-			return 0, fmt.Errorf("receipt capacity inconsistent for %s", e.id)
-		}
+	n, err = charged.RowsAffected()
+	if err != nil {
+		return 0, err
 	}
-	return len(selected), nil
+	if n != 1 {
+		return 0, fmt.Errorf("receipt capacity inconsistent for pruned batch")
+	}
+	return count, nil
 }
+
+// PruneExpiredConversationReceipts commits each bounded batch independently.
+// It does not depend on send traffic or on the larger lifecycle sweep succeeding.
+func (s *Store) PruneExpiredConversationReceipts(ctx context.Context) (int, error) {
+	if !s.receiptLifecycle {
+		return 0, nil
+	}
+	total := 0
+	for {
+		var pruned int
+		err := s.runImmediate(ctx, func() error {
+			var err error
+			pruned, err = s.pruneConversationReceipts(ctx, formatTimestamp(s.clock.Now()))
+			return err
+		})
+		if err != nil {
+			return total, err
+		}
+		total += pruned
+		if pruned < receiptPruneBatch {
+			return total, nil
+		}
+	}
+}
+
+// ConversationReceiptCleanupDelay wakes at the earliest deadline, with a
+// short poll as a fallback for other store handles and test-clock jumps.
+func (s *Store) ConversationReceiptCleanupDelay(ctx context.Context, maximum time.Duration) (time.Duration, error) {
+	if !s.receiptLifecycle {
+		return maximum, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, errors.New("store is closed")
+	}
+	var deadline string
+	err := s.db.QueryRowContext(ctx, `SELECT deadline_at FROM conversation_send_receipts ORDER BY deadline_at,message_id LIMIT 1`).Scan(&deadline)
+	if errors.Is(err, sql.ErrNoRows) {
+		return maximum, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	at := parseTimestamp(deadline)
+	if at.IsZero() {
+		return 0, fmt.Errorf("invalid conversation receipt deadline")
+	}
+	delay := at.Sub(s.clock.Now())
+	if delay < 0 {
+		return 0, nil
+	}
+	if delay < maximum {
+		return delay, nil
+	}
+	return maximum, nil
+}
+
 func (s *Store) insertConversation(ctx context.Context, candidate *conversationCandidate, incarnation, recorded string, delivery *domain.Message) (*domain.ConversationMessage, error) {
 	a, b := candidate.From, candidate.To
 	if b < a {

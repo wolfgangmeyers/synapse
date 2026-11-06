@@ -24,7 +24,6 @@ func TestManagedQuietAuthorizationSurvivesReceiptRejection(t *testing.T) {
 		name, code string
 		status     int
 	}{
-		{name: "expired unresolved receipt", status: http.StatusGone, code: "conversation_receipt_expired_unresolved"},
 		{name: "idempotency conflict", status: http.StatusConflict, code: "idempotency_conflict"},
 		{name: "receipt capacity", status: http.StatusInsufficientStorage, code: "conversation_receipt_capacity"},
 	} {
@@ -67,13 +66,10 @@ func TestManagedQuietAuthorizationSurvivesReceiptRejection(t *testing.T) {
 				require.NoError(t, check.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n))
 				return n
 			}
-			// Baseline includes the unresolved receipt/history/delivery in 410/409.
-			if tc.status == http.StatusGone || tc.status == http.StatusConflict {
+			// The conflicting ID already owns a delivery, history, and receipt.
+			if tc.status == http.StatusConflict {
 				status, _ := post("rejected-id", "original body", "")
 				require.Equal(t, http.StatusCreated, status)
-			}
-			if tc.status == http.StatusGone {
-				require.NoError(t, clock.Advance(30*24*time.Hour))
 			}
 			if tc.status == http.StatusInsufficientStorage {
 				status, _ := post("capacity-seed", "ordinary seed", "")

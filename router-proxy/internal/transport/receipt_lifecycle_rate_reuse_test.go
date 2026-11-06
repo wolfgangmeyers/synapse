@@ -18,9 +18,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// The retained receipt is not a rate-limit exemption once its resolved ID can
-// be admitted by Store as a fresh incarnation. Unresolved IDs still need to
-// reach Store for the typed 410 without consuming a rate token.
+// Expired receipts cannot exempt a fresh incarnation from rate admission.
+// A still-live delivery retains normal ID replay and conflict behavior.
 func TestConversationReceiptExpiredResolvedReuseRateAdmission(t *testing.T) {
 	ctx := context.Background()
 	clock := deterministic.NewFixedClock(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
@@ -87,7 +86,7 @@ func TestConversationReceiptExpiredResolvedReuseRateAdmission(t *testing.T) {
 	require.NoError(t, err)
 
 	// The in-horizon receipt owns its ID even under a full sender rate bucket.
-	require.NoError(t, clock.Advance(30*24*time.Hour-time.Millisecond))
+	require.NoError(t, clock.Advance(30*time.Minute-time.Millisecond))
 	router.rateMu.Lock()
 	router.rates["rate-reuse-sender"] = nil
 	for i := 0; i < 60; i++ {
@@ -109,25 +108,22 @@ func TestConversationReceiptExpiredResolvedReuseRateAdmission(t *testing.T) {
 	require.Len(t, router.rates["rate-reuse-sender"], 60)
 	router.rateMu.Unlock()
 
-	// Exact accepted-at + 30 days. Both receipts remain in SQLite: only
-	// the resolved one is eligible to become a new send.
+	// At 30 minutes both receipts expire; the queued message still owns its ID.
 	require.NoError(t, clock.Advance(time.Millisecond))
 	var retained int
 	require.NoError(t, check.QueryRowContext(ctx, `SELECT count(*) FROM conversation_send_receipts WHERE message_id IN ('rate-reuse-resolved', 'rate-reuse-unresolved')`).Scan(&retained))
 	require.Equal(t, 2, retained)
-	for _, body := range []string{"unresolved body", "changed unresolved body"} {
-		status, gone := post("rate-reuse-unresolved", body, "rate-reuse-other-target")
-		require.Equal(t, http.StatusGone, status, gone)
-		problem := gone["error"].(map[string]any)
-		require.Equal(t, "conversation_receipt_expired_unresolved", problem["code"])
-		require.Equal(t, "rate-reuse-unresolved", problem["message_id"])
-		receipts, deliveries, history = counts()
-		require.Equal(t, beforeReceipts, receipts)
-		require.Equal(t, beforeDeliveries, deliveries)
-		require.Equal(t, beforeHistory, history)
-	}
+	status, _ = post("rate-reuse-unresolved", "unresolved body", "rate-reuse-other-target")
+	require.Equal(t, http.StatusOK, status)
+	status, conflict = post("rate-reuse-unresolved", "changed unresolved body", "rate-reuse-other-target")
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "idempotency_conflict", conflict["error"].(map[string]any)["code"])
+	receipts, deliveries, history = counts()
+	require.Zero(t, receipts)
+	require.Equal(t, beforeDeliveries, deliveries)
+	require.Equal(t, beforeHistory, history)
 	router.rateMu.Lock()
-	require.Len(t, router.rates["rate-reuse-sender"], 60, "410 must not charge the sender")
+	require.Len(t, router.rates["rate-reuse-sender"], 60, "live-ID replay and conflict must not charge the sender")
 	router.rateMu.Unlock()
 
 	// This is a fresh send despite the retained receipt. HTTP must apply the
@@ -136,7 +132,7 @@ func TestConversationReceiptExpiredResolvedReuseRateAdmission(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, status, limited)
 	require.Equal(t, "rate_limited", limited["error"].(map[string]any)["code"])
 	receipts, deliveries, history = counts()
-	require.Equal(t, beforeReceipts, receipts, "429 must not replace the receipt")
+	require.Zero(t, receipts, "429 must not recreate expired receipts")
 	require.Equal(t, beforeDeliveries, deliveries, "429 must not enqueue")
 	require.Equal(t, beforeHistory, history, "429 must not add history")
 	router.rateMu.Lock()
@@ -150,7 +146,7 @@ func TestConversationReceiptExpiredResolvedReuseRateAdmission(t *testing.T) {
 	require.Equal(t, http.StatusCreated, status, reused)
 	require.NotEqual(t, firstIncarnation, reused["message"].(map[string]any)["message_incarnation_id"])
 	receipts, deliveries, history = counts()
-	require.Equal(t, beforeReceipts, receipts)
+	require.Equal(t, 1, receipts)
 	require.Equal(t, beforeDeliveries+1, deliveries)
 	require.Equal(t, beforeHistory+1, history)
 }
