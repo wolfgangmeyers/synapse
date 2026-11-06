@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,23 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAttachmentReferenceCheckKeepsFilesWhenStoreUnavailable(t *testing.T) {
+	ctx := context.Background()
+	require.True(t, attachmentReferenced(ctx, nil, "saved.png"))
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	require.False(t, attachmentReferenced(ctx, durable, "unreferenced.png"))
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	require.True(t, attachmentReferenced(cancelled, durable, "saved.png"), "a failed query must preserve uncertain references")
+	require.NoError(t, durable.Close())
+	require.True(t, attachmentReferenced(ctx, durable, "saved.png"), "a closed store cannot prove a file is unreferenced")
+}
 
 func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	parsed, err := parseConfig([]string{"--database", "/tmp/router.db"})

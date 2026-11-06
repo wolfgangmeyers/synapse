@@ -74,6 +74,11 @@ func sameConversation(c *domain.ConversationMessage, candidate *conversationCand
 // HasAcceptedSend lets HTTP retries bypass new-send rate limits. Enqueue still
 // performs the authoritative receipt comparison inside its write transaction.
 func (s *Store) HasAcceptedSend(ctx context.Context, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, errors.New("store is closed")
+	}
 	var accepted bool
 	query := `SELECT EXISTS(SELECT 1 FROM messages WHERE id=?) OR EXISTS(SELECT 1 FROM conversation_send_receipts WHERE message_id=?) OR EXISTS(SELECT 1 FROM conversation_messages WHERE message_id=?)`
 	if s.receiptLifecycle {
