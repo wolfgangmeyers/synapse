@@ -660,6 +660,9 @@ func New(options Options) (*Router, error) {
 	r.startupManaged = options.StartupManaged
 	r.systemOneClient = systemone.NewClient(nil)
 	r.mcpManager = options.MCPManager
+	if r.mcpManager == nil && options.Managed != nil {
+		r.mcpManager = options.Managed.MCPManager()
+	}
 	r.gitSyncer = options.GitSyncer
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
@@ -676,9 +679,9 @@ func New(options Options) (*Router, error) {
 			r.sweepReminders(ctx)
 			r.broadcast(map[string]any{"type": "reminders_changed"})
 		})
-		if options.MCPManager != nil {
-			options.Managed.SetMCPManager(options.MCPManager)
-		}
+		// Startup recovery can create embedded sessions before any MCP HTTP request.
+		// Install the router's manager now so persisted tools are available immediately.
+		options.Managed.SetMCPManager(r.MCPManager())
 		if options.GitSyncer != nil {
 			options.Managed.SetGitSyncer(options.GitSyncer)
 		}
