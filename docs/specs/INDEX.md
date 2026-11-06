@@ -35,6 +35,7 @@ Specifications covering agent process supervisors, tmux bridges, embedded runtim
 
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SPEC-MAILBOX-RECEIPTS-001` | Bounded Conversation Send Receipts | `Mailbox` | [`conversation-send-receipt-retention.spec.md`](./conversation-send-receipt-retention.spec.md) | `tests/e2e/conversation-send-receipt-retention.spec.ts` | `Active` |
 | `SPEC-MAILBOX-001` | Mailbox Progress Across Session Replacement | `Mailbox` | [`mailbox-session-recovery.spec.md`](./mailbox-session-recovery.spec.md) | `tests/e2e/mailbox-session-recovery.spec.ts` (one combined ordinary/reset TC; remaining matrix planned) | `Draft` |
 | `SPEC-GOAL-001` | Bounded Automatic Goal Wakeups | `AgentManagement` | [`goal-wake-safety.spec.md`](./goal-wake-safety.spec.md) | `tests/e2e/goal-wake-safety.spec.ts` (one partial GWS-002/003 TC; remaining matrix planned) | `Draft` |
 | `SPEC-ROUTER-INIT-001` | Fresh-machine Router Initialization | `Settings` | [`router-initialization.spec.md`](./router-initialization.spec.md) | `tests/e2e/router-initialization.spec.ts` | `Active` |

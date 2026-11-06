@@ -164,6 +164,32 @@ func waitForDeliveryOffers(ctx context.Context, group *sync.WaitGroup) error {
 
 func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	// Receipt retention must progress even when unrelated lifecycle work fails
+	// or blocks. Join this loop on shutdown before the store can be closed.
+	receiptDone := make(chan struct{})
+	go func() {
+		defer close(receiptDone)
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				delay := time.Second
+				_, err := r.store.PruneExpiredConversationReceipts(ctx)
+				if err == nil {
+					delay, err = r.store.ConversationReceiptCleanupDelay(ctx, time.Second)
+				}
+				if err != nil && ctx.Err() == nil {
+					r.emitEvent(RouterErrorEvent("conversation_receipt_cleanup_failed", ""))
+					delay = time.Second // retry without a tight error loop
+				}
+				timer.Reset(delay)
+			}
+		}
+	}()
+	defer func() { <-receiptDone }()
 	ticker := time.NewTicker(r.sweepInterval)
 	defer ticker.Stop()
 	for {

@@ -69,7 +69,9 @@ func TestReceiptLegacy081To082BaselineAndPayload(t *testing.T) {
 	path, clock, before := receiptLegacyFixture(t)
 	ctx := context.Background()
 	baseline := clock.Now().UTC().Truncate(time.Millisecond)
-	upgraded, err := Open(ctx, path, Options{Clock: clock})
+	migrations := DefaultMigrations()
+	through082 := migrationIndex(t, migrations, "082_conversation_send_receipt_lifecycle") + 1
+	upgraded, err := Open(ctx, path, Options{Clock: clock, Migrations: migrations[:through082]})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
 	for _, id := range []string{"078_conversation_send_receipt", "079_conversation_send_receipt_capacity", "080_embedded_restart_wakes", "081_embedded_restart_wake_checked_origin", "082_conversation_send_receipt_lifecycle"} {
@@ -79,13 +81,13 @@ func TestReceiptLegacy081To082BaselineAndPayload(t *testing.T) {
 	var accepted, deadline string
 	require.NoError(t, upgraded.db.QueryRow(`SELECT accepted_at,deadline_at FROM conversation_send_receipts WHERE message_id='legacy-id'`).Scan(&accepted, &deadline))
 	require.Equal(t, formatTimestamp(baseline), accepted)
-	require.Equal(t, formatTimestamp(baseline.Add(30*24*time.Hour)), deadline)
+	require.Equal(t, formatTimestamp(baseline.Add(receiptHorizon)), deadline)
 	var backed int
 	require.NoError(t, upgraded.db.QueryRow(`SELECT receipt_backed FROM conversation_messages WHERE message_id='legacy-id'`).Scan(&backed))
 	require.Equal(t, 1, backed, "old receipt-backed history must not become receipt-less fallback after pruning")
 	require.NoError(t, upgraded.Close())
-	require.NoError(t, clock.Advance(24*time.Hour))
-	reopened, err := Open(ctx, path, Options{Clock: clock})
+	require.NoError(t, clock.Advance(time.Minute))
+	reopened, err := Open(ctx, path, Options{Clock: clock, Migrations: migrations[:through082]})
 	require.NoError(t, err)
 	defer reopened.Close()
 	receiptMigrationCount(t, reopened, "082_conversation_send_receipt_lifecycle", 1)
@@ -125,7 +127,8 @@ func TestReceiptLegacy082FailureRollsBackSchemaAndBaseline(t *testing.T) {
 	_, err = inspect.db.ExecContext(ctx, `DROP TRIGGER fail_receipt_baseline`)
 	require.NoError(t, err)
 	require.NoError(t, inspect.Close())
-	upgraded, err := Open(ctx, path, Options{Clock: clock})
+	through082 := migrationIndex(t, migrations, "082_conversation_send_receipt_lifecycle") + 1
+	upgraded, err := Open(ctx, path, Options{Clock: clock, Migrations: migrations[:through082]})
 	require.NoError(t, err, "the unmodified 082 should succeed after removing the owned fault")
 	defer upgraded.Close()
 	receiptMigrationCount(t, upgraded, "082_conversation_send_receipt_lifecycle", 1)
@@ -133,5 +136,5 @@ func TestReceiptLegacy082FailureRollsBackSchemaAndBaseline(t *testing.T) {
 	var accepted, deadline string
 	require.NoError(t, upgraded.db.QueryRow(`SELECT accepted_at,deadline_at FROM conversation_send_receipts WHERE message_id='legacy-id'`).Scan(&accepted, &deadline))
 	require.Equal(t, formatTimestamp(clock.Now()), accepted)
-	require.Equal(t, formatTimestamp(clock.Now().Add(30*24*time.Hour)), deadline)
+	require.Equal(t, formatTimestamp(clock.Now().Add(receiptHorizon)), deadline)
 }

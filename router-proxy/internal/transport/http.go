@@ -59,34 +59,33 @@ var recallPolicy = map[string]any{
 }
 
 var errorMessages = map[string]string{
-	"invalid_request":                         "Request does not match the mailbox protocol.",
-	"recipient_rejected":                      "'system' is an automated system notifier and does not accept incoming messages.",
-	"escaped_newlines":                        "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
-	"payload_too_large":                       "Request exceeds local mailbox limits.",
-	"queue_full":                              "Recipient queue is full.",
-	"conversation_receipt_capacity":           "Conversation receipt capacity is exhausted. Eligible expired receipts are pruned in bounded batches; retry after maintenance or resolve outstanding deliveries.",
-	"conversation_receipt_expired_unresolved": "Conversation receipt expired while its original delivery remains unresolved. Resolve the delivery before reusing this ID; reusing an ID after 30 days can duplicate an earlier real-world effect.",
-	"rate_limited":                            "Sender rate limit exceeded.",
-	"reserved_sender":                         "Sender is reserved for native router policy messages.",
-	"idempotency_conflict":                    "Message ID already belongs to a different request.",
-	"dead_letter_required":                    "Message is not a dead letter.",
-	"invalid_reminder":                        "Reminder request is invalid.",
-	"prompt_template_capacity_exceeded":       "Prompt template collection is full.",
-	"prompt_template_name_conflict":           "Prompt template name already exists.",
-	"invalid_prompt_template":                 "Prompt template request is invalid.",
-	"invalid_workflow_state":                  "Workflow state request is invalid.",
-	"workflow_state_name_conflict":            "Workflow state name already exists.",
-	"invalid_workflow":                        "Workflow request is invalid.",
-	"workflow_name_conflict":                  "Workflow name already exists.",
-	"workflow_not_found":                      "Workflow was not found.",
-	"reminder_idempotency_conflict":           "Reminder ID already belongs to a different request.",
-	"reminder_not_cancelable":                 "Reminder is already linked to a delivery.",
-	"reminder_target_unavailable":             "Reminder target has never connected.",
-	"not_found":                               "Resource was not found.",
-	"internal_error":                          "Router could not complete the request.",
-	"tmux_unavailable":                        "The tmux session is unavailable.",
-	"tmux_invalid_name":                       "The tmux session name is invalid.",
-	"tmux_operation_failed":                   "The tmux operation failed.",
+	"invalid_request":                   "Request does not match the mailbox protocol.",
+	"recipient_rejected":                "'system' is an automated system notifier and does not accept incoming messages.",
+	"escaped_newlines":                  "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
+	"payload_too_large":                 "Request exceeds local mailbox limits.",
+	"queue_full":                        "Recipient queue is full.",
+	"conversation_receipt_capacity":     "Conversation receipt capacity is exhausted. Retry after receipts expire; new sends are not saved until accepted.",
+	"rate_limited":                      "Sender rate limit exceeded.",
+	"reserved_sender":                   "Sender is reserved for native router policy messages.",
+	"idempotency_conflict":              "Message ID already belongs to a different request.",
+	"dead_letter_required":              "Message is not a dead letter.",
+	"invalid_reminder":                  "Reminder request is invalid.",
+	"prompt_template_capacity_exceeded": "Prompt template collection is full.",
+	"prompt_template_name_conflict":     "Prompt template name already exists.",
+	"invalid_prompt_template":           "Prompt template request is invalid.",
+	"invalid_workflow_state":            "Workflow state request is invalid.",
+	"workflow_state_name_conflict":      "Workflow state name already exists.",
+	"invalid_workflow":                  "Workflow request is invalid.",
+	"workflow_name_conflict":            "Workflow name already exists.",
+	"workflow_not_found":                "Workflow was not found.",
+	"reminder_idempotency_conflict":     "Reminder ID already belongs to a different request.",
+	"reminder_not_cancelable":           "Reminder is already linked to a delivery.",
+	"reminder_target_unavailable":       "Reminder target has never connected.",
+	"not_found":                         "Resource was not found.",
+	"internal_error":                    "Router could not complete the request.",
+	"tmux_unavailable":                  "The tmux session is unavailable.",
+	"tmux_invalid_name":                 "The tmux session name is invalid.",
+	"tmux_operation_failed":             "The tmux operation failed.",
 }
 
 type httpError struct {
@@ -102,8 +101,6 @@ func httpCode(code string) int {
 		return http.StatusRequestEntityTooLarge
 	case "conversation_receipt_capacity":
 		return http.StatusInsufficientStorage
-	case "conversation_receipt_expired_unresolved":
-		return http.StatusGone
 	case "queue_full", "rate_limited":
 		return http.StatusTooManyRequests
 	case "idempotency_conflict", "dead_letter_required", "reminder_idempotency_conflict", "reminder_not_cancelable", "prompt_template_name_conflict", "prompt_template_capacity_exceeded", "reminder_target_unavailable":
@@ -738,6 +735,10 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	})
 	if err != nil {
 		releaseConversation()
+		var capacity *store.ConversationReceiptCapacityError
+		if errors.As(err, &capacity) {
+			r.emitEvent(RouterErrorEvent("conversation_receipt_capacity", ""))
+		}
 		for _, item := range pending {
 			_ = r.attachments.Discard(item)
 		}
@@ -1623,15 +1624,6 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		value = candidate
 	case *store.IdempotencyConflictError:
 		value = &httpError{409, "idempotency_conflict", 0}
-	case *store.ConversationReceiptExpiredUnresolvedError:
-		value = &httpError{status: http.StatusGone, code: candidate.Code()}
-		details = map[string]any{
-			"message_id":             candidate.MessageID,
-			"accepted_at":            candidate.AcceptedAt,
-			"deadline_at":            candidate.DeadlineAt,
-			"delivery_state":         candidate.DeliveryState,
-			"message_incarnation_id": candidate.IncarnationID,
-		}
 	case *store.QueueLimitError:
 		value = &httpError{429, "queue_full", 0}
 	case *store.ReminderValidationError:

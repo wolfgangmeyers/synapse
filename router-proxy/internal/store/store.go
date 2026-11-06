@@ -264,6 +264,10 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id='082_conversation_send_receipt_lifecycle')`).Scan(&store.receiptLifecycle); err != nil {
 		return closeOnError(err)
 	}
+	// Do not serve traffic with an overdue backlog after a restart or upgrade.
+	if _, err := store.PruneExpiredConversationReceipts(ctx); err != nil {
+		return closeOnError(fmt.Errorf("startup conversation receipt cleanup: %w", err))
+	}
 	if present, err := store.managedSubagentSchemaPresent(ctx); err != nil {
 		return closeOnError(err)
 	} else if present {

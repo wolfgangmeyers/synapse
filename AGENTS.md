@@ -12,7 +12,7 @@ Any behavioral change, feature implementation, or bugfix in `mecha-developer` mu
 - **Retire Redundant Brittle Tests**: Integration tests that merely mock internal JavaScript functions or duplicate E2E test coverage without testing real end-to-end boundaries should be eliminated.
 - **Specification Index**: The complete catalog of active behavioral specifications is maintained in `docs/specs/INDEX.md`.
 
-Direct specifications: [memory capture](docs/specs/memory-capture.spec.md), [router native tooling](docs/specs/router-native-tooling.spec.md), [desktop package payload](docs/specs/desktop-package-payload.spec.md), and [managed runtime contracts](docs/specs/managed-runtime-contracts.spec.md) (Draft; acceptance incomplete). Each specification retains its own status. See the [retirement crosswalk](docs/retirement-crosswalk.md) and [CLI archive record](docs/cli-archive-migration.md) for archival disposition.
+Direct specifications: [memory capture](docs/specs/memory-capture.spec.md), [router native tooling](docs/specs/router-native-tooling.spec.md), [conversation send receipt retention](docs/specs/conversation-send-receipt-retention.spec.md), [desktop package payload](docs/specs/desktop-package-payload.spec.md), and [managed runtime contracts](docs/specs/managed-runtime-contracts.spec.md) (Draft; acceptance incomplete). Each specification retains its own status. See the [retirement crosswalk](docs/retirement-crosswalk.md) and [CLI archive record](docs/cli-archive-migration.md) for archival disposition.
 
 ## How skills work
 

@@ -35,7 +35,7 @@ func TestConversationReceiptSurvivesACKSweepAndColdReopen(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.AcknowledgeDelivery(ctx, receipt)
 	require.NoError(t, err)
-	require.NoError(t, clock.Advance(30*24*time.Hour-time.Millisecond))
+	require.NoError(t, clock.Advance(30*time.Minute-time.Millisecond))
 	replayed, err := s.Enqueue(ctx, original, options)
 	require.NoError(t, err)
 	require.False(t, replayed.Created)
@@ -47,7 +47,7 @@ func TestConversationReceiptSurvivesACKSweepAndColdReopen(t *testing.T) {
 	_, err = s.Enqueue(ctx, changed, changedOptions)
 	require.ErrorAs(t, err, new(*IdempotencyConflictError))
 
-	require.NoError(t, clock.Advance(24*time.Hour+time.Millisecond))
+	require.NoError(t, clock.Advance(31*24*time.Hour+time.Millisecond))
 	swept, err := s.SweepLifecycle(ctx, DefaultRetentionPolicy)
 	require.NoError(t, err)
 	require.Equal(t, 1, swept.ConversationMessages)
@@ -67,7 +67,7 @@ func TestConversationReceiptSurvivesACKSweepAndColdReopen(t *testing.T) {
 	}
 	fresh, err := s.Enqueue(ctx, changed, changedOptions)
 	require.NoError(t, err)
-	require.True(t, fresh.Created, "resolved receipt can admit a new effect after its 30-day deadline")
+	require.True(t, fresh.Created, "resolved receipt can admit a new effect after its 30-minute deadline")
 	require.True(t, fresh.ConversationCreated)
 	require.NotEqual(t, first.Message.MessageIncarnationID, fresh.Message.MessageIncarnationID)
 	replayed, err = s.Enqueue(ctx, changed, changedOptions)

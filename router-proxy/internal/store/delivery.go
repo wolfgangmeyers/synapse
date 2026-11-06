@@ -167,6 +167,18 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 	if err != nil {
 		return EnqueueResult{}, err
 	}
+	// Commit expiry cleanup separately: a capacity, rate, or later admission
+	// failure must not roll it back and leave the ledger permanently full.
+	if conversation != nil {
+		if _, err := s.PruneExpiredConversationReceipts(ctx); err != nil {
+			if producer != nil {
+				// No mail transaction started, so this witness conclusively
+				// failed and must not be reused for another admission.
+				producer.recordDomainDisposition(false, true, err)
+			}
+			return EnqueueResult{}, err
+		}
+	}
 	var result EnqueueResult
 	var settleAdmission func(bool)
 	committed, conclusive, transactionErr := s.runImmediateWithCommitOutcome(ctx, func() error {
@@ -177,18 +189,13 @@ func (s *Store) enqueue(ctx context.Context, envelope protocol.Envelope, option 
 		}
 		admittedAt := s.clock.Now().UTC().Truncate(time.Millisecond)
 		now := formatTimestamp(admittedAt)
-		receipt, accepted, acceptedAt, deadlineAt, err := s.conversationReceipt(ctx, candidate.ID)
+		receipt, accepted, _, deadlineAt, err := s.conversationReceipt(ctx, candidate.ID)
 		if err != nil {
 			return err
 		}
 		if receipt != nil && s.receiptLifecycle && now >= deadlineAt {
-			resolved, state, reason, err := s.receiptResolution(ctx, candidate.ID, accepted.MessageIncarnationID)
-			if err != nil {
-				return err
-			}
-			if !resolved {
-				return &ConversationReceiptExpiredUnresolvedError{MessageID: candidate.ID, AcceptedAt: acceptedAt, DeadlineAt: deadlineAt, DeliveryState: state, Reason: reason, IncarnationID: accepted.MessageIncarnationID}
-			}
+			// A deadline may pass between the independent cleanup and this
+			// transaction. The expired record must not replay or pin the ID.
 			if _, err := s.pruneConversationReceiptsFor(ctx, now, candidate.ID); err != nil {
 				return err
 			}
