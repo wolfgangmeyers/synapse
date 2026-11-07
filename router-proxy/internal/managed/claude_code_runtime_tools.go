@@ -18,19 +18,20 @@ import (
 // producer rendezvous waits outside serial so HTTP can never block its producer.
 // State is bounded by the process event/input limits and explicitly capped here.
 type claudeCodeTurnBridge struct {
-	serial    sync.Mutex
-	mu        sync.Mutex
-	changed   chan struct{}
-	closed    bool
-	admitted  bool
-	authority *embeddedTurnToolAuthority
-	calls     map[string]*claudeCodeCheckedCall
-	bytes     int
-	interrupt func()
-	owner     *embeddedOwner
-	fatal     func(error)
-	failure   error
-	terminal  bool // protected by serial; checked terminating result is durable
+	serial      sync.Mutex
+	mu          sync.Mutex
+	changed     chan struct{}
+	closed      bool
+	admitted    bool
+	authority   *embeddedTurnToolAuthority
+	inlineCheck func(context.Context, string) error
+	calls       map[string]*claudeCodeCheckedCall
+	bytes       int
+	interrupt   func()
+	owner       *embeddedOwner
+	fatal       func(error)
+	failure     error
+	terminal    bool // protected by serial; checked terminating result is durable
 }
 type claudeCodeCheckedCall struct {
 	call     ai.ToolCall
@@ -148,6 +149,17 @@ func (b *claudeCodeTurnBridge) execute(ctx context.Context, request ClaudeCodeMC
 	call.Arguments = nil
 	if err := json.Unmarshal(item.original, &call.Arguments); err != nil {
 		return nil, err
+	}
+	if b.inlineCheck != nil {
+		if err := b.inlineCheck(ctx, call.Name); err != nil {
+			message := ai.ToolResultMessage{ToolCallID: call.ID, ToolName: call.Name, Timestamp: time.Now().UnixMilli(), IsError: true, Content: ai.ContentList{ai.TextContent{Text: err.Error()}}}
+			if appendErr := b.authority.AppendCheckedMessage(ctx, message); appendErr != nil {
+				b.fail(appendErr)
+				return nil, appendErr
+			}
+			item.result = &message
+			return claudeCodeMCPResult(message)
+		}
 	}
 	if err := b.authority.BeforeToolExecute(ctx, agent.BeforeToolCallContext{ToolCall: call}); err != nil {
 		var denial *agent.PolicyDenial
@@ -276,7 +288,9 @@ func claudeCodeForegroundOnly(name string) bool {
 	return name == "context_reset" || name == "goal_snooze" || name == "mecha_worker_terminate"
 }
 func (g *claudeCodeGrantBinding) execute(ctx context.Context, request ClaudeCodeMCPCall) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// This deadline only bounds waiting for attachment, not tool execution or
+	// checked result persistence. Both retain the caller/grant lifetime.
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {
 		g.mu.Lock()
@@ -296,7 +310,7 @@ func (g *claudeCodeGrantBinding) execute(ctx context.Context, request ClaudeCode
 			return nil, errors.New("tool requires foreground turn")
 		}
 		select {
-		case <-ctx.Done():
+		case <-waitCtx.Done():
 			return nil, errors.New("no admitted turn")
 		case <-changed:
 		}

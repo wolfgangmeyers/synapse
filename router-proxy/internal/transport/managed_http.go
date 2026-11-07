@@ -238,10 +238,6 @@ func (r *Router) handleDefaultModelPUT(w http.ResponseWriter, req *http.Request)
 	}
 	var selected *managed.Model
 	if !clearing {
-		if provider == "claude-code" {
-			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_ENGINE_SELECTION", "Router default must remain a Pi model"})
-			return
-		}
 		for _, candidate := range catalog.Models {
 			if candidate.Provider == provider && candidate.ID == id && candidate.Available {
 				candidateCopy := candidate

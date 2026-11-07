@@ -186,7 +186,10 @@ func TestClaudeManagerClaimedWakeUnconfirmedCleanup(t *testing.T) {
 	require.Equal(t, "claimed", wake.State)
 	// The fixture manager's shutdown reports this deliberately injected failure.
 	pool.mu.Lock()
+	fenceErr := pool.startErr
 	pool.entries = nil
 	pool.closed = false
+	pool.startErr = nil
 	pool.mu.Unlock()
+	require.ErrorIs(t, fenceErr, errClaudeCodeGroupUnconfirmed)
 }

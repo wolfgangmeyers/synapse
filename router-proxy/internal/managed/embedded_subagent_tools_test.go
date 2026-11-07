@@ -618,3 +618,15 @@ func TestEmbeddedSubagentBashStdoutOverflowTerminatesDescendants(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, text.Text, fmt.Sprintf("Output truncated at %d bytes", embeddedSubagentBashLimit))
 }
+
+func TestEmbeddedSubagentBashPreservesBackgroundProcessBehavior(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewEmbeddedSubagentBashTool(dir)
+	t.Cleanup(func() { _ = os.WriteFile(filepath.Join(dir, "release"), []byte("go"), 0600) })
+	// The background job waits for a signal from the test, so it cannot finish
+	// before the tool returns. Redirect its descriptors so bash can be reaped.
+	_, err := tool.Execute(context.Background(), "pi-background", map[string]any{"command": `(while [ ! -f release ]; do sleep 0.02; done; echo done > finished) >/dev/null 2>&1 &`}, nil)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "release"), []byte("go"), 0600))
+	require.Eventually(t, func() bool { _, err := os.Stat(filepath.Join(dir, "finished")); return err == nil }, 3*time.Second, 10*time.Millisecond)
+}

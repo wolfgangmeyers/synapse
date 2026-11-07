@@ -550,6 +550,16 @@ func embeddedSubagentBashSchema() *ai.Schema {
 
 // NewEmbeddedSubagentBashTool builds an unconfined bash tool rooted at cwd.
 func NewEmbeddedSubagentBashTool(cwd string) agent.AgentTool {
+	return embeddedSubagentBashTool(cwd, executeSubagentBash)
+}
+
+func newEmbeddedSubagentBashTool(cwd, orphanRoot string) agent.AgentTool {
+	return embeddedSubagentBashTool(cwd, func(ctx context.Context, cwd, command string, timeout time.Duration) (agent.AgentToolResult, error) {
+		return executeSubagentBashOwned(ctx, cwd, command, timeout, orphanRoot)
+	})
+}
+
+func embeddedSubagentBashTool(cwd string, execute func(context.Context, string, string, time.Duration) (agent.AgentToolResult, error)) agent.AgentTool {
 	return agent.AgentTool{
 		Name:        "bash",
 		Description: "Run a bash command in the current working directory.",
@@ -587,7 +597,7 @@ func NewEmbeddedSubagentBashTool(cwd string) agent.AgentTool {
 				return agent.AgentToolResult{}, fmt.Errorf("workspace directory inaccessible: %w", err)
 			}
 
-			return executeSubagentBash(ctx, canonicalCwd, command, timeout)
+			return execute(ctx, canonicalCwd, command, timeout)
 		},
 	}
 }
@@ -646,6 +656,127 @@ func executeSubagentBash(ctx context.Context, cwd, command string, timeout time.
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
+		}
+		if ctx.Err() != nil {
+			return agent.AgentToolResult{}, ctx.Err()
+		}
+		return agent.AgentToolResult{}, errors.New("bash command timed out")
+	}
+}
+
+func executeSubagentBashOwned(ctx context.Context, cwd, command string, timeout time.Duration, orphanRoot string) (agent.AgentToolResult, error) {
+	return executeSubagentBashWithWait(ctx, cwd, command, timeout, orphanRoot, waitClaudeCodeCommandConfirmed)
+}
+
+func executeSubagentBashWithWait(ctx context.Context, cwd, command string, timeout time.Duration, orphanRoot string, wait func(*exec.Cmd, ProcessIdentity, func()) error) (agent.AgentToolResult, error) {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd, gate, err := claudeCodeGatedCommand("bash", []string{"-c", command})
+	if err != nil {
+		return agent.AgentToolResult{}, err
+	}
+	defer gate.Close()
+	defer cmd.ExtraFiles[0].Close()
+	cmd.Dir = cwd
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	out := &limitedBashWriter{limit: embeddedSubagentBashLimit, overflow: make(chan struct{})}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	cmd.WaitDelay = time.Second
+
+	if err := cmd.Start(); err != nil {
+		return agent.AgentToolResult{}, fmt.Errorf("failed to spawn bash: %w", err)
+	}
+
+	_ = cmd.ExtraFiles[0].Close()
+	marker, markerErr := processStartMarker(cmd.Process.Pid)
+	if markerErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w: %v", errClaudeCodeGroupUnconfirmed, markerErr)
+	}
+	identity := ProcessIdentity{PID: cmd.Process.Pid, StartMarker: marker, Incarnation: claudeCodeNewInputID()}
+	orphanPath := ""
+	if orphanRoot != "" {
+		orphanPath, err = persistClaudeCodeOrphan(orphanRoot, identity.PID, identity.Incarnation)
+		if err != nil {
+			_ = cmd.Process.Kill()
+			if waitErr := waitClaudeCodeCommand(cmd, identity); errors.Is(waitErr, errClaudeCodeGroupUnconfirmed) {
+				return agent.AgentToolResult{}, fmt.Errorf("bash launch failed: %w", errors.Join(err, waitErr))
+			}
+			return agent.AgentToolResult{}, fmt.Errorf("bash launch failed: %w", err)
+		}
+	}
+	var cleanupErr error
+	forget := func() {
+		if orphanPath != "" {
+			cleanupErr = removeClaudeCodeOrphan(orphanPath, identity)
+		}
+	}
+	if _, err := gate.Write([]byte("ready\n")); err != nil {
+		_ = cmd.Process.Kill()
+		_ = waitClaudeCodeCommandConfirmed(cmd, identity, forget)
+		return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w", errClaudeCodeGroupUnconfirmed)
+	}
+	_ = gate.Close()
+	done := make(chan error, 1)
+	go func() {
+		waitErr := wait(cmd, identity, forget)
+		if cleanupErr != nil {
+			waitErr = errors.Join(errClaudeCodeGroupUnconfirmed, waitErr, cleanupErr)
+		}
+		done <- waitErr
+	}()
+
+	select {
+	case err := <-done:
+		if errors.Is(err, errClaudeCodeGroupUnconfirmed) {
+			return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w", err)
+		}
+		exit := 0
+		if err != nil {
+			var e *exec.ExitError
+			if errors.As(err, &e) {
+				exit = e.ExitCode()
+			} else {
+				return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w: %v", errClaudeCodeGroupUnconfirmed, err)
+			}
+		}
+		resultText := out.text()
+		if out.truncated() {
+			resultText = fmt.Sprintf("%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", resultText, out.limit)
+		}
+		result := fmt.Sprintf("exit=%d\n%s", exit, resultText)
+		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: result}}}, nil
+
+	case <-out.overflow:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case err := <-done:
+			var exitErr *exec.ExitError
+			if err != nil && (!errors.As(err, &exitErr) || errors.Is(err, errClaudeCodeGroupUnconfirmed)) {
+				return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w: %v", errClaudeCodeGroupUnconfirmed, err)
+			}
+		case <-time.After(2 * time.Second):
+			return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w", errClaudeCodeGroupUnconfirmed)
+		}
+		resultText := out.text()
+		result := fmt.Sprintf("exit=0\n%s\n[Output truncated at %d bytes. Narrow your command if full output is needed.]", resultText, out.limit)
+		return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: result}}}, nil
+
+	case <-runCtx.Done():
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case err := <-done:
+			var exitErr *exec.ExitError
+			if err != nil && (!errors.As(err, &exitErr) || errors.Is(err, errClaudeCodeGroupUnconfirmed)) {
+				return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w: %v", errClaudeCodeGroupUnconfirmed, err)
+			}
+		case <-time.After(2 * time.Second):
+			return agent.AgentToolResult{}, fmt.Errorf("bash outcome unknown: %w", errClaudeCodeGroupUnconfirmed)
 		}
 		if ctx.Err() != nil {
 			return agent.AgentToolResult{}, ctx.Err()

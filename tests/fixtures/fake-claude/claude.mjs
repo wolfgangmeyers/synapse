@@ -53,7 +53,9 @@ try {
   }
   const envKeys = ['TMUX', 'TMUX_PANE', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT',
     'FAKE_CLAUDE_SCRIPT', 'FAKE_CLAUDE_RECORD', 'FAKE_CLAUDE_RECORD_LIMIT'];
-  record({ kind: 'start', argv: args, cwd: process.cwd(), env: Object.fromEntries(
+  const promptIndex = args.indexOf('--append-system-prompt-file');
+  const systemPrompt = promptIndex >= 0 ? readFileSync(args[promptIndex + 1], 'utf8') : null;
+  record({ kind: 'start', argv: args, systemPrompt, cwd: process.cwd(), env: Object.fromEntries(
     envKeys.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])) });
 
   let config = {};
@@ -62,7 +64,7 @@ try {
     config = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, 'utf8'));
   }
   if (!config || Array.isArray(config) || typeof config !== 'object') throw Error('script must be object');
-  const allowed = ['auth', 'startup', 'turns', 'resume_missing', 'refuse_model', 'capabilities', 'continue_after_mcp_error', 'turns_by_input', 'executions_by_input', 'ignore_sighup', 'replay_control', 'replay_role', 'contextWindow', 'resultModel', 'interrupt_output'];
+  const allowed = ['auth', 'startup', 'turns', 'resume_missing', 'refuse_model', 'capabilities', 'continue_after_mcp_error', 'turns_by_input', 'executions_by_input', 'ignore_sighup', 'replay_control', 'replay_role', 'contextWindow', 'resultModel', 'interrupt_output', 'skip_mcp_result'];
   for (const key of Object.keys(config)) if (!allowed.includes(key)) throw Error(`unknown script key: ${key}`);
   if (config.replay_control !== undefined && !['skip', 'hold'].includes(config.replay_control)) throw Error('invalid replay_control');
   if (config.interrupt_output !== undefined && (!Array.isArray(config.interrupt_output) || config.interrupt_output.length !== 2 || config.interrupt_output.some(x => typeof x !== 'string' || !x || x.length > 1024))) throw Error('interrupt_output requires two bounded strings');
@@ -92,7 +94,9 @@ try {
         if (!value || typeof value !== 'object' || typeof value.type !== 'string') throw Error('emit needs event type');
       } else if (key === 'tool') {
         if (!value || typeof value.id !== 'string' || typeof value.name !== 'string') throw Error('tool needs id/name');
-      } else if (key === 'mcp_call') {
+      } else if (key === 'mcp_join') {
+        if (value !== true) throw Error('mcp_join must be true');
+      } else if (key === 'mcp_call' || key === 'mcp_start') {
         if (!value || typeof value.id !== 'string' || !value.id || typeof value.name !== 'string' ||
           !/^[a-zA-Z0-9_-]+$/.test(value.name) || ('input' in value &&
           (!value.input || Array.isArray(value.input) || typeof value.input !== 'object')) ||
@@ -136,9 +140,9 @@ try {
     }
   } else {
     const options = {};
-    const booleans = ['-p', '--verbose', '--replay-user-messages'];
+    const booleans = ['-p', '--verbose', '--replay-user-messages', '--strict-mcp-config'];
     const values = ['--input-format', '--output-format', '--model', '--permission-mode',
-      '--session-id', '--resume', '--mcp-config', '--append-system-prompt-file'];
+      '--session-id', '--resume', '--mcp-config', '--append-system-prompt-file', '--tools', '--setting-sources'];
     for (let i = 0; i < args.length; i++) {
       if (booleans.includes(args[i])) options[args[i]] = true;
       else if (values.includes(args[i]) && typeof args[i + 1] === 'string') options[args[i]] = args[++i];
@@ -197,13 +201,16 @@ try {
           res.on('end', () => {
             try {
               const rpc = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              if (method === 'tools/call' && rpc.jsonrpc === '2.0' && rpc.id === rpcId) {
+                record({ kind: 'mcp_call_response', name: params.name, tool_id: params._meta?.['claudecode/toolUseId'], error: rpc.error ?? null, result: rpc.result ?? null });
+              }
               if (rpc.jsonrpc !== '2.0' || rpc.id !== rpcId || rpc.error || !rpc.result) throw Error('invalid/error JSON-RPC response');
               resolve(rpc.result);
             } catch { reject(Error('MCP invalid/error JSON-RPC response')); }
           });
         });
         state.abort = () => req.destroy(Error('interrupted'));
-        timer = setTimeout(() => req.destroy(Error('deadline exceeded')), 5000);
+        timer = setTimeout(() => req.destroy(Error('deadline exceeded')), method === 'tools/call' ? 40000 : 5000);
         req.on('error', () => reject(Error('MCP HTTP request failed')));
         req.on('close', () => clearTimeout(timer));
         req.end(body);
@@ -293,6 +300,7 @@ try {
       };
       if (config.replay_control === 'hold') barrier('replay', next.value.uuid, proceed); else proceed();
     }
+    let backgroundMcp;
     function runSteps(state) {
       while (!ending && state.index < state.steps.length) {
         const step = state.steps[state.index++];
@@ -302,6 +310,18 @@ try {
         }
         else if ('thinking' in step) assistant([{ type: 'thinking', thinking: step.thinking, signature: 'fake' }]);
         else if ('emit' in step) emit(step.emit);
+        else if ('mcp_start' in step) {
+          if (backgroundMcp) throw Error('only one background MCP call permitted');
+          const tool = step.mcp_start;
+          assistant([{ type: 'tool_use', id: tool.id, name: `mcp__mecha__${tool.name}`, input: tool.input ?? {} }]);
+          backgroundMcp = new Promise(resolve => process.stdout.write('', resolve))
+            .then(() => callMcp(mcpConfig(), tool, {}));
+          backgroundMcp.catch(() => {});
+        } else if ('mcp_join' in step) {
+          blocked = true;
+          backgroundMcp.then(() => { backgroundMcp = undefined; blocked = false; runSteps(state); }).catch(error => fail(error.message));
+          return;
+        }
         else if ('barrier' in step) { barrier(step.barrier, state.inputID, () => runSteps(state)); return; }
         else if ('raw' in step) process.stdout.write((typeof step.raw === 'string'
           ? step.raw : step.raw.text.repeat(step.raw.repeat)) + '\n');
@@ -324,7 +344,7 @@ try {
               work = new Promise(resolve => process.stdout.write('', resolve))
                 .then(() => ending || state.cancelled ? null : callMcp(server, tool, state))
                 .then(response => {
-                  if (ending || state.cancelled) return;
+                  if (ending || state.cancelled || config.skip_mcp_result) return;
                   emit({ type: 'user', session_id: session, uuid: id(), parent_tool_use_id: null,
                     message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool.id,
                       content: response.content, is_error: response.isError ?? false }] } });

@@ -6,7 +6,7 @@ import { model } from "./workflow-implicit-goals-harness";
 // Only the configured openai-codex default is used: the tagged launcher forces
 // its HTTP transport to literal loopback and rejects other destinations.
 // Never select Google here: the seeded key is NOT a mocked Google transport.
-// Gaps: persisted Claude default (correctly rejected by REST), zero-window and
+// Gaps in this suite: persisted Claude default, zero-window and
 // unconstructible stream require a test-launcher resolver seam; they are not
 // simulated by editing production rows or relabeling an unknown model.
 // Unauthenticated defaults remain supporting Go coverage, not claimed here.
@@ -68,7 +68,9 @@ test.describe("Claude configured Pi evaluator only", () => {
     await f.idle(agent);
     expect(await f.inputs()).toHaveLength(1);
     expect(f.requests).toEqual([]);
-    expect(f.tableRows("embedded_goal_evaluations", agent)).toEqual([]);
+    // The checked final is claimed before evaluator resolution; unavailable
+    // leaves the claim UNKNOWN, not a verdict or permission to retry it.
+    expect(f.tableRows("embedded_goal_evaluations", agent).map(row => row.state)).toEqual(["UNKNOWN"]);
     expect(f.tableRows("embedded_goal_applied_receipts", agent)).toHaveLength(1);
     expect(f.tableRows("embedded_acks", agent)).toHaveLength(0); // goal wake is not mailbox consumption
     noContinuation(f, agent);

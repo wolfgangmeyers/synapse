@@ -338,11 +338,14 @@ test.describe("Claude workers deterministic CLI acceptance", () => {
     expect((await f.mcp(grant, "mecha_context", { action: "status" }, "stale-grant")).status).not.toBe(200);
   });
 
-  test("CC-010 partitions models and rejects default and cross-engine mutation", async ({ page }) => {
+  test("CC-010 partitions models, accepts Claude default and rejects cross-engine mutation", async ({ page }) => {
     f = await claudeWorkersHarness({ turns_by_input: [{ contains: "First turn", steps: [text("Before model change")] }, { contains: "Use the newly selected model", steps: [text("After model change")] }] });
     await f.open(page); agent = await f.launch(page); await f.userTurn(page, "First turn"); await f.final(page, agent, "Before model change");
-    const denied = await f.request(page, "/v1/settings/default-model", { model: { provider: "claude-code", id: "sonnet" } }, "PUT");
-    expect(denied.status).toBe(422);
+    const saved = await f.request(page, "/v1/settings/default-model", { model: { provider: "claude-code", id: "sonnet" } }, "PUT");
+    expect(saved.status).toBe(200);
+    expect((await f.api("/v1/models")).default_model).toMatchObject({ provider: "claude-code", id: "sonnet" });
+    // This test exercises model switching, not the Claude goal evaluator.
+    expect((await f.request(page, "/v1/settings/default-model", { model: null }, "PUT")).status).toBe(200);
     const cross = await f.request(page, `/v1/managed-agents/${agent}/restart`, { model: { provider: "openai-codex", id: "gpt-6.1-terra" } });
     expect(cross.status).toBe(422);
     // The selected model applies to the next execution.
@@ -361,7 +364,7 @@ test.describe("Claude workers deterministic CLI acceptance", () => {
     expect(starts[1].argv).toEqual(expect.arrayContaining(["--model", "haiku"]));
     expect(f.rows("SELECT CAST(body AS TEXT) AS body FROM embedded_entries WHERE agent_id=? AND kind='assistant'", agent)
       .some(row => String(row.body).includes("Before model change"))).toBe(true);
-    expect((await f.api("/v1/models")).default_model.provider).not.toBe("claude-code");
+    expect((await f.api("/v1/models")).default_model).toBeNull();
     await page.getByRole("button", { name: /claude-code\/haiku/ }).click();
     await picker.getByRole("searchbox", { name: "Search available models" }).fill("openai-codex/gpt-6.1-terra");
     await expect(picker.getByRole("listbox")).toHaveAttribute("aria-busy", "false");

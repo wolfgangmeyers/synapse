@@ -1257,7 +1257,9 @@ func TestSubagentRunnerImmediateSameIDTerminalResume(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, childID, res2.AgentID)
-	require.Equal(t, "running", res2.Status)
+	// The terminal attempt may still own its slot during cleanup; queued is
+	// valid only if the eventual completion assertion below also succeeds.
+	require.Contains(t, []string{"queued", "running"}, res2.Status)
 
 	require.Eventually(t, func() bool {
 		rec, err := db.ManagedSubagent(ctx, parent, childID)
@@ -2210,4 +2212,67 @@ func TestSubagentTurnLimitCheckRespectsMaxTurnsRegardlessOfTools(t *testing.T) {
 	task.mu.Unlock()
 
 	require.True(t, maxTurns > 0 && currentTurns >= maxTurns+5)
+}
+
+func TestStopResumedQueuedSubagentWithPriorActiveCleanup(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "stop-resume.db"), store.Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	parent := subagentTestParent(t, db, "parent-stop-resume")
+	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
+	defer reg.Unregister()
+	mgr := makeSubagentTestManager(t, db, reg, 1)
+	defer mgr.Close(ctx)
+	registerParentOwner(mgr, parent)
+	childID := "subagent-parent-stop-resume-1"
+	// Model an execution whose Claude resource cleanup has not returned yet.
+	old := &subagentTask{parent: parent, childID: childID, attempt: 1, status: "running", claude: true}
+	mgr.subagentsMu.Lock()
+	mgr.subagentsActive[childID] = old
+	mgr.subagentsRegistry[childID] = old
+	mgr.subagentsMu.Unlock()
+	// Create the persistent first attempt without starting it behind the active slot.
+	res, err := mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{AgentID: childID, Description: "stop resume", Prompt: "first"})
+	require.NoError(t, err)
+	require.Equal(t, "queued", res.Status)
+	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, childID))
+	res, err = mgr.SpawnSubagent(ctx, parent, SubagentSpawnRequest{Resume: childID, Prompt: "resume"})
+	require.NoError(t, err)
+	require.Equal(t, "queued", res.Status)
+	mgr.subagentsMu.Lock()
+	queued := mgr.subagentsRegistry[childID]
+	mgr.subagentsMu.Unlock()
+	require.NotNil(t, queued)
+	require.NotSame(t, old, queued)
+	queuedCtx, cancelQueued := context.WithCancel(ctx)
+	defer cancelQueued()
+	queued.mu.Lock()
+	queued.cancel = cancelQueued
+	queued.mu.Unlock()
+	require.NoError(t, mgr.StopSubagent(ctx, parent.AgentID, childID))
+	require.ErrorIs(t, queuedCtx.Err(), context.Canceled)
+	mgr.subagentsMu.Lock()
+	active := mgr.subagentsActive[childID]
+	registered := mgr.subagentsRegistry[childID]
+	queueLen := len(mgr.subagentsQueue)
+	mgr.subagentsMu.Unlock()
+	require.Same(t, old, active, "old Claude cleanup must retain its active slot")
+	require.Nil(t, registered, "stopped resumed attempt must leave registry")
+	require.Zero(t, queueLen)
+	queued.mu.Lock()
+	stopped, status := queued.stopped, queued.status
+	queued.mu.Unlock()
+	require.True(t, stopped)
+	require.Equal(t, "stopped", status)
+	rec, err := db.ManagedSubagent(ctx, parent, childID)
+	require.NoError(t, err)
+	require.Equal(t, "stopped", rec.Status)
+	mgr.releaseSubagentSlot(old)
+	mgr.subagentsMu.Lock()
+	_, activeAfterCleanup := mgr.subagentsActive[childID]
+	_, registeredAfterCleanup := mgr.subagentsRegistry[childID]
+	mgr.subagentsMu.Unlock()
+	require.False(t, activeAfterCleanup)
+	require.False(t, registeredAfterCleanup)
 }

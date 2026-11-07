@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { startIsolatedRouter, startRouterProxy, serveFrontendDist, type IsolatedRouter, type IsolatedProxy, type IsolatedFrontend } from "./harness";
 
-export type Reply = { tool: string; args: object } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void> } | { failure: 503; evaluation: true; barrier?: Promise<void> } | { hold: true };
+export type Reply = { tool: string; args: object } | { answer: string; evaluation?: true; advanceMS?: number; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { failure: 503; evaluation: true; barrier?: Promise<void>; onRelease?: (destroyed: boolean) => void } | { hold: true };
 export const model = { provider: "openai-codex", id: "gpt-6.1-terra" };
 
 // ResolveModel bypasses the worker resolver for Claude evaluations. Only this
@@ -42,13 +42,22 @@ export type WorkflowHarnessOptions = {
   // Keep the evaluator on the loopback-only Codex transport, or deliberately
   // clear the configured default. Never select seeded Google credentials.
   defaultModel?: typeof model | null;
+  omitGoogle?: boolean;
+  // Expected model for requests to the local Codex mock; defaults to Terra.
+  expectedCodexModel?: string;
+  expectedCodexModels?: string[];
   kbDir?: (home: string) => string;
+  capacityFixture?: boolean;
+  mcpQueueFixture?: boolean;
   backgroundExpiryInterval?: string;
+  piReviewBarrier?: boolean;
+  initialReplies?: Reply[];
+  embeddedRoot?: { name: string; requestId: string; model: { provider: string; id: string }; instruction: string };
 };
 export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   const requests: Record<string, unknown>[] = [];
   const violations: string[] = [];
-  const replies: Reply[] = [];
+  const replies: Reply[] = [...(options.initialReplies ?? [])];
   const wsFrames: string[] = [];
   const held: ServerResponse[] = [];
   let fixture: { advance(ms: number): Promise<unknown> } | undefined;
@@ -73,13 +82,14 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
         violations.push(`unexpected ${isEvaluation ? "evaluator" : "worker"} request ${requests.length}: ${JSON.stringify({ instructions: parsed.instructions, input: parsed.input })}`);
         res.writeHead(400).end(); return;
       }
-      if (!reply || parsed.model !== model.id) {
+      if (!reply || parsed.model !== (options.expectedCodexModels?.[requests.length - 1] ?? options.expectedCodexModel ?? model.id)) {
         violations.push(`unexpected provider request ${requests.length}: ${parsed.model}`); res.writeHead(400).end(); return;
       }
       if ("hold" in reply) { held.push(res); return; }
       if (("answer" in reply || "failure" in reply) && reply.barrier) {
         held.push(res);
         await reply.barrier;
+        reply.onRelease?.(res.destroyed);
         if (res.destroyed) return;
       }
       if ("failure" in reply) {
@@ -179,13 +189,14 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
   };
   try {
     const repoRoot = resolve(import.meta.dirname, "../..");
-    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, fakeEmbeddedCatalog: true, backgroundExpiryInterval: options.backgroundExpiryInterval, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir } });
+    router = await startIsolatedRouter({ repoRoot, managed: true, testClock: true, capacityFixture: options.capacityFixture, mcpQueueFixture: options.mcpQueueFixture, piReviewBarrier: options.piReviewBarrier, fakeEmbeddedCatalog: true, backgroundExpiryInterval: options.backgroundExpiryInterval, embeddedRoot: options.embeddedRoot, embedded: { endpoint: `http://127.0.0.1:${address.port}`, kbDir: options.kbDir, omitGoogle: options.omitGoogle } });
     proxy = await startRouterProxy({ repoRoot, upstreamPort: router.port });
     await expect.poll(async () => {
       try { return (await fetch(proxy!.url + "/v1/health")).status; } catch { return 0; }
     }, { timeout: 5000 }).toBe(200);
     frontend = await serveFrontendDist(process.env.MECHA_E2E_FRONTEND_DIST || join(repoRoot, "web/router-ui-react/dist"));
     const f = { router, proxy, frontend, requests, violations, replies, wsFrames, close,
+      providerUrl: `http://127.0.0.1:${address.port}/codex/responses`,
       releaseHeld() { for (const res of held.splice(0)) res.destroy(); },
       async restart() {
         // Keep the provider server, request history and queued replies alive.
@@ -211,9 +222,9 @@ export async function workflowHarness(options: WorkflowHarnessOptions = {}) {
         expect(res.ok, `${method} ${path}: ${res.status} ${text}`).toBeTruthy();
         return text ? JSON.parse(text) : null;
       },
-      rows(sql: string, agent: string) {
+      rows(sql: string, ...params: string[]) {
         const db = new DatabaseSync(router!.databasePath, { readOnly: true });
-        try { return db.prepare(sql).all(agent); } finally { db.close(); }
+        try { return db.prepare(sql).all(...params); } finally { db.close(); }
       },
       async open(page: Page) {
         page.setDefaultTimeout(8000);

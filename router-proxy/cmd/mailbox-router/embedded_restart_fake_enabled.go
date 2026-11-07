@@ -48,7 +48,7 @@ func configureEmbeddedRestartFake(options config, out *managed.ManagerOptions) e
 	wireClaudeSerialBarrier(options.database)
 	wireClaudeRestartBarrier(options.database)
 	out.EmbeddedModelResolver = func(row store.ManagedAgentRecord) *ai.Model {
-		if row.SelectedModel.Provider != "openai-codex" || (row.SelectedModel.ID != "gpt-6-sol" && row.SelectedModel.ID != "gpt-6.1-terra") {
+		if row.SelectedModel.Provider != "openai-codex" || (row.SelectedModel.ID != "gpt-6-sol" && row.SelectedModel.ID != "gpt-6.1-terra" && row.SelectedModel.ID != "gpt-5.3-codex-spark") {
 			return nil
 		}
 		original := ai.GetModel(row.SelectedModel.Provider, row.SelectedModel.ID)

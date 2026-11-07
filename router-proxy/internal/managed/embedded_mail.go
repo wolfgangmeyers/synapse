@@ -53,6 +53,47 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
 	for {
+		if pending := lane.claudePendingDiagnostic; pending != nil {
+			entry, err := m.store.RecordClaudeUnclassifiedMail(context.Background(), pending.Binding, pending, claudeUnclassifiedDiagnostic)
+			if errors.Is(err, store.ErrStaleEmbeddedFence) {
+				lane.claudePendingDiagnostic = nil
+				continue
+			}
+			if err != nil && entry.ID == "" {
+				log.Printf("[embedded:%s] Claude diagnostic retry failed: %v", agentID, err)
+				m.retryClaudeSettlement(agentID)
+				return
+			}
+			lane.claudePendingDiagnostic = nil
+			m.publishCompleteHistory(entry)
+			continue
+		}
+		if pending := lane.claudePendingSettlement; pending != nil {
+			var entry store.ManagedHistoryEntry
+			var settleErr error
+			if lane.claudePendingHold {
+				entry, settleErr = m.store.HoldClaudeUncertainMail(context.Background(), pending.Binding, pending)
+			} else {
+				entry, settleErr = m.store.SettleClaudeUnsubmittedMail(context.Background(), pending.Binding, pending)
+			}
+			if errors.Is(settleErr, store.ErrStaleEmbeddedFence) {
+				lane.claudePendingSettlement = nil
+				lane.claudePendingHold = false
+				lane.claudeUnclassifiedBlocked = pending
+				delete(lane.mailAttempts, pending.MessageID)
+				continue
+			}
+			if settleErr != nil && entry.ID == "" {
+				log.Printf("[embedded:%s] Claude settlement retry failed: %v", agentID, settleErr)
+				m.retryClaudeSettlement(agentID)
+				return
+			}
+			lane.claudePendingSettlement = nil
+			lane.claudePendingHold = false
+			delete(lane.mailAttempts, pending.MessageID)
+			m.publishCompleteHistory(entry)
+			continue
+		}
 		if lane.embeddedResetPending() || m.runCtx.Err() != nil {
 			gated = true
 			return
@@ -95,6 +136,9 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 			return
 		}
 		binding := owner.binding
+		if saved.SelectedModel.Provider == claudeCodeProvider && sameClaudeBlockedAttempt(lane.claudeUnclassifiedBlocked, attempt) {
+			return
+		}
 		log.Printf("[embedded:%s] Turn started (source: %s, message: %s)", binding.AgentID, "mail", attempt.MessageID)
 		ctx := context.WithValue(m.runCtx, embeddedOwnerContextKey{}, owner)
 		finalSeq, err := m.runEmbeddedMail(ctx, *saved, attempt)
@@ -121,9 +165,6 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 				m.failEmbeddedOwner(owner.binding, saved.LaunchOperationID, "EMBEDDED_MAIL_FAILED", err)
 				return
 			}
-			lane.mailAttempts[attempt.MessageID]++
-			attempts := lane.mailAttempts[attempt.MessageID]
-
 			// Do not fail the worker on turn errors. Transition cleanly back to idle:
 			if fenceErr := m.store.RenewEmbeddedOwner(context.Background(), owner.binding, owner.identity, embeddedOwnerTTL); fenceErr == nil {
 				_ = m.store.SetEmbeddedActivityState(context.Background(), owner.binding, "idle")
@@ -132,12 +173,34 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 			}
 			m.flushEmbeddedReplies(m.runCtx, agentID)
 
-			held, holdErr := m.store.ClaudeMailHeld(context.Background(), attempt.MessageID)
-			if holdErr != nil || held {
-				log.Printf("[embedded:%s] Mail %s held after uncertain Claude stdin: %v", agentID, attempt.MessageID, holdErr)
-				delete(lane.mailAttempts, attempt.MessageID)
-				return // uncertain mail is never dead-lettered or retried automatically
+			if saved.SelectedModel.Provider == claudeCodeProvider {
+				if errors.Is(err, errEmbeddedExecutionUnsettled) {
+					m.blockClaudeUnclassified(lane, attempt)
+					return
+				}
+				held, holdErr := m.store.ClaudeMailHeld(context.Background(), attempt.MessageID)
+				if holdErr != nil {
+					// Unknown marker state must not be treated as a definite start failure.
+					m.blockClaudeUnclassified(lane, attempt)
+					return
+				}
+				if held {
+					lane.claudePendingSettlement = attempt
+					lane.claudePendingHold = true
+					continue
+				}
+				if !errors.Is(err, errClaudeDefiniteStart) {
+					m.blockClaudeUnclassified(lane, attempt)
+					return
+				}
 			}
+			lane.mailAttempts[attempt.MessageID]++
+			attempts := lane.mailAttempts[attempt.MessageID]
+			if saved.SelectedModel.Provider == claudeCodeProvider && attempts >= 3 {
+				lane.claudePendingSettlement = attempt
+				continue
+			}
+
 			if attempts >= 3 {
 				log.Printf("[embedded:%s] POISON PILL: message %s failed 3 times; dead-lettering to prevent spin loop: %v", agentID, attempt.MessageID, err)
 				delete(lane.mailAttempts, attempt.MessageID)
@@ -152,6 +215,11 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 				baseBackoff = m.embeddedMailBackoff
 			}
 			backoff := time.Duration(1<<(attempts-1)) * baseBackoff
+
+			if saved.SelectedModel.Provider == claudeCodeProvider {
+				m.scheduleClaudeMailRetry(agentID, backoff)
+				return
+			}
 
 			m.startManagedTask(func() {
 				timer := time.NewTimer(backoff)
@@ -298,5 +366,88 @@ func buildSteerUserMessage(msg *store.EmbeddedMailAttempt, nowMilli int64) ai.Us
 	return ai.UserMessage{
 		Content:   content,
 		Timestamp: nowMilli,
+	}
+}
+
+// Retry only the fenced transaction, not the provider execution.
+func (m *Manager) retryClaudeSettlement(agentID string) {
+	m.scheduleClaudeMailRetry(agentID, 5*time.Second)
+}
+
+const claudeUnclassifiedDiagnostic = "Claude mail could not be classified safely and is blocked from automatic retry. Inspect the router logs and conversation before retrying or restarting the router."
+
+func sameClaudeBlockedAttempt(a, b *store.EmbeddedMailAttempt) bool {
+	return a != nil && b != nil && a.MessageID == b.MessageID && a.MessageIncarnationID == b.MessageIncarnationID && a.Binding == b.Binding
+}
+
+func (m *Manager) blockClaudeUnclassified(lane *managedAgentLane, attempt *store.EmbeddedMailAttempt) {
+	lane.claudeUnclassifiedBlocked = attempt
+	entry, err := m.store.RecordClaudeUnclassifiedMail(context.Background(), attempt.Binding, attempt, claudeUnclassifiedDiagnostic)
+	if errors.Is(err, store.ErrStaleEmbeddedFence) {
+		return
+	}
+	if err != nil && entry.ID == "" {
+		log.Printf("[embedded:%s] cannot record blocked Claude mail diagnostic: %v", attempt.Binding.AgentID, err)
+		lane.claudePendingDiagnostic = attempt
+		m.retryClaudeSettlement(attempt.Binding.AgentID)
+		return
+	}
+	m.publishCompleteHistory(entry)
+}
+
+func (m *Manager) scheduleClaudeMailRetry(agentID string, delay time.Duration) {
+	lane := m.laneFor(agentID) // caller holds lane.serial
+	deadline := time.Now().Add(delay)
+	if lane.claudeRetryScheduled {
+		if deadline.Before(lane.claudeRetryDeadline) {
+			lane.claudeRetryDeadline = deadline
+			select {
+			case lane.claudeRetryWake <- struct{}{}:
+			default:
+			}
+		}
+		return
+	}
+	lane.claudeRetryScheduled = true
+	lane.claudeRetryDeadline = deadline
+	lane.claudeRetryWake = make(chan struct{}, 1)
+	wake := lane.claudeRetryWake
+	if !m.startManagedTask(func() {
+		for {
+			lane.serial.Lock()
+			remaining := time.Until(lane.claudeRetryDeadline)
+			lane.serial.Unlock()
+			timer := time.NewTimer(remaining)
+			select {
+			case <-timer.C:
+				lane.serial.Lock()
+				if time.Now().Before(lane.claudeRetryDeadline) {
+					lane.serial.Unlock()
+					continue
+				}
+				lane.claudeRetryScheduled = false
+				lane.claudeRetryDeadline = time.Time{}
+				lane.serial.Unlock()
+				m.OfferDirect(agentID)
+				return
+			case <-wake:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			case <-m.runCtx.Done():
+				timer.Stop()
+				lane.serial.Lock()
+				lane.claudeRetryScheduled = false
+				lane.claudeRetryDeadline = time.Time{}
+				lane.serial.Unlock()
+				return
+			}
+		}
+	}) {
+		lane.claudeRetryScheduled = false
+		lane.claudeRetryDeadline = time.Time{}
 	}
 }

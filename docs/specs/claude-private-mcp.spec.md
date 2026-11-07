@@ -60,3 +60,15 @@ This is a Claude-specific stateless JSON-response subset, not a claim of full MC
 - Adding, removing and re-adding tools across turns becomes visible even to a client that caches `tools/list` for its process lifetime. A cached disabled-tool call remains denied by current admission policy.
 
 Discovery evaluates policy per tool; a concurrent policy edit can therefore produce a mixed catalog. Each call is independently checked against current policy, so discovery is not an authorization snapshot. An atomic catalog snapshot is not claimed by this change.
+
+### Scenario: Concurrent tool queue admission
+- **Given** a tool call occupies a process grant's serial lane,
+- **When** another tool call waits for that lane,
+- **Then** it is rejected after 30 seconds if not admitted, or sooner on request or grant cancellation; once admitted its execution retains its own timeout policy.
+
+- Each grant serializes its own calls. The 30-second limit measures queue admission, not execution. An expired waiter returns JSON-RPC error `-32000`, `tool queue wait timed out`, and never invokes the checked tool, even if the lane becomes available at the same instant. It cannot leave the lane occupied.
+- A request or grant cancelled while queued does not invoke the checked tool or retain the lane. When a response can still be delivered, cancellation returns JSON-RPC error `-32000`, `tool request cancelled`; a disconnected client need not receive it. Revocation can also prevent subsequent calls entirely.
+- An admitted call may run longer than the queue limit under its existing execution context and timeout policy. Its result is subject to the usual post-execution grant and ownership checks. Timeout or cancellation is not a rollback guarantee for an already admitted effect.
+- After a waiter times out, an otherwise valid grant can admit a later call once the lane is free.
+
+Queue verification: `claude-mcp-queue-admission.spec.ts` runs a browser-launched router with a held external MCP call and a timed-out scratchpad contender. After release it confirms no write and retries the exact producer ID and arguments through the same grant, proving that checked authority can execute and persist once. This covers that controlled timeout ordering, not all cancellation or admission races. `TestInvestigationWitnessedQueueTimeout` independently checks the same authority property at the HTTP/checked-bridge boundary. `TestQueueHTTPTimeoutAndLongExecution` exercises HTTP and JSON-RPC with a controlled queue deadline and a simulated checked callback. `TestQueueRequestAndGrantCanceled` exercises both cancellation paths at the handler boundary. The latter handler tests do not themselves establish durable effects or browser-to-router E2E coverage.

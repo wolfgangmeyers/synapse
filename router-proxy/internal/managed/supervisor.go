@@ -183,6 +183,7 @@ type managedAgentLane struct {
 	activeMu                    sync.RWMutex
 	activeSession               embeddedRuntime
 	activePersistence           *embeddedPersistence
+	claudeRestartGeneration     atomic.Uint64
 	consecutiveContinuations    atomic.Int64
 	goalNextAttempt             time.Time // lane.serial-owned
 	goalOwnerInvalid            bool      // lane.serial-owned
@@ -190,6 +191,13 @@ type managedAgentLane struct {
 	consecutiveErrors           int
 	goalAttempt                 atomic.Int64
 	mailAttempts                map[string]int
+	claudePendingSettlement     *store.EmbeddedMailAttempt
+	claudePendingHold           bool
+	claudeUnclassifiedBlocked   *store.EmbeddedMailAttempt
+	claudePendingDiagnostic     *store.EmbeddedMailAttempt
+	claudeRetryScheduled        bool
+	claudeRetryDeadline         time.Time
+	claudeRetryWake             chan struct{}
 	warningEpoch                int64
 	warningEmitted              bool
 	claudeWindowBinding         store.EmbeddedBinding
@@ -450,6 +458,9 @@ type managedBinding struct {
 }
 
 type Manager struct {
+	// Test hook set before admission; nil in production.
+	subagentAdmissionTestHook func()
+
 	claudeCodeMCP         *ClaudeCodeMCPServer
 	claudeCodeProcesses   claudeCodeProcessPool
 	store                 *store.Store
@@ -469,6 +480,7 @@ type Manager struct {
 	codexHTTPTransport         http.RoundTripper
 	embeddedStatusObserver     func(embeddedTransportTrace)
 	embeddedGoalEvaluator      func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error)
+	embeddedBeforeGoalCommit   func()
 	embeddedUrgencyCoordinator func(func() (store.AgentUrgencyResult, bool, error)) (store.AgentUrgencyResult, error)
 	embeddedExternalTool       *agent.AgentTool
 	embeddedAfterIntent        func(context.Context)
@@ -587,6 +599,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, errors.New("managed store is required")
 	}
 	config := options.Config
+	capacityFixtureConfigure(&config)
 	config.normalize()
 	if err := ValidateManagedLaunchConfig(config); err != nil {
 		return nil, err
@@ -660,11 +673,12 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
-	// Complete orphan recovery before publishing a manager or admitting any
-	// embedded runtime. Unsafe identity is a startup failure, never a warning.
+	// Keep unrelated runtimes available, but never admit Claude after unsafe
+	// recovery. A fresh manager retries recovery on the next router start.
 	if err := manager.RecoverClaudeCodeOrphans(runCtx); err != nil {
-		cancel()
-		return nil, fmt.Errorf("Claude orphan startup recovery: %w", err)
+		safeErr := safeClaudeRecoveryError(err)
+		manager.claudeCodeProcesses.fenceStartup(safeErr)
+		manager.emitEvent(Event{Kind: EventManagedRecovery, Phase: "claude_orphan_startup", Status: "failed", ErrorCode: "claude_admission_fenced", ErrorText: safeErr.Error() + "; Claude admission fenced until cleanup and router restart"})
 	}
 	manager.goalContinuationDelay = options.GoalContinuationDelay
 	manager.embeddedMailBackoff = options.EmbeddedMailBackoff
@@ -795,15 +809,27 @@ func (m *Manager) launchWithEmbeddedRole(ctx context.Context, request LaunchRequ
 			}
 		}
 	}
-	if request.Model != nil && request.Model.Provider == claudeCodeProvider {
-		if request.Runtime != "embedded" || embeddedRole == "root" {
-			return LaunchResult{}, &EngineSelectionError{Reason: "Claude requires an embedded worker; root remains Pi"}
+	// Selection errors other than an unavailable model must not be
+	// replaced by engine admission. Embedded admission intentionally handles
+	// explicit unavailable selections independently of catalog availability.
+	if err != nil && !(request.Runtime == "embedded" && IsModelUnavailable(err)) {
+		return LaunchResult{}, err
+	}
+	candidate := selected
+	if IsModelUnavailable(err) && request.Model != nil {
+		candidate = *request.Model
+	}
+	if candidate.Provider == claudeCodeProvider {
+		if _, modelErr := claudeCodeModel(candidate.ID); modelErr != nil {
+			return LaunchResult{}, modelErr
 		}
-		selected, err = claudeCodeModel(request.Model.ID)
-		if err == nil {
-			if _, preflightErr := PreflightClaudeCode(ctx, ClaudeCodeProcessConfig{Cwd: cwd}); preflightErr != nil {
-				return LaunchResult{}, &ClaudeUnavailableError{Cause: preflightErr}
-			}
+		// RPC launches Pi with --mode rpc and the mecha RPC extension; Claude's
+		// stream-json CLI is a different protocol, not an interchangeable engine.
+		if request.Runtime != "embedded" {
+			return LaunchResult{}, &EngineSelectionError{Reason: "Claude does not support Pi RPC; use the embedded runtime"}
+		}
+		if _, preflightErr := PreflightClaudeCode(ctx, m.claudeShortCommandConfig(cwd)); preflightErr != nil {
+			return LaunchResult{}, &ClaudeUnavailableError{Cause: preflightErr}
 		}
 	}
 	// Embedded selection never derives credential authority from Pi catalog
@@ -3699,6 +3725,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	firstClose := !m.closed
 	if firstClose {
+		m.claudeCodeProcesses.closeAdmission()
 		m.closed = true
 		m.cancel()
 		for _, timer := range m.embeddedGoalTimers {
@@ -3718,10 +3745,12 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Unlock()
 
 	m.closeClaudePrivateMCP()
-	m.recordCloseError(m.claudeCodeProcesses.stopAll())
+	// Cancel child work before joining the shared Claude admission barrier.
+	// Admitted children release only after their process cleanup finishes.
 	if firstClose {
 		m.closeSubagents()
 	}
+	m.recordCloseError(m.claudeCodeProcesses.stopAll())
 	for _, binding := range bindings {
 		handled, err := m.shutdownLifecycleRestartBinding(ctx, binding)
 		if handled {

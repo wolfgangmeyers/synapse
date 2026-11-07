@@ -175,7 +175,14 @@ func TestClaudeCodeRuntimePartialInterrupt(t *testing.T) {
 
 func TestClaudeCodeTurnBridgeDuplicateConflictAndUnknown(t *testing.T) {
 	ctx := context.Background()
-	db, b, _, _ := wakePersistenceFixtureWithClaim(t, false)
+	db, b, _, path := wakePersistenceFixtureWithClaim(t, false)
+	fixtureDB, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = fixtureDB.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES(?,?)`, b.AgentID, time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+	require.NoError(t, fixtureDB.Close())
+	_, err = db.ManagedAgent(ctx, b.AgentID)
+	require.NoError(t, err, "fixture agent must be readable before authority")
 	m := &Manager{store: db}
 	p := &embeddedPersistence{db: db, binding: b, digest: "genesis"}
 	a, err := m.newEmbeddedTurnToolAuthority(ctx, embeddedOwner{binding: b, identity: "wake-fixture"}, p, SavedAgentSession{Cwd: t.TempDir()}, false)
@@ -190,6 +197,7 @@ func TestClaudeCodeTurnBridgeDuplicateConflictAndUnknown(t *testing.T) {
 	request := ClaudeCodeMCPCall{ToolUseID: call.ID, Name: call.Name, Arguments: args}
 	first, err := bridge.execute(ctx, request)
 	require.NoError(t, err)
+	require.NotContains(t, string(first), `"isError":true`, "scratchpad must succeed before testing replay")
 	second, err := bridge.execute(ctx, request)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
@@ -1109,15 +1117,22 @@ func TestClaudeBridgeTerminalFencesPreregisteredCall(t *testing.T) {
 			p := &embeddedPersistence{db: db, binding: binding, digest: "genesis"}
 			a, err := m.newEmbeddedTurnToolAuthority(ctx, embeddedOwner{binding: binding, identity: "wake-fixture"}, p, SavedAgentSession{Cwd: t.TempDir()}, false)
 			require.NoError(t, err)
-			// The terminal result is deterministic; the bridge, persistence, and second tool are real.
-			for i := len(a.tools) - 1; i >= 0; i-- {
-				if a.tools[i].Name == name {
-					a.tools = append(a.tools[:i], a.tools[i+1:]...)
+			// The bridge executes baseTools, not the filtered tools catalog.
+			for i := len(a.baseTools) - 1; i >= 0; i-- {
+				if a.baseTools[i].Name == name {
+					a.baseTools = append(a.baseTools[:i], a.baseTools[i+1:]...)
 				}
 			}
-			a.tools = append(a.tools, agent.AgentTool{Name: name, Execute: func(context.Context, string, map[string]any, agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+			terminalCalls := 0
+			a.baseTools = append(a.baseTools, agent.AgentTool{Name: name, Execute: func(context.Context, string, map[string]any, agent.ToolUpdateFunc) (agent.AgentToolResult, error) {
+				terminalCalls++
 				return agent.AgentToolResult{Content: ai.ContentList{ai.TextContent{Text: "terminating"}}, Terminate: true}, nil
 			}})
+			foundTerminal := false
+			for _, tool := range a.baseTools {
+				foundTerminal = foundTerminal || tool.Name == name
+			}
+			require.True(t, foundTerminal, "fake terminal tool must be in the bridge execution catalog")
 			originalBefore := a.beforeToolExecute
 			a.beforeToolExecute = func(ctx context.Context, c agent.BeforeToolCallContext) error {
 				if c.ToolCall.Name == name {
@@ -1138,6 +1153,7 @@ func TestClaudeBridgeTerminalFencesPreregisteredCall(t *testing.T) {
 			req := ClaudeCodeMCPCall{ToolUseID: terminal.ID, Name: name, Arguments: json.RawMessage(`{}`)}
 			first, err := bridge.execute(ctx, req)
 			require.NoError(t, err)
+			require.Equal(t, 1, terminalCalls, "the fake terminal tool must execute")
 			snap, err := db.ReopenEmbedded(ctx, binding)
 			require.NoError(t, err)
 			beforeEntries, beforePublished := len(snap.Entries), published
@@ -1151,6 +1167,7 @@ func TestClaudeBridgeTerminalFencesPreregisteredCall(t *testing.T) {
 			replay, err := bridge.execute(ctx, req)
 			require.NoError(t, err)
 			require.Equal(t, first, replay)
+			require.Equal(t, 1, terminalCalls, "replay must not execute the terminal tool again")
 			req.Arguments = json.RawMessage(`{"different":true}`)
 			_, err = bridge.execute(ctx, req)
 			require.ErrorContains(t, err, "conflict")

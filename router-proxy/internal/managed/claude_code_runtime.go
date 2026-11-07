@@ -45,6 +45,52 @@ type claudeCodeProcessPool struct {
 	afterStart func(*ClaudeCodeProcess) // optional synchronization at the start/insert boundary
 }
 
+// admitExternal registers non-pooled Claude work before it can create files or
+// processes. The returned release must follow all process and file cleanup.
+func (pool *claudeCodeProcessPool) admitExternal() (func(), error) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.closed {
+		return nil, errors.Join(errClaudeDefiniteStart, errors.New("Claude process pool closed"))
+	}
+	pool.starts.Add(1)
+	var once sync.Once
+	return func() { once.Do(pool.starts.Done) }, nil
+}
+
+// releaseGate linearizes the pipe write with fencing. Never run cleanup or
+// persistence under this lock: cleanup itself may fence the pool.
+func (pool *claudeCodeProcessPool) releaseGate(write func() (int, error)) (int, error) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.closed {
+		return 0, errors.New("Claude process pool closed")
+	}
+	return write()
+}
+
+func (pool *claudeCodeProcessPool) closeAdmission() {
+	pool.mu.Lock()
+	pool.closed = true
+	pool.mu.Unlock()
+}
+
+// fenceStartup records the sanitized startup recovery failure without claiming
+// that a process group was unconfirmed.
+func (pool *claudeCodeProcessPool) fenceStartup(err error) {
+	pool.mu.Lock()
+	pool.closed = true
+	pool.startErr = errors.Join(pool.startErr, err)
+	pool.mu.Unlock()
+}
+
+func (pool *claudeCodeProcessPool) fence() {
+	pool.mu.Lock()
+	pool.closed = true
+	pool.startErr = errors.Join(pool.startErr, errClaudeCodeGroupUnconfirmed)
+	pool.mu.Unlock()
+}
+
 type claudeStartCleanupError struct{ err error }
 
 func (e *claudeStartCleanupError) Error() string { return e.err.Error() }
@@ -83,7 +129,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 	pool.mu.Lock()
 	if pool.closed {
 		pool.mu.Unlock()
-		return nil, errors.New("Claude process pool closed")
+		return nil, errors.Join(errClaudeDefiniteStart, errors.New("Claude process pool closed"))
 	}
 	if pool.entries == nil {
 		pool.entries = make(map[string]*claudeCodeProcessEntry)
@@ -96,15 +142,22 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 	if newGrant != nil {
 		grant, err = newGrant()
 		if err != nil {
+			if ctx.Err() == nil {
+				return nil, errors.Join(errClaudeDefiniteStart, err)
+			}
 			return nil, err
 		}
 		cfg.MCPConfigFile = grant.MCPConfigFile
 		cfg.SystemPromptFile = grant.SystemPromptFile
 	}
+	cfg.releaseGate = pool.releaseGate
 	proc, err := StartClaudeCodeProcess(ctx, cfg)
 	if err != nil {
 		if grant.Revoke != nil {
 			grant.Revoke()
+		}
+		if ctx.Err() == nil {
+			return nil, errors.Join(errClaudeDefiniteStart, err)
 		}
 		return nil, err
 	}
@@ -132,7 +185,7 @@ func (pool *claudeCodeProcessPool) acquire(ctx context.Context, b store.Embedded
 		if closeErr != nil {
 			return nil, errors.Join(errors.New("Claude process pool closed"), &claudeStartCleanupError{err: closeErr})
 		}
-		return nil, errors.New("Claude process pool closed")
+		return nil, errors.Join(errClaudeDefiniteStart, errors.New("Claude process pool closed"))
 	}
 	pool.entries[b.AgentID] = entry
 	pool.mu.Unlock()
@@ -464,6 +517,8 @@ func (r *claudeCodeRuntime) acquire(ctx context.Context) (*ClaudeCodeProcess, er
 	return proc, err
 }
 
+var errClaudeDefiniteStart = errors.New("definite Claude acquisition or start failure")
+
 func (r *claudeCodeRuntime) failedInitialProbe(proc *ClaudeCodeProcess, started bool, probeErr error) (bool, error) {
 	cleanupErr := r.pool.stop(r.p.binding.AgentID)
 	if cleanupErr != nil {
@@ -579,6 +634,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 		if _, probeErr := proc.Control(ctx, map[string]interface{}{"subtype": "interrupt"}); probeErr != nil {
 			fallback, cleanupErr := r.failedInitialProbe(proc, started, probeErr)
 			if !fallback {
+				if proc.Err() != nil && ctx.Err() == nil {
+					return nil, errors.Join(errClaudeDefiniteStart, cleanupErr)
+				}
 				return nil, cleanupErr
 			}
 			r.config.Resume = false
@@ -588,6 +646,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 			}
 			if _, err = proc.Control(ctx, map[string]interface{}{"subtype": "interrupt"}); err != nil {
 				_, cleanupErr := r.failedInitialProbe(proc, false, err)
+				if proc.Err() != nil && ctx.Err() == nil {
+					return nil, errors.Join(errClaudeDefiniteStart, cleanupErr)
+				}
 				return nil, cleanupErr
 			}
 			fresh = true

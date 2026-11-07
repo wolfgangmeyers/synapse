@@ -63,7 +63,7 @@ type embeddedRootConfig struct {
 var embeddedRootID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // This command is the sole source of root authority. Never synthesize an ID or
-// fill missing fields from HTTP state or the manager's default model.
+// fill missing identity fields from HTTP state. The model may use the saved default.
 func launchConfiguredEmbeddedRoot(ctx context.Context, options config, manager *managed.Manager) error {
 	if !options.embeddedRoot.Enabled {
 		return nil
@@ -72,9 +72,13 @@ func launchConfiguredEmbeddedRoot(ctx context.Context, options config, manager *
 		return errors.New("embedded root bootstrap requires managed mode")
 	}
 	root := options.embeddedRoot
+	var model *managed.Model
+	if root.Model.Provider != "" {
+		model = &root.Model
+	}
 	_, err := manager.LaunchEmbeddedRoot(ctx, managed.LaunchRequest{
 		RequestID: root.RequestID, Name: root.Name, Cwd: root.Cwd,
-		Runtime: "embedded", Model: &root.Model, InitialInstruction: root.InitialInstruction,
+		Runtime: "embedded", Model: model, InitialInstruction: root.InitialInstruction,
 	})
 	return err
 }
@@ -172,11 +176,15 @@ func parseConfig(args []string) (config, error) {
 		if !managedEnabled {
 			return config{}, errors.New("embedded root bootstrap requires managed mode")
 		}
-		if result.codexCredentialPath == "" {
-			return config{}, errors.New("embedded root bootstrap requires --codex-credential-path")
+		provider, modelID := strings.TrimSpace(root.Model.Provider), strings.TrimSpace(root.Model.ID)
+		if (provider == "") != (modelID == "") {
+			return config{}, errors.New("embedded root model provider and ID must be provided together")
 		}
-		if !embeddedRootID.MatchString(root.RequestID) || strings.TrimSpace(root.Name) == "" || !filepath.IsAbs(root.Cwd) || strings.TrimSpace(root.Model.Provider) == "" || strings.TrimSpace(root.Model.ID) == "" || strings.TrimSpace(root.InitialInstruction) == "" {
-			return config{}, errors.New("embedded root bootstrap requires request ID, name, absolute cwd, model provider and ID, and initial instruction")
+		if provider == "openai-codex" && result.codexCredentialPath == "" {
+			return config{}, errors.New("embedded Codex root bootstrap requires --codex-credential-path")
+		}
+		if !embeddedRootID.MatchString(root.RequestID) || strings.TrimSpace(root.Name) == "" || !filepath.IsAbs(root.Cwd) || strings.TrimSpace(root.InitialInstruction) == "" {
+			return config{}, errors.New("embedded root bootstrap requires request ID, name, absolute cwd and initial instruction")
 		}
 	} else if rootFieldsPresent {
 		return config{}, errors.New("embedded root fields require --embedded-root-bootstrap=true")

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/claudemodels"
 )
 
 // ManagedSubagentRecord contains private, parent-bound child state. It is not
@@ -152,14 +154,13 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if err != nil {
 			return fmt.Errorf("subagent parent must be a top-level managed agent: %w", err)
 		}
-		// Claude is an external parent runtime, not a supported embedded child
-		// provider. Select the router default atomically with child admission.
-		if provider == "claude-code" {
-			var defaultProvider, defaultModel sql.NullString
-			if err := s.db.QueryRowContext(ctx, `SELECT default_model_provider, default_model_id FROM managed_settings WHERE singleton_id=1`).Scan(&defaultProvider, &defaultModel); err != nil {
-				return err
-			}
-			if !defaultProvider.Valid || !defaultModel.Valid || !validManagedProvider(defaultProvider.String) || !managedModelIDRE.MatchString(defaultModel.String) {
+		// Claude defaults apply to either parent engine; preserve Pi parent inheritance otherwise.
+		var defaultProvider, defaultModel sql.NullString
+		if err := s.db.QueryRowContext(ctx, `SELECT default_model_provider, default_model_id FROM managed_settings WHERE singleton_id=1`).Scan(&defaultProvider, &defaultModel); err != nil {
+			return err
+		}
+		if provider == claudemodels.Provider || defaultProvider.String == claudemodels.Provider {
+			if !defaultProvider.Valid || !defaultModel.Valid || !(validManagedProvider(defaultProvider.String) || defaultProvider.String == claudemodels.Provider && claudemodels.Valid(defaultModel.String)) || !managedModelIDRE.MatchString(defaultModel.String) {
 				return errors.New("subagent requires a configured router default model")
 			}
 			provider, model = defaultProvider.String, defaultModel.String
@@ -170,7 +171,7 @@ func (s *Store) CreateManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if model == "" {
 			model = "gemini-3.8-flash"
 		}
-		if !validManagedProvider(provider) {
+		if !validManagedProvider(provider) && !(provider == claudemodels.Provider && claudemodels.Valid(model)) {
 			return errors.New("subagent model provider is unavailable")
 		}
 		now := formatTimestamp(s.clock.Now())
@@ -393,6 +394,13 @@ func (s *Store) ResumeManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if !subagentTerminal(old.Status) {
 			return errors.New("only terminal subagents may resume")
 		}
+		var provider string
+		if err := s.db.QueryRowContext(ctx, `SELECT selected_model_provider FROM managed_agents WHERE agent_id=?`, childID).Scan(&provider); err != nil {
+			return err
+		}
+		if provider == "claude-code" {
+			return errors.New("Claude child resume unavailable: children have one attempt; spawn a new child")
+		}
 		effectiveMaxTurns := old.MaxTurns
 		if len(maxTurns) == 1 && maxTurns[0] > 0 {
 			effectiveMaxTurns = maxTurns[0]
@@ -409,6 +417,10 @@ func (s *Store) ResumeManagedSubagent(ctx context.Context, parent EmbeddedBindin
 		if n != 1 {
 			return errors.New("stale subagent resume")
 		}
+		if _, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='running',lifecycle_state='running',activity_state='idle',accepting_prompts=0,updated_at=? WHERE agent_id=?`, now, childID); err != nil {
+			return err
+		}
+
 		resumed, err = scanManagedSubagent(s.db.QueryRowContext(ctx, managedSubagentSelect+` WHERE agent_id=?`, childID))
 		if err != nil {
 			return err

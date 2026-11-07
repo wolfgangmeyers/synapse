@@ -30,11 +30,15 @@ func (m *Manager) reserveClaudeCodeRestart(ctx context.Context, request RestartR
 		lane.endEmbeddedReset()
 		return RestartResult{Operation: committed, Replayed: replayed}, err
 	}
+	// selection serializes the committed fence with evaluator registration.
+	lane.claudeRestartGeneration.Add(1)
+	m.cancelGoalEvaluations(request.AgentID)
 	if !m.startManagedTask(func() {
 		stopped := false
 		defer func() {
 			lane.endEmbeddedReset()
 			if stopped {
+				_ = restartMailTestBarrier(m.runCtx, request.AgentID, "restart-ready")
 				m.startManagedTask(func() { m.dispatchEmbeddedMail(request.AgentID) })
 			}
 		}()

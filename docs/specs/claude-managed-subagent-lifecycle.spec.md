@@ -42,3 +42,15 @@ A Claude worker can delegate to a router-managed subagent, retrieve its complete
 | CS-003 | `tests/e2e/claude-managed-subagent-lifecycle.spec.ts` | `Claude spawn requires a router default` |
 | CS-002 | `tests/e2e/claude-managed-subagent-lifecycle.spec.ts` | `Claude managed subagent lifecycle and restriction` |
 | CS-004 | `tests/e2e/claude-subagent-viewer-regression.spec.ts` | `view and stop a Claude managed child` |
+
+### Scenario: [CS-005] Uncertain Claude child outcome
+- **Given** a Claude child is running or finishing a checked tool call.
+- **When** it reports success without a current final assistant response, or its process/tool cleanup cannot be confirmed.
+- **Then** the child fails and no unconfirmed result is returned as a successful answer. Cleanup uncertainty quarantines any result text.
+
+### Scenario: [CS-006] Stuck Claude child tools
+- **Given** Claude child tool resources are still occupied by unresponsive calls.
+- **When** repeated child executions would exceed the bounded resource capacity.
+- **Then** further executions fail safely rather than accumulating unbounded resources; capacity returns when cleanup finishes.
+
+Coverage for CS-005 and CS-006 is pending browser E2E; deterministic runner regression tests provide interim coverage only.

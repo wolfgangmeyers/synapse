@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { claudeWorkersHarness, exists } from "./claude-workers-harness";
+import { model } from "./workflow-implicit-goals-harness";
 
 // AC7/AC12: real router SIGKILL, REST/proxy/browser/SQLite via existing harness.
 function stat(pid: number) {
@@ -13,7 +14,7 @@ function stat(pid: number) {
   } catch (error) { if (error.code === "ENOENT" || error.code === "ESRCH") return undefined; throw error; }
 }
 
-test("CC-009/015 SIGKILL startup reaps verified leftover group and private files", async ({ page }) => {
+for (const mismatch of [false, true]) test(`CC-009/015 ${mismatch ? "mismatched orphan fences Claude while Pi remains available" : "verified orphan is cleaned up and Claude remains available"}`, async ({ page }) => {
   test.skip(process.platform !== "linux", "Linux durable boot/process identity");
   test.setTimeout(90_000);
   const f = await claudeWorkersHarness({ ignore_sighup: true, turns: [[{ spawn_child: {} }, { text: "Partial before crash" }, { wait: "interrupt" }]] });
@@ -59,21 +60,57 @@ test("CC-009/015 SIGKILL startup reaps verified leftover group and private files
     expect(stat(pid)?.state).not.toMatch(/[ZX]/);
     expect(stat(childPID)?.state).not.toMatch(/[ZX]/);
     expect(await exists(grant.path)).toBe(true);
+    if (mismatch) {
+      const names = await readdir(join(sessions, "claude-orphans"));
+      const recordPath = join(sessions, "claude-orphans", names[0]);
+      const record = JSON.parse(await readFile(recordPath, "utf8"));
+      record.Identity.StartMarker += "-mismatch";
+      await writeFile(recordPath, JSON.stringify(record));
+    }
     await f.configure({ turns: [[{ text: "Recovered after orphan sweep" }]] });
     await f.restart();
-    await expect.poll(() => {
+    // Startup rechecks the recorded identity, kills the matching group and
+    // confirms it is no longer executable before admitting Claude.
+    expect((await fetch(f.router.httpUrl + "/v1/health")).status).toBe(200);
+    if (!mismatch) await expect.poll(() => {
       const leader = stat(pid), descendant = stat(childPID);
       return (!leader || (leader.start === identity.start && ["Z", "X"].includes(leader.state ?? ""))) &&
         (!descendant || (descendant.start === childIdentity.start && ["Z", "X"].includes(descendant.state ?? "")));
     }).toBe(true);
-    expect((await readdir(join(sessions, "claude-orphans"))).length).toBe(0);
+    expect((await readdir(join(sessions, "claude-orphans"))).length).toBe(mismatch ? 1 : 0);
+    if (mismatch) {
+      for (const [processPID, original] of [[pid, identity], [childPID, childIdentity]] as const) {
+        const current = stat(processPID);
+        expect(current, `original process ${processPID} must still exist`).toBeDefined();
+        expect(current?.start).toBe(original.start);
+        expect(current?.state).not.toMatch(/[ZX]/);
+        expect(current?.group).toBe(pid);
+      }
+    }
     expect(await exists(grant.path)).toBe(false);
     for (const path of paths) expect(await exists(path)).toBe(false);
-    // Startup readiness is real admission evidence; any unsafe identity would
-    // have prevented NewManager from returning and /v1/health from serving.
-    expect((await fetch(f.router.httpUrl + "/v1/health")).status).toBe(200);
+    if (mismatch) {
+      const startsBefore = (await f.starts()).length;
+      const rejected = await f.request(page, "/v1/managed-agents", { name: "fenced-claude", cwd: `${f.router.root}/work`, runtime: "embedded", model: { provider: "claude-code", id: "sonnet" } }, "POST", true);
+      expect(rejected.status).toBeGreaterThanOrEqual(400);
+      expect((await f.starts()).length).toBe(startsBefore);
+    } else {
+    const recoveredAgent = await f.launch(page);
+    await f.userTurn(page, "Confirm Claude recovered");
+    await f.final(page, recoveredAgent, "Recovered after orphan sweep", undefined, false);
+    }
+    f.replies.push({ answer: "Pi remains available" });
+    const pi = await f.request(page, "/v1/managed-agents", {
+      name: "available-pi", cwd: `${f.router.root}/work`, runtime: "embedded", model,
+    }, "POST", true);
+    expect(pi.status, JSON.stringify(pi.body)).toBe(202);
+    await expect(page.locator('[data-agent-id="available-pi"]')).toBeVisible();
+    await page.locator('[data-agent-id="available-pi"]').click();
+    await f.userTurn(page, "Confirm Pi still works");
+    await f.final(page, "available-pi", "Pi remains available", undefined, false);
+    expect(f.violations).toEqual([]);
   } finally {
-    if (owned && stat(owned.pid)?.start === owned.start) {
+    if (owned && stat(owned.pid)?.start === owned.start && !["Z", "X"].includes(stat(owned.pid)?.state ?? "")) {
       try { process.kill(-owned.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
     }
     await f.close();

@@ -19,6 +19,8 @@ import (
 	"time"
 )
 
+var ErrStaleEmbeddedFence = errors.New("stale embedded fence")
+
 const embeddedMaxBody = 1 << 20
 const embeddedGenesis = "genesis"
 
@@ -69,7 +71,7 @@ func (s *Store) embeddedManagedFence(ctx context.Context, b EmbeddedBinding) err
 		return err
 	}
 	if count != 1 {
-		return errors.New("stale managed embedded binding")
+		return fmt.Errorf("%w: stale managed embedded binding", ErrStaleEmbeddedFence)
 	}
 	return nil
 }
@@ -87,7 +89,7 @@ func (s *Store) embeddedOwnerFence(ctx context.Context, b EmbeddedBinding) error
 		return err
 	}
 	if count != 1 {
-		return errors.New("stale embedded owner")
+		return fmt.Errorf("%w: stale embedded owner", ErrStaleEmbeddedFence)
 	}
 	return nil
 }
@@ -104,7 +106,7 @@ func (s *Store) embeddedFence(ctx context.Context, b EmbeddedBinding) error {
 			return err
 		}
 		if token != b.OwnerToken {
-			return errors.New("stale embedded owner token")
+			return fmt.Errorf("%w: stale embedded owner token", ErrStaleEmbeddedFence)
 		}
 	}
 	if err := s.embeddedManagedFence(ctx, b); err != nil {
@@ -296,7 +298,7 @@ func (s *Store) RenewEmbeddedOwner(ctx context.Context, b EmbeddedBinding, owner
 		return err
 	}
 	if currentOwner.Valid && currentOwner.String != "" && currentOwner.String != owner {
-		return errors.New("stale embedded owner")
+		return fmt.Errorf("%w: stale embedded owner", ErrStaleEmbeddedFence)
 	}
 	return nil
 }
@@ -428,7 +430,7 @@ func (s *Store) SetEmbeddedActivityState(ctx context.Context, b EmbeddedBinding,
 				return err
 			}
 			if currentToken != b.OwnerToken {
-				return errors.New("stale embedded owner")
+				return fmt.Errorf("%w: stale embedded owner", ErrStaleEmbeddedFence)
 			}
 		}
 		now := formatTimestamp(s.clock.Now())
@@ -1465,7 +1467,7 @@ func (s *Store) embeddedMailAcceptedTx(ctx context.Context, a *EmbeddedMailAttem
 		return "", err
 	}
 	if incarnation != a.MessageIncarnationID || sender != a.Sender || recipient != a.Binding.AgentID || body != a.Body || embeddedHash([]byte(a.MessageID), []byte(incarnation), []byte(sender), []byte(recipient), []byte(body)) != a.AcceptedDigest {
-		return "", errors.New("embedded accepted mail changed")
+		return "", fmt.Errorf("%w: embedded accepted mail changed", ErrStaleEmbeddedFence)
 	}
 	var snapshot, kind, owner, sourceKind, sourceOwner, sourceState string
 	err = s.db.QueryRowContext(ctx, `SELECT t.snapshot_id,t.source_kind,t.owner_identity,r.source_kind,r.owner_identity,r.state FROM message_target_snapshots t JOIN recipient_sources r ON r.recipient_name=t.recipient_name WHERE t.message_id=? AND t.message_incarnation_id=? AND t.recipient_name=?`, a.MessageID, incarnation, recipient).Scan(&snapshot, &kind, &owner, &sourceKind, &sourceOwner, &sourceState)
@@ -1473,10 +1475,10 @@ func (s *Store) embeddedMailAcceptedTx(ctx context.Context, a *EmbeddedMailAttem
 		return "", err
 	}
 	if snapshot != a.SnapshotID || kind != "managed" || owner != recipient || sourceKind != "managed" || sourceOwner != recipient || sourceState != "active" {
-		return "", errors.New("embedded mail target changed")
+		return "", fmt.Errorf("%w: embedded mail target changed", ErrStaleEmbeddedFence)
 	}
 	if requireQueued && (state != "queued" || expiry <= formatTimestamp(s.clock.Now())) {
-		return "", errors.New("embedded mail is no longer queued or live")
+		return "", fmt.Errorf("%w: embedded mail is no longer queued or live", ErrStaleEmbeddedFence)
 	}
 	return state, nil
 }

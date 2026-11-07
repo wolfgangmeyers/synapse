@@ -872,3 +872,38 @@ func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T)
 	require.NoError(t, durable.db.QueryRow(`SELECT count(*) FROM pragma_table_info('managed_provider_status') WHERE lower(name) LIKE '%token%' OR lower(name) LIKE '%secret%' OR lower(name) LIKE '%credential%'`).Scan(&secretRows))
 	require.Zero(t, secretRows)
 }
+
+func TestClaudeDefaultModelPersistenceAndAtomicOperation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := Open(ctx, path, Options{})
+	require.NoError(t, err)
+	model := &ManagedModel{Provider: "claude-code", ID: "sonnet"}
+	require.NoError(t, db.SetDefaultModel(ctx, model))
+	op := ManagedOperation{OperationID: "default-op", Method: "PUT", CanonicalPath: "/v1/settings/default-model", RequestID: "default-op", CanonicalBodyHash: "hash", ResponseStatus: 200, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, db.SetDefaultModelAndPutManagedOperation(ctx, model, op))
+	stored, err := db.ManagedOperation(ctx, op.OperationID)
+	require.NoError(t, err)
+	require.Equal(t, "terminal", stored.State)
+	// A conflicting operation must roll the setting change back.
+	err = db.SetDefaultModelAndPutManagedOperation(ctx, &ManagedModel{Provider: "claude-code", ID: "opus"}, op)
+	require.Error(t, err)
+	storedModel, err := db.GetDefaultModel(ctx)
+	require.NoError(t, err)
+	require.Equal(t, model, storedModel)
+	for _, invalid := range []*ManagedModel{{Provider: "claude-code", ID: "bad id"}, {Provider: "bad/provider", ID: "sonnet"}, {Provider: "", ID: "sonnet"}} {
+		require.Error(t, db.SetDefaultModel(ctx, invalid))
+		require.Error(t, db.SetDefaultModelAndPutManagedOperation(ctx, invalid, op))
+	}
+	require.NoError(t, db.Close())
+	db, err = Open(ctx, path, Options{})
+	require.NoError(t, err)
+	defer db.Close()
+	storedModel, err = db.GetDefaultModel(ctx)
+	require.NoError(t, err)
+	require.Equal(t, model, storedModel)
+	require.NoError(t, db.SetDefaultModel(ctx, nil))
+	storedModel, err = db.GetDefaultModel(ctx)
+	require.NoError(t, err)
+	require.Nil(t, storedModel)
+}

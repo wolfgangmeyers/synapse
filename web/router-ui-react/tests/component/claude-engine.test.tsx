@@ -64,20 +64,22 @@ it("shows Claude router controls while hiding inline controls and retaining time
   expect(thresholds).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole("button", { name: "More agent controls" }));
   const menu = screen.getByRole("menu");
-  for (const name of ["Inline tools", "Inline tool settings"]) expect(within(menu).queryByRole("button", { name, exact: true })).not.toBeInTheDocument();
-  for (const name of ["Workflow", "Worker tools"]) expect(within(menu).getByRole("button", { name, exact: true })).toBeInTheDocument();
+  for (const name of [/^Inline tools$/, /^Inline tool settings$/]) expect(within(menu).queryByRole("button", { name })).not.toBeInTheDocument();
+  for (const name of [/^Workflow$/, /^Worker tools$/]) expect(within(menu).getByRole("button", { name })).toBeInTheDocument();
   expect(within(menu).getByRole("button", { name: "Reset" })).toBeInTheDocument();
   expect(screen.getByText("Retained history")).toBeInTheDocument();
 });
 
-it("never offers Claude as the router default or an auth settings row", async () => {
+it("offers Claude as the router default without an auth settings row", async () => {
   const client = createHttpClient("http://127.0.0.1:8765", async input => new Response(JSON.stringify(String(input).endsWith("/v1/models") ? catalog : { auth_revision: 0, providers: [
     ["openai-codex", "ChatGPT"], ["google", "Google"], ["google-vertex", "Google Vertex AI"], ["cursor", "Cursor"],
   ].map(([provider, label]) => ({ provider, label, authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.000Z" })) })));
   render(<ProviderAuthDialog open client={client} onClose={vi.fn()} onPromptHandled={vi.fn()} />);
+  expect(await screen.findByText(/Ordinary managed worker launches use this model when no model is chosen\. Embedded subagents may use the default or inherit their parent’s model\./)).toBeInTheDocument();
   const select = await screen.findByRole("combobox", { name: "Default model" });
   await waitFor(() => expect(within(select).getByRole("option", { name: /Gemini/ })).toBeInTheDocument());
-  expect(within(select).queryByRole("option", { name: /Sonnet|Opus/ })).not.toBeInTheDocument();
+  expect(within(select).getByRole("option", { name: /Sonnet/ })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: /Claude/i })).not.toBeInTheDocument();
 });
 
 it("suppresses Claude sidebar subagents while keeping Pi native subagents", () => {

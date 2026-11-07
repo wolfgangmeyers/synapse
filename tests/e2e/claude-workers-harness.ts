@@ -25,6 +25,20 @@ import { join } from 'node:path';
 process.env.FAKE_CLAUDE_SCRIPT=${JSON.stringify(scriptPath)};
 process.env.FAKE_CLAUDE_RECORD=${JSON.stringify(recordPath)};
 const argv=process.argv.slice(2);
+// Evaluator fixture only: records flags and returns deterministic local verdicts.
+if(argv.includes('--strict-mcp-config') && argv.includes('--tools') && !argv.includes('--input-format')) {
+  const chunks=[]; for await (const chunk of process.stdin) chunks.push(chunk);
+  const input=Buffer.concat(chunks).toString('utf8');
+  let config={}; try { config=JSON.parse(readFileSync(join(${JSON.stringify(root)}, 'evaluator.json'),'utf8')); } catch(error) { if(error.code!=='ENOENT') throw error; }
+  const count=Number(readFileSync(join(${JSON.stringify(root)}, 'evaluator-count'),'utf8') || '0');
+  writeFileSync(join(${JSON.stringify(root)}, 'evaluator-count'),String(count+1));
+  appendFileSync(${JSON.stringify(recordPath)},JSON.stringify({kind:'evaluator',pid:process.pid,argv,input,index:count})+'\\n');
+  const reply=(config.replies || [])[count] || {output:'VERDICT: COMPLETED\\nREASON: done'};
+  if(reply.barrier) { while(true) { try { readFileSync(join(${JSON.stringify(root)}, 'evaluator-release-'+reply.barrier)); break; } catch(error) { if(error.code!=='ENOENT') throw error; } await new Promise(resolve=>setTimeout(resolve,25)); } appendFileSync(${JSON.stringify(recordPath)},JSON.stringify({kind:'evaluator_barrier_released',name:reply.barrier,pid:process.pid,index:count})+'\\n'); }
+  if(reply.exit) process.exit(reply.exit);
+  process.stdout.write(reply.output || '');
+  process.exit(0);
+}
 if(argv.includes('-p')) {
   // Optional reset checkpoint runs before the replacement CLI reads any input.
   let checkpoint;
@@ -67,6 +81,7 @@ if(argv.includes('-p')) {
 }
 await import(${JSON.stringify(pathToFileURL(executable).href)});
 `, { mode: 0o700 });
+  await writeFile(join(root, "evaluator-count"), "0", { mode: 0o600 });
   const savedPath = process.env.PATH;
   // An inherited override must never select a real CLI in automated tests.
   const savedBinary = process.env.MECHA_CLAUDE_BIN;
@@ -92,6 +107,11 @@ await import(${JSON.stringify(pathToFileURL(executable).href)});
   async function inputs() {
     return (await records()).filter(row => row.kind === "stdin" && typeof row.line === "string")
       .map(row => JSON.parse(String(row.line))).filter(row => row.type === "user");
+  }
+  async function configureEvaluator(next: object) { await writeFile(join(root, "evaluator.json"), JSON.stringify(next), { mode: 0o600 }); }
+  async function releaseEvaluator(name: string) {
+    if (!/^[a-z0-9-]+$/.test(name)) throw Error("invalid evaluator barrier");
+    await writeFile(join(root, `evaluator-release-${name}`), "release", { mode: 0o600 });
   }
   async function configure(next: object) {
     await writeFile(scriptPath + ".new", JSON.stringify(next), { mode: 0o600 });
@@ -122,13 +142,14 @@ await import(${JSON.stringify(pathToFileURL(executable).href)});
       { timeout: 10_000, message: `barrier release acknowledgement ${invocation}` }).toBe(true);
   }
   async function request(page: Page, path: string, body?: object, method = "POST", direct = false) {
-    // Claude defaults are a deliberate admission-refusal test: the real router
-    // rejects them before persistence. All potentially usable defaults must use
-    // the transport-guarded local Codex fixture.
-    const refusedClaude = path === "/v1/settings/default-model" && body !== undefined &&
+    // Claude defaults can execute: this harness starts the router with the
+    // disposable fake CLI first in PATH and strips inherited binary overrides.
+    // Other providers must use the loopback-only Codex evaluator fixture.
+    const fixtureClaude = path === "/v1/settings/default-model" && body !== undefined &&
       "model" in body && typeof body.model === "object" && body.model !== null &&
-      "provider" in body.model && body.model.provider === "claude-code";
-    if (!refusedClaude) assertLocalEvaluatorDefault(path, body);
+      "provider" in body.model && body.model.provider === "claude-code" &&
+      "id" in body.model && typeof body.model.id === "string";
+    if (!fixtureClaude) assertLocalEvaluatorDefault(path, body);
     return page.evaluate(async ({ url, body, method }) => {
       const response = await fetch(url, { method: body === undefined && method === "POST" ? "GET" : method,
         credentials: "omit", headers: { "Content-Type": "application/json", "X-Request-ID": crypto.randomUUID() },
@@ -212,7 +233,7 @@ await import(${JSON.stringify(pathToFileURL(executable).href)});
   async function restoreExecutable() {
     await rename(join(bin, "claude.saved"), join(bin, "claude"));
   }
-  return { ...f, fixtureRoot: root, records, starts, inputs, configure, releaseBarrier, request, launch, tableRows, idle, final, grant, mcp, userTurn, emitIdleEvents, breakExecutable, restoreExecutable,
+  return { ...f, fixtureRoot: root, records, starts, inputs, configure, configureEvaluator, releaseEvaluator, releaseBarrier, request, launch, tableRows, idle, final, grant, mcp, userTurn, emitIdleEvents, breakExecutable, restoreExecutable,
     close: async () => { try { await f.close(); } finally { await rm(root, { recursive: true, force: true }); } },
   };
 }

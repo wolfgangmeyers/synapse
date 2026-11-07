@@ -7,7 +7,7 @@ import { test, expect } from "@playwright/test";
 import { startIsolatedRouter, startRouterProxy } from "./harness";
 
 // CC-001/002/010: backend slice only. No Claude turn/runtime parity claim.
-test("Claude aliases stay selectable while local admission fails without worker or default mutation", async ({ page }) => {
+test("Claude aliases stay selectable and save as default while signed-out launch is refused", async ({ page }) => {
   test.setTimeout(180_000);
   const repo = resolve(import.meta.dirname, "../..");
   const dir = await mkdtemp(join(tmpdir(), "claude-catalog-"));
@@ -39,12 +39,11 @@ test("Claude aliases stay selectable while local admission fails without worker 
     expect(outcomes[0].status).toBe(422);
     expect(outcomes[0].body.error.code).toBe("CLAUDE_UNAVAILABLE");
     expect(outcomes[0].body.error.message).toContain("host");
-    expect(outcomes[1].status).toBe(422);
-    expect(outcomes[1].body.error.code).toBe("INVALID_ENGINE_SELECTION");
+    expect(outcomes[1].status).toBe(200);
     const db = new DatabaseSync(router.databasePath, { readOnly: true });
     try {
       expect(db.prepare("SELECT agent_id FROM managed_agents WHERE agent_id='claude-refused'").all()).toEqual([]);
-      expect(db.prepare("SELECT default_model_provider FROM managed_settings WHERE singleton_id=1").get()?.default_model_provider).not.toBe("claude-code");
+      expect(db.prepare("SELECT default_model_provider FROM managed_settings WHERE singleton_id=1").get()?.default_model_provider).toBe("claude-code");
     } finally { db.close(); }
   } finally {
     if (saved.binary === undefined) delete process.env.MECHA_CLAUDE_BIN; else process.env.MECHA_CLAUDE_BIN = saved.binary;
