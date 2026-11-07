@@ -40,6 +40,9 @@ function isGoogleAuthMethod(value: string): value is GoogleAuthMethod {
   return value === "api_key" || value === "vertex_adc";
 }
 
+// Shared status line text; error styling is derived from it so a later provider action that overwrites status clears the red.
+const defaultSaveFailedMessage = "Default model could not be saved.";
+
 function computeInitialGoogleMethod(providers?: ProviderStatus[]): GoogleAuthMethod {
   if (!providers) return "api_key";
   const google = providers.find((p) => p.provider === "google");
@@ -71,6 +74,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   const [auth, setAuth] = useState<ProviderAuthResponse>();
   const [catalog, setCatalog] = useState<ModelsResponse>();
   const [status, setStatus] = useState("");
+  const [refreshNotice, setRefreshNotice] = useState("");
   const [value, setValue] = useState(() => getInitialPromptValue(prompt));
   const [codeCopied, setCodeCopied] = useState(false);
   const [userSelectedGoogleMethod, setUserSelectedGoogleMethod] = useState<GoogleAuthMethod | null>(null);
@@ -121,6 +125,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
     if (!open) {
       setValue("");
       setStatus("");
+      setRefreshNotice("");
       setPendingProvider(null);
       setGoogleMenuOpen(false);
       setModelMenuOpen(false);
@@ -229,12 +234,22 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   };
 
   const setDefault = async (model: { provider: string; id: string } | null): Promise<void> => {
+    setRefreshNotice("");
+    let result: DefaultModelResponse;
     try {
-      const result: DefaultModelResponse = await client.setDefaultModel(model);
-      setStatus(`New sessions will use ${result.effective_fallback.name}.`);
-      await refresh();
+      result = await client.setDefaultModel(model);
     } catch {
-      setStatus("Default model could not be saved.");
+      setStatus(defaultSaveFailedMessage);
+      return;
+    }
+    setCatalog((current) => current ? { ...current, default_model: result.default_model } : current);
+    setStatus(`New sessions will use ${result.effective_fallback.name}.`);
+    try {
+      const [nextAuth, nextCatalog] = await Promise.all([client.providerAuth(), client.models()]);
+      setAuth(nextAuth);
+      setCatalog(nextCatalog);
+    } catch {
+      setRefreshNotice("Could not refresh the model list. Reload to check availability.");
     }
   };
 
@@ -480,8 +495,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       <section className="provider-auth-section" aria-labelledby="provider-default-model-title">
         <div className="provider-auth-section-heading">
           <h3 id="provider-default-model-title">Default model</h3>
-          <p>Ordinary managed worker launches use this model when no model is chosen. Embedded subagents may use the default or inherit their parent’s model. Automatic uses the first available Pi model, or the built-in Pi fallback if none is available.</p>
-          <p>For Claude models, install the Claude CLI and sign in on the router host; provider sign-in is not required.</p>
+          <p>Used for new worker launches when no model is chosen. Automatic uses a Pi model; Claude models need the Claude CLI installed and signed in on the router host.</p>
         </div>
         <div ref={modelPickerRef} className="model-picker provider-dropdown default-model-picker">
           <button
@@ -550,6 +564,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
         </div>
       </section>
     )}
-    {status ? <p className="provider-auth-status" role="status">{status}</p> : null}
+    {status ? <p className={`provider-auth-status${status === defaultSaveFailedMessage ? " error" : ""}`} role="status">{status}</p> : null}
+    {refreshNotice ? <p className="provider-auth-status">{refreshNotice}</p> : null}
   </DialogShell>;
 }

@@ -64,8 +64,8 @@ describe("ProviderAuthDialog", () => {
     await user.click(await screen.findByRole("button", { name: "Automatic (Pi model)" }));
     const list = screen.getByRole("listbox", { name: "Default model options" });
     expect(within(list).getByRole("option", { name: "Automatic (Pi model)" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText(/first available Pi model/i)).toBeInTheDocument();
-    expect(screen.getByText(/install the Claude CLI and sign in/i)).toBeInTheDocument();
+    expect(screen.getByText(/Automatic uses a Pi model/i)).toBeInTheDocument();
+    expect(screen.getByText(/Claude models need the Claude CLI installed and signed in/i)).toBeInTheDocument();
     const select = screen.getByLabelText("Default model", { selector: "select" });
     expect(within(select).getByRole("option", { name: "Automatic (Pi model)" })).toBeInTheDocument();
     expect(within(select).getByRole("option", { name: "Claude Sonnet" })).toHaveValue("claude-code:sonnet");
@@ -537,5 +537,27 @@ describe("ProviderAuthDialog", () => {
     // Resolve the promise
     resolveAuth({ operation_id: "cursor-1" });
     await waitFor(() => expect(cursorConnect).not.toBeDisabled());
+  });
+
+  it("clears default-save error styling when a later provider action overwrites the shared status", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+    client.modelsMock.mockResolvedValue({ auth_revision: 3, models: [
+      { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
+    ], default_model: null });
+    client.setDefaultModelMock.mockRejectedValue(new Error("save failed"));
+    client.startProviderAuthMock.mockRejectedValue(new Error("unavailable"));
+
+    render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    await screen.findByText("ChatGPT");
+
+    await user.click(screen.getByRole("button", { name: /Automatic \(Pi model\)/i }));
+    await user.click(within(screen.getByRole("listbox", { name: "Default model options" })).getByRole("option", { name: /GPT-5.6 Terra/i }));
+    await waitFor(() => expect(screen.getByText("Default model could not be saved.")).toHaveClass("error"));
+
+    const connectButtons = screen.getAllByRole("button", { name: "Connect" });
+    await user.click(connectButtons[1]!);
+    await waitFor(() => expect(screen.getByText("Provider request could not be started.")).toBeInTheDocument());
+    expect(screen.getByText("Provider request could not be started.")).not.toHaveClass("error");
   });
 });

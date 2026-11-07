@@ -451,7 +451,7 @@ function models(value: unknown): ModelsResponse {
 }
 function defaultModel(value: unknown): DefaultModelResponse {
   const root = recordValue(value); const saved = savedModel(root?.default_model);
-  if (!root || !nonEmptyString(root.operation_id) || saved === undefined || !providerModel(root.effective_fallback)) throw invalidResponse("Router returned invalid default model", value);
+  if (!root || !nonEmptyString(root.operation_id) || saved === undefined || !modelChoice(root.effective_fallback)) throw invalidResponse("Router returned invalid default model", value);
   const fallback = root.effective_fallback;
   const effectiveFallback: ProviderModel = {
     ...fallback,

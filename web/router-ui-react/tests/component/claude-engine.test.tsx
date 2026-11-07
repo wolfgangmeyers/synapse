@@ -75,7 +75,7 @@ it("offers Claude as the router default without an auth settings row", async () 
     ["openai-codex", "ChatGPT"], ["google", "Google"], ["google-vertex", "Google Vertex AI"], ["cursor", "Cursor"],
   ].map(([provider, label]) => ({ provider, label, authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.000Z" })) })));
   render(<ProviderAuthDialog open client={client} onClose={vi.fn()} onPromptHandled={vi.fn()} />);
-  expect(await screen.findByText(/Ordinary managed worker launches use this model when no model is chosen\. Embedded subagents may use the default or inherit their parent’s model\./)).toBeInTheDocument();
+  expect(await screen.findByText(/Used for new worker launches when no model is chosen\. Automatic uses a Pi model; Claude models need the Claude CLI installed and signed in on the router host\./)).toBeInTheDocument();
   const select = await screen.findByRole("combobox", { name: "Default model" });
   await waitFor(() => expect(within(select).getByRole("option", { name: /Gemini/ })).toBeInTheDocument());
   expect(within(select).getByRole("option", { name: /Sonnet/ })).toBeInTheDocument();
