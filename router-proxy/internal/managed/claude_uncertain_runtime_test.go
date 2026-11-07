@@ -1,6 +1,7 @@
 package managed
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -17,6 +18,9 @@ import (
 type uncertainClaudePipe struct{ io.WriteCloser }
 
 func (w uncertainClaudePipe) Write(b []byte) (int, error) {
+	if !bytes.Contains(b, []byte(`"type":"user"`)) {
+		return w.WriteCloser.Write(b)
+	}
 	n, err := w.WriteCloser.Write(b[:len(b)/2])
 	if err != nil {
 		return n, err
@@ -26,7 +30,7 @@ func (w uncertainClaudePipe) Write(b []byte) (int, error) {
 
 func TestClaudeRuntimePartialMailWriteHoldsExactDelivery(t *testing.T) {
 	ctx := context.Background()
-	r, p, pool, cfg := claudeRuntimeFixture(t, `{}`)
+	r, p, pool, _ := claudeRuntimeFixture(t, `{}`)
 	require.NoError(t, p.db.ReconcileManagedRecipientSources(ctx))
 	_, err := p.db.Enqueue(ctx, protocol.Envelope{ID: "uncertain-runtime", From: "sender", To: p.binding.AgentID, Body: "never replay", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
 	require.NoError(t, err)
@@ -35,9 +39,7 @@ func TestClaudeRuntimePartialMailWriteHoldsExactDelivery(t *testing.T) {
 	attempt, err := p.db.ReserveEmbeddedMail(ctx, p.binding, "uncertain-runtime")
 	require.NoError(t, err)
 	p.mail = attempt
-	proc, err := pool.acquire(ctx, p.binding, cfg, nil)
-	require.NoError(t, err)
-	proc.stdin = uncertainClaudePipe{proc.stdin}
+	pool.afterStart = func(proc *ClaudeCodeProcess) { proc.stdin = uncertainClaudePipe{proc.stdin} }
 	user, err := store.EmbeddedMailUserMessage(attempt, time.Now().UnixMilli())
 	require.NoError(t, err)
 	_, err = r.RunMessages(ctx, []agent.AgentMessage{user})

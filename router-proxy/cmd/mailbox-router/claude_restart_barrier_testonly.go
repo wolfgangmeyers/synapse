@@ -20,7 +20,7 @@ func wireClaudeRestartBarrier(database string) {
 	var mu sync.Mutex
 	consumed := map[string]int{}
 	send := func(ctx context.Context, agentID, phase, messageID, site string) error {
-		if phase != "restart" && phase != "reset" && phase != "gated" && phase != "launch" {
+		if phase != "restart" && phase != "restart-ready" && phase != "reset" && phase != "gated" && phase != "launch" {
 			return errors.New("invalid restart barrier phase")
 		}
 		path := database + ".restart-mail-barrier.json"

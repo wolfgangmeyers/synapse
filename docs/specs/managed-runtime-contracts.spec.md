@@ -137,3 +137,8 @@ No tests were added or run for this docs-only backfill. These are existing evide
 | MR-011 | `router-proxy/internal/transport/managed_bridge_server_functional_test.go`: `TestManagedBridgeServerPhase2BEventAdmissionDropReplaysExactlyOnce`; `router-proxy/internal/store/managed_bridge_test.go`; `router-proxy/internal/managedbridge/phase3b_test.go` | Composed bridge/store and process lifecycle fixtures, not all-runtime launch acceptance |
 
 Retention owners: `router-proxy/internal/store/store.go` owns conversation sweeps; `managed_history.go` prunes complete history at write; `managed_bridge.go` bounds its ledger by 24 hours, 50,000 rows, and 64 MiB (live capacity can reject rather than erase needed replay); `managed_control_delivery_receipts_retention_test.go` covers terminal receipt pruning. Bridge defaults keep 128 event/cursor entries and bounded stderr. These limits are separate, not interchangeable guarantees for all histories.
+
+### Subagent admission during shutdown
+
+- When a child is admitted normally, its caller receives its actual queued or running admission status.
+- If router shutdown closes task admission after the child enters running state but before execution starts, the spawn caller receives an error rather than a running response. The child eventually has a durable stopped outcome; this does not promise settlement before Close returns. Claude child admission follows the same behavior and releases its reservation when execution never starts.

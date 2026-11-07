@@ -525,7 +525,7 @@ func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 }
 
 func validDefaultModel(model *ManagedModel) error {
-	if model != nil && (model.Provider == "claude-code" || !managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
+	if model != nil && (!managedIdentifierRE.MatchString(model.Provider) || !managedModelIDRE.MatchString(model.ID)) {
 		return errors.New("invalid default model")
 	}
 	return nil

@@ -14,11 +14,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const claudeCodeOrphanLimit = 1024
+
+// Router startup owns the session root exclusively. Serialize in-process
+// reservations through publication so concurrent launches cannot exceed the cap.
+var claudeOrphanPublishMu sync.Mutex
 
 type claudeCodeOrphanRecord struct {
 	Version  int
@@ -31,6 +36,8 @@ type claudeCodeOrphanRecord struct {
 // One record per live group; remove its returned path ONLY after verified stop.
 // Records contain no prompt, credential, command line or conversation content.
 func persistClaudeCodeOrphan(root string, pid int, incarnation string) (string, error) {
+	claudeOrphanPublishMu.Lock()
+	defer claudeOrphanPublishMu.Unlock()
 	boot, err := claudeCodeOrphanBoot()
 	if err != nil {
 		return "", err
@@ -54,7 +61,7 @@ func persistClaudeCodeOrphan(root string, pid int, incarnation string) (string, 
 	if (defaultProcessGroupOps{}).Probe(identity).State != ProcessOwned {
 		return "", errors.New("Claude group identity unavailable")
 	}
-	f, err := os.CreateTemp(dir, "group-*.json")
+	f, err := os.CreateTemp(dir, ".orphan-tmp-*")
 	if err != nil {
 		return "", err
 	}
@@ -78,11 +85,20 @@ func persistClaudeCodeOrphan(root string, pid int, incarnation string) (string, 
 	if err = f.Close(); err != nil {
 		return "", err
 	}
+	// Link is an atomic, no-replace publication in the same directory. The
+	// temporary name is never an authoritative recovery record.
+	published := filepath.Join(dir, "group-"+strings.TrimPrefix(filepath.Base(path), ".orphan-tmp-")+".json")
+	if err = os.Link(path, published); err != nil {
+		return "", err
+	}
+	if err = os.Remove(path); err != nil {
+		return "", err
+	}
 	if err = claudeCodeOrphanSync(dir); err != nil {
 		return "", err
 	}
 	ok = true
-	return path, nil
+	return published, nil
 }
 
 // reapClaudeCodeOrphans runs under exclusive router startup ownership before
@@ -117,9 +133,30 @@ func reapClaudeCodeOrphans(ctx context.Context, root string) error {
 			return err
 		}
 		path := filepath.Join(dir, entry.Name())
+		if strings.HasPrefix(entry.Name(), ".orphan-tmp-") {
+			info, statErr := os.Lstat(path)
+			if statErr == nil && (!info.Mode().IsRegular() || info.Mode().Perm() != 0600) {
+				statErr = errors.New("invalid private Claude orphan temporary file")
+			}
+			if statErr == nil {
+				statErr = os.Remove(path)
+			}
+			if statErr != nil {
+				failures = append(failures, fmt.Errorf("Claude orphan %s: %w", entry.Name(), statErr))
+			}
+			continue
+		}
+		if !strings.HasPrefix(entry.Name(), "group-") || !strings.HasSuffix(entry.Name(), ".json") || len(entry.Name()) <= len("group-")+len(".json") {
+			failures = append(failures, fmt.Errorf("Claude orphan %s: unexpected filename", entry.Name()))
+			continue
+		}
 		record, err := readClaudeCodeOrphan(path)
-		if err == nil && record.Boot == boot {
-			err = reapClaudeCodeOrphan(ctx, record.Identity)
+		if err == nil {
+			if record.Boot == boot {
+				err = reapClaudeCodeOrphan(ctx, record.Identity)
+			} else if runtime.GOOS != "linux" || !claudeLinuxBootID(record.Boot) {
+				err = errors.New("Claude orphan boot identity unsafe")
+			}
 		}
 		if err == nil {
 			err = os.Remove(path)
@@ -142,6 +179,9 @@ func reapClaudeCodeOrphans(ctx context.Context, root string) error {
 				}
 			}
 		}
+		if e == nil {
+			e = claudeCodeOrphanSync(tempDir)
+		}
 		if e != nil {
 			failures = append(failures, e)
 		}
@@ -158,29 +198,37 @@ func reapClaudeCodeOrphan(ctx context.Context, identity ProcessIdentity) error {
 	case ProcessAbsent:
 		return nil
 	case ProcessOwned:
-		// Reverify at the signal boundary; never use an unverified negative PID kill.
+		// SignalVerifiedProcessGroup immediately rechecks the persisted identity.
 		if err := ops.SignalVerifiedProcessGroup(identity, syscall.SIGKILL); err != nil {
+			if ops.Probe(identity).State == ProcessAbsent {
+				return nil
+			}
 			return err
 		}
+		confirmCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return confirmClaudeCodeGroupAbsent(confirmCtx, func() ProcessProbeState { return ops.Probe(identity).State })
 	default:
 		return errors.New("Claude orphan identity unsafe; group untouched")
 	}
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if ops.Probe(identity).State == ProcessAbsent {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return errors.New("Claude orphan stop not confirmed")
-		case <-ticker.C:
+}
+
+// Linux boot IDs are UUIDs. A legacy constant or malformed value cannot
+// establish that a record predates the current boot.
+func claudeLinuxBootID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, c := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
 		}
 	}
+	return true
 }
 
 func readClaudeCodeOrphan(path string) (claudeCodeOrphanRecord, error) {
@@ -225,6 +273,16 @@ func claudeCodeOrphanDir(root, name string) (string, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
 		return "", errors.New("Claude private leaf must be a real 0700 directory")
 	}
+	// Sync each ancestor: MkdirAll may have created the root as well as the
+	// private leaf. Syncing only the leaf does not persist its directory entry.
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		if err := claudeCodeOrphanSync(parent); err != nil {
+			return "", err
+		}
+		if filepath.Dir(parent) == parent || parent == "." {
+			break
+		}
+	}
 	return dir, nil
 }
 func claudeCodeOrphanBoot() (string, error) {
@@ -252,9 +310,19 @@ func claudeCodeOrphanSync(dir string) error {
 	return f.Sync()
 }
 
+// Recovery errors can contain private paths, filenames, or malformed record
+// contents. Expose only a bounded OS error category, never the raw error.
+func safeClaudeRecoveryError(err error) error {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return fmt.Errorf("Claude orphan recovery failed (operating system error: %s)", errno.Error())
+	}
+	return errors.New("Claude orphan recovery failed (unsafe or unavailable recovery records)")
+}
+
 // RecoverClaudeCodeOrphans must be called once during router startup, before
-// Claude runtime construction/admission. Error blocks Claude admission; it is
-// not safe to continue after an unverifiable old group. The startup caller owns
+// Claude runtime construction/admission. Error blocks Claude admission, while
+// unrelated runtimes may continue. The startup caller owns
 // exclusive access to SessionRoot (the same ownership as the router database).
 func (m *Manager) RecoverClaudeCodeOrphans(ctx context.Context) error {
 	return reapClaudeCodeOrphans(ctx, m.config.SessionRoot)
@@ -272,13 +340,28 @@ func (p *ClaudeCodeProcess) forgetClaudeOrphanConfirmed() {
 	if p.orphanPath == "" {
 		return
 	}
-	record, err := readClaudeCodeOrphan(p.orphanPath)
-	if err != nil || record.Identity != p.orphanIdentity {
-		return
+	p.orphanCleanupOnce.Do(func() {
+		if err := removeClaudeCodeOrphan(p.orphanPath, p.orphanIdentity); err != nil {
+			p.orphanCleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, err)
+			if p.onUnconfirmedStop != nil {
+				p.onUnconfirmedStop()
+			}
+		}
+	})
+}
+
+func removeClaudeCodeOrphan(path string, identity ProcessIdentity) error {
+	record, err := readClaudeCodeOrphan(path)
+	if err != nil {
+		return err
 	}
-	if os.Remove(p.orphanPath) == nil {
-		_ = claudeCodeOrphanSync(filepath.Dir(p.orphanPath))
+	if record.Identity != identity {
+		return errors.New("Claude orphan identity changed")
 	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return claudeCodeOrphanSync(filepath.Dir(path))
 }
 
 // The shell executes builtins only until the durable identity is synced. EOF

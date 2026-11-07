@@ -141,3 +141,19 @@ func TestResolveModelCanonical(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, empty)
 }
+
+func TestSavedClaudeSelectionNeverFallsBack(t *testing.T) {
+	catalog := withClaudeCodeModels(Catalog{Models: []Model{{Provider: "google", ID: "gemini", Available: true}}})
+	selected, err := SelectModel(nil, &store.ManagedModel{Provider: "claude-code", ID: "sonnet"}, catalog)
+	require.NoError(t, err)
+	require.Equal(t, "claude-code", selected.Provider)
+	require.Equal(t, "sonnet", selected.ID)
+	selected, err = SelectModel(nil, &store.ManagedModel{Provider: "claude-code", ID: "unknown"}, catalog)
+	require.NoError(t, err)
+	require.Equal(t, "claude-code", selected.Provider)
+	require.Equal(t, "unknown", selected.ID)
+	require.False(t, selected.Available)
+	selected, err = SelectModel(&Model{Provider: "google", ID: "gemini"}, &store.ManagedModel{Provider: "claude-code", ID: "sonnet"}, catalog)
+	require.NoError(t, err)
+	require.Equal(t, "google", selected.Provider)
+}

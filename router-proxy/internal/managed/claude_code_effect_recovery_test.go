@@ -15,7 +15,14 @@ import (
 // A replacement bridge must reject durable effects before fresh admission.
 func TestClaudeBridgePriorEffectBeforeFreshAdmission(t *testing.T) {
 	ctx := context.Background()
-	db, binding, _, _ := wakePersistenceFixtureWithClaim(t, false)
+	db, binding, _, path := wakePersistenceFixtureWithClaim(t, false)
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = raw.ExecContext(ctx, `INSERT INTO agents(agent_id,first_seen_at) VALUES(?,?)`, binding.AgentID, "2026-01-01T00:00:00Z")
+	require.NoError(t, err)
+	_, err = raw.ExecContext(ctx, `INSERT INTO recipient_sources(recipient_name,source_kind,owner_identity,state,created_at,updated_at) VALUES(?,'managed',?,'active',?,?)`, binding.AgentID, binding.AgentID, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
 	p := &embeddedPersistence{db: db, binding: binding, digest: "genesis"}
 	m := &Manager{store: db}
 	a, err := m.newEmbeddedTurnToolAuthority(ctx, embeddedOwner{binding: binding, identity: "wake-fixture"}, p, SavedAgentSession{Cwd: t.TempDir()}, false)
@@ -32,6 +39,11 @@ func TestClaudeBridgePriorEffectBeforeFreshAdmission(t *testing.T) {
 	request := ClaudeCodeMCPCall{ToolUseID: call.ID, Name: call.Name, Arguments: args}
 	first, err := bridge.execute(ctx, request)
 	require.NoError(t, err)
+	var result struct {
+		IsError bool `json:"isError"`
+	}
+	require.NoError(t, json.Unmarshal(first, &result))
+	require.False(t, result.IsError, "reminder execution failed: %s", first)
 	evidence, err := db.RecoverEmbeddedEffect(ctx, binding, call.ID)
 	require.NoError(t, err)
 	require.Equal(t, "observed", evidence.State)

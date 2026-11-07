@@ -25,7 +25,7 @@ Router-managed workers can run on Claude Code (the `claude` CLI) as well as on p
 
 A Claude Code worker is an embedded worker with a different turn engine. Each foreground execution starts its own headless `claude` process, resumes the worker's Claude conversation when available, and stops and reaps the process and its owned children before the execution is settled. An execution is the entire admitted foreground scope, including all Run and Continue calls in that scope; those calls share its process. The next execution starts a fresh process with a new PID after cleanup. Router tools are offered through a process-scoped MCP endpoint. Tool discovery filters the available catalog against current worker policy; enabling or disabling a tool is reflected when the next scope discovers tools, without carrying a stale filtered catalog across scopes. The timeline uses the existing conversation store.
 
-Out of scope: tmux and the legacy mailbox integration (disk mailboxes, `mailbox-deliver.py`, `claude_sidecar.mjs`, `mailbox_send.py`). The existing `worker_launch.py --agent claude` path is left as it is and is not used.
+Out of scope: tmux and the legacy mailbox integration (disk mailboxes, `mailbox-deliver.py`, `claude_sidecar.mjs`, `mailbox_send.py`). The separate mecha-wolfgang `worker_launch.py --agent claude` path is not used by this integration; it is not present in this checkout.
 
 ## 2. Goals and non-goals
 
@@ -107,11 +107,13 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
 
 ### 3.7 Process lifetime, interrupt, restart, terminate, router restart
 
-**Claude process group safety.** Given a recorded Claude process identity, a zombie leader with live or uncertain group members is not proof of safe orphan cleanup. After router restart, an uncertain group is left untouched and its record retained; recovery may make the router unavailable until an operator safely resolves it and restarts. A local Claude waiter may signal remaining members only while its exact child leader is pinned and its identity and group are verified. It confirms no executable members remain before removing the matching record. This does not change the contract for other managed runtimes.
+**Unclassified mail diagnostic write failure.** When an unclassified Claude mail failure blocks automatic retry and its visible diagnostic cannot be saved, the router retries only the fenced diagnostic write using its existing retry schedule. The original mail remains unsettled and blocked; no worker execution or submission marker is invented. A stale owner or replaced reservation ends that diagnostic retry without writing on behalf of the successor. A successful write appears once in the conversation. Browser-level fault-injection acceptance remains pending.
+
+**Claude process group safety.** Given a recorded Claude process identity, a zombie leader with live or uncertain group members is not proof of safe orphan cleanup. After router restart, an uncertain group is left untouched and its record retained; the manager starts with Claude admission fenced while Pi remains available. An operator must safely resolve the group and restart the router to retry recovery. A local Claude waiter may signal remaining members only while its exact child leader is pinned and its identity and group are verified. It confirms no executable members remain before removing the matching record. This does not change the contract for other managed runtimes.
 - **One process per foreground execution.** Start a fresh process for each admitted foreground execution, including goal continuations and reset wakeups. Resume the same session on subsequent executions; use a fresh session and bounded seed after reset or confirmed missing transcript. At most one process per worker is active, and cleanup completes before another starts.
 - **No between-turn background work.** Stop and reap the process group and revoke its grant at execution end, including successful completion. Background tasks may run during the foreground execution but are not supported between executions; no idle notification turn or background authority is admitted. Unconfirmed cleanup fences further admission and retains recovery evidence.
 - **Interrupt.** Stop the current execution promptly, preserve checked partial output and conversation, and reap its process. If interrupt wins before submission, no input is sent. If a write has started without a checked echo, hold the input as uncertain rather than replaying it. A later execution starts a new process.
-- **Restart.** Stop and reap any active process; the next execution resumes the same conversation.
+- **Restart.** Stop and reap any active process; the next execution resumes the same conversation. A successfully reserved Claude restart cancels an in-flight goal evaluator and prevents an evaluator queued by an earlier turn from starting. Failed or replayed reservations do not cancel current evaluation. Pi reset behavior is unchanged.
 
 - **Terminate.** Stops any running turn and the worker's process promptly, then removes the worker as for embedded workers. The worktree cleanup option is unchanged.
   - Given a successful checked self-termination result is saved, when the engine emits further assistant output before cleanup completes, then no final or partial assistant output after that result is saved or shown. The checked producer and result remain intact until worker removal. The same rule applies to a successful checked `context_reset` result.
@@ -121,8 +123,8 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
   - Given concurrent termination requests or a replacement runtime, only a newly accepted reservation may interrupt its captured runtime and process; it must not stop a replacement. Admission remains available while interruption and turn drain wait.
 - **Router restart.**
   - A running turn is shown as interrupted, and its tool cards read "Interrupted by restart".
-  - Verified leftover Claude process groups are stopped; uncertain identities remain fenced for operator resolution.
-  - On startup the worker gets the same interrupted-turn notice embedded workers get, and continues its conversation.
+  - Recovery immediately rechecks a matching live leader identity before SIGKILL (without pinning the group, so reuse before signaling remains a risk), then waits a bounded time for confirmed group absence before removing the record. Mismatched or uncertain groups are left untouched and retained; Claude admission is fenced while Pi remains available until recovery succeeds after restart.
+  - Once startup recovery succeeds, the worker gets the same interrupted-turn notice embedded workers get and can continue its conversation.
   - No tool effect is automatically repeated.
 
 ### 3.8 Model change
@@ -184,7 +186,7 @@ These work the same as for embedded workers.
 - **Other failures.** These include a missing CLI, expired sign-in, a crash or malformed output.
   - The turn ends with a visible error in the conversation, as with embedded workers.
   - The worker stays alive.
-- **Process cleanup.** Every foreground execution ends by stopping and reaping its process group and revoking the grant. Restart, reset, termination and router shutdown also stop active processes. Recovery safely handles verified leftovers; uncertain cleanup fences admission.
+- **Process cleanup.** Every foreground execution ends by stopping and reaping its process group and revoking the grant. Restart, reset, termination and router shutdown also stop active processes. Recovery kills identity-verified live orphan groups and confirms absence; uncertain cleanup fences admission.
 
 ### 3.12 UX parity matrix
 
@@ -322,7 +324,7 @@ Still to verify:
 - **AC4. Mid-turn messages.** Durably accepted mail waits in the existing queue; direct HTTP prompts wait for the lane without durable acceptance before reservation and can be lost on cancellation or restart. Admitted inputs run in later executions and ACK only on their own checked echo. Definitely unsubmitted inputs remain eligible; a write-started input without checked echo is held, including across reset/restart, not automatically replayed.
 - **AC5. Router tools.** Each v1 router tool works from a Claude Code worker with embedded-equivalent effects. A repeated call with the same tool-use ID has no second effect. A call bound to an old session is rejected.
 - **AC6. Interrupt.** Interrupt ends a running turn within 5 s, keeps the partial output, and leaves the worker idle with its conversation.
-- **AC7. Restart, terminate, router restart.** Restart continues the conversation. Terminate stops a running turn and the worker's Claude process within 5 s. A router restart mid-turn produces the interrupted-turn notice and continuation, with no repeated tool effects and no leftover `claude` processes.
+- **AC7. Restart, terminate, router restart.** Restart continues the conversation. Terminate stops a running turn and the worker's Claude process within 5 s. After a router restart mid-turn, successful recovery produces the interrupted-turn notice and permits continuation without repeating tool effects. Recovery immediately rechecks and kills identity-verified live orphan groups, confirms absence within a bounded time, and permits Claude admission. Mismatched or uncertain groups remain untouched and retained; Pi remains available while Claude is fenced until recovery succeeds after restart.
 - **AC8. Model change.** A Claude Code worker can switch between Claude Code models and keeps its conversation. Cross-engine switches are rejected by both the UI and the router.
 - **AC9. Context reset.** Each of the three triggers produces a new epoch whose first Claude message contains the instruction, scratchpad and last N messages, in order, followed by the wake prompt. The epoch marker appears, the context bar drops, and no reset loop occurs when the post-reset context is above the threshold.
 - **AC10. Goals.** Setting a goal on a Claude Code worker leads to evaluation after each normal turn. NOT_DONE produces continuation turns, DONE turns the goal off, snooze delays the continuation, and the cap and circuit breaker hold.
@@ -405,7 +407,7 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 are not ac
 - **User Goal**: Stop or recover safely.
 - **Given**: Partial output and pending input/background child processes.
 - **When**: Interrupt, restart, terminate and router crash occur as separate cases.
-- **Then**: Interrupt keeps partial output, ends within 5 s and preserves conversation. Restart resumes it; terminate stops process/children within 5 s. Router recovery records interrupted tools/notice, reaps verified leftovers and never repeats uncertain effects. Old output cannot mutate current binding.
+- **Then**: Interrupt keeps partial output, ends within 5 s and preserves conversation. Restart resumes it; terminate stops process/children within 5 s. Router recovery records interrupted tools/notice, cleans verified live orphan groups, fences uncertain groups, and never repeats uncertain effects. Old output cannot mutate current binding.
 
 Restart implementation contract: an empty restart request for an embedded Claude worker closes/reaps only its engine resources, revokes its private MCP grant and keeps the checked router binding/history. It does not look up an RPC worker. New acquisitions consult a fenced, persisted binding-started bit even after process eviction. Before submitting any user input, a resumed process must answer the control channel. Only the explicit missing-conversation diagnostic permits one fresh-process fallback; any other failure, or failure of that fallback, leaves the input unconsumed. Checked history is context, never authority to repeat an uncertain tool effect. The started bit shares existing session retention and deletion, with no separate ledger.
 
@@ -574,3 +576,64 @@ The full scenario rows below remain required acceptance targets, not passing cla
 - **Then** a lowercase `claude` tag appears beside its name with the same styling as the existing `tmux` tag.
 - **Given** a tmux worker or a non-Claude managed worker, **when** its row is displayed, **then** the tmux worker retains its `tmux` tag and the non-Claude managed worker does not gain a `claude` tag. A tmux worker using a Claude model is still labeled `tmux`, not `claude`.
 - **Verification**: `tests/e2e/claude-worker-label.spec.ts` exercises launch, browser projection and reload; `tests/component/claude-worker-label.test.tsx` covers source and model edge cases.
+
+### Failed admission cleanup uncertainty
+
+- Given durable admission fails before the Claude process gate is released, when process-group cleanup cannot be confirmed, the caller sees both the admission failure and unconfirmed cleanup, the manager fences further Claude admission, and the orphan record remains for startup recovery. Local cleanup verifies the owned leader; restart recovery rechecks identity but cannot pin the group, so reuse between verification and signaling remains a risk.
+- Given a Claude auth preflight or goal evaluator runs, its process group must have durable recovery authority before the CLI is released. Unconfirmed cleanup retains that authority, fences admission, and is reported even if the request was canceled or the CLI output is invalid.
+
+### Scenario: Superseding an in-flight goal evaluation
+- A newer goal revision makes an older evaluator verdict stale. The evaluator may finish, but its stale verdict cannot persist, publish a failure diagnostic, or schedule continuation. Goal mutations do not cancel the evaluator.
+- Evidence: `TestGoalMutationDoesNotCancelButRejectsStaleVerdict` and `tests/e2e/claude-evaluator-qa-regression.spec.ts`.
+
+### Mail failure settlement
+
+- **Given** a Claude mail turn definitely fails before submission and cleanup is complete, **when** bounded retries fail, **then** the message is dead-lettered with an actionable error and the next queued message is offered.
+- **Given** settlement storage fails, **when** storage recovers, **then** the router retries settlement without replaying the worker. A stale reservation or owner ends that settlement without modifying a replacement.
+- **Given** a Claude turn has a durable stdin marker, **when** it fails, **then** its exact message is held against automatic replay with a visible diagnostic until expiry; other eligible messages may proceed. Unclassified errors without that marker are not speculatively marked uncertain. A storage failure during classification must not cause replay or a speculative hold.
+
+The definite pre-submission startup failure count and pending terminal settlement intent are manager-local, not durable. A router crash can lose either and permit another attempt. Settlement itself is transactional and fenced to the current owner, attempt, message incarnation, accepted target and unsubmitted state. Pi retry accounting is unchanged.
+
+- **Given** the third definite startup failure is recorded, **when** terminal settlement rolls back while the manager remains running, **then** the manager retries settlement for that same attempt without starting Claude again. A router restart can lose the pending decision and restart the failure count. A storage error is not a stale fence; a stale fence must not mutate a replacement.
+- **Given** the attempt may have reached stdin, **when** recovery runs, **then** the existing stdin marker prevents replay and definite-failure settlement. Failure to record a result must not turn uncertain execution into a safe retry after restart.
+- **Given** settlement or a stale settlement finishes, **when** other eligible messages remain, **then** the queue is offered again. Repeated storage failures schedule at most one outstanding settlement retry per agent.
+
+The queued-mail regression fixture must enqueue distinct accepted messages: identical live sends may collapse to one delivery, so two requested IDs do not by themselves prove two queued messages exist.
+
+### Restart and in-flight goal evaluation
+
+A successful Claude worker restart supersedes goal work from the prior
+execution, including a turn that has finished its provider work but has not
+registered its evaluator yet. The restart reservation and its cancellation
+fence are one ordered boundary: no prior evaluator may register or commit a
+verdict through the gap. An evaluator already running is cancelled. A stale
+result must not change goal counters, record a verdict, or schedule a
+continuation after that boundary. The existing turn and counter ordering is
+otherwise unchanged. A NOT_DONE verdict committed before the restart remains
+eligible under the existing continuation guards; restart must not generation-fence
+its timer, idle recovery, or eventual start.
+
+A failed reservation, an idempotent replay, or a conflicting request must not
+cancel an evaluator or invalidate its result. These restart rules apply only to
+Claude workers and do not change Pi context reset behavior.
+
+**Acceptance scenarios (pending E2E):**
+- Given a Claude turn held before evaluator registration, when restart is
+  durably reserved and the turn resumes, then no evaluator verdict or
+  continuation from that turn is applied.
+- Given a Claude evaluator held in flight, when restart is durably reserved,
+  then the evaluator observes cancellation and cannot update goal counters or
+  schedule a continuation.
+- Given a held evaluator, when restart reservation fails, replays an existing
+  operation, or conflicts, then the evaluator is not cancelled and its valid
+  result can settle normally.
+- Given a Pi worker, when its context is reset, then existing Pi reset behavior
+  remains unchanged.
+
+These scenarios still require Playwright E2E acceptance. Focused deterministic
+router tests are supporting evidence, not a replacement for that acceptance.
+
+### Claude child preflight failure
+
+- A Claude child has one attempt, including when local preflight fails before execution. Its failure identifies the host install or sign-in action where applicable. Its parent may spawn a new child, but cannot resume the failed child or replay its effects.
+- **Evidence**: `TestClaudeChildPreflightFailureIsActionableAndCannotResume` and Claude child resume guard tests; browser E2E acceptance remains pending.

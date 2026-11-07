@@ -163,3 +163,12 @@ func TestSubagentResultReportFormatting(t *testing.T) {
 	})
 	assert.Contains(t, reportWithTranscript, "User: start\nAssistant: done")
 }
+
+func TestSubagentTerminalStatusIncludesFailure(t *testing.T) {
+	for _, status := range []string{"failed", "timed_out"} {
+		assert.True(t, IsTerminalSubagentStatus(status), "%s must be terminal", status)
+	}
+	for _, status := range []string{"queued", "running"} {
+		assert.False(t, IsTerminalSubagentStatus(status), "%s must remain active", status)
+	}
+}

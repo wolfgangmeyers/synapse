@@ -66,6 +66,8 @@ type ClaudeCodeMCPServer struct {
 	grants  map[string]*claudeMCPGrant
 	private *claudePrivateMCPListener
 	closed  bool
+	// queueDeadline overrides the queue clock for deterministic tests. Set before serving.
+	queueDeadline func() (time.Time, *time.Timer)
 }
 
 func (m *Manager) ClaudeCodeMCP() *ClaudeCodeMCPServer {
@@ -246,6 +248,25 @@ func claudeMCPPingValid(raw json.RawMessage) bool {
 	}
 	return true
 }
+func claudeMCPAcquireSerial(ctx context.Context, serial chan struct{}, deadline time.Time, expired <-chan time.Time) error {
+	select {
+	case serial <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-serial
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			<-serial
+			return context.DeadlineExceeded
+		}
+		return nil
+	case <-expired:
+		return context.DeadlineExceeded
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *ClaudeCodeMCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		claudeMCPReply(w, 405, nil, nil, -32600, "POST required")
@@ -260,7 +281,9 @@ func (s *ClaudeCodeMCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		claudeMCPReply(w, 401, nil, nil, -32001, "invalid process grant")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	// Tool execution has its own policy timeout (normally five minutes, up to
+	// thirty). The request and process grant still cancel the whole call.
+	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	stop := context.AfterFunc(g.ctx, cancel)
 	defer stop()
@@ -409,13 +432,23 @@ func (s *ClaudeCodeMCPServer) handleMCPMessage(w http.ResponseWriter, ctx contex
 			reject(-32602, "invalid tool or arguments")
 			return
 		}
-		select {
-		case g.serial <- struct{}{}:
-			defer func() { <-g.serial }()
-		case <-ctx.Done():
-			reject(-32000, "tool request cancelled")
+		deadline := time.Now().Add(claudeMCPQueueDuration())
+		var queueTimer *time.Timer
+		if s.queueDeadline != nil {
+			deadline, queueTimer = s.queueDeadline()
+		} else {
+			queueTimer = time.NewTimer(time.Until(deadline))
+		}
+		defer queueTimer.Stop()
+		if err := claudeMCPAcquireSerial(ctx, g.serial, deadline, queueTimer.C); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				reject(-32000, "tool queue wait timed out")
+			} else {
+				reject(-32000, "tool request cancelled")
+			}
 			return
 		}
+		defer func() { <-g.serial }()
 		// Recheck after serialization: a queued request cannot inherit an old owner.
 		if g.ctx.Err() != nil || s.db.RenewEmbeddedOwner(ctx, g.spec.Binding, g.spec.Owner, embeddedOwnerTTL) != nil {
 			reject(-32001, "stale process grant")

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -17,6 +18,36 @@ import (
 func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.ManagedAgentRecord, owner embeddedOwner, p *embeddedPersistence, authority *embeddedTurnToolAuthority, prompt string, setReceipt func(*store.EmbeddedGoalAppliedReceipt)) (*claudeCodeRuntime, error) {
 	bridge := newClaudeCodeTurnBridge(authority)
 	bridge.owner = &owner
+	if authority.role == "root" {
+		bridge.inlineCheck = func(ctx context.Context, name string) error {
+			normalized, inline := normalizeInlineActionTool(name)
+			if inline {
+				if err := admitWorkflowStateTool(ctx, m.store, p.binding.AgentID, name); err != nil {
+					return err
+				}
+			}
+			if !inline || m.IsInlineToolsAllowed(ctx, p.binding.AgentID) {
+				return nil
+			}
+			tools := authority.baseTools
+			if lane := m.laneFor(p.binding.AgentID); lane != nil {
+				if active := lane.getActiveTools(); len(active) > 0 {
+					tools = active
+				} else if base := lane.getBaseTools(); len(base) > 0 {
+					tools = base
+				}
+			}
+			for _, tool := range tools {
+				if tool.Name == InlineToolAllowanceToolName {
+					if lane := m.laneFor(p.binding.AgentID); lane != nil && lane.consumeInlineAllowance(normalized, time.Now()) {
+						return nil
+					}
+					return errors.New(InlineToolBlockReason)
+				}
+			}
+			return nil
+		}
+	}
 	before := func(ctx context.Context, size int) error {
 		lane := m.laneFor(p.binding.AgentID)
 		if lane.embeddedResetPending() {
@@ -83,12 +114,8 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 		setReceipt(&receipt)
 		return nil
 	}
-	config := ClaudeCodeProcessConfig{OrphanRoot: m.config.SessionRoot, Cwd: saved.Cwd, SessionID: claudeCodeSessionID(p.binding.SessionID), Model: saved.SelectedModel.ID}
-	config.OnUnconfirmedStop = func() {
-		m.claudeCodeProcesses.mu.Lock()
-		m.claudeCodeProcesses.closed = true
-		m.claudeCodeProcesses.mu.Unlock()
-	}
+	config := ClaudeCodeProcessConfig{OrphanRoot: m.config.SessionRoot, Cwd: saved.Cwd, SessionID: claudeCodeSessionID(p.binding.SessionID), Model: saved.SelectedModel.ID, RootAuthority: authority.role == "root"}
+	config.OnUnconfirmedStop = m.claudeCodeProcesses.fence
 	grantFactory := func() (claudeCodeProcessGrant, error) {
 		mcpURL, err := m.ClaudeCodeMCPURL()
 		if err != nil {
@@ -102,7 +129,7 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 			candidates = authority.tools
 		}
 		for _, tool := range candidates {
-			if !claudeCodeApplicableTool(tool.Name) {
+			if !claudeCodeApplicableRoleTool(authority.role, tool.Name) {
 				continue
 			}
 			schema, err := json.Marshal(tool.Parameters)
@@ -189,6 +216,14 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 	}
 	bridge.interrupt = func() { r.mu.Lock(); r.discardPartial = true; r.mu.Unlock(); r.Interrupt() }
 	return r, nil
+}
+
+// Root uses checked router equivalents rather than unrestricted native tools.
+func claudeCodeApplicableRoleTool(role, name string) bool {
+	if role == "root" {
+		return true
+	}
+	return claudeCodeApplicableTool(name)
 }
 
 // Claude provides its own native file and shell tools. The inline allowance

@@ -16,7 +16,7 @@ const (
 // IsTerminalSubagentStatus returns true if status is one of the settled terminal states.
 func IsTerminalSubagentStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "steered", "aborted", "stopped", "error", "interrupted", "cancelled":
+	case "completed", "failed", "timed_out", "steered", "aborted", "stopped", "error", "interrupted", "cancelled":
 		return true
 	default:
 		return false

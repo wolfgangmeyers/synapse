@@ -102,7 +102,7 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
   }, [isGoogleConnected, selectedGoogleMethod, activeGoogleStatus?.account_label]);
 
   const defaultModelLabel = useMemo(() => {
-    if (!catalog?.default_model) return "Use ChatGPT default";
+    if (!catalog?.default_model) return "Automatic (Pi model)";
     const matched = (catalog.models ?? []).find(
       (m) => m.provider === catalog.default_model?.provider && m.id === catalog.default_model?.id
     );
@@ -480,7 +480,8 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
       <section className="provider-auth-section" aria-labelledby="provider-default-model-title">
         <div className="provider-auth-section-heading">
           <h3 id="provider-default-model-title">Default model</h3>
-          <p>New managed agents use this model when you do not choose one.</p>
+          <p>Ordinary managed worker launches use this model when no model is chosen. Embedded subagents may use the default or inherit their parent’s model. Automatic uses the first available Pi model, or the built-in Pi fallback if none is available.</p>
+          <p>For Claude models, install the Claude CLI and sign in on the router host; provider sign-in is not required.</p>
         </div>
         <div ref={modelPickerRef} className="model-picker provider-dropdown default-model-picker">
           <button
@@ -506,9 +507,9 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
                     setModelMenuOpen(false);
                   }}
                 >
-                  <strong>Use ChatGPT default</strong>
+                  <strong>Automatic (Pi model)</strong>
                 </button>
-                {(catalog?.models ?? []).filter((model) => model.available && model.provider !== "claude-code").map((model) => (
+                {(catalog?.models ?? []).filter((model) => model.available).map((model) => (
                   <button
                     key={`${model.provider}:${model.id}`}
                     type="button"
@@ -539,8 +540,8 @@ export function ProviderAuthDialog({ open, client, prompt, refreshKey = 0, onClo
               if (provider !== undefined) void setDefault({ provider, id: id.join(":") });
             }}
           >
-            <option value="">Use ChatGPT default</option>
-            {(catalog?.models ?? []).filter((model) => model.available && model.provider !== "claude-code").map((model) => (
+            <option value="">Automatic (Pi model)</option>
+            {(catalog?.models ?? []).filter((model) => model.available).map((model) => (
               <option key={`${model.provider}:${model.id}`} value={`${model.provider}:${model.id}`}>
                 {model.name}
               </option>

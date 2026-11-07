@@ -15,7 +15,7 @@ import (
 
 // Real HTTP -> manager -> SQLite, with only the external CLI replaced.
 func TestClaudeBackendCatalogAndAdmission(t *testing.T) {
-	db, processes, manager, server := newLaunchValidationServer(t, managed.CatalogFromModels(), &launchValidationRPCFactory{})
+	db, processes, manager, server := newLaunchValidationServer(t, managed.CatalogFromModels(managed.Model{Provider: "claude-code", ID: "sonnet", Available: true}), &launchValidationRPCFactory{})
 	ctx := context.Background()
 	root := manager.AllowedWorkingDirectoryRoots()[0]
 	binary, err := filepath.Abs(filepath.Join("..", "..", "..", "tests", "fixtures", "fake-claude", "claude.mjs"))
@@ -41,10 +41,10 @@ func TestClaudeBackendCatalogAndAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, agents)
 	require.Zero(t, processes.count())
-	// Root and RPC restrictions precede any CLI execution.
+	// Roots use the same Claude availability preflight; RPC remains restricted.
 	t.Setenv("MECHA_CLAUDE_BIN", "/no/such/claude")
 	_, err = manager.LaunchEmbeddedRoot(ctx, managed.LaunchRequest{Name: "root-rejected", Cwd: root, Runtime: "embedded", Model: &managed.Model{Provider: "claude-code", ID: "sonnet"}})
-	require.ErrorContains(t, err, "root")
+	require.ErrorContains(t, err, "Claude CLI unavailable")
 	status, payload = launchValidationRequest(t, server, "123e4567-e89b-42d3-a456-426614174092", strings.ReplaceAll(strings.ReplaceAll(body, `"runtime":"embedded"`, `"runtime":"rpc"`), "claude-rejected", "rpc-rejected"))
 	require.Equal(t, 422, status)
 	require.Equal(t, "INVALID_ENGINE_SELECTION", payload["error"].(map[string]any)["code"])
@@ -55,8 +55,10 @@ func TestClaudeBackendCatalogAndAdmission(t *testing.T) {
 	res, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer res.Body.Close()
-	require.Equal(t, 422, res.StatusCode)
+	require.Equal(t, 200, res.StatusCode)
 	saved, err := db.GetDefaultModel(ctx)
 	require.NoError(t, err)
-	require.Nil(t, saved)
+	require.NotNil(t, saved)
+	require.Equal(t, "claude-code", saved.Provider)
+	require.Equal(t, "sonnet", saved.ID)
 }

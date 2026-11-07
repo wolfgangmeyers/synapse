@@ -86,7 +86,7 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 		}
 		return *explicit, nil
 	}
-	if saved != nil && saved.Provider != claudeCodeProvider {
+	if saved != nil {
 		for _, model := range catalog.Models {
 			if model.Provider == saved.Provider && model.ID == saved.ID && model.Available {
 				return model, nil

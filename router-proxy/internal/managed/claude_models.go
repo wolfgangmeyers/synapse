@@ -2,18 +2,19 @@ package managed
 
 import (
 	"fmt"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/claudemodels"
 )
 
-const claudeCodeProvider = "claude-code"
+const claudeCodeProvider = claudemodels.Provider
 
 // These are selectable CLI aliases, not a provider-auth or sign-in snapshot.
 func claudeCodeModels() []Model {
-	return []Model{
-		{Provider: claudeCodeProvider, ID: "fable", Name: "Claude Fable", Available: true, ContextWindow: 1000000},
-		{Provider: claudeCodeProvider, ID: "opus", Name: "Claude Opus", Available: true, ContextWindow: 1000000},
-		{Provider: claudeCodeProvider, ID: "sonnet", Name: "Claude Sonnet", Available: true, ContextWindow: 1000000},
-		{Provider: claudeCodeProvider, ID: "haiku", Name: "Claude Haiku", Available: true, ContextWindow: 1000000},
+	var models []Model
+	for _, alias := range claudemodels.Catalog() {
+		models = append(models, Model{Provider: claudeCodeProvider, ID: alias.ID, Name: alias.Name, Available: true, ContextWindow: 1000000})
 	}
+	return models
 }
 
 func claudeCodeModel(id string) (Model, error) {

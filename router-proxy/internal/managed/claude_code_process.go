@@ -33,6 +33,14 @@ type ClaudeCodeProcessConfig struct {
 	MCPConfigFile, SystemPromptFile string
 	OrphanRoot                      string // managed private recovery root; empty only for standalone callers
 	OnUnconfirmedStop               func() // closes only the owning manager pool; no filesystem dependency
+	admitExternal                   func() (func(), error)
+	releaseGate                     func(func() (int, error)) (int, error)
+	BeforeRelease                   func() error // durable admission immediately before CLI exec
+	waitForCleanup                  func(*exec.Cmd, ProcessIdentity, func()) error
+	afterFailedRelease              func() error
+	writeRelease                    func(*os.File) (int, error)
+	RootAuthority                   bool // root uses only the checked router tool bridge
+	ChildAuthority                  bool // child uses only its scoped tool bridge
 	Resume                          bool
 	Environment                     []string
 }
@@ -68,6 +76,8 @@ type claudeCodePendingInput struct {
 type ClaudeCodeProcess struct {
 	orphanPath        string
 	orphanIdentity    ProcessIdentity
+	orphanCleanupOnce sync.Once
+	orphanCleanupErr  error
 	ownedTasks        map[string]bool
 	ownedTaskBytes    int
 	cmd               *exec.Cmd
@@ -162,6 +172,13 @@ func resolveClaudeCodeBinary(cfg ClaudeCodeProcessConfig, env []string) (string,
 // PreflightClaudeCode runs local `auth status --json` with a five-second limit,
 // bounded capture and scrubbed environment. No identity is retained or model called.
 func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (string, error) {
+	if cfg.admitExternal != nil {
+		release, err := cfg.admitExternal()
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
 	env := claudeCodeEnvironment(cfg.Environment)
 	bin, err := resolveClaudeCodeBinary(cfg, env)
 	if err != nil {
@@ -169,27 +186,29 @@ func PreflightClaudeCode(ctx context.Context, cfg ClaudeCodeProcessConfig) (stri
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.Command(bin, "auth", "status", "--json")
+	cmd, gate, err := claudeCodeGatedCommand(bin, []string{"auth", "status", "--json"})
+	if err != nil {
+		return "", err
+	}
+	defer gate.Close()
+	defer cmd.ExtraFiles[0].Close()
 	cmd.Dir = cfg.Cwd
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 250 * time.Millisecond
 	out := &claudeCodeBoundedCapture{limit: claudeCodeStderrLimit}
 	cmd.Stdout = out
 	cmd.Stderr = io.Discard
+	var orphanPath string
 	if err = ctx.Err(); err == nil {
-		err = cmd.Start()
+		orphanPath, err = startClaudeShortCommand(cmd, gate, cfg)
 	}
 	if err != nil {
 		return "", fmt.Errorf("check Claude CLI sign-in on the host: %w", err)
 	}
-	wait := make(chan error, 1)
-	go func() { wait <- cmd.Wait() }()
-	select {
-	case err = <-wait:
-	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-wait
-		err = ctx.Err()
+	err = waitClaudeShortCommand(ctx, cmd, cfg, orphanPath)
+	if errors.Is(err, errClaudeCodeGroupUnconfirmed) {
+		return "", err
 	}
 	var status struct {
 		LoggedIn *bool `json:"loggedIn"`
@@ -217,18 +236,12 @@ func (b *claudeCodeBoundedCapture) Write(v []byte) (int, error) {
 	return n, nil
 }
 
-func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*ClaudeCodeProcess, error) {
-	if cfg.Cwd == "" || cfg.SessionID == "" || cfg.Model == "" {
-		return nil, errors.New("Claude process requires cwd, session ID and model")
-	}
-	bin, err := PreflightClaudeCode(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
+// claudeCodeProcessArgs keeps root tool isolation distinct from worker defaults.
+func claudeCodeProcessArgs(cfg ClaudeCodeProcessConfig) []string {
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--model", cfg.Model, "--permission-mode", "bypassPermissions"}
+	if cfg.RootAuthority || cfg.ChildAuthority {
+		args = append(args, "--tools", "", "--strict-mcp-config")
+	}
 	if cfg.MCPConfigFile != "" {
 		args = append(args, "--mcp-config", cfg.MCPConfigFile)
 	}
@@ -240,6 +253,21 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 		flag = "--resume"
 	}
 	args = append(args, flag, cfg.SessionID)
+	return args
+}
+
+func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*ClaudeCodeProcess, error) {
+	if cfg.Cwd == "" || cfg.SessionID == "" || cfg.Model == "" {
+		return nil, errors.New("Claude process requires cwd, session ID and model")
+	}
+	bin, err := PreflightClaudeCode(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	args := claudeCodeProcessArgs(cfg)
 	cmd, gate, err := claudeCodeGatedCommand(bin, args)
 	if err != nil {
 		return nil, err
@@ -308,6 +336,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 			stderr.Close()
 			outw.Close()
 			errw.Close()
+			cfg.blockUnconfirmedClaudeStop()
 			return nil, fmt.Errorf("persist Claude orphan identity: %w", err)
 		}
 		record, readErr := readClaudeCodeOrphan(orphanPath)
@@ -315,10 +344,77 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 			orphanIdentity = record.Identity
 		}
 	}
-	if _, err = gate.Write([]byte("ready\n")); err != nil {
+	if cfg.BeforeRelease != nil {
+		if err = cfg.BeforeRelease(); err != nil {
+			_ = cmd.Process.Kill()
+			wait := cfg.waitForCleanup
+			if wait == nil {
+				wait = waitClaudeCodeCommandConfirmed
+			}
+			confirmed := false
+			var removalErr error
+			cleanupErr := wait(cmd, orphanIdentity, func() {
+				confirmed = true
+				if orphanPath != "" {
+					removalErr = removeClaudeCodeOrphan(orphanPath, orphanIdentity)
+				}
+			})
+			if !confirmed {
+				cfg.blockUnconfirmedClaudeStop()
+				cleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, cleanupErr)
+			} else if removalErr != nil {
+				cfg.blockUnconfirmedClaudeStop()
+				cleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, removalErr)
+			} else {
+				cleanupErr = nil
+			}
+			return nil, errors.Join(err, cleanupErr)
+		}
+	}
+	writeRelease := cfg.writeRelease
+	if writeRelease == nil {
+		writeRelease = func(f *os.File) (int, error) { return f.Write([]byte("ready\n")) }
+	}
+	release := func() (int, error) { return writeRelease(gate) }
+	var n int
+	var writeErr error
+	if cfg.releaseGate != nil {
+		n, writeErr = cfg.releaseGate(release)
+	} else {
+		n, writeErr = release()
+	}
+	if writeErr != nil || n != len("ready\n") {
+		if writeErr == nil {
+			writeErr = io.ErrShortWrite
+		}
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return nil, err
+		confirmed := false
+		var removalErr error
+		cleanupErr := waitClaudeCodeCommandConfirmed(cmd, orphanIdentity, func() {
+			confirmed = true
+			if orphanPath != "" {
+				removalErr = removeClaudeCodeOrphan(orphanPath, orphanIdentity)
+			}
+		})
+		stdin.Close()
+		stdout.Close()
+		stderr.Close()
+		outw.Close()
+		errw.Close()
+		if confirmed && removalErr != nil {
+			cfg.blockUnconfirmedClaudeStop()
+			cleanupErr = errors.Join(errClaudeCodeGroupUnconfirmed, removalErr)
+		} else if confirmed {
+			cleanupErr = nil
+		} else {
+			cfg.blockUnconfirmedClaudeStop()
+		}
+		if n == 0 && confirmed && cfg.afterFailedRelease != nil {
+			if restoreErr := cfg.afterFailedRelease(); restoreErr != nil {
+				return nil, errors.Join(writeErr, restoreErr)
+			}
+		}
+		return nil, errors.Join(writeErr, cleanupErr)
 	}
 	gate.Close()
 	outw.Close()
@@ -350,6 +446,7 @@ func StartClaudeCodeProcess(ctx context.Context, cfg ClaudeCodeProcessConfig) (*
 	}()
 	go func() {
 		err := waitClaudeCodeCommandConfirmed(cmd, orphanIdentity, p.forgetClaudeOrphanConfirmed)
+		err = errors.Join(err, p.orphanCleanupErr)
 		if errors.Is(err, errClaudeCodeGroupUnconfirmed) {
 			// The regular identity record remains durable recovery authority.
 			// Stop same-manager admission even if every filesystem write fails.

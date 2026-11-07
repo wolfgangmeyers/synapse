@@ -143,11 +143,15 @@ export async function startIsolatedRouter(options: {
   repoRoot: string;
   managed?: boolean;
   testClock?: boolean;
-  embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string };
+  embedded?: { endpoint: string; signedOut?: boolean; kbDir?: (home: string) => string; omitGoogle?: boolean };
   codexCredentialPath?: string;
   fakeEmbeddedCatalog?: boolean;
   backgroundExpiryInterval?: string;
   rootControlFixture?: boolean;
+  piReviewBarrier?: boolean;
+  capacityFixture?: boolean;
+  mcpQueueFixture?: boolean;
+  embeddedRoot?: { name: string; requestId: string; model: { provider: string; id: string }; instruction: string };
 }): Promise<IsolatedRouter> {
   if (options.embedded && !options.managed) throw new Error("Embedded E2E requires managed mode");
   if (options.backgroundExpiryInterval && options.testClock === false) throw new Error("Background expiry interval requires the test clock");
@@ -165,7 +169,7 @@ export async function startIsolatedRouter(options: {
 
   // Compile router binary into the temporary directory for isolation
   await new Promise<void>((res, rej) => {
-    const cp = spawn("go", ["build", ...(options.embedded ? ["-tags=embedded_restart_test_only"] : []), "-o", binaryPath, "./cmd/mailbox-router"], {
+    const cp = spawn("go", ["build", ...(options.embedded ? [`-tags=embedded_restart_test_only${options.capacityFixture ? ",claude_capacity_test_only" : ""}${options.mcpQueueFixture ? ",claude_mcp_queue_test_only" : ""}`] : []), "-o", binaryPath, "./cmd/mailbox-router"], {
       cwd: routerProxyDir,
       stdio: "pipe",
     });
@@ -234,6 +238,14 @@ export async function startIsolatedRouter(options: {
     );
   }
 
+  if (options.embeddedRoot) {
+    if (!options.managed) throw new Error("Embedded root requires managed mode");
+    args.push("--embedded-root-bootstrap", "--embedded-root-request-id", options.embeddedRoot.requestId,
+      "--embedded-root-name", options.embeddedRoot.name, "--embedded-root-cwd", join(root, "work"),
+      "--embedded-root-model-provider", options.embeddedRoot.model.provider, "--embedded-root-model-id", options.embeddedRoot.model.id,
+      "--embedded-root-initial-instruction", options.embeddedRoot.instruction);
+  }
+
   if (options.embedded) {
     const privateDir = join(root, "private");
     await mkdir(privateDir, { mode: 0o700 });
@@ -251,6 +263,20 @@ export async function startIsolatedRouter(options: {
       const fixtureAuth = join(root, "provider-fixture");
       await mkdir(fixtureAuth, { mode: 0o700 });
       await copyFile(join(options.repoRoot, "web/router-ui-react/tests/functional/fixtures/fake-provider-auth.mjs"), join(fixtureAuth, "index.mjs"));
+      if (options.embedded.omitGoogle) {
+        // Restrict this disposable catalog to the loopback Codex fixture.
+        const fixturePath = join(fixtureAuth, "index.mjs");
+        const { readFile } = await import("node:fs/promises");
+        const source = await readFile(fixturePath, "utf8");
+        const providers = ["google", "google-vertex"];
+        const lines = source.split("\n");
+        for (const provider of providers) {
+          const matches = lines.filter(line => line.includes("available: true") && line.includes(`provider: "${provider}"`));
+          if (matches.length !== 1) throw new Error(`expected exactly one available ${provider} catalog fixture entry, found ${matches.length}`);
+        }
+        const filtered = lines.filter(line => !providers.some(provider => line.includes("available: true") && line.includes(`provider: "${provider}"`))).join("\n");
+        await writeFile(fixturePath, filtered);
+      }
       await copyFile(join(options.repoRoot, "auth-helper/codex-consumer.mjs"), join(fixtureAuth, "codex-consumer.mjs"));
       await symlink(join(options.repoRoot, "auth-helper/node_modules"), join(fixtureAuth, "node_modules"), "dir");
       const helperIndex = args.indexOf("--managed-auth-helper");
@@ -264,7 +290,7 @@ export async function startIsolatedRouter(options: {
       args[args.indexOf("--managed-mecha-rpc") + 1] = join(root, "mecha-rpc.ts");
     }
     args.push("--codex-credential-path", join(privateDir, "codex.json"));
-    await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify({ google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });
+    await writeFile(join(root, "managed-home/.pi/agent/auth.json"), JSON.stringify(options.embedded.omitGoogle ? {} : { google: { type: "api_key", key: "other-provider-test-secret" } }), { mode: 0o600 });
     await writeFile(join(root, "work/note.txt"), "terra harmless tool evidence", { mode: 0o600 });
   }
   if (options.codexCredentialPath) args.push("--codex-credential-path", options.codexCredentialPath);
@@ -280,6 +306,8 @@ export async function startIsolatedRouter(options: {
       ...(options.embedded?.kbDir ? { MECHA_KB_DIR: options.embedded.kbDir(join(root, "managed-home")) } : {}),
     };
   }
+  if (options.capacityFixture) runtimeEnvironment = { ...runtimeEnvironment, MECHA_TEST_CLAUDE_CAPACITY_DIR: root };
+  if (options.piReviewBarrier) runtimeEnvironment = { ...runtimeEnvironment, MECHA_PI_REVIEW_BARRIER: root };
   if (options.backgroundExpiryInterval) {
     runtimeEnvironment = { ...runtimeEnvironment, MECHA_TEST_BACKGROUND_EXPIRY_INTERVAL: options.backgroundExpiryInterval };
   }

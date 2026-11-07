@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,8 +29,61 @@ func orphanDummy(t *testing.T) *exec.Cmd {
 	cmd := exec.Command("sh", "-c", "sleep 120 & wait")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, cmd.Start())
-	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
+	marker, markerErr := processStartMarker(cmd.Process.Pid)
+	t.Cleanup(func() {
+		if err := cleanupOrphanDummy(cmd, marker, markerErr, (defaultProcessGroupOps{}).SignalVerifiedProcessGroup); err != nil {
+			t.Errorf("fixture cleanup: %v", err)
+		}
+	})
+	require.NoError(t, markerErr)
 	return cmd
+}
+
+// The child is never reaped by another waiter, so Process.Kill targets our
+// child even when identity verification fails. Never guess at a group ID.
+func cleanupOrphanDummy(cmd *exec.Cmd, marker string, markerErr error, signal func(ProcessIdentity, syscall.Signal) error) error {
+	if cmd.ProcessState != nil {
+		return nil
+	}
+	identity := ProcessIdentity{PID: cmd.Process.Pid, StartMarker: marker, Incarnation: "fixture"}
+	var signalErr error
+	if markerErr == nil {
+		signalErr = signal(identity, syscall.SIGKILL)
+	} else {
+		signalErr = markerErr
+	}
+	if signalErr != nil && markerErr == nil && (defaultProcessGroupOps{}).Probe(identity).State == ProcessAbsent {
+		signalErr = nil // Recovery already stopped the entire group.
+	}
+	if signalErr != nil {
+		// The group cannot safely be signaled. Still stop the owned leader and
+		// report the failure rather than blocking forever or hiding descendants.
+		_ = cmd.Process.Kill()
+	}
+	done := make(chan error, 1)
+	go func() { done <- waitClaudeCodeCommand(cmd, identity) }()
+	select {
+	case err := <-done:
+		if errors.Is(err, errClaudeCodeGroupUnconfirmed) {
+			return errors.Join(signalErr, err)
+		}
+		return signalErr
+	case <-time.After(3 * time.Second):
+		return errors.Join(signalErr, errors.New("timed out waiting for owned fixture"))
+	}
+}
+
+func TestOrphanDummyCleanupSignalFailureIsBounded(t *testing.T) {
+	cmd := exec.Command("sleep", "120")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	marker, err := processStartMarker(cmd.Process.Pid)
+	require.NoError(t, err)
+	start := time.Now()
+	err = cleanupOrphanDummy(cmd, marker, nil, func(ProcessIdentity, syscall.Signal) error { return errors.New("signal failed") })
+	require.ErrorContains(t, err, "signal failed")
+	require.Less(t, time.Since(start), 3*time.Second)
+	require.NotNil(t, cmd.ProcessState, "owned child must be reaped")
 }
 
 func TestClaudeCodeOrphanRestartReapsAndSweeps(t *testing.T) {
@@ -49,6 +103,7 @@ func TestClaudeCodeOrphanRestartReapsAndSweeps(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	require.NoError(t, reapClaudeCodeOrphans(ctx, root))
+	require.NoFileExists(t, path)
 	data, err := processStartMarker(cmd.Process.Pid)
 	if err == nil {
 		require.Equal(t, ProcessAbsent, (defaultProcessGroupOps{}).Probe(ProcessIdentity{PID: cmd.Process.Pid, StartMarker: data, Incarnation: "test"}).State)
@@ -92,8 +147,7 @@ func TestClaudeCodeOrphanSweepDoesNotFollowSymlink(t *testing.T) {
 	require.FileExists(t, outside)
 }
 
-// RED acceptance for the actual constructor boundary, not a manually invoked
-// recovery helper. An unsafe record must prevent obtaining any admitting manager.
+// Unsafe recovery must fence Claude without preventing manager startup.
 func TestClaudeCodeOrphanManagerStartupBoundary(t *testing.T) {
 	for _, mismatch := range []bool{false, true} {
 		t.Run(fmt.Sprint("mismatch=", mismatch), func(t *testing.T) {
@@ -119,14 +173,18 @@ func TestClaudeCodeOrphanManagerStartupBoundary(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Join(sessions, "claude-prompts"), 0700))
 			prompt := filepath.Join(sessions, "claude-prompts", "stale.prompt")
 			require.NoError(t, os.WriteFile(prompt, []byte("private"), 0600))
-			manager, err := NewManager(ManagerOptions{Store: durable, Manifest: manifest, Config: Config{SessionRoot: sessions, AllowedWorkingDirectoryRoots: []string{root}}})
+			var events []Event
+			manager, err := NewManager(ManagerOptions{Store: durable, Manifest: manifest, Config: Config{SessionRoot: sessions, AllowedWorkingDirectoryRoots: []string{root}}, EventSink: func(e Event) { events = append(events, e) }})
+			require.NoError(t, err)
+			require.NotNil(t, manager)
+			_, err = manager.claudeCodeProcesses.admitExternal()
 			if mismatch {
-				require.ErrorContains(t, err, "Claude orphan")
-				require.Nil(t, manager, "no manager can admit/reacquire Claude on unsafe identity")
+				require.Error(t, err)
+				require.NotEmpty(t, events)
+				require.FileExists(t, path)
 				require.NoError(t, syscall.Kill(cmd.Process.Pid, 0))
 			} else {
 				require.NoError(t, err)
-				require.NoError(t, manager.Close(ctx))
 				require.NoFileExists(t, path)
 			}
 			require.NoFileExists(t, prompt)
@@ -228,9 +286,8 @@ func TestClaudeCodeOrphanWaitChildWithoutInheritedPipes(t *testing.T) {
 	identity := ProcessIdentity{PID: cmd.Process.Pid, StartMarker: marker, Incarnation: "closed-pipes"}
 	t.Cleanup(func() {
 		_ = input.Close()
-		_ = (defaultProcessGroupOps{}).SignalVerifiedProcessGroup(identity, syscall.SIGKILL)
-		if cmd.ProcessState == nil {
-			_ = cmd.Wait()
+		if err := cleanupOrphanDummy(cmd, marker, nil, (defaultProcessGroupOps{}).SignalVerifiedProcessGroup); err != nil {
+			t.Errorf("fixture cleanup: %v", err)
 		}
 	})
 	var childPID int

@@ -53,6 +53,26 @@ function clientFixture(): TestAuthClient {
 afterEach(cleanup);
 
 describe("ProviderAuthDialog", () => {
+  it("offers Claude defaults without connected providers and labels automatic Pi fallback", async () => {
+    const user = userEvent.setup();
+    const client = clientFixture();
+    client.providerAuthMock.mockResolvedValue({ auth_revision: 3, providers: [] });
+    client.modelsMock.mockResolvedValue({ auth_revision: 3, models: [
+      { provider: "claude-code", id: "sonnet", name: "Claude Sonnet", available: true },
+    ], default_model: null });
+    render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    await user.click(await screen.findByRole("button", { name: "Automatic (Pi model)" }));
+    const list = screen.getByRole("listbox", { name: "Default model options" });
+    expect(within(list).getByRole("option", { name: "Automatic (Pi model)" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText(/first available Pi model/i)).toBeInTheDocument();
+    expect(screen.getByText(/install the Claude CLI and sign in/i)).toBeInTheDocument();
+    const select = screen.getByLabelText("Default model", { selector: "select" });
+    expect(within(select).getByRole("option", { name: "Automatic (Pi model)" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "Claude Sonnet" })).toHaveValue("claude-code:sonnet");
+    await user.click(within(list).getByRole("option", { name: /Claude Sonnet/ }));
+    await waitFor(() => expect(client.setDefaultModelMock).toHaveBeenCalledWith({ provider: "claude-code", id: "sonnet" }));
+  });
+
   it("renders the bounded three-provider shared auth surface", async () => {
     const client = clientFixture();
     render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
@@ -486,7 +506,7 @@ describe("ProviderAuthDialog", () => {
     expect(googleTrigger).toHaveTextContent("Vertex AI ADC");
 
     // Click custom Default model dropdown trigger
-    const modelTrigger = screen.getByRole("button", { name: /Use ChatGPT default/i });
+    const modelTrigger = screen.getByRole("button", { name: /Automatic \(Pi model\)/i });
     await user.click(modelTrigger);
     const modelListbox = screen.getByRole("listbox", { name: "Default model options" });
     const modelOption = within(modelListbox).getByRole("option", { name: /GPT-5.6 Terra/i });

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -442,5 +443,120 @@ func TestClaudeCodeProcessRejectsEchoWrongRole(t *testing.T) {
 	claudeWait(t, p)
 	if p.Err() == nil {
 		t.Fatal("echo with assistant role accepted")
+	}
+}
+
+func TestClaudeCodeChildProcessIsolationArguments(t *testing.T) {
+	cfg := claudeTestConfig(t, `{"turns":[[{"text":"done"}]]}`)
+	cfg.ChildAuthority = true
+	cfg.MCPConfigFile = "child-mcp.json"
+	p := claudeStart(t, cfg)
+	claudeSend(t, p, "child-input", `"task"`)
+	for i := 0; i < 4; i++ {
+		claudeNext(t, p)
+	}
+	p.Close()
+	data, err := os.ReadFile(filepath.Join(cfg.Cwd, "record.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var r struct {
+			Kind string   `json:"kind"`
+			Argv []string `json:"argv"`
+		}
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatal(err)
+		}
+		for i, arg := range r.Argv {
+			if arg == "--tools" {
+				if i+1 >= len(r.Argv) || r.Argv[i+1] != "" {
+					t.Fatalf("native tools not disabled: %q", r.Argv)
+				}
+				found = true
+			}
+		}
+		if found {
+			if !containsArg(r.Argv, "--strict-mcp-config") || !containsArg(r.Argv, "child-mcp.json") {
+				t.Fatalf("missing strict child MCP: %q", r.Argv)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("missing child isolation flags")
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestClaudeGateWriteFailureConfirmsNeverReleased(t *testing.T) {
+	cfg := claudeTestConfig(t, `{"turns":[]}`)
+	admitted, restored := false, false
+	cfg.BeforeRelease = func() error { admitted = true; return nil }
+	cfg.afterFailedRelease = func() error { restored = true; return nil }
+	cfg.writeRelease = func(*os.File) (int, error) { return 0, errors.New("injected gate failure") }
+	_, err := StartClaudeCodeProcess(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "injected gate failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !admitted {
+		t.Fatal("not admitted")
+	}
+	if !restored {
+		t.Fatal("not restored")
+	}
+}
+
+func TestClaudeGatePartialWriteRemainsUncertain(t *testing.T) {
+	cfg := claudeTestConfig(t, `{"turns":[]}`)
+	restored := false
+	cfg.BeforeRelease = func() error { return nil }
+	cfg.afterFailedRelease = func() error { restored = true; return nil }
+	cfg.writeRelease = func(f *os.File) (int, error) {
+		n, _ := f.Write([]byte("ready\n"))
+		return n, errors.New("injected partial failure")
+	}
+	_, err := StartClaudeCodeProcess(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected gate failure")
+	}
+	if restored {
+		t.Fatal("possibly released process marked unstarted")
+	}
+}
+
+func TestClaudeBeforeReleaseUnconfirmedCleanupFencesAdmission(t *testing.T) {
+	cfg := claudeTestConfig(t, `{"turns":[]}`)
+	cfg.OrphanRoot = t.TempDir()
+	admission := errors.New("admission failed")
+	fenced := false
+	cfg.BeforeRelease = func() error { return admission }
+	cfg.OnUnconfirmedStop = func() { fenced = true }
+	calls := 0
+	cfg.waitForCleanup = func(cmd *exec.Cmd, id ProcessIdentity, confirmed func()) error {
+		calls++
+		if calls == 1 {
+			return waitClaudeCodeCommandConfirmed(cmd, id, confirmed)
+		}
+		// Reap the test child without confirming it to the production callback.
+		_ = waitClaudeCodeCommandConfirmed(cmd, id, nil)
+		return errClaudeCodeGroupUnconfirmed
+	}
+	_, err := StartClaudeCodeProcess(context.Background(), cfg)
+	if !errors.Is(err, admission) || !errors.Is(err, errClaudeCodeGroupUnconfirmed) || !fenced {
+		t.Fatalf("error=%v fenced=%v", err, fenced)
+	}
+	entries, e := os.ReadDir(filepath.Join(cfg.OrphanRoot, "claude-orphans"))
+	if e != nil || len(entries) != 1 {
+		t.Fatalf("recovery records=%v err=%v", entries, e)
 	}
 }

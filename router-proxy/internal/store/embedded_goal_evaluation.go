@@ -308,3 +308,45 @@ func (s *Store) EmbeddedGoalDiagnostics(ctx context.Context, agentID string) (ma
 	}
 	return counts, &last, nil
 }
+
+// RecordEmbeddedGoalEvaluationFailure publishes only while the original claim
+// and applied goal remain current. The check and history write are atomic.
+func (s *Store) RecordEmbeddedGoalEvaluationFailure(ctx context.Context, b EmbeddedBinding, k EmbeddedGoalEvaluationKey, token int64, message, eventKey string) (ManagedHistoryEntry, error) {
+	if ctx == nil || !validEmbeddedGoalEvaluationKey(k) || !managedHistoryText(message, 512, false) || len(eventKey) > 200 {
+		return ManagedHistoryEntry{}, errors.New("invalid evaluator failure")
+	}
+	presentation := defaultManagedHistoryPresentation("managed_goal", "error", message)
+	presentationJSON, err := managedHistoryPresentationJSON(presentation)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	var entry ManagedHistoryEntry
+	err = s.runImmediate(ctx, func() error {
+		if err := s.embeddedExecutionOwnerTx(ctx, b); err != nil {
+			return err
+		}
+		execution, _, err := s.embeddedExecutionRowTx(ctx, b)
+		if err != nil {
+			return err
+		}
+		if execution.Kind != "evaluator" || execution.Owner != b.OwnerToken || execution.Token != token || execution.Source == nil || execution.Source.EmbeddedGoalEvaluationKey != k {
+			return errors.New("stale evaluator execution")
+		}
+		if err := s.embeddedEvidenceReplayTx(ctx, b, k, ""); err != nil {
+			return err
+		}
+		if err := s.embeddedGoalEvaluationGate(ctx, b, k, false); err != nil {
+			return err
+		}
+		e, err := s.embeddedEvaluationRow(ctx, b, k)
+		if err != nil {
+			return err
+		}
+		if e.State != EmbeddedGoalEvaluationUnknown || e.OwnerToken != b.OwnerToken || e.Generation != b.Generation || e.FinalSeq != k.FinalSeq || e.FinalDigest != k.FinalDigest {
+			return errors.New("stale embedded evaluation claim")
+		}
+		entry, err = s.recordManagedCompleteHistoryTx(ctx, b.AgentID, "managed_goal", "error", message, eventKey, presentationJSON, presentation)
+		return err
+	})
+	return entry, err
+}

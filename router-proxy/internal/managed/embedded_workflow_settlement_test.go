@@ -16,6 +16,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/sky-valley/pi/ai"
+	fauxproviders "github.com/sky-valley/pi/ai/providers"
 	"github.com/stretchr/testify/require"
 )
 
@@ -91,7 +92,16 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 				_, err = raw.ExecContext(ctx, `CREATE TRIGGER break_agent_read AFTER INSERT ON embedded_goal_evaluations BEGIN UPDATE managed_agents SET progress_percent='broken' WHERE agent_id=NEW.agent_id; END`)
 				require.NoError(t, err)
 			}
-			require.NoError(t, mgr.evaluateEmbeddedTurn(ctx, binding, p, &receipt, nil, nil))
+			// Exercise the real Claude path with no configured evaluator: active
+			// workflows must continue without consulting the default model.
+			if tc.name == "text" {
+				mgr.embeddedGoalEvaluator = nil
+			}
+			var model *ai.Model
+			if tc.name == "text" {
+				model = &ai.Model{Provider: claudeCodeProvider, ID: "sonnet"}
+			}
+			require.NoError(t, mgr.evaluateEmbeddedTurn(ctx, binding, p, &receipt, model, nil))
 			if tc.readFailure {
 				// Close joins the evaluation task before examining diagnostics/counters.
 				require.Eventually(t, func() bool {
@@ -126,6 +136,18 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 			require.Equal(t, 1, reservations)
 			require.Equal(t, want, mgr.formatGoalContinuationPrompt(ctx, binding, nil))
 			if tc.name == "start-read-error" {
+				// Wait for the asynchronous history write to commit before using the
+				// independent SQLite connection for fixture mutations.
+				require.Eventually(t, func() bool {
+					var n int
+					return raw.QueryRowContext(ctx, `SELECT count(*) FROM managed_complete_history WHERE agent_id=? AND category='managed_goal_evaluation'`, binding.AgentID).Scan(&n) == nil && n == 1
+				}, 5*time.Second, time.Millisecond)
+				// Admit a local faux model so the test reaches prompt construction, not Codex credential admission.
+				reg := fauxproviders.RegisterFauxProvider(fauxproviders.RegisterFauxProviderOptions{})
+				defer reg.Unregister()
+				mgr.embeddedModelResolver = func(store.ManagedAgentRecord) *ai.Model { providers.Add(1); return reg.GetModel() }
+				_, err = raw.ExecContext(ctx, `UPDATE managed_agents SET selected_model_provider='google',selected_model_id='gemini-fixture' WHERE agent_id=?`, binding.AgentID)
+				require.NoError(t, err)
 				lane := mgr.laneFor(binding.AgentID)
 				lane.serial.Lock()
 				lane.serial.Unlock()
@@ -142,7 +164,7 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 				// Unsnoozed reservation is already due; dispatch pacing uses a separate timer.
 				mgr.startEmbeddedGoalContinuation(binding, key)
 				require.Contains(t, diagnostics.String(), "read managed agent for goal continuation prompt")
-				require.Zero(t, providers.Load())
+				require.EqualValues(t, 1, providers.Load()) // admission reached; no provider turn is needed
 				require.Zero(t, calls.Load())
 				var state, disposition string
 				require.NoError(t, raw.QueryRowContext(ctx, `SELECT state,disposition FROM embedded_goal_continuations WHERE agent_id=?`, binding.AgentID).Scan(&state, &disposition))
@@ -150,8 +172,26 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 				require.Equal(t, "unknown", disposition)
 				_, err = raw.ExecContext(ctx, `UPDATE managed_agents SET progress_percent=NULL WHERE agent_id=?`, binding.AgentID)
 				require.NoError(t, err)
+				// Cross the actual pacing deadline without scheduling a retry timer.
+				lane.serial.Lock()
+				deadline := lane.goalNextAttempt
+				attempts := lane.consecutiveContinuations.Load()
+				lane.serial.Unlock()
+				require.True(t, deadline.After(clock.Now()))
+				require.NoError(t, clock.Advance(deadline.Sub(clock.Now())+time.Millisecond))
+				// The start CAS calls evidence admission inside its transaction. A
+				// transactional trigger witnesses that path, not just admission.
+				_, err = raw.ExecContext(ctx, `CREATE TABLE retry_witness(n INTEGER NOT NULL); INSERT INTO retry_witness VALUES(0); CREATE TRIGGER witness_retry AFTER UPDATE OF evidence_expired_through_ms ON embedded_sessions BEGIN UPDATE retry_witness SET n=n+1; END`)
+				require.NoError(t, err)
 				mgr.startEmbeddedGoalContinuation(binding, key)
-				require.Zero(t, providers.Load(), "uncertain start must not replay after read recovery")
+				var visits int
+				require.NoError(t, raw.QueryRowContext(ctx, `SELECT n FROM retry_witness`).Scan(&visits))
+				require.Equal(t, 2, visits, "retry must reach and commit the durable start transaction")
+				require.Equal(t, attempts, lane.consecutiveContinuations.Load(), "durable CAS must reject the already-started continuation without consuming an attempt")
+				require.EqualValues(t, 1, providers.Load(), "uncertain start must not replay after read recovery")
+				require.NoError(t, raw.QueryRowContext(ctx, `SELECT state,disposition FROM embedded_goal_continuations WHERE agent_id=?`, binding.AgentID).Scan(&state, &disposition))
+				require.Equal(t, "started", state)
+				require.Equal(t, "unknown", disposition)
 			}
 
 		})

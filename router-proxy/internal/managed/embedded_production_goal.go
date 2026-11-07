@@ -114,6 +114,49 @@ func parseGoalEvaluationResponse(rawText string) (verdict string, reason string)
 	return verdict, reason
 }
 
+// Claude output must contain exactly one canonical verdict. Ambiguous or
+// negated prose stays inconclusive rather than ending an active goal.
+func parseClaudeGoalEvaluationResponse(raw string) (string, string) {
+	verdict, reason := "", ""
+	count := 0
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "VERDICT:") {
+			count++
+			switch strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(line, "VERDICT:"))) {
+			case "COMPLETED", "DONE":
+				verdict = store.EmbeddedGoalEvaluationCompleted
+			case "NOT_DONE":
+				verdict = store.EmbeddedGoalEvaluationNotDone
+			default:
+				verdict = ""
+			}
+		} else if strings.HasPrefix(line, "REASON:") {
+			reason = strings.TrimSpace(strings.TrimPrefix(line, "REASON:"))
+		}
+	}
+	if count != 1 {
+		verdict = ""
+	}
+	if len(reason) > 240 {
+		reason = reason[:240]
+	}
+	if reason == "" {
+		if verdict == store.EmbeddedGoalEvaluationCompleted {
+			reason = "Goal completed"
+		} else {
+			reason = "Actionable steps remain"
+		}
+	}
+	return verdict, reason
+}
+
+func goalEvaluationContextTokens(system string, input []ai.Message) int {
+	messages := append([]ai.Message{}, input...)
+	messages = append(messages, ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: system}}})
+	return coding.EstimateContextTokens(messages)
+}
+
 type embeddedGoalEvaluationResult struct {
 	verdict    string
 	reason     string
@@ -152,7 +195,11 @@ func (m *Manager) evaluateEmbeddedProductionGoalWithDetails(ctx context.Context,
 	systemPrompt := strings.ReplaceAll(embeddedGoalEvaluationSystem, "<goal description>", goal)
 
 	request := ai.NormalizeContext(ai.Context{SystemPrompt: systemPrompt, Messages: []ai.Message{ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: userPrompt}}}}})
-	if model == nil || model.ContextWindow <= 0 || coding.EstimateContextTokens(request.Messages) > model.ContextWindow-embeddedContextHeadroom {
+	tokens := coding.EstimateContextTokens(request.Messages)
+	if model != nil && model.Provider == claudeCodeProvider {
+		tokens = goalEvaluationContextTokens(systemPrompt, request.Messages)
+	}
+	if model == nil || model.ContextWindow <= 0 || tokens > model.ContextWindow-embeddedContextHeadroom {
 		return res, errors.New("goal evaluation context cannot fit fixed headroom")
 	}
 	maxTokens := embeddedGoalEvaluationMaxTokens
@@ -166,19 +213,27 @@ func (m *Manager) evaluateEmbeddedProductionGoalWithDetails(ctx context.Context,
 		Reasoning:  ai.ThinkingLevel("off"),
 		ToolChoice: ai.ToolChoiceNone,
 	}
-	result := stream(context.WithValue(ctx, embeddedAuxiliaryRequestKey{}, true), model, request, opts).Result()
-	if ctx.Err() != nil || result == nil || result.StopReason != ai.StopStop {
-		return res, errors.New("goal evaluation did not produce a bounded verdict")
-	}
-	var textBuilder strings.Builder
-	for _, c := range result.Content {
-		if tc, ok := c.(ai.TextContent); ok {
-			textBuilder.WriteString(tc.Text)
-		} else if tc, ok := c.(*ai.TextContent); ok && tc != nil {
-			textBuilder.WriteString(tc.Text)
+	var rawText string
+	if model.Provider == claudeCodeProvider {
+		rawText, err = runClaudeGoalEvaluator(ctx, m.claudeShortCommandConfig(""), model.ID, systemPrompt+"\n\n"+userPrompt)
+		if err != nil {
+			return res, fmt.Errorf("Claude goal evaluation unavailable: %w", err)
 		}
+	} else {
+		result := stream(context.WithValue(ctx, embeddedAuxiliaryRequestKey{}, true), model, request, opts).Result()
+		if ctx.Err() != nil || result == nil || result.StopReason != ai.StopStop {
+			return res, errors.New("goal evaluation did not produce a bounded verdict")
+		}
+		var textBuilder strings.Builder
+		for _, c := range result.Content {
+			if tc, ok := c.(ai.TextContent); ok {
+				textBuilder.WriteString(tc.Text)
+			} else if tc, ok := c.(*ai.TextContent); ok && tc != nil {
+				textBuilder.WriteString(tc.Text)
+			}
+		}
+		rawText = textBuilder.String()
 	}
-	rawText := textBuilder.String()
 	if rawText == "" {
 		return embeddedGoalEvaluationResult{
 			verdict:    store.EmbeddedGoalEvaluationNotDone,
@@ -187,8 +242,11 @@ func (m *Manager) evaluateEmbeddedProductionGoalWithDetails(ctx context.Context,
 		}, nil
 	}
 	verdict, reason := parseGoalEvaluationResponse(rawText)
+	if model.Provider == claudeCodeProvider {
+		verdict, reason = parseClaudeGoalEvaluationResponse(rawText)
+	}
 	if verdict == "" {
-		log.Printf("GOAL EVALUATION WARNING for %s: unparseable verdict output: %q", binding.AgentID, rawText)
+		logUnparseableGoalVerdict(model.Provider == claudeCodeProvider, binding.AgentID, rawText)
 		return embeddedGoalEvaluationResult{
 			verdict:    store.EmbeddedGoalEvaluationNotDone,
 			reason:     "Inconclusive evaluator output; continuing progress on goal",
@@ -240,5 +298,13 @@ func (m *Manager) recordGoalEvaluationActivity(binding store.EmbeddedBinding, ke
 		log.Printf("[embedded:%s] Failed to record goal evaluation history (%s): %v", binding.AgentID, eventKey, err)
 	} else {
 		m.publishCompleteHistory(entry)
+	}
+}
+
+func logUnparseableGoalVerdict(claude bool, agentID, rawText string) {
+	if claude {
+		log.Printf("GOAL EVALUATION WARNING for %s: unparseable verdict output", agentID)
+	} else {
+		log.Printf("GOAL EVALUATION WARNING for %s: unparseable verdict output: %q", agentID, rawText)
 	}
 }
