@@ -96,6 +96,7 @@ Specifications governing provider settings, router MCP configurations, and serve
 | Spec ID | Subsystem / Feature | Domain | Specification File | Target E2E Suite | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `SPEC-ROUTER-CONFIG-001` | Router JSON Config File & Custom KB Directory | `Settings` | [`router-config-file-and-kb.spec.md`](./router-config-file-and-kb.spec.md) | `tests/e2e/router-kb-root-selection.spec.ts` (partial coverage: CFG-009/010), `tests/e2e/router-config-file-and-kb.spec.ts` (planned) | `Draft` |
+| `SPEC-SETTINGS-DEFAULT-MODEL-001` | Default Model Save Feedback & Concise Copy | `Settings` | [`default-model-save-feedback.spec.md`](./default-model-save-feedback.spec.md) | `tests/e2e/claude-sonnet-default-provider-settings.spec.ts` (DM-001); `tests/e2e/default-model-save-errors.spec.ts` (DM-003; DM-004 for 503 only); `tests/e2e/claude-selector-supplement.spec.ts` (DM-001; its DM-005 help-copy assertion is stale); DM-002 has no executable coverage | `Draft`; DM-002 gap, DM-005 stale |
 | `SPEC-SETTINGS-002` | Server Management Dropdown Menu | `Settings` | [`SPEC-SERVER-MANAGEMENT-MENU.md`](./SPEC-SERVER-MANAGEMENT-MENU.md) | `tests/e2e/server-management-menu.spec.ts` | `Draft` |
 
 ---

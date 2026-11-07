@@ -12,8 +12,8 @@ test("CD-001 CD-002 settings selector persists Claude and explains local preflig
       return page.getByRole("dialog", { name: "Provider settings", exact: true });
     };
     let settings = await openSettings();
-    await expect(settings.getByText(/install the Claude CLI and sign in on the router host; provider sign-in is not required/i)).toBeVisible();
-    await expect(settings.getByText(/Automatic uses the first available Pi model, or the built-in Pi fallback/i)).toBeVisible();
+    await expect(settings.getByText(/Claude models need the Claude CLI installed and signed in on the router host/i)).toBeVisible();
+    await expect(settings.getByText(/Automatic uses a Pi model/i)).toBeVisible();
     const native = settings.locator("select[aria-label='Default model']");
     await expect(native.locator('option[value=""]')).toHaveText("Automatic (Pi model)");
     await settings.getByRole("button", { name: "Automatic (Pi model)", exact: true }).click();

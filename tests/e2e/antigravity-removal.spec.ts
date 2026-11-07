@@ -155,6 +155,8 @@ test("AGR-001 offers only supported provider methods and models in actual settin
     const settings = page.getByRole("dialog", { name: "Provider settings", exact: true });
     await settings.getByRole("button", { name: "Use ChatGPT default", exact: true }).click();
     const models = settings.getByRole("listbox", { name: "Default model options" });
+    await expect(settings.getByText(/Automatic uses a Pi model/)).toBeVisible();
+    await expect(settings.getByText(/Claude models need the Claude CLI installed and signed in/)).toBeVisible();
     const expectedCatalog = (await catalog.api("/v1/models")).models;
     for (const provider of ["google", "google-vertex", "openai-codex"]) {
       await expect(models.getByRole("option").filter({ hasText: `${provider}:` })).toHaveCount(expectedCatalog.filter((m: { provider: string }) => m.provider === provider).length);

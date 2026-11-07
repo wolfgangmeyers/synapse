@@ -3495,6 +3495,7 @@ dialog,
   pointer-events: none !important;
 }
 .provider-auth-status { min-height: 1.4em; }
+.provider-auth-status.error { color: var(--danger); }
 
 .provider-auth-loading {
   display: flex;
