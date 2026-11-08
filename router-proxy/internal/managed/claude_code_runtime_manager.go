@@ -100,7 +100,8 @@ func (m *Manager) buildClaudeCodeRuntime(ctx context.Context, saved store.Manage
 		if err != nil {
 			return err
 		}
-		if policy.DesiredRevision <= 0 {
+		if !(policy.DesiredRevision > 0 &&
+			(policy.DesiredRevision > policy.AppliedRevision || (policy.Config.Enabled && policy.DesiredRevision == policy.AppliedRevision && policy.ProjectionState == "applied"))) {
 			return nil
 		}
 		key := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d:%s:%d:%d", p.binding.AgentID, p.binding.SessionID, p.binding.Epoch, p.binding.Generation, p.turnSeq, policy.DesiredRevision))))
