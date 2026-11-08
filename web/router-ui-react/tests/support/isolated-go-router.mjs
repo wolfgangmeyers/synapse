@@ -375,7 +375,6 @@ export function fixtureMessage(id = "fixture-message", to = "fixture-peer", over
 
 export function fixtureGoalSettings() {
   return {
-    goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 1_000,
     snooze_turn_limit: 2,

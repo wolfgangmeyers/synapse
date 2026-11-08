@@ -714,7 +714,6 @@ async function materializeRoots(runDirectory: string): Promise<{ baselineRoot: s
   await archiveBaseline(archivePath);
   await execFileAsync("tar", ["-xf", archivePath, "-C", baselineRoot]);
   await copyPackageTree(join(ROOT, "pi-extensions", "mecha-messaging"), join(currentRoot, "pi-extensions", "mecha-messaging"));
-  await copyPackageTree(join(ROOT, "pi-extensions", "mecha-goal"), join(currentRoot, "pi-extensions", "mecha-goal"));
   const baselineIndexPath = join(baselineRoot, "pi-extensions", "mecha-messaging", "index.ts");
   const baselineIndex = await readFile(baselineIndexPath, "utf8");
   assert.equal(createHash("sha256").update(baselineIndex).digest("hex"), BASELINE_INDEX_SHA256);

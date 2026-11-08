@@ -462,28 +462,6 @@ func TestClaudeBridgeCheckedFailureClosesAdmission(t *testing.T) {
 	require.True(t, closed, "failed checked result must reject later assistant/final publication")
 }
 
-func TestClaudeEvaluatorRequiresConstructibleAuth(t *testing.T) {
-	ctx := context.Background()
-	db, _, _, _ := wakePersistenceFixtureWithClaim(t, false)
-	m := &Manager{store: db}
-	_, err := m.claudeCodeEvaluatorModel(ctx)
-	require.ErrorContains(t, err, "unavailable")
-	require.NoError(t, db.SetDefaultModel(ctx, &store.ManagedModel{Provider: "google", ID: "gemini-2.5-flash"}))
-	// A whitespace environment and isolated HOME prevent ambient credentials.
-	t.Setenv("GEMINI_API_KEY", "")
-	t.Setenv("GOOGLE_API_KEY", "")
-	t.Setenv("HOME", t.TempDir())
-	m.config.PiAgentDir = t.TempDir()
-	m.config.ManagedHome = t.TempDir()
-	_, err = m.claudeCodeEvaluatorModel(ctx)
-	require.ErrorContains(t, err, "unavailable")
-	t.Setenv("GEMINI_API_KEY", "deterministic-not-sent")
-	model, err := m.claudeCodeEvaluatorModel(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "google", string(model.Provider))
-	require.Equal(t, "gemini-2.5-flash", model.ID)
-}
-
 func TestClaudeRuntimeMCPFailureCannotPublishLaterFinal(t *testing.T) {
 	r, p, _, _ := claudeRuntimeFixture(t, `{"continue_after_mcp_error":true,"turns":[[{"mcp_call":{"id":"fail","name":"scratchpad","input":{}}},{"text":"must not publish"}]]}`)
 	a := &embeddedTurnToolAuthority{persistence: p, beforeToolExecute: func(context.Context, agent.BeforeToolCallContext) error { return nil }}

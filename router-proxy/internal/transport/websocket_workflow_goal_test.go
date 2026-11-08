@@ -20,7 +20,6 @@ func TestGoalControlCurrentManagedWorkflowRejectsWithoutMutation(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, binding.AgentID, &state.ID))
 			settings := store.DefaultManagedGoalSettings()
-			settings.GoalLockEnabled = true
 			_, err = durable.UpdateManagedGoalConfig(ctx, binding.AgentID, store.ManagedGoalConfig{Enabled: true, Goal: "Complete active workflow: active", Settings: settings})
 			require.NoError(t, err)
 			require.NoError(t, durable.SetManagedGoalSnoozeUntil(ctx, binding.AgentID, "2099-01-01T00:00:00Z"))

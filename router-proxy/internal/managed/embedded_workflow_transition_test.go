@@ -146,7 +146,6 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	// 2. Set active workflow state to Plan and set implicit workflow goal
 	require.NoError(t, db.SetManagedAgentActiveWorkflowState(ctx, agentID, &planState.ID))
 	goalSettings := store.DefaultManagedGoalSettings()
-	goalSettings.GoalLockEnabled = true
 	_, err = db.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
 		Enabled:  true,
 		Goal:     "Complete active workflow: TestWF",
@@ -193,7 +192,6 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, goalPolicy.Config.Enabled)
 	require.Equal(t, "Complete active workflow: TestWF", goalPolicy.Config.Goal)
-	require.True(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
 	// 6. Transition from Implement to Done using aliasTool and TargetStateID
 	resAlias, err := aliasTool.Execute(ctx, "call-4", map[string]any{
@@ -214,7 +212,6 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, goalPolicy.Config.Enabled)
 	require.Equal(t, "Complete active workflow: TestWF", goalPolicy.Config.Goal)
-	require.True(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
 	// 7. Done state has allow_exit == true -> Successful exit
 	resExit, err := tool.Execute(ctx, "call-5", map[string]any{
@@ -234,7 +231,6 @@ func TestEmbeddedWorkflowTransitionExecution(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, goalPolicy.Config.Enabled)
 	require.Empty(t, goalPolicy.Config.Goal)
-	require.False(t, goalPolicy.Config.Settings.GoalLockEnabled)
 
 	// 8. Test transition with variable substitution in goal, reminders, guidance
 	wfWithVars, err := db.CreateWorkflow(ctx, store.WorkflowRequest{

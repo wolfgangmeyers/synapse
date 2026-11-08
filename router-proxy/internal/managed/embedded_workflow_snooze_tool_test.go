@@ -125,7 +125,7 @@ func TestEmbeddedWorkflowSnoozeExecutionAndBypass(t *testing.T) {
 
 			// Verify formatGoalContinuationPrompt uses workflow prompt
 			prompt := mgr.formatGoalContinuationPrompt(ctx, binding, nil)
-			require.Equal(t, "The workflow Release Pipeline is currently active in state Build & Test. You must either make progress towards completing the workflow or call workflow_snooze.", prompt)
+			require.Equal(t, "The workflow Release Pipeline is currently active in state Build & Test. You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason.", prompt)
 
 			// Test workflow_snooze tool execution
 			userMsg, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "start turn"}}})

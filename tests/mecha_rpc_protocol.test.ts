@@ -78,7 +78,6 @@ function policyApplied(): RecordValue {
     inline_credits: { bash: 1 },
     recall_content: "",
     settled_enabled: false,
-    goal_lock_enabled: false,
     compaction_deferred: false,
   };
 }

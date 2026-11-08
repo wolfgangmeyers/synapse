@@ -199,20 +199,12 @@ function bootstrap(current: ReturnType<typeof fixture>) {
   return current.commands.get("mecha-bootstrap-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
 }
 
-function evaluatorEnvelope(current: ReturnType<typeof fixture>, evaluationId: string, goalRevision: number, settledSequence: number, goal = "finish the migration"): RecordValue {
-  return {
-    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: {},
-    evaluator: { evaluation_id: evaluationId, goal_revision: goalRevision, settled_sequence: settledSequence, goal },
-  };
-}
-
 function goalPolicy(action: "set" | "off", revision: number): RecordValue {
   return {
     goal: {
       action, control_id: `goal-${revision}`, target_instance_id: "goal-agent", revision,
       ...(action === "set" ? { goal: `finish revision ${revision}` } : {}),
-      settings: { goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null, snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000 },
+      settings: { snoozeEnabled: true, snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null, snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000 },
     },
   };
 }
@@ -393,7 +385,7 @@ test("the extension preflights all 18 command names and registers no Mailbox bri
   const current = fixture();
   assert.deepEqual([...current.commands.keys()], [
     "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-control-result-reconcile-v1", "mecha-mailbox-deliver-v1", "mecha-mailbox-reconcile-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
-    "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
+    "goal", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
   ]);
   assert.equal(current.commands.has("mecha-mailbox"), false);
   assert.equal(current.tools.size, 0);
@@ -407,7 +399,7 @@ test("a managed goal policy acknowledges the validated policy revision", async (
     policy: {
       goal: {
         action: "set", control_id: "goal-control", target_instance_id: "goal-agent", revision: 1, goal: "finish the migration",
-        settings: { goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null, snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000 },
+        settings: { snoozeEnabled: true, snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null, snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000 },
       },
     },
   }), current.context);
@@ -416,146 +408,9 @@ test("a managed goal policy acknowledges the validated policy revision", async (
     protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
     applied: {
       inline_enabled: false, inline_credits: {}, recall_content: "", settled_enabled: false,
-      goal_lock_enabled: false, compaction_deferred: false, goal_revision: 1,
+      compaction_deferred: false, goal_revision: 1,
     },
   });
-});
-
-test("a managed goal evaluator arms no tools before its hidden turn and returns valid DONE and NOT_DONE receipts", async () => {
-  for (const [outcome, reason] of [["DONE", "The migration is complete."], ["NOT_DONE", "The migration still has work."]] as const) {
-    const current = fixture();
-    await bootstrap(current);
-    const activeBefore = current.pi.getActiveTools();
-    const evaluationId = outcome === "DONE" ? "123e4567-e89b-42d3-a456-426614174009" : "123e4567-e89b-42d3-a456-426614174010";
-    await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, evaluationId, 1, 7, "finish the migration exactly")), current.context);
-
-    const evaluatorStart = current.sent.at(-1);
-    assert.equal(evaluatorStart?.message.customType, "mecha.policy.applied.v1");
-    assert.equal(evaluatorStart?.message.content, "Evaluate the managed goal using the available conversation only.\nGoal: finish the migration exactly\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.");
-    assert.deepEqual(evaluatorStart?.options, { deliverAs: "followUp", triggerTurn: true });
-    assert.deepEqual(current.pi.getActiveTools(), [], "the evaluator must lose tools before triggerTurn starts it");
-    current.handlers.get("agent_start")!({}, current.context);
-    assert.deepEqual(current.handlers.get("tool_call")!({ toolCallId: "evaluator-tool", toolName: "goal" }, current.context), {
-      block: true,
-      reason: "Managed goal evaluation cannot call tools.",
-    });
-
-    current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `${outcome}\nREASON: ${reason}` }] } }, current.context);
-    await current.handlers.get("agent_settled")!({}, current.context);
-    const evaluatorResult = current.sent.at(-1);
-    assert.equal((evaluatorResult?.message.details as RecordValue).manifest_sha256, current.extension.hashManifest(manifest()));
-    assert.deepEqual((evaluatorResult?.message.details as RecordValue).evaluator, {
-      evaluation_id: evaluationId, goal_revision: 1, settled_sequence: 7,
-      phase: "result", outcome, reason,
-    });
-    assert.deepEqual(current.pi.getActiveTools(), activeBefore);
-    const sentAfterResult = current.sent.length;
-    await current.handlers.get("agent_settled")!({}, current.context);
-    assert.equal(current.sent.length, sentAfterResult, "the evaluator receipt must not recursively settle another evaluator");
-  }
-});
-
-test("a managed goal evaluator rejects malformed output without before_agent_start", async () => {
-  const current = fixture();
-  await bootstrap(current);
-  const activeBefore = current.pi.getActiveTools();
-  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174011", 1, 8)), current.context);
-  current.handlers.get("agent_start")!({}, current.context);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "GOAL_DONE" }] } }, current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  const result = current.sent.at(-1)?.message.details as RecordValue;
-  assert.equal((result.evaluator as RecordValue).outcome, "NOT_DONE");
-  assert.equal((result.evaluator as RecordValue).reason, "invalid evaluator output");
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
-});
-
-test("a failed evaluator enqueue restores tools and leaves no pending evaluator settlement", async () => {
-  const current = fixture();
-  await bootstrap(current);
-  const activeBefore = current.pi.getActiveTools();
-  const originalSend = current.pi.sendMessage;
-  current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
-    if (message.content === "Evaluate the managed goal using the available conversation only.\nGoal: finish the migration\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.") return Promise.reject(new Error("evaluator enqueue failed"));
-    return originalSend(message, options);
-  };
-  await assert.rejects(() => current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174012", 1, 9))));
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
-  const sentAfterFailure = current.sent.length;
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.equal(current.sent.length, sentAfterFailure);
-});
-
-test("single-flight goal evaluation keeps a replacement fenced until the prior terminal path restores tools", async () => {
-  const current = fixture();
-  await bootstrap(current);
-  const activeBefore = current.pi.getActiveTools();
-  const command = current.commands.get("mecha-policy-apply-v1")!;
-  const resultReceipts = () => current.sent.filter(({ message }) => {
-    const details = message.details;
-    return message.customType === "mecha.policy.applied.v1" && details !== null && typeof details === "object"
-      && !Array.isArray(details) && (details as RecordValue).evaluator !== undefined
-      && ((details as RecordValue).evaluator as RecordValue).phase === "result";
-  });
-
-  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174013", 1, 10, "complete evaluator A")), current.context);
-  current.handlers.get("agent_start")!({}, current.context);
-  await command.handler(encodeHiddenEnvelope({
-    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("set", 1),
-  }), current.context);
-  assert.deepEqual(current.pi.getActiveTools(), [], "a duplicate goal policy cannot cancel its active evaluator");
-  await command.handler(encodeHiddenEnvelope({
-    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("set", 2),
-  }), current.context);
-  assert.deepEqual(current.pi.getActiveTools(), [], "a replacement policy leaves the cancelled evaluator isolated until it settles");
-  await assert.rejects(
-    () => command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174014", 2, 11, "complete evaluator B")), current.context),
-    /retry after the active evaluator settles/,
-  );
-
-  current.handlers.get("agent_start")!({}, current.context);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: stale evaluator A output." }] } }, current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "the cancelled evaluator restores only its own tool snapshot");
-  assert.equal(resultReceipts().length, 0, "a cancelled evaluator cannot emit a result receipt");
-
-  current.handlers.get("agent_start")!({}, current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore, "an unrelated normal prompt between evaluations leaves tools alone");
-
-  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174014", 2, 11, "complete evaluator B")), current.context);
-  const replacementRequest = current.sent.at(-1);
-  assert.equal(replacementRequest?.message.content, "Evaluate the managed goal using the available conversation only.\nGoal: complete evaluator B\nReturn exactly two lines:\nDONE|NOT_DONE\nREASON: <concise reason>\nDo not use tools or take actions.");
-  assert.deepEqual(current.pi.getActiveTools(), []);
-  current.handlers.get("agent_start")!({}, current.context);
-  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "DONE\nREASON: evaluator B is complete." }] } }, current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
-  assert.deepEqual(resultReceipts().map(({ message }) => ((message.details as RecordValue).evaluator as RecordValue).evaluation_id), ["123e4567-e89b-42d3-a456-426614174014"]);
-
-  await command.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174015", 3, 12, "cancel pending evaluator C")), current.context);
-  await command.handler(encodeHiddenEnvelope({
-    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
-    manifest_sha256: current.extension.hashManifest(manifest()), policy: goalPolicy("off", 3),
-  }), current.context);
-  assert.deepEqual(current.pi.getActiveTools(), [], "deactivation waits for a pending evaluator terminal event");
-  current.handlers.get("agent_start")!({}, current.context);
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
-  assert.equal(resultReceipts().length, 1, "pending cancellation cannot emit or duplicate a receipt");
-});
-
-test("session shutdown restores evaluator tools and clears its turn", async () => {
-  const current = fixture();
-  await bootstrap(current);
-  const activeBefore = current.pi.getActiveTools();
-  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope(evaluatorEnvelope(current, "123e4567-e89b-42d3-a456-426614174018", 1, 15)), current.context);
-  current.handlers.get("session_shutdown")!({}, current.context);
-  assert.deepEqual(current.pi.getActiveTools(), activeBefore);
-  const sentAfterShutdown = current.sent.length;
-  await current.handlers.get("agent_settled")!({}, current.context);
-  assert.equal(current.sent.length, sentAfterShutdown);
 });
 
 test("a managed goal policy rejects malformed goal settings before it acknowledges the revision", async () => {
@@ -583,7 +438,7 @@ test("every legacy command preserves raw input and root or child availability in
     assert.equal(details.raw_arguments, raw);
     assert.deepEqual(details.availability, { session_id: "root-session", kind: "root" });
   }
-  assert.equal(current.sent.length, 9);
+  assert.equal(current.sent.length, 8);
 });
 
 test("accepted receipt reports the runtime active tools and manifest revision", async () => {

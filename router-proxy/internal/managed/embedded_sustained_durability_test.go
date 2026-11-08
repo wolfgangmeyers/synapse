@@ -242,13 +242,6 @@ func TestEmbeddedGoalSnoozeFixedClockDueCompletionDurability(t *testing.T) {
 		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model {
 			return reg.GetModel()
 		},
-		EmbeddedGoalEvaluator: func(_ context.Context, _ store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			n := evaluations.Add(1)
-			if n == 1 {
-				return store.EmbeddedGoalEvaluationNotDone, "still working on goal", nil
-			}
-			return store.EmbeddedGoalEvaluationDone, "goal successfully finished", nil
-		},
 	})
 	require.NoError(t, err)
 	defer m.Close(ctx)

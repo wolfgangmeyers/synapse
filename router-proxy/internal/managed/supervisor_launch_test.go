@@ -136,14 +136,14 @@ func (r *launchRPC) ApplyPolicy(_ context.Context, envelope map[string]any) (map
 	if err := r.readinessFailure("policy-command"); err != nil {
 		return nil, err
 	}
-	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "compactionDeferred": false}, nil
 }
 func (r *launchRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
 	r.calls = append(r.calls, "policy-receipt")
 	if err := r.readinessFailure("policy-receipt"); err != nil {
 		return nil, err
 	}
-	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false}}, nil
 }
 func (r *launchRPC) RequestChildSnapshot(_ context.Context, envelope map[string]any) (map[string]any, error) {
 	r.calls = append(r.calls, "snapshot")

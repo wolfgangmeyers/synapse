@@ -63,10 +63,10 @@ func (r managedTestRPC) WaitForReceipt(context.Context, string, string, int, int
 }
 func (r managedTestRPC) GetActiveTools(context.Context) ([]string, error) { return r.active, nil }
 func (r managedTestRPC) ApplyPolicy(context.Context, map[string]any) (map[string]any, error) {
-	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "compactionDeferred": false}, nil
 }
 func (r managedTestRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
-	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false}}, nil
 }
 func (r managedTestRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
 	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": *r.session, "sequence": int64(0), "runs": []any{}}, nil

@@ -262,8 +262,8 @@ type ManagedReadinessSource struct {
 	Recoveries          []ManagedChildRecovery
 }
 
-const defaultManagedReadinessPolicyCanonical = `{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`
-const defaultManagedReadinessPolicySHA256 = "dcb17869020df00dd27a11e14cc0facada376f729a13002185a3d4b87f3c3648"
+const defaultManagedReadinessPolicyCanonical = `{"compaction":{"deferred":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`
+const defaultManagedReadinessPolicySHA256 = "3207b96e188aaeffc384420b9c9533df1c9147ffc25634cf73963e2490b6f877"
 
 // DefaultManagedReadinessPolicy returns a copy because callers must not mutate
 // the exact canonical bytes that identify the router's default projection.
@@ -6200,6 +6200,6 @@ func (s *Store) retireWorkflowSnoozeTx(ctx context.Context, agentID string, deac
 	if err := s.retireEmbeddedGoalSnoozeEvidenceTx(ctx, agentID); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET snoozed_until=NULL,next_wakeup_at=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,goal_enabled=CASE WHEN ? THEN 0 ELSE goal_enabled END,goal_text=CASE WHEN ? THEN '' ELSE goal_text END,settings_json=CASE WHEN ? THEN json_set(settings_json,'$.goal_lock_enabled',json('false')) ELSE settings_json END,updated_at=? WHERE agent_id=?`, deactivate, deactivate, deactivate, formatTimestamp(s.clock.Now()), agentID)
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET snoozed_until=NULL,next_wakeup_at=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,goal_enabled=CASE WHEN ? THEN 0 ELSE goal_enabled END,goal_text=CASE WHEN ? THEN '' ELSE goal_text END,updated_at=? WHERE agent_id=?`, deactivate, deactivate, formatTimestamp(s.clock.Now()), agentID)
 	return err
 }

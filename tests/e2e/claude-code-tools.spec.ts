@@ -379,7 +379,7 @@ test.describe("Claude successful router tools", () => {
     // snooze itself. No fabricated receipt or inactive/idle denial substitutes.
     expect((await f.request(page, `/v1/managed-agents/${agent}/goal`,
       { action: "set", goal: "Finish after one bounded snooze", settings: {
-        goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: args.duration_ms,
+        snooze_enabled: true, snooze_duration_ms: args.duration_ms,
         snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000,
         snooze_refill_elapsed_ms: 60_000,
       } }, "PUT")).status).toBe(200);

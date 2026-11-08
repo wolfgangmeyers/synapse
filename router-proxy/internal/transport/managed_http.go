@@ -1657,12 +1657,12 @@ func managedGoalState(details map[string]any) map[string]any {
 	}
 	result := map[string]any{
 		"enabled": enabled, "goal": goal,
-		"goal_lock_enabled": false, "snooze_enabled": true, "snooze_duration_ms": int64(60000),
+		"snooze_enabled": true, "snooze_duration_ms": int64(60000),
 		"snooze_turn_limit": nil, "snooze_budget_cap_ms": nil,
 		"snooze_refill_yield_ms": int64(30000), "snooze_refill_elapsed_ms": int64(60000),
 		"outcome_counts": map[string]any{"COMPLETED": 0, "NOT_DONE": 0},
 	}
-	for _, key := range []string{"goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"} {
+	for _, key := range []string{"snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"} {
 		if value, found := state[key]; found {
 			result[key] = value
 		}
@@ -1676,7 +1676,7 @@ func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, er
 		return nil, nil
 	}
 	var values map[string]json.RawMessage
-	if json.Unmarshal(raw, &values) != nil || len(values) != 7 {
+	if json.Unmarshal(raw, &values) != nil || len(values) != 6 {
 		return nil, errors.New("managed goal settings are invalid")
 	}
 	readBoolean := func(name string) (bool, bool) {
@@ -1694,7 +1694,6 @@ func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, er
 		value, ok := readPositive(name)
 		return value, ok
 	}
-	goalLock, lockOK := readBoolean("goal_lock_enabled")
 	snooze, snoozeOK := readBoolean("snooze_enabled")
 	duration, durationOK := readPositive("snooze_duration_ms")
 	if duration > store.EmbeddedGoalSnoozeMaxDurationMS {
@@ -1707,10 +1706,10 @@ func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, er
 	budget, budgetOK := readNullablePositive("snooze_budget_cap_ms")
 	yield, yieldOK := readPositive("snooze_refill_yield_ms")
 	elapsed, elapsedOK := readPositive("snooze_refill_elapsed_ms")
-	if !lockOK || !snoozeOK || !durationOK || !turnLimitOK || !budgetOK || !yieldOK || !elapsedOK {
+	if !snoozeOK || !durationOK || !turnLimitOK || !budgetOK || !yieldOK || !elapsedOK {
 		return nil, errors.New("managed goal settings are invalid")
 	}
-	return map[string]any{"goal_lock_enabled": goalLock, "snooze_enabled": snooze, "snooze_duration_ms": duration, "snooze_turn_limit": turnLimit, "snooze_budget_cap_ms": budget, "snooze_refill_yield_ms": yield, "snooze_refill_elapsed_ms": elapsed}, nil
+	return map[string]any{"snooze_enabled": snooze, "snooze_duration_ms": duration, "snooze_turn_limit": turnLimit, "snooze_budget_cap_ms": budget, "snooze_refill_yield_ms": yield, "snooze_refill_elapsed_ms": elapsed}, nil
 }
 
 func (r *Router) handleManagedWorkflowStateGET(w http.ResponseWriter, req *http.Request, agentID string) {
@@ -1843,7 +1842,6 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 		if policy, err := r.store.ManagedGoalPolicyFor(req.Context(), agentID); err == nil && policy != nil {
 			goalSettings = policy.Config.Settings
 		}
-		goalSettings.GoalLockEnabled = true
 		goalSettings.SnoozeDurationMS = snoozeDurationMS
 		_, _ = r.store.UpdateManagedGoalConfig(req.Context(), agentID, store.ManagedGoalConfig{
 			Enabled:  true,
@@ -1967,9 +1965,6 @@ func (r *Router) handleManagedWorkflowStatePUT(w http.ResponseWriter, req *http.
 
 func goalSettingsFromMap(settings map[string]any, base store.ManagedGoalSettings) store.ManagedGoalSettings {
 	res := base
-	if val, ok := settings["goal_lock_enabled"].(bool); ok {
-		res.GoalLockEnabled = val
-	}
 	if val, ok := settings["snooze_enabled"].(bool); ok {
 		res.SnoozeEnabled = val
 	}
@@ -2019,7 +2014,7 @@ func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, 
 		settings := policy.Config.Settings
 		state = managedGoalState(map[string]any{"goal_state": map[string]any{
 			"enabled": policy.Config.Enabled, "goal": policy.Config.Goal,
-			"goal_lock_enabled": settings.GoalLockEnabled, "snooze_enabled": settings.SnoozeEnabled,
+			"snooze_enabled":     settings.SnoozeEnabled,
 			"snooze_duration_ms": settings.SnoozeDurationMS, "snooze_turn_limit": settings.SnoozeTurnLimit,
 			"snooze_budget_cap_ms":     settings.SnoozeBudgetCapMS,
 			"snooze_refill_yield_ms":   settings.SnoozeRefillYieldMS,
@@ -2133,7 +2128,6 @@ func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, 
 	} else {
 		config.Enabled = false
 		config.Goal = ""
-		config.Settings.GoalLockEnabled = false
 	}
 	if settings != nil {
 		config.Settings = goalSettingsFromMap(settings, config.Settings)
@@ -2148,7 +2142,7 @@ func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, 
 	settingsData := policy.Config.Settings
 	state := managedGoalState(map[string]any{"goal_state": map[string]any{
 		"enabled": policy.Config.Enabled, "goal": policy.Config.Goal,
-		"goal_lock_enabled": settingsData.GoalLockEnabled, "snooze_enabled": settingsData.SnoozeEnabled,
+		"snooze_enabled":     settingsData.SnoozeEnabled,
 		"snooze_duration_ms": settingsData.SnoozeDurationMS, "snooze_turn_limit": settingsData.SnoozeTurnLimit,
 		"snooze_budget_cap_ms":     settingsData.SnoozeBudgetCapMS,
 		"snooze_refill_yield_ms":   settingsData.SnoozeRefillYieldMS,

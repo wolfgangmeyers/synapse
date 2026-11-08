@@ -137,7 +137,6 @@ export interface GoalOutcomeCounts {
 }
 
 export interface GoalControlSettings {
-  goal_lock_enabled: boolean;
   snooze_enabled: boolean;
   snooze_duration_ms: number;
   snooze_turn_limit: number | null;

@@ -19,7 +19,6 @@ function editorFromState(source: GoalState): GoalEditorValues {
   return {
     enabled: source.enabled,
     goal: source.goal,
-    goal_lock_enabled: source.goal_lock_enabled,
     snooze_enabled: source.snooze_enabled,
     snooze_duration_seconds: source.snooze_duration_ms / 1000,
     snooze_turn_limit: source.snooze_turn_limit,
@@ -29,9 +28,9 @@ function editorFromState(source: GoalState): GoalEditorValues {
   };
 }
 
-function Toggle({ label, pressed, lock, onChange }: { label: string; pressed: boolean; lock?: boolean; onChange: (value: boolean) => void }) {
-  return <button type="button" className={`goal-toggle${lock ? " goal-lock-toggle" : ""}`} aria-pressed={pressed} aria-label={`${label}: ${lock ? (pressed ? "LOCKED" : "UNLOCKED") : (pressed ? "ON" : "OFF")}`} onClick={() => onChange(!pressed)}>
-    <span className="goal-toggle-label">{label}</span><span className="goal-toggle-track" aria-hidden="true"><span className="goal-toggle-thumb"><span className="goal-toggle-state">{lock ? (pressed ? "LOCKED" : "UNLOCKED") : (pressed ? "ON" : "OFF")}</span></span></span>
+function Toggle({ label, pressed, onChange }: { label: string; pressed: boolean; onChange: (value: boolean) => void }) {
+  return <button type="button" className="goal-toggle" aria-pressed={pressed} aria-label={`${label}: ${pressed ? "ON" : "OFF"}`} onClick={() => onChange(!pressed)}>
+    <span className="goal-toggle-label">{label}</span><span className="goal-toggle-track" aria-hidden="true"><span className="goal-toggle-thumb"><span className="goal-toggle-state">{pressed ? "ON" : "OFF"}</span></span></span>
   </button>;
 }
 
@@ -55,7 +54,6 @@ export function GoalEditorDialog({ open, peer, goalState, value, capabilityAvail
     {!capabilityAvailable ? <p className="error" role="alert">Goal controls are not available on this router.</p> : <div className="goal-editor-form">
       <Toggle label="Goal" pressed={draft.enabled} onChange={(next) => set("enabled", next)} />
       <label>What should this agent work toward?<textarea id="goal-text" maxLength={4000} rows={10} placeholder="Describe the goal in Markdown" value={draft.goal} disabled={!draft.enabled} onChange={(event) => { set("goal", event.target.value); setValidationError(""); }} /></label>
-      <Toggle label="Goal lock" lock pressed={draft.goal_lock_enabled} onChange={(next) => set("goal_lock_enabled", next)} />
       <fieldset><legend>Snooze settings</legend>
         <Toggle label="Allow snoozing" pressed={draft.snooze_enabled} onChange={(next) => set("snooze_enabled", next)} />
         <NumberField label="Snooze duration (seconds)" value={draft.snooze_duration_seconds} min={1} onChange={(next) => { if (next !== "") set("snooze_duration_seconds", next); }} />

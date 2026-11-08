@@ -258,7 +258,6 @@ await (async () => {
       currentLeaseId: () => "fixed-lease",
       connect() { const call = { action: "connect" }; clientCalls.push(call); sideEffect("client.connect", call); return Promise.resolve(); },
       close() { record.closed = true; const call = { action: "close" }; clientCalls.push(call); sideEffect("client.close", call); },
-      sendGoalState(value) { const call = { action: "goal-state", value }; clientCalls.push(call); sideEffect("client.goal-state", call); },
       sendActivity(value, payload) { const call = { action: "activity", state: value, payload }; clientCalls.push(call); sideEffect("client.activity", call); },
       sendLifecycleSnapshot(value) { const call = { action: "lifecycle-snapshot", value }; clientCalls.push(call); sideEffect("client.lifecycle-snapshot", call); return "fixed-snapshot"; },
       sendLifecycleEvent(value) { const call = { action: "lifecycle-event", value }; clientCalls.push(call); sideEffect("client.lifecycle-event", call); return "fixed-lifecycle-event"; },

@@ -76,6 +76,20 @@ var notDoneWakeups = []string{
 	"NOT_DONE: %s IS NOT COMPLETE. ACT NOW, DELIVER THE NEXT VERIFIED RESULT, AND ACCOUNT FOR THE REMAINING WORK!",
 }
 
+// embeddedAutomaticContinuationReason is the durable reason stored for every
+// settled turn with an active goal. No model judges completion.
+const embeddedAutomaticContinuationReason = "Goal active after the worker settled; continuing automatically."
+
+// goalSettledHint is included in every automatic continuation. Completion and
+// blocking are decided by the agent through its own tools.
+const goalSettledHint = "If the goal is complete, turn it off with the goal tool (action \"off\"). " +
+	"If you are blocked from achieving it and need external help, call mecha_blocked with the reason."
+
+// goalContinuationPrompt is the escalating wake-up plus the done/blocked hint.
+func goalContinuationPrompt(goal string, attempt int) string {
+	return notDoneWakeup(goal, attempt) + "\n" + goalSettledHint
+}
+
 func notDoneWakeup(goal string, attempt int) string {
 	if attempt < 1 {
 		attempt = 1
@@ -471,7 +485,7 @@ func (m *Manager) workflowContinuationGuidance(ctx context.Context, agent *store
 			stateName = st.Name
 		}
 	}
-	return fmt.Sprintf("The workflow %s is currently active in state %s. You must either make progress towards completing the workflow or call workflow_snooze.", wfName, stateName)
+	return fmt.Sprintf("The workflow %s is currently active in state %s. You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason.", wfName, stateName)
 }
 
 // An empty prompt means the workflow authority could not be read. Callers must
@@ -495,16 +509,6 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 		}
 	}
 
-	rationale := ""
-	if key != nil && m.store != nil {
-		if row, err := m.store.EmbeddedEvaluationRow(ctx, binding, *key); err == nil && row.Reason != "" {
-			rationale = row.Reason
-		}
-	}
-	if rationale == "" {
-		rationale = "Take the next actionable step to make progress on the goal."
-	}
-
 	lane := m.laneFor(binding.AgentID)
 	attempt := lane.goalAttempt.Load()
 	if attempt <= 0 {
@@ -516,7 +520,7 @@ func (m *Manager) formatGoalContinuationPrompt(ctx context.Context, binding stor
 
 	var basePrompt string
 	if goal != "" {
-		basePrompt = fmt.Sprintf("%s\nVERDICT: NOT_DONE\nREASON: %s", notDoneWakeup(goal, int(attempt)), rationale)
+		basePrompt = goalContinuationPrompt(goal, int(attempt))
 	} else {
 		basePrompt = goalContinuationDefaultPrompt
 	}

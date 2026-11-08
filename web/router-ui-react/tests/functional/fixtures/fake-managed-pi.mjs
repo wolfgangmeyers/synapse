@@ -68,7 +68,6 @@ function policyApplied(envelope) {
       inline_credits: policy.inline?.credits ?? {},
       recall_content: policy.recall?.content ?? "",
       settled_enabled: policy.settled?.enabled === true,
-      goal_lock_enabled: policy.goal_lock?.enabled === true,
       compaction_deferred: policy.compaction?.deferred === true,
     },
   };

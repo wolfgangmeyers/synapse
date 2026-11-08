@@ -15,12 +15,9 @@ const BASELINE_COMMIT = "3c9bfb53a3112d0fd4a7a42ba835dc484021de91";
 const BASELINE_INDEX_SHA256 = "b370e684928001625bcaf641f4fab2bb050defb3886835ccf1249f43a874dc00";
 const BASELINE_INDEX_BYTES = 92_707;
 
-// The fixture fixes all model, session, data, router, clock, and response values. The only
-// generated value is the per-extension Goal producer epoch carried by the worker identity event.
-const DIFFERENTIAL_ALLOWLIST = Object.freeze([
-  Object.freeze({ name: "Goal producer epoch", pathSuffix: ".value.producerEpoch" }),
-  Object.freeze({ name: "Goal request producer epoch", pathSuffix: ".value.request.producerEpoch" }),
-] as const);
+// The fixture fixes all model, session, data, router, clock, and response values, so no
+// generated value is allowlisted. Goal producer epochs no longer exist in the Messaging package.
+const DIFFERENTIAL_ALLOWLIST = Object.freeze([] as const);
 
 const RUNNER_SOURCE = String.raw`
 import { mkdir, writeFile } from "node:fs/promises";
@@ -62,26 +59,12 @@ const modelOtherProvider = { provider: "other-provider", id: "target", name: "Ot
 const modelThrow = { provider: "fixture-provider", id: "throw-target", name: "Throw target" };
 const modelReject = { provider: "fixture-provider", id: "reject-target", name: "Reject target" };
 const catalog = [modelCurrent, null, "malformed", modelOtherProvider, modelTarget, modelThrow, modelReject];
-const goalState = {
-  enabled: true,
-  goal: "ship the differential fixture",
-  goalLockEnabled: false,
-  snoozeEnabled: true,
-  snoozeDurationMs: 60_000,
-  snoozeTurnLimit: null,
-  snoozeBudgetCapMs: null,
-  snoozeRefillYieldMs: 30_000,
-  snoozeRefillElapsedMs: 60_000,
-  outcomeCounts: { COMPLETED: 2, NOT_DONE: 1 },
-};
 let context;
 let clientOptions;
 let currentClient;
-let goalResponded = false;
 const handlers = new Map();
 const eventHandlers = new Map();
 const activityCalls = [];
-const goalPublications = [];
 const setModelCalls = [];
 const traces = [];
 
@@ -113,7 +96,7 @@ function createPi() {
     events: {
       on(name, handler) { add(eventHandlers, name, handler); },
       emit(name, value) {
-        observe("event", { name, request: name === "goal:control-request" ? { ...value, respond: typeof value?.respond === "function" } : value });
+        observe("event", { name, request: value });
         for (const handler of eventHandlers.get(name) ?? []) handler(value);
       },
     },
@@ -134,15 +117,6 @@ function createPi() {
 const pi = createPi();
 context = createContext();
 
-const goalEventName = "goal:control-request";
-add(eventHandlers, goalEventName, (request) => {
-  const respond = request?.respond;
-  if (typeof respond === "function" && !goalResponded) {
-    goalResponded = true;
-    respond({ accepted: true, goalState });
-  }
-});
-
 function createClient(options) {
   clientOptions = options;
   currentClient = {
@@ -151,7 +125,6 @@ function createClient(options) {
     sendReceipt() {},
     sendReply: async () => ({ id: "fixture-message", state: "queued" }),
     sendActivity(state, payload) { activityCalls.push({ state, payload: clone(payload) }); },
-    sendGoalState(state) { goalPublications.push(clone(state)); },
   };
   return currentClient;
 }
@@ -184,18 +157,7 @@ observe("refresh", activityCalls);
 context.model = modelCurrent;
 observe("control", await clientOptions.onModelControl({ controlId: "rejected", sourceAgentId: "controller", action: "set_model", model: { provider: "fixture-provider", id: "reject-target" } }));
 observe("refresh", activityCalls);
-goalResponded = false;
-observe("goal", await clientOptions.onGoalControl({
-  correlationId: "goal-correlation",
-  controlId: "goal-control",
-  sourceAgentId: "goal-web",
-  targetInstanceId: "web-instance",
-  revision: 1,
-  action: "set",
-  goal: goalState.goal,
-  settings: { goalLockEnabled: false, snoozeEnabled: true },
-}));
-observe("final", { setModelCalls, activityCalls, goalPublications, traces });
+observe("final", { setModelCalls, activityCalls, traces });
 process.stdout.write(JSON.stringify(observations) + "\n");
 `;
 
@@ -252,7 +214,6 @@ async function materialize(runDirectory: string): Promise<{ baselineRoot: string
   await archiveBaseline(archivePath);
   await execFileAsync("tar", ["-xf", archivePath, "-C", baselineRoot]);
   await copyPackageTree(join(ROOT, "pi-extensions", "mecha-messaging"), join(currentRoot, "pi-extensions", "mecha-messaging"));
-  await copyPackageTree(join(ROOT, "pi-extensions", "mecha-goal"), join(currentRoot, "pi-extensions", "mecha-goal"));
   const baselineIndex = await readFile(join(baselineRoot, "pi-extensions", "mecha-messaging", "index.ts"));
   assert.equal(createHash("sha256").update(baselineIndex).digest("hex"), BASELINE_INDEX_SHA256);
   assert.equal(baselineIndex.byteLength, BASELINE_INDEX_BYTES);
@@ -268,11 +229,8 @@ async function runChild(runnerPath: string, side: "baseline" | "current", roots:
   return observations as Observation[];
 }
 
-test("model and Goal projections match the exact extraction parent", { timeout: 60_000 }, async () => {
-  assert.deepEqual(DIFFERENTIAL_ALLOWLIST.map(({ name, pathSuffix }) => ({ name, pathSuffix })), [
-    { name: "Goal producer epoch", pathSuffix: ".value.producerEpoch" },
-    { name: "Goal request producer epoch", pathSuffix: ".value.request.producerEpoch" },
-  ]);
+test("model projections match the exact extraction parent", { timeout: 60_000 }, async () => {
+  assert.deepEqual(DIFFERENTIAL_ALLOWLIST.map(({ name, pathSuffix }) => ({ name, pathSuffix })), []);
   const runDirectory = await mkdtemp(join(tmpdir(), "mecha-model-control-differential-"));
   const runnerPath = join(runDirectory, "runner.mjs");
   try {
@@ -283,7 +241,6 @@ test("model and Goal projections match the exact extraction parent", { timeout: 
     compareExact(baseline, current);
     assert.equal(baseline.some(({ kind }) => kind === "catalog"), true);
     assert.equal(baseline.filter(({ kind }) => kind === "control").length, 3);
-    assert.equal(baseline.some(({ kind }) => kind === "goal"), true);
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
   }

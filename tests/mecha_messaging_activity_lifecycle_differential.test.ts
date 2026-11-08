@@ -176,7 +176,6 @@ function createPi() {
         currentLeaseId: () => "fixed-lease",
         connect() { observe({ kind: "client", action: "connect", number }); return Promise.resolve(); },
         close() { observe({ kind: "client", action: "close", number }); },
-        sendGoalState() { observe({ kind: "client", action: "goal-state", number }); },
         sendActivity(state, payload) { observe({ kind: "activity", state, payload }); },
         sendLifecycleSnapshot(subagents) {
           const eventId = "fixed-snapshot-" + (++lifecycleNumber);
@@ -303,7 +302,6 @@ async function typedTerminal() {
   const records = [{ id: "typed-child", type: "worker", status: "running", description: "typed label", prompt: "private prompt", output: "private output", error: "private error" }];
   const harness = createHarness({ "parent-session": { getLifecycleSnapshots: () => records } });
   await operation("session-start", () => harness.root("session_start", {}));
-  await operation("goal-projection", () => harness.pi.events.emit("goal:state", { enabled: true, goal: "ship lifecycle parity" }));
   await operation("agent-start", () => harness.root("agent_start", {}));
   await operation("heartbeat-before-terminal", () => harness.clock.heartbeat());
   await operation("native-start", () => harness.native("subagents:started", { id: "typed-child", type: "worker", status: "running", description: "typed label" }));
@@ -641,10 +639,9 @@ function assertScenarioCoverage(scenario: string, value: Observation): void {
   }
   if (scenario === "startup-shutdown") {
     const startup = rows.findIndex((row) => row.kind === "operation" && row.name === "parent-startup");
-    const goal = rows.findIndex((row, index) => index > startup && row.kind === "client" && row.action === "goal-state");
-    const interval = rows.findIndex((row, index) => index > goal && row.kind === "timer" && row.action === "interval-set");
+    const interval = rows.findIndex((row, index) => index > startup && row.kind === "timer" && row.action === "interval-set");
     const connect = rows.findIndex((row, index) => index > interval && row.kind === "client" && row.action === "connect");
-    assert.ok(startup >= 0 && goal > startup && interval > goal && connect > interval);
+    assert.ok(startup >= 0 && interval > startup && connect > interval);
     const shutdown = rows.findIndex((row) => row.kind === "operation" && row.name === "parent-shutdown");
     const settled = rows.findIndex((row, index) => index > shutdown && row.kind === "activity" && row.state === "settled");
     const clear = rows.findIndex((row, index) => index > settled && row.kind === "timer" && row.action === "interval-clear");
@@ -828,10 +825,10 @@ test("lifecycle coverage assertions fail under representative mutations", async 
 
   const ordering = observationRecords(JSON.parse(JSON.stringify(await runCurrent("startup-shutdown"))) as Observation);
   const startup = ordering.findIndex((row) => row.kind === "operation" && row.name === "parent-startup");
-  const goal = ordering.findIndex((row, index) => index > startup && row.kind === "client" && row.action === "goal-state");
-  const interval = ordering.findIndex((row, index) => index > goal && row.kind === "timer" && row.action === "interval-set");
-  assert.ok(startup >= 0 && goal > startup && interval > goal);
-  [ordering[goal], ordering[interval]] = [ordering[interval], ordering[goal]];
+  const interval = ordering.findIndex((row, index) => index > startup && row.kind === "timer" && row.action === "interval-set");
+  const connect = ordering.findIndex((row, index) => index > interval && row.kind === "client" && row.action === "connect");
+  assert.ok(startup >= 0 && interval > startup && connect > interval);
+  [ordering[interval], ordering[connect]] = [ordering[connect], ordering[interval]];
   assert.throws(() => assertScenarioCoverage("startup-shutdown", ordering));
 
   const shutdownOrdering = observationRecords(JSON.parse(JSON.stringify(await runCurrent("startup-shutdown"))) as Observation);

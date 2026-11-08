@@ -143,7 +143,7 @@ func TestManagedAgentAllowInlineToolsHTTP(t *testing.T) {
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_agents(agent_id,name,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,runtime,pi_session_id,session_epoch,runtime_generation,manifest_revision,manifest_hash,allow_inline_tools,created_at,updated_at) VALUES(?,?,'/tmp','google','gemini-3.8-flash','running','running','idle','embedded','session-1',1,'gen-1',1,'hash',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, helperID, "context-helper-style")
 	require.NoError(t, err)
 
-	policyJSON := []byte(`{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
+	policyJSON := []byte(`{"compaction":{"deferred":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
 	_, err = rawDB.ExecContext(ctx, `INSERT INTO managed_readiness_sources (agent_id, desired_policy_canonical, desired_policy_sha256) VALUES (?, ?, ?)`, helperID, policyJSON, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	require.NoError(t, err)
 

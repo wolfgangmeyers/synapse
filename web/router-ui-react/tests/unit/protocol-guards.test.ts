@@ -38,7 +38,6 @@ const identity = {
 };
 
 const goalSettings = {
-  goal_lock_enabled: true,
   snooze_enabled: true,
   snooze_duration_ms: 1_000,
   snooze_turn_limit: 3,

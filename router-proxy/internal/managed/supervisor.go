@@ -73,7 +73,6 @@ type ManagerOptions struct {
 	CodexCredentialStore              *store.LocalCodexCredentialStore
 	CodexRefresh                      func(context.Context, store.CodexCredential) (store.CodexCredential, error)
 	CodexHTTPTransport                http.RoundTripper
-	EmbeddedGoalEvaluator             func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error)
 	EmbeddedExternalTool              *agent.AgentTool
 	EmbeddedAfterIntent               func(context.Context)
 	EmbeddedAfterCheckedIntent        func(context.Context)
@@ -479,7 +478,6 @@ type Manager struct {
 	codexRefresh               func(context.Context, store.CodexCredential) (store.CodexCredential, error)
 	codexHTTPTransport         http.RoundTripper
 	embeddedStatusObserver     func(embeddedTransportTrace)
-	embeddedGoalEvaluator      func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error)
 	embeddedBeforeGoalCommit   func()
 	embeddedUrgencyCoordinator func(func() (store.AgentUrgencyResult, bool, error)) (store.AgentUrgencyResult, error)
 	embeddedExternalTool       *agent.AgentTool
@@ -672,7 +670,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedGoalEvaluator: options.EmbeddedGoalEvaluator, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, attachments: options.Attachments, eventSink: options.EventSink, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, mcpManager: options.MCPManager, gitSyncer: options.GitSyncer, embeddedRunnerFactory: options.EmbeddedRunnerFactory, embeddedModelResolver: options.EmbeddedModelResolver, codexCredentialStore: options.CodexCredentialStore, codexRefresh: options.CodexRefresh, codexHTTPTransport: options.CodexHTTPTransport, embeddedExternalTool: options.EmbeddedExternalTool, embeddedAfterIntent: options.EmbeddedAfterIntent, embeddedAfterCheckedIntent: options.EmbeddedAfterCheckedIntent, embeddedEffectObserver: options.EmbeddedEffectObserver, embeddedAfterGoalCommit: options.EmbeddedAfterGoalCommit, embeddedAfterWorkerLaunch: options.EmbeddedAfterWorkerLaunch, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, rootRecoveryOperatorOwner: operatorOwner, subagentsActive: map[string]*subagentTask{}, subagentsRegistry: map[string]*subagentTask{}, activeEmbeddedSessions: make(map[string]embeddedRuntime), runCtx: runCtx, cancel: cancel}
 	// Keep unrelated runtimes available, but never admit Claude after unsafe
 	// recovery. A fresh manager retries recovery on the next router start.
 	if err := manager.RecoverClaudeCodeOrphans(runCtx); err != nil {
@@ -2825,7 +2823,7 @@ func normalizePolicyResponse(value map[string]any) (map[string]any, error) {
 	}
 	return normalizeAppliedPolicyReceipt(map[string]any{
 		"inline_enabled": value["inlineEnabled"], "inline_credits": value["inlineCredits"], "recall_content": value["recallContent"],
-		"settled_enabled": value["settledEnabled"], "goal_lock_enabled": value["goalLockEnabled"], "compaction_deferred": value["compactionDeferred"],
+		"settled_enabled": value["settledEnabled"], "compaction_deferred": value["compactionDeferred"],
 	})
 }
 func normalizePolicyReceiptEnvelope(value map[string]any, fence store.ManagedRuntimeFence) (map[string]any, error) {

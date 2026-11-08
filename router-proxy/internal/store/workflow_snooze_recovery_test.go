@@ -149,7 +149,6 @@ func TestRecoveryLifecycleRetiresEvidence(t *testing.T) {
 			if mode != "transition" {
 				require.False(t, policy.Config.Enabled)
 				require.Empty(t, policy.Config.Goal)
-				require.False(t, policy.Config.Settings.GoalLockEnabled)
 			} else {
 				require.True(t, policy.Config.Enabled)
 			}

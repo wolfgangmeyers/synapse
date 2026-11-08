@@ -16,7 +16,6 @@
     ],
     "legacy": [
       "goal",
-      "goal-lock",
       "goal-snooze",
       "goal-snooze-turn-limit",
       "goal-snooze-budget",

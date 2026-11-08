@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GOAL_CONTROL_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 import {
-  createGoalControlBridge,
   createModelControlProjection,
   modelControlErrorCode,
   modelProjection,
@@ -21,46 +19,6 @@ function context(models: unknown[], model: unknown = models[0]): Context {
     modelRegistry: { getAvailable: () => models },
     sessionManager: { getSessionId: () => "session" },
   };
-}
-
-type GoalTestState = {
-  enabled: boolean;
-  goal: string;
-  revision: number;
-  nested: { value: string };
-};
-
-function goalTestState(overrides: Partial<GoalTestState> = {}): GoalTestState {
-  return {
-    enabled: false,
-    goal: "",
-    revision: 1,
-    nested: { value: "cached" },
-    ...overrides,
-  };
-}
-
-function normalizeGoalTestState(value: unknown): GoalTestState | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const candidate = value as Record<string, unknown>;
-  const nested = candidate.nested;
-  const revision = typeof candidate.revision === "number" && Number.isSafeInteger(candidate.revision)
-    ? candidate.revision : undefined;
-  if (typeof candidate.enabled !== "boolean" || typeof candidate.goal !== "string"
-    || revision === undefined || nested === null || typeof nested !== "object"
-    || Array.isArray(nested) || typeof (nested as Record<string, unknown>).value !== "string") return undefined;
-  const nestedValue = (nested as Record<string, unknown>).value;
-  if (typeof nestedValue !== "string") return undefined;
-  return {
-    enabled: candidate.enabled,
-    goal: candidate.goal,
-    revision,
-    nested: { value: nestedValue },
-  };
-}
-
-function cloneGoalTestState(state: GoalTestState): GoalTestState {
-  return { ...state, nested: { ...state.nested } };
 }
 
 test("model projection requires provider and id and preserves bounded optional metadata", () => {
@@ -482,141 +440,6 @@ test("model control override clears on reset or context change and refresh runs 
   assert.deepEqual(overrideProjection.current(), { provider: "provider", id: "current" });
 });
 
-test("Goal bridge normalizes a valid response and publishes the root-owned state", async () => {
-  type State = { enabled: boolean; goal: string; outcomeCounts: { COMPLETED: number; NOT_DONE: number } };
-  let state: State = { enabled: false, goal: "", outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 } };
-  let publications = 0;
-  const bridge = createGoalControlBridge<State>({
-    emit: (_event, request) => {
-      const respond = request.respond;
-      if (typeof respond === "function") respond({ accepted: true, goalState: { enabled: true, goal: "ship", outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 } } });
-    },
-    getContext: () => ({ context: true }),
-    getState: () => state,
-    normalizeState: (value) => {
-      if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-      const candidate = value as { enabled?: unknown; goal?: unknown; outcomeCounts?: unknown };
-      if (typeof candidate.enabled !== "boolean" || typeof candidate.goal !== "string") return undefined;
-      return value as State;
-    },
-    setState: (value) => { state = value; },
-    publish: () => { publications += 1; },
-    cloneState: (value) => ({ ...value, outcomeCounts: { ...value.outcomeCounts } }),
-  });
-
-  const result = await bridge({ controlId: "control", targetInstanceId: "instance", sourceAgentId: "source" });
-  assert.equal(result.accepted, true);
-  assert.equal(result.goalState?.goal, "ship");
-  assert.equal(publications, 1);
-  assert.equal(state.goal, "ship");
-});
-
-test("Goal bridge maps requests and sanitizes response error codes", async () => {
-  let state = goalTestState();
-  let eventName = "";
-  let emittedRequest: Record<string, unknown> | undefined;
-  const bridge = createGoalControlBridge<GoalTestState>({
-    emit: (event, request) => {
-      eventName = event;
-      emittedRequest = request;
-      const respond = request.respond;
-      if (typeof respond === "function") respond({
-        accepted: true,
-        errorCode: "not valid",
-        goalState: goalTestState({ enabled: true, goal: "ship", revision: 2 }),
-      });
-    },
-    getContext: () => ({ parent: true }),
-    getState: () => state,
-    normalizeState: normalizeGoalTestState,
-    setState: (value) => { state = value; },
-    publish: () => {},
-    cloneState: cloneGoalTestState,
-  });
-
-  const result = await bridge({
-    controlId: "control",
-    sourceAgentId: "source",
-    instanceId: "instance",
-    revision: 3,
-    action: "set",
-    goal: "ship",
-    settings: { setting: true },
-  });
-  assert.equal(eventName, GOAL_CONTROL_REQUEST_EVENT);
-  assert.equal(emittedRequest?.correlationId, "control");
-  assert.equal(emittedRequest?.controlId, "control");
-  assert.equal(emittedRequest?.targetInstanceId, "instance");
-  assert.deepEqual(emittedRequest?.context, { parent: true });
-  assert.equal(typeof emittedRequest?.respond, "function");
-  assert.equal(result.accepted, true);
-  assert.equal(result.errorCode, undefined);
-  assert.deepEqual(result.goalState, goalTestState({ enabled: true, goal: "ship", revision: 2 }));
-});
-
-test("Goal bridge rejects invalid controls and emitter failures with an isolated cached clone", async () => {
-  let state = goalTestState();
-  let emits = 0;
-  const bridge = createGoalControlBridge<GoalTestState>({
-    emit: () => { emits += 1; throw new Error("event bus unavailable"); },
-    getContext: () => undefined,
-    getState: () => state,
-    normalizeState: normalizeGoalTestState,
-    setState: (value) => { state = value; },
-    publish: () => { throw new Error("must not publish"); },
-    cloneState: cloneGoalTestState,
-  });
-
-  const invalid = await bridge(null);
-  assert.equal(invalid.errorCode, "invalid_control");
-  assert.equal(emits, 0);
-  assert.deepEqual(invalid.goalState, state);
-  if (invalid.goalState !== undefined) invalid.goalState.nested.value = "changed";
-  assert.equal(state.nested.value, "cached");
-
-  const failed = await bridge({ controlId: "control", targetInstanceId: "instance" });
-  assert.equal(failed.errorCode, "unavailable");
-  assert.equal(emits, 1);
-  assert.deepEqual(failed.goalState, state);
-});
-
-test("Goal bridge bounds missing responses and distinguishes malformed and no-state results", async () => {
-  let state = goalTestState();
-  let publications = 0;
-  const responses: unknown[] = [
-    null,
-    { accepted: true },
-    { accepted: true, goalState: { malformed: true } },
-    { accepted: false, errorCode: "bad code" },
-  ];
-  const bridge = createGoalControlBridge<GoalTestState>({
-    emit: (_event, request) => {
-      const respond = request.respond;
-      if (typeof respond === "function") respond(responses.shift());
-    },
-    getContext: () => undefined,
-    getState: () => state,
-    normalizeState: normalizeGoalTestState,
-    setState: (value) => { state = value; },
-    publish: () => { publications += 1; },
-    cloneState: cloneGoalTestState,
-  });
-  const control = { controlId: "control", targetInstanceId: "instance" };
-
-  for (let index = 0; index < 3; index += 1) {
-    const result = await bridge(control);
-    assert.equal(result.accepted, false);
-    assert.equal(result.errorCode, "malformed_response");
-    assert.deepEqual(result.goalState, state);
-    assert.equal(publications, 0);
-  }
-  const noState = await bridge(control);
-  assert.equal(noState.accepted, false);
-  assert.equal(noState.errorCode, undefined);
-  assert.deepEqual(noState.goalState, state);
-  assert.equal(publications, 1);
-});
-
 test("model control catalog requires a parent context", () => {
   const projection = createModelControlProjection({ getParentContext: () => undefined, refresh() {} });
   assert.throws(() => projection.catalog(), /Pi context is unavailable/);
@@ -625,56 +448,4 @@ test("model control catalog requires a parent context", () => {
     refresh() {},
   });
   assert.deepEqual(availableProjection.catalog(), [{ provider: "provider", id: "model" }]);
-});
-
-test("Goal bridge preserves the first valid response when respond is called twice", async () => {
-  let state = goalTestState();
-  const bridge = createGoalControlBridge<GoalTestState>({
-    emit: (_event, request) => {
-      const respond = request.respond;
-      if (typeof respond === "function") {
-        respond({ accepted: false, errorCode: "temporarily_unavailable" });
-        respond({ accepted: true, goalState: goalTestState({ goal: "stale" }) });
-      }
-    },
-    getContext: () => undefined,
-    getState: () => state,
-    normalizeState: normalizeGoalTestState,
-    setState: (value) => { state = value; },
-    publish: () => {},
-    cloneState: cloneGoalTestState,
-  });
-
-  const result = await bridge({ controlId: "control", targetInstanceId: "instance" });
-  assert.equal(result.accepted, false);
-  assert.equal(result.errorCode, "temporarily_unavailable");
-  assert.deepEqual(result.goalState, state);
-});
-
-test("Goal bridge returns unavailable after the response timeout", async () => {
-  let state = goalTestState();
-  let timeoutCallback: (() => void) | undefined;
-  let cleared: unknown;
-  let unrefCount = 0;
-  const fakeTimer = { unref: () => { unrefCount += 1; } };
-  const bridge = createGoalControlBridge<GoalTestState>({
-    emit: () => {},
-    getContext: () => undefined,
-    getState: () => state,
-    normalizeState: normalizeGoalTestState,
-    setState: (value) => { state = value; },
-    publish: () => {},
-    cloneState: cloneGoalTestState,
-    setTimeoutImpl: ((callback: () => void) => { timeoutCallback = callback; return fakeTimer; }) as typeof setTimeout,
-    clearTimeoutImpl: (timer) => { cleared = timer; },
-  });
-  const pending = bridge({ controlId: "control", targetInstanceId: "instance" });
-  assert.equal(typeof timeoutCallback, "function");
-  timeoutCallback?.();
-  const result = await pending;
-  assert.equal(unrefCount, 1);
-  assert.equal(result.accepted, false);
-  assert.equal(result.errorCode, "unavailable");
-  assert.equal(cleared, fakeTimer);
-  assert.deepEqual(result.goalState, state);
 });

@@ -32,14 +32,14 @@ var clientNestedFields = map[clientFieldKind]map[string]clientFieldKind{
 	},
 	clientGoalProjection: {"enabled": clientScalar, "goal": clientScalar},
 	clientGoalSettings: {
-		"goal_lock_enabled": clientScalar, "snooze_enabled": clientScalar,
+		"snooze_enabled":     clientScalar,
 		"snooze_duration_ms": clientScalar, "snooze_turn_limit": clientScalar,
 		"snooze_budget_cap_ms": clientScalar, "snooze_refill_yield_ms": clientScalar,
 		"snooze_refill_elapsed_ms": clientScalar,
 	},
 	clientGoalState: {
 		"enabled": clientScalar, "goal": clientScalar,
-		"goal_lock_enabled": clientScalar, "snooze_enabled": clientScalar,
+		"snooze_enabled":     clientScalar,
 		"snooze_duration_ms": clientScalar, "snooze_turn_limit": clientScalar,
 		"snooze_budget_cap_ms": clientScalar, "snooze_refill_yield_ms": clientScalar,
 		"snooze_refill_elapsed_ms": clientScalar, "outcome_counts": clientGoalCounts,

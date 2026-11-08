@@ -1807,7 +1807,6 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 
 	claudeEvaluation := model != nil && model.Provider == claudeCodeProvider
 	claudeRestartGeneration := p.claudeRestartGeneration
-	failClosedEvaluation := claudeEvaluation
 	policy, err := m.store.ManagedGoalPolicyFor(ctx, binding.AgentID)
 	if err != nil {
 		return err
@@ -1986,7 +1985,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			log.Printf("[embedded:%s] Empty response on turn %d (count %d/3); re-nudging with actionable prompt", binding.AgentID, p.turnSeq, lane.consecutiveEmptyTurns.Load())
 			incrementGoalAttempt(&lane.goalAttempt)
 			goal := policy.Config.Goal
-			nudge := notDoneWakeup(goal, int(lane.goalAttempt.Load()))
+			nudge := goalContinuationPrompt(goal, int(lane.goalAttempt.Load()))
 			continuationPrompt := "You emitted an empty response without taking action. You must take concrete action now on this goal: " + goal + ". Execute a bash command, read a file, or edit code to make progress.\n" + nudge
 
 			key := store.EmbeddedGoalEvaluationKey{UserSeq: p.turnSeq, UserDigest: p.turnDigest,
@@ -2077,14 +2076,10 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			m.publishProjection()
 			return
 		}
-		evalCtx := m.runCtx
 		if claudeEvaluation {
-			var unregister func()
-			evalCtx, unregister = m.registerGoalEvaluation(binding.AgentID, key.GoalRevision)
 			lane.selection.Unlock()
-			defer unregister()
-			// Register before reading the revision to close the update race.
-			currentPolicy, policyErr := m.store.ManagedGoalPolicyFor(evalCtx, binding.AgentID)
+			// Re-check the revision before recording the settled verdict.
+			currentPolicy, policyErr := m.store.ManagedGoalPolicyFor(m.runCtx, binding.AgentID)
 			if policyErr != nil || currentPolicy == nil || currentPolicy.DesiredRevision != key.GoalRevision || !currentPolicy.Config.Enabled {
 				_ = m.store.ClearEmbeddedExecution(context.Background(), binding, token)
 				lane.serial.Unlock()
@@ -2092,7 +2087,6 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 				return
 			}
 		}
-		evaluator := m.embeddedGoalEvaluator
 		var outcome, reason, rawDetails string
 		var evalErr error
 		curAgent, curAgentErr := m.store.ManagedAgent(m.runCtx, binding.AgentID)
@@ -2113,25 +2107,11 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			// The exact guidance is external content, not the bounded store reason.
 			rawDetails = reason
 			reason = "Active workflow requires progress or workflow_snooze."
-		} else if evaluator != nil {
-			outcome, reason, evalErr = evaluator(evalCtx, key)
-			rawDetails = reason
 		} else {
-			// Only Claude foreground turns select the configured evaluator. Pi
-			// retains its foreground model, stream and historical error semantics.
-			if claudeEvaluation {
-				model, evalErr = m.claudeCodeEvaluatorModel(evalCtx)
-				if evalErr == nil && model.Provider != claudeCodeProvider {
-					_, stream, evalErr = m.resolveSubagentModel(store.ManagedAgentRecord{SelectedModel: store.ManagedModel{Provider: model.Provider, ID: model.ID}})
-				}
-			}
-			if evalErr == nil {
-				evalRes, err := m.evaluateEmbeddedProductionGoalWithDetails(evalCtx, binding, key, snapshot, policy.Config.Goal, model, stream)
-				outcome = evalRes.verdict
-				reason = evalRes.reason
-				rawDetails = evalRes.rawContent
-				evalErr = err
-			}
+			// A settled turn with an active goal always continues. The agent
+			// itself decides completion (goal off) or blocking (mecha_blocked).
+			outcome = store.EmbeddedGoalEvaluationNotDone
+			reason = embeddedAutomaticContinuationReason
 		}
 		if m.embeddedBeforeGoalCommit != nil {
 			m.embeddedBeforeGoalCommit()
@@ -2145,7 +2125,7 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			piReviewBarrier(binding.AgentID, key.GoalRevision, outcome)
 			defer piReviewDecisionComplete(binding.AgentID, key.GoalRevision)
 		}
-		if evalCtx.Err() != nil || (claudeEvaluation && lane.claudeRestartGeneration.Load() != claudeRestartGeneration) {
+		if m.runCtx.Err() != nil || (claudeEvaluation && lane.claudeRestartGeneration.Load() != claudeRestartGeneration) {
 			if claudeEvaluation {
 				lane.selection.Unlock()
 			}
@@ -2153,37 +2133,6 @@ func (m *Manager) evaluateEmbeddedTurn(ctx context.Context, binding store.Embedd
 			lane.serial.Unlock()
 			m.publishProjection()
 			return
-		}
-		if evalErr != nil && failClosedEvaluation {
-			diagnostic := "Goal evaluation unavailable: evaluation failed; continuation stopped"
-			if claudeEvaluation {
-				diagnostic = claudeEvaluatorDiagnostic(evalErr)
-			}
-			entry, historyErr := m.store.RecordEmbeddedGoalEvaluationFailure(context.Background(), binding, key, token, diagnostic, fmt.Sprintf("goal-evaluator-failed:%s:%d", binding.AgentID, p.turnSeq))
-			if historyErr != nil {
-				log.Printf("[embedded:%s] evaluator failure history not recorded (stale claim or storage error)", binding.AgentID)
-			} else if entry.ID != "" {
-				m.publishCompleteHistory(entry)
-			}
-			if clearErr := m.store.ClearEmbeddedExecution(context.Background(), binding, token); clearErr != nil {
-				log.Printf("[embedded:%s] evaluator execution not cleared (stale claim or storage error)", binding.AgentID)
-			}
-			if claudeEvaluation {
-				lane.selection.Unlock()
-			}
-			lane.serial.Unlock()
-			m.publishProjection()
-			return
-		}
-		if evalErr != nil {
-			log.Printf("[embedded:%s] Goal evaluation error (%v); falling back to NOT_DONE to ensure worker never stalls", binding.AgentID, evalErr)
-			outcome = store.EmbeddedGoalEvaluationNotDone
-			reason = "Evaluator inconclusive: " + evalErr.Error()
-			if len(reason) > 512 {
-				reason = reason[:512]
-			}
-			rawDetails = fmt.Sprintf("Goal evaluation failed: %v", evalErr)
-			evalErr = nil
 		}
 		changed := false
 		if m.runCtx.Err() == nil {

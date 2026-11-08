@@ -14,7 +14,6 @@ export type ManagedPolicyProjection = {
   inlineCredits: Readonly<Record<string, number>>;
   recallContent: string;
   settledEnabled: boolean;
-  goalLockEnabled: boolean;
   compactionDeferred: boolean;
   goalControl?: ManagedGoalControlProjection;
 };
@@ -24,7 +23,6 @@ const EMPTY_POLICY: ManagedPolicyProjection = {
   inlineCredits: {},
   recallContent: "",
   settledEnabled: false,
-  goalLockEnabled: false,
   compactionDeferred: false,
 };
 
@@ -37,11 +35,10 @@ function boundedBoolean(value: unknown, fallback: boolean): boolean {
 }
 
 function validGoalSettings(settings: JsonRecord): boolean {
-  const keys = ["goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs", "snoozeRefillYieldMs", "snoozeRefillElapsedMs"];
+  const keys = ["snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs", "snoozeRefillYieldMs", "snoozeRefillElapsedMs"];
   const positiveInteger = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
   const optionalPositiveInteger = (value: unknown) => value === null || positiveInteger(value);
   return Object.keys(settings).length === keys.length && keys.every((key) => Object.hasOwn(settings, key))
-    && typeof settings.goalLockEnabled === "boolean"
     && typeof settings.snoozeEnabled === "boolean"
     && positiveInteger(settings.snoozeDurationMs)
     && optionalPositiveInteger(settings.snoozeTurnLimit)
@@ -65,7 +62,7 @@ export function createPolicyBridge() {
   return {
     apply(value: unknown): ManagedPolicyProjection {
       if (!isRecord(value)) throw new TypeError("Managed policy projection must be an object");
-      const allowed = new Set(["inline", "recall", "settled", "goal_lock", "compaction", "goal"]);
+      const allowed = new Set(["inline", "recall", "settled", "compaction", "goal"]);
       if (Object.keys(value).some((key) => !allowed.has(key))) throw new TypeError("Managed policy projection has unsupported fields");
       const inline = value.inline === undefined ? {} : closedRecord(value.inline, ["enabled", "credits"], "inline");
       const creditsRaw = inline.credits === undefined ? {} : closedRecord(inline.credits, ["bash", "edit", "write"], "inline credits");
@@ -80,7 +77,6 @@ export function createPolicyBridge() {
       const content = typeof recall.content === "string" ? recall.content : "";
       if (Buffer.byteLength(content, "utf8") > 24_000) throw new TypeError("Managed recall projection is too large");
       const settled = value.settled === undefined ? {} : closedRecord(value.settled, ["enabled"], "settled");
-      const goalLock = value.goal_lock === undefined ? {} : closedRecord(value.goal_lock, ["enabled"], "goal lock");
       const compaction = value.compaction === undefined ? {} : closedRecord(value.compaction, ["deferred"], "compaction");
       let goalControl: ManagedGoalControlProjection | undefined;
       if (value.goal !== undefined) {
@@ -106,7 +102,6 @@ export function createPolicyBridge() {
         inlineCredits: Object.freeze(credits),
         recallContent: content,
         settledEnabled: boundedBoolean(settled.enabled, false),
-        goalLockEnabled: boundedBoolean(goalLock.enabled, false),
         compactionDeferred: boundedBoolean(compaction.deferred, false),
         ...(goalControl === undefined ? {} : { goalControl }),
       });

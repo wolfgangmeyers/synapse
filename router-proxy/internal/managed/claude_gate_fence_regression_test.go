@@ -56,19 +56,6 @@ func TestClaudeManagerCloseFencesBeforeCancellation(t *testing.T) {
 	}
 }
 
-func TestClaudeShortCommandFenceBeforeRelease(t *testing.T) {
-	var pool claudeCodeProcessPool
-	cfg := claudeTestConfig(t, `{"turns":[]}`)
-	cfg.releaseGate = pool.releaseGate
-	pool.fence()
-	if _, err := PreflightClaudeCode(context.Background(), cfg); err == nil {
-		t.Fatal("fenced preflight succeeded")
-	}
-	if _, err := runClaudeGoalEvaluator(context.Background(), cfg, "sonnet", "evaluate"); err == nil {
-		t.Fatal("fenced evaluator succeeded")
-	}
-}
-
 func TestClaudeGateFailureCleanupMayFenceWithoutDeadlock(t *testing.T) {
 	var pool claudeCodeProcessPool
 	cfg := claudeTestConfig(t, `{"turns":[]}`)

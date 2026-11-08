@@ -40,10 +40,6 @@ func TestGoalEvaluationSkippedWhileSubagentsActive(t *testing.T) {
 	defer mgr.Close(ctx)
 
 	var evaluatorCalled atomic.Int32
-	mgr.embeddedGoalEvaluator = func(evalCtx context.Context, evalKey store.EmbeddedGoalEvaluationKey) (string, string, error) {
-		evaluatorCalled.Add(1)
-		return store.EmbeddedGoalEvaluationDone, "goal finished", nil
-	}
 
 	launched, err := mgr.LaunchEmbeddedRoot(ctx, LaunchRequest{
 		Name:      "parent-worker-goal",

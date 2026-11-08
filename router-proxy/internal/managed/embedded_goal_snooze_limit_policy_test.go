@@ -87,7 +87,6 @@ func TestUserConfiguring5HoursOnGoalPolicySucceeds(t *testing.T) {
 
 	fiveHoursMS := int64(5 * 60 * 60 * 1000) // 18,000,000 ms = 5 hours
 	settings := map[string]any{
-		"goal_lock_enabled":        false,
 		"snooze_enabled":           true,
 		"snooze_duration_ms":       fiveHoursMS,
 		"snooze_turn_limit":        nil,

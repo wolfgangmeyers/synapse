@@ -327,8 +327,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
       expect(preferences()).toHaveLength(1);
       expect(policy()).toEqual(originalPolicy);
       expect((await f.api(`/v1/managed-agents/${agent}/goal`)).goal_state).toMatchObject({
-        enabled: true, goal: goal.goal, goal_lock_enabled: true,
-      });
+        enabled: true, goal: goal.goal, });
       expect(f.rows("SELECT * FROM embedded_goal_continuations WHERE agent_id=? AND state='started'", agent)).toHaveLength(0);
       await expect(page.getByText(answer, { exact: true }).first()).toBeVisible();
     }
@@ -353,7 +352,7 @@ test.describe("Persisted workflow snooze through real boundaries", () => {
     f.replies.push({ hold: true });
     await f.advance(1);
     await expect.poll(() => f.requests.length).toBe(6);
-    const expected = `The workflow ${workflow.name} is currently active in state A. You must either make progress towards completing the workflow or call workflow_snooze.`;
+    const expected = `The workflow ${workflow.name} is currently active in state A. You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason.`;
     const input = f.requests.at(-1)!.input;
     expect(Array.isArray(input)).toBe(true);
     const lastUser = [...(input as { role?: string; content?: unknown }[])].reverse().find(item => item.role === "user");

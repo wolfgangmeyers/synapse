@@ -89,7 +89,6 @@ test("protocol inventories stay closed and exact", () => {
   ]);
   assert.deepEqual(LEGACY_COMMAND_NAMES, [
     "goal",
-    "goal-lock",
     "goal-snooze",
     "goal-snooze-turn-limit",
     "goal-snooze-budget",

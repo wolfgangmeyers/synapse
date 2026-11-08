@@ -36,11 +36,10 @@ func (r *inlineAllowanceRPC) WaitForPolicyApplied(_ context.Context, generation 
 	inline, _ := r.policy["inline"].(map[string]any)
 	recall, _ := r.policy["recall"].(map[string]any)
 	settled, _ := r.policy["settled"].(map[string]any)
-	goalLock, _ := r.policy["goal_lock"].(map[string]any)
 	compaction, _ := r.policy["compaction"].(map[string]any)
 	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{
 		"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"],
-		"settled_enabled": settled["enabled"], "goal_lock_enabled": goalLock["enabled"], "compaction_deferred": compaction["deferred"],
+		"settled_enabled": settled["enabled"], "compaction_deferred": compaction["deferred"],
 	}}, nil
 }
 
@@ -151,11 +150,10 @@ func (r *nativeInlineAllowanceRPC) WaitForPolicyApplied(ctx context.Context, gen
 		inline, _ := r.policy["inline"].(map[string]any)
 		recall, _ := r.policy["recall"].(map[string]any)
 		settled, _ := r.policy["settled"].(map[string]any)
-		goalLock, _ := r.policy["goal_lock"].(map[string]any)
 		compaction, _ := r.policy["compaction"].(map[string]any)
 		return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{
 			"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"],
-			"settled_enabled": settled["enabled"], "goal_lock_enabled": goalLock["enabled"], "compaction_deferred": compaction["deferred"],
+			"settled_enabled": settled["enabled"], "compaction_deferred": compaction["deferred"],
 		}}, nil
 	}
 	r.policyMu.Unlock()
@@ -365,7 +363,7 @@ func TestNativeBuiltinLifecycleCannotStallManagedAllowanceControlPipe(t *testing
 				"protocol": "mecha.policy/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch,
 				"applied": map[string]any{
 					"inline_enabled": true, "inline_credits": map[string]any{"bash": int64(1)}, "recall_content": "",
-					"settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
+					"settled_enabled": false, "compaction_deferred": false,
 				},
 			},
 		},

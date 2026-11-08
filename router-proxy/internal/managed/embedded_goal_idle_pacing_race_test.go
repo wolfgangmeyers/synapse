@@ -19,9 +19,6 @@ func TestGoalIdleKickoffCannotBypassReservedPacing(t *testing.T) {
 	ctx := context.Background()
 	f := newFailureFixture(t)
 	f.m.goalContinuationDelay = 10 * time.Second
-	f.m.embeddedGoalEvaluator = func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-		return store.EmbeddedGoalEvaluationDone, "done", nil
-	}
 	f.reg.SetResponses([]providers.FauxResponseStep{f.response("continuation")})
 	owner := f.launch(t, "")
 	f.m.startWG.Wait()
@@ -110,9 +107,6 @@ func TestGoalReservedSnoozeSurvivesManagerRestart(t *testing.T) {
 	f.m, err = NewManager(ManagerOptions{Store: f.db, Manifest: manifest, Clock: f.clock, Config: Config{SessionRoot: filepath.Join(f.root, "sessions"), AllowedWorkingDirectoryRoots: []string{f.root}}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-6-sol", Available: true}), EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return f.reg.GetModel() }, CodexCredentialStore: testfixture.CodexAdmission(t)})
 	require.NoError(t, err)
 	f.m.goalContinuationDelay = 10 * time.Second
-	f.m.embeddedGoalEvaluator = func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-		return store.EmbeddedGoalEvaluationDone, "done", nil
-	}
 	generation, err := f.db.MintEmbeddedProcessGeneration(ctx, "restart-pacing")
 	require.NoError(t, err)
 	require.NoError(t, f.m.SetEmbeddedStartupGeneration(generation))

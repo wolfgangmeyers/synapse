@@ -196,7 +196,7 @@ func PublicAgentWithGoal(agent *store.ManagedAgentRecord, policy *store.ManagedG
 		"desired_revision": policy.DesiredRevision, "applied_revision": policy.AppliedRevision,
 		"projection_state":  policy.ProjectionState,
 		"outcome_counts":    map[string]any{"COMPLETED": 0, "NOT_DONE": 0},
-		"goal_lock_enabled": settings.GoalLockEnabled, "snooze_enabled": settings.SnoozeEnabled,
+		"snooze_enabled": settings.SnoozeEnabled,
 		"snooze_duration_ms": settings.SnoozeDurationMS, "snooze_turn_limit": settings.SnoozeTurnLimit,
 		"snooze_budget_cap_ms":   settings.SnoozeBudgetCapMS,
 		"snooze_refill_yield_ms": settings.SnoozeRefillYieldMS, "snooze_refill_elapsed_ms": settings.SnoozeRefillElapsedMS,

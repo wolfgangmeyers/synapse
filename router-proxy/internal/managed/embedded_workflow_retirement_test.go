@@ -32,7 +32,6 @@ func TestWorkflowLifecycleRetiresTimerAfterDurableSuccess(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, db.SetManagedAgentActiveWorkflowWithVariables(ctx, binding.AgentID, &wf.ID, &state.ID, nil))
 				settings := store.DefaultManagedGoalSettings()
-				settings.GoalLockEnabled = true
 				_, err = db.UpdateManagedGoalConfig(ctx, binding.AgentID, store.ManagedGoalConfig{Enabled: true, Goal: "Complete active workflow: Retirement", Settings: settings})
 				require.NoError(t, err)
 				before, err := db.ManagedGoalPolicyFor(ctx, binding.AgentID)
@@ -78,11 +77,9 @@ func TestWorkflowLifecycleRetiresTimerAfterDurableSuccess(t *testing.T) {
 					if action == "transition" {
 						require.Equal(t, next.ID, agent.ActiveWorkflowStateID)
 						require.Equal(t, before.DesiredRevision, policy.DesiredRevision)
-						require.True(t, policy.Config.Settings.GoalLockEnabled)
 					} else {
 						require.Empty(t, agent.ActiveWorkflowStateID)
 						require.False(t, policy.Config.Enabled)
-						require.False(t, policy.Config.Settings.GoalLockEnabled)
 						require.Empty(t, policy.Config.Goal)
 					}
 				}

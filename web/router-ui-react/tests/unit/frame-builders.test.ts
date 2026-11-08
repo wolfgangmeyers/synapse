@@ -13,7 +13,6 @@ import {
 import { isClientFrame } from "../../src/protocol/guards";
 
 const settings = {
-  goal_lock_enabled: false,
   snooze_enabled: true,
   snooze_duration_ms: 60_000,
   snooze_turn_limit: null,

@@ -187,7 +187,7 @@ describe("validated post-E2E reliability repairs", () => {
     const register = requiredFrame(socket);
     socket.emit("message", { data: JSON.stringify(registered(String(register.frame_id), String(register.instance_id))) });
     await waitFor(() => expect(transport.goalControlAvailable).toBe(false));
-    expect(transport.sendGoalControl("worker", "worker-instance", { controlId: "goal-control", action: "set", goal: "Do the work", settings: { goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).toBe(false);
+    expect(transport.sendGoalControl("worker", "worker-instance", { controlId: "goal-control", action: "set", goal: "Do the work", settings: { snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).toBe(false);
     transport.close();
   });
 
@@ -215,7 +215,7 @@ describe("validated post-E2E reliability repairs", () => {
     const secondSocket = sockets[1]; if (!secondSocket) throw new Error("second websocket is missing");
     secondSocket.readyState = 1; secondSocket.emit("open", {});
     expect(transport.goalControlAvailable).toBe(false);
-    expect(transport.sendGoalControl("worker", "worker-instance", { controlId: "goal-control", action: "set", goal: "Do the work", settings: { goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).toBe(false);
+    expect(transport.sendGoalControl("worker", "worker-instance", { controlId: "goal-control", action: "set", goal: "Do the work", settings: { snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).toBe(false);
     const secondRegister = requiredFrame(secondSocket); secondSocket.emit("message", { data: JSON.stringify(registered(String(secondRegister.frame_id), String(secondRegister.instance_id))) });
     resolveCapability?.(new Response(JSON.stringify({ goal_control_v1: true })));
     await waitFor(() => expect(transport.goalControlAvailable).toBe(true));

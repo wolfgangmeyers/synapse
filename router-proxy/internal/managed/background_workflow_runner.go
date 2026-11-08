@@ -174,7 +174,6 @@ func (m *Manager) LaunchBackgroundWorkflow(
 	if policy, err := m.store.ManagedGoalPolicyFor(ctx, agentID); err == nil && policy != nil {
 		goalSettings = policy.Config.Settings
 	}
-	goalSettings.GoalLockEnabled = true
 	goalSettings.SnoozeDurationMS = snoozeDurationMS
 	_, _ = m.store.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
 		Enabled:  true,
