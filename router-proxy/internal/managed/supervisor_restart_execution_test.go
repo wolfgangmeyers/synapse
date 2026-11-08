@@ -172,10 +172,10 @@ func (rpc *restartExecutionRPC) ApplyPolicy(ctx context.Context, _ map[string]an
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "compactionDeferred": false}, nil
 }
 func (rpc *restartExecutionRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
-	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false}}, nil
 }
 func (rpc *restartExecutionRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
 	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": rpc.session, "sequence": int64(0), "runs": []any{}}, nil

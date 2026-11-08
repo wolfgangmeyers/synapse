@@ -26,13 +26,11 @@ export type ActivityContext = {
   isIdle?: () => boolean;
 };
 
-export type ActivityGoalProjection = { enabled: boolean; goal: string };
 export type ActivityModel = { provider: string; id: string; name?: string; contextWindow?: number; maxTokens?: number };
 
 type ActivityPayload = {
   subagentCount?: number;
   subagents?: unknown;
-  goal?: unknown;
   currentModel?: unknown;
 };
 
@@ -63,7 +61,6 @@ export type ActivityLifecycleOptions = ActivityLifecycleTimerOptions & {
   getClient: () => ActivityClient | undefined;
   getParentContext: () => ActivityContext | undefined;
   isCompacting: () => boolean;
-  getGoalProjection: () => ActivityGoalProjection | undefined;
   getCurrentModel: () => ActivityModel | undefined;
   getNativeService: (ownerSessionId: string) => NativeSubagentService | undefined;
   notify: (message: string, level?: string) => void;
@@ -206,7 +203,6 @@ type ActivitySent = {
   state: string;
   subagentCount: number;
   subagents: Array<{ id: string; type?: string; description: string; status?: string }>;
-  goal?: ActivityGoalProjection;
   currentModel?: ActivityModel;
   sentAtMs: number;
 };
@@ -242,7 +238,6 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     getClient,
     getParentContext,
     isCompacting,
-    getGoalProjection,
     getCurrentModel,
     getNativeService: resolveNativeService,
     notify,
@@ -255,7 +250,7 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     nowImpl = Date.now,
   } = options;
   if (typeof getClient !== "function" || typeof getParentContext !== "function"
-    || typeof isCompacting !== "function" || typeof getGoalProjection !== "function"
+    || typeof isCompacting !== "function"
     || typeof getCurrentModel !== "function" || typeof resolveNativeService !== "function"
     || typeof notify !== "function" || typeof trace !== "function"
     || typeof createSettledScheduler !== "function") {
@@ -986,10 +981,6 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     return parentActivityStateFromPiContext() ?? (activityHeartbeatActive ? "active" : "settled");
   }
 
-  function effectiveGoalProjection(): ActivityGoalProjection | undefined {
-    return getGoalProjection();
-  }
-
   function sendActivityState(state: string, { force = false, reconcile = true }: { force?: boolean; reconcile?: boolean } = {}): boolean {
     // Compaction owns the visible state until its lifecycle resumes; ordinary
     // frames must not clear that pause early.
@@ -1009,12 +1000,10 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     const subagents = publicSubagentSummaries();
     const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
     const currentModel = getCurrentModel();
-    const goal = effectiveGoalProjection();
     const unchanged = lastActivitySent !== undefined
       && lastActivitySent.state === state
       && lastActivitySent.subagentCount === subagentCount
       && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents)
-      && JSON.stringify(lastActivitySent.goal) === JSON.stringify(goal)
       && JSON.stringify(lastActivitySent.currentModel) === JSON.stringify(currentModel);
     // Settled with no children is terminal until reconciliation changes it; it does
     // not need a periodic refresh frame.
@@ -1030,14 +1019,12 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       getClient()?.sendActivity?.(state, {
         subagentCount,
         subagents,
-        ...(goal === undefined ? {} : { goal }),
         currentModel,
       });
       lastActivitySent = {
         state,
         subagentCount,
         subagents,
-        goal,
         currentModel,
         sentAtMs: nowMs,
       };

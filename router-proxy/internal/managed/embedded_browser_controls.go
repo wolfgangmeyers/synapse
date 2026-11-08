@@ -79,7 +79,6 @@ func (m *Manager) directEmbeddedBrowserGoal(ctx context.Context, agentID, operat
 		} else {
 			config.Enabled = false
 			config.Goal = ""
-			config.Settings.GoalLockEnabled = false
 		}
 		if settings, ok := arguments["settings"]; ok {
 			var valid bool

@@ -59,7 +59,7 @@ On entering or transitioning to a state:
    - Instructions from `entry_text` (variable-interpolated)
    - Available forward transitions with descriptions
    - Exit allowance indicator
-2. **Implicit workflow completion goal**: When an agent enters an active workflow, the router automatically activates an implicit goal: `"Complete active workflow: <workflow_name>"` with `GoalLockEnabled: true` and workflow-configured snooze duration (default 10 minutes). Per-state goals are removed; internal state transitions keep the implicit goal active and locked. Manual goal set/off calls are rejected while any workflow is active. When the workflow exits or deactivates, the goal is cleared.
+2. **Implicit workflow completion goal**: When an agent enters an active workflow, the router automatically activates an implicit goal: `"Complete active workflow: <workflow_name>"` with workflow-configured snooze duration (default 10 minutes). Per-state goals are removed; internal state transitions keep the implicit goal active. Goal lock has been removed; stored `goal_lock_enabled` values are ignored. Manual goal set/off calls are rejected while any workflow is active. When the workflow exits or deactivates, the goal is cleared.
 3. **Tool filtering**: If `allowed_tools` is defined and non-empty, the agent's exposed toolset is restricted to that list.
    - System escape tools always bypass restrictions:
      - `mecha_workflow_transition` (or alias `workflow_transition`)
@@ -188,14 +188,14 @@ Parameters:
 When activated:
 - Active workflow and state are assigned to the agent.
 - State reminders and monitors are spawned.
-- Implicit workflow completion goal and goal lock are applied.
+- Implicit workflow completion goal is applied.
 - Active toolset is filtered.
 - Initial guidance prompt is admitted to the agent turn.
 
 When deactivated:
 - Active workflow pointers and variables are cleared.
 - State-scoped reminders and monitors are cleaned up.
-- Goal lock is disabled.
+- Implicit workflow goal is cleared.
 - Tool filtering resets to default agent toolset.
 
 ### 6. `workflow_state_list`

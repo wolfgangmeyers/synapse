@@ -224,7 +224,6 @@ func TestWorkflowAdminTools_Lifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, pol.Config.Enabled)
 	require.Equal(t, "Complete active workflow: Test Bundle Workflow", pol.Config.Goal)
-	require.True(t, pol.Config.Settings.GoalLockEnabled)
 
 	// 6. workflow_assign: deactivate
 	resAssignDeact, err := assignTool.Execute(ctx, "c8", map[string]any{

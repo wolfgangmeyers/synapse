@@ -10,6 +10,7 @@ SKILL = Path(__file__).parents[1] / "SKILL.md"
 INSTALL_SKILL = SKILL.parents[1] / "install" / "SKILL.md"
 CURSOR_DOC = SKILL.parents[3] / "docs" / "cursor-tool-surfaces.md"
 VERIFIER_MARKER = 'python3 - "$GOAL_SOURCE" "$MESSAGING_SOURCE" "$SETTINGS" <<\'PY\'\n'
+MAINTENANCE_VERIFIER_MARKER = 'python3 - "$MESSAGING_SOURCE" "$SETTINGS" <<\'PY\'\n'
 PACKAGE_SECTION = "### Pi checkout packages (bare Pi)"
 MAINTENANCE_STATUS_SECTION = "## Status and registration check (read-only)"
 
@@ -21,7 +22,7 @@ def embedded_program():
 
 def maintenance_program():
     section = SKILL.read_text().split(MAINTENANCE_STATUS_SECTION, 1)[1].split("\n```\n", 1)[0]
-    return section.split(VERIFIER_MARKER, 1)[1].split("\nPY\n", 1)[0]
+    return section.split(MAINTENANCE_VERIFIER_MARKER, 1)[1].split("\nPY", 1)[0]
 
 
 class PiExtensionMaintenanceSkillTests(unittest.TestCase):
@@ -34,13 +35,13 @@ class PiExtensionMaintenanceSkillTests(unittest.TestCase):
             "## Final verification",
         ):
             self.assertIn(heading, skill)
-        self.assertIn("REPO_ROOT/pi-extensions/mecha-goal/", skill)
+        self.assertNotIn("REPO_ROOT/pi-extensions/mecha-goal/", skill)
         self.assertIn("REPO_ROOT/pi-extensions/mecha-messaging/", skill)
-        self.assertIn("Goal-first", skill)
+        self.assertNotIn("Goal-first", skill)
         self.assertNotIn("REPO_ROOT/pi-extensions/mecha-messaging.js", skill)
         self.assertIn("Do not copy, move, symlink, restore,", skill)
         self.assertIn("registration for `~/.mecha-developer/extensions/mecha-messaging.js` is stale", skill)
-        self.assertIn("exactly one Goal registration followed immediately\nby exactly one Messaging registration", skill)
+        self.assertIn("must contain exactly one Messaging registration and no", skill)
         self.assertIn("reject standalone or old flat Pi registration", skill)
         self.assertIn('path.name in {"goal.js", "mecha-messaging.js"}', skill)
         self.assertIn("~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js", skill)
@@ -76,18 +77,45 @@ class PiExtensionMaintenanceSkillTests(unittest.TestCase):
             env=os.environ.copy(), capture_output=True, text=True,
         )
 
+    def run_maintenance_verifier(self, messaging_source, settings):
+        return subprocess.run(
+            ["python3", "-c", maintenance_program(), str(messaging_source), str(settings)],
+            env=os.environ.copy(), capture_output=True, text=True,
+        )
+
+    def test_maintenance_verifier_accepts_one_messaging_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            messaging_source = root / "pi-extensions" / "mecha-messaging"
+            messaging_source.mkdir(parents=True)
+            settings = root / "settings.json"
+            settings.write_text(json.dumps({"packages": [str(messaging_source)]}))
+            result = self.run_maintenance_verifier(messaging_source, settings)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("one Messaging checkout package registration", result.stdout)
+
+    def test_maintenance_verifier_rejects_stale_goal_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            messaging_source = root / "pi-extensions" / "mecha-messaging"
+            messaging_source.mkdir(parents=True)
+            stale_goal = root / "pi-extensions" / "mecha-goal"
+            settings = root / "settings.json"
+            settings.write_text(json.dumps({"packages": [str(stale_goal), str(messaging_source)]}))
+            result = self.run_maintenance_verifier(messaging_source, settings)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("stale Goal registration", result.stderr)
+
     def test_maintenance_verifier_rejects_flat_graph_registrations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            goal_source = root / "pi-extensions" / "mecha-goal"
             messaging_source = root / "pi-extensions" / "mecha-messaging"
-            goal_source.mkdir(parents=True)
             messaging_source.mkdir(parents=True)
             settings = root / "settings.json"
             for legacy in ("goal.js", "mecha-messaging.js"):
                 with self.subTest(legacy=legacy):
-                    settings.write_text(json.dumps({"packages": [str(goal_source), str(messaging_source), str(root / legacy)]}))
-                    result = self.run_verifier(goal_source, messaging_source, settings, maintenance_program())
+                    settings.write_text(json.dumps({"packages": [str(messaging_source), str(root / legacy)]}))
+                    result = self.run_maintenance_verifier(messaging_source, settings)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("old flat", result.stderr)
 

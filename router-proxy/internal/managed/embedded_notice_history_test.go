@@ -51,10 +51,6 @@ func TestEmbeddedColdInterruptedNoticeFinalHistory(t *testing.T) {
 			CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 			EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 			CodexCredentialStore:  testfixture.CodexAdmission(t),
-			EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-				evaluations.Add(1)
-				return store.EmbeddedGoalEvaluationNotDone, "not evaluated for notice", nil
-			},
 		})
 		require.NoError(t, e)
 		return m
@@ -167,10 +163,6 @@ func TestEmbeddedColdInterruptedNoticeStaleOwnerNoHistory(t *testing.T) {
 			CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 			EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 			CodexCredentialStore:  testfixture.CodexAdmission(t),
-			EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-				evaluations.Add(1)
-				return store.EmbeddedGoalEvaluationNotDone, "not evaluated for notice", nil
-			},
 		})
 		require.NoError(t, e)
 		return m

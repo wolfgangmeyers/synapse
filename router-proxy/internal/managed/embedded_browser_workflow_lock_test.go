@@ -21,7 +21,6 @@ func TestEmbeddedBrowserWorkflowGoalLock(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.SetManagedAgentActiveWorkflowWithVariables(ctx, binding.AgentID, &wf.ID, &state.ID, nil))
 	settings := store.DefaultManagedGoalSettings()
-	settings.GoalLockEnabled = true
 	_, err = db.UpdateManagedGoalConfig(ctx, binding.AgentID, store.ManagedGoalConfig{Enabled: true, Goal: "Complete active workflow: Locked workflow", Settings: settings})
 	require.NoError(t, err)
 	before, err := db.ManagedGoalPolicyFor(ctx, binding.AgentID)

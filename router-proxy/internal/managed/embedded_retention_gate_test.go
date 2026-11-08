@@ -114,15 +114,6 @@ func TestEmbeddedRetentionContextResetPreservesAdmission(t *testing.T) {
 func TestEmbeddedRetentionRuntimeExecutionSlots(t *testing.T) {
 	f := newFailureFixture(t)
 	var sdkSeen, evalSeen atomic.Int32
-	f.m.embeddedGoalEvaluator = func(_ context.Context, k store.EmbeddedGoalEvaluationKey) (string, string, error) {
-		var kind string
-		var seq int64
-		require.NoError(t, f.raw.QueryRow(`SELECT json_extract(execution_json,'$.kind'),json_extract(execution_json,'$.source.UserSeq') FROM embedded_sessions WHERE agent_id='failure-root' AND current=1`).Scan(&kind, &seq))
-		require.Equal(t, "evaluator", kind)
-		require.Equal(t, k.UserSeq, seq)
-		evalSeen.Add(1)
-		return store.EmbeddedGoalEvaluationDone, "finished", nil
-	}
 	checkSDK := func() {
 		var kind string
 		var n int
@@ -196,12 +187,6 @@ func TestEmbeddedRetentionContinuationProtectsSourceAndCurrent(t *testing.T) {
 	f := newFailureFixture(t)
 	ctx := context.Background()
 	var evaluations atomic.Int32
-	f.m.embeddedGoalEvaluator = func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-		if evaluations.Add(1) == 1 {
-			return store.EmbeddedGoalEvaluationNotDone, "continue", nil
-		}
-		return store.EmbeddedGoalEvaluationDone, "finished", nil
-	}
 	var requests atomic.Int32
 	f.reg.SetResponses([]providers.FauxResponseStep{f.response("source settled"), func(ai.TranscriptContext, *ai.SimpleStreamOptions, *providers.FauxState, *ai.Model) *ai.AssistantMessage {
 		requests.Add(1)

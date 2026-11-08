@@ -97,20 +97,19 @@ func managedGoalSettingsFromArguments(value any) (store.ManagedGoalSettings, boo
 		}
 		return &result, true
 	}
-	goalLock, lockOK := asBool("goal_lock_enabled")
 	snooze, snoozeOK := asBool("snooze_enabled")
 	duration, durationOK := asPositive("snooze_duration_ms")
 	turnLimit, turnOK := asOptional("snooze_turn_limit")
 	budget, budgetOK := asOptional("snooze_budget_cap_ms")
 	yield, yieldOK := asPositive("snooze_refill_yield_ms")
 	elapsed, elapsedOK := asPositive("snooze_refill_elapsed_ms")
-	if !lockOK || !snoozeOK || !durationOK || !turnOK || !budgetOK || !yieldOK || !elapsedOK || (turnLimit != nil && *turnLimit > 20) {
+	if !snoozeOK || !durationOK || !turnOK || !budgetOK || !yieldOK || !elapsedOK || (turnLimit != nil && *turnLimit > 20) {
 		return store.ManagedGoalSettings{}, false
 	}
 	if duration > store.EmbeddedGoalSnoozeMaxDurationMS {
 		duration = store.EmbeddedGoalSnoozeMaxDurationMS
 	}
-	return store.ManagedGoalSettings{GoalLockEnabled: goalLock, SnoozeEnabled: snooze, SnoozeDurationMS: duration, SnoozeTurnLimit: turnLimit, SnoozeBudgetCapMS: budget, SnoozeRefillYieldMS: yield, SnoozeRefillElapsedMS: elapsed}, true
+	return store.ManagedGoalSettings{SnoozeEnabled: snooze, SnoozeDurationMS: duration, SnoozeTurnLimit: turnLimit, SnoozeBudgetCapMS: budget, SnoozeRefillYieldMS: yield, SnoozeRefillElapsedMS: elapsed}, true
 }
 
 func (m *Manager) managedGoalStatus(ctx context.Context, agentID string) (RootControlHandlerResult, error) {
@@ -136,7 +135,6 @@ func managedGoalStatusDetails(policy *store.ManagedGoalPolicy) map[string]any {
 		result["enabled"], result["goal"] = policy.Config.Enabled, policy.Config.Goal
 		result["desired_revision"], result["applied_revision"], result["projection_state"] = policy.DesiredRevision, policy.AppliedRevision, policy.ProjectionState
 	}
-	result["goal_lock_enabled"] = settings.GoalLockEnabled
 	result["snooze_enabled"] = settings.SnoozeEnabled
 	result["snooze_duration_ms"] = settings.SnoozeDurationMS
 	result["snooze_turn_limit"] = nullableInt64Value(settings.SnoozeTurnLimit)
@@ -161,7 +159,7 @@ func managedGoalProjectionValue(policy *store.ManagedGoalPolicy, controlID strin
 	goal := map[string]any{
 		"action":     map[bool]string{true: "set", false: "off"}[policy.Config.Enabled],
 		"control_id": controlID, "target_instance_id": policy.AgentID, "revision": policy.DesiredRevision,
-		"settings": map[string]any{"goalLockEnabled": settings.GoalLockEnabled, "snoozeEnabled": settings.SnoozeEnabled, "snoozeDurationMs": settings.SnoozeDurationMS, "snoozeTurnLimit": settings.SnoozeTurnLimit, "snoozeBudgetCapMs": settings.SnoozeBudgetCapMS, "snoozeRefillYieldMs": settings.SnoozeRefillYieldMS, "snoozeRefillElapsedMs": settings.SnoozeRefillElapsedMS},
+		"settings": map[string]any{"snoozeEnabled": settings.SnoozeEnabled, "snoozeDurationMs": settings.SnoozeDurationMS, "snoozeTurnLimit": settings.SnoozeTurnLimit, "snoozeBudgetCapMs": settings.SnoozeBudgetCapMS, "snoozeRefillYieldMs": settings.SnoozeRefillYieldMS, "snoozeRefillElapsedMs": settings.SnoozeRefillElapsedMS},
 	}
 	if policy.Config.Enabled {
 		goal["goal"] = policy.Config.Goal

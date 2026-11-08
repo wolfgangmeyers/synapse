@@ -1,5 +1,3 @@
-import { GOAL_CONTROL_REQUEST_EVENT } from "../mecha-goal/index.js";
-
 export type ModelInput = {
   provider?: string;
   id?: string;
@@ -44,7 +42,6 @@ export const MAX_MODEL_PROVIDER_CHARS = 128;
 export const MAX_MODEL_ID_CHARS = 256;
 export const MAX_MODEL_NAME_CHARS = 256;
 const MODEL_SOURCE_LIMIT = 1_000_000;
-const GOAL_CONTROL_RESPONSE_TIMEOUT_MS = 1_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -391,92 +388,5 @@ export function createModelControlProjection({
     handleControl,
     onContext: () => { current(); },
     reset: () => { modelSwitchOverride = undefined; },
-  };
-}
-
-export type GoalControlState = object;
-export type GoalControlResult<T extends GoalControlState = Record<string, unknown>> = { accepted: boolean; errorCode?: string; goalState?: T };
-
-export function createGoalControlBridge<T extends GoalControlState>({
-  emit,
-  getContext,
-  getState,
-  normalizeState,
-  setState,
-  publish,
-  cloneState = (state) => state,
-  setTimeoutImpl = setTimeout,
-  clearTimeoutImpl = clearTimeout,
-}: {
-  emit: (event: string, value: Record<string, unknown>) => void;
-  getContext: () => unknown;
-  getState: () => T;
-  normalizeState: (value: unknown) => T | undefined;
-  setState: (state: T) => void;
-  publish: () => void;
-  cloneState?: (state: T) => T;
-  setTimeoutImpl?: typeof setTimeout;
-  clearTimeoutImpl?: typeof clearTimeout;
-}): (control: unknown) => Promise<GoalControlResult<T>> {
-  const clone = (state: T): T => cloneState(state);
-  const safeRejection = (errorCode = "unavailable"): GoalControlResult<T> => ({
-    accepted: false,
-    errorCode,
-    goalState: clone(getState()),
-  });
-  const normalizeResult = (result: unknown): GoalControlResult<T> => {
-    if (!isRecord(result) || typeof result.accepted !== "boolean") return safeRejection("malformed_response");
-    if (result.accepted === true && result.goalState === undefined) return safeRejection("malformed_response");
-    const responseState = result.goalState === undefined ? clone(getState()) : normalizeState(result.goalState);
-    if (responseState === undefined) return safeRejection("malformed_response");
-    setState(responseState);
-    publish();
-    return {
-      accepted: result.accepted,
-      ...(typeof result.errorCode === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(result.errorCode)
-        ? { errorCode: result.errorCode } : {}),
-      goalState: clone(responseState),
-    };
-  };
-
-  return async (control: unknown): Promise<GoalControlResult<T>> => {
-    const record = isRecord(control) ? control : undefined;
-    const request = record === undefined ? undefined : {
-      correlationId: record.correlationId ?? record.controlId,
-      controlId: record.controlId,
-      sourceAgentId: record.sourceAgentId,
-      targetInstanceId: record.targetInstanceId ?? record.instanceId,
-      revision: record.revision,
-      action: record.action,
-      goal: record.goal,
-      settings: record.settings,
-      context: getContext(),
-    };
-    if (request?.controlId === undefined || request?.targetInstanceId === undefined) return safeRejection("invalid_control");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let response: unknown;
-    let responded = false;
-    let resolveResponse: (value: unknown) => void = () => {};
-    const responsePromise = new Promise<unknown>((resolve) => { resolveResponse = resolve; });
-    const respond = (value: unknown) => {
-      if (responded) return;
-      responded = true;
-      resolveResponse(value);
-    };
-    try {
-      emit(GOAL_CONTROL_REQUEST_EVENT, { ...request, respond });
-    } catch {
-      return safeRejection("unavailable");
-    }
-    if (!responded) {
-      timer = setTimeoutImpl(() => respond(undefined), GOAL_CONTROL_RESPONSE_TIMEOUT_MS);
-      timer?.unref?.();
-      response = await responsePromise;
-      if (timer !== undefined) clearTimeoutImpl(timer);
-    } else {
-      response = await responsePromise;
-    }
-    if (!responded || response === undefined) return safeRejection("unavailable");
-    return normalizeResult(response);
   };
 }

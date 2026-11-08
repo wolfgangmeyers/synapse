@@ -661,13 +661,13 @@ test("the diagnostic journal rejects malformed activity identities, kinds, and e
   const basePath = join(directory, "journal.jsonl");
   try {
     const journal = createDiagnosticJournal({ path: basePath, windowId: basePath, processId: process.pid });
-    assert.equal(journal.record("mecha-goal", "activity_gate_rejected", {
+    assert.equal(journal.record("mecha-messaging", "activity_gate_rejected", {
       kind: "tool-completed",
       event_id: "tool-completed:read-1",
       session_id: "session-1",
       error_name: "TypeError",
     }), true);
-    assert.equal(journal.record("mecha-goal", "activity_gate_rejected", {
+    assert.equal(journal.record("mecha-messaging", "activity_gate_rejected", {
       kind: "tool-completed private",
       event_id: "tool-completed:private id",
       session_id: "private session",
@@ -680,7 +680,7 @@ test("the diagnostic journal rejects malformed activity identities, kinds, and e
     assert.deepEqual(records[0], {
       timestamp: records[0]?.timestamp,
       sequence: 1,
-      source: "mecha-goal",
+      source: "mecha-messaging",
       event: "activity_gate_rejected",
       kind: "tool-completed",
       event_id: "tool-completed:read-1",

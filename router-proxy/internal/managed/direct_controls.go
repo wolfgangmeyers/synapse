@@ -340,7 +340,7 @@ func validManagedGoalSettings(value any) bool {
 			return false
 		}
 	}
-	return boolean("goal_lock_enabled") && boolean("snooze_enabled") && integer("snooze_duration_ms", 1) && nullableInteger("snooze_budget_cap_ms") && integer("snooze_refill_yield_ms", 1) && integer("snooze_refill_elapsed_ms", 1) && nullableInteger("snooze_turn_limit")
+	return boolean("snooze_enabled") && integer("snooze_duration_ms", 1) && nullableInteger("snooze_budget_cap_ms") && integer("snooze_refill_yield_ms", 1) && integer("snooze_refill_elapsed_ms", 1) && nullableInteger("snooze_turn_limit")
 }
 
 func (m *Manager) manifestToolForOperation(operationID string) (ManifestTool, bool) {

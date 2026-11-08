@@ -87,7 +87,6 @@ function createClientStub(sendReply: MailboxClientStub["sendReply"]): MailboxCli
     connect: async () => {},
     sendReceipt: () => {},
     sendActivity: () => {},
-    sendGoalState: () => false,
     sendInlineToolState: () => false,
     sendLifecycleSnapshot: () => undefined,
     sendLifecycleEvent: () => undefined,

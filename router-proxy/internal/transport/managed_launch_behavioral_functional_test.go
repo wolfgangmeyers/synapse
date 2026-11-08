@@ -228,7 +228,7 @@ func writeFunctionalReceipt(encoder *json.Encoder, message string, activeTools [
 	case "mecha.policy/v1":
 		customType = "mecha.policy.applied.v1"
 		details["protocol"] = "mecha.policy/v1"
-		details["applied"] = map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}
+		details["applied"] = map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false}
 	case "mecha.child-snapshot/v1":
 		customType = "mecha.child.snapshot.v1"
 		details = map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "functional-snapshot", "owner_session_id": sessionID, "sequence": 0, "runs": []any{}}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -577,124 +576,6 @@ func TestBehavioral_ContextReset_WarningAndAutomaticEpochRotation(t *testing.T) 
 	curAgent, err := h.db.ManagedAgent(h.ctx, launched.Agent.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), curAgent.SessionEpoch, "session_epoch must rotate to 2 after auto-reset")
-}
-
-// -----------------------------------------------------------------------------
-// Test d: Goal Loop Continuation with Escalating Nudges and Fail-Open Evaluation
-// -----------------------------------------------------------------------------
-func TestBehavioral_GoalLoop_EscalatingNudgesAndFailOpen(t *testing.T) {
-	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
-	defer reg.Unregister()
-
-	expectedGoal := "Deliver complete verified subsystem"
-	var (
-		evalCalls        atomic.Int32
-		sawNudgeAttempt1 atomic.Bool
-		sawNudgeAttempt2 atomic.Bool
-	)
-
-	// Step 1: Set goal
-	step1 := func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-		return providers.FauxAssistantMessage(ai.ContentList{
-			providers.FauxToolCall("goal", map[string]any{"action": "set", "goal": expectedGoal}, "call-goal-set"),
-		}, ai.StopToolUse)
-	}
-
-	// Step 2: Goal tool result returns, assistant acknowledges with text
-	step2 := func(_ ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-		return providers.FauxAssistantMessage(ai.ContentList{
-			ai.TextContent{Text: "Goal set. Commencing task execution."},
-		}, ai.StopStop)
-	}
-
-	// Step 3: Receives Continuation 1 (attempt 1 nudge). Executes work step.
-	step3 := func(tc ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-		for _, m := range tc.Messages {
-			if u, ok := m.(ai.UserMessage); ok {
-				for _, c := range u.Content {
-					if txt, ok := c.(ai.TextContent); ok {
-						if strings.Contains(txt.Text, "NOT_DONE: Review "+expectedGoal) {
-							sawNudgeAttempt1.Store(true)
-						}
-					}
-				}
-			}
-		}
-		return providers.FauxAssistantMessage(ai.ContentList{
-			ai.TextContent{Text: "Completed phase 1 implementation."},
-		}, ai.StopStop)
-	}
-
-	// Step 4: Receives Continuation 2 (attempt 2 nudge) after evaluator fail-open.
-	step4 := func(tc ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
-		for _, m := range tc.Messages {
-			if u, ok := m.(ai.UserMessage); ok {
-				for _, c := range u.Content {
-					if txt, ok := c.(ai.TextContent); ok {
-						if strings.Contains(txt.Text, "NOT_DONE: Continue "+expectedGoal) && strings.Contains(txt.Text, "Evaluator inconclusive:") {
-							sawNudgeAttempt2.Store(true)
-						}
-					}
-				}
-			}
-		}
-		return providers.FauxAssistantMessage(ai.ContentList{
-			ai.TextContent{Text: "Completed phase 2 and verified all tests pass."},
-		}, ai.StopStop)
-	}
-
-	reg.SetResponses([]providers.FauxResponseStep{step1, step2, step3, step4})
-
-	h := newBehavioralHarness(t, func(rec store.ManagedAgentRecord) *ai.Model {
-		return reg.GetModel()
-	}, func(opts *managed.ManagerOptions) {
-		opts.GoalContinuationDelay = 20 * time.Millisecond
-		opts.EmbeddedGoalEvaluator = func(ctx context.Context, key store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			call := evalCalls.Add(1)
-			switch call {
-			case 1:
-				// First evaluation: normal NOT_DONE
-				return store.EmbeddedGoalEvaluationNotDone, "Phase 1 finished, phase 2 remaining", nil
-			case 2:
-				// Second evaluation: evaluator error -> must FAIL OPEN to NOT_DONE
-				return "", "", errors.New("simulated evaluator transient backend failure")
-			case 3:
-				// Third evaluation: goal complete
-				return store.EmbeddedGoalEvaluationCompleted, "All subsystem requirements verified", nil
-			default:
-				return store.EmbeddedGoalEvaluationCompleted, "Done", nil
-			}
-		}
-	})
-
-	launched, err := h.manager.Launch(h.ctx, managed.LaunchRequest{
-		Name:               "goal-loop-worker",
-		Cwd:                h.root,
-		Runtime:            "embedded",
-		Model:              &managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra"},
-		InitialInstruction: "start goal task",
-		RequestID:          "44444444-4444-4444-8444-444444444444",
-	})
-	require.NoError(t, err)
-
-	// Wait for all 3 evaluations to complete
-	require.Eventually(t, func() bool {
-		return evalCalls.Load() >= 3
-	}, 5*time.Second, 20*time.Millisecond, "evaluator must be called 3 times across the multi-turn loop")
-
-	require.True(t, sawNudgeAttempt1.Load(), "attempt 1 escalating nudge must be received")
-	require.True(t, sawNudgeAttempt2.Load(), "attempt 2 escalating nudge with fail-open reason must be received")
-
-	// Wait for worker to settle cleanly to idle after goal completed
-	require.Eventually(t, func() bool {
-		agent, err := h.db.ManagedAgent(h.ctx, launched.Agent.AgentID)
-		return err == nil && agent.ActivityState == "idle"
-	}, 3*time.Second, 20*time.Millisecond)
-
-	// Verify goal evaluation history was recorded in store
-	var evalHistoryCount int
-	require.NoError(t, h.sqlDB(t).QueryRowContext(h.ctx, `SELECT count(*) FROM managed_complete_history WHERE agent_id=? AND category='managed_goal_evaluation'`, launched.Agent.AgentID).Scan(&evalHistoryCount))
-	require.GreaterOrEqual(t, evalHistoryCount, 2, "goal evaluations must be published to complete history")
 }
 
 // -----------------------------------------------------------------------------

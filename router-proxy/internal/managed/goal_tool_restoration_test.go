@@ -2,10 +2,7 @@ package managed
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,137 +106,6 @@ func TestGoalControlRecoveryDoesNotDuplicateRevisionOrContinuation(t *testing.T)
 	require.EqualValues(t, recovered.DesiredRevision, afterReplay.DesiredRevision)
 	require.EqualValues(t, recovered.AppliedRevision, afterReplay.AppliedRevision)
 	require.Empty(t, afterReplay.WakeupMessageID)
-}
-
-func TestRPCClientStartsGoalEvaluationWithFencedHiddenNoToolPolicy(t *testing.T) {
-	stdinReader, stdinWriter := io.Pipe()
-	stdoutReader, stdoutWriter := io.Pipe()
-	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
-	t.Cleanup(func() { _ = client.Close() })
-	requests := readJSONLRequests(stdinReader)
-	wantTools := []string{"bash", "edit", "goal.control", "read"}
-	client.mu.Lock()
-	client.activeTools = append([]string(nil), wantTools...)
-	client.mu.Unlock()
-	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
-	policy := store.ManagedGoalPolicy{EvaluatorID: "evaluation", EvaluatorGoalRevision: 4, EvaluatorSettledSequence: 9, Config: store.ManagedGoalConfig{Goal: "finish the goal"}}
-	started := make(chan error, 1)
-	go func() { started <- client.StartManagedGoalEvaluation(context.Background(), fence, policy) }()
-	request := requireRequest(t, requests)
-	command, ok := request["message"].(string)
-	require.True(t, ok)
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(command, "/mecha-policy-apply-v1 "))
-	require.NoError(t, err)
-	var envelope map[string]any
-	require.NoError(t, json.Unmarshal(raw, &envelope))
-	require.Equal(t, map[string]any{}, envelope["policy"])
-	require.Equal(t, fence.RuntimeGeneration, envelope["runtime_generation"])
-	require.EqualValues(t, fence.SessionEpoch, envelope["session_epoch"])
-	evaluator := envelope["evaluator"].(map[string]any)
-	require.Equal(t, policy.EvaluatorID, evaluator["evaluation_id"])
-	require.Equal(t, policy.Config.Goal, evaluator["goal"])
-	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true, "data": map[string]any{"success": true, "command": "prompt"}}))
-	require.NoError(t, <-started)
-	active, err := client.GetActiveTools(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, wantTools, active)
-}
-
-func TestRPCClientGoalEvaluationKeepsExactToolSnapshotAcrossTerminalOutcomes(t *testing.T) {
-	wantTools := []string{"bash", "edit", "goal.control", "read"}
-	fence := store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
-
-	for _, test := range []struct {
-		name             string
-		outcome, reason  string
-		wantOutcome      string
-		wantReason       string
-		wantErr          string
-		cancelBeforeWait bool
-		replacement      bool
-	}{
-		{name: "DONE", outcome: "DONE", reason: "complete", wantOutcome: store.ManagedGoalEvaluationCompleted, wantReason: "complete"},
-		{name: "NOT_DONE", outcome: store.ManagedGoalEvaluationNotDone, reason: "continue", wantOutcome: store.ManagedGoalEvaluationNotDone, wantReason: "continue"},
-		{name: "malformed output", outcome: "MALFORMED", reason: "invalid", wantErr: "managed goal evaluation result is invalid"},
-		{name: "timeout", wantErr: context.DeadlineExceeded.Error(), cancelBeforeWait: true},
-		{name: "cancel", wantErr: context.Canceled.Error(), cancelBeforeWait: true},
-		{name: "replacement", outcome: "DONE", reason: "replacement runtime", wantOutcome: store.ManagedGoalEvaluationCompleted, wantReason: "replacement runtime", replacement: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			stdoutReader, stdoutWriter := io.Pipe()
-			client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
-			t.Cleanup(func() { _ = client.Close() })
-			client.mu.Lock()
-			client.activeTools = append([]string(nil), wantTools...)
-			client.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 4, settled: 9, fence: fence}
-			client.mu.Unlock()
-
-			if test.replacement {
-				// The replacement runtime owns the current token. Deliver the old
-				// runtime's result first, then a matching replacement result. The
-				// backlog checks prove the stale result reached the client and was
-				// consumed before the current result settled the wait.
-				replacementFence := fence
-				replacementFence.PiSessionID = "replacement-session"
-				replacementFence.SessionEpoch++
-				replacementFence.ProcessPID++
-				replacementFence.ProcessStartMarker = "replacement-start"
-				replacementFence.ProcessIncarnation = "replacement-incarnation"
-				replacementFence.RuntimeGeneration = "replacement-generation"
-				client.mu.Lock()
-				client.goalEvaluationToken = &managedGoalEvaluationToken{evaluationID: "evaluation", goalRevision: 4, settled: 9, fence: replacementFence}
-				client.mu.Unlock()
-
-				require.NoError(t, writeRPC(stdoutWriter, managedGoalEvaluationReceipt(fence, "evaluation", 4, 9, test.outcome, "old runtime")))
-				require.Eventually(t, func() bool {
-					client.mu.Lock()
-					defer client.mu.Unlock()
-					if len(client.backlog) != 1 {
-						return false
-					}
-					details := receiptDetails(client.backlog[0].value)
-					return details != nil && details["runtime_generation"] == fence.RuntimeGeneration
-				}, time.Second, time.Millisecond)
-				require.NoError(t, writeRPC(stdoutWriter, managedGoalEvaluationReceipt(replacementFence, "evaluation", 4, 9, test.outcome, test.reason)))
-				require.Eventually(t, func() bool {
-					client.mu.Lock()
-					defer client.mu.Unlock()
-					return len(client.backlog) == 2
-				}, time.Second, time.Millisecond)
-			} else if !test.cancelBeforeWait {
-				require.NoError(t, writeRPC(stdoutWriter, managedGoalEvaluationReceipt(fence, "evaluation", 4, 9, test.outcome, test.reason)))
-			}
-
-			waitCtx := context.Background()
-			var cancel context.CancelFunc
-			if test.cancelBeforeWait {
-				if test.name == "timeout" {
-					waitCtx, cancel = context.WithDeadline(context.Background(), time.Unix(0, 0))
-				} else {
-					waitCtx, cancel = context.WithCancel(context.Background())
-					cancel()
-				}
-				defer cancel()
-			}
-			outcome, reason, err := client.WaitForManagedGoalEvaluation(waitCtx)
-			if test.wantErr != "" {
-				require.EqualError(t, err, test.wantErr)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, test.wantOutcome, outcome)
-				require.Equal(t, test.wantReason, reason)
-			}
-			client.mu.Lock()
-			require.Nil(t, client.goalEvaluationToken)
-			if test.replacement {
-				require.Empty(t, client.backlog, "stale old-generation result must be consumed")
-			}
-			client.mu.Unlock()
-			active, err := client.GetActiveTools(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, wantTools, active)
-		})
-	}
 }
 
 type failedInlineAllowanceRPC struct {

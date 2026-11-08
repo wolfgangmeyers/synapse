@@ -26,9 +26,6 @@ func TestClaudeRestartCommittedContinuation(t *testing.T) {
 			t.Setenv("FAKE_CLAUDE_RECORD", filepath.Join(cfg.Cwd, "record.jsonl"))
 			f := newFailureFixture(t)
 			f.m.goalContinuationDelay = 10 * time.Second
-			f.m.embeddedGoalEvaluator = func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-				return store.EmbeddedGoalEvaluationDone, "done", nil
-			}
 			owner := f.launch(t, "")
 			f.m.startWG.Wait()
 			_, err := f.db.UpdateManagedGoalConfig(ctx, owner.binding.AgentID, store.ManagedGoalConfig{Enabled: true, Goal: "finish", Settings: store.DefaultManagedGoalSettings()})

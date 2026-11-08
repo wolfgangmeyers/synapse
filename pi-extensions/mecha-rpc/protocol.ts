@@ -16,7 +16,6 @@ export const HIDDEN_COMMAND_NAMES = Object.freeze([
 
 export const LEGACY_COMMAND_NAMES = Object.freeze([
   "goal",
-  "goal-lock",
   "goal-snooze",
   "goal-snooze-turn-limit",
   "goal-snooze-budget",
@@ -44,7 +43,6 @@ export type LegacyCommandDefinition = { readonly name: LegacyCommandName; readon
 
 export const legacyCommandDefinitions: Readonly<Record<LegacyCommandName, LegacyCommandDefinition>> = Object.freeze({
   goal: { name: "goal", operationId: "legacy.goal", description: "Preserve /goal raw arguments through the managed control bridge." },
-  "goal-lock": { name: "goal-lock", operationId: "legacy.goal_lock", description: "Preserve /goal-lock raw arguments through the managed control bridge." },
   "goal-snooze": { name: "goal-snooze", operationId: "legacy.goal_snooze", description: "Preserve /goal-snooze raw arguments through the managed control bridge." },
   "goal-snooze-turn-limit": { name: "goal-snooze-turn-limit", operationId: "legacy.goal_snooze_turn_limit", description: "Preserve /goal-snooze-turn-limit raw arguments through the managed control bridge." },
   "goal-snooze-budget": { name: "goal-snooze-budget", operationId: "legacy.goal_snooze_budget", description: "Preserve /goal-snooze-budget raw arguments through the managed control bridge." },
@@ -438,9 +436,9 @@ function validateAvailability(value: unknown): void {
 
 function validatePolicyApplied(value: unknown): void {
   if (!isRecord(value)) protocolError("policy application details are invalid");
-  assertExactKeys(value, ["inline_enabled", "inline_credits", "recall_content", "settled_enabled", "goal_lock_enabled", "compaction_deferred"], ["goal_revision"]);
+  assertExactKeys(value, ["inline_enabled", "inline_credits", "recall_content", "settled_enabled", "compaction_deferred"], ["goal_revision"]);
   if (typeof value.inline_enabled !== "boolean" || typeof value.settled_enabled !== "boolean"
-    || typeof value.goal_lock_enabled !== "boolean" || typeof value.compaction_deferred !== "boolean") {
+    || typeof value.compaction_deferred !== "boolean") {
     protocolError("policy application flags are invalid");
   }
   if (!isRecord(value.inline_credits)) protocolError("policy application credits are invalid");

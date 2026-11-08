@@ -137,24 +137,24 @@ func TestManagedArchiveHTTPContractSeparatesClosedReadFromLiveDetail(t *testing.
 }
 
 func TestManagedGoalSettingsAcceptsOnlyTheSharedEditorShape(t *testing.T) {
-	valid := map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":120000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)}
+	valid := map[string]json.RawMessage{"settings": json.RawMessage(`{"snooze_enabled":true,"snooze_duration_ms":120000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)}
 	settings, err := managedGoalSettings(valid)
 	require.NoError(t, err)
-	require.Equal(t, true, settings["goal_lock_enabled"])
+	require.NotContains(t, settings, "goal_lock_enabled")
 	require.Equal(t, int64(120000), settings["snooze_duration_ms"])
 	require.Nil(t, settings["snooze_turn_limit"])
 
-	_, err = managedGoalSettings(map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":0,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)})
+	_, err = managedGoalSettings(map[string]json.RawMessage{"settings": json.RawMessage(`{"snooze_enabled":true,"snooze_duration_ms":0,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)})
 	require.Error(t, err)
-	_, err = managedGoalSettings(map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":21,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)})
+	_, err = managedGoalSettings(map[string]json.RawMessage{"settings": json.RawMessage(`{"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":21,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)})
 	require.Error(t, err)
 }
 
 func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
-	state := managedGoalState(map[string]any{"goal_state": map[string]any{"enabled": false, "goal": "stale text", "goal_lock_enabled": true, "snooze_duration_ms": int64(120000)}})
+	state := managedGoalState(map[string]any{"goal_state": map[string]any{"enabled": false, "goal": "stale text", "snooze_duration_ms": int64(120000)}})
 	require.False(t, state["enabled"].(bool))
 	require.Equal(t, "", state["goal"])
-	require.Equal(t, true, state["goal_lock_enabled"])
+	require.NotContains(t, state, "goal_lock_enabled")
 	require.Equal(t, int64(120000), state["snooze_duration_ms"])
 }
 
@@ -470,13 +470,13 @@ func (r replayRPC) ApplyPolicy(context.Context, map[string]any) (map[string]any,
 	if r.failed {
 		return nil, errors.New("scripted startup failure")
 	}
-	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "compactionDeferred": false}, nil
 }
 func (r replayRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
 	if r.failed {
 		return nil, errors.New("scripted startup failure")
 	}
-	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false}}, nil
 }
 func (r replayRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
 	if r.failed {

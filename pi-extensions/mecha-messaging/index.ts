@@ -1,14 +1,5 @@
 import { createMailboxClient, createNanoId, assertAgentId, routerHttpUrl, parseReplyArguments } from "./mailbox-client.js";
 import {
-  GOAL_ACTIVITY_EVENT,
-  GOAL_CONTROL_STATE_EVENT,
-  GOAL_STATE_EVENT,
-  GOAL_STATE_REQUEST_EVENT,
-  GOAL_WORKER_ID_EVENT,
-} from "../mecha-goal/index.js";
-import type { GoalPi } from "../mecha-goal/index.js";
-import {
-  createGoalControlBridge,
   createModelControlProjection,
   modelControlErrorCode,
 } from "./model-control-projection.js";
@@ -98,21 +89,6 @@ const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
 const MAILBOX_MESSAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAILBOX_ACCEPTED_STATES = new Set(["queued", "leased", "injection_requested", "acknowledged", "delivered"]);
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
-const MAX_GOAL_CHARS = 4_000;
-const GOAL_OUTCOME_KEYS = ["COMPLETED", "NOT_DONE"];
-const MAX_MEANINGFUL_ACTIVITY_IDS = 1_024;
-const GOAL_ACTIVITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
-const GOAL_ACTIVITY_KINDS = new Set(["tool-completed", "native-subagent-launch"]);
-function safeGoalActivityIdentity(value: unknown): string | undefined {
-  return typeof value === "string" && GOAL_ACTIVITY_ID_PATTERN.test(value) ? value : undefined;
-}
-// These tools change Mecha/control-plane state or move messages; their successful completion
-// is not proof that the worker advanced its standing goal. Real work tools remain eligible.
-const GOAL_ACTIVITY_EXCLUDED_TOOLS = new Set([
-  "goal", "goal_snooze", "mecha_parent_message", "mecha_mailbox_send", "mecha_request_inline_tool_allowance",
-  "mecha_recall", "mecha_settled_notifications", "mecha_context", "mecha_state", "mecha_priority",
-  "mecha_verification_handoff", "mecha_reminder", "mecha_pr", "mecha_git", "mecha_router",
-]);
 
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
@@ -122,18 +98,6 @@ type JsonObject = { [key: string]: JsonValue };
 type DynamicRecord = JsonObject;
 type Environment = NodeJS.ProcessEnv;
 type ErrorLike = Error | { code?: string; message?: string; name?: string; cause?: ErrorLike };
-type GoalProjection = { enabled: boolean; goal: string };
-type GoalControlInput = DynamicRecord & { enabled: boolean; goal: string; goalLockEnabled: boolean; snoozeEnabled: boolean; snoozeDurationMs: number; snoozeTurnLimit: number | null; snoozeBudgetCapMs: number | null; snoozeRefillYieldMs: number; snoozeRefillElapsedMs: number; outcomeCounts: DynamicRecord };
-type GoalControlState = GoalProjection & {
-  goalLockEnabled: boolean;
-  snoozeEnabled: boolean;
-  snoozeDurationMs: number;
-  snoozeTurnLimit: number | null;
-  snoozeBudgetCapMs: number | null;
-  snoozeRefillYieldMs: number;
-  snoozeRefillElapsedMs: number;
-  outcomeCounts: Record<string, number>;
-};
 type SessionManager = { getBranch: () => SessionEntry[]; getSessionId: () => string; isPersisted: () => boolean; getSessionFile: () => string | undefined };
 type Ui = { setStatus: (key: string, value: string | undefined) => void; notify: (message: string, level?: string) => void };
 type PiContext = { sessionManager: SessionManager; model?: ModelInput; modelRegistry?: ModelRegistry; ui: Ui; isIdle?: () => boolean; getContextUsage?: () => ContextUsage | undefined; compact?: (options: CompactOptions) => void; abort?: () => void };
@@ -177,23 +141,19 @@ function isRecallChoice(value: RecallControllerSelection): value is RecallContro
   if (!isRecord(value) || !Array.isArray(value.ids) || !Number.isSafeInteger(value.depth)) return false;
   return value.ids.every((id) => typeof id === "string");
 }
-type GoalControlRequest = JsonObject & { controlId?: string; targetInstanceId?: string; correlationId?: string; sourceAgentId?: string; revision?: number; action?: string; goal?: JsonValue; settings?: JsonValue; context?: PiContext };
-type GoalControlResult = { accepted: boolean; errorCode?: string; goalState?: GoalControlState };
 type ReminderLock = ReturnType<typeof createReminderLockState>;
 type SendMessageOptions = { deliverAs?: string; triggerTurn?: boolean };
-type MessagingPi = { sendMessage: GoalPi["sendMessage"] };
+type MessagingPi = { sendMessage: (...args: unknown[]) => void };
 type PiEvent = JsonObject & { id?: string; status?: string; toolName?: string; toolCallId?: string; result?: ToolResult; isError?: boolean; cancelled?: boolean; canceled?: boolean; aborted?: boolean; error?: JsonValue; details?: JsonObject; message?: JsonObject; messages?: HistoryMessage[]; signal?: AbortSignal; preparation?: { messagesToSummarize?: HistoryMessage[]; turnPrefixMessages?: HistoryMessage[] } };
-type GoalEvents = NonNullable<GoalPi["events"]>;
-type PiEvents = { on: (name: string, handler: (event: PiEvent, context: PiContext) => unknown) => void; emit?: NonNullable<GoalEvents["emit"]> };
+type PiEvents = { on: (name: string, handler: (event: PiEvent, context: PiContext) => unknown) => void };
 type MailboxClientOptions = NonNullable<Parameters<typeof createMailboxClient>[0]>;
 type ExternalMailboxMessage = Parameters<NonNullable<MailboxClientOptions["onEnvelope"]>>[0];
 type ExternalMailboxDelivery = Parameters<NonNullable<MailboxClientOptions["onEnvelope"]>>[1];
-type ExternalGoalControl = Parameters<NonNullable<MailboxClientOptions["onGoalControl"]>>[0];
 type ExternalInlineToolControl = Parameters<NonNullable<MailboxClientOptions["onInlineToolControl"]>>[0];
 type ExternalReminderControl = Parameters<NonNullable<MailboxClientOptions["onReminderLockControl"]>>[0];
 type ExternalTraceValue = Parameters<NonNullable<MailboxClientOptions["onLifecycleTrace"]>>[0];
 type PiTool = { name: string; label: string; description: string; parameters: object; execute: (...args: never[]) => Promise<object> };
-type PiRuntime = MessagingPi & { events: PiEvents; on(name: string, handler: (event: PiEvent, context: PiContext) => unknown): void; on(name: string, handler: GoalPi["on"] extends (event: string, handler: infer Handler) => void ? Handler : never): void; registerTool(tool: object): void; registerCommand(name: string, command: object): void; setModel?: (model: ModelInput) => Promise<boolean> | boolean; exec: (file: string, args: string[], options: { timeout: number }) => Promise<{ code: number; stderr: string }>; getSessionId?: () => string | undefined; appendEntry: GoalPi["appendEntry"] };
+type PiRuntime = MessagingPi & { events: PiEvents; on(name: string, handler: (event: PiEvent, context: PiContext) => unknown): void; registerTool(tool: object): void; registerCommand(name: string, command: object): void; setModel?: (model: ModelInput) => Promise<boolean> | boolean; exec: (file: string, args: string[], options: { timeout: number }) => Promise<{ code: number; stderr: string }>; getSessionId?: () => string | undefined; appendEntry: (...args: unknown[]) => void };
 type MemoryCapture = ReturnType<typeof createMemoryCaptureLifecycle>;
 type RateReservation = { timestamp: number };
 type CompactionRequest = { action?: string; policy?: CompactionPolicyInput | readonly CompactionLevelInput[]; customInstructions?: string; postCompactionNotification?: string };
@@ -244,58 +204,6 @@ function validateMailboxSendResult(value: unknown): { id: string; state: string 
 
 function isServiceRegistry(value: object | JsonValue | undefined): value is ServiceRegistry {
   return isRecord(value) && typeof value.get === "function";
-}
-
-function normalizeGoalProjection(value: unknown): GoalProjection | undefined {
-  if (!isRecord(value) || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
-    || value.goal.length > MAX_GOAL_CHARS) return undefined;
-  if (!value.enabled && value.goal !== "") return undefined;
-  if (value.enabled && value.goal.length === 0) return undefined;
-  return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
-}
-
-function defaultGoalControlState(): GoalControlState {
-  return {
-    enabled: false, goal: "", goalLockEnabled: false, snoozeEnabled: true,
-    snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null,
-    snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000,
-    outcomeCounts: Object.fromEntries(GOAL_OUTCOME_KEYS.map((key) => [key, 0])),
-  };
-}
-
-function isGoalControlInput(value: unknown): value is GoalControlInput {
-  return isRecord(value) && typeof value.enabled === "boolean" && typeof value.goal === "string"
-    && typeof value.goalLockEnabled === "boolean" && typeof value.snoozeEnabled === "boolean"
-    && typeof value.snoozeDurationMs === "number"
-    && (typeof value.snoozeTurnLimit === "number" || value.snoozeTurnLimit === null)
-    && (typeof value.snoozeBudgetCapMs === "number" || value.snoozeBudgetCapMs === null)
-    && typeof value.snoozeRefillYieldMs === "number" && typeof value.snoozeRefillElapsedMs === "number"
-    && isRecord(value.outcomeCounts);
-}
-
-function normalizeGoalControlState(value: unknown): GoalControlState | undefined {
-  if (!isGoalControlInput(value) || value.goal.length > MAX_GOAL_CHARS || (!value.enabled && value.goal !== "") || (value.enabled && value.goal.length === 0)
-    || !Number.isSafeInteger(value.snoozeDurationMs) || value.snoozeDurationMs <= 0
-    || (value.snoozeTurnLimit !== null && (!Number.isSafeInteger(value.snoozeTurnLimit) || value.snoozeTurnLimit < 1))
-    || (value.snoozeBudgetCapMs !== null && (!Number.isSafeInteger(value.snoozeBudgetCapMs) || value.snoozeBudgetCapMs < 1))
-    || !Number.isSafeInteger(value.snoozeRefillYieldMs) || value.snoozeRefillYieldMs <= 0
-    || !Number.isSafeInteger(value.snoozeRefillElapsedMs) || value.snoozeRefillElapsedMs <= 0) return undefined;
-  const projection = normalizeGoalProjection(value);
-  if (projection === undefined) return undefined;
-  const outcomeCounts: Record<string, number> = {};
-  for (const key of GOAL_OUTCOME_KEYS) {
-    const count = value.outcomeCounts[key];
-    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) return undefined;
-    outcomeCounts[key] = count;
-  }
-  return { ...projection, goalLockEnabled: value.goalLockEnabled, snoozeEnabled: value.snoozeEnabled,
-    snoozeDurationMs: value.snoozeDurationMs, snoozeTurnLimit: value.snoozeTurnLimit,
-    snoozeBudgetCapMs: value.snoozeBudgetCapMs, snoozeRefillYieldMs: value.snoozeRefillYieldMs,
-    snoozeRefillElapsedMs: value.snoozeRefillElapsedMs, outcomeCounts };
-}
-
-function cloneGoalControlState(state: GoalControlState): GoalControlState {
-  return { ...state, outcomeCounts: { ...state.outcomeCounts } };
 }
 
 function getOwnerSubagentsService(ownerSessionId: string | undefined): SubagentService | undefined {
@@ -638,103 +546,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   let parentAgentId: string | undefined;
   let parentActivityContext: PiContext | undefined;
   let modelControlProjection: ModelControlProjection | undefined;
-  let goalProjection: GoalProjection | undefined;
-  let goalProjectionReceived = false;
-  let meaningfulActivityRevision = 0;
-  const activityProducerEpoch = randomUUID();
-  const meaningfulActivityIds = new Set();
-  let goalControlState = defaultGoalControlState();
-  const recordGoalBridgeDiagnostic = (event: string, fields: Record<string, JsonValue> = {}, context: PiContext | undefined = parentActivityContext) => {
-    const sessionId = contextSessionId(context);
-    recordDiagnostic(event, {
-      state: goalProjection === undefined ? "unknown" : goalProjection.enabled ? "enabled" : "disabled",
-      enabled: goalProjection?.enabled === true,
-      ...(sessionId === undefined ? {} : { session_id: sessionId }),
-      ...(parentAgentId === undefined ? {} : { agent_id: parentAgentId }),
-      ...fields,
-    });
-  };
-  const receiveGoalProjection = (value: JsonValue) => {
-    const normalized = normalizeGoalProjection(value);
-    if (normalized === undefined) {
-      recordGoalBridgeDiagnostic("goal_projection_rejected", { reason: "invalid_projection" });
-      return;
-    }
-    goalProjection = normalized;
-    goalProjectionReceived = true;
-    if (parentAgentId !== undefined) emitWorkerIdentity(parentActivityContext, parentAgentId);
-  };
-  const receiveGoalControlState = (value: JsonValue) => {
-    const normalized = normalizeGoalControlState(value);
-    if (normalized === undefined) {
-      recordGoalBridgeDiagnostic("goal_control_state_rejected", { reason: "invalid_state" });
-      return;
-    }
-    goalControlState = normalized;
-    publishGoalState();
-  };
-  const emitWorkerIdentity = (context: PiContext | undefined, workerId: string) => {
-    const safeWorkerId = safeGoalActivityIdentity(workerId);
-    const sessionId = safeGoalActivityIdentity(contextSessionId(context));
-    if (safeWorkerId === undefined || sessionId === undefined) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", {
-        reason: safeWorkerId === undefined ? "invalid_worker_id" : "invalid_session_id",
-        component: "worker-identity",
-      }, context);
-      return;
-    }
-    try {
-      pi.events?.emit?.(GOAL_WORKER_ID_EVENT, { workerId: safeWorkerId, sessionId, producerEpoch: activityProducerEpoch });
-    } catch (error) {
-      recordGoalBridgeDiagnostic("publication_failed", { reason: "worker_identity_emit", component: "worker-identity", error_name: errorName(error) }, context);
-      // The goal extension is optional; an unavailable local bridge must not block startup.
-    }
-  };
-  const emitMeaningfulActivity = (kind: string, rawActivityId: string | undefined, context: PiContext | undefined) => {
-    const safeKind = GOAL_ACTIVITY_KINDS.has(kind) ? kind : undefined;
-    if (!goalProjectionReceived || goalProjection?.enabled !== true) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", {
-        reason: "goal_projection_unavailable",
-        ...(safeKind === undefined ? {} : { kind: safeKind }),
-      }, context);
-      return;
-    }
-    const activityId = safeGoalActivityIdentity(rawActivityId);
-    const sessionId = safeGoalActivityIdentity(contextSessionId(context) ?? contextSessionId(parentActivityContext));
-    const workerId = safeGoalActivityIdentity(parentAgentId);
-    const key = safeKind !== undefined && activityId !== undefined ? `${safeKind}:${activityId}` : undefined;
-    if (safeKind === undefined || activityId === undefined || key === undefined || !GOAL_ACTIVITY_ID_PATTERN.test(key)
-      || sessionId === undefined || workerId === undefined || meaningfulActivityIds.has(key)) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", {
-        reason: safeKind === undefined ? "invalid_kind" : activityId === undefined || key === undefined || !GOAL_ACTIVITY_ID_PATTERN.test(key) ? "invalid_activity_id" : sessionId === undefined ? "invalid_session_id" : workerId === undefined ? "invalid_worker_id" : "duplicate_activity",
-        ...(safeKind === undefined ? {} : { kind: safeKind }),
-        ...(activityId === undefined ? {} : { event_id: activityId }),
-      }, context);
-      return;
-    }
-    meaningfulActivityIds.add(key);
-    while (meaningfulActivityIds.size > MAX_MEANINGFUL_ACTIVITY_IDS) {
-      meaningfulActivityIds.delete(meaningfulActivityIds.keys().next().value);
-    }
-    const revision = ++meaningfulActivityRevision;
-    try {
-      pi.events?.emit?.(GOAL_ACTIVITY_EVENT, {
-        activityId: key,
-        kind: safeKind,
-        revision,
-        sessionId,
-        workerId,
-        producerEpoch: activityProducerEpoch,
-        goal: { ...goalProjection },
-      });
-    } catch (error) {
-      recordGoalBridgeDiagnostic("publication_failed", { reason: "activity_emit", component: "meaningful-activity", event_id: key, error_name: errorName(error) }, context);
-      // Progress observation is best-effort and cannot change the worker action outcome.
-    }
-  };
-  const isConcreteGoalTool = (toolName: string | undefined) => {
-    return typeof toolName === "string" && toolName.length > 0 && !GOAL_ACTIVITY_EXCLUDED_TOOLS.has(toolName);
-  };
   const publishInlineToolState = (mailboxClient: MailboxClient | undefined = client) => {
     if (mailboxClient === undefined || typeof mailboxClient.sendInlineToolState !== "function") return false;
     try {
@@ -754,36 +565,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       return { accepted: false, errorCode: "invalid_inline_tool_state", enabled: inlineToolPolicy.isEnabled() };
     }
   };
-  const publishGoalState = (mailboxClient: MailboxClient | undefined = client) => {
-    if (mailboxClient === undefined || typeof mailboxClient.sendGoalState !== "function") {
-      recordGoalBridgeDiagnostic("publication_failed", { reason: mailboxClient === undefined ? "client_unavailable" : "send_goal_state_unavailable", component: "goal-state" });
-      return false;
-    }
-    try {
-      mailboxClient.sendGoalState(cloneGoalControlState(goalControlState));
-      return true;
-    } catch (error) {
-      recordGoalBridgeDiagnostic("publication_failed", { reason: "goal_state_publish", component: "goal-state", error_name: errorName(error) });
-      return false;
-    }
-  };
   const handleReminderLockControl = async (control: ExternalReminderControl) => reminderLock.control(control);
-  const handleGoalControl = createGoalControlBridge<GoalControlState>({
-    emit: (event, value) => { pi.events?.emit?.(event, value); },
-    getContext: () => parentActivityContext,
-    getState: () => goalControlState,
-    normalizeState: (value) => normalizeGoalControlState(value),
-    setState: (state) => { goalControlState = state; },
-    publish: () => { publishGoalState(); },
-    cloneState: cloneGoalControlState,
-    setTimeoutImpl,
-    clearTimeoutImpl,
-  });
-  pi.events?.on?.(GOAL_STATE_EVENT, receiveGoalProjection);
-  pi.events?.on?.(GOAL_CONTROL_STATE_EVENT, receiveGoalControlState);
-  try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch (error) {
-    recordGoalBridgeDiagnostic("publication_failed", { reason: "state_request_emit", component: "goal-state-request", error_name: errorName(error) });
-  }
   let startupError: ErrorLike | undefined;
   let activeWork = ""; let recallAbort: AbortController | undefined; let recallProcess: ReturnType<typeof execFile> | undefined; let policyAbort: AbortController | undefined; let policyReady: Promise<JsonObject> | undefined; let capture: MemoryCapture | undefined;
   const ensureCapture = async (signal: AbortSignal | undefined): Promise<MemoryCapture> => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal }: CaptureContextInput) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body: CaptureApplyInput, signal: AbortSignal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); }, diagnostics: appendMemoryCaptureDiagnostic }); return capture; };
@@ -865,13 +647,12 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     getClient: () => client,
     getParentContext: () => parentActivityContext,
     isCompacting: () => compaction?.isMailboxPaused() ?? false,
-    getGoalProjection: () => goalProjectionReceived ? goalProjection : undefined,
     getCurrentModel: () => modelControlProjection?.current() ?? undefined,
     getNativeService: (ownerSessionId) => {
       try {
         return currentSubagentsServiceAccessor?.(ownerSessionId);
       } catch (error) {
-        recordGoalBridgeDiagnostic("owner_service_failed", {
+        recordDiagnostic("owner_service_failed", {
           reason: "service_lookup",
           component: "native-subagents",
           ...(ownerSessionId === undefined ? {} : { session_id: ownerSessionId }),
@@ -1147,9 +928,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   });
 
   pi.events.on("subagents:started", (event: NativeSubagent) => {
-    // A launch is a concrete worker action. This signal is intentionally emitted from the
-    // launch event itself, never inferred from lifecycle polling or liveness refreshes.
-    emitMeaningfulActivity("native-subagent-launch", event?.id, parentActivityContext);
     activityLifecycle.onNativeStarted(event);
   });
   // Pi versions expose different terminal event names. Delegate each terminal alias to
@@ -1263,42 +1041,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     }
     return typeof _event.toolName === "string" ? inlineToolPolicy.evaluate(_event.toolName) : undefined;
   });
-  // These completion hooks are the local action boundary. Count only successful, uniquely
-  // identified real tools; intent, output text, failures, and control-plane completions are not progress.
-  const recordToolCompletion = (_event: PiEvent, context: PiContext) => {
-    const sessionId = context?.sessionManager?.getSessionId?.();
-    if (children.has(sessionId)) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "child_session", component: "tool-completion", ...(sessionId === undefined ? {} : { session_id: sessionId }) }, context);
-      return;
-    }
-    const result = _event?.result ?? _event;
-    const explicitlySuccessful = _event?.isError === false || result?.isError === false;
-    if (!explicitlySuccessful) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "unsuccessful_tool", component: "tool-completion" }, context);
-      return;
-    }
-    if (_event?.cancelled === true || _event?.canceled === true || _event?.aborted === true
-      || result?.cancelled === true || result?.canceled === true || result?.aborted === true
-      || _event?.details?.cancelled === true || _event?.details?.canceled === true
-      || result?.details?.cancelled === true || result?.details?.canceled === true
-      || _event?.error !== undefined || result?.error !== undefined) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "canceled_or_failed_tool", component: "tool-completion" }, context);
-      return;
-    }
-    const toolName = _event?.toolName ?? result?.toolName;
-    if (!isConcreteGoalTool(toolName)) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "control_plane_tool", component: "tool-completion" }, context);
-      return;
-    }
-    const toolCallId = _event?.toolCallId ?? _event?.tool_call_id ?? _event?.id ?? result?.toolCallId;
-    if (typeof toolCallId !== "string" || toolCallId.length === 0) {
-      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "missing_activity_id", component: "tool-completion" }, context);
-      return;
-    }
-    emitMeaningfulActivity("tool-completed", toolCallId, context);
-  };
-  pi.on("tool_result", recordToolCompletion);
-  pi.on("tool_execution_end", recordToolCompletion);
 
   pi.on("session_before_compact", async (event: PiEvent, context: PiContext) => {
     if (children.has(context.sessionManager.getSessionId())) return undefined;
@@ -1443,7 +1185,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
       parentAgentId = agentId;
-      emitWorkerIdentity(context, agentId);
       pi.sendMessage({
         customType: "mecha-worker-identity",
         content: `Your managed worker identity is ${agentId}.`,
@@ -1512,14 +1253,11 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         onEnvelope: (message, delivery) => { const normalizedDelivery = normalizeMailboxDelivery(delivery); if (!compactionState().isMailboxPaused() && isMailboxMessage(message) && normalizedDelivery !== undefined) coordinator?.onEnvelope(message, normalizedDelivery); },
         onModelControl: handleModelControl,
         onModelControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
-        onGoalControl: handleGoalControl,
-        onGoalControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
         onInlineToolControl: handleInlineToolControl,
         onInlineToolControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
         getInlineToolState: () => inlineToolPolicy.state(),
         onReminderLockControl: handleReminderLockControl,
         onReminderLockReset: () => reminderLock.clear(),
-        getGoalState: () => cloneGoalControlState(goalControlState),
         getModelCatalog: () => {
           try {
             if (modelControlProjection === undefined) throw new Error("model control is not initialized");
@@ -1553,7 +1291,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         onConnectionState: (value) => { if (!isRecord(value)) return; const state = value.state; const error = value.error;
           if (client !== mailboxClient) return;
           if (state === "connected") {
-            publishGoalState(mailboxClient);
             context.ui.setStatus("mecha-mailbox", "mailbox: connected");
           } else if (state === "connecting" || state === "reconnecting") {
             context.ui.setStatus("mecha-mailbox", "mailbox: reconnecting");
@@ -1566,7 +1303,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         log: () => {},
       });
       client = mailboxClient;
-      publishGoalState(mailboxClient);
       coordinator = createMailboxCoordinator(context, mailboxClient);
       activityLifecycle.onSessionStart();
       activityLifecycle.ensureHeartbeat();

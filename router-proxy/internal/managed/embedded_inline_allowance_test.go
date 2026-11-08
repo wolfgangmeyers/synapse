@@ -438,7 +438,7 @@ func TestUnrestrictedInlineToolsReproduction(t *testing.T) {
 	rawDB, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
 	defer rawDB.Close()
-	policyJSON := []byte(`{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
+	policyJSON := []byte(`{"compaction":{"deferred":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
 	h := sha256.Sum256(policyJSON)
 	policyHash := hex.EncodeToString(h[:])
 	_, err = rawDB.ExecContext(ctx, `UPDATE managed_readiness_sources SET desired_policy_canonical=?, desired_policy_sha256=? WHERE agent_id=?`, policyJSON, policyHash, agentID)

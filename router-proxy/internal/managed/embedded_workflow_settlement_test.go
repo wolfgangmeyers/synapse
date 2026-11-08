@@ -54,10 +54,7 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 			_, err = raw.ExecContext(ctx, `UPDATE managed_agent_policies SET goal_enabled=1,goal_text='Complete active workflow: Recovery',desired_revision=1,applied_revision=1,projection_state='applied' WHERE agent_id=?`, binding.AgentID)
 			require.NoError(t, err)
 			var calls, providers atomic.Int32
-			mgr, err := NewManager(ManagerOptions{Store: db, Manifest: manifestManagedTools(t), Clock: clock, Config: Config{SessionRoot: t.TempDir()}, EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { providers.Add(1); return nil }, EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-				calls.Add(1)
-				return store.EmbeddedGoalEvaluationDone, "ordinary evaluator", nil
-			}})
+			mgr, err := NewManager(ManagerOptions{Store: db, Manifest: manifestManagedTools(t), Clock: clock, Config: Config{SessionRoot: t.TempDir()}, EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { providers.Add(1); return nil }})
 			require.NoError(t, err)
 			defer mgr.Close(ctx)
 			if tc.name == "text" {
@@ -65,7 +62,7 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 					{},
 					{ActiveWorkflowID: "missing-workflow", ActiveWorkflowStateID: "missing-state"},
 				} {
-					require.Equal(t, "The workflow Workflow is currently active in state active. You must either make progress towards completing the workflow or call workflow_snooze.", mgr.workflowContinuationGuidance(ctx, agent))
+					require.Equal(t, "The workflow Workflow is currently active in state active. You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason.", mgr.workflowContinuationGuidance(ctx, agent))
 				}
 			}
 			userBody, err := json.Marshal(ai.UserMessage{Content: ai.ContentList{ai.TextContent{Text: "work"}}})
@@ -95,7 +92,6 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 			// Exercise the real Claude path with no configured evaluator: active
 			// workflows must continue without consulting the default model.
 			if tc.name == "text" {
-				mgr.embeddedGoalEvaluator = nil
 			}
 			var model *ai.Model
 			if tc.name == "text" {
@@ -128,7 +124,7 @@ func TestWorkflowSettlementExactPromptWithoutEvaluator(t *testing.T) {
 				return raw.QueryRowContext(ctx, `SELECT state,reason FROM embedded_goal_evaluations WHERE agent_id=?`, binding.AgentID).Scan(&verdict, &reason) == nil && verdict == store.EmbeddedGoalEvaluationNotDone
 			}, time.Second, time.Millisecond)
 			require.Zero(t, calls.Load())
-			want := "The workflow " + tc.workflow + " is currently active in state " + tc.state + ". You must either make progress towards completing the workflow or call workflow_snooze."
+			want := "The workflow " + tc.workflow + " is currently active in state " + tc.state + ". You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason."
 			require.LessOrEqual(t, len(reason), 512)
 			require.NotEmpty(t, reason)
 			var reservations int

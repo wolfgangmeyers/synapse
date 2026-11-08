@@ -606,7 +606,6 @@ func (r *nativeResetFakeRPC) WaitForPolicyApplied(_ context.Context, generation 
 	if !ok {
 		return nil, errors.New("native fake compaction policy is missing")
 	}
-	goalLock, ok := r.policy["goal_lock"].(map[string]any)
 	if !ok {
 		return nil, errors.New("native fake goal-lock policy is missing")
 	}
@@ -618,7 +617,7 @@ func (r *nativeResetFakeRPC) WaitForPolicyApplied(_ context.Context, generation 
 	if !ok {
 		return nil, errors.New("native fake settled policy is missing")
 	}
-	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"], "settled_enabled": settled["enabled"], "goal_lock_enabled": goalLock["enabled"], "compaction_deferred": compaction["deferred"]}}, nil
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"], "settled_enabled": settled["enabled"], "compaction_deferred": compaction["deferred"]}}, nil
 }
 func (r *nativeResetFakeRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
 	return map[string]any{"success": true, "command": "prompt"}, nil

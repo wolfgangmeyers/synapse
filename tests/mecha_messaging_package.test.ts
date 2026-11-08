@@ -9,7 +9,6 @@ import test from "node:test";
 import packageExtension, * as packageExports from "../pi-extensions/mecha-messaging/index.ts";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../pi-extensions/mecha-messaging");
-const GOAL_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../pi-extensions/mecha-goal");
 const EXPECTED_EXPORTS = [
   "DEFAULT_COMPACTION_POLICY",
   "INLINE_TOOL_ALLOWANCE_TOOL_NAME",
@@ -88,7 +87,7 @@ test("the TypeScript package exposes the Mecha Messaging export surface", () => 
   assert.deepEqual(Object.keys(packageExports).sort(), EXPECTED_EXPORTS);
 });
 
-test("the Messaging package dependency graph stays within Messaging and extracted Goal packages", async () => {
+test("the Messaging package dependency graph stays within the Messaging package", async () => {
   const files = (await readdir(PACKAGE_ROOT)).filter((file) => /\.(?:ts|js)$/.test(file)).sort();
   assert.deepEqual(files, [
     "activity-lifecycle.ts",
@@ -114,7 +113,7 @@ test("the Messaging package dependency graph stays within Messaging and extracte
     for (const specifier of source.matchAll(/from\s+["'](\.[^"']+)["']/g)) {
       const target = resolve(PACKAGE_ROOT, dirname(file), specifier[1]);
       assert.ok(
-        target.startsWith(`${PACKAGE_ROOT}/`) || target.startsWith(`${GOAL_PACKAGE_ROOT}/`),
+        target.startsWith(`${PACKAGE_ROOT}/`),
         `${file} escapes the package graph: ${specifier[1]}`,
       );
     }

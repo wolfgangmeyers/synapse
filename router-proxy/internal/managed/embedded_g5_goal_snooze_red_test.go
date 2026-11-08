@@ -93,7 +93,6 @@ func TestEmbeddedG5GoalSnoozeFixedClockSDKRED(t *testing.T) {
 			},
 		})
 	}
-	var evaluations atomic.Int32
 	m, err := NewManager(ManagerOptions{Store: db, Manifest: manifest, Clock: clock,
 		Config:               Config{SessionRoot: filepath.Join(root, "sessions"), AllowedWorkingDirectoryRoots: []string{root}},
 		CatalogSource:        CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
@@ -105,10 +104,6 @@ func TestEmbeddedG5GoalSnoozeFixedClockSDKRED(t *testing.T) {
 				}
 			}
 			return nil
-		},
-		EmbeddedGoalEvaluator: func(_ context.Context, _ store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			evaluations.Add(1)
-			return store.EmbeddedGoalEvaluationNotDone, "more work remains", nil
 		},
 	})
 	require.NoError(t, err)

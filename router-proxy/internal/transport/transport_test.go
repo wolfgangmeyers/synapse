@@ -688,7 +688,7 @@ func TestLiveProjectionsOnlyReachNodeProjectedRecipients(t *testing.T) {
 	require.Equal(t, "message_arrival", readJSON(t, b)["type"])
 	require.Equal(t, "message_arrival", readJSON(t, c)["type"])
 
-	goalState := map[string]any{"enabled": true, "goal": "do work", "goal_lock_enabled": true, "snooze_enabled": true, "snooze_duration_ms": 1, "snooze_turn_limit": nil, "snooze_budget_cap_ms": nil, "snooze_refill_yield_ms": 1, "snooze_refill_elapsed_ms": 1, "outcome_counts": map[string]any{"COMPLETED": 0, "NOT_DONE": 0}}
+	goalState := map[string]any{"enabled": true, "goal": "do work", "snooze_enabled": true, "snooze_duration_ms": 1, "snooze_turn_limit": nil, "snooze_budget_cap_ms": nil, "snooze_refill_yield_ms": 1, "snooze_refill_elapsed_ms": 1, "outcome_counts": map[string]any{"COMPLETED": 0, "NOT_DONE": 0}}
 	sendJSON(t, a, map[string]any{"version": "v1", "frame_id": "goal-frame", "type": "goal_state", "agent_id": "a", "instance_id": "a-instance", "lease_id": aRegistered["lease_id"], "goal_state": goalState})
 	require.Equal(t, "agent_goal_state", readJSON(t, a)["type"])
 	require.Equal(t, "agent_goal_state", readJSON(t, b)["type"])

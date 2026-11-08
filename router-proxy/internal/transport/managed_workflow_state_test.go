@@ -93,7 +93,6 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	policy, err := durable.ManagedGoalPolicyFor(ctx, agentID)
 	require.NoError(t, err)
 	require.True(t, policy.Config.Enabled)
-	require.True(t, policy.Config.Settings.GoalLockEnabled)
 	require.Equal(t, "Complete active workflow: active", policy.Config.Goal)
 
 	// Verify persistence via GET
@@ -129,7 +128,6 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, policy.Config.Enabled)
 	require.Equal(t, "Complete active workflow: active", policy.Config.Goal)
-	require.True(t, policy.Config.Settings.GoalLockEnabled)
 
 	// 3. Deactivate workflow state
 	deactivateBody, err := json.Marshal(map[string]any{
@@ -155,7 +153,6 @@ func TestManagedAgentWorkflowStateHTTP(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, policy.Config.Enabled)
 	require.Empty(t, policy.Config.Goal)
-	require.False(t, policy.Config.Settings.GoalLockEnabled)
 
 	// Verify persistence after deactivation via GET
 	res, err = client.Get(server.URL + "/v1/managed-agents/" + agentID + "/workflow-state")
@@ -477,7 +474,6 @@ func TestManagedAgentWorkflowDeactivateAtomicHTTP(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, durable.SetManagedAgentActiveWorkflowWithVariables(ctx, agentID, &wf.ID, &ws.ID, map[string]string{"task": "review"}))
 			settings := store.DefaultManagedGoalSettings()
-			settings.GoalLockEnabled = true
 			settings.SnoozeDurationMS = 300000
 			_, err = durable.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{Enabled: true, Goal: "Complete active workflow: atomic-workflow", Settings: settings})
 			require.NoError(t, err)
@@ -519,7 +515,6 @@ func TestManagedAgentWorkflowDeactivateAtomicHTTP(t *testing.T) {
 			require.False(t, after.Config.Enabled)
 			require.Empty(t, after.Config.Goal)
 			require.Empty(t, after.SnoozedUntil)
-			settings.GoalLockEnabled = false
 			require.Equal(t, settings, after.Config.Settings, "deactivation must not reset unrelated goal settings via a second goal update")
 		})
 	}

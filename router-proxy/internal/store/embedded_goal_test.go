@@ -104,7 +104,7 @@ func TestEmbeddedGoalFenceAndUnknownIntent(t *testing.T) {
 	cmd := EmbeddedGoalCommand{Action: "set", Goal: "one", Settings: DefaultManagedGoalSettings()}
 	_, _, err := s.ApplyEmbeddedGoalCall(ctx, EmbeddedBinding{AgentID: b.AgentID, SessionID: "wrong-session", Epoch: b.Epoch, Generation: b.Generation}, "unowned", cmd)
 	require.Error(t, err)
-	_, err = s.db.Exec(`INSERT INTO embedded_goal_calls(call_id,agent_id,session_id,epoch,generation,role,action,args_json,state) VALUES(?,?,?,?,?,?,'set',?,'unknown')`, "uncertain", b.AgentID, b.SessionID, b.Epoch, b.Generation, "worker", `{"action":"set","goal":"one","settings":{"goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`)
+	_, err = s.db.Exec(`INSERT INTO embedded_goal_calls(call_id,agent_id,session_id,epoch,generation,role,action,args_json,state) VALUES(?,?,?,?,?,?,'set',?,'unknown')`, "uncertain", b.AgentID, b.SessionID, b.Epoch, b.Generation, "worker", `{"action":"set","goal":"one","settings":{"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`)
 	require.NoError(t, err)
 	_, _, err = s.ApplyEmbeddedGoalCall(ctx, b, "uncertain", cmd)
 	require.ErrorContains(t, err, "unknown")

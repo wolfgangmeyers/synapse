@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const output = resolve(root, "router/contract/managed-tools-v1.json");
 const sources = {
-  goal: resolve(root, "pi-extensions/mecha-goal/index.ts"),
   messaging: resolve(root, "pi-extensions/mecha-messaging/index.ts"),
   operational: resolve(root, "pi-extensions/mecha-messaging/operational-tools.ts"),
   rootControl: resolve(root, "tools/managed_root_control.py"),
@@ -35,13 +34,10 @@ function definition(capabilityId, label, description, parameters, operationId, m
 }
 
 function assertSourceContract() {
-  const goal = readFileSync(sources.goal, "utf8");
   const messaging = readFileSync(sources.messaging, "utf8");
   const operational = readFileSync(sources.operational, "utf8");
   const rootControl = readFileSync(sources.rootControl, "utf8");
   for (const [text, marker, file] of [
-    [goal, 'description: "Set, inspect, or disable the active goal evaluator."', sources.goal],
-    [goal, 'description: "Deliberately wait before resuming an active goal when snooze is enabled."', sources.goal],
     [messaging, 'description: "Child-only: send an ordinary Mailbox message to this native subagent\'s target parent."', sources.messaging],
     [messaging, 'description: "Send an ordinary Mailbox V2 message to another local agent."', sources.messaging],
     [messaging, 'description: "Enable, disable, or inspect process-local Markdown recall."', sources.messaging],

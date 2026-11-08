@@ -105,7 +105,6 @@ func (*coldRecoverySweepRPC) WaitForPolicyApplied(_ context.Context, generation 
 			"inline_credits":      map[string]any{},
 			"recall_content":      "",
 			"settled_enabled":     false,
-			"goal_lock_enabled":   false,
 			"compaction_deferred": false,
 		},
 	}, nil

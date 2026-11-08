@@ -27,7 +27,7 @@ for (const verdict of ["COMPLETED", "NOT_DONE"] as const) {
       await writeFile(join(f.router.root, "release"), "go");
       // Guidance cannot start until the stale evaluator has settled and left the lane.
       await expect.poll(() => f.requests.length, { timeout: 15000 }).toBe(4);
-      expect(JSON.stringify(f.requests[3].input)).toContain("The workflow New workflow is currently active in state Start. You must either make progress towards completing the workflow or call workflow_snooze.");
+      expect(JSON.stringify(f.requests[3].input)).toContain("The workflow New workflow is currently active in state Start. You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason.");
       expect((await f.api(`/v1/managed-agents/${agent}/workflow-state`))).toMatchObject({ active_workflow_id: workflow.id, active_workflow_state_id: state.id });
       expect(f.rows("SELECT state FROM embedded_goal_evaluations WHERE agent_id=? AND goal_revision=1", agent).map(row => row.state)).toEqual(["UNKNOWN"]);
       // Lane release precedes the continuation decision; wait for the evaluator task to finish.

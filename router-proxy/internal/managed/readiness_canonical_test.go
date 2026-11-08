@@ -14,7 +14,7 @@ func TestReadinessCanonicalJSONVectors(t *testing.T) {
 	for _, test := range []struct {
 		name, input, canonical, hash string
 	}{
-		{"default policy", `{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`, `{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`, "dcb17869020df00dd27a11e14cc0facada376f729a13002185a3d4b87f3c3648"},
+		{"default policy", `{"compaction":{"deferred":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`, `{"compaction":{"deferred":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`, "dcb17869020df00dd27a11e14cc0facada376f729a13002185a3d4b87f3c3648"},
 		{"UTF-16 key order", `{"\ue000":1,"😀":2}`, `{"😀":2,"":1}`, "28c95d1bbb2209223307e62f489020e8f9e0cfa16adf2daf6d88127a1e8dd22a"},
 		{"Unicode and escaping", `{"z":"\u000f\n\"\\","a":"€"}`, `{"a":"€","z":"\u000f\n\"\\"}`, "98f26eda458b7d2c608d427a3cc241632efa23705871286bd5d95bde7917cca7"},
 		{"literal Unicode escape", `{"literal":"\\uD800","paired":"\ud83d\ude00"}`, `{"literal":"\\uD800","paired":"😀"}`, "79077a6609d12b2b3f6572139f10b86fcb6dfe86381f473c39cf7d9b512a3a65"},
@@ -83,7 +83,6 @@ func defaultDesiredPolicyValue() map[string]any {
 		"inline":     map[string]any{"enabled": false, "credits": map[string]any{}},
 		"recall":     map[string]any{"content": ""},
 		"settled":    map[string]any{"enabled": false},
-		"goal_lock":  map[string]any{"enabled": false},
 		"compaction": map[string]any{"deferred": false},
 	}
 }
@@ -94,7 +93,7 @@ func TestNormalizeAppliedPolicyReceiptAcceptsRetainedGoalProjectionAndIgnoresAdd
 	// persists the policy fields it owns.
 	retained := map[string]any{
 		"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "",
-		"settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
+		"settled_enabled": false, "compaction_deferred": false,
 		"goal_revision": int64(1), "future_extension_field": map[string]any{"enabled": true},
 	}
 
@@ -168,12 +167,12 @@ func TestReadinessPolicyNormalizersRejectClosedShapeFailures(t *testing.T) {
 		})
 	}
 
-	validApplied := map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}
+	validApplied := map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false}
 	_, err := normalizeAppliedPolicyReceipt(validApplied)
 	require.NoError(t, err)
 	for _, malformed := range []map[string]any{
 		{"inline_enabled": false},
-		{"inline_enabled": false, "inline_credits": map[string]any{"bash": -1}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false},
+		{"inline_enabled": false, "inline_credits": map[string]any{"bash": -1}, "recall_content": "", "settled_enabled": false, "compaction_deferred": false},
 	} {
 		_, err := normalizeAppliedPolicyReceipt(malformed)
 		require.Error(t, err)

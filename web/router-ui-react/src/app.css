@@ -931,21 +931,10 @@ dialog,
   color: #07131a;
   text-shadow: 0 0 5px rgba(255,255,255,0.45);
 }
-.goal-lock-toggle[aria-pressed="true"] .goal-toggle-thumb {
-  background: var(--primary);
-  box-shadow: 0 0 10px rgba(157,168,255,0.55);
-}
-.goal-lock-toggle .goal-toggle-thumb {
-  gap: 1px;
-}
-.goal-lock-toggle .goal-toggle-thumb i {
-  flex: 0 0 auto;
-  color: #101623;
-  font-size: 9px;
-  line-height: 1;
-}
-.goal-lock-toggle[aria-pressed="true"] .goal-toggle-thumb i,
-.goal-lock-toggle[aria-pressed="true"] .goal-toggle-thumb .goal-toggle-state { color: #080d1c; }
+
+
+
+
 .goal-number-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 150px); align-items: center; gap: 12px; }
 .goal-number-field input { padding: 8px 10px; }
 .goal-outcome-counts { padding: 10px 12px; border-radius: 12px; background: var(--canvas); font-size: 13px; }

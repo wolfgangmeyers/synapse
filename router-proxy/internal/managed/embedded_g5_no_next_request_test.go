@@ -46,10 +46,6 @@ func TestEmbeddedG5GoalSetWithoutNextProviderRequestStaysPending(t *testing.T) {
 		EmbeddedModelResolver:   func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 		CodexCredentialStore:    testfixture.CodexAdmission(t),
 		EmbeddedAfterGoalCommit: func(context.Context) { close(entered); <-release },
-		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			calls <- struct{}{}
-			return store.EmbeddedGoalEvaluationDone, "", nil
-		},
 	})
 	require.NoError(t, err)
 	defer func() { unblock(); _ = m.Close(ctx) }()

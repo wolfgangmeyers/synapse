@@ -136,10 +136,6 @@ func TestEmbeddedG5GoalSnoozeDueReservationFixedClockSDKRED(t *testing.T) {
 			CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 			EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 			CodexCredentialStore:  testfixture.CodexAdmission(t),
-			EmbeddedGoalEvaluator: func(_ context.Context, _ store.EmbeddedGoalEvaluationKey) (string, string, error) {
-				evaluations.Add(1)
-				return store.EmbeddedGoalEvaluationNotDone, "more work remains", nil
-			},
 		})
 		require.NoError(t, e)
 		return m

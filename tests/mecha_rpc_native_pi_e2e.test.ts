@@ -23,7 +23,7 @@ const ACCEPTANCE_EVIDENCE = join(ROOT, "tests/fixtures/mecha-rpc/acceptance-evid
 const ACCEPTANCE_ARTIFACT_DIR = "/tmp/mecha-rpc-acceptance";
 const EXPECTED_COMMANDS = new Set([
   "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
-  "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
+  "goal", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
 ]);
 const MANAGED_CODING_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
 const FIXED_SUBAGENT_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_subagent"] as const;
@@ -290,9 +290,8 @@ function configureDeterministicProvider(home: string, baseUrl: string): void {
   }), "utf8");
 }
 
-async function startDeterministicProvider(options: { firstToolCall?: boolean; evaluatorOutput?: string; attemptEvaluatorToolWhenAdvertised?: string } = {}): Promise<{ baseUrl: string; requests: JsonRecord[]; attemptedEvaluatorTools: string[]; stop: () => Promise<void> }> {
+async function startDeterministicProvider(options: { firstToolCall?: boolean } = {}): Promise<{ baseUrl: string; requests: JsonRecord[]; stop: () => Promise<void> }> {
   const requests: JsonRecord[] = [];
-  const attemptedEvaluatorTools: string[] = [];
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404).end();
@@ -303,17 +302,7 @@ async function startDeterministicProvider(options: { firstToolCall?: boolean; ev
     const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) requests.push(parsed as JsonRecord);
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-    if (requests.length === 1 && options.evaluatorOutput !== undefined) {
-      const advertisedTool = options.attemptEvaluatorToolWhenAdvertised;
-      if (advertisedTool !== undefined && requestToolNames(parsed as JsonRecord).has(advertisedTool)) {
-        attemptedEvaluatorTools.push(advertisedTool);
-        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "evaluator-advertised-tool", type: "function", function: { name: advertisedTool, arguments: JSON.stringify({ action: "status" }) } }] }, finish_reason: null }] })}\n\n`);
-        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
-      } else {
-        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", content: options.evaluatorOutput }, finish_reason: null }] })}\n\n`);
-        response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
-      }
-    } else if (requests.length === 1 && options.firstToolCall !== false) {
+    if (requests.length === 1 && options.firstToolCall !== false) {
       response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "raw-goal-call", type: "function", function: { name: "goal", arguments: JSON.stringify({ action: "status" }) } }] }, finish_reason: null }] })}\n\n`);
       response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
     } else {
@@ -331,7 +320,6 @@ async function startDeterministicProvider(options: { firstToolCall?: boolean; ev
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requests,
-    attemptedEvaluatorTools,
     stop: () => new Promise<void>((resolveStop, rejectStop) => server.close((error) => error === undefined ? resolveStop() : rejectStop(error))),
   };
 }
@@ -1069,50 +1057,6 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
       prompted_hidden: hiddenPrompts, prompted_legacy: legacyPrompts, accepted_manifest_sizes: [16, 17],
       supplemental_replay: true, custom_message_types: ["mecha.mailbox.appended.v1", "mecha.policy.applied.v1", "mecha.child.snapshot.v1"],
     });
-  } finally {
-    await rpc.stop();
-    await provider.stop();
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("stock Pi 0.85 isolates managed goal evaluation from tools and restores them for the next prompt", { timeout: 30_000 }, async () => {
-  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-goal-evaluator-"));
-  const provider = await startDeterministicProvider({
-    evaluatorOutput: "DONE\nREASON: The goal is complete.",
-    attemptEvaluatorToolWhenAdvertised: "goal",
-  });
-  const rpc = new StockPiRpc(home, provider.baseUrl, { managedActiveOnly: true, enableBuiltinTools: true });
-  try {
-    const manifest = readManifest();
-    const manifestHash = hashCanonicalJson(manifest);
-    await bootstrapCurrentManifest(rpc, manifest, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174093");
-    successful(await rpc.request({ type: "prompt", message: `/mecha-policy-apply-v1 ${encodeHiddenEnvelope({
-      protocol: "mecha.policy/v1", runtime_generation: RUNTIME_GENERATION, session_epoch: 1, manifest_sha256: manifestHash, policy: {},
-      evaluator: { evaluation_id: "123e4567-e89b-42d3-a456-426614174094", goal_revision: 1, settled_sequence: 9, goal: "finish the evaluator isolation fix" },
-    })}` }));
-
-    const evaluatorRequest = await waitFor(() => provider.requests[0], "isolated evaluator provider request");
-    assert.deepEqual(requestToolNames(evaluatorRequest), new Set(), "the evaluator provider request must advertise no tools");
-    assert.deepEqual(provider.attemptedEvaluatorTools, [], "the deterministic provider can attempt its evaluator tool only when Pi advertises it");
-    assert.match(JSON.stringify(evaluatorRequest), /Goal: finish the evaluator isolation fix/);
-    assert.match(JSON.stringify(evaluatorRequest), /DONE\|NOT_DONE\\nREASON: <concise reason>/);
-    const evaluatorReceipt = await waitFor(() => customMessages(rpc.events, "mecha.policy.applied.v1").find((event) => {
-      const details = (event.message as JsonRecord).details;
-      const evaluator = details !== null && typeof details === "object" && !Array.isArray(details) ? (details as JsonRecord).evaluator : undefined;
-      return evaluator !== null && typeof evaluator === "object" && !Array.isArray(evaluator) && (evaluator as JsonRecord).phase === "result" ? event : undefined;
-    }), "fenced evaluator result receipt");
-    const evaluator = ((evaluatorReceipt.message as JsonRecord).details as JsonRecord).evaluator as JsonRecord;
-    assert.deepEqual(evaluator, {
-      evaluation_id: "123e4567-e89b-42d3-a456-426614174094", goal_revision: 1, settled_sequence: 9,
-      phase: "result", outcome: "DONE", reason: "The goal is complete.",
-    });
-
-    const normalRequestIndex = provider.requests.length;
-    successful(await rpc.request({ type: "prompt", message: "Confirm normal tools returned after the evaluator." }));
-    const normalRequest = await waitFor(() => provider.requests[normalRequestIndex], "post-evaluator normal provider request");
-    const manifestNames = (manifest.tools as JsonRecord[]).map((tool) => String(tool.name));
-    assert.deepEqual(requestToolNames(normalRequest), new Set([...manifestNames, ...FIXED_SUBAGENT_TOOL_NAMES, ...MANAGED_CODING_TOOL_NAMES]));
   } finally {
     await rpc.stop();
     await provider.stop();

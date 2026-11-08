@@ -611,7 +611,7 @@ func normalizeDesiredPolicy(value any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := exactReadinessKeys(root, "inline", "recall", "settled", "goal_lock", "compaction"); err != nil {
+	if err := exactReadinessKeys(root, "inline", "recall", "settled", "compaction"); err != nil {
 		return nil, err
 	}
 	inline, err := readinessObject(root["inline"])
@@ -662,17 +662,6 @@ func normalizeDesiredPolicy(value any) (map[string]any, error) {
 	if !ok {
 		return nil, errors.New("settled enabled is invalid")
 	}
-	goalLock, err := readinessObject(root["goal_lock"])
-	if err != nil {
-		return nil, err
-	}
-	if err := exactReadinessKeys(goalLock, "enabled"); err != nil {
-		return nil, err
-	}
-	goalLockEnabled, ok := readinessBool(goalLock["enabled"])
-	if !ok {
-		return nil, errors.New("goal lock enabled is invalid")
-	}
 	compaction, err := readinessObject(root["compaction"])
 	if err != nil {
 		return nil, err
@@ -685,8 +674,8 @@ func normalizeDesiredPolicy(value any) (map[string]any, error) {
 		return nil, errors.New("compaction deferred is invalid")
 	}
 	return map[string]any{
-		"compaction": map[string]any{"deferred": deferred}, "goal_lock": map[string]any{"enabled": goalLockEnabled},
-		"inline": map[string]any{"credits": normalizedCredits, "enabled": enabled}, "recall": map[string]any{"content": content}, "settled": map[string]any{"enabled": settledEnabled},
+		"compaction": map[string]any{"deferred": deferred},
+		"inline":     map[string]any{"credits": normalizedCredits, "enabled": enabled}, "recall": map[string]any{"content": content}, "settled": map[string]any{"enabled": settledEnabled},
 	}, nil
 }
 
@@ -695,7 +684,7 @@ func normalizeAppliedPolicyReceipt(value any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := requiredReadinessKeys(applied, "inline_enabled", "inline_credits", "recall_content", "settled_enabled", "goal_lock_enabled", "compaction_deferred"); err != nil {
+	if err := requiredReadinessKeys(applied, "inline_enabled", "inline_credits", "recall_content", "settled_enabled", "compaction_deferred"); err != nil {
 		return nil, err
 	}
 	inlineEnabled, ok := readinessBool(applied["inline_enabled"])
@@ -710,10 +699,6 @@ func normalizeAppliedPolicyReceipt(value any) (map[string]any, error) {
 	if !ok {
 		return nil, errors.New("applied settled enabled is invalid")
 	}
-	goalLock, ok := readinessBool(applied["goal_lock_enabled"])
-	if !ok {
-		return nil, errors.New("applied goal lock enabled is invalid")
-	}
 	deferred, ok := readinessBool(applied["compaction_deferred"])
 	if !ok {
 		return nil, errors.New("applied compaction deferred is invalid")
@@ -722,7 +707,7 @@ func normalizeAppliedPolicyReceipt(value any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return normalizeDesiredPolicy(map[string]any{"inline": map[string]any{"enabled": inlineEnabled, "credits": credits}, "recall": map[string]any{"content": recall}, "settled": map[string]any{"enabled": settled}, "goal_lock": map[string]any{"enabled": goalLock}, "compaction": map[string]any{"deferred": deferred}})
+	return normalizeDesiredPolicy(map[string]any{"inline": map[string]any{"enabled": inlineEnabled, "credits": credits}, "recall": map[string]any{"content": recall}, "settled": map[string]any{"enabled": settled}, "compaction": map[string]any{"deferred": deferred}})
 }
 
 // validateReadinessJSONBounds mirrors the fixed extension's custom-message

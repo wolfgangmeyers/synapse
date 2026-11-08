@@ -19,11 +19,9 @@ import {
   createNativeSubagentTrace,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging/index.ts";
-import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 import { createDiagnosticJournal } from "../pi-extensions/mecha-messaging/diagnostics-history.js";
 
-const MAX_NOT_DONE_WAKEUPS = 1000;
 const activeFixtures = new Set<{ shutdown: () => Promise<void> }>();
 
 test.afterEach(async () => {
@@ -491,83 +489,6 @@ test("managed workers receive their tmux identity on startup and resume", async 
       triggerTurn: false,
     }]], reason);
   }
-});
-
-test("goal progress bridge counts only successful concrete actions with provenance", async () => {
-  const fixture = createMessagingFixture({ sessionId: "parent-session" });
-  goalExtension(fixture.pi);
-  // The goal extension is installed after messaging in this fixture, so replay the optional
-  // state request once to establish the bridge before the goal is set.
-  fixture.pi.events.emit(GOAL_STATE_REQUEST_EVENT);
-  await sessionStart(fixture);
-  const goal = fixture.tools.get("goal");
-  const set = await goal.execute("goal-set", { action: "set", goal: "ship the bridge" }, undefined, undefined, fixture.context);
-  assert.equal(set.isError, undefined);
-  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "read-1", isError: false });
-  const first = fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT);
-  assert.equal(first.length, 1);
-  assert.match(first[0].data.producerEpoch, /^[0-9a-f-]{36}$/);
-  const firstData = { ...first[0].data };
-  delete firstData.producerEpoch;
-  assert.deepEqual(firstData, {
-    activityId: "tool-completed:read-1",
-    kind: "tool-completed",
-    revision: 1,
-    sessionId: "parent-session",
-    workerId: "worker",
-    goal: { enabled: true, goal: "ship the bridge" },
-  });
-
-  // A replayed provider result is not a new worker action.
-  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "read-1", isError: false });
-  // Failed work and control-plane tools are never progress events.
-  await runHandlers(fixture, "tool_result", { toolName: "edit", toolCallId: "edit-1", isError: true });
-  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "ambiguous-1" });
-  await runHandlers(fixture, "tool_execution_end", { toolName: "read", toolCallId: "failed-end", isError: true });
-  await runHandlers(fixture, "tool_execution_end", { toolName: "read", toolCallId: "successful-end", isError: false });
-  for (const toolName of ["goal", "goal_snooze", "mecha_mailbox_send", "mecha_reminder", "mecha_worker"]) {
-    await runHandlers(fixture, "tool_result", { toolName, toolCallId: `${toolName}-1`, isError: false });
-  }
-  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 2);
-
-  await fixture.childHandlers.get("subagents:started")({ id: "child-1", type: "general-purpose", description: "Concrete child" });
-  const activity = fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT);
-  assert.equal(activity.length, 3);
-  assert.equal(activity[1].data.kind, "tool-completed");
-  assert.equal(activity[1].data.activityId, "tool-completed:successful-end");
-  assert.equal(activity[1].data.revision, 2);
-  assert.equal(activity[2].data.kind, "native-subagent-launch");
-  assert.equal(activity[2].data.activityId, "native-subagent-launch:child-1");
-  assert.equal(activity[2].data.revision, 3);
-
-  // The goal consumer rejects malformed/stale/foreign provenance even if another local caller
-  // tries to impersonate a meaningful event. This is not a transport or liveness signal.
-  const consume = fixture.childHandlers.get(GOAL_ACTIVITY_EVENT);
-  consume({ activityId: "foreign-worker", kind: "tool-completed", revision: 3, sessionId: "parent-session", workerId: "other-worker", goal: { enabled: true, goal: "ship the bridge" } });
-  consume({ activityId: "foreign-goal", kind: "tool-completed", revision: 4, sessionId: "parent-session", workerId: "worker", goal: { enabled: true, goal: "other goal" } });
-  consume({ activityId: "stale-check", kind: "goal-check", revision: 5, sessionId: "parent-session", workerId: "worker", goal: { enabled: true, goal: "ship the bridge" } });
-  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 3, "foreign/stale consumer injections do not create bridge emissions");
-
-  const goalResults = () => fixture.sent.filter(([message]) => message?.customType === "goal-result");
-  const settleAndFlush = async () => {
-    await runHandlers(fixture, "agent_settled");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  };
-  for (let attempt = 0; attempt < MAX_NOT_DONE_WAKEUPS; attempt += 1) await settleAndFlush();
-  assert.equal(goalResults().length, MAX_NOT_DONE_WAKEUPS, "the first retry-limit NOT_DONE attempts are delivered");
-  for (let action = 1; action <= 2; action += 1) {
-    await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: `rearm-${action}`, isError: false });
-    await settleAndFlush();
-    assert.equal(goalResults().length, MAX_NOT_DONE_WAKEUPS, `${action} concrete action(s) do not rearm early`);
-  }
-  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "rearm-3", isError: false });
-  await settleAndFlush();
-  assert.equal(goalResults().length, MAX_NOT_DONE_WAKEUPS + 1, "the third producer action re-arms the next delivery");
-  for (let attempt = 0; attempt < MAX_NOT_DONE_WAKEUPS - 1; attempt += 1) await settleAndFlush();
-  assert.equal(goalResults().length, MAX_NOT_DONE_WAKEUPS * 2, "the re-armed cycle delivers the remaining attempts");
-  await settleAndFlush();
-  assert.equal(goalResults().length, MAX_NOT_DONE_WAKEUPS * 2, "the second cycle is capped at the retry limit");
 });
 
 test("activity broadcasts current model metadata without recurring catalog payloads", async () => {
@@ -1101,7 +1022,7 @@ test("mailbox activity traces its frame identity and explicit lack of receipt su
   }) }));
   await connected;
 
-  client.sendActivity("active", { subagentCount: 1, subagents: [{ id: "child", description: "private" }], goal: { enabled: true, goal: "private" } });
+  client.sendActivity("active", { subagentCount: 1, subagents: [{ id: "child", description: "private" }] });
   const activity = socket.sent.find((frame) => frame.type === "activity");
   const published = traces.find((trace) => trace.event === "client_activity_published");
   const unavailable = traces.find((trace) => trace.event === "client_activity_receipt_unavailable");

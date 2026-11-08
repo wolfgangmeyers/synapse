@@ -32,9 +32,8 @@ language, not UNKNOWN/no-replay safety. Current scoped validation is recorded ab
   retirement authority. No coalescing, early start, deadline restart or duplicate.
 - Historical UNKNOWN/started state is not actual execution. Surviving fences reject
   replay/recreation after deletion, including repeated NOT_DONE. UNKNOWN never
-  becomes failure/retry permission. Exact running evaluator can save its verdict
-  after expiry but cannot create a missing continuation for an expired admission.
-- Actual SDK/evaluator execution shares lane.serial. Queued claims are unprotected.
+  becomes failure/retry permission. *Superseded (goal redesign): no evaluator runs on settle; the verdict-save clause no longer applies.*
+- *Superseded (goal redesign):* actual SDK/evaluator execution shares lane.serial. Queued claims are unprotected.
   One bounded validated JSON execution record on existing session rows stores kind,
   owner token, full source evaluation key, current SDK user key and exact referenced
   calls, reusing key structs. Parent coordinates schema/API with store/managed owners.
@@ -116,24 +115,24 @@ Scope exclusions unchanged: preserve/exclude every `tests/e2e/background-workflo
 
 ## 1. Intent & User Outcome
 
-A workflow agent keeps one locked goal: `Complete active workflow: <workflow name>`. States have no individual goals. Settlement keeps the workflow in progress without an auxiliary model decision.
+A workflow agent keeps one goal: `Complete active workflow: <workflow name>`. States have no individual goals. Settlement keeps the workflow in progress without an auxiliary model decision.
 
 `workflow_snooze` delays autonomous continuation until a durable agent-level deadline. User messages, mailbox deliveries, and reminders still run. Their settlement neither cancels nor restarts the remaining wait. Workflow transitions retire the old snooze; exit/deactivation restores ordinary goal control.
 
 ## 2. Core Invariants
 
-1. **Implicit goal and lock.** Activation enables the workflow-derived goal and lock, using workflow snooze configuration. Manual set/off through REST, WS, and native goal controls is rejected while a workflow is active (REST 409). Intermediate turns and internal transitions preserve goal text, enabled state, lock, and revision. Evaluators cannot complete an active workflow.
+1. **Implicit goal.** Activation enables the workflow-derived goal, using workflow snooze configuration. Manual set/off through REST, WS, and native goal controls is rejected while a workflow is active (REST 409). Intermediate turns and internal transitions preserve goal text, enabled state, and revision. No model judges completion, so none can complete an active workflow. *Goal lock is removed; stored `goal_lock_enabled` values are ignored.*
 2. **Configuration and compatibility.** Workflow `snooze_duration_ms` is positive, default 600000. State goals are absent from schema, REST, editor, and exports. Legacy import discards state goals and defaults missing/non-positive workflow duration to 600000.
 3. **Optional native arguments.** `workflow_snooze` accepts optional integer `duration_minutes`, optional integer `duration_ms`, and optional string `reason`. Native JSON schema allows an empty object and either duration independently. Positive minutes precede positive milliseconds. With neither positive, use workflow configuration, otherwise 600000. Clamp effective duration to 1000–86400000 ms. Reject unknown fields, wrong types, fractions, and integers not representable by the existing integer argument boundary without snooze mutation. A valid representable oversized positive duration clamps, rather than failing merely because conversion would overflow: bound minutes before multiplying by 60000. No numeric-format redesign is required. Reason is metadata, not wake/completion authority.
 4. **Alias boundary.** Existing `goal_snooze` remains supported in workflows with workflow default and persistent agent-deadline protection. Per `embedded_goal_snooze_tool.go:24–130`, retain its existing argument handling: omitted duration uses the active workflow duration, and positive overrides are capped at that configured duration, itself capped at 86400000 ms. Cap unification and new outside-workflow behavior are out of scope, not unresolved recovery requirements.
-5. **Deterministic settlement and exact prompt.** Active workflows settle as `NOT_DONE` without either injected or production auxiliary goal evaluation. Continuation input is exactly `The workflow <workflow name> is currently active in state <state name>. You must either make progress towards completing the workflow or call workflow_snooze.` Substitute names without added quotes. No verdict headers or evaluator-inconclusive suffix. Existing fallback names are `Workflow` and `active` if name lookup fails; name lookup failure does not authorize auxiliary evaluation.
+5. **Deterministic settlement and exact prompt.** Active workflows settle as `NOT_DONE` without either injected or production auxiliary goal evaluation. Continuation input is exactly `The workflow <workflow name> is currently active in state <state name>. You must either make progress towards completing the workflow, call workflow_snooze, exit the workflow with mecha_workflow_transition (action exit) when an exit is allowed, or call mecha_blocked with the reason.` Substitute names without added quotes. No verdict headers or evaluator-inconclusive suffix. Existing fallback names are `Workflow` and `active` if name lookup fails; name lookup failure does not authorize auxiliary evaluation.
 6. **Durable agent delay.** Successful snooze records deadline D using the store clock and reports persisted deadline, effective duration, and workflow name. A new user/mailbox/reminder turn can finish without another snooze call; its own evaluation/reservation must still honor D. Combine relevant future agent-policy and valid saved turn-preference deadlines using the latest. Do not recompute a saved deadline from the later settlement time. Other agents, obsolete revisions, stale sessions, and superseded workflow-state evidence cannot extend the current wait.
 7. **Timestamp and failure handling.** NULL, empty, expired, or malformed policy `snoozed_until` establishes no future snooze. Parse timestamps and normalize accepted values to canonical store format, rather than ordering arbitrary text. A malformed saved continuation deadline is denied at the existing start boundary, not treated as permission to start. Database errors are not absence: do not report successful persistence or silently schedule early after a read/write failure. Denied/stale invocations do not mutate policy. Preserve existing fenced invocation and unknown-outcome/no-replay semantics; no new retry protocol is specified.
 8. **Timing, pacing, and one admitted start.** No autonomous continuation starts before the effective future deadline. At expiry an otherwise eligible idle worker receives one admitted start for the current reservation. Repeated timer/idle/recovery dispatch cannot start that reservation twice. This is not exactly-once external execution: an unknown provider outcome cannot authorize replay. A genuinely new settled turn can reserve new work. Unsnoozed/expired work follows normal existing pacing and caps; zero-delay continuation is not required. Pending mail, blocked state, subagents, termination, ownership, revision, and semantic-head safeguards remain authoritative.
-9. **Lifecycle cleanup.** Accepted internal transition clears old snooze while preserving implicit goal/revision/lock. Exit/deactivation clears binding, goal, lock, and snooze. Ordinary explicit-goal completion clears snooze. Retired preferences/reservations/timers cannot restore the delay or start obsolete work. Rejected transitions/exits preserve binding and snooze. Do not silently describe failed cleanup persistence as successful cleanup.
+9. **Lifecycle cleanup.** Accepted internal transition clears old snooze while preserving implicit goal/revision. Exit/deactivation clears binding, goal, and snooze. Ordinary explicit-goal completion clears snooze. Retired preferences/reservations/timers cannot restore the delay or start obsolete work. Rejected transitions/exits preserve binding and snooze. Do not silently describe failed cleanup persistence as successful cleanup.
 10. **Bounded evidence and no replay.** The latest retention contract and SCN-WFIG-014 govern the five evidence tables: immutable A, inclusive A+30d admission closure, immutable bounded D, pending R, frozen legacy H and exact execution protection. Owner deletion alone is not a live-owner retention bound. Pruning never grants replay or converts UNKNOWN/started evidence into retry authority. Historical owner-lifetime-only shipping failures below describe the earlier snapshot, not a current authorization prohibition.
 
-Embedded automatic goal attempts additionally obey [SPEC-GOAL-001](goal-wake-safety.spec.md): default 10-second repeated-attempt pacing, a 20-attempt consecutive automatic-chain cap including failures, and invalid-owner holds. These protections do not shorten snooze, bypass keyed reservations, change deterministic workflow prompts, or authorize UNKNOWN replay.
+Embedded automatic goal attempts additionally obey [SPEC-GOAL-001](goal-wake-safety.spec.md): default 10-second repeated-attempt pacing, a 20-attempt consecutive automatic-chain cap including failures, and invalid-owner holds. At the cap, continuation pauses until a user prompt or a new goal set resets the count. These protections do not shorten snooze, bypass keyed reservations, change deterministic workflow prompts, or authorize UNKNOWN replay.
 
 ## 3. User Scenarios (Behavioral Contract)
 
@@ -143,29 +142,29 @@ Embedded automatic goal attempts additionally obey [SPEC-GOAL-001](goal-wake-saf
 - **When**: The user creates a workflow, selects 15 minutes, edits it, and opens a state editor.
 - **Then**: Default is 10 minutes; label is `Snooze (minutes)`; 900000 ms persists across edit. State editor, REST, and export contain no state goal.
 
-### Scenario: [SCN-WFIG-002] Activate and lock the implicit goal
+### Scenario: [SCN-WFIG-002] Activate the implicit goal
 - **User Goal**: Keep the worker focused on workflow completion.
 - **Given**: A workflow has configured duration.
 - **When**: An agent enters through supported launch/assignment paths and manual set/off is attempted through REST, WS, and native controls.
-- **Then**: Goal is enabled and locked with inherited duration. Manual control fails (REST 409) without changing goal/revision.
+- **Then**: Goal is enabled with inherited duration. Manual control fails (REST 409) without changing goal/revision.
 
 ### Scenario: [SCN-WFIG-003] Preserve goal across native transition
 - **User Goal**: Advance states without losing focus.
 - **Given**: State A has an active implicit goal with recorded revision.
 - **When**: An allowed native transition advances to B.
-- **Then**: B guidance is delivered; goal text/enabled/lock/revision remain unchanged. REST reactivation alone is not proof of native transition.
+- **Then**: B guidance is delivered; goal text/enabled/revision remain unchanged. REST reactivation alone is not proof of native transition.
 
 ### Scenario: [SCN-WFIG-004] Snooze survives intermediate turns
 - **User Goal**: Handle input without premature autonomous work.
 - **Given**: A real workflow turn snoozes for five minutes, finishes, and settles with future deadline D.
 - **When**: Before D a user message, mailbox delivery, or state reminder runs and finishes without another snooze (exercise each source).
-- **Then**: The intermediate turn has its own applied receipt, `NOT_DONE`, and reserved continuation joined by full turn identity. Its deadline remains D. No second preference or autonomous start appears. Goal text/enabled/lock/revision remain unchanged. Input is not blocked. Unsnoozed/elapsed control cases use normal continuation pacing, not a fresh snooze delay.
+- **Then**: The intermediate turn has its own applied receipt, `NOT_DONE`, and reserved continuation joined by full turn identity. Its deadline remains D. No second preference or autonomous start appears. Goal text/enabled/revision remain unchanged. Input is not blocked. Unsnoozed/elapsed control cases use normal continuation pacing, not a fresh snooze delay.
 
 ### Scenario: [SCN-WFIG-005] Exit or deactivate workflow
 - **User Goal**: Restore ordinary goal control.
-- **Given**: An active workflow has a locked implicit goal.
+- **Given**: An active workflow has an implicit goal.
 - **When**: Native exit from an exit-permitted state or administrative REST deactivation succeeds.
-- **Then**: Workflow/state references clear, goal becomes disabled/empty, lock clears, and manual goal control works. Snoozed cleanup variants are in 010.
+- **Then**: Workflow/state references clear, goal becomes disabled/empty, and manual goal control works. Snoozed cleanup variants are in 010.
 
 ### Scenario: [SCN-WFIG-006] Import legacy bundles
 - **User Goal**: Reuse older definitions.
@@ -195,9 +194,10 @@ Embedded automatic goal attempts additionally obey [SPEC-GOAL-001](goal-wake-saf
 - **User Goal**: Avoid carrying old waits into new or finished work.
 - **Given**: A workflow has a snooze and reservation.
 - **When**: Native transition, native exit, or REST deactivation succeeds (exercise all).
-- **Then**: Old snooze clears and old evidence cannot restore it. Transition preserves goal/revision/lock; exit/deactivation clears goal/lock. Advancing beyond old D cannot start obsolete work; valid new-state work remains allowed.
+- **Then**: Old snooze clears and old evidence cannot restore it. Transition preserves goal/revision; exit/deactivation clears goal. Advancing beyond old D cannot start obsolete work; valid new-state work remains allowed.
 
 ### Scenario: [SCN-WFIG-011] Clear snooze on ordinary goal completion
+*Superseded (goal redesign): the evaluator-completion step no longer exists; completion is the agent's goal tool action `off`.*
 - **User Goal**: Stop nudges after explicit goal completion.
 - **Given**: A non-workflow explicit goal is snoozed.
 - **When**: A real turn completes it through the deterministic external evaluation mock.
@@ -260,7 +260,7 @@ Earlier read-only inspection recorded these boundaries, not latest-source passin
 
 No independent public embedded policy writer yielding unequal relevant policy/preference deadlines was established. `managed/direct_controls.go:17–28` routes embedded controls to `embedded_browser_controls.go:37–40`, which accepts only `goal.control`, not `goal.snooze`. The legacy `managed_goal_snooze.go` / store `managed_goal_policy.go:SnoozeManagedGoalPolicy` fenced path is not such an embedded writer. `SetManagedGoalSnoozeUntil` is a store helper, not a public route (the inspected non-test caller clears policy on transition). Thus public long/short snoozes demonstrate replacement, not max selection. This boundary correction is not a policy waiver or behavior weakening: invariant 6 remains fully mandatory, including unequal relevant deadlines.
 
-Historical inspection status: WS002 implementation is now present under owner `14ce`: `router-proxy/internal/transport/websocket.go` has a reject-only workflow guard after source lease/role validation and before legacy target lookup. It matches the exact target `managed.pi_session_id` and returns the existing `WORKFLOW_ACTIVE` error with `request_id: frameID`. This does not add general embedded WS dispatch or require post-deactivation WS success. Focused supporting WS tests in new `websocket_workflow_goal_test.go` passed (2.429s), including stale/blank/agent-ID-alias targets, non-UI callers, bad leases, and no-workflow cases. Focused existing/new WS checks subsequently passed under verifier `de3244`; independent full public coverage remains pending. The mandatory WS set/off lock contract is unchanged.
+Historical inspection status: WS002 implementation is now present under owner `14ce`: `router-proxy/internal/transport/websocket.go` has a reject-only workflow guard after source lease/role validation and before legacy target lookup. It matches the exact target `managed.pi_session_id` and returns the existing `WORKFLOW_ACTIVE` error with `request_id: frameID`. This does not add general embedded WS dispatch or require post-deactivation WS success. Focused supporting WS tests in new `websocket_workflow_goal_test.go` passed (2.429s), including stale/blank/agent-ID-alias targets, non-UI callers, bad leases, and no-workflow cases. Focused existing/new WS checks subsequently passed under verifier `de3244`; independent full public coverage remains pending. The mandatory WS set/off rejection contract is unchanged; goal lock itself is removed.
 
 Historical inspection status: Parent authorized this factual boundary correction only. Existing corrected-plan approval at 02:09Z and full plan/spec reread at 02:12Z remain recorded, not expanded into acceptance. No code/tests/services/commit/push/branch actions in this pass. Coverage remains pending/unverified.
 

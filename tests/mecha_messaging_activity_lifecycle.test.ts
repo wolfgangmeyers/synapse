@@ -72,7 +72,6 @@ function activityFixture(initialService: NativeSubagentService = {}, overrides: 
     }),
     getParentContext: () => context,
     isCompacting: () => false,
-    getGoalProjection: () => undefined,
     getCurrentModel: () => undefined,
     getNativeService: (ownerSessionId) => ownerSessionId === "parent-session" ? service : undefined,
     notify: (message, level) => notifications.push({ message, level }),
@@ -118,7 +117,6 @@ function validLifecycleOptions(): ActivityLifecycleOptions {
     getClient: () => undefined,
     getParentContext: () => undefined,
     isCompacting: () => false,
-    getGoalProjection: () => undefined,
     getCurrentModel: () => undefined,
     getNativeService: () => undefined,
     notify: () => {},
@@ -135,7 +133,7 @@ function validLifecycleOptions(): ActivityLifecycleOptions {
 
 test("lifecycle callback validation and optional boundaries stay explicit", () => {
   const callbackKeys: Array<keyof ActivityLifecycleOptions> = [
-    "getClient", "getParentContext", "isCompacting", "getGoalProjection", "getCurrentModel",
+    "getClient", "getParentContext", "isCompacting", "getCurrentModel",
     "getNativeService", "notify", "trace", "createSettledScheduler",
   ];
   for (const key of callbackKeys) {
@@ -305,7 +303,6 @@ test("remaining lifecycle boundary branches stay covered without changing owners
   const compactionFixture = activityFixture({}, {
     isCompacting: () => compacting,
     getParentContext: () => parentWithoutIdle,
-    getGoalProjection: () => ({ enabled: true, goal: "cover lifecycle" }),
     getCurrentModel: () => ({ provider: "fixture", id: "model" }),
   });
   compactionFixture.lifecycle.onAgentStart(parentWithoutIdle);
@@ -1179,7 +1176,6 @@ test("root compaction failure resumes heartbeat and preserves the watermark", as
     connect: () => Promise.resolve(),
     close() {},
     sendReceipt() {},
-    sendGoalState() {},
     sendActivity(state: string, payload: unknown) { activities.push({ state, payload }); },
     sendLifecycleSnapshot(subagents: unknown) { snapshots.push(subagents); return "snapshot"; },
     sendReply: async () => ({ id: "reply", state: "queued" }),
@@ -1287,7 +1283,6 @@ test("root steered events leave a running legacy child active", async () => {
     connect: () => Promise.resolve(),
     close() {},
     sendReceipt() {},
-    sendGoalState() {},
     sendActivity(state: string, payload: unknown) { activities.push({ state, payload }); },
     sendLifecycleSnapshot(subagents: unknown) { snapshots.push(subagents); return `snapshot-${snapshots.length}`; },
     sendReply: async () => ({ id: "reply", state: "queued" }),
@@ -1399,7 +1394,6 @@ test("root session startup and shutdown keep client and lifecycle ordering", asy
     order.push("client-created");
     createdClient = mailboxClient;
     mailboxClient.connect = () => Promise.resolve();
-    mailboxClient.sendGoalState = () => { order.push("goal-state"); return undefined; };
     mailboxClient.sendActivity = (state) => { order.push(`activity:${state}`); };
     mailboxClient.close = () => { order.push("client-close"); };
     return mailboxClient;
@@ -1428,14 +1422,14 @@ test("root session startup and shutdown keep client and lifecycle ordering", asy
   const sessionStart = handlers.get("session_start")?.at(-1);
   await sessionStart?.({}, context);
   assert.equal(createdClient !== undefined, true);
-  assert.deepEqual(order.slice(0, 3), ["client-created", "goal-state", "coordinator-created"]);
+  assert.deepEqual(order.slice(0, 2), ["client-created", "coordinator-created"]);
 
   const shutdownHandlers = handlers.get("session_shutdown") ?? [];
   assert.equal(shutdownHandlers.length, 2);
   const shutdownContext = { ...context, isIdle: () => true };
   await shutdownHandlers[0]?.({}, shutdownContext);
   heartbeat?.();
-  assert.deepEqual(order, ["client-created", "goal-state", "coordinator-created", "activity:active"]);
+  assert.deepEqual(order, ["client-created", "coordinator-created", "activity:active"]);
 
   const sessionShutdown = shutdownHandlers.at(-1);
   await sessionShutdown?.({}, shutdownContext);

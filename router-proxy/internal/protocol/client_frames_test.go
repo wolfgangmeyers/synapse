@@ -114,7 +114,7 @@ func TestValidateInlineToolFramesAndRegistrationCapability(t *testing.T) {
 
 func TestValidateClientFrameAcceptsNullableGoalSettingsAndRejectsUnsafeIntegers(t *testing.T) {
 	settings := map[string]any{
-		"goal_lock_enabled": true, "snooze_enabled": true, "snooze_duration_ms": 1,
+		"snooze_enabled": true, "snooze_duration_ms": 1,
 		"snooze_turn_limit": nil, "snooze_budget_cap_ms": nil,
 		"snooze_refill_yield_ms": 1, "snooze_refill_elapsed_ms": 1,
 	}
@@ -143,5 +143,5 @@ func TestValidateClientFrameAcceptsNodeIntegralNumberSpellingsAndRejectsFraction
 
 func goalControlWithDuration(t *testing.T, duration string) map[string]json.RawMessage {
 	t.Helper()
-	return rawFrame(t, []byte(fmt.Sprintf(`{"version":"v1","frame_id":"frame","type":"goal_control","agent_id":"agent","instance_id":"instance","lease_id":"lease","target_agent_id":"target","target_instance_id":"target-instance","control_id":"control","action":"set","goal":"do work","settings":{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":%s,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":1,"snooze_refill_elapsed_ms":1}}`, duration)))
+	return rawFrame(t, []byte(fmt.Sprintf(`{"version":"v1","frame_id":"frame","type":"goal_control","agent_id":"agent","instance_id":"instance","lease_id":"lease","target_agent_id":"target","target_instance_id":"target-instance","control_id":"control","action":"set","goal":"do work","settings":{"snooze_enabled":true,"snooze_duration_ms":%s,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":1,"snooze_refill_elapsed_ms":1}}`, duration)))
 }

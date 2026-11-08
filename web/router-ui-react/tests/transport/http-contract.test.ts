@@ -59,16 +59,16 @@ describe("direct HTTP transport", () => {
   });
 
   it("uses the managed goal route without asking the browser for credentials", async () => {
-    const goalState = { enabled: false, goal: "", goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000, outcome_counts: { COMPLETED: 0, NOT_DONE: 0 } };
+    const goalState = { enabled: false, goal: "", snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000, outcome_counts: { COMPLETED: 0, NOT_DONE: 0 } };
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(init?.credentials).toBe("omit");
       expect(init?.headers).toEqual({ "x-request-id": expect.any(String), "content-type": "application/json" });
       expect(String(input)).toBe("http://router.test/v1/managed-agents/managed-alpha/goal");
-      expect(init?.body).toBe(JSON.stringify({ action: "off", settings: { goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } }));
+      expect(init?.body).toBe(JSON.stringify({ action: "off", settings: { snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } }));
       return response({ goal_state: goalState });
     });
     const client = createHttpClient("http://router.test", fetchImpl);
-    await expect(client.saveManagedGoal("managed-alpha", { action: "off", goal: "", settings: { goal_lock_enabled: false, snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).resolves.toEqual({ goal_state: goalState });
+    await expect(client.saveManagedGoal("managed-alpha", { action: "off", goal: "", settings: { snooze_enabled: true, snooze_duration_ms: 60_000, snooze_turn_limit: null, snooze_budget_cap_ms: null, snooze_refill_yield_ms: 30_000, snooze_refill_elapsed_ms: 60_000 } })).resolves.toEqual({ goal_state: goalState });
   });
 
   it("restarts a managed agent with an explicitly selected model", async () => {

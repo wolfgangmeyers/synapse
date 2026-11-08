@@ -146,7 +146,6 @@ func TestEmbeddedWorkflowTransitionPreservesCustomGoalSettings(t *testing.T) {
 	// Configure custom goal settings on agent policy: SnoozeDurationMS: 600000
 	customSettings := store.DefaultManagedGoalSettings()
 	customSettings.SnoozeDurationMS = 600000
-	customSettings.GoalLockEnabled = true
 	_, err = db.UpdateManagedGoalConfig(ctx, agentID, store.ManagedGoalConfig{
 		Enabled:  true,
 		Goal:     "Complete active workflow: " + wf.Name,
@@ -173,7 +172,6 @@ func TestEmbeddedWorkflowTransitionPreservesCustomGoalSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, policyAfter.Config.Enabled)
 	require.Equal(t, "Complete active workflow: "+wf.Name, policyAfter.Config.Goal)
-	require.True(t, policyAfter.Config.Settings.GoalLockEnabled)
 	require.Equal(t, int64(600000), policyAfter.Config.Settings.SnoozeDurationMS, "custom SnoozeDurationMS must be preserved across workflow state transitions")
 }
 

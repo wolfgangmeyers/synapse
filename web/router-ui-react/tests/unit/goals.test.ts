@@ -3,7 +3,6 @@ import { goalControlPayload, goalSettingsFromEditor, normalizeGoalState, validat
 
 describe("goals", () => {
   const settings = {
-    goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 1000,
     snooze_turn_limit: 1,
@@ -21,7 +20,6 @@ describe("goals", () => {
     expect(goalSettingsFromEditor({
       enabled: true,
       goal: "x",
-      goal_lock_enabled: false,
       snooze_enabled: true,
       snooze_duration_seconds: 1.5,
       snooze_turn_limit: null,
@@ -34,7 +32,6 @@ describe("goals", () => {
       enabled: false,
       goal: "ignored",
       ...({
-        goal_lock_enabled: false,
         snooze_enabled: true,
         snooze_duration_seconds: 1,
         snooze_turn_limit: null,

@@ -23,7 +23,6 @@ const (
 // ManagedGoalSettings is the shared Goal Editor shape. The router stores this
 // exact, validated input so a restarted managed Pi receives the same policy.
 type ManagedGoalSettings struct {
-	GoalLockEnabled       bool   `json:"goal_lock_enabled"`
 	SnoozeEnabled         bool   `json:"snooze_enabled"`
 	SnoozeDurationMS      int64  `json:"snooze_duration_ms"`
 	SnoozeTurnLimit       *int64 `json:"snooze_turn_limit"`

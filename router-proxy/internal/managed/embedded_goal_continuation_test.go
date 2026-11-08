@@ -56,10 +56,6 @@ func TestEmbeddedGoalContinuationDoneAndOffDoNotStart(t *testing.T) {
 				CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 				EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 				CodexCredentialStore:  testfixture.CodexAdmission(t),
-				EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-					evaluations.Add(1)
-					return store.EmbeddedGoalEvaluationDone, "finished", nil
-				},
 			})
 			require.NoError(t, err)
 			defer m.Close(ctx)
@@ -145,10 +141,6 @@ func TestEmbeddedGoalOffOptionalArgumentsIntegrated(t *testing.T) {
 				CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 				EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 				CodexCredentialStore:  testfixture.CodexAdmission(t),
-				EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-					evaluations.Add(1)
-					return store.EmbeddedGoalEvaluationDone, "finished", nil
-				},
 			})
 			require.NoError(t, err)
 			defer m.Close(ctx)
@@ -276,10 +268,6 @@ func TestEmbeddedGoalOffOptionalArgumentsStatusIntegrated(t *testing.T) {
 		CatalogSource:         CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 		CodexCredentialStore:  testfixture.CodexAdmission(t),
-		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			evaluations.Add(1)
-			return store.EmbeddedGoalEvaluationDone, "finished", nil
-		},
 	})
 	require.NoError(t, err)
 	defer m.Close(ctx)
@@ -573,10 +561,6 @@ func TestEmbeddedGoalCircuitBreakerEmptyAssistantHalts(t *testing.T) {
 					EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 					CodexCredentialStore:  testfixture.CodexAdmission(t),
 					GoalContinuationDelay: 20 * time.Millisecond,
-					EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-						evaluations.Add(1)
-						return store.EmbeddedGoalEvaluationNotDone, "still needs work", nil
-					},
 				})
 				require.NoError(t, err)
 				defer m.Close(ctx)
@@ -663,7 +647,7 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 	reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{})
 	defer reg.Unregister()
 
-	var requests, evaluations, continuations atomic.Int32
+	var requests, continuations atomic.Int32
 	respond := func(h ai.TranscriptContext, _ *ai.SimpleStreamOptions, _ *providers.FauxState, _ *ai.Model) *ai.AssistantMessage {
 		requests.Add(1)
 		for _, msg := range h.Messages {
@@ -702,10 +686,6 @@ func TestEmbeddedGoalConsecutiveContinuationCapHalts(t *testing.T) {
 		CodexCredentialStore:            testfixture.CodexAdmission(t),
 		GoalContinuationDelay:           10 * time.Millisecond,
 		MaxConsecutiveGoalContinuations: 3,
-		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			evaluations.Add(1)
-			return store.EmbeddedGoalEvaluationNotDone, "needs more work", nil
-		},
 	})
 	require.NoError(t, err)
 	defer m.Close(ctx)
@@ -800,9 +780,6 @@ func TestEmbeddedGoalCircuitBreakerTurnErrorsHalt(t *testing.T) {
 		EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return reg.GetModel() },
 		CodexCredentialStore:  testfixture.CodexAdmission(t),
 		GoalContinuationDelay: 10 * time.Millisecond,
-		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			return store.EmbeddedGoalEvaluationNotDone, "still needs work", nil
-		},
 	})
 	require.NoError(t, err)
 	defer m.Close(ctx)

@@ -58,7 +58,6 @@ type MailboxMessage = WireRecord & { id: string };
 type GoalState = {
   enabled: boolean;
   goal: string;
-  goalLockEnabled: boolean;
   snoozeEnabled: boolean;
   snoozeDurationMs: number;
   snoozeTurnLimit: number | null;
@@ -200,7 +199,6 @@ type MailboxClientOptions = {
 
 type ReplyPayload = { message?: WireRecord; error?: { code?: string } };
 type GoalSettingsInput = {
-  goalLockEnabled: boolean;
   snoozeEnabled: boolean;
   snoozeDurationMs: number;
   snoozeTurnLimit: number | null;
@@ -239,8 +237,7 @@ function isGoalSettingsInput(value: unknown): value is GoalSettingsInput {
   if (!isRecord(value)
     || Object.keys(value).some((key) => !GOAL_SETTINGS_KEYS.includes(key))
     || GOAL_SETTINGS_REQUIRED_KEYS.some((key) => !Object.hasOwn(value, key))) return false;
-  return typeof value.goalLockEnabled === "boolean"
-    && typeof value.snoozeEnabled === "boolean"
+  return typeof value.snoozeEnabled === "boolean"
     && typeof value.snoozeDurationMs === "number"
     && (value.snoozeTurnLimit === null || typeof value.snoozeTurnLimit === "number")
     && (value.snoozeBudgetCapMs === null || typeof value.snoozeBudgetCapMs === "number")
@@ -518,11 +515,11 @@ function normalizeModelSummaries(models: unknown, maximum = MAX_MODELS): ModelSu
 
 const GOAL_OUTCOME_KEYS = ["COMPLETED", "NOT_DONE"];
 const GOAL_STATE_REQUIRED_KEYS = [
-  "enabled", "goal", "goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit",
+  "enabled", "goal", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit",
   "snoozeBudgetCapMs", "snoozeRefillYieldMs", "snoozeRefillElapsedMs", "outcomeCounts",
 ];
 const GOAL_SETTINGS_REQUIRED_KEYS = [
-  "goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs",
+  "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs",
   "snoozeRefillYieldMs", "snoozeRefillElapsedMs",
 ];
 const GOAL_STATE_KEYS = GOAL_STATE_REQUIRED_KEYS;
@@ -536,14 +533,13 @@ function normalizeGoalControlSettings(value: unknown): Omit<GoalState, "enabled"
   if (!isGoalSettingsInput(value)) return undefined;
   const snoozeTurnLimit = value.snoozeTurnLimit === null ? null : positiveGoalInteger(value.snoozeTurnLimit);
   const snoozeBudgetCapMs = value.snoozeBudgetCapMs === null ? null : positiveGoalInteger(value.snoozeBudgetCapMs);
-  if (typeof value.goalLockEnabled !== "boolean" || typeof value.snoozeEnabled !== "boolean"
+  if (typeof value.snoozeEnabled !== "boolean"
     || positiveGoalInteger(value.snoozeDurationMs) === undefined
     || (value.snoozeTurnLimit !== null && (snoozeTurnLimit === undefined || snoozeTurnLimit === null || snoozeTurnLimit > 20))
     || (value.snoozeBudgetCapMs !== null && snoozeBudgetCapMs === undefined)
     || positiveGoalInteger(value.snoozeRefillYieldMs) === undefined
     || positiveGoalInteger(value.snoozeRefillElapsedMs) === undefined) return undefined;
   return {
-    goalLockEnabled: value.goalLockEnabled,
     snoozeEnabled: value.snoozeEnabled,
     snoozeDurationMs: value.snoozeDurationMs,
     snoozeTurnLimit: snoozeTurnLimit === undefined ? null : snoozeTurnLimit,
@@ -588,7 +584,6 @@ function defaultGoalState(): GoalState {
   return {
     enabled: false,
     goal: "",
-    goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
     snoozeTurnLimit: null,
@@ -603,7 +598,6 @@ function goalStateToWire(state: GoalState): WireRecord {
   return {
     enabled: state.enabled,
     goal: state.goal,
-    goal_lock_enabled: state.goalLockEnabled,
     snooze_enabled: state.snoozeEnabled,
     snooze_duration_ms: state.snoozeDurationMs,
     snooze_turn_limit: state.snoozeTurnLimit,
@@ -617,7 +611,6 @@ function goalStateToWire(state: GoalState): WireRecord {
 function goalSettingsFromWire(settings: unknown): Omit<GoalState, "enabled" | "goal" | "outcomeCounts"> | undefined {
   if (!isRecord(settings)) return undefined;
   return normalizeGoalControlSettings({
-    goalLockEnabled: settings.goal_lock_enabled,
     snoozeEnabled: settings.snooze_enabled,
     snoozeDurationMs: settings.snooze_duration_ms,
     snoozeTurnLimit: settings.snooze_turn_limit,

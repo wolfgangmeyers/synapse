@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const nativeSeedPolicy = `{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{"bash":2},"enabled":true},"recall":{"content":"readiness seed"},"settled":{"enabled":false}}`
+const nativeSeedPolicy = `{"compaction":{"deferred":false},"inline":{"credits":{"bash":2},"enabled":true},"recall":{"content":"readiness seed"},"settled":{"enabled":false}}`
 const nativeSeedPolicyHash = "7f88a0a98892509ffdd135e163a5ffe20df486b802d2f176f58af87387a640c8"
 
 type nativeBlockingProcessFactory struct {

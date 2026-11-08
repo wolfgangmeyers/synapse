@@ -113,7 +113,7 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
 - **One process per foreground execution.** Start a fresh process for each admitted foreground execution, including goal continuations and reset wakeups. Resume the same session on subsequent executions; use a fresh session and bounded seed after reset or confirmed missing transcript. At most one process per worker is active, and cleanup completes before another starts.
 - **No between-turn background work.** Stop and reap the process group and revoke its grant at execution end, including successful completion. Background tasks may run during the foreground execution but are not supported between executions; no idle notification turn or background authority is admitted. Unconfirmed cleanup fences further admission and retains recovery evidence.
 - **Interrupt.** Stop the current execution promptly, preserve checked partial output and conversation, and reap its process. If interrupt wins before submission, no input is sent. If a write has started without a checked echo, hold the input as uncertain rather than replaying it. A later execution starts a new process.
-- **Restart.** Stop and reap any active process; the next execution resumes the same conversation. A successfully reserved Claude restart cancels an in-flight goal evaluator and prevents an evaluator queued by an earlier turn from starting. Failed or replayed reservations do not cancel current evaluation. Pi reset behavior is unchanged.
+- **Restart.** Stop and reap any active process; the next execution resumes the same conversation. *Superseded (goal redesign): there is no goal evaluator to cancel; settled goal turns use deterministic NOT_DONE continuation.* Pi reset behavior is unchanged.
 
 - **Terminate.** Stops any running turn and the worker's process promptly, then removes the worker as for embedded workers. The worktree cleanup option is unchanged.
   - Given a successful checked self-termination result is saved, when the engine emits further assistant output before cleanup completes, then no final or partial assistant output after that result is saved or shown. The checked producer and result remain intact until worker removal. The same rule applies to a successful checked `context_reset` result.
@@ -168,14 +168,13 @@ The triggers and the result are the same as for embedded workers.
 ### 3.10 Goals
 These work the same as for embedded workers.
 - **Setting a goal.** Use the goal editor to set, edit, check or turn off a goal. The worker can also use its own `goal` and `goal_snooze` tools.
-- **Evaluation.** Each time a turn ends normally with an active, applied goal, the router evaluates the conversation:
-  - DONE turns the goal off;
-  - NOT_DONE schedules a continuation prompt, after any snooze or the default delay, up to the existing cap.
+- **Continuation.** Each time a turn settles with an active, applied goal, the router schedules an automatic NOT_DONE continuation. No model judges completion.
+  - The agent turns the goal off with the goal tool (`off`) when it is complete, or calls `mecha_blocked` with the reason when blocked;
+  - the continuation follows any snooze or the default delay, escalates through a fixed list of NOT_DONE messages, and stops at the cap of 20 consecutive automatic continuations until a user prompt or a new goal resets it.
 - The existing circuit breaker still stops the loop after repeated empty turns.
 - No Claude-initiated between-turn executions are admitted.
-- **Who evaluates.** A router-side pi-go model, not the Claude worker: only the usable configured Pi router default (positive context window and authenticated constructible stream). No fallback search, new setting or Antigravity. Evaluation therefore uses no Claude usage and finishes within the existing time limit.
-- **No evaluator available.** If no evaluator model is usable, the router records a visible "goal evaluation unavailable" entry and schedules no continuation. It does not loop on NOT_DONE.
-- **Off or completed goals.** A message sent after a goal is DONE or turned off gets a normal answer that persists in the conversation. No evaluation runs for that turn. A failed turn is reported as a failure and is never evaluated, whether the goal is active or off.
+- *Superseded (goal redesign): no router-side evaluator model is called on settle, so Pi-default evaluator selection and the "goal evaluation unavailable" entry no longer apply.*
+- **Off or completed goals.** A message sent after a goal is DONE or turned off gets a normal answer that persists in the conversation. No continuation is scheduled for that turn. A failed turn is reported as a failure and schedules no continuation, whether the goal is active or off.
 - **Mid-turn changes.** A goal changed during a turn applies at the next reliably observed response boundary after its checked result, otherwise at the next submitted input. No unsupported CLI request gate or goal-set-time receipt is implied.
 
 ### 3.11 Usage limits and failures
@@ -252,7 +251,7 @@ router message store ──▶ agent lane ──▶ embedded turn (shared: owner
 1. **Engine selection.** The model provider `claude-code` identifies the engine. Agents stay `runtime=embedded`, so every existing embedded path applies to them unless the engine says otherwise.
 2. **Turn engine seam.** The embedded turn runs one of two engines behind a small interface: the existing pi-go session, or the new Claude Code turn engine. Both engines share:
    - everything before the turn: ownership, activity, message reservation;
-   - everything after it: answer recording, goal evaluation, reset checks, lifecycle.
+   - everything after it: answer recording, goal continuation, reset checks, lifecycle.
 3. **Claude Code process manager and turn engine.** Start a fresh process for each foreground execution, resume the binding's session or seed a fresh session, translate its events, and stop/reap before releasing the lane. Mid-turn mail remains in the durable router queue; direct HTTP prompts wait for the lane without durable acceptance before reservation. No idle handler, background notification execution, or in-place model switch is needed.
 
 4. **Router MCP endpoint.** A Streamable HTTP MCP server inside the router. It:
@@ -261,7 +260,7 @@ router message store ──▶ agent lane ──▶ embedded turn (shared: owner
    - de-duplicates using Claude's tool-use ID.
 5. **Local preflight and model table.** Engine/model aliases are selectable without a settings provider. On launch/process acquisition only, validate the local executable/auth status with a 5 s bound. No provider-auth/polling subsystem or credential store. Login stays external.
 
-6. **Goal integration.** The Claude engine records the "goal applied" evidence at the same logical points the pi engine does. The evaluator runs on the helper model.
+6. **Goal integration.** The Claude engine records the "goal applied" evidence at the same logical points the pi engine does. No evaluator model runs on settle.
 7. **Context integration.** Exact token counts from Claude's usage reports feed the threshold checks and the context bar. Reset seeding uses the engine's seeding path (component 3).
 8. **Usage-limit hold.** Pauses the agent's message lane until the reset time Claude reports.
 9. **Web UI.** Accepts the new provider, splits model choices by engine, and hides phase-2 controls for Claude Code workers.
@@ -328,7 +327,7 @@ Still to verify:
 - **AC7. Restart, terminate, router restart.** Restart continues the conversation. Terminate stops a running turn and the worker's Claude process within 5 s. After a router restart mid-turn, successful recovery produces the interrupted-turn notice and permits continuation without repeating tool effects. Recovery immediately rechecks and kills identity-verified live orphan groups, confirms absence within a bounded time, and permits Claude admission. Mismatched or uncertain groups remain untouched and retained; Pi remains available while Claude is fenced until recovery succeeds after restart.
 - **AC8. Model change.** A Claude Code worker can switch between Claude Code models and keeps its conversation. Cross-engine switches are rejected by both the UI and the router.
 - **AC9. Context reset.** Each of the three triggers produces a new epoch whose first Claude message contains the instruction, scratchpad and last N messages, in order, followed by the wake prompt. The epoch marker appears, the context bar drops, and no reset loop occurs when the post-reset context is above the threshold.
-- **AC10. Goals.** Setting a goal on a Claude Code worker leads to evaluation after each normal turn. NOT_DONE produces continuation turns, DONE turns the goal off, snooze delays the continuation, and the cap and circuit breaker hold.
+- **AC10. Goals.** Setting a goal on a Claude Code worker leads to an automatic NOT_DONE continuation after each settled turn with an active goal. No model judges completion. The agent turns the goal off (`off`) when done or calls `mecha_blocked` when blocked; snooze delays the continuation, and the cap (20) and circuit breaker hold.
 - **AC11. Usage limit.** A reported usage limit pauses queued work until reset; retry the interrupted input only when known safe; otherwise hold it as uncertain without blocking later eligible work after the hold.
 - **AC12. Isolation.** The Claude process environment lacks `TMUX`, `TMUX_PANE` and `CLAUDECODE`. MCP tokens never appear in argv or logs. Temporary files are removed when the process exits and at startup.
 - **AC13. No regression.** Preserve Pi behavior on changed shared paths and existing regressions, with the separately specified reset release/redelivery fix rather than the historical stranded-reservation defect. The scoped green browser run covers Pi RE-008 and Claude CC-005, not every reset/echo race or the expanded Pi matrix. Applicable changed-path E2E and regression gaps remain required; unrelated expanded Pi matrix cases are deferred, not claimed passed. See the boundary coverage report.
@@ -435,17 +434,18 @@ Fresh Claude sessions seed even when checked history is empty. A fresh session c
 
 ### Scenario: [CC-012] Continue a checked applied goal
 - **User Goal**: Continue a checked applied goal.
-- **Given**: An active goal and deterministic usable Pi-default evaluator.
-- **When**: Tool/UI changes, NOT_DONE, DONE, snooze, empty turns, aborted/error/unprompted turns and cap cases run.
-- **Then**: Only applied checked eligible foreground turns evaluate. NOT_DONE continues after delay/snooze up to cap 20, DONE turns off, empty-turn breaker holds. An idle sweep racing a newly reserved verdict must not bypass its normal continuation delay; repeated sweeps must not postpone it indefinitely. A recovered reservation remains eligible through the existing restart path, and snoozed deadlines remain authoritative. Mid-turn tool changes apply only at next reliable response boundary or submitted input. No goal-set-time receipt. Aborted/error/unprompted turns do not evaluate.
+- **Given**: An active goal.
+- **When**: Tool/UI changes, settled turns, goal off, blocked, snooze, empty turns, aborted/error/unprompted turns and cap cases run.
+- **Then**: Only applied checked eligible foreground turns schedule continuation. Settled turns continue after delay/snooze up to cap 20, goal off stops continuation, empty-turn breaker holds. An idle sweep racing a newly reserved continuation must not bypass its normal continuation delay; repeated sweeps must not postpone it indefinitely. A recovered reservation remains eligible through the existing restart path, and snoozed deadlines remain authoritative. Mid-turn tool changes apply only at next reliable response boundary or submitted input. No goal-set-time receipt. Aborted/error/unprompted turns do not schedule continuation.
 
 ### Scenario: [CC-012A] Persist normal answers after a goal is off or completed
 - **User Goal**: Get a normal answer to a message sent after an applied goal is turned off or completed.
 - **Given**: A Claude worker whose applied goal is turned off or has reached DONE, so the goal is disabled.
 - **When**: The user sends a message and the turn ends normally with a final answer.
-- **Then**: The final answer persists in the conversation and survives reload. No new goal evaluation record or evaluator request is created, and no protocol violation is recorded.
+- **Then**: The final answer persists in the conversation and survives reload. No goal continuation is scheduled, and no protocol violation is recorded.
 
 ### Scenario: [CC-013] Avoid looping without an evaluator
+*Superseded (goal redesign): no evaluator model is used, so there is no evaluator-availability gate.*
 - **User Goal**: Avoid looping without an evaluator.
 - **Given**: Default is missing, Claude, unauthenticated, zero-window or lacks a usable stream.
 - **When**: A Claude goal turn completes.
@@ -506,7 +506,7 @@ The full scenario rows below remain required acceptance targets, not passing cla
 | CC-011 | AC9 | `tests/e2e/claude-code-workers.spec.ts` | `preserves bounded reset context without reset loops` |
 | CC-012 | AC10 | `tests/e2e/claude-code-workers.spec.ts` | `evaluates only checked applied goals and honors loop limits` |
 | CC-012A | AC10 | `tests/e2e/claude-goal-state-user-send.spec.ts` | `applied goal turned off: next user send persists Claude response across reload`; `completed goal: next user send persists Claude response across reload` |
-| CC-013 | AC10 | `tests/e2e/claude-code-workers.spec.ts` | `reports unavailable Pi default evaluator without continuation` |
+| CC-013 | AC10 | `tests/e2e/claude-code-workers.spec.ts` | `reports unavailable Pi default evaluator without continuation` (superseded: no evaluator) |
 | CC-014 | AC11 | `tests/e2e/claude-code-workers.spec.ts` | `holds limited work and resumes before queue dispatch` |
 | CC-015 | AC12 | `tests/e2e/claude-code-workers.spec.ts` | `inherits CLI config and cleans private process artifacts` |
 | CC-016 | AC14 | `tests/e2e/claude-code-workers.spec.ts` | `uses one process per foreground execution and reaps children` |
@@ -588,9 +588,10 @@ The full scenario rows below remain required acceptance targets, not passing cla
 ### Failed admission cleanup uncertainty
 
 - Given durable admission fails before the Claude process gate is released, when process-group cleanup cannot be confirmed, the caller sees both the admission failure and unconfirmed cleanup, the manager fences further Claude admission, and the orphan record remains for startup recovery. Local cleanup verifies the owned leader; restart recovery rechecks identity but cannot pin the group, so reuse between verification and signaling remains a risk.
-- Given a Claude auth preflight or goal evaluator runs, its process group must have durable recovery authority before the CLI is released. Unconfirmed cleanup retains that authority, fences admission, and is reported even if the request was canceled or the CLI output is invalid.
+- Given a Claude auth preflight runs, its process group must have durable recovery authority before the CLI is released. Unconfirmed cleanup retains that authority, fences admission, and is reported even if the request was canceled or the CLI output is invalid.
 
 ### Scenario: Superseding an in-flight goal evaluation
+*Superseded (goal redesign): no evaluator runs on settle, so there is no in-flight evaluator to supersede.*
 - A newer goal revision makes an older evaluator verdict stale. The evaluator may finish, but its stale verdict cannot persist, publish a failure diagnostic, or schedule continuation. Goal mutations do not cancel the evaluator.
 - Evidence: `TestGoalMutationDoesNotCancelButRejectsStaleVerdict` and `tests/e2e/claude-evaluator-qa-regression.spec.ts`.
 
@@ -609,6 +610,8 @@ The definite pre-submission startup failure count and pending terminal settlemen
 The queued-mail regression fixture must enqueue distinct accepted messages: identical live sends may collapse to one delivery, so two requested IDs do not by themselves prove two queued messages exist.
 
 ### Restart and in-flight goal evaluation
+
+*Superseded (goal redesign): no goal evaluator exists to register, cancel, or reject; the scenarios below are historical.*
 
 A successful Claude worker restart supersedes goal work from the prior
 execution, including a turn that has finished its provider work but has not

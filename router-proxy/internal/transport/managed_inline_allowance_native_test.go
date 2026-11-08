@@ -248,7 +248,7 @@ func writeNativeInlineAllowanceModels(t *testing.T, home, baseURL string) {
 }
 
 func seedNativeInlineAllowanceReadinessPolicy(ctx context.Context, path, agentID string) error {
-	canonical := []byte(`{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
+	canonical := []byte(`{"compaction":{"deferred":false},"inline":{"credits":{},"enabled":true},"recall":{"content":""},"settled":{"enabled":false}}`)
 	sum := sha256.Sum256(canonical)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

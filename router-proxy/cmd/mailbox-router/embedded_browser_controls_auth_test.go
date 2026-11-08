@@ -150,12 +150,7 @@ data: {"type":"response.completed","response":{"id":"resp_browser","status":"com
 	})
 	f.manager, err = managed.NewManager(managed.ManagerOptions{Store: f.db, Manifest: manifest, Config: managed.Config{SessionRoot: filepath.Join(base, "sessions"), AllowedWorkingDirectoryRoots: []string{project}}, CatalogSource: managed.StoreCatalogSource{Store: f.db}, CodexCredentialStore: f.credentials, CodexRefresh: func(ctx context.Context, c store.CodexCredential) (store.CodexCredential, error) {
 		return codexdevice.Refresh(ctx, &http.Client{Transport: issuer}, c)
-	}, CodexHTTPTransport: provider, EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return &model },
-		// Keep goal evaluation enabled, but mock its external verdict separately
-		// from ordinary Responses turns and their exact provider-entry counts.
-		EmbeddedGoalEvaluator: func(context.Context, store.EmbeddedGoalEvaluationKey) (string, string, error) {
-			return store.EmbeddedGoalEvaluationDone, "", nil
-		}})
+	}, CodexHTTPTransport: provider, EmbeddedModelResolver: func(store.ManagedAgentRecord) *ai.Model { return &model }})
 	require.NoError(t, err)
 	helper := managed.CodexBrowserAuth{Ordinary: f.ordinary, Credentials: f.credentials, Client: &http.Client{Transport: issuer}, Manager: f.manager}
 	f.auth, err = managed.NewProviderAuthCoordinator(f.db, f.manager, helper)
@@ -229,7 +224,7 @@ func TestEmbeddedBrowserGoalInlineRoundTripReplayAndReopen(t *testing.T) {
 		goalID := []string{"e5444444-4444-4444-8444-444444444444", "e5555555-5555-4555-8555-555555555555"}[i]
 		inlineID := []string{"e5666666-6666-4666-8666-666666666666", "e5777777-7777-4777-8777-777777777777"}[i]
 		goalPath := "/v1/managed-agents/" + name + "/goal"
-		body := `{"action":"set","goal":"browser goal","settings":{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":120000,"snooze_turn_limit":3,"snooze_budget_cap_ms":240000,"snooze_refill_yield_ms":50000,"snooze_refill_elapsed_ms":80000}}`
+		body := `{"action":"set","goal":"browser goal","settings":{"snooze_enabled":true,"snooze_duration_ms":120000,"snooze_turn_limit":3,"snooze_budget_cap_ms":240000,"snooze_refill_yield_ms":50000,"snooze_refill_elapsed_ms":80000}}`
 		set := f.call(t, "PUT", goalPath, body, goalID)
 		require.Equal(t, 200, set.Code, set.Body.String())
 		get := f.call(t, "GET", goalPath, "", "")

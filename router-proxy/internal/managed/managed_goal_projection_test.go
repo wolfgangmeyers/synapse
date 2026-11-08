@@ -121,11 +121,10 @@ func (r *goalProjectionRPC) WaitForPolicyApplied(ctx context.Context, generation
 		inline, _ := r.policy["inline"].(map[string]any)
 		recall, _ := r.policy["recall"].(map[string]any)
 		settled, _ := r.policy["settled"].(map[string]any)
-		goalLock, _ := r.policy["goal_lock"].(map[string]any)
 		compaction, _ := r.policy["compaction"].(map[string]any)
 		receipt["applied"] = map[string]any{
 			"inline_enabled": inline["enabled"], "inline_credits": inline["credits"], "recall_content": recall["content"],
-			"settled_enabled": settled["enabled"], "goal_lock_enabled": goalLock["enabled"], "compaction_deferred": compaction["deferred"],
+			"settled_enabled": settled["enabled"], "compaction_deferred": compaction["deferred"],
 		}
 	}
 	applied := receipt["applied"].(map[string]any)
@@ -249,7 +248,7 @@ func TestManagedGoalStatusCanonicalizesNullableSettings(t *testing.T) {
 			require.NoError(t, err)
 			canonical, err := canonicalJSON(result.Details)
 			require.NoError(t, err)
-			require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":`+test.wantTurnLimit+`,"snooze_budget_cap_ms":`+test.wantBudget+`,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, string(canonical))
+			require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":`+test.wantTurnLimit+`,"snooze_budget_cap_ms":`+test.wantBudget+`,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, string(canonical))
 		})
 	}
 }
@@ -289,7 +288,7 @@ func TestManagedGoalStatusDynamicRootControlPersistsAndDeliversSuccess(t *testin
 	require.Equal(t, "Goal is active.", delivered["content"])
 	deliveredDetails, err := json.Marshal(delivered["details"])
 	require.NoError(t, err)
-	require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, string(deliveredDetails))
+	require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, string(deliveredDetails))
 	require.Eventually(t, func() bool {
 		row, lookupErr := durable.ManagedControlRequest(ctx, requestID)
 		return lookupErr == nil && row.State == "delivered"
@@ -298,7 +297,7 @@ func TestManagedGoalStatusDynamicRootControlPersistsAndDeliversSuccess(t *testin
 	require.NoError(t, err)
 	require.Equal(t, "ok", row.ResultStatus)
 	require.Empty(t, row.ErrorCode)
-	require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","goal_lock_enabled":false,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, row.ResultDetailsJSON)
+	require.JSONEq(t, `{"goal_state":{"enabled":true,"goal":"finish the migration","desired_revision":1,"applied_revision":0,"projection_state":"pending","snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}}`, row.ResultDetailsJSON)
 }
 
 func int64Pointer(value int64) *int64 { return &value }
@@ -691,7 +690,7 @@ func TestManagedGoalDirectControlPersistsSharedSettingsBeforeProjection(t *testi
 	ctx := context.Background()
 	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
 	settings := map[string]any{
-		"goal_lock_enabled": true, "snooze_enabled": true, "snooze_duration_ms": int64(120_000),
+		"snooze_enabled": true, "snooze_duration_ms": int64(120_000),
 		"snooze_turn_limit": int64(3), "snooze_budget_cap_ms": int64(300_000),
 		"snooze_refill_yield_ms": int64(30_000), "snooze_refill_elapsed_ms": int64(60_000),
 	}
@@ -699,15 +698,12 @@ func TestManagedGoalDirectControlPersistsSharedSettingsBeforeProjection(t *testi
 	require.NoError(t, err)
 	state, stateOK := result.Details["goal_state"].(map[string]any)
 	require.True(t, stateOK)
-	require.Equal(t, true, state["goal_lock_enabled"])
 	require.Equal(t, int64(120_000), state["snooze_duration_ms"])
 	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
 	require.NoError(t, err)
-	require.Equal(t, true, policy.Config.Settings.GoalLockEnabled)
 	require.NotNil(t, policy.Config.Settings.SnoozeTurnLimit)
 	require.EqualValues(t, 3, *policy.Config.Settings.SnoozeTurnLimit)
 	projected := rpc.policy["goal"].(map[string]any)["settings"].(map[string]any)
-	require.Equal(t, true, projected["goalLockEnabled"])
 	require.Equal(t, int64(120_000), projected["snoozeDurationMs"])
 
 	_, err = manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174004", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "invalid settings", "settings": map[string]any{}}, Fence: fence})
@@ -721,7 +717,7 @@ func TestManagedGoalSnoozeSchedulesOneFencedOrdinaryWakeup(t *testing.T) {
 	ctx := context.Background()
 	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
 	rpc.directBodies = make(chan string, 2)
-	settings := map[string]any{"goal_lock_enabled": false, "snooze_enabled": true, "snooze_duration_ms": int64(1), "snooze_turn_limit": nil, "snooze_budget_cap_ms": nil, "snooze_refill_yield_ms": int64(30_000), "snooze_refill_elapsed_ms": int64(60_000)}
+	settings := map[string]any{"snooze_enabled": true, "snooze_duration_ms": int64(1), "snooze_turn_limit": nil, "snooze_budget_cap_ms": nil, "snooze_refill_yield_ms": int64(30_000), "snooze_refill_elapsed_ms": int64(60_000)}
 	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174011", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration", "settings": settings}, Fence: fence})
 	require.NoError(t, err)
 
@@ -848,7 +844,6 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	// 3. Set active workflow state to stateInWf and activate implicit workflow goal
 	require.NoError(t, durable.SetManagedAgentActiveWorkflowState(ctx, fence.AgentID, &stateInWf.ID))
 	goalSettings := store.DefaultManagedGoalSettings()
-	goalSettings.GoalLockEnabled = true
 	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
 		Enabled:  true,
 		Goal:     "Complete active workflow: " + wf.Name,
@@ -860,7 +855,6 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, policy.Config.Enabled)
 	require.Equal(t, "Complete active workflow: "+wf.Name, policy.Config.Goal)
-	require.True(t, policy.Config.Settings.GoalLockEnabled)
 
 	// 4. Worker goal(action="set") rejected with lock error when workflow is active
 	_, err = manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
@@ -896,7 +890,6 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	// 7. Clear workflow state completely (exit)
 	require.NoError(t, durable.SetManagedAgentActiveWorkflowWithVariables(ctx, fence.AgentID, nil, nil, nil))
 	goalSettingsUnlocked := store.DefaultManagedGoalSettings()
-	goalSettingsUnlocked.GoalLockEnabled = false
 	_, err = durable.UpdateManagedGoalConfig(ctx, fence.AgentID, store.ManagedGoalConfig{
 		Enabled:  false,
 		Goal:     "",
@@ -908,7 +901,6 @@ func TestManagedGoalLockAndWorkflowStateSynchronization(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, policy.Config.Enabled)
 	require.Empty(t, policy.Config.Goal)
-	require.False(t, policy.Config.Settings.GoalLockEnabled)
 
 	// 8. Worker goal(action="set") permitted when no workflow state
 	resSetNoState, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{

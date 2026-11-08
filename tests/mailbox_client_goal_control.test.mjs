@@ -6,7 +6,6 @@ import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-cl
 const state = {
   enabled: true,
   goal: "ship goal control",
-  goalLockEnabled: true,
   snoozeEnabled: true,
   snoozeDurationMs: 60_000,
   snoozeTurnLimit: 4,
@@ -20,7 +19,6 @@ function wireState(value = state) {
   return {
     enabled: value.enabled,
     goal: value.goal,
-    goal_lock_enabled: value.goalLockEnabled,
     snooze_enabled: value.snoozeEnabled,
     snooze_duration_ms: value.snoozeDurationMs,
     snooze_turn_limit: value.snoozeTurnLimit,
@@ -161,7 +159,6 @@ test("incoming goal control maps the request and returns correlated full state",
     action: "set",
     goal: state.goal,
     settings: {
-      goalLockEnabled: true,
       snoozeEnabled: true,
       snoozeDurationMs: 60_000,
       snoozeTurnLimit: 4,

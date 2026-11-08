@@ -393,7 +393,7 @@ export function isGoalProjection(value: unknown): value is GoalProjection {
 
 export function isGoalSettings(value: unknown): value is GoalControlSettings {
   if (!isRecord(value)) return false;
-  return typeof value.goal_lock_enabled === "boolean" && typeof value.snooze_enabled === "boolean" && isSafeInteger(value.snooze_duration_ms, 1) && (value.snooze_turn_limit === null || isSafeInteger(value.snooze_turn_limit, 1, 20)) && (value.snooze_budget_cap_ms === null || isSafeInteger(value.snooze_budget_cap_ms, 1)) && isSafeInteger(value.snooze_refill_yield_ms, 1) && isSafeInteger(value.snooze_refill_elapsed_ms, 1);
+  return typeof value.snooze_enabled === "boolean" && isSafeInteger(value.snooze_duration_ms, 1) && (value.snooze_turn_limit === null || isSafeInteger(value.snooze_turn_limit, 1, 20)) && (value.snooze_budget_cap_ms === null || isSafeInteger(value.snooze_budget_cap_ms, 1)) && isSafeInteger(value.snooze_refill_yield_ms, 1) && isSafeInteger(value.snooze_refill_elapsed_ms, 1);
 }
 
 export function isGoalOutcomeCounts(value: unknown): value is GoalOutcomeCounts {

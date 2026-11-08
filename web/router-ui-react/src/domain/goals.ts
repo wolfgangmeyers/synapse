@@ -6,7 +6,6 @@ export interface GoalEvaluationSummary {
   goal_revision?: number;
 }
 export interface GoalControlSettings {
-  goal_lock_enabled: boolean;
   snooze_enabled: boolean;
   snooze_duration_ms: number;
   snooze_turn_limit: number | null;
@@ -27,7 +26,6 @@ export interface GoalState extends GoalControlSettings {
 export interface GoalEditorValues {
   enabled: boolean;
   goal: string;
-  goal_lock_enabled: boolean;
   snooze_enabled: boolean;
   snooze_duration_seconds: number;
   snooze_turn_limit: number | null;
@@ -36,7 +34,6 @@ export interface GoalEditorValues {
   snooze_refill_elapsed_seconds: number;
 }
 export const DEFAULT_GOAL_SETTINGS: GoalControlSettings = {
-  goal_lock_enabled: false,
   snooze_enabled: true,
   snooze_duration_ms: 60_000,
   snooze_turn_limit: null,
@@ -66,9 +63,8 @@ function nullablePositive(value: unknown): value is number | null {
   return value === null || positive(value);
 }
 export function validateGoalControlSettings(value: unknown): GoalControlSettings | undefined {
-  if (!record(value) || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean" || !positive(value.snooze_duration_ms) || !nullablePositive(value.snooze_turn_limit) || !nullablePositive(value.snooze_budget_cap_ms) || !positive(value.snooze_refill_yield_ms) || !positive(value.snooze_refill_elapsed_ms) || (value.snooze_turn_limit !== null && value.snooze_turn_limit > 20)) return undefined;
+  if (!record(value) || typeof value.snooze_enabled !== "boolean" || !positive(value.snooze_duration_ms) || !nullablePositive(value.snooze_turn_limit) || !nullablePositive(value.snooze_budget_cap_ms) || !positive(value.snooze_refill_yield_ms) || !positive(value.snooze_refill_elapsed_ms) || (value.snooze_turn_limit !== null && value.snooze_turn_limit > 20)) return undefined;
   return {
-    goal_lock_enabled: value.goal_lock_enabled,
     snooze_enabled: value.snooze_enabled,
     snooze_duration_ms: value.snooze_duration_ms,
     snooze_turn_limit: value.snooze_turn_limit,
@@ -129,7 +125,7 @@ export function normalizeGoalState(value: unknown): GoalState | undefined {
   };
 }
 export function normalizeGoalProjection(value: unknown): { enabled: boolean; goal: string } | undefined { if (!record(value) || typeof value.enabled !== "boolean" || typeof value.goal !== "string" || value.goal.length > 4000 || (value.enabled && value.goal.length === 0)) return undefined; return { enabled: value.enabled, goal: value.enabled ? value.goal : "" }; }
-export function goalSettingsFromEditor(editor: GoalEditorValues): GoalControlSettings { const seconds = (value: number) => Math.round(value * 1000); const minutes = (value: number | null) => value === null ? null : Math.round(value * 60_000); return { goal_lock_enabled: editor.goal_lock_enabled, snooze_enabled: editor.snooze_enabled, snooze_duration_ms: seconds(editor.snooze_duration_seconds), snooze_turn_limit: editor.snooze_turn_limit, snooze_budget_cap_ms: minutes(editor.snooze_budget_minutes), snooze_refill_yield_ms: seconds(editor.snooze_refill_yield_seconds), snooze_refill_elapsed_ms: seconds(editor.snooze_refill_elapsed_seconds) }; }
+export function goalSettingsFromEditor(editor: GoalEditorValues): GoalControlSettings { const seconds = (value: number) => Math.round(value * 1000); const minutes = (value: number | null) => value === null ? null : Math.round(value * 60_000); return { snooze_enabled: editor.snooze_enabled, snooze_duration_ms: seconds(editor.snooze_duration_seconds), snooze_turn_limit: editor.snooze_turn_limit, snooze_budget_cap_ms: minutes(editor.snooze_budget_minutes), snooze_refill_yield_ms: seconds(editor.snooze_refill_yield_seconds), snooze_refill_elapsed_ms: seconds(editor.snooze_refill_elapsed_seconds) }; }
 export function goalControlPayload(editor: GoalEditorValues): { action: GoalAction; goal: string; settings: GoalControlSettings } { const action: GoalAction = editor.enabled ? "set" : "off"; return { action, goal: action === "off" ? "" : editor.goal, settings: goalSettingsFromEditor(editor) }; }
 export function goalErrorMessage(code?: string, message?: string): string { if (message) return message; switch (code) { case "target_instance_changed": return "That agent restarted. Close this editor and try again."; case "target_not_connected": return "That agent is no longer connected."; case "goal_control_unavailable": return "Goal controls are not available on this router."; case "invalid_settings": return "Check the goal settings and try again."; case "invalid_goal": return "Enter a goal before saving."; case "control_timeout": return "The goal change timed out."; case "router_reconnecting": return "The router is reconnecting."; default: return "The goal change could not be saved."; } }
 export function goalResultMatches(pending: { controlId: string; peer: string; instanceId: string; revision?: number }, result: { controlId: string; targetAgentId: string; targetInstanceId: string; revision?: number }): boolean { return pending.controlId === result.controlId && pending.peer === result.targetAgentId && pending.instanceId === result.targetInstanceId && (pending.revision === undefined || pending.revision === result.revision); }

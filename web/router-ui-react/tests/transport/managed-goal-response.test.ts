@@ -32,7 +32,6 @@ describe("standalone managed goal response", () => {
       desired_revision: 30,
       enabled: true,
       goal: "Using google search directly (no subagents), look up 5 different cookie recipes, pick the best one and present to the user.",
-      goal_lock_enabled: true,
       last_evaluation: {
         completed_at: "2026-10-12T23:55:37.115Z",
         goal_revision: 30,

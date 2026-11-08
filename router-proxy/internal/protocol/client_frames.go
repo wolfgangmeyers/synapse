@@ -477,7 +477,7 @@ func optionalGoalProjection(frame map[string]json.RawMessage, key string) bool {
 }
 func goalSettingsValue(raw json.RawMessage) bool {
 	value, ok := objectValue(raw)
-	if !ok || !required(value, "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms") || !has(value, "snooze_turn_limit") || !has(value, "snooze_budget_cap_ms") || !boolValue(value["goal_lock_enabled"]) || !boolValue(value["snooze_enabled"]) || !requiredInt(value, "snooze_duration_ms", 1, math.MaxInt64) || !requiredInt(value, "snooze_refill_yield_ms", 1, math.MaxInt64) || !requiredInt(value, "snooze_refill_elapsed_ms", 1, math.MaxInt64) {
+	if !ok || !required(value, "snooze_enabled", "snooze_duration_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms") || !has(value, "snooze_turn_limit") || !has(value, "snooze_budget_cap_ms") || !boolValue(value["snooze_enabled"]) || !requiredInt(value, "snooze_duration_ms", 1, math.MaxInt64) || !requiredInt(value, "snooze_refill_yield_ms", 1, math.MaxInt64) || !requiredInt(value, "snooze_refill_elapsed_ms", 1, math.MaxInt64) {
 		return false
 	}
 	for _, key := range []string{"snooze_turn_limit", "snooze_budget_cap_ms"} {
@@ -493,7 +493,7 @@ func goalSettingsValue(raw json.RawMessage) bool {
 }
 func goalStateValue(raw json.RawMessage) bool {
 	value, ok := objectValue(raw)
-	if !ok || !required(value, "enabled", "goal", "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms", "outcome_counts") || !has(value, "snooze_turn_limit") || !has(value, "snooze_budget_cap_ms") || !goalSettingsValue(mustObject(value, []string{"goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"})) || !boolValue(value["enabled"]) || !stringRange(value["goal"], 0, 4000) {
+	if !ok || !required(value, "enabled", "goal", "snooze_enabled", "snooze_duration_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms", "outcome_counts") || !has(value, "snooze_turn_limit") || !has(value, "snooze_budget_cap_ms") || !goalSettingsValue(mustObject(value, []string{"snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"})) || !boolValue(value["enabled"]) || !stringRange(value["goal"], 0, 4000) {
 		return false
 	}
 	enabled, _ := boolParsed(value["enabled"])
