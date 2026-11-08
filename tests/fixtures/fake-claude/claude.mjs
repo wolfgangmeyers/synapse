@@ -64,9 +64,10 @@ try {
     config = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, 'utf8'));
   }
   if (!config || Array.isArray(config) || typeof config !== 'object') throw Error('script must be object');
-  const allowed = ['auth', 'startup', 'turns', 'resume_missing', 'refuse_model', 'capabilities', 'continue_after_mcp_error', 'turns_by_input', 'executions_by_input', 'ignore_sighup', 'replay_control', 'replay_role', 'contextWindow', 'resultModel', 'interrupt_output', 'skip_mcp_result'];
+  const allowed = ['auth', 'startup', 'turns', 'resume_missing', 'refuse_model', 'capabilities', 'continue_after_mcp_error', 'turns_by_input', 'executions_by_input', 'ignore_sighup', 'replay_control', 'replay_role', 'contextWindow', 'resultModel', 'interrupt_output', 'skip_mcp_result', 'steer_mid_turn'];
   for (const key of Object.keys(config)) if (!allowed.includes(key)) throw Error(`unknown script key: ${key}`);
   if (config.replay_control !== undefined && !['skip', 'hold'].includes(config.replay_control)) throw Error('invalid replay_control');
+  if (config.steer_mid_turn !== undefined && typeof config.steer_mid_turn !== 'boolean') throw Error('steer_mid_turn must be boolean');
   if (config.interrupt_output !== undefined && (!Array.isArray(config.interrupt_output) || config.interrupt_output.length !== 2 || config.interrupt_output.some(x => typeof x !== 'string' || !x || x.length > 1024))) throw Error('interrupt_output requires two bounded strings');
   if (config.ignore_sighup !== undefined && typeof config.ignore_sighup !== 'boolean') throw Error('ignore_sighup must be boolean');
   if (config.ignore_sighup) process.on('SIGHUP', () => {});
@@ -86,6 +87,8 @@ try {
         if (typeof value !== 'string' || !/^[a-z0-9-]+$/.test(value)) throw Error('invalid barrier');
       } else if (key === 'wait') {
         if (value !== 'interrupt') throw Error('wait must be interrupt');
+      } else if (key === 'steer') {
+        if (typeof value !== 'string' || !value || value.length > 1024) throw Error('steer must be bounded string');
       } else if (key === 'hang') {
         if (value !== true) throw Error('hang must be true');
       } else if (key === 'crash') {
@@ -245,6 +248,9 @@ try {
     let keepAlive;
     let eof = false;
     const pending = [];
+    // Mid-turn inputs held for the active turn's `steer` step. Unabsorbed ones
+    // become pending (next execution) when the turn ends or is interrupted.
+    const steered = [];
     let queuedBytes = 0;
     const usage = { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 20, cache_read_input_tokens: 30 };
     const id = () => `fake-${++sequence}`;
@@ -278,6 +284,10 @@ try {
         if (!ending) resume();
       }, 10);
     }
+    // Steered input never answered by its turn is durable pending work for the next execution.
+    function settleSteered() {
+      pending.push(...steered.splice(0));
+    }
     function pump() {
       if (ending || active || blocked) return;
       const next = pending.shift();
@@ -293,7 +303,7 @@ try {
       active = { inputID: next.value.uuid, steps: inputRule?.steps ?? (executionTurns ?? config.turns)?.[turn++] ?? [{ text: 'fake answer' }], index: 0, text: '' };
       init();
       const proceed = () => {
-        if (options['--replay-user-messages'] && config.replay_control !== 'skip') {
+        if (options['--replay-user-messages'] && config.replay_control !== 'skip' && !next.echoed) {
           emit({ ...next.value, isReplay: true, message: { ...next.value.message, role: config.replay_role ?? next.value.message.role } });
         }
         runSteps(active);
@@ -382,6 +392,15 @@ try {
             } else fail(error.message);
           });
           return;
+        } else if ('steer' in step) {
+          // Consume every input steered into this turn so far; each gets one answer.
+          while (steered.length) {
+            const absorbed = steered.shift();
+            queuedBytes -= absorbed.bytes;
+            record({ kind: 'steer_absorbed', turn_input_id: state.inputID, input_id: absorbed.value.uuid });
+            state.text = (state.text ?? '') + step.steer;
+            assistant([{ type: 'text', text: step.steer }]);
+          }
         } else if ('tool' in step) {
           const tool = step.tool;
           assistant([{ type: 'tool_use', id: tool.id, name: tool.name, input: tool.input ?? {} }]);
@@ -393,19 +412,29 @@ try {
           emit({ type: 'rate_limit_event', rate_limit_info: info, session_id: session, uuid: id() });
           assistant([{ type: 'text', text: 'Usage limit reached' }], { is_api_error_message: true,
             api_error: 'usage_limit_reached', api_error_params: { rate_limit_info: info } });
+          settleSteered();
           result(true, 'Usage limit reached');
           active = null;
           pump();
           return;
         }
       }
-      if (state === active) { result(false, state.text); active = null; }
+      if (state === active) { settleSteered(); result(false, state.text); active = null; }
       pump();
     }
     function receive(value, bytes) {
       if (value.type === 'user') {
         if (!value.message || value.message.role !== 'user') throw Error('invalid user record');
-        if (pending.length >= 64 || queuedBytes + bytes > MAX_QUEUED) throw Error('pending input limit exceeded');
+        if (pending.length + steered.length >= 64 || queuedBytes + bytes > MAX_QUEUED) throw Error('pending input limit exceeded');
+        if (active && config.steer_mid_turn) {
+          // Steering: echo the input while the running turn is still active. The
+          // same turn consumes it at its next `steer` step; it is not a new turn.
+          if (options['--replay-user-messages'] && config.replay_control !== 'skip') {
+            emit({ ...value, isReplay: true, message: { ...value.message, role: config.replay_role ?? value.message.role } });
+          }
+          record({ kind: 'steer_echo', input_id: value.uuid });
+          steered.push({ value, bytes, echoed: true }); queuedBytes += bytes; return;
+        }
         pending.push({ value, bytes }); queuedBytes += bytes; pump();
       } else if (value.type === 'control_request') {
         const request = value.request;
@@ -426,6 +455,7 @@ try {
           message: { role: 'user', content: `<local-command-stdout>Set model to ${model}</local-command-stdout>` } });
         else if (active && active.wait !== 'hang') {
           active.cancelled = true; active.abort?.();
+          settleSteered();
           result(true, 'Interrupted'); active = null; blocked = false;
           clearInterval(keepAlive); keepAlive = undefined;
           pump();

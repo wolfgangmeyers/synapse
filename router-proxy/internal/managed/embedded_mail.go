@@ -238,10 +238,69 @@ func (m *Manager) dispatchEmbeddedMailTagged(agentID, messageID, offerSite strin
 	}
 }
 
-func (m *Manager) trySteerActiveSession(agentID string, active embeddedRuntime) bool {
-	// Claude mail stays in the durable queue for the next scoped execution.
-	if _, ok := active.(*claudeCodeRuntime); ok {
+// trySteerClaudeMail reserves one queued mail, then writes it into the running
+// Claude turn. The reservation is taken under admission, but the write runs
+// after admission is released because the process submit gate takes it too.
+func (m *Manager) trySteerClaudeMail(agentID string, active embeddedRuntime, claude *claudeCodeRuntime) bool {
+	ctx := m.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lane := m.laneFor(agentID)
+	lane.admission.Lock()
+	if (lane.resetPending || len(lane.resetToolGates) > 0) || lane.terminationPending > 0 {
+		lane.admission.Unlock()
 		return false
+	}
+	lane.activeMu.RLock()
+	p := lane.activePersistence
+	current := lane.activeSession
+	lane.activeMu.RUnlock()
+	if p == nil || current != active {
+		lane.admission.Unlock()
+		return false
+	}
+	msgID, err := m.store.NextEmbeddedSteerMail(ctx, agentID)
+	if err != nil || msgID == "" {
+		lane.admission.Unlock()
+		return false
+	}
+	attempt, err := m.store.ReserveEmbeddedMail(ctx, p.binding, msgID)
+	lane.admission.Unlock()
+	if err != nil || attempt == nil {
+		log.Printf("[embedded:%s] Failed to reserve Claude steer mail %s: %v", agentID, msgID, err)
+		return false
+	}
+
+	nowMilli := time.Now().UnixMilli()
+	if m.clock != nil {
+		nowMilli = m.clock.Now().UnixMilli()
+	}
+	outcome, err := claude.steerInput(ctx, buildSteerUserMessage(attempt, nowMilli), attempt, "")
+	switch outcome {
+	case claudeSteerAccepted:
+		log.Printf("[embedded:%s] Steered Claude mail %s into active turn", agentID, attempt.MessageID)
+		return true
+	case claudeSteerRefused:
+		if err != nil {
+			log.Printf("[embedded:%s] Claude steer mail %s not written: %v", agentID, attempt.MessageID, err)
+		}
+		// Nothing reached stdin: the mail stays queued for a later execution.
+		if releaseErr := m.store.ReleaseEmbeddedUnconsumedAttempt(ctx, p.binding, attempt.AttemptID); releaseErr != nil {
+			log.Printf("[embedded:%s] ERROR releasing unsteered mail %s: %v", agentID, attempt.MessageID, releaseErr)
+		}
+		return false
+	default:
+		// A started write has an unknown outcome. Keep the reservation and stop
+		// steering; the turn is failing closed and the mail is held, not replayed.
+		log.Printf("[embedded:%s] ERROR Claude steer mail %s uncertain: %v", agentID, attempt.MessageID, err)
+		return false
+	}
+}
+
+func (m *Manager) trySteerActiveSession(agentID string, active embeddedRuntime) bool {
+	if claude, ok := active.(*claudeCodeRuntime); ok {
+		return m.trySteerClaudeMail(agentID, active, claude)
 	}
 	ctx := m.runCtx
 	if ctx == nil {

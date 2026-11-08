@@ -5,7 +5,7 @@
 - **Domain**: `AgentManagement`
 - **Target E2E Suite**: `tests/e2e/claude-code-workers.spec.ts` (planned)
 
-Status: Draft; Implementation in progress, acceptance pending · Date: 2026-10-26, revised for per-foreground-execution processes · Plan: [claude-code-workers-plan.md](claude-code-workers-plan.md)
+Status: Draft; Implementation in progress, acceptance pending · Date: 2026-10-26, revised for per-foreground-execution processes and 2026-11-08 for active mid-turn steering · Plan: [claude-code-workers-plan.md](claude-code-workers-plan.md)
 
 Boundary prerequisite: [runtime-engine-boundary.spec.md](runtime-engine-boundary.spec.md) (Draft). Extract a narrow, behavior-preserving Pi adapter first. Reuse internal persistence types where practical; normalized events are optional targeted cleanup, not a generic engine framework. Wolfgang has authorized implementation; required E2E acceptance remains pending. The goal is near-identical UI with the explicit engine differences below, not exact protocol parity.
 
@@ -78,7 +78,9 @@ Keep `claude-code/<alias>` only as an internal engine/model selection key in the
 - **Context bar.** It shows the context size Claude reports after each model response, against the model's context window.
 
 ### 3.4 Messages that arrive during a turn
-- Durably accepted mail arriving during an execution stays in the existing router queue for later dispatch; it is not written to that process. A direct HTTP prompt instead waits for the lane and is not durably accepted before reservation. Cancellation or router restart can drop that unaccepted request; no new queue is implied. Admitted inputs run in later foreground executions, with their own answers.
+- **Mail and direct prompts are steered mid-turn.** Mail and direct HTTP prompts that arrive while a foreground execution is running are written to that process's stdin as user messages, so the running turn picks them up without waiting for the turn to end. No second process is started. One live observation on `claude` 2.1.316 shows a mid-tool steer folded into the running turn (§6). The exact stream-json point and echo shape are not guaranteed by that single observation (§6 *Still to verify*).
+- **Fallback.** Input that cannot be steered stays durably eligible and runs in a later foreground execution with its own answer. This covers a process still starting or recovering, a write rejected before stdin, and a turn that ends before the echo.
+- Each steered input is durably reserved before its write. A reservation or a write is not consumption; only the checked echo consumes the input.
 - A message is ACKed only after its exact correlated echo is durably checked. Definitely unsubmitted messages remain eligible after interrupt or reset. If a write started but consumption cannot be checked, hold that input unacknowledged from automatic redelivery, including across restart/reset, until existing expiry; never guess that it was unconsumed.
 
 ### 3.5 Tools
@@ -203,7 +205,7 @@ These work the same as for embedded workers.
 | Context reset: tool, thresholds, gear menu | ✓ | ✓ (transcript seed) |
 | Scratchpad, progress, reminders, monitors | ✓ | ✓ |
 | Goal editor, auto-continuation, snooze | ✓ | ✓ |
-| Mid-turn messages folded into the running turn | ✓ | Mail waits queued; direct HTTP prompts wait for the lane |
+| Mid-turn messages folded into the running turn | ✓ | Mail and direct prompts steered into the active process; unsteerable input waits for the next execution |
 | Subagent pill and stop-subagent | ✓ | Phase 2 (hidden) |
 | Workflow states, inline tools, worker tool toggles | ✓ | Phase 2 (hidden) |
 
@@ -252,7 +254,7 @@ router message store ──▶ agent lane ──▶ embedded turn (shared: owner
 2. **Turn engine seam.** The embedded turn runs one of two engines behind a small interface: the existing pi-go session, or the new Claude Code turn engine. Both engines share:
    - everything before the turn: ownership, activity, message reservation;
    - everything after it: answer recording, goal continuation, reset checks, lifecycle.
-3. **Claude Code process manager and turn engine.** Start a fresh process for each foreground execution, resume the binding's session or seed a fresh session, translate its events, and stop/reap before releasing the lane. Mid-turn mail remains in the durable router queue; direct HTTP prompts wait for the lane without durable acceptance before reservation. No idle handler, background notification execution, or in-place model switch is needed.
+3. **Claude Code process manager and turn engine.** Start a fresh process for each foreground execution, resume the binding's session or seed a fresh session, translate its events, and stop/reap before releasing the lane. Mid-turn mail and direct HTTP prompts are steered into the running process when possible; otherwise they stay durably queued for a later execution. No idle handler, background notification execution, or in-place model switch is needed.
 
 4. **Router MCP endpoint.** A Streamable HTTP MCP server inside the router. It:
    - authenticates the per-process token and maps it to the worker's current process and session;
@@ -288,7 +290,7 @@ Live probes on 2026-10-26 with `claude` 2.1.308:
 
 - **One process handles many turns.** A single `claude -p --input-format stream-json --output-format stream-json` process answers several user messages. Each answer produces its own `result` event, and the process exits cleanly when stdin closes.
 - **A text seed works.** A reset-style seed, sent as one message with several text blocks (instruction, scratchpad, transcript, wake prompt), is picked up. A follow-up turn in the same process recalled the seeded state correctly.
-- **Mid-turn messages are queued, not folded in.** A message written while a turn runs is echoed back (`--replay-user-messages`) only when Claude starts answering it, after the current turn's `result`, and it gets its own answer and `result`.
+- **2026-10-26 probe (2.1.308): mid-turn messages were queued, not folded in.** Not seen on 2.1.316; see the 2026-11-08 steering probe below. §3.4 changes this behavior. A message written while a turn runs is echoed back (`--replay-user-messages`) only when Claude starts answering it, after the current turn's `result`, and it gets its own answer and `result`.
 - **Interrupt works through the control protocol.** `{"type":"control_request","request":{"subtype":"interrupt"}}` ends the turn. Claude emits the partial assistant message, then `result/error_during_execution`, and the process stays alive for the next input. SIGINT also ends the turn, but the process then exits.
 - **The HTTP MCP endpoint works as designed.** Configured with `type: http` and an `Authorization: Bearer` header:
   - the header arrives on every request;
@@ -312,16 +314,20 @@ Live probes on 2026-10-28 with `claude` 2.1.308 (plan Phase 0, S1–S9):
 - **Usage limit, from the CLI's schema.** A refused request arrives as an API-error assistant message with `api_error: "usage_limit_reached"` and the limit's `resetsAt`. `rate_limit_event` reports `status: "rejected"`. Not yet seen live.
 - **Permissions.** `--permission-mode bypassPermissions` alone runs every tool in headless mode with no prompt and no refusal, including writes into `.claude/`. It does not depend on the `skipDangerousModePermissionPrompt` setting. Without the flag, writes are refused and reported in the stream; nothing waits for an answer.
 
+Live probe on 2026-11-08 with `claude` 2.1.316 (one run, one observation, no guarantee):
+- A turn asked to run `sleep 20` through Bash. A stdin user message sent 5.4 s in, while the Bash tool was running, was folded into that turn.
+- The steer's echo arrived 23.34 s after the tool result, before the single combined answer and the turn's single `result`.
+
 Still to verify:
 - the usage-limit event shapes above, live, when a limit is hit naturally;
-- whether the `interrupt_send_now_v1` capability allows true mid-turn steering, as a possible later improvement.
+- the steering behavior beyond the single 2.1.316 observation above: repeatability, other versions, steering while no tool is running, and the exact stream-json point and echo shape. The §3.4 fallback applies to whatever later probes show.
 
 ## 7. Acceptance criteria
 
 - **AC1. Local availability.** Known Claude engine/model aliases appear in the existing launch picker. On-demand local executable/auth checks permit signed-in launch and reject missing/signed-out/timed-out/malformed status helpfully, without creating a worker. Normal configuration/login is inherited; no provider settings/auth route, credentials, polling or status events.
 - **AC2. Launch.** Launching with a Claude Code model, with and without a worktree, starts a worker whose first turn is the initial instruction. The worker appears in the sidebar like an embedded worker.
 - **AC3. Conversation.** A composer message with an image produces a turn in which Claude receives both text and image. Its thinking, tool cards (running then finished) and final answer appear in the timeline. The activity indicator and context bar update. Nothing is mailed automatically.
-- **AC4. Mid-turn messages.** Durably accepted mail waits in the existing queue; direct HTTP prompts wait for the lane without durable acceptance before reservation and can be lost on cancellation or restart. Admitted inputs run in later executions and ACK only on their own checked echo. Definitely unsubmitted inputs remain eligible; a write-started input without checked echo is held, including across reset/restart, not automatically replayed.
+- **AC4. Mid-turn messages.** Mail and direct HTTP prompts that arrive during a foreground execution are steered into the active process after durable reservation, with no second process. Each is ACKed only on its own exact checked echo. Input that cannot be steered stays durably eligible for a later execution. Definitely unsubmitted inputs remain eligible; a write-started input without checked echo is held, including across reset/restart, not automatically replayed.
 - **AC5. Router tools.** Each v1 router tool works from a Claude Code worker with embedded-equivalent effects. A repeated call with the same tool-use ID has no second effect. A call bound to an old session is rejected.
 - **AC6. Interrupt.** Interrupt ends a running turn within 5 s, keeps the partial output, and leaves the worker idle with its conversation.
 - **AC7. Restart, terminate, router restart.** Restart continues the conversation. Terminate stops a running turn and the worker's Claude process within 5 s. After a router restart mid-turn, successful recovery produces the interrupted-turn notice and permits continuation without repeating tool effects. Recovery immediately rechecks and kills identity-verified live orphan groups, confirms absence within a bounded time, and permits Claude admission. Mismatched or uncertain groups remain untouched and retained; Pi remains available while Claude is fenced until recovery succeeds after restart.
@@ -337,7 +343,7 @@ Still to verify:
 
 Implementation is authorized and in progress. Pi seam/shared authority/reset store/coordinator and Claude process/UI/catalog work are implemented with partial focused validation. Reported real catalog-admission browser evidence: `tests/e2e/claude-catalog-admission.spec.ts`, **1 passed**. Supporting scoped UI tests and typecheck passed. These checks do not prove the full Claude lifecycle.
 
-Claude runtime/MCP integration remains in progress. **CC-001–CC-018 are not accepted**, and this specification remains **Draft**. Target acceptance suite: `tests/e2e/claude-code-workers.spec.ts` (planned), with per-AC mapping in plan §13–14. It must exercise headless browser, REST, router-proxy, WebSocket and SQLite with deterministic local Claude/evaluator mocks. Go/Vitest checks support but do not replace that matrix. See the [root implementation status](../../CLAUDE_CODE_ADAPTER_PLAN.md#current-implementation-evidence) for the compact evidence summary. No builds or tests were run for this documentation reconciliation.
+Claude runtime/MCP integration remains in progress. **CC-001–CC-018 and the new CC-019 are not accepted**, and this specification remains **Draft**. Target acceptance suite: `tests/e2e/claude-code-workers.spec.ts` (planned), with per-AC mapping in plan §13–14. It must exercise headless browser, REST, router-proxy, WebSocket and SQLite with deterministic local Claude/evaluator mocks. Go/Vitest checks support but do not replace that matrix. See the [root implementation status](../../CLAUDE_CODE_ADAPTER_PLAN.md#current-implementation-evidence) for the compact evidence summary. No builds or tests were run for this documentation reconciliation.
 
 
 ## 9. Core Invariants
@@ -379,7 +385,7 @@ Claude runtime/MCP integration remains in progress. **CC-001–CC-018 are not ac
 - **User Goal**: Receive queued input without false receipt.
 - **Given**: A running turn with equal-text distinct messages and deterministic echo/result barriers.
 - **When**: More messages arrive during normal/startup/recovery work, or execution ends before their submission or echo.
-- **Then**: Accepted mail stays durably queued for later executions. Direct HTTP prompts wait for the lane without durable acceptance before reservation; cancellation or restart can drop an unaccepted request. Each admitted input gets its own ACK only on its exact correlated echo. Definitely unsubmitted reservations are released; write-started inputs without checked echo are held, not redelivered. Equal text never swaps identities.
+- **Then**: Mail and direct prompts are steered into the active process; input that cannot be steered stays durably queued for a later execution. Each steered input gets its own ACK only on its exact correlated echo. Definitely unsubmitted reservations are released; write-started inputs without checked echo are held, not redelivered. Equal text never swaps identities.
 
 ### Scenario: [CC-005] Keep mail through every reset race
 - **User Goal**: Keep mail through every reset race.
@@ -487,6 +493,14 @@ Fresh Claude sessions seed even when checked history is empty. A fresh session c
 - **When**: Admission denies before write, or echo is consumed while ownership/persistence changes, or unsolicited output arrives outside the foreground execution.
 - **Then**: Denial writes nothing/ACKs nothing. Echo checks original bytes/execution/entry before later publication; failure revokes/reaps and prevents final/evaluation. A committed ACK is not undone/replayed; definitely unsubmitted work remains queued and uncertain writes stay held. No receipt on assistant arrival. Unsolicited output outside the foreground execution is rejected, not admitted as a new turn.
 
+### Scenario: [CC-019] Steer mid-turn mail and prompts into the running turn
+- **User Goal**: Have mail or a direct prompt that arrives during a turn reach the running worker without waiting for the turn to end, without loss or double delivery.
+- **Given**: A running Claude foreground turn and two equal-text messages, one arriving as mail and one as a direct prompt, with deterministic echo and result barriers.
+- **When**: The second message arrives while the first is in the turn.
+- **Then**: The second message is durably reserved, written to the same process (same PID), and ACKed only on its exact checked echo. Its answer appears in this execution or in its own later turn. Equal text keeps distinct identities. No second process starts.
+- **Negative cases**: (a) Write rejected before stdin: the message stays eligible. (b) Write started and echo not checked before interrupt, reset or restart: held, not redelivered, not ACKed. (c) Process still starting or recovering, or turn ends before the echo: the message stays durably queued for a later execution.
+- **E2E**: `tests/e2e/claude-steering-mid-turn.spec.ts` (`CC-019 steers mid-turn mail into the active turn with checked echo ACK`; `CC-019 steers a direct user send into the active turn`). Present in the working tree, uncommitted. Not accepted.
+
 ## 11. Automated E2E Verification Matrix
 
 The full scenario rows below remain required acceptance targets, not passing claims. Partial catalog evidence is recorded in §8. Each uses headless browser, real UI/REST/router-proxy/WebSocket/router/SQLite and deterministic external CLI/provider/evaluator mocks. No real Claude, LLM or external service. Use explicit barriers, isolated databases and bounded waits. Restart the real router over the same database for crash cases. Assert UI, WS and checked SQLite records; include direct cross-origin controls (credentials omitted) as well as proxy transport. Supporting Go/Vitest tests do not replace this matrix. AC13 requires the applicable changed-path boundary scenarios and existing regressions, including reset release/redelivery; unrelated expanded Pi matrix coverage is deferred. See the boundary coverage report.
@@ -512,6 +526,7 @@ The full scenario rows below remain required acceptance targets, not passing cla
 | CC-016 | AC14 | `tests/e2e/claude-code-workers.spec.ts` | `uses one process per foreground execution and reaps children` |
 | CC-017 | AC3–AC5, AC12, AC14 | `tests/e2e/claude-code-workers.spec.ts` | `bounds buffers and fails malformed protocol closed` |
 | CC-018 | AC4, AC10, AC13 | `tests/e2e/claude-code-workers.spec.ts` | `gates submission and fences consumed rejection` |
+| CC-019 | AC4 | `tests/e2e/claude-steering-mid-turn.spec.ts` | `CC-019 steers mid-turn mail into the active turn with checked echo ACK`; `CC-019 steers a direct user send into the active turn` (present in working tree, uncommitted; not accepted) |
 
 ### Scoped lifecycle cleanup regressions
 

@@ -31,7 +31,7 @@ Primary implementation sequence: [CLAUDE_CODE_ADAPTER_PLAN.md](../../CLAUDE_CODE
 | D3 | One fresh process per admitted foreground execution (all Run/Continue calls in that scope share it); the next execution gets a new PID. Stop/reap and revoke its grant before another execution. Resume the conversation with the selected model; no idle process or in-place switching. | Spec §3.4–3.8 |
 | D4 | Use the binding session ID for a fresh session or resume; on confirmed missing transcript, reseed once from bounded router context. | Spec §3.4–3.8 |
 | D5 | Canonical shared names in checked router-tool producers/results; raw protocol identity stays transient. Use the shared witness path (§6). | See sections |
-| D6 | ACK only the exact correlated checked echo. Mid-turn mail stays durably queued; direct HTTP prompts wait for the lane without durable acceptance before reservation and can be dropped on cancellation or restart. A write-started input without a checked echo is held, never automatically redelivered. | Spec §3.4–3.8 |
+| D6 | ACK only the exact correlated checked echo. Mid-turn mail and direct prompts are reserved and steered into the running process's stdin (CC-019). Input not yet written stays durably queued for a later execution. Direct HTTP prompts wait for the lane without durable acceptance before reservation and can be dropped on cancellation or restart. A write-started input without a checked echo is held, never automatically redelivered. (The earlier queue-only design is superseded by CC-019.) | Spec §3.4–3.8, CC-019 |
 | D7 | Every router tool requires current process grant and checked foreground user/assistant producer; no between-turn authority. | Spec §3.4–3.8 |
 | D8 | Pi retains pre-dispatch StreamFn guards. Claude validates before stdin and commits consumption/entry on echo; no unsupported per-request CLI gate (§5). | See sections |
 | D9 | Claude evaluates only with a usable configured Pi router default; otherwise visible unavailability and no continuation. | See sections |
@@ -145,7 +145,7 @@ Follow [runtime-engine-boundary.spec.md](runtime-engine-boundary.spec.md), slice
 - The mirror always gets the **original** value, so the ACK byte-match holds.
 - Plain prompts, continuation prompts and notices are sent as text.
 
-**Execution and interruption.** Submit only the foreground input after admission and durable write-start marking. Correlate the exact echo and commit checked consumption before ACK/publication. Keep durably accepted mid-turn mail in the existing router queue for subsequent executions. Direct HTTP prompts wait for the lane and are not durably accepted before reservation; cancellation or restart can drop an unaccepted request. Do not steer either into the active process or add a new queue. On interrupt preserve checked partial output, stop/reap and return cancellation. Definitely unsubmitted inputs can be released; uncertain writes remain held through reset/restart until expiry. Reset, termination and router shutdown drain callbacks and stop the captured process without affecting a replacement.
+**Execution and interruption.** Submit only the foreground input after admission and durable write-start marking. Correlate the exact echo and commit checked consumption before ACK/publication. Mid-turn mail and direct prompts that arrive during a running turn are reserved and written to the same process's stdin (CC-019), and are ACKed only on their exact checked echo. Input not yet written (write rejected, process starting or recovering, or turn ended before the echo) stays durably queued for a later execution. Direct HTTP prompts wait for the lane and are not durably accepted before reservation; cancellation or restart can drop an unaccepted request. Add no new queue. On interrupt preserve checked partial output, stop/reap and return cancellation. Definitely unsubmitted inputs can be released; uncertain writes remain held through reset/restart until expiry. Reset, termination and router shutdown drain callbacks and stop the captured process without affecting a replacement.
 
 **System prompt file**
 - It contains:
@@ -353,7 +353,7 @@ Also test: the warning reminder fires once per epoch; the loop guard; a per-mode
 - It speaks stream-json from a JSON script named by `FAKE_CLAUDE_SCRIPT`. Each input's steps can be: thinking, text, `tool_use` (built-in, answered with a canned result), `mcp_call`, `interrupt-wait`, `rate_limit`, `crash`, `hang`, `compact_boundary`, `slow_start`.
 - `mcp_call` makes a **real HTTP MCP call** to the router, using `--mcp-config`. It emits `tool_use` before the call and `tool_result` after, so the endpoint, grants and tools are exercised end to end.
 - It honours `control_request` interrupt, `--replay-user-messages` echoes for submitted inputs, `--session-id` and `--resume` (a missing session fails as in S4), and `system/init` with capabilities.
-- It records PID, argv, environment and stdin: all Run/Continue calls within one foreground scope share its PID, and each subsequent execution starts a new process with a new PID. It can spawn a child and exercise successful cleanup and unconfirmed-cleanup fencing; queued messages are not sent to an active process.
+- It records PID, argv, environment and stdin: all Run/Continue calls within one foreground scope share its PID, and each subsequent execution starts a new process with a new PID. It can spawn a child and exercise successful cleanup and unconfirmed-cleanup fencing; steered inputs (CC-019) are written to the active process; other queued messages wait for the next execution.
 
 **Required behavioral tests (Playwright).** Planned `tests/e2e/claude-code-workers.spec.ts`: headless UI through real REST/router-proxy/WebSocket/router/SQLite boundaries with fake Claude and deterministic local evaluator, no external LLM. The cases below map acceptance criteria to planned coverage, not passing evidence. Go behavioral tests following `embedded_behavioral_lifecycle_test.go` support but do not replace that suite:
 
@@ -361,7 +361,7 @@ Also test: the warning reminder fires once per epoch; the loop guard; a per-mode
 |---|---|
 | local preflight, launch/refusal, unchanged settings/no polling, implicit default never Claude | AC1, AC2 |
 | composer message with image → Claude stdin has text and image; timeline rows, answer row, activity, context usage; no mail sent | AC3 |
-| mid-turn mail stays durable; direct HTTP prompt waits unaccepted before reservation and may be lost on cancellation/restart; ACK at exact echo, own answer; redelivery only when definitely unsubmitted; uncertain writes held; no steer during start-up or recovery; reservation released across a reset | AC4 |
+| mid-turn mail and prompts steered into the running process and ACKed at exact echo; unwritten input stays durable; direct HTTP prompt waits unaccepted before reservation and may be lost on cancellation/restart; own answer; redelivery only when definitely unsubmitted; uncertain writes held; no steer during start-up or recovery; reservation released across a reset | AC4 |
 | every router tool through MCP, de-duplication with a new timestamp, stale binding | AC5 |
 | interrupt partial | AC6 |
 | restart, terminate mid-turn, router restart mid-turn, orphan sweep | AC7 |
@@ -418,7 +418,7 @@ Required AC13 evidence (the scoped 65-test browser run is green; see the boundar
 - **Shared-code changes.** The adapter and any later provider-entry/history helpers touch code Pi workers run. Normalization and steer release are excluded from the first slice. Mitigations: the existing suite, parity tests, and separate commits.
 - **Startup cost.** Each execution pays CLI and configured MCP server startup latency; no idle Claude memory is retained.
 - **Background tradeoff.** Work started by Claude cannot survive execution cleanup; no between-turn notification processing is promised.
-- **Cold start** of a few seconds may occur on every execution. Mid-turn mail waits in the durable router queue; direct HTTP prompts wait for the lane without durable acceptance before reservation.
+- **Cold start** of a few seconds may occur on every execution. Mid-turn mail and prompts are steered into a running process when possible; input not yet written waits in the durable router queue, and direct HTTP prompts wait for the lane without durable acceptance before reservation.
 - **User configuration side effects.** Full configuration means the user's hooks and plugins run inside workers. This is the settled configuration contract (spec Alt J), not proof of validated integration.
 - **Shared subscription limits** across many Claude workers. The usage-limit hold covers correctness, not capacity.
 - **Concurrent edits on `main`.** Three commits landed while this plan was written, one of them deleting a UI component it referenced. Re-check references at the start of each phase.

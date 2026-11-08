@@ -128,6 +128,29 @@ func (s *Store) ReserveEmbeddedPrompt(ctx context.Context, b EmbeddedBinding, id
 	return replay, err
 }
 
+// ReleaseEmbeddedPrompt deletes a pending request whose steered write is known
+// never to have reached stdin, so the same request ID may be reserved again. Any
+// other state is left alone: an uncertain pending request stays ambiguous.
+func (s *Store) ReleaseEmbeddedPrompt(ctx context.Context, b EmbeddedBinding, id string) error {
+	return s.runImmediate(ctx, func() error {
+		if err := s.embeddedFence(ctx, b); err != nil {
+			return err
+		}
+		result, err := s.db.ExecContext(ctx, `DELETE FROM embedded_prompt_requests WHERE request_id=? AND agent_id=? AND session_id=? AND epoch=? AND generation=? AND state='pending'`, id, b.AgentID, b.SessionID, b.Epoch, b.Generation)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return errors.New("embedded prompt request is not releasable")
+		}
+		return nil
+	})
+}
+
 // CompleteEmbeddedPrompt records only a checked, durable assistant head.
 func (s *Store) CompleteEmbeddedPrompt(ctx context.Context, b EmbeddedBinding, id string) error {
 	return s.runImmediate(ctx, func() error {

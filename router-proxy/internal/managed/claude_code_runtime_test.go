@@ -1012,7 +1012,7 @@ func TestClaudeInterruptBlockedRealStdin(t *testing.T) {
 	require.NoError(t, err)
 	submitted := make(chan error, 1)
 	go func() { submitted <- r.submitInput(context.Background(), "blocked", raw) }()
-	require.Eventually(t, func() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.inputCancel != nil }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { r.mu.Lock(); defer r.mu.Unlock(); return len(r.inputCancels) != 0 }, time.Second, time.Millisecond)
 	// Reading one byte proves the OS pipe write began; the remaining megabyte cannot fit.
 	var first [1]byte
 	_, err = reader.Read(first[:])

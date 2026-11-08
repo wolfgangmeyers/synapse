@@ -294,7 +294,7 @@ type claudeCodeRuntime struct {
 	runDone          chan struct{}
 	interruptNotify  chan struct{}
 	interruptDone    chan struct{}
-	inputCancel      context.CancelFunc
+	inputCancels     map[string]context.CancelFunc
 	snapshot         embeddedSnapshot
 	lastUser         *ai.UserMessage
 	seedHistory      []agent.AgentMessage
@@ -303,6 +303,8 @@ type claudeCodeRuntime struct {
 	admissionBytes   int
 	tools            map[string]string
 	rawTools         map[string]string
+	steers           map[string]*claudeSteer
+	steerOpen        bool
 }
 
 var _ embeddedRuntime = (*claudeCodeRuntime)(nil)
@@ -416,7 +418,8 @@ func (r *claudeCodeRuntime) Steer(message agent.AgentMessage) {
 	}
 }
 
-// New input belongs to a later durable execution, never this process.
+// Generic steering has no reservation, so it is refused. Managed Claude input
+// is steered through steerInput with its mail attempt or prompt request.
 func (r *claudeCodeRuntime) TrySteer(message agent.AgentMessage, attempt *store.EmbeddedMailAttempt) bool {
 	return false
 }
@@ -435,8 +438,8 @@ func (r *claudeCodeRuntime) Interrupt() {
 		return
 	}
 	r.interrupted = true
-	if r.inputCancel != nil {
-		r.inputCancel()
+	for _, cancel := range r.inputCancels {
+		cancel()
 	}
 	close(r.interruptNotify)
 	done := make(chan struct{})
@@ -586,8 +589,8 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 		r.mu.Unlock()
 		return &embeddedOutcome{StopReason: ai.StopAborted}, context.Canceled
 	}
-	r.mu.Unlock()
 	r.admissionBytes = 0
+	r.mu.Unlock()
 	if len(messages) != 1 {
 		return nil, errors.New("Claude run requires exactly one input per execution")
 	}
@@ -715,6 +718,8 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 		}
 		r.mu.Lock()
 		r.active = false
+		r.steerOpen = false
+		r.steers = nil
 		interruptDone := r.interruptDone
 		r.mu.Unlock()
 		if interruptDone != nil {
@@ -740,7 +745,9 @@ func (r *claudeCodeRuntime) run(ctx context.Context, messages []agent.AgentMessa
 			}
 			return r.stop(err)
 		}
+		r.mu.Lock()
 		r.admissionBytes += len(rendered[i])
+		r.mu.Unlock()
 	}
 	return r.readTurn(ctx, pending, pendingRaw, continuing)
 }
@@ -908,6 +915,12 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 				continue
 			}
 			if event.IsReplay && record.Origin == nil {
+				if steer := r.takeEchoedSteer(event.UUID); steer != nil {
+					if err := r.commitSteerEcho(ctx, steer); err != nil {
+						return r.stop(err)
+					}
+					continue
+				}
 				original, ok := pending[event.UUID]
 				if !ok {
 					return r.stop(errors.New("Claude echo has no exact accepted input"))
@@ -933,6 +946,7 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 				}
 				r.mu.Lock()
 				r.snapshot.HasUser = true
+				r.steerOpen = true
 				copy := original
 				r.lastUser = &copy
 				r.mu.Unlock()
@@ -1025,6 +1039,19 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 		case "result":
 			if !admitted {
 				return r.stop(errors.New("Claude result before checked consumption"))
+			}
+			// Unacknowledged steers stay reserved: a result without their echo is not
+			// an error here, so the held answer and original turn still settle.
+			answered, uncertain := r.settleSteersAtResult()
+			if uncertain > 0 {
+				if err := r.pool.stop(r.p.binding.AgentID); err != nil {
+					r.mu.Lock()
+					r.probeCleanupErr = errors.Join(r.probeCleanupErr, err)
+					r.mu.Unlock()
+				}
+			}
+			if limit != nil && (len(answered) > 0 || uncertain > 0) {
+				return r.stop(errors.New("Claude usage limit with steered input in flight"))
 			}
 			if limit != nil {
 				notice := r.emptyAssistant()
@@ -1143,6 +1170,9 @@ func (r *claudeCodeRuntime) readTurn(ctx context.Context, pending map[string]ai.
 			}
 			if stop == ai.StopError {
 				return &embeddedOutcome{StopReason: stop}, errors.New(errorText)
+			}
+			if err := r.completeSteeredPrompts(ctx, answered); err != nil {
+				return r.stop(err)
 			}
 			if len(pending) != 0 {
 				return r.stop(errors.New("Claude result without all input echoes"))
@@ -1370,11 +1400,14 @@ func (r *claudeCodeRuntime) submitRetryInput(ctx context.Context, id string, raw
 			return context.Canceled
 		}
 		writeCtx, cancel := context.WithCancel(ctx)
-		r.inputCancel = cancel
+		if r.inputCancels == nil {
+			r.inputCancels = make(map[string]context.CancelFunc)
+		}
+		r.inputCancels[id] = cancel
 		r.mu.Unlock()
 		defer func() {
 			r.mu.Lock()
-			r.inputCancel = nil
+			delete(r.inputCancels, id)
 			r.mu.Unlock()
 			cancel()
 		}()

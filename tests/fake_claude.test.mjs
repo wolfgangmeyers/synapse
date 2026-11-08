@@ -121,6 +121,50 @@ test('interrupt queues equal-text IDs until result; model switch correlates', { 
   assert.equal((await f.closed).code, 0);
 });
 
+test('steer_mid_turn: a mid-turn input is absorbed by the active turn at its steer step', { timeout: 5000 }, async t => {
+  const f = await launch(t, { steer_mid_turn: true, turns: [[{ text: 'partial' }, { barrier: 'mid' }, { text: 'tail' }, { steer: 'steered answer' }]] });
+  f.send(user('first'));
+  await f.next(); await f.next();
+  assert.equal((await f.next()).message.content[0].text, 'partial');
+  f.send(user('second'));
+  const echo = await f.next();
+  assert.equal(echo.uuid, 'second');
+  assert.equal(echo.isReplay, true);
+  assert.deepEqual((await f.records()).filter(row => row.kind === 'steer_echo').map(row => row.input_id), ['second']);
+  // Nothing new starts while the turn is held: the steered input is not a turn.
+  const [barrier] = (await f.records()).filter(row => row.kind === 'barrier');
+  await writeFile(join(f.root, `barrier-${barrier.invocation}`), 'release');
+  assert.equal((await f.next()).message.content[0].text, 'tail');
+  assert.equal((await f.next()).message.content[0].text, 'steered answer');
+  assert.equal((await f.next()).subtype, 'success');
+  f.child.stdin.end();
+  assert.equal((await f.closed).code, 0);
+  const rows = await f.records();
+  assert.deepEqual(rows.filter(row => row.kind === 'steer_absorbed').map(row => [row.turn_input_id, row.input_id]), [['first', 'second']]);
+  assert.equal(rows.filter(row => row.kind === 'start').length, 1);
+  assert.equal(rows.filter(row => row.kind === 'stdin').length, 2);
+});
+
+test('steer_mid_turn: input not absorbed before the turn ends is answered by a later execution', { timeout: 5000 }, async t => {
+  const f = await launch(t, { steer_mid_turn: true, turns: [[{ text: 'partial' }, { barrier: 'mid' }], [{ text: 'next answer' }]] });
+  f.send(user('first'));
+  await f.next(); await f.next();
+  assert.equal((await f.next()).message.content[0].text, 'partial');
+  f.send(user('second'));
+  assert.equal((await f.next()).uuid, 'second');
+  const [barrier] = (await f.records()).filter(row => row.kind === 'barrier');
+  await writeFile(join(f.root, `barrier-${barrier.invocation}`), 'release');
+  assert.equal((await f.next()).subtype, 'success');
+  assert.equal((await f.next()).type, 'system');
+  assert.equal((await f.next()).message.content[0].text, 'next answer');
+  assert.equal((await f.next()).subtype, 'success');
+  f.child.stdin.end();
+  assert.equal((await f.closed).code, 0);
+  const rows = await f.records();
+  assert.equal(rows.filter(row => row.kind === 'steer_absorbed').length, 0);
+  assert.equal(rows.filter(row => row.kind === 'start').length, 1);
+});
+
 test('model refusal and missing resume have probe-shaped failures', { timeout: 5000 }, async t => {
   const f = await launch(t, { refuse_model: true });
   f.send(control('no-model', 'set_model', { model: 'opus' }));
